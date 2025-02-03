@@ -1,23 +1,27 @@
 import asyncio
 from sqlalchemy import create_engine, func
-from sqlalchemy.orm import sessionmaker
-from db.models import Drop
-from datetime import datetime
+from sqlalchemy.orm import sessionmaker, joinedload
+from db.models import Drop, Player, GroupConfiguration, session
+from datetime import datetime, timedelta
 import json
 import os
-import concurrent.futures
 from utils.redis import RedisClient
-from interactions import Task, IntervalTrigger
+from utils.format import parse_redis_data
+import logging
 
 # Initialize Redis
 redis_client = RedisClient()
-
+handled_list = []
 # Redis Keys
 LAST_DROP_ID_KEY = "last_processed_drop_id"
-MINIMUM_RECENT_VALUE = 2500000  # 2.5M minimum
 
 # Batch size for pagination
-BATCH_SIZE = 1000  # Number of drops processed at once
+BATCH_SIZE = 2500  # Number of drops processed at once
+
+# At the top of the file, after the imports
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 def get_last_processed_drop_id():
     return int(redis_client.get(LAST_DROP_ID_KEY) or 0)
@@ -25,81 +29,228 @@ def get_last_processed_drop_id():
 def set_last_processed_drop_id(drop_id):
     redis_client.set(LAST_DROP_ID_KEY, drop_id)
 
-def process_drops_batch(batch_drops):
-    """
-    Processes a batch of drops and updates Redis accordingly.
-    This function can be run in parallel across multiple threads.
-    """
+def update_player_in_redis(player_id, session, force_update=True, batch_drops=None):
+    """Update the player's total loot and related data in Redis."""
+    current_partition = datetime.now().year * 100 + datetime.now().month
+    
+    if force_update:
+        # Wipe all player-related data from Redis
+        keys_to_delete = redis_client.client.keys(f"player:{player_id}:*")
+        if keys_to_delete:
+            redis_client.client.delete(*keys_to_delete)
+        ## Grabs ALL drops from the player_id since they began existing in the db
+    ## If batch_drops exist, they're used... (coming from loop)
+    player_drops = batch_drops if batch_drops else []
+
+
+    # Initialize Redis pipeline
     pipeline = redis_client.client.pipeline(transaction=False)
 
-    for drop in batch_drops:
-        player_id = drop.player_id
-        npc_id = drop.npc_id
-        item_id = drop.item_id
-        partition = drop.partition  # Get the partition from the drop
-        total_value = drop.value * drop.quantity
+    # Get the player's groups and their minimum values
+    player = session.query(Player).filter(Player.player_id == player_id).options(joinedload(Player.groups)).first()
+    clan_minimums = {}
+    ## If player exists, we'll use their groups to store their recent submissions for the loot leaderboard.
+    if player:
+        for group in player.groups:
+            ## Grab info on the players' groups so we can store their "recent submissions"-related items for the loot leaderboard.
+            group_id = group.group_id
+            ## check if we stored the group config in redis already to prevent excessive queries
+            group_config_key = f"group_config:{group_id}"
+            group_config = redis_client.client.hgetall(group_config_key)
+            if group_config:
+                ## Parse the config from redis
+                group_config = parse_redis_data(group_config)
+            if not group_config:
+                ## otherwise let's query the DB anyways
+                configs = session.query(GroupConfiguration).filter_by(group_id=group_id).all()
+                group_config = {config.config_key: config.config_value for config in configs}
+                if group_config:
+                    redis_client.client.hset(group_config_key, mapping=group_config)
+                    redis_client.client.expire(group_config_key, 3600)  # Cache for 1 hour
+            
+            clan_minimums[group_id] = int(group_config.get('minimum_value_to_notify', 2500000))
 
-        # Create Redis keys for player and NPC-specific totals, partitioned and 'all'
-        total_items_key_partition = f"player:{player_id}:{partition}:total_items"
-        total_items_key_all = f"player:{player_id}:all:total_items"
+    ## Initialize the partition totals (a partition refers to a year/month combo of data) and all-time totals
+    partition_totals = {}
+    all_time_totals = {
+        'total_loot': 0,
+        'items': {},
+        'npcs': {}
+    }
+    for drop in player_drops:
+        ## Sort through the list of drops and update totals in redis
+        drop_partition = drop.partition  # Use the drop's actual partition (i.e, 202501 for jan 2025.)
         
-        npc_totals_key_partition = f"player:{player_id}:{partition}:npc_totals"
-        npc_totals_key_all = f"player:{player_id}:all:npc_totals"
-        
-        total_loot_key_partition = f"player:{player_id}:{partition}:total_loot"
-        total_loot_key_all = f"player:{player_id}:all:total_loot"
-        
-        recent_items_key_partition = f"player:{player_id}:{partition}:recent_items"
-        recent_items_key_all = f"player:{player_id}:all:recent_items"
-
-        # Update total item count and value for both partition and 'all'
-        item_data_partition = redis_client.client.hget(total_items_key_partition, item_id)
-        item_data_all = redis_client.client.hget(total_items_key_all, item_id)
-
-        if item_data_partition:
-            existing_qty, existing_value = map(int, item_data_partition.split(','))
-            new_qty = existing_qty + drop.quantity
-            new_value = existing_value + total_value
-        else:
-            new_qty = drop.quantity
-            new_value = total_value
-
-        # Store item quantity and value as a string "quantity,value"
-        pipeline.hset(total_items_key_partition, item_id, f"{new_qty},{new_value}")
-        pipeline.hset(total_items_key_all, item_id, f"{new_qty},{new_value}")
-
-        # Batch update cumulative total loot from NPCs
-        pipeline.hincrby(npc_totals_key_partition, npc_id, total_value)
-        pipeline.hincrby(npc_totals_key_all, npc_id, total_value)
-
-        # Batch update overall total loot
-        pipeline.incrby(total_loot_key_partition, total_value)
-        pipeline.incrby(total_loot_key_all, total_value)
-
-        # Check if this drop exceeds the MINIMUM_RECENT_VALUE for recent items
-        if drop.value >= MINIMUM_RECENT_VALUE:
-            recent_item_data = { 
-                "item_id": item_id,
-                "npc_id": npc_id,
-                "player_id": player_id,
-                "value": total_value,
-                "date_added": drop.date_added.isoformat()
+        if drop_partition not in partition_totals:
+            ## If this is the first time we've seen this partition, add it with empty values to the dict
+            partition_totals[drop_partition] = {
+                'total_loot': 0,
+                'items': {},
+                'npcs': {}
             }
-            recent_item_json = json.dumps(recent_item_data)
-            # Batch update recent items list in both partitions
-            pipeline.rpush(recent_items_key_partition, recent_item_json)
-            pipeline.rpush(recent_items_key_all, recent_item_json)
+        ## determine the total value of the drop based on quantity * value
+        total_value = drop.value * drop.quantity
+        
+        # Update partition totals
+        partition_totals[drop_partition]['total_loot'] += total_value
+        if drop.item_id not in partition_totals[drop_partition]['items']:
+            ## Add the item to the items dict with an empty set of values if it doesn't exist
+            partition_totals[drop_partition]['items'][drop.item_id] = [0, 0]  # [qty, value]
 
-    # Execute the Redis pipeline batch
+        ## Add the quantity and value to the item's dict
+        partition_totals[drop_partition]['items'][drop.item_id][0] += drop.quantity
+        partition_totals[drop_partition]['items'][drop.item_id][1] += total_value
+        
+        # Update NPC totals for partition
+        if drop.npc_id not in partition_totals[drop_partition]['npcs']:
+            ## Add the npc to the npcs dict with an empty set of values if it doesn't exist
+            partition_totals[drop_partition]['npcs'][drop.npc_id] = 0
+        ## Add the total value to the npc's dict
+        partition_totals[drop_partition]['npcs'][drop.npc_id] += total_value
+        
+        # Update all-time totals
+        all_time_totals['total_loot'] += total_value
+        if drop.item_id not in all_time_totals['items']:
+            ## Add the item to the items dict with an empty set of values if it doesn't exist
+            all_time_totals['items'][drop.item_id] = [0, 0]
+        ## Add the quantity and value to the item's dict
+        all_time_totals['items'][drop.item_id][0] += drop.quantity
+        all_time_totals['items'][drop.item_id][1] += total_value
+        if drop.npc_id not in all_time_totals['npcs']:
+            ## Add the npc to the npcs dict with an empty set of values if it doesn't exist
+            all_time_totals['npcs'][drop.npc_id] = 0
+        ## Add the total value to the npc's dict
+        all_time_totals['npcs'][drop.npc_id] += total_value
+
+        # Handle recent items (only for current partition)
+        if drop_partition == current_partition:
+            for group_id, min_value in clan_minimums.items():
+                if total_value >= min_value:
+                    recent_item_data = {
+                        "item_id": drop.item_id,
+                        "npc_id": drop.npc_id,
+                        "player_id": player_id,
+                        "value": total_value,
+                        "date_added": drop.date_added.isoformat()
+                    }
+                    recent_item_json = json.dumps(recent_item_data)
+                    pipeline.lpush(f"player:{player_id}:{drop_partition}:recent_items", recent_item_json)
+                    pipeline.lpush(f"player:{player_id}:all:recent_items", recent_item_json)
+                    break
+
+    # Store totals for each partition
+    for partition, totals in partition_totals.items():
+        # Set total loot for partition
+        currentTotal = redis_client.client.get(f"player:{player_id}:{partition}:total_loot")
+        if currentTotal:
+            currentTotal = int(currentTotal)
+        else:
+            currentTotal = 0
+        pipeline.set(f"player:{player_id}:{partition}:total_loot", totals['total_loot'] + currentTotal)
+        
+        # Store item totals
+        existing_items = redis_client.client.hgetall(f"player:{player_id}:{partition}:total_items")
+        for item_id, (qty, value) in totals['items'].items():
+            existing_qty, existing_value = (0, 0)
+            if str(item_id) in existing_items:
+                existing_qty, existing_value = map(int, existing_items[str(item_id)].split(','))
+            pipeline.hset(
+                f"player:{player_id}:{partition}:total_items",
+                str(item_id),
+                f"{qty + existing_qty},{value + existing_value}"
+            )
+        
+        # Store NPC totals
+        existing_npcs = redis_client.client.hgetall(f"player:{player_id}:{partition}:npc_totals")
+        for npc_id, value in totals['npcs'].items():
+            existing_value = int(existing_npcs.get(str(npc_id), 0))
+            pipeline.hset(
+                f"player:{player_id}:{partition}:npc_totals",
+                str(npc_id),
+                value + existing_value
+            )
+
+    # Store all-time totals gathered from the loop after multiplying quantity * value for each drop in the matching partition
+    pipeline.set(f"player:{player_id}:all:total_loot", all_time_totals['total_loot'])
+    for item_id, (qty, value) in all_time_totals['items'].items():
+        ## Store the total amount and quantity of each item the player has received (lootboard purposes)
+        pipeline.hset(
+            f"player:{player_id}:all:total_items",
+            str(item_id),
+            f"{qty},{value}"
+        )
+    for npc_id, value in all_time_totals['npcs'].items():
+        ## Store the total amount of GP the player has received from each NPC (stored with the NPC ID as the key)
+        pipeline.hset(
+            f"player:{player_id}:all:npc_totals",
+            str(npc_id),
+            value
+        )
+
+    # Trim recent items lists to remove excess items if their group has a value set to 1 or some b.s.
+    pipeline.ltrim(f"player:{player_id}:{current_partition}:recent_items", 0, 99)
+    pipeline.ltrim(f"player:{player_id}:all:recent_items", 0, 99)
+
+    # Execute all Redis commands
     pipeline.execute()
 
+    if force_update:
+        ## If the force_update flag is set, the player's cache was rendered invalid and wiped.
+        ## We will update their player object to reflect this change
+        player = session.query(Player).filter(Player.player_id == player_id).first()
+        if player:
+            player.date_updated = datetime.now()
+            session.commit()
 
+    # After updating player totals, update leaderboards
+    # for partition in partition_totals.keys():
+    #     leaderboard_manager.update_player_leaderboard_score(player_id, partition)
+    
+    # # Update all-time leaderboard
+    # leaderboard_manager.update_player_leaderboard_score(player_id, 'all')
+
+def process_drops_batch(batch_drops, session):
+    ## This function is called during the processing of drops as they come in from webhooks
+    ## Then, the update_player_in_redis function is called to update the player's cache with the force_update flag set to false
+    
+    """Process a batch of drops and update Redis"""
+    # Group drops by player to process efficiently
+    player_drops = {}
+    for drop in batch_drops:
+        if drop.player_id not in player_drops:
+            player_drops[drop.player_id] = []
+        player_drops[drop.player_id].append(drop)
+    
+    # Process each player's drops
+    for player_id, drops in player_drops.items():
+        try:
+            # Pass the specific drops to process
+            update_player_in_redis(player_id, session, force_update=False, batch_drops=drops)
+            # logger.info(f"Processed {len(drops)} drops for player {player_id}")
+        except Exception as e:
+            # logger.error(f"Failed to process drops for player {player_id}: {e}")
+            pass
+
+def check_and_update_players(session):
+    """
+    Check if any player's data needs to be updated in Redis and update if more than 24 hours have passed.
+    """
+    # Get time threshold (24 hours ago)
+    time_threshold = datetime.now() - timedelta(hours=24)
+
+    # Query for players who need their data updated (older than 24 hours)
+    players_to_update = session.query(Player).filter(Player.date_updated < time_threshold).all()
+    if len(players_to_update) > 5:
+        players_to_update = players_to_update[:5]
+    for player in players_to_update:
+        player_drops = session.query(Drop).filter(Drop.player_id == player.player_id).all()
+        print(f"Updating player {player.player_id} in Redis (more than 24 hours since last update).")
+        update_player_in_redis(player.player_id, session, force_update=True, batch_drops=player_drops)
 
 async def update_player_totals():
     """
-    Function to update player totals by fetching new drop records
-    from the database and updating the Redis cache.
-    This function runs in the background to ensure the cache is up to date.
+        Fetch new drop records from the database and update the Redis cache.
+        Process new drops and update player totals without modifying their `date_updated`.
     """
     DB_USER = os.getenv('DB_USER')
     DB_PASS = os.getenv('DB_PASS')
@@ -107,47 +258,31 @@ async def update_player_totals():
     Session = sessionmaker(bind=engine)
     session = Session()
 
-    # Get the last drop_id processed
     last_drop_id = get_last_processed_drop_id()
-
-    # Fetch all drop IDs after the last processed drop_id
     drop_count = session.query(func.count(Drop.drop_id)).filter(Drop.drop_id > last_drop_id).scalar()
-    print(f"Starting at ID {last_drop_id}. Total drops left to process: {drop_count}")
 
-    # Fetch drops after the last processed drop_id in batches
     offset = 0
+    while offset < drop_count:
+        batch_drops = session.query(Drop).filter(Drop.drop_id > last_drop_id)\
+                                         .order_by(Drop.drop_id.asc())\
+                                         .limit(BATCH_SIZE)\
+                                         .offset(offset)\
+                                         .all()
 
-    # Use ThreadPoolExecutor to process batches in parallel
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = []
-        processed_drops = 0
-        while offset < drop_count:
-            # Fetch the next batch of drops
-            batch_drops = session.query(Drop).filter(Drop.drop_id > last_drop_id)\
-                                             .order_by(Drop.drop_id.asc())\
-                                             .limit(BATCH_SIZE)\
-                                             .offset(offset)\
-                                             .all()
+        if not batch_drops:
+            break
 
-            if not batch_drops:
-                break  # Exit if no more drops
+        last_batch_drop_id = batch_drops[-1].drop_id
 
-            last_batch_drop_id = batch_drops[-1].drop_id
+        # Run the blocking code in a thread using asyncio.to_thread
+        await asyncio.to_thread(process_drops_batch, batch_drops, session)
 
-            # Submit each batch to be processed by a separate thread
-            futures.append(executor.submit(process_drops_batch, batch_drops))
-
-            # Update the last processed drop ID
-            set_last_processed_drop_id(last_batch_drop_id)
-
-            # Increase the offset for the next batch
-            offset += BATCH_SIZE
-
-        # Wait for all threads to complete
-        concurrent.futures.wait(futures)
+        # Verify some data was stored
+                
+        set_last_processed_drop_id(last_batch_drop_id)
+        offset += BATCH_SIZE
 
     session.close()
-    print("Drops processed successfully.")
 
 async def background_task():
     """
@@ -156,16 +291,16 @@ async def background_task():
     """
     while True:
         try:
-            print("Updating drops...")
             await update_player_totals()
+            check_and_update_players(session)
         except Exception as e:
-            print(f"Error in update_player_totals: {e}")
-        await asyncio.sleep(60)  # Wait for 60 seconds before the next run (adjust as needed)
+            logger.exception(f"Error in update_player_totals: {e}")
+        await asyncio.sleep(1)  # Wait for 1 second before the next run
 
-# Add this to your Quart or Discord bot setup
 async def start_background_redis_tasks():
     """
     Starts the background tasks for the Quart server or Discord bot.
     This ensures that update_player_totals runs without blocking the main event loop.
     """
     asyncio.create_task(background_task())
+

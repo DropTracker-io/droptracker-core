@@ -5,7 +5,7 @@ from asynciolimiter import Limiter
 from dotenv import load_dotenv
 from db.models import Player, session
 import wom
-
+from wom import Err
 load_dotenv()
 
 rate_limit = 100 / 65  # This calculates the rate as 100 requests per 65 seconds
@@ -25,29 +25,50 @@ async def check_user_by_username(username: str):
         their WOM ID, and their displayName.
     """
     # TODO -- only grab necessary info and parse it before returning the full player obj?
+    await limiter.wait()
     await client.start()  # Initialize the client (if required by the `wom` library)
 
     try:
-        await limiter.wait()
         result = await client.players.get_details(username=username)
-        if result.is_ok:
-            player = result.unwrap()
-            player_id = player.id
-            player_name = player.username
-            ## Return string types to ensure proper data storage in sql
-            return player, str(player_name), str(player_id)
-        else:
-            result = await client.players.update_player(username=username)
+        # Add debug logging
+        try:
             if result.is_ok:
                 player = result.unwrap()
+                if player is None:
+                    return None, None, None
+                return player, player.username, player.id
+        except Exception as e:
+            error = result.unwrap_err()
+            if isinstance(error, Err):
+                pass
+        else:
+            error = result.unwrap_err()
+            if isinstance(error, Err):
+                pass
+            # Try update if get fails
+            try:
+                result = await client.players.update_player(username=username)
+            except Exception as e:
+                print("Error updating player:", e)
+            # Add debug logging
+            if not result.is_ok:
+                print(f"Update player failed for {username}. Status: {result.status_code}")
+                
+            if result.is_ok:
+                player = result.unwrap()
+                
+                if player is None:
+                    print(f"Got empty player object after update for {username}")
+                    return None, None, None
+                print("Got player object after update for", username + ":", player)
                 player_id = player.id
                 player_name = player.username
-                ## Return string types to ensure proper data storage in sql
                 return player, str(player_name), str(player_id)
             else:
+                print("Result is not ok, returning None")
                 return None, None, None
     except Exception as e:
-        print(f"Error while fetching user by username: {e}")
+        print(f"Error checking user {username}: {str(e)}")
         return None, None, None
 
 async def check_user_by_id(uid: int):
@@ -69,7 +90,7 @@ async def check_user_by_id(uid: int):
             # Handle the case where the request failed
             return None, None, None
     finally:
-        await client.close()
+        pass
 
 async def check_group_by_id(wom_group_id: int):
     """ Searches for a group on WiseOldMan by a passed group ID 
@@ -89,13 +110,14 @@ async def check_group_by_id(wom_group_id: int):
         else:
             return None, None, None
     finally:
-        await client.close()
+        pass
 
 async def fetch_group_members(wom_group_id: int):
     """ 
     Returns a list of WiseOldMan Player IDs 
     for members of a specified group 
     """
+    #print("Fetching group members for ID:", wom_group_id)
     user_list = []
     
     if wom_group_id == 1:
@@ -116,5 +138,6 @@ async def fetch_group_members(wom_group_id: int):
             return user_list
         else:
             return []
-    finally:
-        await client.close()
+    except Exception as e:
+        print("Couldn't find WOM group members... Error:", e)
+        return []

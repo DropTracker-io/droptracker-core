@@ -5,7 +5,7 @@ import json
 import os
 import traceback
 from datetime import datetime
-from db.models import Player, ItemList, session
+from db.models import Guild, Player, ItemList, session, Group, GroupConfiguration, NpcList
 from io import BytesIO
 
 import aiohttp
@@ -14,7 +14,7 @@ from PIL import Image, ImageFont, ImageDraw
 
 from utils.redis import RedisClient
 from utils.wiseoldman import fetch_group_members
-from db.ops import DatabaseOperations
+from db.ops import DatabaseOperations, associate_player_ids
 
 from utils.format import format_number
 
@@ -36,81 +36,117 @@ async def get_drops_for_group(player_ids, partition: str = datetime.now().year *
     recent_drops = []
     total_loot = 0
     player_totals = {}
-    print("Getting drops for partition", partition)
+    # print("Getting drops for partition", partition)
+    # print("Called with player_ids =", player_ids)
 
-    for player_id in player_ids:
-        total_items_key_all = f"player:{player_id}:{partition}:total_items"
-        npc_totals_key_all = f"player:{player_id}:{partition}:npc_totals"
-        total_loot_key_all = f"player:{player_id}:{partition}:total_loot"
-        recent_items_key_all = f"player:{player_id}:{partition}:recent_items"
+    async def process_player(player_id):
+        nonlocal total_loot
+        player_total = 0
+        total_items_key = f"player:{player_id}:{partition}:total_items"
+        recent_items_key = f"player:{player_id}:{partition}:recent_items"
 
-        # Get total items and merge dictionaries
-        total_items = {k.decode('utf-8'): v.decode('utf-8') for k, v in redis_client.client.hgetall(total_items_key_all).items()}
+        # Get total items
+        total_items = redis_client.client.hgetall(total_items_key)
+        #print("redis update total items stored:", total_items)
         for key, value in total_items.items():
-            # value will be in the format "quantity,value"
-            quantity, total_value = map(int, value.split(','))
-            if player_id not in player_totals:
-                player_totals[player_id] = int(total_value)
-            else:
-                player_totals[player_id] += int(total_value)
-
+            key = key.decode('utf-8')
+            value = value.decode('utf-8')
+            try:
+                quantity, total_value = map(int, value.split(','))
+            except ValueError:
+                #print(f"Error processing item {key} for player {player_id}: {value}")
+                continue
+            player_total += total_value
             
-            # Update group_items to store both quantity and total_value
             if key in group_items:
-                # If the item already exists in group_items, sum both quantity and value
                 existing_quantity, existing_value = map(int, group_items[key].split(','))
                 new_quantity = existing_quantity + quantity
                 new_total_value = existing_value + total_value
                 group_items[key] = f"{new_quantity},{new_total_value}"
             else:
-                # If the item is new, add it directly
                 group_items[key] = f"{quantity},{total_value}"
 
-            # Aggregate total value across all items for the group
-            total_loot += total_value
+        # Get recent items and ensure uniqueness
+        recent_items = list({json.loads(item.decode('utf-8'))['date_added']: json.loads(item.decode('utf-8')) 
+                           for item in redis_client.client.lrange(recent_items_key, 0, -1)}.values())
+        
+        return player_id, player_total, recent_items
 
-        # Get NPC totals (assuming you may want to aggregate this too)
-        npc_totals = {k.decode('utf-8'): v.decode('utf-8') for k, v in redis_client.client.hgetall(npc_totals_key_all).items()}
+    # Use asyncio.gather to process all players concurrently
+    results = await asyncio.gather(*[process_player(player_id) for player_id in player_ids])
 
-        # Add to the total loot from Redis
-        loot = redis_client.get(total_loot_key_all)
-        if loot:
-            total_loot += int(loot)
-
-        # Get recent items and decode JSON
-        recent_items = [json.loads(item.decode('utf-8')) for item in redis_client.client.lrange(recent_items_key_all, 0, -1)]
-        recent_drops.extend(recent_items)
+    for player_id, player_total, player_recent_items in results:
+        player_totals[player_id] = player_total
+        total_loot += player_total
+        recent_drops.extend(player_recent_items)
 
     return group_items, player_totals, recent_drops, total_loot
 
 
-async def generate_server_board(bot, group_id: int, partition: str = datetime.now().year * 100 + (datetime.now().month)):
-    # Fetch clan settings first (commented out for now)
-    # clan_settings = await get_clan_settings(server_id)
-    # if not clan_settings:
-    #     return
+async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom_group_id: int = 0, partition: str = datetime.now().year * 100 + (datetime.now().month)):
+    """
+        :param: bot: Instance of the interactions.Client bot object
+        :param: group_id: DropTracker GroupID. 0 expects a wom_group_id
+        :param: wom_group_id: WiseOldMan groupID. 0 expects a group_id
+        :param: partition: The partition to search drops for (202408 for August 2024)
+        Providing neither option (group_id, wom_group_id) uses global drops.
+    
+    """
+    group = None
+    if group_id != 0: ## we prioritize group_id here
+        group = session.query(Group).filter(Group.group_id == group_id).first()
+    elif wom_group_id != 0:
+        group = session.query(Group).filter(Group.wom_id == wom_group_id).first()
+    
+    if (group_id != 0 or wom_group_id != 0) and not group:
+        print("Cannot generate a lootboard, no group data was properly parsed..")
+    elif (group_id == 0 and wom_group_id == 0):
+        group_id = 1
+    else:
+        group_id = group.group_id
+    
+    group_config = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id).all()
+    # Transform group_config into a dictionary for easy access
+    config = {conf.config_key: conf.config_value for conf in group_config}
 
     loot_board_style = 1  # TODO: Implement other boards eventually
-
+    minimum_value = config.get('minimum_value_to_notify', 2500000)
+    channel = config.get('lootboard_channel_id', None)
+    message = config.get('lootboard_message_id', None)
+        
     # Load background image based on the board style
     bg_img, draw = load_background_image("/store/droptracker/disc/lootboard/bank-new-clean-dark.png")
-
+    if group_id != 2:
+        if wom_group_id == 0:
+            wom_group_id = group.wom_id
+        elif wom_group_id != 0:
     # Fetch player WOM IDs and associated Player IDs
-    player_wom_ids = await fetch_group_members(group_id)
+            player_wom_ids = await fetch_group_members(wom_group_id)
+        else:
+            player_wom_ids = []
+            raw_wom_ids = session.query(Player.wom_id).all() ## get all users if no wom_group_id is found
+            for player in raw_wom_ids:
+                player_wom_ids.append(player[0])
+    else:
+        player_wom_ids = []
+        all_players = session.query(Player.wom_id).all()
+        for p in all_players:
+            player_wom_ids.append(p[0])
     player_ids = await associate_player_ids(player_wom_ids)
-
     # Get the drops, recent drops, and total loot for the group
-    
+    #print("Processed player_ids")
     group_items, player_totals, recent_drops, total_loot = await get_drops_for_group(player_ids, partition)
 
     # Draw elements on the background image
     bg_img = await draw_drops_on_image(bg_img, draw, group_items, group_id)  # Pass `group_items` here
     bg_img = await draw_headers(bot, group_id, total_loot, bg_img, draw)  # Draw headers
-    bg_img = await draw_recent_drops(bg_img, draw, recent_drops, min_value=2500000)  # Draw recent drops, with a minimum value
+    bg_img = await draw_recent_drops(bg_img, draw, recent_drops, min_value=minimum_value)  # Draw recent drops, with a minimum value
     bg_img = await draw_leaderboard(bg_img, draw, player_totals)  # Draw leaderboard
     save_image(bg_img, group_id)  # Save the generated image
-
-    return bg_img
+    print("Saved the new image.")
+    current_date = datetime.now()
+    ydmpart = int(current_date.strftime('%d%m%Y'))
+    return f"/store/droptracker/disc/static/assets/img/clans/{group_id}/lb/{ydmpart}.png"
 
 
 def get_year_month_string():
@@ -123,11 +159,12 @@ async def draw_headers(bot: interactions.Client, group_id, total_loot, bg_img, d
     current_year_month = datetime.now().strftime('%Y-%m')
     this_month = format_number(total_loot)
     # recents = f"Recent Submissions"
-    if int(group_id) == 1:
+    # print("Drawing headers for group_id", group_id)
+    if int(group_id) == 2:
         title = f"Tracked Drops - All Players ({month_string.capitalize()}) - {this_month}"
     else:
-        #server = bot.get_guild(server_id)
-        server_name = "Nameless"
+        group = session.query(Group).filter(Group.group_id == group_id).first()
+        server_name = group.group_name
         title = f"{server_name}'s Tracked Drops for {month_string.capitalize()} ({this_month})"
 
     # Calculate text size using textbbox
@@ -178,7 +215,7 @@ async def draw_leaderboard(bg_img, draw, player_totals):
         rank_num_text = f'{i + 1}'
         player_obj = session.query(Player.player_name).filter(Player.player_id == player).first()
         if not player_obj:
-            print("Player with ID", player, " not found.")
+            #print("Player with ID", player, " not found.")
             player_rsn = f"Name not found...."
         else:
             player_rsn = player_obj.player_name
@@ -237,11 +274,14 @@ async def draw_drops_on_image(bg_img, draw, group_items, group_id):
     sorted_items = sorted(group_items.items(), key=lambda x: int(x[1]) if isinstance(x[1], int) else int(x[1].split(',')[1]), reverse=True)[:32]
 
     for i, (item_id, totals) in enumerate(sorted_items):
-        # print("Item:", sorted_items[i])
-        # Get quantity and total value from Redis data
-        # print(item_id, totals)
-        quantity, total_value = map(int, totals.split(','))
+        try:
+            quantity, total_value = map(int, totals.split(','))
+        except ValueError as e:
+            #print(f"Error processing item {item_id}: {e}")
+            #print(f"Raw data: {totals}")
+            continue  # Skip this item and move to the next one
 
+        # print("Item:", sorted_items[i])
         # Get the item's position from the CSV file
         current_pos_x = int(locations[i]['x'])
         current_pos_y = int(locations[i]['y'])
@@ -288,7 +328,10 @@ async def draw_recent_drops(bg_img, draw, recent_drops, min_value):
     :param min_value: The minimum value of drops to be displayed.
     """
     # print("Recent drops:", recent_drops)
-    
+    try:
+        min_value = int(min_value)
+    except TypeError:
+        min_value = 2500000
     # Filter the drops based on their value, keeping only those above the specified min_value
     filtered_recents = [drop for drop in recent_drops if drop['value'] >= min_value]
     
@@ -379,15 +422,25 @@ def center_image(image, width, height):
 
 def save_image(image, server_id):
     # Save logic here
-    os.makedirs(f"/store/droptracker/disc/static/clans/{server_id}", exist_ok=True)
-    image.save(f"/store/droptracker/disc/static/clans/{server_id}/loot_board.png")
-    # image.save(f'data/{server_id}/loot-board.png')
+    os.makedirs(f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb", exist_ok=True)
+    current_date = datetime.now()
+    ydmpart = int(current_date.strftime('%d%m%Y'))
+    image.save(f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/{ydmpart}.png")
+    image.save(f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/lootboard.png")
 
 
 async def load_image_from_id(item_id):
     if item_id == "None" or item_id is None or not isinstance(item_id, int):
         return None
     file_path = f"/store/droptracker/disc/static/assets/img/itemdb/{item_id}.png"
+    item = session.query(ItemList).filter(ItemList.item_id == item_id).first()
+    item_name = item.item_name
+    if item.stackable:
+        all_items = session.query(ItemList).filter(ItemList.item_name == item_name).all()
+        target_item_id = [max(item.stacked, item.item_id) for item in all_items]
+        item_id = target_item_id
+    if not os.path.exists(file_path):
+        await load_rl_cache_img(item_id)
     loop = asyncio.get_event_loop()
     try:
         # Run the blocking Image.open operation in a thread pool
@@ -424,14 +477,4 @@ async def load_rl_cache_img(item_id):
     finally:
         await aiohttp.ClientSession().close()
 
-async def associate_player_ids(player_wom_ids):
-    # Query the database for all players' WOM IDs and Player IDs
-    all_players = session.query(Player.wom_id, Player.player_id).all()
-    
-    # Create a mapping of WOM ID to Player ID
-    db_wom_to_ids = [{"wom": player.wom_id, "id": player.player_id} for player in all_players]
-    
-    # Filter out the Player IDs where the WOM ID matches any of the given `player_wom_ids`
-    matched_ids = [player['id'] for player in db_wom_to_ids if player['wom'] in player_wom_ids]
-    
-    return matched_ids
+

@@ -1,157 +1,498 @@
 {% extends "base.html" %}
-
-{% block content %}
-<h1>Clan Configuration</h1>
-
-<form method="POST" action="/save_config">
-    <!-- Authorized Roles -->
-    <div class="form-group">
-        <label for="authed_roles">Authorized Roles:</label>
-        <input type="text" id="authed_roles" name="authed_roles" value="{{ config.authed_roles }}">
-    </div>
-
-    <!-- Lootboard Settings -->
-    <h3>Lootboard Settings</h3>
-    <div class="form-group">
-        <label for="lootboard_message_id">Lootboard Message ID:</label>
-        <input type="text" id="lootboard_message_id" name="lootboard_message_id" value="{{ config.lootboard_message_id }}">
-    </div>
-
-    <div class="form-group">
-        <label for="lootboard_channel_id">Lootboard Channel:</label>
-        <select id="lootboard_channel_id" name="lootboard_channel_id">
-            <option value="">-- Select Channel --</option>
-            {% for channel in channel_list %}
-            {% if channel.type == 'text' %}
-            <option value="{{ channel.id }}" {% if config.lootboard_channel_id == channel.id %}selected{% endif %}>{{ channel.name }}</option>
-            {% endif %}
-            {% endfor %}
-        </select>
-    </div>
-
-    <!-- Channels to Post Settings -->
-    <h3>Channels to Post</h3>
-    <div class="form-group">
-        <label for="channel_id_to_post_loot">Channel to Post Loot:</label>
-        <select id="channel_id_to_post_loot" name="channel_id_to_post_loot">
-            <option value="">-- Select Channel --</option>
-            {% for channel in channel_list %}
-            {% if channel.type == 'text' %}
-            <option value="{{ channel.id }}" {% if config.channel_id_to_post_loot == channel.id %}selected{% endif %}>{{ channel.name }}</option>
-            {% endif %}
-            {% endfor %}
-        </select>
-    </div>
-
-    <div class="form-group">
-        <label for="channel_id_to_post_clog">Channel to Post Clog:</label>
-        <select id="channel_id_to_post_clog" name="channel_id_to_post_clog">
-            <option value="">-- Select Channel --</option>
-            {% for channel in channel_list %}
-            {% if channel.type == 'text' %}
-            <option value="{{ channel.id }}" {% if config.channel_id_to_post_clog == channel.id %}selected{% endif %}>{{ channel.name }}</option>
-            {% endif %}
-            {% endfor %}
-        </select>
-    </div>
-
-    <!-- Other Settings -->
-    <div class="form-group">
-        <label for="only_send_messages_with_images">Only Send Messages With Images:</label>
-        <input type="checkbox" id="only_send_messages_with_images" name="only_send_messages_with_images" {% if config.only_send_messages_with_images %}checked{% endif %}>
-    </div>
-
-    <div class="form-group">
-        <label for="loot_board_type">Loot Board Type:</label>
-        <input type="text" id="loot_board_type" name="loot_board_type" value="{{ config.loot_board_type }}">
-    </div>
-
-    <div class="form-group">
-        <label for="minimum_value_to_notify">Minimum Value to Notify:</label>
-        <input type="number" id="minimum_value_to_notify" name="minimum_value_to_notify" value="{{ config.minimum_value_to_notify }}">
-    </div>
-
-    <!-- Voice Channels Settings -->
-    <h3>Voice Channels</h3>
-    <div class="form-group">
-        <label for="vc_to_display_monthly_loot">VC to Display Monthly Loot:</label>
-        <select id="vc_to_display_monthly_loot" name="vc_to_display_monthly_loot">
-            <option value="">-- Select Channel --</option>
-            {% for channel in channel_list %}
-            {% if channel.type == 'voice' %}
-            <option value="{{ channel.id }}" {% if config.vc_to_display_monthly_loot == channel.id %}selected{% endif %}>{{ channel.name }}</option>
-            {% endif %}
-            {% endfor %}
-        </select>
-    </div>
-
-    <div class="form-group">
-        <label for="vc_to_display_wom_members">VC to Display WOM Members:</label>
-        <select id="vc_to_display_wom_members" name="vc_to_display_wom_members">
-            <option value="">-- Select Channel --</option>
-            {% for channel in channel_list %}
-            {% if channel.type == 'voice' %}
-            <option value="{{ channel.id }}" {% if config.vc_to_display_wom_members == channel.id %}selected{% endif %}>{{ channel.name }}</option>
-            {% endif %}
-            {% endfor %}
-        </select>
-    </div>
-
-    <!-- Notifications -->
-    <h3>Notifications</h3>
-    <div class="form-group">
-        <label for="notify_clogs">Notify Clogs:</label>
-        <input type="checkbox" id="notify_clogs" name="notify_clogs" {% if config.notify_clogs %}checked{% endif %}>
-    </div>
-
-    <div class="form-group">
-        <label for="notify_cas">Notify CAs:</label>
-        <input type="checkbox" id="notify_cas" name="notify_cas" {% if config.notify_cas %}checked{% endif %}>
-    </div>
-
-    <div class="form-group">
-        <label for="notify_pbs">Notify PBs:</label>
-        <input type="checkbox" id="notify_pbs" name="notify_pbs" {% if config.notify_pbs %}checked{% endif %}>
-    </div>
-
-    <!-- Other Links -->
-    <h3>Other Links</h3>
-    <div class="form-group">
-        <label for="spreadsheet_url">Spreadsheet URL:</label>
-        <input type="url" id="spreadsheet_url" name="spreadsheet_url" value="{{ config.spreadsheet_url }}">
-    </div>
-
-    <div class="form-group">
-        <label for="clan_chat_name">Clan Chat Name:</label>
-        <input type="text" id="clan_chat_name" name="clan_chat_name" value="{{ config.clan_chat_name }}">
-    </div>
-
-    <div class="form-group">
-        <label for="discord_invite_link">Discord Invite Link:</label>
-        <input type="url" id="discord_invite_link" name="discord_invite_link" value="{{ config.discord_invite_link }}">
-    </div>
-
-    <!-- Patreon Integration -->
-    <div class="form-group">
-        {% if not config.patreon %}
-        <button type="button" onclick="window.location.href='https://patreon.com/link_here';">Link Patreon</button>
-        {% else %}
-        <label for="patreon">Patreon:</label>
-        <input type="text" id="patreon" name="patreon" value="{{ config.patreon }}" readonly>
-        {% endif %}
-    </div>
-
-    <button type="submit">Save Configuration</button>
-</form>
-
+{% block css %}
 <style>
+     #user_list, 
+    #lootboard_channel_id, 
+    #channel_id_to_post_loot, 
+    #channel_id_to_post_pb, 
+    #channel_id_to_post_ca, 
+    #channel_id_to_post_clog, 
+    #vc_to_display_monthly_loot, 
+    #vc_to_display_droptracker_users {
+        background-color: #2c2c2c;  /* Dark background */
+        color: #ffffff;  /* White text */
+        border: 1px solid #444;  /* Subtle border */
+    }
+
+    #user_list option,
+    #lootboard_channel_id option,
+    #channel_id_to_post_loot option,
+    #channel_id_to_post_pb option,
+    #channel_id_to_post_ca option,
+    #channel_id_to_post_clog option,
+    #vc_to_display_monthly_loot option,
+    #vc_to_display_droptracker_users option {
+        background-color: #2c2c2c;  /* Option background */
+        color: #ffffff;  /* Option text */
+    }
+
+    /* Customize hover and focus states */
+    #user_list:focus, 
+    #lootboard_channel_id:focus, 
+    #channel_id_to_post_loot:focus, 
+    #channel_id_to_post_pb:focus, 
+    #channel_id_to_post_ca:focus, 
+    #channel_id_to_post_clog:focus, 
+    #vc_to_display_monthly_loot:focus, 
+    #vc_to_display_droptracker_users:focus {
+        border-color: #555;  /* Slightly brighter border on focus */
+    }
+
+    #user_list option:hover,
+    #lootboard_channel_id option:hover,
+    #channel_id_to_post_loot option:hover,
+    #channel_id_to_post_pb option:hover,
+    #channel_id_to_post_ca option:hover,
+    #channel_id_to_post_clog option:hover,
+    #vc_to_display_monthly_loot option:hover,
+    #vc_to_display_droptracker_users option:hover {
+        background-color: #3a3a3a;  /* Slightly lighter hover */
+    }
+
+    /* Input styling */
+    #user_search {
+        margin-bottom: 1em;
+    }
+
+    /* Styling for the authorized user list items */
+    #authed_users_list li {
+        background-color: #2c2c2c;  /* Dark background for the list */
+        color: #ffffff;  /* White text */
+        border: 1px solid #444;  /* Border */
+    }
+
+    #authed_users_list li button {
+        background-color: #444;  /* Dark background for buttons */
+        color: #fff;  /* White text */
+        border: none;
+    }
+
+    #authed_users_list li button:hover {
+        background-color: #555;  /* Slightly lighter on hover */
+    }
     .form-group {
         margin-bottom: 1.5em;
     }
-    h3 {
-        margin-top: 2em;
-        font-size: 1.2em;
-        color: #333;
+    
+    #user_list {
+        margin-top: 0.5em;
+    }
+
+    #authed_users_list {
+        list-style-type: none;
+        padding-left: 0;
+    }
+
+    #authed_users_list li {
+        display: flex;
+        align-items: center;
+        margin-bottom: 0.5em;
+    }
+
+    #authed_users_list li button {
+        margin-left: 1em;
+    }
+
+    .form-inline {
+        display: flex;
+        align-items: center;
+    }
+
+    /* Input styling */
+    #user_search {
+        margin-bottom: 1em;
     }
 </style>
+{% endblock %}
+{% block content %}
+<div class="container mt-4">
+    <h1>Group Settings</h1>
+
+    <form method="POST" action="/api/group_config">
+        <input type="hidden" name="group_id" value="{{ group_id }}">
+        <input type="hidden" id="authed_users_input" name="authed_users" value="{{ config.authed_users | join(',') }}">
+        <!-- Informational Section -->
+        <div class="alert alert-info" role="alert">
+            <i class="bi bi-info-circle"></i> If you need to change your <b>WiseOldMan</b> Group ID or any settings that are not listed here, please visit our <a href="/discord" target="_blank">Discord server</a> for assistance.
+        </div>
+        {% if group_patreon %}
+        {% if patreon_trial %}
+            <div class="alert alert-success">
+                <strong>Free Trial!</strong><br /> Hey -- Thanks for checking out the DropTracker.<br />Your Group has been granted a 7-day trial to the patreon features we offer, starting from when you created it.<br />
+                These benefits include:<br />
+                <ul>
+                    <li>Personal Best tracking</li>
+                    <li>Collection Log tracking</li>
+                    <li>Combat Achievement tracking</li>
+                    <li>Google Spreadsheet integration</li>
+                    <li>Access to a Patreon-only Discord channel, where super secret chats happen</li>
+                    <li>Customizable Embed Formats <strong>*</strong></li>
+                    <li>Choice between multiple Loot Leaderboard styles <strong>*</strong></li>
+                    <li>Helping keep the project alive!</li>
+                </ul>
+                <small>* denotes features that are <em>coming SOON&trade;</em></small>
+                <br />Your trial will end in approximately {{ trial_time_left }}. <br />
+                If you enjoy what the DropTracker has to offer, consider <a href="/patreon" target="_blank">supporting us</a>!
+            </div>
+        {% else %}
+            <div class="alert alert-success">
+                <strong>You have Patreon features unlocked!</strong> Thank you for you and your group's support in helping to keep the DropTracker alive.
+            </div>
+        {% endif %}
+        {% else %}
+        <div class="alert alert-success">
+            <strong>Note:</strong> Options with a '<i class="bi bi-cash-stack"></i>' are reserved for Patreon groups.
+        </div>
+        <i class="bi bi-cash-stack"></i>
+        {% endif %}
+
+         <!-- Authorized Users Section -->
+         <div class="form-group">
+            <label for="authed_users"><strong>Authorized Users</strong></label>
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> Users added here will have admin access to the DropTracker Discord bot for your group, and to this page.</small></p>
+        
+            <!-- Search box for filtering users -->
+            <input type="text" class="form-control" id="user_search" placeholder="Search users..." onkeyup="filterUsers()">
+        
+            <!-- Dropdown list for available users -->
+            <select id="user_list" class="form-control" size="5">
+                {% for user in user_list %}
+                <option value="{{ user.id }}" data-username="{{ user.name }}">
+                    {{ user.name }}
+                </option>
+                {% endfor %}
+            </select>
+        
+            <!-- Add User Button -->
+            <button type="button" class="btn btn-primary mt-2" onclick="addUser()">Add User</button>
+        </div>
+        
+        <!-- Authorized Users List -->
+        <div class="form-group">
+            <label><strong>Authorized Users List</strong></label>
+            <ul id="authed_users_list" class="list-group">
+                {% if config.authed_users and config.authed_users|length > 0 %}
+                    {% for authed_user_id in config.authed_users %}
+                        {% for user in user_list %}
+                            {% if user.id | string == authed_user_id | string %}
+                                <li class="list-group-item d-flex justify-content-between align-items-center" data-user-id="{{ authed_user_id }}">
+                                    <span>{{ user.name }}</span> 
+                                    <button type="button" class="btn btn-danger btn-sm" onclick="removeUser('{{ authed_user_id }}')">Remove</button>
+                                </li>
+                            {% endif %}
+                        {% endfor %}
+                    {% endfor %}
+                {% else %}
+                    <li class="list-group-item">No authorized users were found.</li>
+                {% endif %}
+            </ul>
+        </div>
+
+
+        <!-- Channel Options -->
+        <h3>Channels</h3>
+        <div class="form-group">
+            <label for="lootboard_channel_id">Lootboard Channel</label>
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> Select a channel to post your group's Loot Leaderboard.<br />
+                This channel should remain clean, except for the bot's message, since it will update the post every 10 minutes; not post a new embed.</small></p>
+            <select id="lootboard_channel_id" name="lootboard_channel_id" class="form-control">
+                {% if not config.lootboard_channel_id %}
+                <option value="" selected>--Select channel--</option>
+                {% else %}
+                {% for channel in channel_list %}
+                    {% if channel.type == 'text' %}
+                        {% if config.lootboard_channel_id | string == channel.id | string %}
+                            <option value="{{ channel.id }}" {% if config.lootboard_channel_id | string == channel.id | string %}selected{% endif %}>{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+                <option value="">--Select channel--</option>
+                {% endif %}
+                
+                <!-- Loop through the channels to display options -->
+                {% for channel in channel_list %}
+                    {% if channel.type == 'text' %}
+                        {% if channel.id | string != config.lootboard_channel_id | string %}
+                        <option value="{{ channel.id }}">{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="channel_id_to_post_loot">Channel to Post Loot</label>
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> Drop notifications will be sent to this channel if they exceed the minimum value you configure below.</small></p>
+            <select id="channel_id_to_post_loot" name="channel_id_to_post_loot" class="form-control">
+                
+                {% if not config.channel_id_to_post_loot %}
+                <option value="" selected>--Select channel--</option>
+                {% else %}
+                {% for channel in channel_list %}
+                    {% if channel.type == 'text' %}
+                        {% if config.channel_id_to_post_loot | string == channel.id | string %}
+                            <option value="{{ channel.id }}" {% if config.channel_id_to_post_loot | string == channel.id | string %}selected{% endif %}>{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+                <option value="">--Select channel--</option>
+                {% endif %}
+                
+                <!-- Loop through the channels to display options -->
+                {% for channel in channel_list %}
+                    {% if channel.type == 'text' %}
+                        {% if channel.id | string != config.channel_id_to_post_loot | string %}
+                        <option value="{{ channel.id }}">{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="channel_id_to_post_pb">Channel to Post New Personal Bests <i class="bi bi-cash-stack"></i></label>
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> New personal bests will be sent to this channel when a group member achieves them.</small></p>
+            <select id="channel_id_to_post_pb" name="channel_id_to_post_pb" class="form-control">
+                {% if not config.channel_id_to_post_pb %}
+                <option value="" selected>--Select channel--</option>
+                {% else %}
+                {% for channel in channel_list %}
+                    {% if channel.type == 'text' %}
+                        {% if config.channel_id_to_post_pb | string == channel.id | string %}
+                            <option value="{{ channel.id }}" {% if config.channel_id_to_post_pb | string == channel.id | string %}selected{% endif %}>{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+                <option value="">--Select channel--</option>
+                {% endif %}
+                
+                <!-- Loop through the channels to display options -->
+                {% for channel in channel_list %}
+                    {% if channel.type == 'text' %}
+                        {% if channel.id | string != config.channel_id_to_post_pb | string %}
+                        <option value="{{ channel.id }}">{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="channel_id_to_post_ca">Channel to Post Combat Achievements <i class="bi bi-cash-stack"></i></label>
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> New combat achievements will be sent to this channel</small>.</p>
+            <select id="channel_id_to_post_ca" name="channel_id_to_post_ca" class="form-control">
+                {% if not config.channel_id_to_post_ca %}
+                <option value="" selected>--Select channel--</option>
+                {% else %}
+                {% for channel in channel_list %}
+                    {% if channel.type == 'text' %}
+                        {% if config.channel_id_to_post_ca | string == channel.id | string %}
+                            <option value="{{ channel.id }}" {% if config.channel_id_to_post_ca | string == channel.id | string %}selected{% endif %}>{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+                <option value="">--Select channel--</option>
+                {% endif %}
+                
+                <!-- Loop through the channels to display options -->
+                {% for channel in channel_list %}
+                    {% if channel.type == 'text' %}
+                        {% if channel.id | string != config.channel_id_to_post_ca | string %}
+                        <option value="{{ channel.id }}">{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="channel_id_to_post_clog">Channel to Post Collection Logs <i class="bi bi-cash-stack"></i></label>
+            <select id="channel_id_to_post_clog" name="channel_id_to_post_clog" class="form-control">
+                {% if not config.channel_id_to_post_clog %}
+                <option value="" selected>--Select channel--</option>
+                {% else %}
+                {% for channel in channel_list %}
+                    {% if channel.type == 'text' %}
+                        {% if config.channel_id_to_post_clog | string == channel.id | string %}
+                            <option value="{{ channel.id }}" {% if config.channel_id_to_post_clog | string == channel.id | string %}selected{% endif %}>{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+                <option value="">--Select channel--</option>
+                {% endif %}
+                
+                <!-- Loop through the channels to display options -->
+                {% for channel in channel_list %}
+                    {% if channel.type == 'text' %}
+                        {% if channel.id | string != config.channel_id_to_post_clog | string %}
+                        <option value="{{ channel.id }}">{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="vc_to_display_monthly_loot">Monthly Loot Display</label>
+            <p class="text-muted">
+                <i class="bi bi-info-circle"></i>
+                <small> Select a voice channel to update automatically every 30 minutes with your clan's total acquired loot this month.</small>
+            </p>
+            <select id="vc_to_display_monthly_loot" name="vc_to_display_monthly_loot" class="form-control">
+                {% if not config.vc_to_display_monthly_loot %}
+                <option value="" selected>--Select channel--</option>
+                {% else %}
+                {% for channel in channel_list %}
+                    {% if channel.type == 'voice' %}
+                        {% if config.vc_to_display_monthly_loot | string == channel.id | string %}
+                            <option value="{{ channel.id }}" {% if config.vc_to_display_monthly_loot | string == channel.id | string %}selected{% endif %}>{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+                <option value="">--Select channel--</option>
+                {% endif %}
+                
+                <!-- Loop through the channels to display options -->
+                {% for channel in channel_list %}
+                    {% if channel.type == 'voice' %}
+                        {% if channel.id | string != config.vc_to_display_monthly_loot | string %}
+                        <option value="{{ channel.id }}">{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="vc_to_display_droptracker_users">VC to Display DropTracker User count</label>
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> Select a voice channel to update every 10 minutes with the number of members in your group using the DropTracker.</small></p>
+            <select id="vc_to_display_droptracker_users" name="vc_to_display_droptracker_users" class="form-control">
+                {% if not config.vc_to_display_droptracker_users %}
+                <option value="" selected>--Select channel--</option>
+                {% else %}
+                {% for channel in channel_list %}
+                    {% if channel.type == 'voice' %}
+                        {% if config.vc_to_display_droptracker_users | string == channel.id | string %}
+                            <option value="{{ channel.id }}" {% if config.vc_to_display_droptracker_users | string == channel.id | string %}selected{% endif %}>{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+                <option value="">--Select channel--</option>
+                {% endif %}
+                
+                <!-- Loop through the channels to display options -->
+                {% for channel in channel_list %}
+                    {% if channel.type == 'voice' %}
+                        {% if channel.id | string != config.vc_to_display_droptracker_users | string %}
+                        <option value="{{ channel.id }}">{{ channel.name }}</option>
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+            </select>
+        </div>
+
+
+        <!-- Notification Settings -->
+        <h3>Notification Settings</h3>
+        <div class="form-group">
+            <label for="only_send_messages_with_images">Only Send Messages With Images</label>
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> Should notifications only be sent for submissions containing images?<br />
+                                You should ensure your <strong>group members</strong> have <mark>screenshots enabled</mark>; otherwise their drops will be ignored if this is "Yes".</small></p>
+            <div class="form-check">
+                <input type="checkbox" class="form-check-input" id="only_send_messages_with_images" name="only_send_messages_with_images" {% if config.only_send_messages_with_images == '1' %}checked{% endif %}>
+                <label class="form-check-label" for="only_send_messages_with_images">Yes</label>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="minimum_value_to_notify">Minimum Drop Value to Notify</label>
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> Set the minimum GP value required for a notification to be sent.</small></p>
+            <input type="number" class="form-control" id="minimum_value_to_notify" name="minimum_value_to_notify" value="{{ config.minimum_value_to_notify }}">
+        </div>
+        <div class="form-group">
+            <label for="send_stacks_of_items">Send stacks of items?</label>
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> Should we send a notification for stacks of items (ex: 500 zulrah scales vs 1 serp visage)?</small></p>
+            <div class="form-check">
+                <input type="checkbox" class="form-check-input" id="send_stacks_of_items" name="send_stacks_of_items" {% if config.send_stacks_of_items == 'true' %}checked{% endif %}>
+                <label class="form-check-label" for="send_stacks_of_items">Yes</label>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="notify_clogs">Notify for Collection Logs <i class="bi bi-cash-stack"></i></label>
+            <div class="form-check">
+                <input type="checkbox" class="form-check-input" id="notify_clogs" name="notify_clogs" {% if config.notify_clogs == '1' %}checked{% endif %}>
+                <label class="form-check-label" for="notify_clogs">Yes</label>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="notify_cas">Notify for Combat Achievements <i class="bi bi-cash-stack"></i></label>
+            <div class="form-check">
+                <input type="checkbox" class="form-check-input" id="notify_cas" name="notify_cas" {% if config.notify_cas == '1' %}checked{% endif %}>
+                <label class="form-check-label" for="notify_cas">Yes</label>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="notify_pbs">Notify for Personal Bests <i class="bi bi-cash-stack"></i></label>
+            <div class="form-check">
+                <input type="checkbox" class="form-check-input" id="notify_pbs" name="notify_pbs" {% if config.notify_pbs == '1' %}checked{% endif %}>
+                <label class="form-check-label" for="notify_pbs">Yes</label>
+            </div>
+        </div>
+        
+        <!-- Other Settings -->
+        <h3>Lootboard Settings</h3>
+        <div class="form-group">
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> <mark>Currently disabled</mark> - This will allow you to use different "themes" for your lootboard.</small></p>
+            <label for="loot_board_type">Loot Board Type <i class="bi bi-cash-stack"></i></label>
+            <input type="text" class="form-control" id="loot_board_type" name="loot_board_type" value="{{ config.loot_board_type }}" readonly>
+        </div>
+
+        <!-- Voice Channels Settings -->
+        
+
+        <!-- Other Links -->
+        <h3>Other Integrations</h3>
+        <div class="form-group">
+            <label for="spreadsheet_url">Spreadsheet URL <i class="bi bi-cash-stack"></i></label>
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> Configure a Google Sheet to store all of your group's drops inside of, in addition to the DropTracker database.<br />
+            You can simply place the entire sheet URL here.<br />
+            <mark>You must invite the DropTracker's Google service account to your sheet as an editor in order for Google Sheets to work:</mark><br />
+            <strong>droptracker@droptracker.iam.gserviceaccount.com</strong></small></p>
+            {% if group_patreon %}
+            
+            <input type="url" class="form-control" id="spreadsheet_url" name="spreadsheet_url" value="{{ config.spreadsheet_url }}">
+            {% else %}
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> A <a href="/patreon" target="_blank">Patreon subscription</a> will enable this feature.</small></p>
+            {% endif %}
+        </div>
+
+        <div class="form-group">
+            <label for="discord_invite_link">Discord Invite Link</label>
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> You can create an invite link through Discord and share it here to have it publicly accessible when your group is displayed on the website.<br />
+                </small></p>
+
+            {% if group_patreon %}
+            <input type="url" class="form-control" id="discord_invite_link" name="discord_invite_link" value="{{ config.discord_invite_link }}">
+            {% else %}
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> A <a href="/patreon" target="_blank">Patreon subscription</a> will enable this feature.</small></p>
+            {% endif %}
+        </div>
+
+        <!-- Patreon Integration -->
+        <div class="form-group">
+            {% if not group_patreon %}
+            <p class="text-muted"><i class="bi bi-info-circle"></i><small> Consider becoming a <a href="/patreon" target="_blank">Patreon supporter</a> to unlock extra features for your group.</small></p>
+            
+            {% else %}
+            {% if not patreon_trial %}
+            <p><strong>Thank you to you and your group for being Patreon supporters! This project couldn't survive without your support.</strong></p>
+            {% endif %}
+            {% endif %}
+        </div>
+
+        <button type="submit" class="btn btn-success mt-3">Save Configuration</button>
+    </form>
+</div>
 {% endblock %}

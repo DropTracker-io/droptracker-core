@@ -11,6 +11,9 @@
 /static/assets/css/*
 /static/assets/plugins/*
 
+# templates
+/templates/*
+
 # schema migration configuration
 alembic.ini 
 alembic/versions/*
@@ -18,4 +21,22 @@ alembic/versions/*
 # General project excludes
 *.cpython*
 *.mako
+*.pxi
+*.pyi
+*.pyx
+venv/*
+utils/sheets/*
+email_*.html
+*.zip
+discord_login.py
+*.png
 data/items.json
+debug.log
+invalid_npcs.txt
+main_backup1.py
+xf_acc_conversion.py
+xf_drop_conversion.py
+db/drop_mem.py
+templates/base.html
+templates/index.html
+templates/group/config.html

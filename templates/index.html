@@ -1,7 +1,171 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Primary focus right now is on the backend logic and Discord bot.<br />
+<div class="container mt-4">
+    <!-- BEGIN card -->
+    <div class="row">
+    <div class="card mb-3">
+        <!-- BEGIN card-body -->
+        <div class="card-body">
+            <!-- BEGIN title -->
+            <h1 style="text-align: center;">Welcome to the DropTracker</h1>
+            <p>An all-in-one solution for players & clans to track Old School RuneScape drops, personal bests, collection log slots, combat achievements & more.</p>
+                
+            
+            <div class="row">
+                <br />
+                <h6>Featuring "Loot Leaderboards":</h6>
+                <img src="https://www.joelhalen.net/img/example-board.png" alt="Example Loot Leaderboard" width="40%" />
+                <hr />
+                <h3 style="text-align: center;">Track your drops & compete amongst clanmates</h3>
+                <p style="text-align:center;">Download our <a href="/runelite" target="_blank">RuneLite plugin</a>, and follow our <a href="/docs/runelite">plugin set-up guide</a> guide to start tracking today!</a></p>
+                <br />
+                <hr />
+                <p style="width:95%"><mark>Please note,</mark> this website is a work-in-progress.<br />
+                    {% if user %}
+                        <a href="/user-settings">User Settings</a><br />
+                        <a href="/group-settings">Group Settings</a>
+                    {% endif %}
+                <br />
+                {% if not user %}
+                    You can also <a href="/login/discord">login to the website with Discord</a> to edit group or user settings.
+                {% endif %}
+                <br>
+                <!--The result looks something like this, with every drop you receive added to the "bank":<br><br></p>
+                <img src="/img/hero-bg.png" alt="" />-->
+                </div>
+            <!-- END row -->
+        </div>
+        <!-- END card-body -->
+        
+        <!-- BEGIN card-arrow -->
+        <div class="card-arrow">
+            <div class="card-arrow-top-left"></div>
+            <div class="card-arrow-top-right"></div>
+            <div class="card-arrow-bottom-left"></div>
+            <div class="card-arrow-bottom-right"></div>
+        </div>
+        <!-- END card-arrow -->
+    </div>
+</div>
+    <!-- END card -->
+     <!--
+        <div class="card mb-3">
+            <div class="card-body">
+                <div class="d-flex fw-bold small mb-3">
+                    <span class="flex-grow-1">Statistics</span>
+                    
+                </div>
+                <div class="row align-items-center mb-2">
+                    <div class="col-7">
+                        <h3 class="mb-0" id="total-loot">0 </h3>
+                    </div>
+                    <div class="col-5">
+                        <div class="mt-n2" data-render="apexchart" data-type="bar" data-title="Visitors" data-height="30"></div>
+                    </div>
+                </div>
+                <div class="small text-inverse text-opacity-50 text-truncate">
+                    <i class="fa fa-chevron-up fa-fw me-1"></i> <span id="total-drops">0</span> total drops received<br>
+                    <i class="far fa-user fa-fw me-1"></i> by <span id="total-players">0</span> players<br>
+                    <i class="fas fa-fw me-2 fa-plug"></i>with <span id="total-users">0</span> users registered
+                    <i class="fas fa-fw me-2 fa-trophy"></i> topPlayer
+                    
+                </div>
+            </div>
+            <div class="card-arrow">
+                <div class="card-arrow-top-left"></div>
+                <div class="card-arrow-top-right"></div>
+                <div class="card-arrow-bottom-left"></div>
+                <div class="card-arrow-bottom-right"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-xl-3 col-lg-6"></div>
+        <div class="card mb-3">
+            <div class="card-body">
+                <div class="d-flex fw-bold small mb-3">
+                    <span class="flex-grow-1">Top Player (this month)</span>
+                    
+                </div>
+                <div class="row align-items-center mb-2">
+                    <div class="col-7">
+                        <h3 class="mb-0" id="top-player-name"> Nobody! </h3>
+                    </div>
+                    <div class="col-5">
+                        <div class="mt-n2" data-render="apexchart" data-type="bar" data-title="Visitors" data-height="30"></div>
+                    </div>
+                </div>
+                <div class="small text-inverse text-opacity-50 text-truncate">
+                    <i class="fa fa-chevron-up fa-fw me-1"></i> <span id="top-player-loot">0</span> total loot received<br>
+                    <i class="far fa-user fa-fw me-1"></i> based on <span id="top-player-total-drops">0</span> drops<br>
+                    <i class="fas fa-fw me-2 fa-plug"></i>(<span id="top-player-top-npc-loot">0</span> gp from <span id="top-player-top-npc">Unknown</span>)
+                    <i class="fas fa-fw me-2 fa-trophy"></i> topPlayer
+                    
+                </div>
+            </div>
+            
+            <div class="card-arrow">
+                <div class="card-arrow-top-left"></div>
+                <div class="card-arrow-top-right"></div>
+                <div class="card-arrow-bottom-left"></div>
+                <div class="card-arrow-bottom-right"></div>
+            </div>
+        </div>
+    </div>
+-->
+</div>
+<!-- END col-6 -->
+<h1><br />
     <hr />
-    Website will be up and running soon. :)
+    We are actively looking for front-end developers to help contribute to building our website.<br />
+    <a href="/discord" target="_blank">Join our Discord to learn more</a>
 </h1>
+{% endblock %}
+{% block js %}
+<script>
+    async function fetchHomepageData() {
+        try {
+            // Call the API to fetch homepage data
+            const response = await fetch('/api/homepage-data');
+            
+            // Parse the JSON response
+            const data = await response.json();
+            
+            // Update the HTML fields with the data from the API
+            document.getElementById('total-players').textContent = data.total_players;
+            document.getElementById('total-users').textContent = data.total_users;
+            document.getElementById('total-groups').textContent = data.total_groups;
+            document.getElementById('total-pbs').textContent = data.total_pbs;
+            document.getElementById('total-clog').textContent = data.total_clog;
+            document.getElementById('total-loot').textContent = data.total_loot;
+            const topPlayer = data.top_player;
+
+            if (topPlayer) {
+                // Create a more detailed string to display
+                const playerName = topPlayer.player_name;
+                const player_id = topPlayer.player_id;
+                const player_loot = topPlayer.loot;
+                const playerTopNpc = topPlayer.top_npc;
+                const playerTotalDrops = topPlayer.total_drops;
+                
+                document.getElementById('top-player-name').innerHTML = playerName;
+                document.getElementById('top-player-loot').innerHTML = player_loot;  
+                document.getElementById('top-player-total-drops').innerHTML = playerTotalDrops;
+                
+                document.getElementById('top-player-top-npc').innerHTML = playerTopNpc.name;
+                document.getElementById('top-player-top-npc-loot').innerHTML = playerTopNpc.loot;
+            } else {
+                document.getElementById('top-player-name').textContent = "Nobody!";
+                document.getElementById('top-player-loot').innerHTML = 0;
+                document.getElementById('top-player-top-npc').innerHTML = 0;
+                document.getElementById('top-player-top-npc-loot').innerHTML = 0;
+            }
+            
+        } catch (error) {
+            console.error('Error fetching homepage data:', error);
+        }
+    }
+
+    // Call the function to fetch and update data when the page loads
+    window.onload = fetchHomepageData;
+</script>
 {% endblock %}
