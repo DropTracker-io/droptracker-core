@@ -36,7 +36,7 @@ async def patreon_sync():
 async def get_creator_patreon_data():
     url = "https://www.patreon.com/api/oauth2/v2/campaigns/12053510/members"
     headers = {
-        "Authorization": "Bearer 0ptwSZBwhFgqApSVUjcCBW9wVuEjmbEkBHUnaBR5cfI"
+        "Authorization": f"Bearer {os.getenv('PATREON_ACCESS_TOKEN')}"
     }
     params = {
         "include": "currently_entitled_tiers,user",  # Include user info

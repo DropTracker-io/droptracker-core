@@ -1,6 +1,8 @@
 import aiohttp
 import json
 from typing import Optional, Dict, Any
+import os
+
 
 base_url = "https://www.droptracker.io/"
 class LoggerClient:
@@ -13,7 +15,7 @@ class LoggerClient:
             token: Authentication token for logging
         """
         self.base_url = base_url.rstrip('/')
-        self.token = "zLsv8WsPjlh9YP3UZllZs85zlBrireqU1LG8xC8Aqa6pgSjWW2rFiOjzRHewLa9h"
+        self.token = os.getenv('LOGGER_TOKEN')
         self.headers = {
             'Authorization': f'Bearer {self.token}',
             'Content-Type': 'application/json'
