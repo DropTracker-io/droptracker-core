@@ -118,6 +118,7 @@ class GielinorRace:
             "boost": Item("Boost", 40, "Double points for next task", "⚡", ItemType.OFFENSIVE, 2)
         }
         self.tasks: Dict[TileType, List[Task]] = {tile_type: [] for tile_type in TileType}
+        self.task_file_path = 'games/gielinor_race/tasks.json'
         self.load_tasks()
         self.load_game_state()
         self.current_team_index = 0
@@ -136,7 +137,7 @@ class GielinorRace:
         """
         Load tasks from a JSON file and populate the tasks list.
         """
-        with open('games/gielinor-race/tasks.json', 'r') as f:
+        with open(self.task_file_path, 'r') as f:
             task_data = json.load(f)
             for task in task_data:
                 tile_type = TileType(task['difficulty'])

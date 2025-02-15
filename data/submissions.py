@@ -9,6 +9,7 @@ from sqlalchemy import func, text
 from utils.format import get_command_id, get_extension_from_content_type, replace_placeholders, convert_from_ms
 import interactions
 from utils.logger import LoggerClient
+from utils.semantic_check import check_drop as verify_item_real
 
 from dotenv import load_dotenv
 import os
@@ -137,6 +138,7 @@ async def drop_processor(bot: interactions.Client, drop_data: RawDropData):
             return
     user_exists, authed = check_auth(player_name, account_hash, auth_key)
     # print("Exists, authed:", user_exists,authed)
+
     if user_exists and not authed:
         player_object = session.query(Player).filter(Player.account_hash == account_hash).first()
         if player_object:
@@ -187,7 +189,14 @@ async def drop_processor(bot: interactions.Client, drop_data: RawDropData):
     else:
         await confirm_new_item(bot, item_name, player_name, item_id, npc_name, value)
         return
-    
+    drop_value = value * quantity
+    if drop_value > 1000000: ## Anything over 1M should be verified against it's source..
+        is_from_npc = verify_item_real(item_name, npc_name)
+        print("Was " + item_name, "from", npc_name + "?", is_from_npc)
+        #is_from_npc = check_item_against_monster(item_name, npc_name)
+        if not is_from_npc:
+            print("Drop has been destroyed as it exceeded 1M and was not expected from this npc:", item_name, "from", npc_name)
+            return
     # Now create the drop object
     # print("Creating db object for a drop....")
     attachment_url = drop_data['attachment_url']
@@ -676,9 +685,10 @@ async def pb_processor(bot: interactions.Client,
                 send_pbs = session.query(GroupConfiguration.config_value).filter(GroupConfiguration.config_key == 'notify_pbs',
                                                                                     GroupConfiguration.group_id == group_id).first()
                 formatted_name = None
-                if player.user_id:
-                    user: User = session.query(User).filter(User.user_id == player.user_id).first()
-                    formatted_name = f"<@{user.discord_id}>"
+                if type(player) == Player:
+                    if player.user_id:
+                        user: User = session.query(User).filter(User.user_id == player.user_id).first()
+                        formatted_name = f"<@{user.discord_id}>"
                 if (
                     send_pbs
                     and send_pbs[0]
@@ -703,7 +713,13 @@ async def pb_processor(bot: interactions.Client,
 
                     player_ids = await associate_player_ids(player_wom_ids)
                     total_tracked = len(player_ids)
-                    npc_id = npc_id[0]
+                    if type(npc_id) == int:
+                        print(f"NPC ID is already an int: {npc_id}")
+                    else:
+                        try:
+                            npc_id = npc_id[0]
+                        except Exception as e:
+                            print("Couldn't get the subscripted npc id:", e)
                     group_ranks = session.query(PersonalBestEntry).filter(PersonalBestEntry.player_id.in_(player_ids), PersonalBestEntry.npc_id == int(npc_id),
                                                                           PersonalBestEntry.team_size == team_size).order_by(PersonalBestEntry.personal_best.asc()).all()
                     all_ranks = session.query(PersonalBestEntry).filter(PersonalBestEntry.npc_id == int(npc_id),

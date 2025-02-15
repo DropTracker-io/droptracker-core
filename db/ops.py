@@ -48,25 +48,7 @@ class DatabaseOperations:
         item_name = session.query(ItemList.item_name).filter(ItemList.item_id == drop_data.item_id).first()
         item_name = item_name[0] if item_name else "Unknown"
         drop_value = drop_data.value * drop_data.quantity
-        if drop_value > 1000000: ## Anything over 1M should be verified against it's source..
-            is_from_npc = verify_item_real(item_name, npc_name)
-            print("Was " + item_name, "from", npc_name + "?", is_from_npc)
-            #is_from_npc = check_item_against_monster(item_name, npc_name)
-            if not is_from_npc:
-                try:
-                    query = """
-                        INSERT INTO logs (level, source, message, details)
-                        VALUES ('warning', 'drop_validator', 'Drop denied as it exceeded 12.5M and was not expected from this npc.', 'Item name: %s, NPC name: %s')
-                    """
-                    session.execute(query, (item_name, npc_name))
-                except Exception as e:
-                    print("Couldn't insert log into database:", e)
-                print("Drop denied as it exceeded 12.5M and was not expected from this npc:", item_name, "from", npc_name)
-                return
-
-                # # item_name = session.query(ItemList.item_name).filter(ItemList.item_id == drop_data.item_id).first()
-                # # item_name = item_name[0] if item_name else "Unknown"
-                # print("This drop is not expected from this npc:", item_name, "from", npc_name)
+        
 
         #print("Checking drop for player_id", player_id)
         if player_id:
