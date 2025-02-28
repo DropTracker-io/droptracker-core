@@ -229,6 +229,14 @@ class Player(Base):
             # Only add the group if no association exists
             self.groups.append(group)
             session.commit()
+            
+    def remove_group(self, group):
+        # Check if the association already exists by querying the user_group_association table
+        existing_association = session.query(user_group_association).filter_by(
+            player_id=self.player_id, group_id=group.group_id).first()
+        if existing_association:
+            self.groups.remove(group)
+            session.commit()
 
     def __init__(self, wom_id, player_name, account_hash, user_id=None, user=None, log_slots=0, total_level=0, group=None):
         self.wom_id = wom_id

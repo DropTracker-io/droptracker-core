@@ -43,12 +43,11 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
     partition_totals = {}
     partition_items = {}
     partition_npcs = {}
-    daily_totals = {}  # New: Track daily totals
-    daily_items = {}   # New: Track daily items
-    daily_npcs = {}    # New: Track daily NPCs
+    daily_totals = {}
+    daily_items = {}    # Initialize empty dictionary
+    daily_npcs = {}     # Initialize empty dictionary
 
     player_drops = batch_drops if batch_drops else []
-
 
     # Initialize Redis pipeline
     pipeline = redis_client.client.pipeline(transaction=False)
@@ -84,8 +83,23 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
         'items': {},
         'npcs': {}
     }
-    daily_totals = []
+    daily_totals = {}
     for drop in player_drops:
+        drop_partition = drop.partition
+        drop_date = drop.date_added.strftime('%Y-%m-%d')
+        
+        # Initialize the dictionaries for this date if they don't exist
+        if drop_date not in daily_totals:
+            daily_totals[drop_date] = {
+                'total_loot': 0,
+                'items': {},
+                'npcs': {}
+            }
+        if drop_date not in daily_items:    # Add this check
+            daily_items[drop_date] = {}
+        if drop_date not in daily_npcs:     # Add this check
+            daily_npcs[drop_date] = {}
+
         ## Sort through the list of drops and update totals in redis
         drop_partition = drop.partition  # Use the drop's actual partition (i.e, 202501 for jan 2025.)
         day_of_drop = drop.date_added.strftime('%Y-%m-%d')
@@ -152,23 +166,18 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
                     break
 
         # Add daily tracking alongside existing logic
-        drop_date = drop.date_added.strftime('%Y%m%d')
+        drop_date = drop.date_added.strftime('%Y-%m-%d')
         
-        if drop_date not in daily_totals:
-            daily_totals[drop_date] = 0
-            daily_items[drop_date] = {}
-            daily_npcs[drop_date] = {}
-
-        daily_totals[drop_date] += drop.value
+        daily_totals[drop_date]['total_loot'] += total_value
         
         if drop.item_id not in daily_items[drop_date]:
             daily_items[drop_date][drop.item_id] = [0, 0]
         daily_items[drop_date][drop.item_id][0] += drop.quantity
-        daily_items[drop_date][drop.item_id][1] += drop.value
+        daily_items[drop_date][drop.item_id][1] += total_value
         
         if drop.npc_id not in daily_npcs[drop_date]:
             daily_npcs[drop_date][drop.npc_id] = 0
-        daily_npcs[drop_date][drop.npc_id] += drop.value
+        daily_npcs[drop_date][drop.npc_id] += total_value
 
     # Store totals for each partition
     for partition, totals in partition_totals.items():
@@ -225,21 +234,23 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
 
     # Add daily data storage to the existing pipeline
     for date, total in daily_totals.items():
-        pipeline.set(f"player:{player_id}:daily:{date}:total_loot", total)
+        pipeline.set(f"player:{player_id}:daily:{date}:total_loot", total['total_loot'])
         
-        for item_id, (qty, value) in daily_items[date].items():
-            pipeline.hset(
-                f"player:{player_id}:daily:{date}:items",
-                str(item_id),
-                f"{qty},{value}"
-            )
+        if date in daily_items:  # Add safety check
+            for item_id, (qty, value) in daily_items[date].items():
+                pipeline.hset(
+                    f"player:{player_id}:daily:{date}:items",
+                    str(item_id),
+                    f"{qty},{value}"
+                )
             
-        for npc_id, value in daily_npcs[date].items():
-            pipeline.hset(
-                f"player:{player_id}:daily:{date}:npcs",
-                str(npc_id),
-                value
-            )
+        if date in daily_npcs:  # Add safety check
+            for npc_id, value in daily_npcs[date].items():
+                pipeline.hset(
+                    f"player:{player_id}:daily:{date}:npcs",
+                    str(npc_id),
+                    value
+                )
 
     # Execute all Redis commands
     pipeline.execute()

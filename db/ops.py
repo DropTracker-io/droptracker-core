@@ -436,17 +436,35 @@ async def update_group_members():
         group: Group = session.query(Group).filter(Group.wom_id == wom_id).first()
         if group:
             group_wom_ids = await fetch_group_members(wom_id)
-            group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
-            for member in group_members:
-                if member.user:
-                    member.user.add_group(group)
-                member.add_group(group)
-            group.date_updated = func.now()
-            try:
-                session.commit()
-                #await logger.log("access", f"Successfully updated {len(group_members)} group assocations for {group.group_name} (#{group.group_id})", "update_group_members")
-            except Exception as e:
-                await logger.log("error", f"Couldn't update group member associations for{group.group_name} (#{group.group_id}) e: {e}", "update_group_members")
+            
+            # Only proceed with member updates if we successfully got the member list
+            if group_wom_ids:
+                # Get current group members from database
+                group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
+                
+                # Remove members no longer in the group
+                for member in group.players:
+                    if member.wom_id and member.wom_id not in group_wom_ids:
+                        print(f"Removing {member.player_name} from {group.group_name}")
+                        member.remove_group(group)
+                
+                # Add new members to the group
+                for member in group_members:
+                    if member not in group.players:
+                        print(f"Adding {member.player_name} to {group.group_name}")
+                        if member.user:
+                            member.user.add_group(group)
+                        member.add_group(group)
+                
+                group.date_updated = func.now()
+                try:
+                    session.commit()
+                    await logger.log("access", f"Successfully updated {len(group_members)} group associations for {group.group_name} (#{group.group_id})", "update_group_members")
+                except Exception as e:
+                    session.rollback()
+                    await logger.log("error", f"Couldn't update group member associations for {group.group_name} (#{group.group_id}): {e}", "update_group_members")
+            else:
+                print(f"Failed to fetch member list for group {group.group_name} (WOM ID: {wom_id})")
         else:
             print("Group not found for wom_id", wom_id)
 
