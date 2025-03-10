@@ -152,6 +152,55 @@ def get_combat_achievement_tiers():
     
     return tier_data
 
+def get_ca_tier_progress(current_points):
+    current_points = int(current_points)    
+    tiers = get_combat_achievement_tiers()
+    
+    # Define tier order from lowest to highest
+    tier_order = ['Easy', 'Medium', 'Hard', 'Elite', 'Master', 'Grandmaster']
+    
+    # Find which tier the player is currently in and what's next
+    current_tier = None
+    next_tier = None
+    
+    # First find the current tier
+    for i, tier_name in enumerate(tier_order):
+        if tier_name not in tiers:
+            continue
+            
+        tier_points = int(tiers[tier_name]['total_points'])
+        
+        if current_points >= tier_points:
+            current_tier = tier_name
+            current_tier_points = tier_points
+            # Look ahead to next tier
+            if i + 1 < len(tier_order) and tier_order[i + 1] in tiers:
+                next_tier = tier_order[i + 1]
+                next_tier_points = int(tiers[next_tier]['total_points'])
+        else:
+            # If we haven't reached this tier, it's our next goal
+            if current_tier is None:
+                next_tier = tier_name
+                next_tier_points = tier_points
+                current_tier_points = 0
+            break
+    
+    # Calculate progress
+    if current_tier is None:
+        # Haven't reached Easy tier yet
+        easy_points = int(tiers['Easy']['total_points'])
+        progress = (current_points / easy_points) * 100
+        return round(progress, 2), easy_points
+    elif next_tier is None:
+        # Completed Grandmaster
+        return 100.0, int(tiers['Grandmaster']['total_points'])
+    else:
+        # Calculate progress to next tier
+        points_needed = next_tier_points - current_tier_points
+        points_gained = current_points - current_tier_points
+        progress = (points_gained / points_needed) * 100
+        return round(progress, 2), next_tier_points
+
 def get_current_ca_tier(current_points):
     current_points = int(current_points)    
     tiers = get_combat_achievement_tiers()

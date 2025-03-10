@@ -1,3 +1,4 @@
+
 import random
 from typing import List, Dict, Optional, Tuple, Union
 from dataclasses import dataclass, field, asdict
@@ -7,6 +8,7 @@ import json
 from enum import Enum
 import interactions
 from interactions import Embed
+
 
 class TileType(Enum):
     AIR = "air"
@@ -39,6 +41,7 @@ class Team:
     players: List[Player]
     position: int = 0
     points: int = 0
+    gold: int = 0
     inventory: List[Item] = field(default_factory=list)
     cooldowns: Dict[str, int] = field(default_factory=dict)
     active_effects: Dict[str, int] = field(default_factory=dict)
@@ -99,39 +102,59 @@ class GielinorRaceEmbed:
         for team in game.teams:
             embed.add_field(name=f"Team: {team.name}", value=f"Position: {team.position}\nPoints: {team.points}", inline=False)
         return embed
+    
+    @staticmethod
+    def embed_base(game: 'GielinorRace') -> interactions.Embed:
+        embed = interactions.Embed(title="Gielinor Race", color=0x00ffff)
+        embed.set_footer(text=f"Powered by the DropTracker | https://www.droptracker.io/")
+        return embed
+    
+    @staticmethod
+    def embed_base_with_title(game: 'GielinorRace', title: str) -> interactions.Embed:
+        embed = GielinorRaceEmbed.embed_base(game)
+        embed.title = title
+
 
 class GielinorRace:
-    def __init__(self, group_id: int, board_size: int = 100):
+    def __init__(self, bot: interactions.Client, group_id: int, board_size: int = 100, 
+                 join_channel: int = None, shop_channel: int = None, 
+                 noti_channel: int = None, admin_channel: int = None):
         """
         Initialize a new Gielinor Race game for a specific group.
 
         :param group_id: The ID of the group playing the game
         :param board_size: The number of tiles on the game board (50-250)
+        :param channel_id: The ID of the Discord channel to send game updates to
         """
         self.group_id = group_id
-        self.board_size = max(50, min(250, board_size))
+        self.board_size = 100
         self.teams: List[Team] = []
-        self.tiles: List[Tile] = self._generate_tiles()
+        self.tiles: List[Tile] = []
+        for i, tile_number in enumerate(range(self.board_size)):
+            if tile_number % 25 == 0:
+                self.tiles.append(Tile(TileType.AIR, tile_number))
+            elif tile_number % 50 == 0:
+                self.tiles.append(Tile(TileType.EARTH, tile_number))
+            elif tile_number % 75 == 0:
+                self.tiles.append(Tile(TileType.FIRE, tile_number))
+            else:
+                self.tiles.append(Tile(TileType.WATER, tile_number))
+
         self.shop: Dict[str, Item] = {
-            "teleport": Item("Teleport", 50, "Move forward 1-6 spaces", "🌀", ItemType.SPECIAL, 3),
-            "protection": Item("Protection", 30, "Avoid next negative effect", "🛡️", ItemType.DEFENSIVE, 2),
-            "boost": Item("Boost", 40, "Double points for next task", "⚡", ItemType.OFFENSIVE, 2)
+            "teleport": Item("Teleport", 50, "Instantly re-roll your current task to one difficulty tier lower.", "🌀", ItemType.SPECIAL, 3),
+            "protection": Item("Protection", 30, "Your next die roll will have +2 added to it.", ":game_die:", ItemType.SPECIAL, 2),
+            "boost": Item("Boost", 40, "Doubles the number of coins you receive for completing your next task.", "⚡", ItemType.SPECIAL, 2)
         }
+
         self.tasks: Dict[TileType, List[Task]] = {tile_type: [] for tile_type in TileType}
-        self.task_file_path = 'games/gielinor_race/tasks.json'
+        self.task_file_path = 'games/events/task_store/default.json'
         self.load_tasks()
         self.load_game_state()
         self.current_team_index = 0
-        self.discord_channel_id = None  # Set this when creating the game
+        self.notification_channel_id = noti_channel
+        self.join_channel_id = join_channel
+        self.shop_channel_id = shop_channel
 
-    def _generate_tiles(self) -> List[Tile]:
-        """
-        Generate the game board tiles.
-
-        :return: A list of Tile objects representing the game board
-        """
-        tile_types = list(TileType)
-        return [Tile(tile_types[i % len(tile_types)], i) for i in range(self.board_size)]
 
     def load_tasks(self):
         """
@@ -238,8 +261,11 @@ class GielinorRace:
         :return: A tuple containing (roll_result, landed_tile, assigned_task)
         """
         roll_result = self.roll_dice()
+        team = self.get_team(team_name)
+        current_loc = team.position
         landed_tile = self.move_team(team_name, roll_result)
         assigned_task = self.generate_task(landed_tile.type)
+        logger.info(f"Team {team_name} rolled a {roll_result} and moved from {current_loc} to {landed_tile.position}. Assigned task: {assigned_task.name}")
         return roll_result, landed_tile, assigned_task
 
     def add_team(self, name: str, player_ids: List[int]) -> None:
@@ -252,10 +278,11 @@ class GielinorRace:
         players = [session.query(Player).get(player_id) for player_id in player_ids]
         self.teams.append(Team(name, players))
         self.save_game_state()
+        logger.info(f"Team {name} added with players: {', '.join([player.player_name for player in players])}")
 
     def award_points(self, team_name: str, task_difficulty: int) -> None:
         """
-        Award points to a team based on task difficulty.
+        Award points to a team for completing an entire task, based on the task difficulty.
 
         :param team_name: The name of the team to award points to
         :param task_difficulty: The difficulty of the completed task
@@ -265,6 +292,7 @@ class GielinorRace:
         team.points += points
         self.move_team(team_name, task_difficulty)
         self.save_game_state()
+        logger.info(f"Team {team_name} earned {points} points for task difficulty {task_difficulty}. New total points: {team.points}")
 
     def get_team(self, team_name: str) -> Team:
         """
@@ -803,10 +831,13 @@ class GielinorRace:
         self.send_discord_message(f"It's now {current_team.name}'s turn!")
 
     def send_discord_message(self, message: str) -> None:
-        if self.discord_channel_id:
-            # Implement the logic to send a Discord message using the interactions library
-            # This is a placeholder and needs to be implemented based on your Discord bot setup
-            pass
+        if self.notification_channel_id:
+            try:
+                bot: interactions.Client = self.bot
+                channel: interactions.Channel = bot.fetch_channel(self.notification_channel_id)
+                channel.send(message)
+            except Exception as e:
+                logger.error(f"Error sending message to Discord: {e}")
 
     def check_win_condition(self) -> Optional[Team]:
         for team in self.teams:

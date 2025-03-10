@@ -28,7 +28,7 @@ rs_font_path = "static/assets/fonts/runescape_uf.ttf"
 tracker_fontpath = 'static/assets/fonts/droptrackerfont.ttf'
 main_font = ImageFont.truetype(rs_font_path, font_size)
 
-async def get_drops_for_group(player_ids, partition: str = datetime.now().year * 100 + (datetime.now().month)):
+async def get_drops_for_group(player_ids, partition: str):
     """ Returns the drops stored in redis cache 
         for the specific list of player_ids
     """
@@ -36,27 +36,38 @@ async def get_drops_for_group(player_ids, partition: str = datetime.now().year *
     recent_drops = []
     total_loot = 0
     player_totals = {}
-    # print("Getting drops for partition", partition)
-    # print("Called with player_ids =", player_ids)
-
+    
+    # Determine if we're using a daily partition (contains a dash) or monthly partition
+    is_daily = '-' in str(partition)
+    
     async def process_player(player_id):
         nonlocal total_loot
         player_total = 0
-        total_items_key = f"player:{player_id}:{partition}:total_items"
-        recent_items_key = f"player:{player_id}:{partition}:recent_items"
+        
+        # Use different key format based on partition type
+        if is_daily:
+            # Daily format: player:123:daily:2025-03-04:total_items
+            true_partition = partition.split('-')
+            true_partition = f"{true_partition[1]}{true_partition[2]}"
+            total_items_key = f"player:{player_id}:daily:{true_partition}:items"
+            recent_items_key = f"player:{player_id}:{true_partition}:recent_items"
+            loot_key = f"player:{player_id}:daily:{true_partition}:total_loot"
+        else:
+            # Monthly format: player:123:202503:total_items
+            total_items_key = f"player:{player_id}:{partition}:total_items"
+            recent_items_key = f"player:{player_id}:{partition}:recent_items"
+            loot_key = f"player:{player_id}:{partition}:total_loot"
 
         # Get total items
         total_items = redis_client.client.hgetall(total_items_key)
-        #print("redis update total items stored:", total_items)
+        
         for key, value in total_items.items():
             key = key.decode('utf-8')
             value = value.decode('utf-8')
             try:
                 quantity, total_value = map(int, value.split(','))
             except ValueError:
-                #print(f"Error processing item {key} for player {player_id}: {value}")
                 continue
-            player_total += total_value
             
             if key in group_items:
                 existing_quantity, existing_value = map(int, group_items[key].split(','))
@@ -65,10 +76,24 @@ async def get_drops_for_group(player_ids, partition: str = datetime.now().year *
                 group_items[key] = f"{new_quantity},{new_total_value}"
             else:
                 group_items[key] = f"{quantity},{total_value}"
-
+                
+        player_total = redis_client.client.get(loot_key)
+        if player_total:
+            player_total = int(player_total.decode('utf-8'))
+        else:
+            player_total = 0
+            
         # Get recent items and ensure uniqueness
-        recent_items = list({json.loads(item.decode('utf-8'))['date_added']: json.loads(item.decode('utf-8')) 
-                           for item in redis_client.client.lrange(recent_items_key, 0, -1)}.values())
+        if is_daily:
+            # Get all recent items first
+            all_recent_items = [json.loads(item.decode('utf-8')) for item in redis_client.client.lrange(recent_items_key, 0, -1)]
+            # Filter to only include items from the specified day
+            target_date = partition  # Format: 2025-03-04
+            recent_items = list({item['date_added']: item for item in all_recent_items 
+                               if item['date_added'].startswith(target_date)}.values())
+        else:
+            recent_items = list({json.loads(item.decode('utf-8'))['date_added']: json.loads(item.decode('utf-8')) 
+                            for item in redis_client.client.lrange(recent_items_key, 0, -1)}.values())
         
         return player_id, player_total, recent_items
 
@@ -83,15 +108,21 @@ async def get_drops_for_group(player_ids, partition: str = datetime.now().year *
     return group_items, player_totals, recent_drops, total_loot
 
 
-async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom_group_id: int = 0, partition: str = datetime.now().year * 100 + (datetime.now().month)):
+async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom_group_id: int = 0, partition: str = None):
     """
         :param: bot: Instance of the interactions.Client bot object
         :param: group_id: DropTracker GroupID. 0 expects a wom_group_id
         :param: wom_group_id: WiseOldMan groupID. 0 expects a group_id
-        :param: partition: The partition to search drops for (202408 for August 2024)
+        :param: partition: The partition to search drops for (202408 for August 2024 or 2025-03-04 for daily)
         Providing neither option (group_id, wom_group_id) uses global drops.
-    
     """
+    # Set default partition if none provided
+    if partition is None:
+        partition = datetime.now().year * 100 + datetime.now().month
+    
+    # Determine if we're using a daily partition
+    is_daily = '-' in str(partition)
+    
     group = None
     if group_id != 0: ## we prioritize group_id here
         group = session.query(Group).filter(Group.group_id == group_id).first()
@@ -113,9 +144,10 @@ async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom
     minimum_value = config.get('minimum_value_to_notify', 2500000)
     channel = config.get('lootboard_channel_id', None)
     message = config.get('lootboard_message_id', None)
-        
+    player_wom_ids = []
     # Load background image based on the board style
     bg_img, draw = load_background_image("/store/droptracker/disc/lootboard/bank-new-clean-dark.png")
+    print(f"Group ID: {group_id}")
     if group_id != 2:
         if wom_group_id == 0:
             wom_group_id = group.wom_id
@@ -128,10 +160,16 @@ async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom
             for player in raw_wom_ids:
                 player_wom_ids.append(player[0])
     else:
+        print("Group ID is 2...")
         player_wom_ids = []
         all_players = session.query(Player.wom_id).all()
+        print(f"Got all players: {len(all_players)}")
         for p in all_players:
-            player_wom_ids.append(p[0])
+            player_wom_ids.append(p.wom_id)
+    if is_daily: 
+        print("Group ID:", group_id)
+        print(f"Got player ids ({len(player_wom_ids)}):")
+        print(player_wom_ids)
     player_ids = await associate_player_ids(player_wom_ids)
     # Get the drops, recent drops, and total loot for the group
     #print("Processed player_ids")
@@ -139,33 +177,53 @@ async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom
 
     # Draw elements on the background image
     bg_img = await draw_drops_on_image(bg_img, draw, group_items, group_id)  # Pass `group_items` here
-    bg_img = await draw_headers(bot, group_id, total_loot, bg_img, draw)  # Draw headers
+    bg_img = await draw_headers(bot, group_id, total_loot, bg_img, draw, partition)  # Draw headers
     bg_img = await draw_recent_drops(bg_img, draw, recent_drops, min_value=minimum_value)  # Draw recent drops, with a minimum value
     bg_img = await draw_leaderboard(bg_img, draw, player_totals)  # Draw leaderboard
-    save_image(bg_img, group_id)  # Save the generated image
+    save_image(bg_img, group_id, partition)  # Save the generated image
     print("Saved the new image.")
-    current_date = datetime.now()
-    ydmpart = int(current_date.strftime('%d%m%Y'))
-    return f"/store/droptracker/disc/static/assets/img/clans/{group_id}/lb/{ydmpart}.png"
+    
+    # When saving the image, use a different naming convention for daily partitions
+    if is_daily:
+        # For daily partitions, use the date directly
+        file_path = f"/store/droptracker/disc/static/assets/img/clans/{group_id}/lb/daily_{partition.replace('-', '')}.png"
+    else:
+        # For monthly partitions, use the existing format
+        current_date = datetime.now()
+        ydmpart = int(current_date.strftime('%d%m%Y'))
+        file_path = f"/store/droptracker/disc/static/assets/img/clans/{group_id}/lb/{ydmpart}.png"
+    
+    return file_path
 
 
 def get_year_month_string():
     return datetime.now().strftime('%Y-%m')
 
 
-async def draw_headers(bot: interactions.Client, group_id, total_loot, bg_img, draw):
-    current_month = datetime.now().month
-    month_string = calendar.month_name[current_month].lower()
-    current_year_month = datetime.now().strftime('%Y-%m')
+async def draw_headers(bot: interactions.Client, group_id, total_loot, bg_img, draw, partition=None):
+    # Determine if we're using a daily partition
+    is_daily = partition and '-' in str(partition)
+    
+    if is_daily:
+        # For daily partitions, parse the date
+        try:
+            date_obj = datetime.strptime(partition, '%Y-%m-%d')
+            date_display = date_obj.strftime('%B %d, %Y')
+        except:
+            date_display = partition
+    else:
+        # For monthly partitions, use the current month
+        current_month = datetime.now().month
+        date_display = calendar.month_name[current_month].capitalize()
+    
     this_month = format_number(total_loot)
-    # recents = f"Recent Submissions"
-    # print("Drawing headers for group_id", group_id)
+    
     if int(group_id) == 2:
-        title = f"Tracked Drops - All Players ({month_string.capitalize()}) - {this_month}"
+        title = f"Tracked Drops - All Players ({date_display}) - {this_month}"
     else:
         group = session.query(Group).filter(Group.group_id == group_id).first()
         server_name = group.group_name
-        title = f"{server_name}'s Tracked Drops for {month_string.capitalize()} ({this_month})"
+        title = f"{server_name}'s Tracked Drops for {date_display} ({this_month})"
 
     # Calculate text size using textbbox
     bbox = draw.textbbox((0, 0), title, font=main_font)
@@ -420,13 +478,53 @@ def center_image(image, width, height):
     return centered_image
 
 
-def save_image(image, server_id):
-    # Save logic here
+def save_image(image, server_id, partition):
+    """
+    Save the generated lootboard image
+    
+    Args:
+        image: The PIL Image object to save
+        server_id: The group/server ID
+        partition: The partition string (either YYYYMM or YYYY-MM-DD format)
+    """
+    # Create directory if it doesn't exist
     os.makedirs(f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb", exist_ok=True)
-    current_date = datetime.now()
-    ydmpart = int(current_date.strftime('%d%m%Y'))
-    image.save(f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/{ydmpart}.png")
-    image.save(f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/lootboard.png")
+    
+    # Determine if this is a daily partition
+    is_daily = '-' in str(partition)
+    
+    if is_daily:
+        # For daily partitions, use the date directly (YYYY-MM-DD)
+        # Save as daily_YYYYMMDD.png
+        formatted_date = partition.replace('-', '')
+        file_path = f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/daily_{formatted_date}.png"
+        image.save(file_path)
+        
+        # Check if this is today's date
+        current_date = datetime.now().strftime('%Y-%m-%d')
+        if partition == current_date:
+            # Also save as the default lootboard.png if it's today
+            image.save(f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/lootboard.png")
+        
+        return file_path
+    else:
+        # For monthly partitions, use the existing format (YYYYMM)
+        current_date = datetime.now()
+        today_ydmpart = int(current_date.strftime('%d%m%Y'))
+        
+        # Save with the date format
+        file_path = f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/{partition}.png"
+        image.save(file_path)
+        
+        # Also save as today's date format if it's the current month
+        current_month_partition = current_date.year * 100 + current_date.month
+        if int(partition) == current_month_partition:
+            today_path = f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/{today_ydmpart}.png"
+            image.save(today_path)
+            # And save as the default lootboard.png
+            image.save(f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/lootboard.png")
+        
+        return file_path
 
 
 async def load_image_from_id(item_id):

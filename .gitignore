@@ -40,3 +40,9 @@ db/drop_mem.py
 templates/base.html
 templates/index.html
 templates/group/config.html
+games/events/task_store/temp.py
+games/events/task_store/temp1.py
+games/events/task_store/old2.json
+games/events/task_store/old.json
+games/events/task_store/default_old.json
+games/events/BoardGame.md

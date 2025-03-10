@@ -1,12 +1,12 @@
 from db.models import CombatAchievementEntry, Drop, NotifiedSubmission, session, NpcList, Player, ItemList, PersonalBestEntry, CollectionLogEntry, User, Group, GroupConfiguration, UserConfiguration
 from utils.messages import confirm_new_npc, confirm_new_item, name_change_message, new_player_message
-from utils.semantic_check import get_current_ca_tier
+from utils.semantic_check import get_current_ca_tier, get_ca_tier_progress
 from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id, fetch_group_members
 from utils.redis import RedisClient
 from db.ops import DatabaseOperations, associate_player_ids
 from utils.download import download_player_image
 from sqlalchemy import func, text
-from utils.format import get_command_id, get_extension_from_content_type, replace_placeholders, convert_from_ms
+from utils.format import format_number, get_command_id, get_extension_from_content_type, replace_placeholders, convert_from_ms
 import interactions
 from utils.logger import LoggerClient
 from utils.semantic_check import check_drop as verify_item_real
@@ -139,33 +139,6 @@ async def drop_processor(bot: interactions.Client, drop_data: RawDropData):
     user_exists, authed = check_auth(player_name, account_hash, auth_key)
     # print("Exists, authed:", user_exists,authed)
 
-    if user_exists and not authed:
-        player_object = session.query(Player).filter(Player.account_hash == account_hash).first()
-        if player_object:
-            if player_object.user:
-                print("Player has a user object attached")
-                user: User = player_object.user
-
-                send_dms = session.query(UserConfiguration).filter(UserConfiguration.user_id == user.user_id,
-                                                                UserConfiguration.config_key == 'dm_me_on_submissions_without_token').first()
-                if send_dms:
-                    if send_dms.config_value == "true":
-                        try:
-                            discord_user = await bot.fetch_user(user_id=user.discord_id)
-                            if discord_user:
-                                await discord_user.send(f"Hey, <@{discord_user.id}>!\n" + 
-                                                        f"It looks like you may have forgotten your `auth token` on the RuneLite plugin!\n\n" + 
-                                                        f"In the event you forgot it, you can retrieve it again with </get-token:{await get_command_id(bot, 'get-token')}>\n\n" + 
-                                                        "Does this seem like an error? You can disable these warnings on our website, or reach out for support in Discord.")
-                                print("DMed the user due to a missing auth token.")
-                        except Exception as e:
-                            print("Couldn't DM a user due to their missing auth token:", e)
-                        return
-                else:
-                    pass
-                    # print("send_dms is false, and the user did not authenticate...")
-            # print("DROP_PROCESSOR - User account exists but their auth token did not match")
-            return
     if npc_name in npc_list:
         npc_id = npc_list[npc_name]
     else:
@@ -283,7 +256,15 @@ async def clog_processor(bot: interactions.Client,
     formatted_name = player_name
     if player:
         if player.user:
-            formatted_name = f"<@{player.user.discord_id}>"
+            user: User = player.user
+            if user.username != player_name:
+                formatted_name = f"<@{player.user.discord_id}> (`{player_name}`)"
+            else:
+                formatted_name = f"<@{player.user.discord_id}>"
+            if user.never_ping:
+                formatted_name = player_name
+            elif not user.group_ping:
+                formatted_name = player_name
     else:
         print("CLOG_PROCESSOR - Player was not found?")
         return
@@ -319,7 +300,7 @@ async def clog_processor(bot: interactions.Client,
                 clog.image_url = image_url
             session.commit()
     # Process group-related logic if the player is part of any groups
-    print("clog_processor - Checking if the player is in any groups.")
+    #print("clog_processor - Checking if the player is in any groups.")
     player_group_id_query = """SELECT group_id FROM user_group_association WHERE player_id = :player_id"""
     player_group_ids = session.execute(text(player_group_id_query), {"player_id": player.player_id}).fetchall()
     player_group_ids = [group_id[0] for group_id in player_group_ids]
@@ -330,7 +311,13 @@ async def clog_processor(bot: interactions.Client,
         print(player.player_name, "is in", len(player_groups), "groups")
         for group in player.groups:
             group_id = group.group_id
-
+            
+            if group_id == 2 and player.hidden:
+                continue
+            elif group_id == 2 and player.user:
+                user: User = player.user
+                if not user.global_ping:
+                    formatted_name = player_name
             # Fetch group settings
             channel_id = session.query(GroupConfiguration.config_value).filter(GroupConfiguration.config_key == 'channel_id_to_post_clog',
                                                                                GroupConfiguration.group_id == group_id).first()
@@ -410,7 +397,7 @@ async def clog_processor(bot: interactions.Client,
                                     "{total_ranked_group}": total_group,
                                     "{total_tracked}": len(player_ids),
                                     "{log_slots}": reported_slots,
-                                    "{player_loot_month}": player_month_total,
+                                    "{player_loot_month}": format_number(player_month_total),
                                     "{item_id}": item_id,
                                     "{kc_received}": kc}
                     embed = replace_placeholders(raw_embed, placeholders)
@@ -450,6 +437,7 @@ async def ca_processor(bot: interactions.Client,
                        account_hash,
                        auth_key,
                        task_name,
+                       task_tier,
                        points_awarded,
                        points_total,
                        completed_tier,
@@ -478,7 +466,7 @@ async def ca_processor(bot: interactions.Client,
     except Exception as e:
         print("Couldn't add the new CA:", e)
         session.rollback()
-    print("ca_processor - Checking if the player is in any groups.")
+    #print("ca_processor - Checking if the player is in any groups.")
     player_group_id_query = """SELECT group_id FROM user_group_association WHERE player_id = :player_id"""
     player_group_ids = session.execute(text(player_group_id_query), {"player_id": player.player_id}).fetchall()
     
@@ -491,8 +479,26 @@ async def ca_processor(bot: interactions.Client,
         for group in player.groups:
             group: Group = group
             group_id = group.group_id
+            if group_id == 2 and player.hidden:
+                continue
             send_cas = session.query(GroupConfiguration.config_value).filter(GroupConfiguration.config_key == 'notify_cas',
                                                                                         GroupConfiguration.group_id == group_id).first()
+            min_tier = session.query(GroupConfiguration.config_value).filter(GroupConfiguration.config_key == 'min_ca_tier_to_notify',
+                                                                            GroupConfiguration.group_id == group_id).first()
+            tier_order = ['easy', 'medium', 'hard', 'elite', 'master', 'grandmaster']
+            if min_tier != "disabled":
+                if min_tier and min_tier[0].lower() in tier_order:
+                    min_tier_value = min_tier[0].lower()
+                    min_tier_index = tier_order.index(min_tier_value)
+                    
+                    # Check if the current task's tier meets the minimum requirement
+                    task_tier_index = tier_order.index(task_tier.lower()) if task_tier.lower() in tier_order else -1
+                    
+                    if task_tier_index < min_tier_index:
+                        # Task tier is below the minimum required tier, skip processing
+                        print(f"Skipping {task_name} ({task_tier}) as it's below minimum tier {min_tier_value} for group {group_id}")
+                        continue
+            
             formatted_name = player.player_name
             channel_id = session.query(GroupConfiguration.config_value).filter(GroupConfiguration.config_key == 'channel_id_to_post_ca',
                                                                                        GroupConfiguration.group_id == group_id).first()
@@ -500,7 +506,15 @@ async def ca_processor(bot: interactions.Client,
                 channel_id = channel_id[0]
             if player.user:
                 user: User = player.user
-                formatted_name = f"<@{user.discord_id}>"
+                if user.never_ping:
+                    formatted_name = player.player_name
+                elif group_id == 2:
+                    if not user.global_ping:
+                        formatted_name = player.player_name
+                elif not user.group_ping:
+                    formatted_name = player.player_name
+                else:
+                    formatted_name = f"<@{user.discord_id}>"
             if (
                 send_cas
                 and send_cas[0]
@@ -536,13 +550,27 @@ async def ca_processor(bot: interactions.Client,
                 if channel:
                     embed_template = await db.get_group_embed('ca', group_id)
                     actual_tier = get_current_ca_tier(points_total)
+                    tier_order = ['Grandmaster', 'Master', 'Elite', 'Hard', 'Medium', 'Easy']
+                    if actual_tier is None:
+                        next_tier = "Easy"
+                    else:
+                        next_tier = tier_order[tier_order.index(actual_tier) - 1]
+                    progress, next_tier_points = get_ca_tier_progress(points_total)
+                    formatted_task_name = task_name.replace(" ", "_").replace("?", "%3F")
+                    wiki_url = f"https://oldschool.runescape.wiki/w/{formatted_task_name}"
+                    formatted_task_name = f"[{task_name}]({wiki_url})"
                     if embed_template:
                         value_dict = {
                             "{player_name}": formatted_name,
-                            "{task_name}": task_name,
+                            "{task_name}": formatted_task_name,
                             "{current_tier}": actual_tier,
+                            "{progress}": progress,
                             "{points_awarded}": points_awarded,
-                            "{total_points}": points_total
+                            "{total_points}": points_total,
+                            "{next_tier}": next_tier,
+                            "{task_tier}": task_tier,
+                            "{next_tier_points}": next_tier_points,
+                            "{points_left}": int(next_tier_points) - int(points_total)
                         }
                         embed: interactions.Embed = replace_placeholders(embed_template, value_dict)
                         if group.group_id == 2:
@@ -554,13 +582,12 @@ async def ca_processor(bot: interactions.Client,
                                     continue
                                 temp_embed.add_field(field.name, field.value, field.inline)
                             embed = temp_embed
-                        embed.set_author("New Combat Achievement:")
                         if dl_path:
                             attachment = interactions.File(dl_path)
-                            message = await channel.send(f"{formatted_name} has completed a new Combat Achievement:",embed=embed,
+                            message = await channel.send(f"{formatted_name} completed a new CA:",embed=embed,
                                 files=attachment)
                         else:
-                            message = await channel.send(f"{formatted_name} has completed a new Combat Achievement:",embed=embed)
+                            message = await channel.send(f"{formatted_name} completed a new CA:",embed=embed)
                         if message:
                             message_id = str(message.id)
                             await logger.log("access", f"{player_name} completed a new Combat Achievement ({task_name}) in {group_id}", "ca_processor")
@@ -623,8 +650,15 @@ async def pb_processor(bot: interactions.Client,
         # already stored player's PB for this boss/team size & this isn't a new PB
         return
     elif not existing_pb:
+        if npc_id and npc_id[0]:
+            rnpc_id = npc_id[0]
+        elif npc_id:
+            rnpc_id = npc_id
+        else:
+            print("Could not obtain an npc id for this personal best boss:", boss_name)
+            return
         new_entry = PersonalBestEntry(player_id=player_id,
-                                  npc_id=npc_id[0],
+                                  npc_id=rnpc_id,
                                   kill_time=current_time_ms,
                                   personal_best=personal_best_ms,
                                   team_size=team_size,
@@ -669,26 +703,36 @@ async def pb_processor(bot: interactions.Client,
                 pb.image_url = image_url
             session.commit()
         player: Player = session.query(Player).filter(Player.player_id == player_id).first()
-        print("pb_processor - Checking if the player is in any groups.")
+        #print("pb_processor - Checking if the player is in any groups.")
         player_group_id_query = """SELECT group_id FROM user_group_association WHERE player_id = :player_id"""
         player_group_ids = session.execute(text(player_group_id_query), {"player_id": player.player_id}).fetchall()
         player_group_ids = [group_id[0] for group_id in player_group_ids]
         player_group_ids.append(2)
         player_groups = session.query(Group).filter(Group.group_id.in_(player_group_ids)).all()
-        print("Returned groups:", player_groups)
+        #print("Returned groups:", player_groups)
         if player_groups:
             print(player.player_name, "is in", len(player_groups), "groups")
             for group in player_groups:
                 group: Group = group
                 print("Checking group:", group.group_name)
                 group_id = group.group_id
+                if group_id == 2 and player.hidden:
+                    continue
                 send_pbs = session.query(GroupConfiguration.config_value).filter(GroupConfiguration.config_key == 'notify_pbs',
                                                                                     GroupConfiguration.group_id == group_id).first()
                 formatted_name = None
                 if type(player) == Player:
                     if player.user_id:
                         user: User = session.query(User).filter(User.user_id == player.user_id).first()
-                        formatted_name = f"<@{user.discord_id}>"
+                        if user.never_ping:
+                            formatted_name = player.player_name
+                        elif group_id == 2:
+                            if not user.global_ping:
+                                formatted_name = player.player_name
+                        elif not user.group_ping:
+                            formatted_name = player.player_name
+                        else:
+                            formatted_name = f"<@{user.discord_id}>"
                 if (
                     send_pbs
                     and send_pbs[0]
@@ -804,7 +848,7 @@ async def try_create_player(bot: interactions.Client, player_name, account_hash)
         account_hash = str(account_hash)
         if not account_hash or len(account_hash) < 5:
             return False # abort if no account hash was passed immediately
-        player_name = player_name.replace("-", " ")
+        #player_name = player_name.replace("-", " ")
         player = session.query(Player).filter(Player.player_name == player_name).first()
         
         if not player:

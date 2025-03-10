@@ -1,15 +1,29 @@
 from datetime import datetime
 from typing import List, Optional
+
+import interactions
 from .GielinorRace import GielinorRace
 
 class Event:
-    def __init__(self, group_id: int, group_name: str, board_size: int = 100):
+    def __init__(self, bot: interactions.Client, group_id: int, group_name: str, board_size: int = 100, 
+                 join_channel: int = None, shop_channel: int = None, noti_channel: int = None, admin_channel: int = None):
+        """
+        Initialize a new Gielinor Race game for a specific group.
+
+        :param group_id: The ID of the group playing the game
+        :param board_size: The number of tiles on the game board (50-250)
+        :param join_channel: The ID of the Discord channel to send a reactable message to, for players tojoin the game
+        :param shop_channel: The ID of the Discord channel to send the item shop to, if enabled
+        :param noti_channel: The ID of the Discord channel to send event updates to
+        :param admin_channel: The ID of the Discord channel to send admin updates to
+        """
+        self.bot = bot
         self.group_id = group_id
         self.group_name = group_name
         self.start_date = datetime.now()
         self.end_date: Optional[datetime] = None
         self.winner: Optional[str] = None
-        self.game = GielinorRace(group_id, board_size)
+        self.game = GielinorRace(bot, group_id, board_size, join_channel, shop_channel, noti_channel, admin_channel)
 
     @property
     def is_active(self) -> bool:

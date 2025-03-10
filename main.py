@@ -35,6 +35,7 @@ from utils.wiseoldman import fetch_group_members
 from web.api import create_api
 from web.front import create_frontend
 from commands import UserCommands, ClanCommands, AdminCommands
+from tickets import Tickets
 from db.models import Group, GroupConfiguration, Guild, User, session, NpcList, ItemList, Webhook, Player
 from db.update_player_total import start_background_redis_tasks
 from db.ops import associate_player_ids, update_group_members
@@ -118,6 +119,7 @@ async def on_startup(event: Startup):
     await bot.change_presence(status=interactions.Status.ONLINE,
                               activity=interactions.Activity(name=f" /help", type=interactions.ActivityType.WATCHING))
     bot.load_extension("commands")
+    bot.load_extension("tickets")
     print("Set bot to ready")
     await create_tasks()
 
@@ -247,11 +249,11 @@ async def on_message_create(event: MessageCreate):
                         elif field.name == "acc_hash":
                             account_hash = field.value
                         elif field.name == "slots":
-                            print("Slots field:", field.value)
+                            #print("Slots field:", field.value)
                             max_slots, reported_slots = field.value.split("/")
                             reported_slots = reported_slots.replace("/","")
                             max_slots = max_slots.replace("/","")
-                            print("reported, max slots:", reported_slots, "/",max_slots)
+                            #print("reported, max slots:", reported_slots, "/",max_slots)
                         elif field.name == "rarity":
                             if field.value != "OptionalDouble.empty":
                                 rarity = field.value
@@ -289,6 +291,7 @@ async def on_message_create(event: MessageCreate):
                 elif "combat_achievement" in field_values:
                     if embed.fields:
                         acc_hash, task_type, points_awarded, points_total, completed_tier, auth_key = None, None, None, None, None, None
+                        task_tier = None
                         for field in embed.fields:
                             if field.name == "acc_hash":
                                 acc_hash = field.value
@@ -302,6 +305,8 @@ async def on_message_create(event: MessageCreate):
                                 auth_key = field.value
                             elif field.name == "task":
                                 task_name = field.value
+                            elif field.name == "tier":
+                                task_tier = field.value
                         attachment_url = None
                         attachment_type = None
                         if message.attachments:
@@ -313,6 +318,7 @@ async def on_message_create(event: MessageCreate):
                                         acc_hash,
                                         auth_key,
                                         task_name,
+                                        task_tier,
                                         points_awarded,
                                         points_total,
                                         completed_tier,
@@ -422,7 +428,7 @@ async def on_message_create(event: MessageCreate):
 
 @app.errorhandler(Exception)
 async def handle_exception(e):
-    await logger.log("error", f"Unhandled exception: {str(e)}", "/api/-based handle_exception")
+    # await logger.log("error", f"Unhandled exception: {str(e)}", "/api/-based handle_exception")
     return jsonify(error=str(e)), 500
 
 
@@ -584,7 +590,7 @@ async def create_tasks():
     print("Syncing group member association tables...")
     await start_group_sync()
     start_group_sync.start()
-    print("Syncing patreon ranks...")
+    #print("Syncing patreon ranks...")
     patreon_sync.start()             # Patreon sync task
     print("Scheduling GitHub updates...")
     updater.schedule_updates.start(updater) # GitHub updater task, scheduling every 60 minutes (only changing the file if actual changes are detected.)

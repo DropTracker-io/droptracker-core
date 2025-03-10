@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 import os
 load_dotenv()
 
-Base = declarative_base()
+from db.base import Base
 
 DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
@@ -107,6 +107,11 @@ class NotifiedSubmission(Base):
         self.ca = ca
         self.pb = pb
 
+
+## Event Models
+
+
+### Standard Models for Submissions, Groups, Players, Users, etc.
 
 class Drop(Base):
     """
@@ -209,6 +214,7 @@ class Player(Base):
     total_level = Column(Integer)
     date_added = Column(DateTime, default=func.now())
     date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
+    hidden = Column(Boolean, default=False)
 
     pbs = relationship("PersonalBestEntry", back_populates="player")
     cas = relationship("CombatAchievementEntry", back_populates="player")
@@ -238,7 +244,7 @@ class Player(Base):
             self.groups.remove(group)
             session.commit()
 
-    def __init__(self, wom_id, player_name, account_hash, user_id=None, user=None, log_slots=0, total_level=0, group=None):
+    def __init__(self, wom_id, player_name, account_hash, user_id=None, user=None, log_slots=0, total_level=0, group=None, hidden=False):
         self.wom_id = wom_id
         self.player_name = player_name
         self.account_hash = account_hash
@@ -246,6 +252,7 @@ class Player(Base):
         self.user = user
         self.log_slots = log_slots
         self.total_level = total_level
+        self.hidden = hidden
         self.group = group
 
 class User(Base):
@@ -263,7 +270,10 @@ class User(Base):
     username = Column(String(20))
     xf_user_id = Column(Integer, nullable=True)
     public = Column(TINYINT(1), server_default=text('1'))
-
+    global_ping = Column(Boolean, default=False)
+    group_ping = Column(Boolean, default=False)
+    never_ping = Column(Boolean, default=False)
+    hidden = Column(Boolean, default=False)
     players = relationship("Player", back_populates="user")
     groups = relationship("Group", secondary=user_group_association, back_populates="users", overlaps="groups")
     configurations = relationship("UserConfiguration", back_populates="user")
@@ -340,7 +350,17 @@ class GroupPatreon(Base):
     user = relationship("User", back_populates="group_patreon")
     group = relationship("Group", back_populates="group_patreon")
     
-
+class Ticket(Base):
+    __tablename__ = 'tickets'
+    ticket_id = Column(Integer, primary_key=True, autoincrement=True)
+    channel_id = Column(String(255), nullable=False)
+    type = Column(String(255), nullable=False)
+    created_by = Column(Integer, ForeignKey('users.user_id'), nullable=False)
+    claimed_by = Column(Integer, ForeignKey('users.user_id'), nullable=True)
+    status = Column(String(255), nullable=False)
+    date_added = Column(DateTime, default=func.now())
+    last_reply_uid = Column(String(255), nullable=True)
+    date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
 
 class GroupConfiguration(Base):
     __tablename__ = 'group_configurations'
@@ -434,6 +454,7 @@ class NewWebhook(Base):
     date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
 
 
+
 class Log(Base):
     """Model for storing application logs"""
     __tablename__ = 'logs'
@@ -447,6 +468,20 @@ class Log(Base):
     
     def __repr__(self):
         return f"<Log(id={self.id}, level={self.level}, source={self.source}, timestamp={self.timestamp})>" 
+
+
+
+
+
+
+
+
+
+
+#### Below models are not used currently; but need to be kept to avoid errors.
+
+
+
 
 
 class CronLog(Base):

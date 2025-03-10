@@ -211,10 +211,15 @@ class DatabaseOperations:
                         player = session.query(Player).filter(Player.player_id == player_id).options(joinedload(Player.user)).first()
                         user = player.user
                         if user:
-                            if user.username != player.player_name:
-                                str_name = f"<@{user.discord_id}> (`{player.player_name}`)"
+                            if group_id == 2 and not user.global_ping:
+                                str_name = f"{player.player_name}"
+                            elif not user.group_ping:
+                                str_name = f"{player.player_name}"
                             else:
-                                str_name = f"<@{user.discord_id}>"
+                                if user.username != player.player_name:
+                                    str_name = f"<@{user.discord_id}> (`{player.player_name}`)"
+                                else:
+                                    str_name = f"<@{user.discord_id}>"
                         else:
                             str_name = f"{player.player_name}"
                         embed.set_author(name=player.player_name,icon_url="https://www.droptracker.io/img/droptracker-small.gif")
@@ -469,9 +474,12 @@ async def update_group_members():
             print("Group not found for wom_id", wom_id)
 
 
-async def associate_player_ids(player_wom_ids):
+async def associate_player_ids(player_wom_ids, before_date: datetime = None):
     # Query the database for all players' WOM IDs and Player IDs
-    all_players = session.query(Player.wom_id, Player.player_id).all()
+    if before_date:
+        all_players = session.query(Player.wom_id, Player.player_id).filter(Player.date_added < before_date).all()
+    else:
+        all_players = session.query(Player.wom_id, Player.player_id).all()
     if player_wom_ids is None:
         return []
     # Create a mapping of WOM ID to Player ID

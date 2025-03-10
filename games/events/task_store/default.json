@@ -1,0 +1,2032 @@
+{
+  "tasks": [
+    {
+      "name": "Abyssal whip",
+      "description": "Obtain 1 Abyssal Whip",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Abyssal whip",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "10 Barrows Points",
+      "description": "Obtain Barrows Items until you reach the required number of </points:1348436781019959318>",
+      "type": "point_collection",
+      "is_assembly": false,
+      "points": 10,
+      "required_items": [
+        {
+          "item_name": "Ahrim's staff",
+          "points": 2.0
+        },
+        {
+          "item_name": "Ahrim's robetop",
+          "points": 2.0
+        },
+        {
+          "item_name": "Ahrim's robeskirt",
+          "points": 2.0
+        },
+        {
+          "item_name": "Ahrim's hood",
+          "points": 2.0
+        },
+        {
+          "item_name": "Dharok's greataxe",
+          "points": 2.0
+        },
+        {
+          "item_name": "Dharok's helm",
+          "points": 2.0
+        },
+        {
+          "item_name": "Dharok's platebody",
+          "points": 2.0
+        },
+        {
+          "item_name": "Dharok's platelegs",
+          "points": 2.0
+        },
+        {
+          "item_name": "Guthan's warspear",
+          "points": 2.0
+        },
+        {
+          "item_name": "Guthan's helm",
+          "points": 2.0
+        },
+        {
+          "item_name": "Guthan's platebody",
+          "points": 2.0
+        },
+        {
+          "item_name": "Guthan's chainskirt",
+          "points": 2.0
+        },
+        {
+          "item_name": "Torag's hammers",
+          "points": 2.0
+        },
+        {
+          "item_name": "Torag's platebody",
+          "points": 2.0
+        },
+        {
+          "item_name": "Torag's platelegs",
+          "points": 2.0
+        },
+        {
+          "item_name": "Torag's helm",
+          "points": 2.0
+        },
+        {
+          "item_name": "Karil's leathertop",
+          "points": 2.0
+        },
+        {
+          "item_name": "Karil's leatherskirt",
+          "points": 2.0
+        },
+        {
+          "item_name": "Karil's coif",
+          "points": 2.0
+        },
+        {
+          "item_name": "Karil's crossbow",
+          "points": 2.0
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "100 Bolt racks",
+      "description": "Obtain 100 Bolt Racks per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Bolt rack",
+          "quantity": 100
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Brine sabre",
+      "description": "Obtain 1 Brine Sabre",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Brine sabre",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Tyrannical ring",
+      "description": "Obtain 1 Tyrannical Ring",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Tyrannical ring",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Claws of callisto",
+      "description": "Obtain the Claws of Callisto",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Claws of callisto",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Black mask",
+      "description": "Obtain 1 Black Mask",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Black mask",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "10 Beginner uniques",
+      "description": "Obtain 10 Beginner Clue Uniques",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "uniques",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Shoulder Parrot",
+      "description": "Obtain the Shoulder Parrot from Beginner Clues",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Shoulder parrot",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "The Sandwich Queen",
+      "description": "Obtain ANY 3 Sandwich Lady Pieces from Beginner Clues",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Queen",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Foot Fetish",
+      "description": "Obtain 2 Feet/Slippers from Beginner Clues",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Fetish",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "10 Easy Uniques",
+      "description": "Obtain 10 Easy Clue Uniques",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Uniques",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Elegant Piece",
+      "description": "Obtain 1 Elegant Piece from Easy Clues",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Elegant piece",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Bob Shirt",
+      "description": "Obtain 1 Bob Shirt from Easy Clues",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Bob shirt",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "5 Elite Uniques",
+      "description": "Obtain 5 Elite Clue Uniques",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Uniques",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Dragon Mask/Ornament Kit",
+      "description": "Obtain 1 Dragon Mask or Ornament Kit from Elite Clues",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon mask",
+          "quantity": 1
+        },
+        {
+          "item_name": "Ornament kit",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "2 God D'Hide Pieces",
+      "description": "Obtain 2 God D'hide Pieces from Hard Clues",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Pieces",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Any Cavalier",
+      "description": "Obtain 1 Cavalier from Hard Clues",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Cavalier",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Any 5 Uniques",
+      "description": "Obtain 5 Master Clue Uniques",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Uniques",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Pair of Boots",
+      "description": "Obtain 1 Pair of Boots from Medium Clues",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Pair of boots",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "2 Boaters",
+      "description": "Obtain 2 Boaters from Medium Clues",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Boaters",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Unicorn Mask",
+      "description": "Obtain 1 Unicorn Mask from Medium Clues",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Unicorn mask",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "10 Saradomin Points",
+      "description": "Obtain Commander Zilyana drops until you reach the required number of </points:1348436781019959318>",
+      "type": "point_collection",
+      "is_assembly": false,
+      "points": 10,
+      "required_items": [
+        {
+          "item_name": "Points",
+          "points": 2.0
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Saradomin Sword",
+      "description": "Obtain 1 Saradomin Sword",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Saradomin sword",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Saradomin's Light",
+      "description": "Obtain 1 Saradomin's Light",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Saradomin's light",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Armadyl Crossbow",
+      "description": "Obtain 1 Armadyl Crossbow",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Armadyl crossbow",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Mystic Staves",
+      "description": "Obtain 1 Mystic Staff per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Mystic staves",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Mystic Set",
+      "description": "Obtain the Blue Mystic Top/Bottom from the Corporeal Beast",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Mystic set",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Gems",
+      "description": "Obtain the Gem Drop from the Corporeal Beast",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Gems",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Fedora",
+      "description": "Obtain the Fedora",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Fedora",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "20 DK Points",
+      "description": "Obtain Dagannoth King drops until you reach the required number of </points:1348436781019959318>",
+      "type": "point_collection",
+      "is_assembly": false,
+      "points": 10,
+      "required_items": [
+        {
+          "item_name": "Points",
+          "points": 1.0
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "The Lumberjack",
+      "description": "Obtain 1 Dragon Axe",
+      "type": "assembly",
+      "is_assembly": true,
+      "required_items": [
+        {
+          "item_name": "Dragon axe",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "The Fremennik",
+      "description": "Obtain 1 Mud Staff, Seercull Bow, Blade, Shield, and Helm",
+      "type": "assembly",
+      "is_assembly": true,
+      "required_items": [
+        {
+          "item_name": "Mud battlestaff",
+          "quantity": 1
+        },
+        {
+          "item_name": "Seercull",
+          "quantity": 1
+        },
+        {
+          "item_name": "Fremennik blade",
+          "quantity": 1
+        },
+        {
+          "item_name": "Fremennik shield",
+          "quantity": 1
+        },
+        {
+          "item_name": "Fremennik helm",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Forgotten Warriors",
+      "description": "Obtain 1 piece of Skeletal,Rock-shell, and Spined Armor",
+      "type": "assembly",
+      "is_assembly": true,
+      "required_items": [
+        {
+          "item_name": "Skeletal piece",
+          "quantity": 1
+        },
+        {
+          "item_name": "Rock-shell piece",
+          "quantity": 1
+        },
+        {
+          "item_name": "Spined piece",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Lord of the Rings",
+      "description": "Obtain 1 of each ring from the Dagannoth Kings (including Ring of Life)",
+      "type": "assembly",
+      "is_assembly": true,
+      "required_items": [
+        {
+          "item_name": "Berserker ring",
+          "quantity": 1
+        },
+        {
+          "item_name": "Warrior ring",
+          "quantity": 1
+        },
+        {
+          "item_name": "Seers ring",
+          "quantity": 1
+        },
+        {
+          "item_name": "Archers ring",
+          "quantity": 1
+        },
+        {
+          "item_name": "Ring of life",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Death Talisman",
+      "description": "Obtain 1 Death Talisman",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Death talisman",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Dark Bow",
+      "description": "Receive 2 Dark bows from Dark Beasts",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dark bow",
+          "quantity": 2
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "10 Demonic Points",
+      "description": "Obtain Demonic Gorilla drops until you reach the required number of </points:1348436781019959318>",
+      "type": "point_collection",
+      "is_assembly": false,
+      "points": 10,
+      "required_items": [
+        {
+          "item_name": "Points",
+          "points": 2.0
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "500 Dragon Javelins",
+      "description": "Obtain & Fletch 100 Dragon Javelins per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Javelins",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Enhanced Teleport Seed",
+      "description": "Obtain 1 Enhanced Teleport Seed (thieving is allowed)",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Enhanced teleport seed",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Big Bass",
+      "description": "Obtain 1 Big Bass",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Big bass",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Big Shark",
+      "description": "Obtain 1 Big Shark",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Big shark",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Granite Maul",
+      "description": "Obtain 1 Granite Maul",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Granite maul",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Crystal Seed",
+      "description": "Obtain 1 Crystal Weapon or Armour Seed",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Crystal seed",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Rune Warriors",
+      "description": "Obtain 1 set of Rune Armour per member of your team.",
+      "type": "assembly",
+      "is_assembly": true,
+      "required_items": [
+        {
+          "item_name": "Rune full helm",
+          "quantity": 1,
+          "per_member": true
+        },
+        {
+          "item_name": "Rune platebody",
+          "quantity": 1,
+          "per_member": true
+        },
+        {
+          "item_name": "Rune platelegs",
+          "quantity": 1,
+          "per_member": true
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Bandos Points",
+      "description": "Obtain General Graardor drops until you reach the required number of </points:1348436781019959318>",
+      "type": "point_collection",
+      "is_assembly": false,
+      "points": 10,
+      "required_items": [
+        {
+          "item_name": "Bandos chestplate",
+          "points": 3.0
+        },
+        {
+          "item_name": "Bandos tassets",
+          "points": 3.0
+        },
+        {
+          "item_name": "Bandos boots",
+          "points": 2.0
+        },
+        {
+          "item_name": "Bandos hilt",
+          "points": 5.0
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Bandos Chestplate",
+      "description": "Obtain a Bandos Chestplate from General Graardor",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Bandos chestplate",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Bandos Tassets",
+      "description": "Obtain a pair of Bandos Tassets from General Graardor",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Bandos tassets",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Bandos Boots",
+      "description": "Obtain a pair of Bandos Boots from General Graardor",
+      "type": "exact_item", 
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Bandos boots",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "50 Ring Nests",
+      "description": "Obtain 50 Ring Nests from bird houses/woodcutting.",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Nests",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Oyster Pearl",
+      "description": "Obtain 1 Oyster Pearl from Giant Mole",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Oyster pearl",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "10 Godwars Points",
+      "description": "Obtain items from Godwars Dungeon bosses until you reach the required number of </points:1348436781019959318>",
+      "type": "point_collection",
+      "is_assembly": false,
+      "points": 10,
+      "required_items": [
+        {
+          "item_name": "Godwars points",
+          "points": 2.0
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Godsword",
+      "description": "Obtain ALL Godsword Shards and 1 Hilt",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Godsword",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Non-maul Unique",
+      "description": "Obtain 1 Unique from Grotesque Guardians",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Non-maul unique",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Strange Old Lockpick",
+      "description": "Obtain 1 Strange Old Lockpick",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Strange old lockpick",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "10 Zamorak Points",
+      "description": "Obtain K'ril Tsutsaroth drops until you reach the required number of </points:1348436781019959318>",
+      "type": "point_collection",
+      "is_assembly": false,
+      "points": 10,
+      "required_items": [
+        {
+          "item_name": "Points",
+          "points": 2.0
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Steam Battlestaff",
+      "description": "Obtain 1 Steam Battlestaff",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Steam battlestaff",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Zamorakian Spear",
+      "description": "Obtain 1 Zamorakian Spear",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Zamorakian spear",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Staff of the Dead",
+      "description": "Obtain 1 Staff of the Dead",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Staff of the dead",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Dragon Chainbody",
+      "description": "Obtain 1 Dragon Chainbody",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon chainbody",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Dragon 2h Sword",
+      "description": "Obtain 1 Dragon 2H from Kalphite Queen",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon 2h sword",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Dragon Pickaxe",
+      "description": "Obtain 1 Dragon Pickaxe from Kalphite Queen",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon pickaxe",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Kbd heads",
+      "description": "Obtain a pair of KBD heads.",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Kbd heads",
+          "quantity": 2
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Kraken Tentacle",
+      "description": "Obtain 1 Kraken Tentacle",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Kraken tentacle",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Trident of the Seas",
+      "description": "Obtain 1 Trident of the Seas",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Trident of the seas",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "10 Armadyl Points",
+      "description": "Obtain Kree'arra drops until you reach the required number of </points:1348436781019959318>",
+      "type": "point_collection",
+      "is_assembly": false,
+      "points": 10,
+      "required_items": [
+        {
+          "item_name": "Points",
+          "points": 2.0
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Armadyl Helmet",
+      "description": "Obtain 1 Armadyl Helmet",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Armadyl helmet",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Armadyl Crossbow",
+      "description": "Obtain 1 Armadyl Crossbow",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Armadyl crossbow",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Armadyl Chainskirt",
+      "description": "Obtain 1 Armadyl Chainskirt",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Armadyl chainskirt",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Leaf-bladed Weapon",
+      "description": "Obtain 1 Leaf-bladed Weapon",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Leaf-bladed weapon",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Dragon Halberds",
+      "description": "Obtain 1 Dragon Halberd per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon halberds",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Dragon Spear",
+      "description": "Obtain 1 Dragon Spear",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon spear",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Dragon Med Helms",
+      "description": "Obtain 1 Dragon Med Helm per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon med helms",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Spirit Seed (No seed packs)",
+      "description": "Obtain 1 Spirit Seed",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Spirit seed",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Champion Scroll",
+      "description": "Obtain 1 Champion Scroll",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Champion scroll",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Curved Bone",
+      "description": "Obtain 1 Curved Bone",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Curved bone",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Shield Left Half",
+      "description": "Obtain 1 Shield Left Half",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Shield left half",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Uncut / Cut Onyx",
+      "description": "Obtain 1 Cut or Uncut Onyx",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Uncut / cut onyx",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Dark Totems",
+      "description": "Obtain 1 Dark Totem per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dark totems",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "100 Coconuts",
+      "description": "Obtain 100 Coconuts per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Coconuts",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "5 Chewed Bones",
+      "description": "Obtain 5 Chewed Bones",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Bones",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Rune Sword",
+      "description": "Obtain 1 Rune Sword from Nex",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Rune sword",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "10 Blood Essences",
+      "description": "Obtain 10 Blood Essences from Nex",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Essences",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "10 Zamorak Brews",
+      "description": "Obtain 10 Zamorak Brews per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Brews",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "50 Bass",
+      "description": "Obtain 50 Bass per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Bass",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Hill Giant Club",
+      "description": "Obtain 1 Hill Giant Club",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Hill giant club",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Bryophyta's Essence",
+      "description": "Obtain 1 Bryophyta's Essence",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Bryophyta's essence",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Shaman Mask",
+      "description": "Obtain 1 Shaman Mask",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Shaman mask",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Frozen Cache",
+      "description": "Obtain 1 Frozen Cache per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Frozen cache",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "1 Ancient Icon",
+      "description": "Obtain 1 Ancient Icon",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Ancient icon",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "3 Wrath Talismans",
+      "description": "Obtain 5 Wrath Talismans",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Talismans",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "1 Dragon Limbs",
+      "description": "Obtain 1 Dragon Limbs",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon limbs",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Sarachnis Cudgel",
+      "description": "Obtain 1 Sarachnis Cudgel",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Sarachnis cudgel",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Giant Egg Sacs",
+      "description": "Obtain 1 Giant Egg Sac per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Giant egg sacs",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Dark Claw",
+      "description": "Obtain 1 Dark Claw",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dark claw",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Superior Slayer Unique",
+      "description": "Obtain 1 Superior Slayer Unique",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Superior slayer unique",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "fire"
+    },
+    {
+      "name": "Occult Necklace",
+      "description": "Obtain 1 Occult Necklace",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Occult necklace",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Smoke Battlestaff",
+      "description": "Obtain 1 Smoke Battlestaff",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Smoke battlestaff",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Dragon Boots",
+      "description": "Obtain 1 Pair of Dragon Boots per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon boots",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Granite Helmet",
+      "description": "Obtain 1 Granite Helmet",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Granite helmet",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "20 Points",
+      "description": "Obtain TzHarr drops until you reach the required number of </points:1348436781019959318>",
+      "type": "point_collection",
+      "is_assembly": false,
+      "points": 20,
+      "required_items": [
+        {
+          "item_name": "Points",
+          "points": 0.5
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "100000 Tokkul",
+      "description": "Obtain 100k Tokkul",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Tokkul",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Mask of Ranul",
+      "description": "Obtain 1 Mask of Ranul",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Mask of Ranul",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Treasonous Ring",
+      "description": "Obtain 1 Treasonous Ring",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Treasonous ring",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Fangs of Venenatis",
+      "description": "Obtain the Fangs of Venenatis",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Fangs of Venenatis",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Ring of the Gods",
+      "description": "Obtain 1 Ring of the Gods",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Ring of the Gods",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Skull of Vet'ion",
+      "description": "Obtain the Skull of Vet'ion",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Skull of Vet'ion",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Dragonhides",
+      "description": "Obtain 10 of ALL Dragonhides from Vorkath per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragonhides",
+          "quantity": 10
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Vorkath Head",
+      "description": "Obtain 1 Vorkath Head",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Vorkath head",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Blood Shard",
+      "description": "Obtain 1 Blood Shard",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Blood shard",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Lord of the Rings",
+      "description": "Obtain 1 of each ring from the Wilderness Bosses",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Lord of the Rings",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Odium Ward",
+      "description": "Obtain 1 of each Odium Shard",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Odium ward",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Malediction Ward",
+      "description": "Obtain 1 of each Malediction Shard",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Malediction ward",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Dragon Pickaxe",
+      "description": "Obtain 1 Dragon Pickaxe from the Wilderness",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon pickaxe",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Dragon 2H Sword",
+      "description": "Obtain 1 Dragon 2H Sword from the Wilderness",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon 2h sword",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Zalcano Unique",
+      "description": "Obtain 1 Unique from Zalcano",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Zalcano unique",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Any Fang",
+      "description": "Obtain 1 Fang from Zulrah",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Any fang",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "The Pyromancer",
+      "description": "Obtain 1 piece of the Pyromancer Outfit",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "The Pyromancer",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "10 Wintertodt Points",
+      "description": "Obtain Wintertodt drops until you reach the required number of </points:1348436781019959318>",
+      "type": "point_collection",
+      "is_assembly": false,
+      "points": 10,
+      "required_items": [
+        {
+          "item_name": "Points",
+          "points": 1.0
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "25 Burnt Pages",
+      "description": "Obtain 25 Burnt Pages per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Pages",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "10 Tempoross Points",
+      "description": "Obtain Tempoross drops until you reach the required number of </points:1348436781019959318>",
+      "type": "point_collection",
+      "is_assembly": false,
+      "points": 10,
+      "required_items": [
+        {
+          "item_name": "Points",
+          "points": 1.0
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "100 Fish",
+      "description": "Obtain 100 of 5 different types of fish",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Fish",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "15 Soaked Pages",
+      "description": "Obtain 15 Soaked Pages per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Pages",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "10 Revenant Points",
+      "description": "Obtain Revenants drops until you reach the required number of </points:1348436781019959318>",
+      "type": "point_collection",
+      "is_assembly": false,
+      "points": 10,
+      "required_items": [
+        {
+          "item_name": "Points",
+          "points": 2.0
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Revenant Trophy",
+      "description": "Obtain 1 of the Ancient Statues from Revenants or Maledictus",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Revenant trophy",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "5 Magic Seeds",
+      "description": "Obtain 5 Magic Seeds from Revenants or Maledictus per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Seeds",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "Fremennik Helm",
+      "description": "Obtain 1 Fremennik Helm from High Level Gambles at Barbarian Assault",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Fremennik helm",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Dragon Weapon",
+      "description": "Obtain 1 Dragon Weapon from Soul Wars Crates",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon weapon",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Cabbage",
+      "description": "Obtain 1 Cabbage from Soul Wars Crates per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Cabbage",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "The Dagon'hai",
+      "description": "Obtain 1 piece of the Dagon'hai Robes",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "The Dagon'hai",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "earth"
+    },
+    {
+      "name": "5 Larran's Keys",
+      "description": "Obtain 5 Larran's Keys per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Keys",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "5 Brimstone Keys",
+      "description": "Obtain 5 Brimstone Keys per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Keys",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Scroll",
+      "description": "Obtain 1 Scroll from the Chambers of Xeric",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Scroll",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Gems or Thread",
+      "description": "Obtain 1 Gem or Thread from the Tombs of Amascut",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Gems or Thread",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Slayer Trophies",
+      "description": "Obtain 1 Slayer Trophy per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Slayer trophies",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Non-Whip Unique",
+      "description": "Obtain 1 Unique from Sire",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Non-Whip Unique",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Unique",
+      "description": "Obtain 1 Unique from Hydra",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Unique",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Any Crystal",
+      "description": "Obtain 1 Crystal from Cerberus",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Any Crystal",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Dragon Mace",
+      "description": "Obtain 1 Dragon Mace per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon mace",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "2 Intricate Pouches",
+      "description": "Obtain 2 Intricate Pouches per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Pouches",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "100 Abyssal Pearls",
+      "description": "Obtain 100 Abyssal Pearls per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Pearls",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "1000 Slayer Points",
+      "description": "Obtain 1000 Slayer Points (type </points:1348436781019959318>",
+      "type": "point_collection",
+      "is_assembly": false,
+      "points": 10,
+      "required_items": [
+        {
+          "item_name": "Points",
+          "points": 0.02
+        }
+      ],
+      "difficulty": "water"
+    },
+    {
+      "name": "Dragon Dagger",
+      "description": "Obtain 1 Dragon Dagger per member of your team",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Dragon dagger",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
+      "name": "Pharaoh's Sceptre",
+      "description": "Obtain 1 Pharaoh's Sceptre from Pyramid Plunder",
+      "type": "exact_item",
+      "is_assembly": false,
+      "required_items": [
+        {
+          "item_name": "Pharaoh's sceptre",
+          "quantity": 1
+        }
+      ],
+      "difficulty": "water"
+    }
+  ]
+}

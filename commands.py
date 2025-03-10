@@ -2,19 +2,19 @@ import json
 import os
 import random
 from secrets import token_hex
-from interactions import BaseContext, GuildText, Permissions, SlashCommand, Button, ButtonStyle, check, is_owner, Extension, slash_command, slash_option, SlashContext, Embed, OptionType, GuildChannel
+from interactions import AutocompleteContext, BaseContext, GuildText, Permissions, SlashCommand, Button, ButtonStyle, SlashCommandOption, check, is_owner, Extension, slash_command, slash_option, SlashContext, Embed, OptionType, GuildChannel
 import interactions
 import time
 import subprocess
 import platform
 from db.models import NpcList, User, Group, Guild, Player, Drop, Webhook, session, UserConfiguration, GroupConfiguration
 from pb.leaderboards import create_pb_embeds, get_group_pbs
-from utils.format import format_time_since_update, format_number, get_command_id, get_npc_image_url
+from utils.format import format_time_since_update, format_number, get_command_id, get_npc_image_url, replace_placeholders
 from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id, fetch_group_members
 from utils.redis import RedisClient
-from db.ops import DatabaseOperations
+from db.ops import DatabaseOperations, associate_player_ids
 from lootboard.generator import generate_server_board
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 from utils.sheets import sheet_manager
 #from utils.zohomail import send_email
@@ -40,9 +40,8 @@ class UserCommands(Extension):
                               url="https://www.droptracker.io/docs",
                               icon_url="https://www.droptracker.io/img/droptracker-small.gif")
         help_embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
-        help_embed.set_footer(text="View our documentation to learn more about how to interact with the Discord bot.")
-        help_embed.add_field(name="Note:",
-                            value=f"To register your Discord account, use any of the **user commands** for the first time")
+        help_embed.add_field(name="Need more help?",
+                            value=f"View our <#1317873428199637022> to find answers to common questions from our community, or reach out for <#1210765301042380820>")
         help_embed.add_field(name="User Commands:",
                              value="" +
                                    f"- </me:{await get_command_id(self.bot, 'me')}> - View your account / stats\n" + 
@@ -84,10 +83,151 @@ class UserCommands(Extension):
     @slash_command(name="global-board",
                    description="View the current global loot leaderboard")
     async def global_lootboard_cmd(self, ctx: SlashContext):
-        embed = await db.get_group_embed(embed_type="drop", group_id=1)
+        embed = await db.get_group_embed(embed_type="lb", group_id=1)
         return await ctx.send(f"Here you are!", embeds=embed, ephemeral=True)
         pass
+
+    @slash_command(name="pingme",
+                   description="Toggle whether or not you want to be pinged when your submissions are sent to Discord")
+    @slash_option(name="type",
+                  description="Select whether you want to toggle global, or clan-specific pings.",
+                  required=True,
+                  opt_type=OptionType.STRING,
+                  autocomplete=True)
+    async def pingme_cmd(self, ctx: SlashContext, type: str):
+        user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
+        if not user:
+            await try_create_user(ctx=ctx)
+        if type == "global":
+            user.global_ping = not user.global_ping
+            session.commit()
+            if user.global_ping:
+                embed = Embed(title="Success!",
+                              description=f"You will now be pinged when your submissions are sent to Discord.")
+                await ctx.send(embed=embed, ephemeral=True)
+            else:
+                embed = Embed(title="Success!",
+                              description=f"You will **no longer** be pinged when your submissions are sent to Discord.")
+                await ctx.send(embed=embed, ephemeral=True)
+        elif type == "group":
+            user.group_ping = not user.group_ping
+            session.commit()
+            if user.group_ping:
+                embed = Embed(title="Success!",
+                              description=f"You will now be pinged when your submissions are sent to Discord.")
+                await ctx.send(embed=embed, ephemeral=True)
+            else:
+                embed = Embed(title="Success!",
+                              description=f"You will **no longer** be pinged when your submissions are sent to Discord.")
+                await ctx.send(embed=embed, ephemeral=True)
+        elif type == "everywhere":
+            user.never_ping = not user.never_ping
+            session.commit()
+            if user.never_ping:
+                embed = Embed(title="Success!",
+                              description=f"You will **no longer** be pinged `anywhere` when your submissions are sent to Discord.")
+                await ctx.send(embed=embed, ephemeral=True)
+            else:
+                embed = Embed(title="Success!",
+                              description=f"You **will now be pinged** `anywhere` when your submissions are sent to Discord.")
+                await ctx.send(embed=embed, ephemeral=True)
+    @pingme_cmd.autocomplete("type")
+    async def pingme_autocomplete_type(self, ctx: AutocompleteContext):
+        string_in = ctx.input_text
+        await ctx.send(
+            choices=[
+                {
+                    "name": f"Globally",
+                    "value": "global"
+                },
+                {
+                    "name": f"In my group",
+                    "value": "group"
+                },
+                {
+                    "name": f"Everywhere",
+                    "value": "everywhere"
+                }
+            ]
+        )
     
+    @slash_command(name="hideme",
+                   description="Toggle whether or not you will appear anywhere in the global discord server / side panel / etc.")
+    @slash_option(name="account",
+                  description="Select which of your accounts you want to hide from our global listings (all for all).",
+                  required=True,
+                  opt_type=OptionType.STRING,
+                  autocomplete=True)
+    async def hideme_cmd(self, ctx: SlashContext, account: str):
+        user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
+        if not user:
+            await try_create_user(ctx=ctx)
+        if account == "all":
+            user.hidden = not user.hidden
+            session.commit()
+            if user.hidden:
+                embed = Embed(title="Success!", 
+                              description=f"All of your accounts will **no longer** be visible in our global listings.")
+                return await ctx.send(embed=embed, ephemeral=True)
+            else:
+                embed = Embed(title="Success!",
+                              description=f"All of your accounts will now **be visible** in our global listings.")
+                return await ctx.send(embed=embed, ephemeral=True)
+        else:
+            player = session.query(Player).filter_by(player_name=account).first()
+            if not player:
+                return await ctx.send(f"You don't have any accounts by that name.", ephemeral=True)
+            player.hidden = not player.hidden
+            session.commit()
+            if player.hidden:
+                embed = Embed(title="Success!",
+                              description=f"Your account, `{player.player_name}` will **no longer** be visible in our global listings.")
+                return await ctx.send(embed=embed, ephemeral=True)
+            else:
+                embed = Embed(title="Success!",
+                              description=f"Your account, `{player.player_name}` will now **be visible** in our global listings.")
+                return await ctx.send(embed=embed, ephemeral=True)
+            
+
+    @hideme_cmd.autocomplete("account")
+    async def hideme_autocomplete_account(self, ctx: AutocompleteContext):
+        string_in = ctx.input_text
+        user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
+        
+        if not user:
+            # User not found in database
+            return await ctx.send(
+                choices=[
+                    {
+                        "name": "All accounts",
+                        "value": "all"
+                    }
+                ]
+            )
+        
+        # Query for the user's accounts
+        accounts = session.query(Player).filter_by(user_id=user.user_id).all()
+        
+        # Always include "All accounts" option
+        choices = [
+            {
+                "name": "All accounts",
+                "value": "all"
+            }
+        ]
+        
+        # Add player accounts if they exist
+        if accounts:
+            choices.extend([
+                {
+                    "name": account.player_name,
+                    "value": account.player_name
+                }
+                for account in accounts
+            ])
+        
+        return await ctx.send(choices=choices)
+
     @slash_command(name="accounts",
                    description="View your currently claimed RuneScape character names, if you have any")
     async def user_accounts_cmd(self, ctx):
@@ -102,11 +242,11 @@ class UserCommands(Extension):
             for account in accounts:
                 count += 1
                 last_updated_unix = format_time_since_update(account.date_updated)
-                account_names += f"<:totallevel:1179971315583684658> {account.total_level}`" + account.player_name.strip() + f"` (id: {account.player_id})\n> Last updated: <t:{last_updated_unix}:R>\n"
+                account_names += f"`" + account.player_name.strip() + f"` (id: {account.player_id})\n> Last updated: {last_updated_unix}\n"
         account_emb = Embed(title="Your Registered Accounts:",
                             description=f"{account_names}(total: `{count}`)")
         # TODO - replace /claim-rsn with an actual clickable command
-        account_emb.add_field(name="/claim-rsn",value="To claim another, you can use the `/claim-rsn` command.", inline=False)
+        account_emb.add_field(name="/claim-rsn",value="To claim another, you can use the </claim-rsn:1269466219841327108> command.", inline=False)
         account_emb.set_footer(text="https://www.droptracker.io/")
         await ctx.send(embed=account_emb, ephemeral=True)
     
@@ -185,64 +325,6 @@ class UserCommands(Extension):
                 await ctx.send(f"Your in-game name has been successfully associated with your Discord account.\n" + 
                                "Please remember to use your `auth token` in the RuneLite plugin config:\n" + 
                                f"</get-token:{await get_command_id(ctx.bot, 'get-token')}>",ephemeral=True) 
-
-    @slash_command(name="me",
-                   description="Views your DropTracker account / stats, or creates an account if you don't already have one.")
-    async def me_command(self, ctx: SlashContext):
-        user = session.query(User).filter(User.discord_id.ilike(str(ctx.user.id))).first()
-        if user:
-            time_added = ""
-            ## only display the last update time if it varies from the time added.
-            if user.date_added != user.date_updated:
-                print("User date added:", user.date_added)
-                time_added = " (" + user.date_added.strftime("%B %d, %Y") + ")"
-            me_embed = Embed(title=f"DropTracker statistics for <@{ctx.user.id}>:", 
-                             description=f"Tracking since: {time_added}\n" + 
-                             f"- Total accounts: `{len(user.players)}`", 
-                             color=0x0ff000)
-            if user.groups:
-                # If user has more than one group
-                if len(user.groups) > 1:
-                    group_list = ""
-                    for group in user.groups:
-                        group_list += f"- {group.group_name} (`{len(group.users)}` members)\n"
-                    me_embed.add_field(name="Your groups:", value=group_list, inline=False)
-                else:
-                    # Only one group, so show it separately
-                    group = user.groups[0]
-                    me_embed.add_field(name="Your group:", value=f"{group.group_name} - (`{len(group.users)}` members)", inline=False)
-            else:
-                me_embed.add_field(name="You are not part of any groups.",
-                                   value="*you can find groups on [our website](https://www.droptracker.io/)",
-                                   inline=False)
-        else:
-            await try_create_user(ctx=ctx)
-            return
-        me_embed.set_author(name="Your Account",
-                              url=f"https://www.droptracker.io/profile?discordId={str(ctx.user.id)}",
-                              icon_url="https://www.droptracker.io/img/droptracker-small.gif")
-        me_embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
-        await ctx.send(embed=me_embed, ephemeral=True)
-        #me_embed.set_footer(text="View our documentation to learn more about how to interact with the Discord bot.")
-        
-    @slash_command(name="patreon",
-                    description=f"View the benefits of becoming a DropTracker Patreon supporter")
-    async def patreon_command(self, ctx: SlashContext):
-        patreon_benefits = Embed(title="[Patreon Benefits](https://www.patreon.com/droptracker)",
-                                 description="Subscribing to the DropTracker patreon helps to keep our service online at no cost to most users,\n" + 
-                                            f"while giving you some fancy benefits like:",
-                                            color=0xffffff)
-        patreon_benefits.add_field(name="User Benefits",
-                                   value=f"Subscribing at the $**4.99**/mo. tier or higher allows you" + 
-                                   " to configure **google sheets**, which can automatically store every drop you receive, " + 
-                                   "and customize **discord webhooks** to send drops to.")
-        patreon_benefits.add_field(name="Group Benefits",
-                                   value=f"Subscribing at the $**9.99**/mo. tier or higher enables " + 
-                                        "one group that you are part of to use a **google sheet** for all group members' drops to be inserted into," + 
-                                        f" and customize the formatting and Embed content in the <@{ctx.bot.user.id}>'s messages.")
-        patreon_benefits.set_footer(f"https://www.droptracker.io/")
-        await ctx.send(f"If you are interested in contributing in some other way than through Patreon, feel free to reach out in our Discord server.",embed=patreon_benefits,ephemeral=True)
-        pass
 
 async def is_admin(ctx: BaseContext):
     perms_value = ctx.author.guild_permissions.value
@@ -429,6 +511,91 @@ class AdminCommands(Extension):
         pass
 
     
+    @slash_command(name="generate_board",
+                   description="Generate a new board for a group")
+    @slash_option(name="timeframe",
+                description="Please enter the date to generate a board for. (2025-03-07, 202503, etc)",
+                opt_type=OptionType.STRING,
+                required=True)
+    async def generate_board(self, ctx: SlashContext, timeframe: str):
+        partition = timeframe
+        if ("-" in partition and len(partition) != 10) and (len(partition) != 6):
+            return await ctx.send(f"Please enter a valid timeframe.\n" + 
+                                    "Examples:\n" + 
+                                    "- 2025-03-07 for March 7th, 2025\n" +
+                                    "> or\n" 
+                                    "- 202503 for all of March 2025")
+        if ctx.guild_id:
+            if str(ctx.guild_id) == "1172737525069135962":
+                group = session.query(Group).filter(Group.group_id == 2).first()
+            else:
+                group = session.query(Group).filter(Group.guild_id == ctx.guild_id).first()
+            if not group:
+                return await ctx.send("No group found for this server.", ephemeral=True)
+            group_id = group.group_id
+        else:
+            user = session.query(User).filter(User.discord_id == str(ctx.author.id)).first()
+            if not user:
+                return await ctx.send("User not found.", ephemeral=True)
+            if not user.groups:
+                return await ctx.send("You are not associated with any groups.", ephemeral=True)
+            
+            if len(user.groups) > 1:
+                group = user.groups[0] if user.groups[0].group_id != 2 and user.groups[0].group_id != 1 else user.groups[1]
+            else:
+                group = user.groups[0]
+            group_id = group.group_id
+            
+        try:
+            # First generate the board
+            await ctx.defer()  # Let user know we're working on it
+            print("Generating board for group:", group_id, "with partition:", partition)
+            board_path = await generate_server_board(ctx.bot, group_id=group_id, partition=partition)
+            embed_template = await db.get_group_embed('lb', group_id)
+            
+            # Parse date if needed
+            if "-" in partition:
+                before_date = datetime.strptime(partition, '%Y-%m-%d')  
+            else:
+                before_date = None
+                
+            # Get player data based on group type
+            if group_id != 2:
+                # For specific groups
+                try:
+                    player_wom_ids = await fetch_group_members(group.wom_id)
+                    player_ids = await associate_player_ids(player_wom_ids, before_date)
+                    total_tracked = len(player_ids)
+                except Exception as e:
+                    print(f"Error fetching group members: {e}")
+                    total_tracked = 0
+            else:
+                # For global group (ID 2)
+                try:
+                    # Extract wom_ids from query results (list of tuples)
+                    wom_id_tuples = session.query(Player.wom_id).all()
+                    player_wom_ids = [wom_id[0] for wom_id in wom_id_tuples if wom_id[0] is not None]
+                    player_ids = await associate_player_ids(player_wom_ids, before_date)
+                    total_tracked = len(player_ids)
+                except Exception as e:
+                    print(f"Error processing global players: {e}")
+                    total_tracked = 0
+                    
+            # Create and send embed
+            value_dict = {
+                "{next_refresh}": "N/A",
+                "{tracked_members}": total_tracked
+            }
+            embed = replace_placeholders(embed_template, value_dict)
+            lootboard = interactions.File(board_path)
+            await ctx.send(content="", embed=embed, files=lootboard)
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()  # Print full error details to console
+            return await ctx.send(f"Error generating board: {e}", ephemeral=True)
+        pass
+
     @slash_command(
         name="get_group_boss_pbs",
         description="Fetches all the PBs for a specific group"
