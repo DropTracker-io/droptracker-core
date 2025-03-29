@@ -78,7 +78,7 @@ class CloudflareIPUpdater:
             new_ip = await self.get_current_ip()
             
             if new_ip == self.current_ip:
-                await logger.log("access", f"IP hasn't changed; skipping.", "CloudflareIPUpdater")
+                #await logger.log("access", f"IP hasn't changed; skipping.", "CloudflareIPUpdater")
                 return
                 
             await logger.log("access", f"IP changed: {self.current_ip} -> {new_ip}. DNS records updated.", "CloudflareIPUpdater")

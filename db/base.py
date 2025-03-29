@@ -30,8 +30,8 @@ def setup_relationships():
     This avoids circular import issues.
     """
     from db.models import Group
-    from db.eventmodels import Event
+    from db.eventmodels import EventModel
     
     # Add relationships
     Group.events = relationship("Event", back_populates="group")
-    Event.group = relationship("Group", back_populates="events") 
+    EventModel.group = relationship("Group", back_populates="events") 

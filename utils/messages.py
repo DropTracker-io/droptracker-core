@@ -14,7 +14,7 @@ from utils.format import format_time_since_update, format_number, get_command_id
 
 from datetime import datetime, timedelta
 
-from utils.redis import RedisClient
+from utils.redis import RedisClient, calculate_global_overall_rank, calculate_rank_amongst_groups
 from db.ops import DatabaseOperations
 
 load_dotenv()
@@ -96,40 +96,39 @@ async def name_change_message(bot, new_name, player_id, old_name):
                                 
 sent_npc_email_list = []
 async def confirm_new_npc(bot: interactions.Client, npc_name, player_name, item_name, value):
-    pass
-    # if npc_name not in sent_npc_email_list:
-    #     send_email(subject=f"New NPC Detected: {npc_name}",
-    #                recipients=["support@droptracker.io"],
-    #                body=f"""
-    #                     <html>
-    #                     <body>
-    #                         <h2>New NPC Detected in DropTracker Database</h2>
-    #                         <p>A new NPC has been detected that needs to be reviewed and potentially added to the NPC list.</p>
-    #                         <h3>Details:</h3>
-    #                         <ul>
-    #                             <li><strong>NPC Name:</strong> {npc_name}</li>
-    #                             <li><strong>Detected by Player:</strong> {player_name}</li>
-    #                             <li><strong>Item Dropped:</strong> {item_name}</li>
-    #                             <li><strong>Item Value:</strong> {value} gp</li>
-    #                         </ul>
-    #                         <p>Please review this information and take appropriate action:</p>
-    #                         <ol>
-    #                             <li>Verify if this is a valid new NPC</li>
-    #                             <li>Add the NPC to the database if confirmed</li>
-    #                             <li>Investigate further if the NPC seems suspicious</li>
-    #                         </ol>
-    #                         <p>If you have any questions or concerns, please discuss with the team.</p>
-    #                     </body>
-    #                     </html>
-    #                 """)
-    #     sent_npc_email_list.append(npc_name)
-    # # await channel.send(embed=confirmation_embed,
-    # #                    components=[deny_button, confirm_button]) 
+    if npc_name == "Loot Chest":
+        return
+    else:
+        channel_id = 1350412061141762110
+        channel = await bot.fetch_channel(channel_id=channel_id)
+        if channel:
+            embed = Embed(title="New NPC Detected",
+                          description=f"Player: `{player_name}`\n" + 
+                          f"Item: `{item_name}`\n" + 
+                          f"**Unknown NPC:** `{npc_name}`\n" + 
+                          f"Value: `{value}`")
+            await channel.send(f"@everyone\nAn NPC has arrived thru a submission that we are not yet tracking:", embeds=embed)
+        
+
+
 sent_item_email_list = []
 async def confirm_new_item(bot: interactions.Client, item_name, player_name, item_id, npc_name, value):
     if item_name not in sent_item_email_list:
+        channel_id = 1350412061141762110
+        channel = await bot.fetch_channel(channel_id=channel_id)
+        if channel:
+            embed = Embed(title="New item Detected",
+                          description=f"Player: `{player_name}`\n" + 
+                          f"**Unknown Item:** `{item_name}`\n" + 
+                          f"Item ID: `{item_id}`\n" + 
+                          f"NPC: `{npc_name}`\n" + 
+                          f"Value: `{value}`")
+            
+            await channel.send(f"@everyone\nAn NPC has arrived thru a submission that we are not yet tracking:", embeds=embed)
         sent_item_email_list.append(item_name)
-        pass
+    else:
+        return
+
 async def joined_guild_msg(bot: interactions.Client, guild: interactions.Guild):
     try:
         owner_id = guild._owner_id
@@ -195,3 +194,4 @@ async def send_lootboard_message(bot: interactions.Client, group_id, channel_id,
             await message.edit(embeds=embed)
         except Exception as e:
             pass
+

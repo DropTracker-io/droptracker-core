@@ -1,4 +1,6 @@
+import asyncio
 from db.models import CombatAchievementEntry, Drop, NotifiedSubmission, session, NpcList, Player, ItemList, PersonalBestEntry, CollectionLogEntry, User, Group, GroupConfiguration, UserConfiguration
+from utils.embeds import update_boss_pb_embed
 from utils.messages import confirm_new_npc, confirm_new_item, name_change_message, new_player_message
 from utils.semantic_check import get_current_ca_tier, get_ca_tier_progress
 from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id, fetch_group_members
@@ -30,6 +32,8 @@ global_footer = os.getenv('DISCORD_MESSAGE_FOOTER')
 redis_client = RedisClient()
 db = DatabaseOperations()
 
+last_channels_sent = []
+
 npc_list = {} # - stores a dict of the npc's and their corresponding IDs to prevent excessive querying
 player_list = {} # - stores a dict of player name:ids, and their last refresh from the DB.
 class RawDropData():
@@ -42,33 +46,45 @@ def check_auth(player_name, account_hash, auth_key):
     Returns true, false if player exists but hash doesn't match.
     Returns false, false if player does not exist.
     """
-    player = session.query(Player).filter(Player.player_name == player_name).first()
-    
-    if not player:
-        return False, False
+    try:
+        player = session.query(Player).filter(Player.player_name == player_name).first()
         
-    if player.account_hash:
-        if account_hash != player.account_hash:
-            return True, False
+        if not player:
+            return False, False
+            
+        if player.account_hash:
+            if account_hash != player.account_hash:
+                return True, False
+            else:
+                return True, True
         else:
+            
+            # Update the account hash if it's not set
+            existing_player = session.query(Player).filter(Player.account_hash == account_hash).first()
+            if existing_player:
+                existing_player.player_name = player_name
+                logger.log(f"access",f"Player {player_name} already exists with account hash {account_hash}, updating player name to {player_name}", "check_auth")
+                try:
+                    session.commit()
+                except Exception as e:
+                    print("Error committing player name change:", e)
+                    session.rollback()
+            player.account_hash = account_hash
+            try:
+                session.commit()
+            except Exception as e:
+                print("Error committing player name change:", e)
+                session.rollback()
             return True, True
-    else:
-        # Update the account hash if it's not set
-        existing_player = session.query(Player).filter(Player.account_hash == account_hash).first()
-        if existing_player:
-            existing_player.player_name = player_name
-            logger.log(f"access",f"Player {player_name} already exists with account hash {account_hash}, updating player name to {player_name}", "check_auth")
-            session.commit()
-        player.account_hash = account_hash
-        session.commit()
-        return True, True
+    except Exception as e:
+        print("Error checking auth:", e)
+        return False, False
 
 # def check_auth(player_name, account_hash, auth_key):
 #     """
 #         Returns true, true if there is a 
 #         matching player+user combo for the passed account hash
 #         and the auth_key matches the stored.
-#         Returns true, false is user exists but auth fails.
 #         Returns false, false if used does not exist or player does not exist.
 #     """
 #     player_auth_key = f"{account_hash}:auth"
@@ -131,11 +147,14 @@ async def drop_processor(bot: interactions.Client, drop_data: RawDropData):
         if not player:
             #print("Player not found in the database, creating a new one...")
             await try_create_player(bot, player_name, account_hash)
-        player: Player = session.query(Player).filter(Player.player_name.ilike(player_name)).first()
+            player: Player = session.query(Player).filter(Player.player_name.ilike(player_name)).first()
         if player:
             player_list[player_name] = player.player_id
         else:
             return
+    if player_name not in player_list:
+        print("Player still not foudn in the list...")
+        return
     user_exists, authed = check_auth(player_name, account_hash, auth_key)
     # print("Exists, authed:", user_exists,authed)
 
@@ -144,8 +163,11 @@ async def drop_processor(bot: interactions.Client, drop_data: RawDropData):
     else:
         npc = session.query(NpcList.npc_id).filter(NpcList.npc_name == npc_name).first()
         if not npc:
-            print(f"NPC {npc_name} not found in the database. Calling confirm_new_npc.")
-            await confirm_new_npc(bot, npc_name, player_name, item_name, value)
+            #print(f"NPC {npc_name} not found in the database. Calling confirm_new_npc.")
+            try:
+                await confirm_new_npc(bot, npc_name, player_name, item_name, value)
+            except Exception as e:
+                pass
             return  # Return here since the NPC creation is deferred; this drop will be ignored
         else:
             npc_list[npc_name] = npc.npc_id
@@ -302,13 +324,16 @@ async def clog_processor(bot: interactions.Client,
     # Process group-related logic if the player is part of any groups
     #print("clog_processor - Checking if the player is in any groups.")
     player_group_id_query = """SELECT group_id FROM user_group_association WHERE player_id = :player_id"""
-    player_group_ids = session.execute(text(player_group_id_query), {"player_id": player.player_id}).fetchall()
-    player_group_ids = [group_id[0] for group_id in player_group_ids]
-    player_group_ids.append(2)
-    player_groups = session.query(Group).filter(Group.group_id.in_(player_group_ids)).all()
-    print("Returned groups ids:", player_groups)
+    player_groups = []
+    if player:
+        if player.player_id:
+            player_group_ids = session.execute(text(player_group_id_query), {"player_id": player.player_id}).fetchall()
+            player_group_ids = [group_id[0] for group_id in player_group_ids]
+            player_group_ids.append(2)
+            player_groups = session.query(Group).filter(Group.group_id.in_(player_group_ids)).all()
+            print("Returned groups ids:", player_groups)
     if player_groups:
-        print(player.player_name, "is in", len(player_groups), "groups")
+        #print(player.player_name, "is in", len(player_groups), "groups")
         for group in player.groups:
             group_id = group.group_id
             
@@ -375,7 +400,7 @@ async def clog_processor(bot: interactions.Client,
                     if entry.player_id == player.player_id:
                         global_placement = idx
                         break
-                if channel_id:
+                if channel_id and isinstance(channel_id[0], str) and channel_id[0].isdigit():
                     channel = await bot.fetch_channel(channel_id[0])
                 else:
                     print("Channel was not found for this group:", group.group_id)
@@ -387,6 +412,8 @@ async def clog_processor(bot: interactions.Client,
                 partition = int(datetime.now().year * 100 + datetime.now().month)
                 player_total_month = f"player:{player.player_id}:{partition}:total_loot"
                 player_month_total = redis_client.get(player_total_month)
+                if player_month_total is None:
+                    player_month_total = 0
                 if raw_embed:
                     placeholders = {"{item_name}": item_name,
                                     "{npc_name}": source,
@@ -413,10 +440,14 @@ async def clog_processor(bot: interactions.Client,
                     if source.lower().strip() == "unknown":
                         embed.description = ""
                     if attachment:
+
+                        if channel not in last_channels_sent:
+                            last_channels_sent.append(channel)
+                        else:
+                            await asyncio.sleep(2)
                         message = await channel.send(f"{formatted_name} has received a new Collection Log slot:",
                                            embed=embed,
                                            files=attachment)
-                        
                     else:
                         message = await channel.send(f"{formatted_name} has received a new Collection Log slot:",
                                            embed=embed)
@@ -475,7 +506,7 @@ async def ca_processor(bot: interactions.Client,
     player_groups = session.query(Group).filter(Group.group_id.in_(player_group_ids)).all()
     print("Returned groups:", player_groups)
     if player_groups:
-        print(player.player_name, "is in", len(player_groups), "groups")
+        #print(player.player_name, "is in", len(player_groups), "groups")
         for group in player.groups:
             group: Group = group
             group_id = group.group_id
@@ -572,22 +603,30 @@ async def ca_processor(bot: interactions.Client,
                             "{next_tier_points}": next_tier_points,
                             "{points_left}": int(next_tier_points) - int(points_total)
                         }
+                        # if group.group_id == 2:
+                        #     player_id = player_list[player_name]
+                        #     embed = await get_global_ca_embed(task_name, player_id, task_tier, points_total, points_awarded, next_tier, next_tier_points)
+                        # else:
                         embed: interactions.Embed = replace_placeholders(embed_template, value_dict)
-                        if group.group_id == 2:
-                            temp_embed = interactions.Embed(title=embed.title, description=embed.description, color=embed.color)
-                            temp_embed.set_thumbnail(embed.thumbnail.url)
-                            temp_embed.set_footer(embed.footer.text)
-                            for field in embed.fields:
-                                if field.name == "Group Stats":
-                                    continue
-                                temp_embed.add_field(field.name, field.value, field.inline)
-                            embed = temp_embed
+                        print("Group ID:", group.group_id)
+                        temp_embed = None
+                        
                         if dl_path:
                             attachment = interactions.File(dl_path)
-                            message = await channel.send(f"{formatted_name} completed a new CA:",embed=embed,
-                                files=attachment)
+                            try:
+                                message = await channel.send(f"{formatted_name} completed a new CA:",embed=embed,
+                                    files=attachment)
+                            except Exception as e:
+                                await asyncio.sleep(2)
+                                message = await channel.send(f"{formatted_name} completed a new CA:",embed=embed,
+                                    files=attachment)
+                                await logger.log("access", f"Couldn't send a CA message: {e}", "ca_processor")
                         else:
-                            message = await channel.send(f"{formatted_name} completed a new CA:",embed=embed)
+                            try:
+                                message = await channel.send(f"{formatted_name} completed a new CA:",embed=embed)
+                            except Exception as e:
+                                await asyncio.sleep(2)
+                                message = await channel.send(f"{formatted_name} completed a new CA:",embed=embed)
                         if message:
                             message_id = str(message.id)
                             await logger.log("access", f"{player_name} completed a new Combat Achievement ({task_name}) in {group_id}", "ca_processor")
@@ -599,6 +638,8 @@ async def ca_processor(bot: interactions.Client,
                                                                 ca=ca)
                             session.add(notified_sub)
                             session.commit()
+                        else:
+                            await logger.log("access", f"No discord msg was sent for CA: {new_ca.id} -- we failed to send the message?", "ca_processor")
     else:
         print("No groups found for the player...")
 async def pb_processor(bot: interactions.Client,
@@ -711,11 +752,17 @@ async def pb_processor(bot: interactions.Client,
         player_groups = session.query(Group).filter(Group.group_id.in_(player_group_ids)).all()
         #print("Returned groups:", player_groups)
         if player_groups:
-            print(player.player_name, "is in", len(player_groups), "groups")
+            #print(player.player_name, "is in", len(player_groups), "groups")
             for group in player_groups:
                 group: Group = group
-                print("Checking group:", group.group_name)
+                #print("Checking group:", group.group_name)
                 group_id = group.group_id
+                ### This is a new PB, and they are in a group...
+                # Let's update the Hall of Fame embed accordingly.
+                try:
+                    await update_boss_pb_embed(bot, group_id, npc_id, from_submission=True)
+                except Exception as e:
+                    print("Unable to update the Hall of Fame embed based on a new PB submission:", e)
                 if group_id == 2 and player.hidden:
                     continue
                 send_pbs = session.query(GroupConfiguration.config_value).filter(GroupConfiguration.config_key == 'notify_pbs',
@@ -743,7 +790,7 @@ async def pb_processor(bot: interactions.Client,
                 ):
                     channel_id = session.query(GroupConfiguration.config_value).filter(GroupConfiguration.config_key == 'channel_id_to_post_pb',
                                                                                        GroupConfiguration.group_id == group_id).first()
-                    print("Got the channel id:", channel_id)
+                    #print("Got the channel id:", channel_id)
                     channel_id = channel_id[0]
                     if group.wom_id:
                         wom_group_id = group.wom_id
@@ -768,15 +815,15 @@ async def pb_processor(bot: interactions.Client,
                                                                           PersonalBestEntry.team_size == team_size).order_by(PersonalBestEntry.personal_best.asc()).all()
                     all_ranks = session.query(PersonalBestEntry).filter(PersonalBestEntry.npc_id == int(npc_id),
                                                                         PersonalBestEntry.team_size == team_size).order_by(PersonalBestEntry.personal_best.asc()).all()
-                    print("Group ranks:",group_ranks)
-                    print("All ranks:",all_ranks)
+                    #print("Group ranks:",group_ranks)
+                    #print("All ranks:",all_ranks)
                     total_ranked_group = len(group_ranks)
                     total_ranked_global = len(all_ranks)
                     current_user_best_ms = personal_best_ms
                     ## player's rank in group
                     group_placement = None
                     global_placement = None
-                    print("Assembling rankings....")
+                    #print("Assembling rankings....")
                     for idx, entry in enumerate(group_ranks, start=1): 
                         if entry.personal_best == current_user_best_ms:
                             group_placement = idx
@@ -786,6 +833,8 @@ async def pb_processor(bot: interactions.Client,
                         if entry.personal_best == current_user_best_ms:
                             global_placement = idx
                             break
+                    if channel_id == '':
+                        continue
                     try:
                         channel = await bot.fetch_channel(channel_id=channel_id)
                         attachment = None
@@ -819,12 +868,25 @@ async def pb_processor(bot: interactions.Client,
                                 embed = temp_embed
                             embed.set_author(name="New Personal Best:")
                             if attachment:
-                                message = await channel.send(f"{formatted_name if formatted_name else player_name} achieved a new PB:",
-                                                    embed=embed,
-                                                    files=attachment)
+                                try:
+                                    message = await channel.send(f"{formatted_name if formatted_name else player_name} achieved a new PB:",
+                                                        embed=embed,
+                                                        files=attachment)
+                                except Exception as e:
+                                    await logger.log("access", f"Couldn't send a PB message: {e}", "pb_processor")
+                                    await asyncio.sleep(2)
+                                    message = await channel.send(f"{formatted_name if formatted_name else player_name} achieved a new PB:",
+                                                embed=embed,
+                                                files=attachment)
                             else:
-                                message = await channel.send(f"{formatted_name if formatted_name else player_name} achieved a new PB:",
-                                                    embed=embed)
+                                try:
+                                    message = await channel.send(f"{formatted_name if formatted_name else player_name} achieved a new PB:",
+                                                        embed=embed)
+                                except Exception as e:
+                                    await logger.log("access", f"Couldn't send a PB message.. trying again: {e}", "pb_processor")
+                                    await asyncio.sleep(2)
+                                    message = await channel.send(f"{formatted_name if formatted_name else player_name} achieved a new PB:",
+                                                        embed=embed)
                             if message:
                                 message_id = str(message.id)
                                 await logger.log("access", f"{player_name} achieved a new PB ({convert_from_ms(current_time_ms)} at {boss_name}) in {group_id}", "pb_processor")
@@ -866,7 +928,6 @@ async def try_create_player(bot: interactions.Client, player_name, account_hash)
                 #print("Player not found in database, checking account hash...")
                 player: Player = session.query(Player).filter(Player.account_hash == account_hash).first()
             if player is not None:
-                print("Player found in database:", player.player_name)
                 if player_name != player.player_name:
                     old_name = player.player_name
                     player.player_name = player_name

@@ -9,35 +9,6 @@ from commands import try_create_user
 from db.models import Ticket, User, session
 
 class Tickets(Extension):
-    @slash_command(name="create_embed", description="Create ticket embed")
-    async def create_ticket_embed(self, ctx: SlashContext):
-        author = ctx.author
-        author_roles = author.roles
-        bot: interactions.Client = self.bot
-        is_admin = False
-        if 1342871954885050379 in [role.id for role in author_roles]:
-            is_admin = True
-        if 1176291872143052831 in [role.id for role in author_roles]:
-            is_admin = True
-        if not is_admin:
-            embed = Embed(description=":warning: You do not have permission to use this command.")
-            await ctx.send(embeds=[embed])
-            return
-        await ctx.defer()
-        target_channel_id = ctx.channel_id
-        target_channel = await bot.fetch_channel(target_channel_id)
-        embed = Embed(title=f"DropTracker Support", description="Need a hand setting up or having some problems?")
-        embed.add_field(name="---", value="Please use the buttons below to open a ticket for what you need help with:")
-        embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
-        embed.set_footer(text="Powered by the DropTracker | https://www.droptracker.io/")
-        buttons = [
-            Button(label="Clans / Setting Up", style=ButtonStyle.SUCCESS, custom_id="create_ticket_clans"),
-            Button(label="Players / Tracking", style=ButtonStyle.SUCCESS, custom_id="create_ticket_players"),
-            Button(label="Supporting the Project", style=ButtonStyle.SUCCESS, custom_id="create_ticket_support"),
-            Button(label="Other", style=ButtonStyle.SUCCESS, custom_id="create_ticket_other")
-        ]
-        await target_channel.send(embed=embed, components=buttons)
-
     @slash_command(name="close",
                    description="Close a ticket")
     async def close_ticket(self, ctx: SlashContext):
@@ -80,7 +51,12 @@ class Tickets(Extension):
                 can_close = True
             ticket = session.query(Ticket).filter_by(channel_id=event.ctx.channel.id).first()
             if ticket:
-                if str(ticket.created_by) == str(author.id):
+                user = session.query(User).filter_by(user_id=str(ticket.created_by)).first()
+                if user:
+                    discord_id = user.discord_id
+                else:
+                    discord_id = None
+                if str(discord_id) == str(author.id):
                     can_close = True
             if not can_close:
                 embed = Embed(description=":warning: You do not have permission to use this command.")

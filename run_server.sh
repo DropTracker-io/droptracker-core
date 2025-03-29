@@ -22,7 +22,6 @@ while true; do
     if check_port; then
         echo "Port 8080 is already in use. Attempting to kill the process..."
         kill_port_process
-        sleep 5
     fi
 
     # Run the application

@@ -4,7 +4,7 @@ import time
 import pymysql
 pymysql.install_as_MySQLdb()
 
-from sqlalchemy import BigInteger, Text, Double, UniqueConstraint, ForeignKeyConstraint, create_engine, Table, Integer, Boolean, String, ForeignKey, DateTime, Float, text, Column, Index, Enum, TIMESTAMP
+from sqlalchemy import BigInteger, Text, Double, UniqueConstraint, ForeignKeyConstraint, create_engine, Table, Integer, Boolean, String, ForeignKey, DateTime, Float, text, Column, Index, Enum, TIMESTAMP, pool
 from sqlalchemy.orm import relationship, scoped_session, sessionmaker, Mapped, declarative_base, relationship
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.mysql import BIGINT, INTEGER, LONGTEXT, TINYINT
@@ -108,7 +108,22 @@ class NotifiedSubmission(Base):
         self.pb = pb
 
 
-## Event Models
+## Notification Models
+
+class GroupNotification(Base):
+    __tablename__ = 'group_notifications'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_id = Column(Integer, ForeignKey('groups.group_id'), nullable=False)
+    title = Column(String(255), nullable=False)
+    description = Column(String(1000), nullable=False)
+    message = Column(String(255), nullable=False)
+    jump_url = Column(String(255), nullable=True)
+    type = Column(String(255), nullable=False)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=True)
+    item_id = Column(Integer, ForeignKey('items.item_id'), nullable=True)
+    date_added = Column(DateTime, default=func.now())
+    date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
+    status = Column(String(255), nullable=False)
 
 
 ### Standard Models for Submissions, Groups, Players, Users, etc.
@@ -244,6 +259,24 @@ class Player(Base):
             self.groups.remove(group)
             session.commit()
 
+    def get_current_total(self):
+        from utils.redis import RedisClient
+        redis_client = RedisClient()
+        try:
+            partition = datetime.now().year * 100 + datetime.now().month
+            total_loot_key = f"player:{self.player_id}:{partition}:total_loot"
+            # Get total items
+            total_loot = redis_client.client.get(total_loot_key)
+            #print("redis update total items stored:", total_items)
+            if total_loot:
+                total_loot = int(total_loot.decode('utf-8'))
+            else:
+                total_loot = 0
+            return total_loot
+        except Exception as e:
+            print(f"Error getting current total for player {self.player_id}: {e}")
+            return 0
+
     def __init__(self, wom_id, player_name, account_hash, user_id=None, user=None, log_slots=0, total_level=0, group=None, hidden=False):
         self.wom_id = wom_id
         self.player_name = player_name
@@ -307,7 +340,6 @@ class Group(Base):
     invite_url = Column(String(255), default=None, nullable=True)
     icon_url = Column(String(255), default=None, nullable=True)
 
-
     # Relationships
     configurations = relationship("GroupConfiguration", back_populates="group")
     # drops = relationship("Drop", back_populates="group")
@@ -326,6 +358,30 @@ class Group(Base):
             self.players.append(player)
             session.commit()
 
+    def get_current_total(self):
+        try:
+            total_value = 0
+            from utils.redis import RedisClient
+            redis_client = RedisClient()
+            for player in self.players:
+                """
+                Get the true, most accurate player total from Redis
+                """
+                partition = datetime.now().year * 100 + datetime.now().month
+                total_loot_key = f"player:{player.player_id}:{partition}:total_loot"
+                # Get total items
+                total_loot = redis_client.client.get(total_loot_key)
+                #print("redis update total items stored:", total_items)
+                if total_loot:
+                    total_loot = int(total_loot.decode('utf-8'))
+                    total_value += total_loot
+                else:
+                    total_value += 0
+            return total_value
+        except Exception as e:
+            print(f"Error getting current total for group {self.group_id}: {e}")
+            return 0
+
     def __init__(self, group_name, wom_id, guild_id, description: str= "An Old School RuneScape group."):
         self.group_name = group_name
         self.wom_id = wom_id
@@ -338,6 +394,16 @@ class Group(Base):
         #create_xf_group(self, group_id=self.group_id)
 
 
+
+class GroupPersonalBestMessage(Base):
+    __tablename__ = 'group_personal_best_message'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_id = Column(Integer, ForeignKey('groups.group_id'), nullable=False)
+    message_id = Column(String(255), nullable=False)
+    channel_id = Column(String(255), nullable=False)
+    boss_name = Column(String(255), nullable=False)
+    date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
+
 class GroupPatreon(Base):
     __tablename__ = 'group_patreon'
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -349,6 +415,34 @@ class GroupPatreon(Base):
 
     user = relationship("User", back_populates="group_patreon")
     group = relationship("Group", back_populates="group_patreon")
+
+
+class LootboardStyle(Base):
+    __tablename__ = 'lootboards'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False)
+    description = Column(String(255), nullable=False)
+    local_url = Column(String(255), nullable=False)
+    date_added = Column(DateTime, default=func.now())
+    date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
+
+
+class PatreonNotification(Base):
+    __tablename__ = 'patreon_notification'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    discord_id = Column(String(255), nullable=True)
+    user_id = Column(Integer, nullable=True)
+    timestamp = Column(TIMESTAMP, nullable=False, 
+                       server_default=text('current_timestamp() ON UPDATE current_timestamp()'))
+    tier = Column(String(255), nullable=True)
+    status = Column(Integer, nullable=True)
+    
+    __table_args__ = {
+        'mysql_engine': 'InnoDB',
+        'mysql_default_charset': 'utf8mb4',
+        'mysql_collate': 'utf8mb4_general_ci'
+    }
     
 class Ticket(Base):
     __tablename__ = 'tickets'
@@ -617,10 +711,21 @@ class HistoricalMetrics(Base):
     timestamp = Column(TIMESTAMP, server_default=text('current_timestamp()'))
 
 # Setup database connection and create tables
-engine = create_engine(f'mysql+pymysql://{DB_USER}:{DB_PASS}@localhost:3306/data', pool_size=20, max_overflow=10)
-Base.metadata.create_all(engine)
-Session = scoped_session(sessionmaker(bind=engine))
-session = Session()
+engine = create_engine(
+    f"mysql+pymysql://{DB_USER}:{DB_PASS}@localhost/data",
+    pool_size=20,                  # Adjust based on your needs
+    max_overflow=10,               # Allow creating extra connections when pool is full
+    pool_timeout=30,               # Wait time for connection from pool
+    pool_recycle=3600,             # Recycle connections after 1 hour
+    pool_pre_ping=True,            # Verify connections before use
+    isolation_level="READ COMMITTED"  # Prevent long-running transactions
+)
+
+# Create a session factory that creates new sessions as needed
+Session = sessionmaker(bind=engine)
+
+# Create a thread-local session registry
+session = scoped_session(Session)
 
 # xenforo_engine = create_engine(f'mysql+pymysql://{DB_USER}:{DB_PASS}@localhost:3306/xf', pool_size=20, max_overflow=10)
 # xenforo_session = sessionmaker(bind=xenforo_engine)()

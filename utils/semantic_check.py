@@ -85,7 +85,7 @@ def check_drop(item_name, npc_name) -> bool:
     
     # Get the semantic name if it exists in our mapping
     semantic_name = reverse_alt_names.get(npc_name, npc_name)
-    print("Checking against semantic name:", semantic_name)
+    #print("Checking against semantic name:", semantic_name)
 
     mmg_data = do_smwjson_query([
         f'[[Has subobject.Dropped item::{item_name}]]',
@@ -93,7 +93,7 @@ def check_drop(item_name, npc_name) -> bool:
         'limit=10000'
     ], ['Drop JSON'])
 
-    print("MMG Data:", mmg_data)
+    #print("MMG Data:", mmg_data)
 
     # Check each source in the data
     for source_name, source_data in mmg_data.items():
@@ -104,7 +104,7 @@ def check_drop(item_name, npc_name) -> bool:
             if "#" in dropped_from:
                 dropped_from = dropped_from.split("#")[0]
             
-            print(f"Comparing '{dropped_from}' with '{semantic_name}'")
+            #print(f"Comparing '{dropped_from}' with '{semantic_name}'")
             # Check if this drop source matches our NPC name
             if dropped_from.lower() == semantic_name.lower():
                 return True
@@ -208,8 +208,8 @@ def get_current_ca_tier(current_points):
     # Define tier order from highest to lowest
     tier_order = ['Grandmaster', 'Master', 'Elite', 'Hard', 'Medium', 'Easy']
     
-    print("Got tiers:", tiers)
-    print("Checking current points:", current_points, "against tiers.")
+    #print("Got tiers:", tiers)
+    #print("Checking current points:", current_points, "against tiers.")
     
     # Check tiers in descending order
     for tier_name in tier_order:
@@ -217,7 +217,7 @@ def get_current_ca_tier(current_points):
             continue
         tier_data = tiers[tier_name]
         tier_points = int(tier_data['total_points'])
-        print("Checking tier:", tier_name, "with points:", tier_points)
+        #print("Checking tier:", tier_name, "with points:", tier_points)
         if current_points >= tier_points:
             return tier_name
             

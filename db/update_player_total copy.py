@@ -39,18 +39,11 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
     """Update the player's total loot and related data in Redis."""
     current_partition = datetime.now().year * 100 + datetime.now().month
     
-    # Format strings for different time granularities
-    DATE_FORMAT = '%Y%m%d'
-    HOUR_FORMAT = '%Y%m%d%H'
-    MINUTE_FORMAT = '%Y%m%d%H%M'
-    
     if force_update:
         # Wipe all player-related data from Redis
         keys_to_delete = redis_client.client.keys(f"player:{player_id}:*")
         if keys_to_delete:
             redis_client.client.delete(*keys_to_delete)
-    
-    # Validate and filter batch_drops
     if len(batch_drops) == 1 and from_submission == True:
         drop = batch_drops[0]
         if check_if_drop_is_ignored(drop.drop_id):
@@ -59,37 +52,32 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
     else:
         old_drops = []
         batch_drops = [drop for drop in batch_drops if drop.drop_id not in already_processed_drops]
-    
     # Initialize tracking dictionaries
     partition_totals = {}
     partition_items = {}
     partition_npcs = {}
-    
-    # Initialize time-based tracking dictionaries
-    time_totals = {}  # Will store totals for all time granularities
-    time_items = {}   # Will store items for all time granularities
-    time_npcs = {}    # Will store NPCs for all time granularities
-    time_npc_items = {}  # Will store items by NPC for all time granularities
-    
+
     player_drops = batch_drops if batch_drops else []
-    
+
     # Initialize Redis pipeline
     pipeline = redis_client.client.pipeline(transaction=False)
-    
+
     # Get the player's groups and their minimum values
     player = session.query(Player).filter(Player.player_id == player_id).options(joinedload(Player.groups)).first()
     clan_minimums = {}
-    
+    ## If player exists, we'll use their groups to store their recent submissions for the loot leaderboard.
     if player:
         for group in player.groups:
+            ## Grab info on the players' groups so we can store their "recent submissions"-related items for the loot leaderboard.
             group_id = group.group_id
+            ## check if we stored the group config in redis already to prevent excessive queries
             group_config_key = f"group_config:{group_id}"
             group_config = redis_client.client.hgetall(group_config_key)
-            
             if group_config:
+                ## Parse the config from redis
                 group_config = parse_redis_data(group_config)
-            
             if not group_config:
+                ## otherwise let's query the DB anyways
                 configs = session.query(GroupConfiguration).filter_by(group_id=group_id).all()
                 group_config = {config.config_key: config.config_value for config in configs}
                 if group_config:
@@ -97,142 +85,128 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
                     redis_client.client.expire(group_config_key, 3600)  # Cache for 1 hour
             
             clan_minimums[group_id] = int(group_config.get('minimum_value_to_notify', 2500000))
-    
-    # Initialize partition and all-time totals
+
+    ## Initialize the partition totals (a partition refers to a year/month combo of data) and all-time totals
     partition_totals = {}
     all_time_totals = {
         'total_loot': 0,
         'items': {},
         'npcs': {}
     }
-    
-    # Process each drop
+    daily_totals = {}
+    daily_items = {}    # Initialize empty dictionary
+    daily_npcs = {}     # Initialize empty dictionary
+## All dicts are initialized as empty here.
     for drop in player_drops:
         if check_if_drop_is_ignored(drop.drop_id):
             print(f"Drop {drop.drop_id} attempted to re-process during batch processing, skipping")
             continue
-        
         drop_partition = drop.partition
-        
-        # Get timestamps at different granularities
-        drop_date = drop.date_added.strftime(DATE_FORMAT)
-        drop_hour = drop.date_added.strftime(HOUR_FORMAT)
-        drop_minute = drop.date_added.strftime(MINUTE_FORMAT)
-        
-        # Initialize partition dictionaries if needed
+        drop_date = drop.date_added.strftime('%Y%m%d')
+    ## Here, we're formatting the {drop_date} variable as YYYYMMDD
+        ## Get the date and the partition for the drop based on the database entry.
+        # Initialize the dictionaries for this date if they don't exist
+        if drop_date not in daily_totals:
+            ## If the drop's date is not stored in daily_totals, we'll add it now.
+            daily_totals[drop_date] = {
+                'total_loot': 0,
+                'items': {},
+                'npcs': {}
+            }
+            ## This would create a new dict embedded in the daily_totals dict
+            ## With a key of the drop_date and a value of a dict with keys 'total_loot', 'items', and 'npcs'
+            ## Each of which has a value of 0 or an empty dict to begin with.
+        ## Here, we're checking if the drop_date is not stored in daily_items or daily_npcs
+        if drop_date not in daily_items:    # Add this check
+            daily_items[drop_date] = {}
+        ## If the drop_date is not stored in daily_items, we'll add it now.
+        if drop_date not in daily_npcs:     # Add this check
+            daily_npcs[drop_date] = {}
+        ## If the drop_date is not stored in daily_npcs, we'll add it now.
+
+        ## Sort through the list of drops and update totals in redis
+        drop_partition = drop.partition  # Use the drop's actual partition (i.e, 202501 for jan 2025.)
+        day_of_drop = drop.date_added.strftime('%Y%m%d')
+    ## Again, we're getting YYYYMMDD for the {day_of_drop} variable.
+        if day_of_drop not in daily_totals:
+            ## If the drop_date is not stored in daily_totals, we'll add it now.
+            daily_totals[day_of_drop] = {
+                'total_loot': 0,
+                'items': {},
+                'npcs': {}
+            }
+        ## Here, we're checking if the drop_partition is not stored in partition_totals
         if drop_partition not in partition_totals:
+            ## If this is the first time we've seen this partition, add it with empty values to the dict
             partition_totals[drop_partition] = {
                 'total_loot': 0,
                 'items': {},
                 'npcs': {}
             }
-        
-        # Initialize time-based dictionaries for all granularities
-        for timeframe in [drop_date, drop_hour, drop_minute]:
-            if timeframe not in time_totals:
-                time_totals[timeframe] = {
-                    'total_loot': 0,
-                    'items': {},
-                    'npcs': {}
-                }
-            
-            if timeframe not in time_items:
-                time_items[timeframe] = {}
-            
-            if timeframe not in time_npcs:
-                time_npcs[timeframe] = {}
-        
-        # Initialize NPC items tracking for all granularities
-        for timeframe in [drop_date, drop_hour, drop_minute]:
-            if timeframe not in time_npc_items:
-                time_npc_items[timeframe] = {}
-            
-            if drop.npc_id not in time_npc_items[timeframe]:
-                time_npc_items[timeframe][drop.npc_id] = {}
-        
-        # Calculate total value
+        ## determine the total value of the drop based on quantity * value
         total_value = drop.value * drop.quantity
         
         # Update partition totals
         partition_totals[drop_partition]['total_loot'] += total_value
-        
-        # Update all-time totals
-        all_time_totals['total_loot'] += total_value
-        
-        # Update time-based totals for all granularities
-        for timeframe in [drop_date, drop_hour, drop_minute]:
-            time_totals[timeframe]['total_loot'] += total_value
-        
-        # Update partition item totals
         if drop.item_id not in partition_totals[drop_partition]['items']:
+            ## Add the item to the items dict with an empty set of values if it doesn't exist
             partition_totals[drop_partition]['items'][drop.item_id] = [0, 0]  # [qty, value]
+        ## Add the quantity and value to the item's dict
         partition_totals[drop_partition]['items'][drop.item_id][0] += drop.quantity
         partition_totals[drop_partition]['items'][drop.item_id][1] += total_value
         
-        # Update all-time item totals
-        if drop.item_id not in all_time_totals['items']:
-            all_time_totals['items'][drop.item_id] = [0, 0]  # [qty, value]
-        all_time_totals['items'][drop.item_id][0] += drop.quantity
-        all_time_totals['items'][drop.item_id][1] += total_value
-        
-        # Update time-based item totals for all granularities
-        for timeframe in [drop_date, drop_hour, drop_minute]:
-            if drop.item_id not in time_items[timeframe]:
-                time_items[timeframe][drop.item_id] = [0, 0]  # [qty, value]
-            time_items[timeframe][drop.item_id][0] += drop.quantity
-            time_items[timeframe][drop.item_id][1] += total_value
-        
-        # Update partition NPC totals
+        # Update NPC totals for partition
         if drop.npc_id not in partition_totals[drop_partition]['npcs']:
+            ## Add the npc to the npcs dict with an empty set of values if it doesn't exist
             partition_totals[drop_partition]['npcs'][drop.npc_id] = 0
+        ## Add the total value to the npc's dict
         partition_totals[drop_partition]['npcs'][drop.npc_id] += total_value
         
-        # Update all-time NPC totals
+        # Update all-time totals
+        all_time_totals['total_loot'] += total_value
+        if drop.item_id not in all_time_totals['items']:
+            ## Add the item to the items dict with an empty set of values if it doesn't exist
+            all_time_totals['items'][drop.item_id] = [0, 0]
+        ## Add the quantity and value to the item's dict
+        all_time_totals['items'][drop.item_id][0] += drop.quantity
+        all_time_totals['items'][drop.item_id][1] += total_value
         if drop.npc_id not in all_time_totals['npcs']:
+            ## Add the npc to the npcs dict with an empty set of values if it doesn't exist
             all_time_totals['npcs'][drop.npc_id] = 0
+        ## Add the total value to the npc's dict
         all_time_totals['npcs'][drop.npc_id] += total_value
+
+        # Handle recent items (only for current partition)
+        if drop_partition == current_partition:
+            for group_id, min_value in clan_minimums.items():
+                if total_value >= min_value:
+                    recent_item_data = {
+                        "item_id": drop.item_id,
+                        "npc_id": drop.npc_id,
+                        "player_id": player_id,
+                        "value": total_value,
+                        "date_added": drop.date_added.isoformat()
+                    }
+                    recent_item_json = json.dumps(recent_item_data)
+                    pipeline.lpush(f"player:{player_id}:{drop_partition}:recent_items", recent_item_json)
+                    pipeline.lpush(f"player:{player_id}:all:recent_items", recent_item_json)
+                    break
+
+        # Add daily tracking alongside existing logic
+        drop_date = drop.date_added.strftime('%Y%m%d')
         
-        # Update time-based NPC totals for all granularities
-        for timeframe in [drop_date, drop_hour, drop_minute]:
-            if drop.npc_id not in time_npcs[timeframe]:
-                time_npcs[timeframe][drop.npc_id] = 0
-            time_npcs[timeframe][drop.npc_id] += total_value
+        daily_totals[drop_date]['total_loot'] += total_value
         
-        # Update NPC item totals for all granularities
-        for timeframe in [drop_date, drop_hour, drop_minute]:
-            if drop.item_id not in time_npc_items[timeframe][drop.npc_id]:
-                time_npc_items[timeframe][drop.npc_id][drop.item_id] = [0, 0]  # [qty, value]
-            
-            time_npc_items[timeframe][drop.npc_id][drop.item_id][0] += drop.quantity
-            time_npc_items[timeframe][drop.npc_id][drop.item_id][1] += total_value
+        if drop.item_id not in daily_items[drop_date]:
+            daily_items[drop_date][drop.item_id] = [0, 0]
+        daily_items[drop_date][drop.item_id][0] += drop.quantity
+        daily_items[drop_date][drop.item_id][1] += total_value
         
-        # Check if this drop exceeds the clan's minimum value for notifications
-        for group_id, min_value in clan_minimums.items():
-            if total_value >= min_value:
-                # Add to the player's recent items list for this group
-                recent_item_data = json.dumps({
-                    'drop_id': drop.drop_id,
-                    'item_id': drop.item_id,
-                    'npc_id': drop.npc_id,
-                    'value': drop.value,
-                    'quantity': drop.quantity,
-                    'date_added': drop.date_added.strftime('%Y-%m-%d %H:%M:%S'),
-                    'partition': drop.partition
-                })
-                
-                # Add to partition recent items
-                pipeline.lpush(f"player:{player_id}:{drop_partition}:recent_items", recent_item_data)
-                
-                # Add to all-time recent items
-                pipeline.lpush(f"player:{player_id}:all:recent_items", recent_item_data)
-                
-                # Add to group recent items
-                pipeline.lpush(f"group:{group_id}:recent_items", recent_item_data)
-        
-        # Mark this drop as processed
-        add_drop_to_ignore(drop.drop_id)
-    
-    # Store partition totals in Redis
+        if drop.npc_id not in daily_npcs[drop_date]:
+            daily_npcs[drop_date][drop.npc_id] = 0
+        daily_npcs[drop_date][drop.npc_id] += total_value
+
+    # Store totals for each partition
     for partition, totals in partition_totals.items():
         # Set total loot for partition
         currentTotal = redis_client.client.get(f"player:{player_id}:{partition}:total_loot")
@@ -263,82 +237,67 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
                 str(npc_id),
                 value + existing_value
             )
-    
-    # Store all-time totals
+
+    # Store all-time totals gathered from the loop after multiplying quantity * value for each drop in the matching partition
     pipeline.set(f"player:{player_id}:all:total_loot", all_time_totals['total_loot'])
     for item_id, (qty, value) in all_time_totals['items'].items():
+        ## Store the total amount and quantity of each item the player has received (lootboard purposes)
         pipeline.hset(
             f"player:{player_id}:all:total_items",
             str(item_id),
             f"{qty},{value}"
         )
     for npc_id, value in all_time_totals['npcs'].items():
+        ## Store the total amount of GP the player has received from each NPC (stored with the NPC ID as the key)
         pipeline.hset(
             f"player:{player_id}:all:npc_totals",
             str(npc_id),
             value
         )
-    
-    # Trim recent items lists
+
+    # Trim recent items lists to remove excess items if their group has a value set to 1 or some b.s.
     pipeline.ltrim(f"player:{player_id}:{current_partition}:recent_items", 0, 99)
     pipeline.ltrim(f"player:{player_id}:all:recent_items", 0, 99)
-    
-    # Store time-based data in Redis with appropriate prefixes
-    for timeframe, total in time_totals.items():
-        # Determine the granularity level and set appropriate prefix and TTL
-        if len(timeframe) == 8:  # YYYYMMDD (daily)
-            prefix = "daily"
-            ttl = 2592000  # 30 days
-        elif len(timeframe) == 10:  # YYYYMMDDHH (hourly)
-            prefix = "hourly"
-            ttl = 604800  # 7 days
-        elif len(timeframe) == 12:  # YYYYMMDDHHMM (minute)
-            prefix = "minute"
-            ttl = 86400  # 1 day
+
+    # Add daily data storage to the existing pipeline
+    for date, total in daily_totals.items():
+        ## Here we check the daily_totals dict for the date and total stored for each date.
+        ## We then store the total_loot for that date in redis.
+        pipeline.set(f"player:{player_id}:daily:{date}:total_loot", total['total_loot'])
         
-        # Store total loot for this timeframe
-        pipeline.set(f"player:{player_id}:{prefix}:{timeframe}:total_loot", total['total_loot'])
-        
-        # Store item totals for this timeframe
-        if timeframe in time_items:
-            for item_id, (qty, value) in time_items[timeframe].items():
+        if date in daily_items:  # Add safety check
+            for item_id, (qty, value) in daily_items[date].items():
                 pipeline.hset(
-                    f"player:{player_id}:{prefix}:{timeframe}:items",
+                    f"player:{player_id}:daily:{date}:items",
                     str(item_id),
                     f"{qty},{value}"
                 )
-        
-        # Store NPC totals for this timeframe
-        if timeframe in time_npcs:
-            for npc_id, value in time_npcs[timeframe].items():
+        ## Here, we're storing the daily items for the player in redis.
+        if date in daily_npcs:  # Add safety check
+            for npc_id, value in daily_npcs[date].items():
                 pipeline.hset(
-                    f"player:{player_id}:{prefix}:{timeframe}:npcs",
+                    f"player:{player_id}:daily:{date}:npcs",
                     str(npc_id),
                     value
                 )
-        
-        # Store NPC item totals for this timeframe
-        if timeframe in time_npc_items:
-            for npc_id, items in time_npc_items[timeframe].items():
-                for item_id, (qty, value) in items.items():
-                    pipeline.hset(
-                        f"player:{player_id}:{prefix}:{timeframe}:npc_items:{npc_id}",
-                        str(item_id),
-                        f"{qty},{value}"
-                    )
-    
+        ## Here, we're storing the daily npcs for the player in redis.
     # Execute all Redis commands
     pipeline.execute()
-    
+
     if force_update:
-        # If the force_update flag is set, the player's cache was rendered invalid and wiped.
-        # We will update their player object to reflect this change
+        ## If the force_update flag is set, the player's cache was rendered invalid and wiped.
+        ## We will update their player object to reflect this change
         player = session.query(Player).filter(Player.player_id == player_id).first()
         if player:
             player.date_updated = datetime.now()
             session.commit()
+
+    # After updating player totals, update leaderboards
+    # for partition in partition_totals.keys():
+    #     leaderboard_manager.update_player_leaderboard_score(player_id, partition)
     
-    return
+    # # Update all-time leaderboard
+    # leaderboard_manager.update_player_leaderboard_score(player_id, 'all')
 
 def process_drops_batch(batch_drops, session, from_submission=False):
     ## This function is called during the processing of drops as they come in from webhooks
@@ -372,15 +331,10 @@ def check_and_update_players(session):
     # Query for players who need their data updated (older than 24 hours)
     players_to_update = session.query(Player).filter(Player.date_updated < time_threshold).all()
     if len(players_to_update) > 5:
-        original_length = len(players_to_update)
         players_to_update = players_to_update[:1]
     for player in players_to_update:
         player_drops = session.query(Drop).filter(Drop.player_id == player.player_id).all()
-        if original_length > 50:
-            if player.player_id % 10 == 0:
-                print(f"[MASS] Updating player {player.player_id} in Redis.")
-        else:
-            print(f"Updating player {player.player_id} in Redis.")
+        print(f"Updating player {player.player_id} in Redis (more than 24 hours since last update).")
         update_player_in_redis(player.player_id, session, force_update=True, batch_drops=player_drops)
 
 async def update_player_totals():

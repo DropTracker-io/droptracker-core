@@ -2,7 +2,8 @@ import json
 import os
 import random
 from secrets import token_hex
-from interactions import AutocompleteContext, BaseContext, GuildText, Permissions, SlashCommand, Button, ButtonStyle, SlashCommandOption, check, is_owner, Extension, slash_command, slash_option, SlashContext, Embed, OptionType, GuildChannel
+from db.clan_sync import insert_xf_group
+from interactions import AutocompleteContext, BaseContext, GuildText, Permissions, SlashCommand, Button, ButtonStyle, SlashCommandOption, check, is_owner, Extension, slash_command, slash_option, SlashContext, Embed, OptionType, GuildChannel, SlashCommandChoice
 import interactions
 import time
 import subprocess
@@ -399,6 +400,10 @@ class ClanCommands(Extension):
                             value=f"<a:loading:1180923500836421715> Please wait while we initialize some other things for you...",
                             inline=False)
             embed.set_footer(f"https://www.droptracker.io/discord")
+            try:
+                await insert_xf_group(group)
+            except Exception as e:
+                print(f"Error inserting group into XenForo: {e}")
             await ctx.send(f"Success!\n",embed=embed,
                                             ephemeral=True)
             default_config = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == 1).all()
@@ -439,269 +444,95 @@ class ClanCommands(Extension):
             await ctx.send(f"You do not have the necessary permissions to use this command inside of this Discord server.\n" + 
                            "Please ask the server owner to execute this command.",
                            ephemeral=True)
+            
+    @slash_command(name="set-lootboard-style",
+                   description="Set the style of the lootboard for a group")
+    @slash_option(name="style",
+                  description="Select which style of board you want to use.",
+                  opt_type=OptionType.STRING,
+                  choices=[
+                    SlashCommandChoice(name="Dark style with outlines", value="1"), # bank-new-clean-dark.png
+                    SlashCommandChoice(name="Light style with outlines", value="2"), # bank-new-clean.png
+                    SlashCommandChoice(name="Dark style with no outlines", value="3"), # lootboard-newest.png
+                    SlashCommandChoice(name="Dark/no outlines/no bg", value="4"), # no_boxes_dark.png
+                    SlashCommandChoice(name="Minimal / no boxes", value="5"), # no_boxes_minimal.png
+                    SlashCommandChoice(name="Halloween", value="6"), # halloween.png
+                  ],
+                  required=True)
+    async def set_lootboard_style(self, ctx: SlashContext, style: str):
 
-# Commands to help moderate the DropTracker as a whole, 
-# meant to be used by admins in the droptracker.io discord
-class AdminCommands(Extension):
-    @slash_command(name="testpbs",
-                    description="Runs the PB embed generation method")
-    async def run_pb_lbs(self, ctx: SlashContext):
-        pb_npc_list = [
-            "Alchemical Hydra",
-            "Araxxor",
-            "Chambers of Xeric",
-            "Duke Sucellus",
-            "Grotesque Guardians",
-            "Nightmare",
-            "Phantom Muspah",
-            "Sol Heredit",
-            "The Gauntlet",
-            "The Corrupted Gauntlet",
-            "The Leviathan",
-            "The Whisperer",
-            "Theatre of Blood",
-            "Tombs of Amascut",
-            "Vardorvis",
-            "Vorkath",
-            "Zulrah"
-        ]
-        for npc in pb_npc_list:
-            pbs = await get_group_pbs(npc, 2)
-            if npc == "Nightmare":
-                print("NPC name is nightmare")
-            print("Top 5 pbs for", npc + ":", pbs)
-        return await ctx.send("Complete.")
-
-    async def is_droptracker_admin(self, ctx: SlashContext):
-        if ctx.author.id in [528746710042804247, 232236164776460288]:
-            return True
-        return False
-
-
-    @slash_command(name="new_webhook",
-                   description="Generate a new webhook, adding it to the database and the GitHub list.")
-    async def new_webhook_generator(self, ctx: SlashContext):
-        if not await self.is_droptracker_admin(ctx):
-            return await ctx.send("You are not authorized to use this command.", ephemeral=True)
-        servers = ["main", "alt"]
-        server = random.choice(servers)
-        if server == "main":
-            parent_ids = [1332506635775770624, 1332506742801694751]
+        if not ctx.guild:
+            return await ctx.send("You must use this command in a Discord server.", ephemeral=True)
+        if str(ctx.guild_id) == "1172737525069135962":
+            group = session.query(Group).filter(Group.group_id == 2).first()
         else:
-            parent_ids = [1332506904840372237, 1332506935886348339]
-        try:
-            parent_id = random.choice(parent_ids)
-            parent_channel = await ctx.bot.fetch_channel(parent_id)
-            num = 35
-            channel_name = f"drops-{num}"
-            while channel_name in [channel.name for channel in parent_channel.channels]:
-                num += 1
-                channel_name = f"drops-{num}"
-            new_channel: GuildText = await parent_channel.create_text_channel(channel_name)
-            logo_path = '/store/droptracker/disc/static/assets/img/droptracker-small.gif'
-            avatar = interactions.File(logo_path)
-            webhook: interactions.Webhook = await new_channel.create_webhook(name=f"DropTracker Webhooks ({num})", avatar=avatar)
-            webhook_url = webhook.url
-            db_webhook = Webhook(webhook_url=str(webhook_url))
-            session.add(db_webhook)
+            group = session.query(Group).filter(Group.guild_id == str(ctx.guild_id)).first()
+        if not group:
+            return await ctx.send("No group found for this server.", ephemeral=True)
+        user = session.query(User).filter(User.discord_id == str(ctx.author.id)).first()
+        if not user:
+            await try_create_user(ctx=ctx)
+            return await ctx.send(f"You are not authorized to use this command in this group.", ephemeral=True)
+        if not is_user_authorized(user.user_id, group):
+            return await ctx.send(f"You are not authorized to use this command in this group.", ephemeral=True)
+        current_style = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group.group_id, GroupConfiguration.config_key == "loot_board_type").first()
+        if current_style:
+            await ctx.send(f"Current value: {current_style.config_value} ({type(current_style.config_value)}) -> changing to {style} ({type(style)})")
+            current_style.config_value = style
             session.commit()
-            await ctx.send(f"A new webhook has been generated in <#{new_channel.id}> ({server}) with ID `{webhook.id}` (`{db_webhook.webhook_id}`)",ephemeral=True)
-        except Exception as e:
-            await ctx.send(f"Couldn't create a new webhook:{e}",ephemeral=True)
-        pass
-
-    
-    @slash_command(name="generate_board",
-                   description="Generate a new board for a group")
-    @slash_option(name="timeframe",
-                description="Please enter the date to generate a board for. (2025-03-07, 202503, etc)",
-                opt_type=OptionType.STRING,
-                required=True)
-    async def generate_board(self, ctx: SlashContext, timeframe: str):
-        partition = timeframe
-        if ("-" in partition and len(partition) != 10) and (len(partition) != 6):
-            return await ctx.send(f"Please enter a valid timeframe.\n" + 
-                                    "Examples:\n" + 
-                                    "- 2025-03-07 for March 7th, 2025\n" +
-                                    "> or\n" 
-                                    "- 202503 for all of March 2025")
-        if ctx.guild_id:
-            if str(ctx.guild_id) == "1172737525069135962":
-                group = session.query(Group).filter(Group.group_id == 2).first()
-            else:
-                group = session.query(Group).filter(Group.guild_id == ctx.guild_id).first()
-            if not group:
-                return await ctx.send("No group found for this server.", ephemeral=True)
-            group_id = group.group_id
+            print(f"Committed style change for {group.group_id} to {style}")
         else:
-            user = session.query(User).filter(User.discord_id == str(ctx.author.id)).first()
-            if not user:
-                return await ctx.send("User not found.", ephemeral=True)
-            if not user.groups:
-                return await ctx.send("You are not associated with any groups.", ephemeral=True)
-            
-            if len(user.groups) > 1:
-                group = user.groups[0] if user.groups[0].group_id != 2 and user.groups[0].group_id != 1 else user.groups[1]
-            else:
-                group = user.groups[0]
-            group_id = group.group_id
-            
-        try:
-            # First generate the board
-            await ctx.defer()  # Let user know we're working on it
-            print("Generating board for group:", group_id, "with partition:", partition)
-            board_path = await generate_server_board(ctx.bot, group_id=group_id, partition=partition)
-            embed_template = await db.get_group_embed('lb', group_id)
-            
-            # Parse date if needed
-            if "-" in partition:
-                before_date = datetime.strptime(partition, '%Y-%m-%d')  
-            else:
-                before_date = None
-                
-            # Get player data based on group type
-            if group_id != 2:
-                # For specific groups
-                try:
-                    player_wom_ids = await fetch_group_members(group.wom_id)
-                    player_ids = await associate_player_ids(player_wom_ids, before_date)
-                    total_tracked = len(player_ids)
-                except Exception as e:
-                    print(f"Error fetching group members: {e}")
-                    total_tracked = 0
-            else:
-                # For global group (ID 2)
-                try:
-                    # Extract wom_ids from query results (list of tuples)
-                    wom_id_tuples = session.query(Player.wom_id).all()
-                    player_wom_ids = [wom_id[0] for wom_id in wom_id_tuples if wom_id[0] is not None]
-                    player_ids = await associate_player_ids(player_wom_ids, before_date)
-                    total_tracked = len(player_ids)
-                except Exception as e:
-                    print(f"Error processing global players: {e}")
-                    total_tracked = 0
-                    
-            # Create and send embed
-            value_dict = {
-                "{next_refresh}": "N/A",
-                "{tracked_members}": total_tracked
-            }
-            embed = replace_placeholders(embed_template, value_dict)
-            lootboard = interactions.File(board_path)
-            await ctx.send(content="", embed=embed, files=lootboard)
-            
-        except Exception as e:
-            import traceback
-            traceback.print_exc()  # Print full error details to console
-            return await ctx.send(f"Error generating board: {e}", ephemeral=True)
-        pass
-
-    @slash_command(
-        name="get_group_boss_pbs",
-        description="Fetches all the PBs for a specific group"
-    )
-    @slash_option(name="group_id",
-                description="Id of the group to search",
-                opt_type=OptionType.INTEGER,
-                required=True)
-    @slash_option(name="boss_name",
-                description="Name of the boss whose pbs u wanna see",
-                opt_type=OptionType.STRING,
-                required=True)
-    @check(interactions.is_owner())
-    async def cmd_get_group_boss_pbs(self, ctx: SlashContext, group_id, boss_name):
-        # Retrieve the JSON array from `config_value` and deserialize it
-        config_value = session.query(GroupConfiguration.config_value).filter(
-            GroupConfiguration.group_id == group_id,
-            GroupConfiguration.config_key == 'personal_best_embed_boss_list'
-        ).first()
-
-        if config_value is None:
-            await ctx.send("Configuration not found.")
+            await ctx.send(f"Could not change your configured loot leaderboard style.\n" + 
+                           "Please try again later, or reach out in our Discord server.",
+                           ephemeral=True)
             return
+
+        current_style = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group.group_id, GroupConfiguration.config_key == "loot_board_type").first()
+        print("Current style:", current_style.config_value)
+        match style:
+            case "1":
+                url = "/store/droptracker/disc/lootboard/bank-new-clean-dark.png"
+            case "2":
+                url = "/store/droptracker/disc/lootboard/bank-new-clean.png"
+            case "3":
+                url = "/store/droptracker/disc/lootboard/lootboard-newest.png"
+            case "4":
+                url = "/store/droptracker/disc/lootboard/no_boxes_dark.png"
+            case "5":
+                url = "/store/droptracker/disc/lootboard/no_boxes_minimal.png"
+            case "6":
+                url = "/store/droptracker/disc/lootboard/halloween.png"
         
-        # Deserialize the JSON string to get a list of NPC names
-        included_list = json.loads(config_value[0]) if config_value[0] else []
-
-        # Use the included_list in `create_pb_embeds`
-        embeds = await create_pb_embeds(group_id, included_list)
-
-        # Send the embeds or handle as required
-        for embed in embeds:
-            await ctx.send(embed=embed)
-        
-    @slash_command(name="checkgroup",
-                    description="Checks if a player is in a group") 
-    @slash_option(name="player_id",
-                description="Id of the player to search",
-                opt_type=OptionType.INTEGER,
-                required=True)
-    @check(interactions.is_owner())
-    async def check_group(self, ctx: SlashContext, player_id):
-        player: Player = session.query(Player).filter(Player.player_id == player_id).first()
-        print("pb_processor - Checking if the player is in any groups.")
-        
-        # Direct query using the association table
-        player_group_id_query = """SELECT group_id FROM user_group_association WHERE player_id = :player_id"""
-        player_group_ids = session.execute(text(player_group_id_query), {"player_id": player.player_id}).fetchall()
-        # Extract just the group_ids from the result tuples
-        group_ids = [g[0] for g in player_group_ids]
-        player_groups = session.query(Group).filter(Group.group_id.in_(group_ids)).all()
-        print("Returned groups: (direct query)", player_groups)
-        
-        # Using the relationship
-        player_group_ids = [group.group_id for group in player.groups]
-        player_ass_groups = session.query(Group).filter(Group.group_id.in_(player_group_ids)).all()
-        print("Returned associated groups: (association query)", player_ass_groups)
-        
-        return await ctx.send(f"Association groups found: {len(player_ass_groups)}\n" + 
-                               f"Direct query groups found: {len(player_groups)}", ephemeral=True)
-
-    @slash_command()
-    @slash_option(name="group_id",
-                description="Group id to search",
-                opt_type = OptionType.STRING,
-                required=True)
-    @check(interactions.is_owner())
-    async def stress_test(self, ctx: SlashContext, group_id):
-        npc_ids = session.query(NpcList).all()
-        downloaded_list = []
-        for npc in npc_ids:
-            npc_name = npc.npc_name
-            if npc_name in downloaded_list:
-                continue
-                # skip duplicate downloads
-            npc_id = npc.npc_id
-            try:
-                print("Attempting to download an image for", npc_name)
-                downloaded_list.append(npc_name) ## Add to the list instantly
-                image_url = await get_npc_image_url(npc_name, npc_id)
-                if image_url:
-                    print("Generated a new NPC image:", image_url)
-
-            except Exception as e:
-                print("Couldn't generate an image for this npc", e)
-            await asyncio.sleep(0.2)
-        # try:
-            
-        # except Exception as e:
-        #     print("Couldn't insert drops into the sheet:", e)
-        #members = await fetch_group_members(wom_group_id=group_id)
-        #print("Found group members:", members)
-        #return # return await ctx.send(f"Testing", ephemeral=True)
-
-        # response = await ctx.send(f"Trying to find all drops in the database and perform sorting")
-        # time_start = time.time()
-        # try:
-        #     all_drops = await db.lootboard_drops()
-        # except Exception as e:
-        #     print("Exception:", e)
-        # finally:
-        #     time_taken = time.time() - time_start
-        # print("Done finding drops.")
-        #return await response.reply(f"Found all drops. Length: {len(all_drops)}, \nTime taken: <t:{int(time_taken)}:R>\n")
+        try:
+            attachment = interactions.File(url)
+            await ctx.send(f"Changed {group.group_name}'s lootboard style to `{style}`.", ephemeral=True, files=attachment)
+        except Exception as e:
+            await ctx.send(f"Changed {group.group_name}'s lootboard style to `{style}`.", ephemeral=True)
 
 
+def is_user_authorized(user_id, group: Group):
+    # Check if the user is an admin or an authorized user for this group
+    group_config = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group.group_id).all()
+    # Transform group_config into a dictionary for easy access
+    config = {conf.config_key: conf.config_value for conf in group_config}
+    authed_user = False
+    user_data: User = session.query(User).filter(User.user_id == user_id).first()
+    if user_data:
+        discord_id = user_data.discord_id
+    else:
+        return False
+    if "authed_users" in config:
+        authed_users = config["authed_users"]
+        if isinstance(authed_users, int):
+            authed_users = f"{authed_users}"  # Get the list of authorized user IDs
+        print("Authed users:", authed_users)
+        authed_users = json.loads(authed_users)
+        # Loop over authed_users and check if the current user is authorized
+        for authed_id in authed_users:
+            if str(authed_id) == str(discord_id):  # Compare the authed_id with the current user's ID
+                authed_user = True
+                return True  # Exit the loop once the user is found
+    return authed_user
 
 async def try_create_user(discord_id: str = None, username: str = None, ctx: SlashContext = None):
     if discord_id == None and username == None:

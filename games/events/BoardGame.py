@@ -12,13 +12,15 @@ import traceback
 import interactions
 from sqlalchemy.orm.exc import NoResultFound
 from db.base import session
-from db.eventmodels import Event as EventModel, EventConfig, EventTask, EventTeam, EventParticipant, EventItems, EventTeamInventory, EventTeamCooldown, EventTeamEffect
+from db.eventmodels import EventModel as EventModel, EventConfigModel, EventTask, EventTeamModel, EventParticipant, EventShopItem, EventTeamInventory, EventTeamCooldown, EventTeamEffect
 from db.models import Player, User, Group
 from utils.logger import LoggerClient
 import os
 
 from dotenv import load_dotenv
-from games.events.utils.bg_config import BoardGameConfig
+from games.events.event import Event as BaseEvent, EventType
+from games.events.utils.classes.base import Task, Team, Tile, TileType, TaskItem, ShopItem, ShopItemType
+
 
 default_tasks_raw = json.load(open("games/events/task_store/default.json"))
 default_tasks = default_tasks_raw["tasks"]
@@ -36,209 +38,41 @@ logging.basicConfig(
 )
 logger = logging.getLogger("events")
 
-class TileType(Enum):
-    AIR = "air"
-    WATER = "water"
-    EARTH = "earth"
-    FIRE = "fire"
-
 AIR_EMOJI = "<:air_rune:1348351869403136040>"
 WATER_EMOJI = "<:water_rune:1348351872557387827>"
 EARTH_EMOJI = "<:earth_rune:1348351870334144644>"
 FIRE_EMOJI = "<:fire_rune:1348351871512743966>"
 
+
+
+
+class BoardGame(BaseEvent):
+    """Board game event type"""
     
-
-@dataclass
-class Tile:
-    """Represents a tile on the board"""
-    type: TileType  # The type of tile (AIR, WATER, EARTH, FIRE)
-    position: int   # The position on the board
-
-class ItemType(Enum):
-    OFFENSIVE = "offensive"
-    DEFENSIVE = "defensive"
-    SPECIAL = "special"
-
-@dataclass
-class Item:
-    name: str
-    cost: int
-    effect: str
-    emoji: str
-    item_type: ItemType
-    cooldown: int
-
-@dataclass
-class TaskItem:
-    name: str
-    points: int
-
-
-@dataclass
-class Task:
-    """Represents a task in the board game"""
-    name: str
-    description: str
-    difficulty: TileType
-    required_items: List[TaskItem]
-    points: int = 0 #for point collection tasks
-    is_assembly: bool = False
-    task_id: Optional[int] = None
-    type: str = "exact_item"  # Can be "exact_item", "assembly", "point_collection", or "any_of"
-
-@dataclass
-class Team:
-    """Represents a team in the board game"""
-    name: str
-    position: int = 0
-    points: int = 0
-    team_id: Optional[int] = None
-    current_task: Optional[Task] = None
-    current_task_id: Optional[int] = None  # Add this field to store the task ID
-    task_progress: int = 0
-    gold: int = 0
-    cooldowns: Dict[str, int] = field(default_factory=dict)
-    active_effects: Dict[str, int] = field(default_factory=dict)
-    mercy_rule: Optional[datetime] = None
-    mercy_count: int = 0
-    assembled_items: Optional[str] = None
-    turn_number: int = 1
-
-    def _get_inventory(self) -> List[EventTeamInventory]:
-        """Get the inventory of the team"""
-        team = session.query(EventTeam).filter(EventTeam.id == self.team_id).first()
-        return [item for item in team.inventory]
-
-    def _get_players(self) -> List[EventParticipant]:
-        """Get the players in the team"""
-        participants = session.query(EventParticipant).filter(EventParticipant.team_id == self.team_id).all()
-        return [participant.player for participant in participants]
-
-class BoardGameState:
-    """Class to handle saving and loading game state"""
-    
-    @staticmethod
-    def save_state(game: 'BoardGame') -> int:
-        """
-        Save the current game state to the database
-        
-        Args:
-            game: The BoardGame instance
-            
-        Returns:
-            update_number: The version number of this state update
-        """
-        # Get the current event
-        event: EventModel = session.query(EventModel).get(game.event_id)
-        if not event:
-            raise ValueError(f"Event with ID {game.event_id} not found")
-            
-        # Increment update number
-        update_number = event.update_number + 1
-        event.update_number = update_number
-        
-        # Serialize game state
-        game_state = game.serialize()
-        
-        # Save as event configuration
-        config = EventConfig(
-            event_id=game.event_id,
-            config_key="game_state",
-            config_value=f"state_{update_number}",
-            long_value=json.dumps(game_state),
-            update_number=update_number
-        )
-        
-        session.add(config)
-        session.commit()
-        
-        return update_number
-    
-    @staticmethod
-    def load_state(event_id: int, version: Optional[int] = None) -> Dict[str, Any]:
-        """
-        Load game state from the database
-        
-        Args:
-            event_id: The ID of the event
-            version: Optional specific version to load, defaults to latest
-            
-        Returns:
-            The game state as a dictionary
-        """
-        if version is None:
-            # Get latest version
-            event = session.query(EventModel).get(event_id)
-            if not event:
-                raise ValueError(f"Event with ID {event_id} not found")
-            version = event.update_number
-        
-        # Get the state configuration
-        config = session.query(EventConfig).filter(
-            EventConfig.event_id == event_id,
-            EventConfig.update_number == version,
-            EventConfig.config_key == "game_state"
-        ).first()
-        
-        if not config:
-            raise ValueError(f"Game state version {version} not found for event {event_id}")
-            
-        return json.loads(config.long_value)
-    
-    @staticmethod
-    def list_versions(event_id: int) -> List[Dict[str, Any]]:
-        """
-        List all available versions of game state for an event
-        
-        Args:
-            event_id: The ID of the event
-            
-        Returns:
-            List of dictionaries with version info
-        """
-        configs = session.query(EventConfig).filter(
-            EventConfig.event_id == event_id,
-            EventConfig.config_key == "game_state"
-        ).order_by(EventConfig.update_number).all()
-        
-        return [
-            {
-                "version": config.update_number,
-                "timestamp": config.updated_at.isoformat(),
-                "key": config.config_value
-            }
-            for config in configs
-        ]
-
-class BoardGame:
-    """Board game implementation for events"""
-    
-    def __init__(self, event_id: int, notification_channel_id: int = None, bot: interactions.Client = None):
+    def __init__(self, group_id: int = -1, id: int = -1, notification_channel_id: Optional[int] = None, bot=None):
         """
         Initialize the board game
         
         Args:
-            event_id: ID of the event
-            notification_channel_id: Channel ID for notifications
-            bot: Discord bot instance for sending messages
+            group_id: The ID of the group
+            id: The ID of the event, if it already existed
+            notification_channel_id: ID of the channel to send notifications to
+            bot: Discord bot instance
         """
-        self.event_id = event_id
-        self.notification_channel_id = notification_channel_id
-        self.bot = bot
-        self.tiles = []
-        self.teams = []
-        self.tasks = []
-        self.shop_items = []
-        self.current_turn = 0
-        self.event_status = None
+        # Set event type before calling parent constructor
+        self.event_type = EventType.BOARD_GAME
         
-        # Load configuration
-        self.config = BoardGameConfig(event_id)
+        # Call parent constructor
+        super().__init__(group_id, id, notification_channel_id, bot)
         
-        # Load event status from database
+        # Initialize board game specific attributes
+        self.tiles = {}
+        self.tasks = self._load_tasks()
+        #self.load_config()
+        
         self._load_event_status()
         
+
 
     def _load_event_status(self):
         """Load the event status from the database"""
@@ -292,25 +126,25 @@ class BoardGame:
             tiles.append(Tile(type=tile_type, position=i))
         self.tiles = tiles
     
-    def _load_shop_items(self) -> List[Item]:
+    def _load_shop_items(self) -> List[ShopItem]:
         """
         Load shop items from the database
         
         Returns:
             List of Item objects available in the shop
         """
-        db_items = session.query(EventItems).filter(
-            EventItems.event_id == self.event_id
+        db_items = session.query(EventShopItem).filter(
+            EventShopItem.event_id == self.event_id
         ).all()
         
         items = []
         for db_item in db_items:
-            item = Item(
+            item = ShopItem(
                 name=db_item.name,
                 cost=db_item.quantity,  # Using quantity as cost
                 effect=db_item.description or "",
                 emoji="🔮",  # Default emoji
-                item_type=ItemType(db_item.type),
+                item_type=ShopItemType(db_item.type),
                 cooldown=db_item.cooldown
             )
             items.append(item)
@@ -326,9 +160,9 @@ class BoardGame:
         """
         # Try to load tasks from EventConfig
         print("Loading tasks")
-        config = session.query(EventConfig).filter(
-            EventConfig.event_id == self.event_id,
-            EventConfig.config_key == "tasks"
+        config = session.query(EventConfigModel).filter(
+            EventConfigModel.event_id == self.event_id,
+            EventConfigModel.config_key == "tasks"
         ).first()
         
         if config and config.long_value:
@@ -348,6 +182,16 @@ class BoardGame:
         except Exception as e:
             print(f"Error loading tasks: {e}")
             return []
+
+    def get_point_awards(self, task: Task = None) -> List[Task]:
+        """
+        Get the point awards for a given task
+        
+        Args:
+            task: The task to get point awards for
+        """
+        
+        return super()._get_point_awards(task)
 
     def get_tile_emoji(self, rune=None, tile_type=None, tile_num=0):
         if tile_num != 0:
@@ -474,8 +318,8 @@ class BoardGame:
     
     def _load_teams_from_db(self) -> None:
         """Load teams from the database"""
-        db_teams = session.query(EventTeam).filter(
-            EventTeam.event_id == self.event_id
+        db_teams = session.query(EventTeamModel).filter(
+            EventTeamModel.event_id == self.event_id
         ).all()
         
         for db_team in db_teams:
@@ -513,15 +357,15 @@ class BoardGame:
             ).all()
             
             for inv_item in inventory_items:
-                db_item = session.query(EventItems).get(inv_item.item_id)
+                db_item = session.query(EventShopItem).get(inv_item.item_id)
                 if db_item:
                     for _ in range(inv_item.quantity):
-                        item = Item(
+                        item = ShopItem(
                             name=db_item.name,
                             cost=db_item.quantity,  # Using quantity as cost
                             effect=db_item.description or "",
                             emoji="🔮",  # Default emoji
-                            item_type=ItemType(db_item.type),
+                            item_type=ShopItemType(db_item.type),
                             cooldown=db_item.cooldown
                         )
                         team.inventory.append(item)
@@ -538,7 +382,7 @@ class BoardGame:
                 
             if team.team_id is None:
                 # Create new team in database
-                db_team = EventTeam(
+                db_team = EventTeamModel(
                     event_id=self.event_id,
                     team_name=team.name,
                     team_members=",".join(str(p.player_id) for p in team.players),
@@ -550,7 +394,7 @@ class BoardGame:
                 team.team_id = db_team.id
             else:
                 # Update existing team
-                db_team: EventTeam = session.query(EventTeam).get(team.team_id)
+                db_team: EventTeamModel = session.query(EventTeamModel).get(team.team_id)
                 if db_team:
                     db_team.name = team.name
                     db_team.current_location = str(team.position)
@@ -604,9 +448,9 @@ class BoardGame:
                 count = item_data["count"]
                 
                 # Find item in database
-                db_item = session.query(EventItems).filter(
-                    EventItems.event_id == self.event_id,
-                    EventItems.name == item.name
+                db_item = session.query(EventShopItem).filter(
+                    EventShopItem.event_id == self.event_id,
+                    EventShopItem.name == item.name
                 ).first()
                 
                 if db_item:
@@ -675,7 +519,7 @@ class BoardGame:
             "position": tile.position
         }
     
-    def _serialize_item(self, item: Item) -> Dict[str, Any]:
+    def _serialize_item(self, item: ShopItem) -> Dict[str, Any]:
         """
         Serialize an item object
         
@@ -774,12 +618,12 @@ class BoardGame:
             
             # Restore inventory
             for item_data in team_data.get("inventory", []):
-                item = Item(
+                item = ShopItem(
                     name=item_data["name"],
                     cost=item_data["cost"],
                     effect=item_data["effect"],
                     emoji=item_data["emoji"],
-                    item_type=ItemType(item_data["item_type"]),
+                    item_type=ShopItemType(item_data["item_type"]),
                     cooldown=item_data["cooldown"]
                 )
                 team.inventory.append(item)
@@ -845,16 +689,16 @@ class BoardGame:
             }
             
             # Save to database
-            config = session.query(EventConfig).filter(
-                EventConfig.event_id == self.event_id,
-                EventConfig.config_key == "game_state"
-            ).order_by(EventConfig.update_number.desc()).first()
+            config = session.query(EventConfigModel).filter(
+                EventConfigModel.event_id == self.event_id,
+                EventConfigModel.config_key == "game_state"
+            ).order_by(EventConfigModel.update_number.desc()).first()
             
             update_number = 1
             if config:
                 update_number = config.update_number + 1
             
-            new_config = EventConfig(
+            new_config = EventConfigModel(
                 event_id=self.event_id,
                 config_key="game_state",
                 update_number=update_number,
@@ -864,7 +708,7 @@ class BoardGame:
             teams = self.teams
             for team in teams:
                 team: Team = team
-                db_team = session.query(EventTeam).filter(EventTeam.name == team.name).first()
+                db_team = session.query(EventTeamModel).filter(EventTeamModel.name == team.name).first()
                 if team.current_task:
                     db_task = session.query(EventTask).filter(EventTask.name == team.current_task.name).first()
                     db_team.current_task = db_task.id
@@ -908,10 +752,10 @@ class BoardGame:
             
             # If no version specified, get the latest
             if version is None:
-                latest_config = session.query(EventConfig).filter(
-                    EventConfig.event_id == self.event_id,
-                    EventConfig.config_key == "game_state"
-                ).order_by(EventConfig.update_number.desc()).first()
+                latest_config = session.query(EventConfigModel).filter(
+                    EventConfigModel.event_id == self.event_id,
+                    EventConfigModel.config_key == "game_state"
+                ).order_by(EventConfigModel.update_number.desc()).first()
                 
                 if latest_config:
                     version = latest_config.update_number
@@ -927,10 +771,10 @@ class BoardGame:
                     return True
             
             # Get the specified version
-            config = session.query(EventConfig).filter(
-                EventConfig.event_id == self.event_id,
-                EventConfig.config_key == "game_state",
-                EventConfig.update_number == version
+            config = session.query(EventConfigModel).filter(
+                EventConfigModel.event_id == self.event_id,
+                EventConfigModel.config_key == "game_state",
+                EventConfigModel.update_number == version
             ).first()
             
             if not config:
@@ -1043,14 +887,14 @@ class BoardGame:
             self.teams = []
             
             # Get teams from database
-            db_teams = session.query(EventTeam).filter(
-                EventTeam.event_id == self.event_id
+            db_teams = session.query(EventTeamModel).filter(
+                EventTeamModel.event_id == self.event_id
             ).all()
             
             logger.info(f"Loading {len(db_teams)} teams from database for event {self.event_id}")
             
             for db_team in db_teams:
-                db_team: EventTeam = db_team
+                db_team: EventTeamModel = db_team
                 # Create team object using the Team dataclass
                 team = Team(
                     name=db_team.name,
@@ -1090,8 +934,8 @@ class BoardGame:
                             team.players.append(member)
                 
                 # Get team inventory
-                inventory_items = session.query(EventTeamInventory, EventItems).join(
-                    EventItems, EventTeamInventory.item_id == EventItems.id
+                inventory_items = session.query(EventTeamInventory, EventShopItem).join(
+                    EventShopItem, EventTeamInventory.item_id == EventShopItem.id
                 ).filter(
                     EventTeamInventory.event_team_id == db_team.id
                 ).all()
@@ -1099,7 +943,7 @@ class BoardGame:
                 for inv, item_data in inventory_items:
                     for _ in range(inv.quantity):
                         # Add item to team inventory
-                        item = Item(
+                        item = ShopItem(
                             id=item_data.id,
                             name=item_data.name,
                             cost=item_data.cost,
@@ -1156,7 +1000,7 @@ class BoardGame:
         self.teams.append(team)
         
         # Save to database
-        db_team = EventTeam(
+        db_team = EventTeamModel(
             event_id=self.event_id,
             team_name=team_name,
             team_members="",
@@ -1204,9 +1048,9 @@ class BoardGame:
                 return False
             
             # Find team in database
-            db_team = session.query(EventTeam).filter(
-                EventTeam.event_id == self.event_id,
-                EventTeam.name == team_name
+            db_team = session.query(EventTeamModel).filter(
+                EventTeamModel.event_id == self.event_id,
+                EventTeamModel.name == team_name
             ).first()
             
             if not db_team:
@@ -1323,7 +1167,7 @@ class BoardGame:
         
         # Update database
         if team.team_id:
-            db_team: EventTeam = session.query(EventTeam).get(team.team_id)
+            db_team: EventTeamModel = session.query(EventTeamModel).get(team.team_id)
             if db_team:
                 db_team.previous_location = db_team.current_location
                 db_team.current_location = str(new_position)
@@ -1356,7 +1200,7 @@ class BoardGame:
         
         # Update database
         if team.team_id:
-            db_team: EventTeam = session.query(EventTeam).get(team.team_id)
+            db_team: EventTeamModel = session.query(EventTeamModel).get(team.team_id)
             if db_team:
                 db_team.previous_location = db_team.current_location
                 db_team.current_location = str(position)
@@ -1433,9 +1277,9 @@ class BoardGame:
         # Update database
         if team.team_id:
             # Find item ID
-            db_item = session.query(EventItems).filter(
-                EventItems.event_id == self.event_id,
-                EventItems.name == item_name
+            db_item = session.query(EventShopItem).filter(
+                EventShopItem.event_id == self.event_id,
+                EventShopItem.name == item_name
             ).first()
             
             if db_item:
@@ -1482,9 +1326,9 @@ class BoardGame:
                 
                 # Update database
                 if team.team_id:
-                    db_item = session.query(EventItems).filter(
-                        EventItems.event_id == self.event_id,
-                        EventItems.name == item_name
+                    db_item = session.query(EventShopItem).filter(
+                        EventShopItem.event_id == self.event_id,
+                        EventShopItem.name == item_name
                     ).first()
                     
                     if db_item:
@@ -1506,7 +1350,7 @@ class BoardGame:
                 
         return False
     
-    def use_item(self, team_name: str, item_name: str) -> Tuple[bool, str, Optional[Item]]:
+    def use_item(self, team_name: str, item_name: str) -> Tuple[bool, str, Optional[ShopItem]]:
         """
         Use an item from a team's inventory
         
@@ -1547,7 +1391,7 @@ class BoardGame:
         self.save_game_state()
         return True, effect_description, item
     
-    def apply_item_effect(self, team_name: str, item: Item) -> str:
+    def apply_item_effect(self, team_name: str, item: ShopItem) -> str:
         """
         Apply an item's effect
         
@@ -1837,7 +1681,7 @@ class BoardGame:
         if team:
             team: Team = team
             team.mercy_rule = datetime.now() + timedelta(days=1) + (timedelta(hours=12) * team.mercy_count)
-            db_team = session.query(EventTeam).filter(EventTeam.name == team_name).first()
+            db_team = session.query(EventTeamModel).filter(EventTeamModel.name == team_name).first()
             db_team.mercy_rule = team.mercy_rule
             db_team.mercy_count = team.mercy_count
             db_team.previous_location = team.position
@@ -1868,15 +1712,15 @@ class BoardGame:
         try:
             # Check database first
             participant = session.query(EventParticipant).join(
-                EventTeam, EventParticipant.team_id == EventTeam.id
+                EventTeamModel, EventParticipant.team_id == EventTeamModel.id
             ).filter(
                 EventParticipant.player_id == player_id,
-                EventTeam.event_id == self.event_id
+                EventTeamModel.event_id == self.event_id
             ).first()
             
             if participant:
-                team = session.query(EventTeam).filter(
-                    EventTeam.id == participant.team_id
+                team = session.query(EventTeamModel).filter(
+                    EventTeamModel.id == participant.team_id
                 ).first()
                 
                 if team:
@@ -1931,10 +1775,10 @@ class BoardGame:
             
             # Remove from database first
             participant = session.query(EventParticipant).join(
-                EventTeam, EventParticipant.team_id == EventTeam.id
+                EventTeamModel, EventParticipant.team_id == EventTeamModel.id
             ).filter(
                 EventParticipant.player_id == player_id,
-                EventTeam.event_id == self.event_id
+                EventTeamModel.event_id == self.event_id
             ).first()
             
             if participant:
@@ -2054,9 +1898,9 @@ class BoardGame:
             # First, delete existing cooldowns and effects
             for team in self.teams:
                 team: Team = team
-                db_team = session.query(EventTeam).filter(
-                    EventTeam.event_id == self.event_id,
-                    EventTeam.name == team.name
+                db_team = session.query(EventTeamModel).filter(
+                    EventTeamModel.event_id == self.event_id,
+                    EventTeamModel.name == team.name
                 ).first()
                 
                 if not db_team:
@@ -2148,9 +1992,9 @@ class BoardGame:
         """
         try:
             for team in self.teams:
-                db_team = session.query(EventTeam).filter(
-                    EventTeam.event_id == self.event_id,
-                    EventTeam.name == team.name
+                db_team = session.query(EventTeamModel).filter(
+                    EventTeamModel.event_id == self.event_id,
+                    EventTeamModel.name == team.name
                 ).first()
                 
                 if not db_team:
@@ -2211,9 +2055,9 @@ class BoardGame:
         """
         try:
             for team in self.teams:
-                db_team = session.query(EventTeam).filter(
-                    EventTeam.event_id == self.event_id,
-                    EventTeam.name == team.name
+                db_team = session.query(EventTeamModel).filter(
+                    EventTeamModel.event_id == self.event_id,
+                    EventTeamModel.name == team.name
                 ).first()
                 
                 if db_team:
@@ -2242,7 +2086,7 @@ class BoardGame:
                         db_team.assembled_items = team.assembled_items
                 else:
                     # Create new team
-                    new_team = EventTeam(
+                    new_team = EventTeamModel(
                         event_id=self.event_id,
                         name=team.name,
                         current_location=str(team.position),
@@ -2270,8 +2114,8 @@ class BoardGame:
         Load teams from the database
         """
         try:
-            db_teams = session.query(EventTeam).filter(
-                EventTeam.event_id == self.event_id
+            db_teams = session.query(EventTeamModel).filter(
+                EventTeamModel.event_id == self.event_id
             ).all()
             
             self.teams = []
@@ -2329,11 +2173,60 @@ class BoardGame:
             logger.error(f"Error getting points awards: {e}")
             logger.error(traceback.format_exc())
             return None
+
+    def get_default_task_by_name(task_name: str) -> dict:
+        """
+        Get a default task by its name
+        """
+        try:
+            for task in default_tasks:
+                if task["name"] == task_name:
+                    return task
+            return None
+        except Exception as e:
+            logger.error(f"Error getting default task by name: {e}")
+            logger.error(traceback.format_exc())
+            return None
         
+    def create_status_embed(self):
+        embed = interactions.Embed(title=f"{self.event_model.name}", description="A Gielinor Race event.")
+        embed.add_field(name="Event Status", value=f"`{str(self.event_model.status).capitalize()}`")
+        embed.add_field(name="Teams", value=f"")
+        team_fields = []
+        for team in self.teams:
+            team: Team = team
+            points = team.points
+            turn_number = team.turn_number
+            team_name = team.name
+            rank = team.position
+            mercy_rule = team.mercy_rule
+            active_effects = team.active_effects
+            cooldowns = team.cooldowns
+            for player in team._get_players():
+                player: EventParticipant = player
+                player_name = player.player_name
+                player_points = player.points
+                if player.user_id:
+                    player_user = session.query(User).filter(User.user_id == player.user_id).first()
+                    if player_user:
+                        player_uid = player_user.discord_id
+                if player_points > mvp_points:
+                    mvp_points = player_points
+                    mvp_name = player_name
+                    if player_uid:
+                        mvp_name = f"<@{player_uid}> (`{player_name}`)"
+            value_string = f"**Members:** `{len(team.members)}`\n**MVP: `{mvp_name}`\n**Points:** `{points}`\n**Turn:** `{turn_number}`\n**Mercy Rule:** `<t:{mercy_rule}:R>`\n" + \
+                (f"**Active Effects:** `{active_effects}`" if active_effects else "") + \
+                (f"**Cooldowns:** `{cooldowns}`" if cooldowns else "")
+            team_field = interactions.EmbedField(name=f"{team_name}", value=value_string)
+            team_fields.append(team_field)
+        embed.add_fields(team_fields)
+        return embed
+
     def create_team_embed(self, embed_type: str, team_obj: Team):
         print("Team object type: ", type(team_obj))
         components = []
-        db_object: EventTeam = session.query(EventTeam).filter(EventTeam.event_id == self.event_id, EventTeam.name == team_obj.name).first()
+        db_object: EventTeamModel = session.query(EventTeamModel).filter(EventTeamModel.event_id == self.event_id, EventTeamModel.name == team_obj.name).first()
         team_positions = {}
         for team in self.teams:
             team_positions[team.name] = team_obj.position
@@ -2458,16 +2351,3 @@ def add_ordinal_suffix(number: int) -> str:
     return f"{number}{['st', 'nd', 'rd'][number % 10 - 1]}"
 
 
-def get_default_task_by_name(task_name: str) -> dict:
-    """
-    Get a default task by its name
-    """
-    try:
-        for task in default_tasks:
-            if task["name"] == task_name:
-                return task
-        return None
-    except Exception as e:
-        logger.error(f"Error getting default task by name: {e}")
-        logger.error(traceback.format_exc())
-        return None

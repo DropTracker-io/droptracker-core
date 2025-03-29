@@ -1,5 +1,6 @@
 import threading
 import aiohttp
+from db.clan_sync import insert_xf_group
 from h11 import LocalProtocolError
 import interactions
 import json
@@ -8,6 +9,9 @@ import asyncio
 import os
 import time
 import multiprocessing
+
+from sqlalchemy import text
+from utils.embeds import create_boss_pb_embed, update_boss_pb_embed
 from utils.logger import LoggerClient
 
 from multiprocessing import Value
@@ -34,9 +38,9 @@ from utils.cloudflare_update import CloudflareIPUpdater
 from utils.wiseoldman import fetch_group_members
 from web.api import create_api
 from web.front import create_frontend
-from commands import UserCommands, ClanCommands, AdminCommands
+from commands import UserCommands, ClanCommands
 from tickets import Tickets
-from db.models import Group, GroupConfiguration, Guild, User, session, NpcList, ItemList, Webhook, Player
+from db.models import Group, GroupConfiguration, GroupPatreon, GroupPersonalBestMessage, Guild, User, session, NpcList, ItemList, Webhook, Player
 from db.update_player_total import start_background_redis_tasks
 from db.ops import associate_player_ids, update_group_members
 from db.ops import DatabaseOperations
@@ -116,6 +120,7 @@ async def on_startup(event: Startup):
     global total_guilds
     print(f"Connected as {bot.user.display_name} with id {bot.user.id}")
     bot_ready.value = True
+    bot.send_command_tracebacks = False
     await bot.change_presence(status=interactions.Status.ONLINE,
                               activity=interactions.Activity(name=f" /help", type=interactions.ActivityType.WATCHING))
     bot.load_extension("commands")
@@ -173,9 +178,10 @@ async def on_message_create(event: MessageCreate):
     global webhook_channels
     global last_webhook_refresh
     global ignored_list
-    bot = event.bot
+    bot: interactions.Client = event.bot
     if bot.is_closed:
         await bot.astart(token=bot_token)
+    await bot.wait_until_ready()
     message = event.message
     if message.author.system:  # or message.author.bot:
         return
@@ -553,7 +559,8 @@ async def update_loot_leaderboards():
             lootboard = interactions.File(image_path)
             await message.edit(content="",embed=embed,files=lootboard)
         except Exception as e:
-            await logger.log("error", f"Couldn't create/send the group's embed: {e}", "update_loot_leaderboards")
+            await logger.log("error", f"Loot leaderboards -- Couldn't create/send {group_obj.group_name} (#{group_id})'s embed: {e}", "update_loot_leaderboards")
+            print("Exception occured while updating the loot leaderboard for group", group_obj.group_name, "e:", e, "type:", type(e))
         # await logger.log("access", "Waiting 1 second before the next group board...", "update_loot_leaderboards")
         await asyncio.sleep(1)
 
@@ -561,8 +568,9 @@ async def update_loot_leaderboards():
 
 @Task.create(IntervalTrigger(minutes=60))
 async def start_group_sync():
-    await update_group_members()
-    await logger.log("access", "update_group_members completed...", "start_group_sync")
+    
+    await update_group_members(bot)
+    #await logger.log("access", "update_group_members completed...", "start_group_sync")
 
 
 async def create_tasks():
@@ -578,11 +586,15 @@ async def create_tasks():
 
     await update_loot_leaderboards()
     update_loot_leaderboards.start()
-    await update_channel_names()
-    update_channel_names.start()
+    print("[Startup] Loot Leaderboard update task started/completed.")
 
     await update_pb_embeds()
     update_pb_embeds.start()
+
+    print("Attempting to perform channel name updates...")
+    await update_channel_names()
+    update_channel_names.start()
+    
 
     # Initialize the GitHubPagesUpdater
     updater = GithubPagesUpdater()
@@ -590,87 +602,194 @@ async def create_tasks():
     print("Syncing group member association tables...")
     await start_group_sync()
     start_group_sync.start()
-    #print("Syncing patreon ranks...")
+    print("Syncing patreon ranks...")
     patreon_sync.start()             # Patreon sync task
+    await check_patreon_notifications()
+    check_patreon_notifications.start()
     print("Scheduling GitHub updates...")
     updater.schedule_updates.start(updater) # GitHub updater task, scheduling every 60 minutes (only changing the file if actual changes are detected.)
+    await logger.log("access", "Startup tasks completed.", "create_tasks")
 
+
+@Task.create(IntervalTrigger(minutes=1))
+async def check_patreon_notifications():
+    new_notifications = session.execute(text("SELECT * FROM patreon_notification WHERE status = 0")).all()
+    for notification in new_notifications:
+        user_id = notification.user_id
+        tier = notification.tier
+        discord_id = notification.discord_id
+        components = []
+        try:
+            user = await bot.fetch_user(user_id=discord_id)
+            if user:
+                patreon_sub_embed = Embed(title=f"Patreon Subscription Received!",
+                                          description=f"You are now a tier `{tier}` patreon supporter of the DropTracker project!",
+                                          color=0x00ff00)
+                patreon_sub_embed.add_field(name="Thank you for your support!", value=f"Our project would not be able to exist without generous contributions from community members like yourself.")
+                if tier >= 2:
+                    patreon_sub_embed.add_field(name=f"Your subscription tier provides you Premium group access!",
+                                                value=f"Please select which group you want to provide premium features to below:")
+                    player_group_id_query = """SELECT group_id FROM user_group_association WHERE user_id = :user_id"""
+                    player_group_ids = session.execute(text(player_group_id_query), {"user_id": user_id}).fetchall()
+                    group_ids = [g[0] for g in player_group_ids]
+                    groups = session.query(Group).filter(Group.group_id.in_(group_ids)).all()
+                    for group in groups:
+                        components.append(Button(style=ButtonStyle.PRIMARY, label=group.group_name, custom_id=f"patreon_group_{group.group_id}"))
+                patreon_sub_embed.set_thumbnail(url=f"https://www.droptracker.io/img/droptracker-small.gif")
+                patreon_sub_embed.set_footer(text="Powered by the DropTracker | https://www.droptracker.io/")
+                await user.send(f"Hey, <@{discord_id}>!", embeds=[patreon_sub_embed], components=components)
+                session.query(text("UPDATE patreon_notification SET status = 1 WHERE status = 0")).execute()
+                session.commit()
+        except Exception as e:
+            print("Couldn't send a message to the user:", e)
+
+
+@listen(Component)
+async def on_component(event: Component):
+    ctx = event.ctx
+    custom_id = ctx.custom_id
+    if custom_id.startswith("patreon_group_"):
+        group_id = int(custom_id.split("_")[2])
+        valid_patreon = session.query(GroupPatreon).filter(GroupPatreon.user_id == ctx.user.id).first()
+        if valid_patreon and valid_patreon.group_id == None:
+            valid_patreon.group_id = group_id
+            group = session.query(Group).filter(Group.group_id == group_id).first()
+            await ctx.send(f"You have assigned your DropTracker Patreon subscription perks to {group.group_name}!")
+            try:
+                await ctx.message.delete()
+            except Exception as e:
+                print("Couldn't delete the message:", e)
+            return
+        else:
+            await ctx.send("You don't have a valid Patreon subscription, or you already have a group assigned to it.")
+            return
 
 @Task.create(IntervalTrigger(minutes=30))
 async def update_pb_embeds():
-    return ## TODO -- re-enable hall of fame embeds once we have the rest of the bosses working
     await logger.log("access", "update_pb_embeds called", "update_pb_embeds")
-    print("update_pb_embeds called")
+    
     enabled_hofs = session.query(GroupConfiguration).filter(
         GroupConfiguration.config_key == 'create_pb_embeds',
-        GroupConfiguration.config_value == 'true'
+        GroupConfiguration.config_value == '1'
     ).all()
-    print("Found enabled groups...")
     
     for enabled_group in enabled_hofs:
-        await asyncio.sleep(1)
         group: Group = enabled_group.group
         print("Group with enabled HOFs is named", group.group_name)
         
-        # Get the channel ID for posting
-        used_channel = session.query(GroupConfiguration).filter(
-            GroupConfiguration.config_key == 'channel_id_to_send_pb_embeds',
-            GroupConfiguration.config_value != '',
-            GroupConfiguration.group_id == group.group_id
+        enabled_bosses_raw = session.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == group.group_id,
+            GroupConfiguration.config_key == 'personal_best_embed_boss_list'
         ).first()
         
-        if used_channel:
-            print("They have a channel used")
-            channel_id = used_channel.config_value
+        if not enabled_bosses_raw:
+            continue
+            
+        if enabled_bosses_raw.long_value == "" or enabled_bosses_raw.long_value == None:
+            enabled_bosses = json.loads(enabled_bosses_raw.config_value)
+        else:
+            enabled_bosses = json.loads(enabled_bosses_raw.long_value)
+
+        max_entries = session.query(GroupConfiguration.config_value).filter(
+            GroupConfiguration.group_id == group.group_id,
+            GroupConfiguration.config_key == 'number_of_pbs_to_display'
+        ).first()
+        
+        max_entries = int(max_entries.config_value) if max_entries else 3
+        
+        channel_id = session.query(GroupConfiguration.config_value).filter(
+            GroupConfiguration.group_id == group.group_id,
+            GroupConfiguration.config_key == 'channel_id_to_send_pb_embeds'
+        ).first()
+        
+        if not channel_id:
+            continue
+            
+        channel_id = channel_id.config_value
+        
+        try:
             channel = await bot.fetch_channel(channel_id=int(channel_id), force=True)
-            
-            # Get the NPC list for this group
-            npc_config = session.query(GroupConfiguration.long_value).filter(
-                GroupConfiguration.group_id == group.group_id,
-                GroupConfiguration.config_key == 'personal_best_embed_boss_list'
-            ).first()
-            
-            try:
-                npc_list = json.loads(npc_config[0]) if npc_config and npc_config[0] else []
-                print("The list of NPCs is", npc_list)
+            if not channel:
+                continue
                 
-                # Get max entries configuration
-                max_entries = session.query(GroupConfiguration.config_value).filter(
-                    GroupConfiguration.group_id == group.group_id,
-                    GroupConfiguration.config_key == 'number_of_pbs_to_display'
+            
+            # Fetch existing messages to identify which NPCs are already posted
+            npcs = {}
+            for boss in enabled_bosses:
+                npc_id = session.query(NpcList.npc_id).filter(NpcList.npc_name == boss).first()
+                if npc_id:
+                    npcs[npc_id[0]] = boss
+                    
+            to_be_posted = set(npcs.keys())
+            print("Processing", len(npcs), "NPCs for", group.group_name + "'s hall of fame...")
+            # Process existing messages with proper rate limiting
+            for i, npc_id in enumerate(list(npcs.keys())):
+                existing_message = session.query(GroupPersonalBestMessage).filter(
+                    GroupPersonalBestMessage.group_id == group.group_id, 
+                    GroupPersonalBestMessage.boss_name == npcs[npc_id]
                 ).first()
-                max_entries = int(max_entries[0]) if max_entries else 5
                 
-                # Generate embeds
-                new_embeds = await create_pb_embeds(group.group_id, npc_list, max_entries)
+                if existing_message:
+                    # Wait 6 seconds after every 4 messages
+                    if i > 0 and i % 4 == 0:
+                        await asyncio.sleep(7)
+                    
+                    try:
+                        success, wait_for_rate_limit = await update_boss_pb_embed(bot, group.group_id, npc_id, from_submission=False)
+                        if success:
+                            # Only remove from to_be_posted if the update was successful
+                            if npc_id in to_be_posted:
+                                to_be_posted.remove(npc_id)
+                        else:
+                            pass
+                        
+                        # Small delay between each edit
+                        if wait_for_rate_limit:
+                            await asyncio.sleep(2)
+                        
+                    except Exception as e:
+                        await asyncio.sleep(7)
+            
+            # Wait before posting new messages
+            await asyncio.sleep(6)
+            
+            # Post new messages with proper rate limiting
+            
+            for i, npc_id in enumerate(to_be_posted):
+                # Wait 6 seconds after every 4 messages
+                if i > 0 and i % 4 == 0:
+                    await asyncio.sleep(7)
                 
-                # Fetch existing messages to identify which NPCs are already posted
-                past_messages = await channel.fetch_messages(limit=25)
-                await asyncio.sleep(0.1)
-                to_be_posted = set(npc_list)  # Track NPCs that still need to be posted
-                
-                for message in past_messages:
-                    if message.embeds:
-                        for msg_embed in message.embeds:
-                            for embed in new_embeds:
-                                if embed.title == msg_embed.title and embed.title in to_be_posted:
-                                    # Update the message and remove from to_be_posted
-                                    await message.edit(embeds=[embed])
-                                    await asyncio.sleep(1)
-                                    to_be_posted.remove(embed.title)
-
-                # Send new embeds for NPCs still in to_be_posted
-                remaining_embeds = [embed for embed in new_embeds if embed.title in to_be_posted]
-                if remaining_embeds:
-                    await channel.send(embeds=remaining_embeds)
+                try:
+                    pb_embed = await create_boss_pb_embed(group.group_id, npcs[npc_id], max_entries)
+                    next_update = datetime.now() + timedelta(minutes=30)
+                    future_timestamp = int(time.mktime(next_update.timetuple()))
+                    now = datetime.now()
+                    now_timestamp = int(time.mktime(now.timetuple()))
+                    pb_embed.add_field(name="Next refresh:", value=f"<t:{future_timestamp}:R> (last: <t:{now_timestamp}:R>)", inline=False)
+                    posted_message = await channel.send(embed=pb_embed)
+                    
+                    new_entry = GroupPersonalBestMessage(
+                        group_id=group.group_id, 
+                        boss_name=npcs[npc_id], 
+                        message_id=posted_message.id, 
+                        channel_id=channel.id
+                    )
+                    session.add(new_entry)
+                    session.commit()
+                    
+                    # Small delay between each post
                     await asyncio.sleep(1)
-
-            except json.JSONDecodeError:
-                print("Error: Failed to decode JSON for NPC list in configuration.")
-            except Exception as e:
-                print("An error occurred creating hall of fame embeds:", e)
-
-            print("Finished HOF generation.")
+                    
+                except Exception as e:
+                    print(f"Error posting message for {npcs[npc_id]}: {e}")
+                    await asyncio.sleep(7)
+                    
+        except Exception as e:
+            print(f"Error processing channel {channel_id} for group {group.group_name}: {e}")
+            
+        # Wait between processing different groups
+        await asyncio.sleep(7)
 
 
 @Task.create(IntervalTrigger(minutes=30))
@@ -690,6 +809,8 @@ async def update_channel_names():
                         template = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_monthly_loot_text',
                                                                             GroupConfiguration.group_id == channel_setting.group_id).first()
                         template_str = template.config_value
+                        if template_str == "" or not template_str:
+                            template_str = "{month}: {gp_amount} gp"
                         if channel_setting.group_id != 2:
                             group_wom_id = session.query(Group.wom_id).filter(Group.group_id == channel_setting.group_id).first()
                             if group_wom_id:
@@ -707,15 +828,24 @@ async def update_channel_names():
                             clan_player_ids = session.query(Player.player_id).all()
                             player_ids = [player_id[0] for player_id in clan_player_ids]
                         player_id = player_ids[0]
+                        group_total = 0
                         from datetime import datetime
+                        partition = datetime.now().year * 100 + datetime.now().month
+                        for player_id in player_ids:
+                            player_total_month = f"player:{player_id}:{partition}:total_loot"
+                            player_month_total = redis_client.get(player_total_month)
+                            if player_month_total is None:
+                                player_month_total = 0
+                            group_total += int(player_month_total)
                         month_str = datetime.now().strftime("%B")
-                        group_rank, ranked_in_group, group_total_month = calculate_clan_overall_rank(player_id, player_ids)
-                        group_total_month = format_number(group_total_month)
-                        fin_text = template_str.replace("{month}", month_str).replace("{gp_amount}", group_total_month)
+                        #group_rank, ranked_in_group, group_total_month = calculate_clan_overall_rank(player_id, player_ids)
+                        #group_total_month = format_number(group_total_month)
+                        fin_text = template_str.replace("{month}", month_str).replace("{gp_amount}", format_number(group_total))
                         await channel.edit(name=f"{fin_text}")
+                else:
+                    print("Channel is not found for group ID", channel_setting.group_id, "and config value", channel_setting.config_value)
             except Exception as e:
-                pass
-                #print("Couldn't edit the channel. e:", e)
+                print("Couldn't edit the channel. e:", e)
 
 
 async def run_discord_bot():

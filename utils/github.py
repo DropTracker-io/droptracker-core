@@ -1,3 +1,4 @@
+import asyncio
 import os
 import github
 import schedule
@@ -96,7 +97,10 @@ class GithubPagesUpdater:
                 # print(f"Error response from GitHub: {e.data}")
                 pass
 
-    def update_github_pages(self):
+    async def update_github_pages(self):
+        await asyncio.to_thread(self._update_github_pages)
+        
+    def _update_github_pages(self):
         """
         Fetch the latest webhooks from the database and update all matching GitHub Pages files.
         """
@@ -181,4 +185,4 @@ class GithubPagesUpdater:
 
     @Task.create(IntervalTrigger(minutes=30))
     async def schedule_updates(self):
-        self.update_github_pages()
+        await self.update_github_pages()

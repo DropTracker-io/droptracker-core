@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../'
 
 from db.base import Base
 import db.models  # Import to register models with Base
+from db.models import LootboardStyle
 import db.eventmodels  # Import to register event models with Base
 
 # this is the Alembic Config object, which provides
@@ -33,6 +34,29 @@ target_metadata = Base.metadata
 # my_important_option = config.get_main_option("my_important_option")
 # ... etc.
 
+def include_object(object, name, type_, reflected, compare_to):
+    """
+    Decide whether to include an object in the autogenerate process.
+    
+    Return True to include the object, False to exclude it.
+    """
+    # Exclude tables that don't have models but exist in the database
+    if type_ == "table" and object.schema == "data":
+        excluded_tables = [
+            'patreon_notification',
+            'event_team_tasks',
+            'migrations',
+            'sessions',
+            # Add any other tables you want to exclude
+        ]
+        if name in excluded_tables:
+            return False
+    
+    # Exclude indexes on tables we're ignoring
+    if type_ == "index" and object.table.name == "sessions":
+        return False
+    
+    return True
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
@@ -73,7 +97,9 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=include_object,
         )
 
         with context.begin_transaction():

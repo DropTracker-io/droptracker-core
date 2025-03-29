@@ -19,7 +19,7 @@ DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
 
 
-class Event(Base):
+class EventModel(Base):
     """
     Represents an event in the database.
     :var id: The ID of the event
@@ -47,12 +47,12 @@ class Event(Base):
     
     # Other relationships
     participants = relationship("EventParticipant", back_populates="event")
-    configurations = relationship("EventConfig", back_populates="event")
-    teams = relationship("EventTeam", back_populates="event")
+    configurations = relationship("EventConfigModel", back_populates="event")
+    teams = relationship("EventTeamModel", back_populates="event")
     items = relationship("EventItems", back_populates="event")
 
 
-class EventConfig(Base):
+class EventConfigModel(Base):
     __tablename__ = 'event_configs'
 
     id = Column(Integer, primary_key=True)
@@ -65,10 +65,10 @@ class EventConfig(Base):
     updated_at = Column(TIMESTAMP, nullable=False, default=func.now(), onupdate=func.now())
     
     # Relationships
-    event = relationship("Event", back_populates="configurations")
+    event = relationship("EventModel", back_populates="configurations")
 
 
-class EventTeam(Base):
+class EventTeamModel(Base):
     __tablename__ = 'event_teams'
 
     id = Column(Integer, primary_key=True)
@@ -92,14 +92,14 @@ class EventTeam(Base):
     assembled_items = Column(String(255), nullable=True)
 
     # Relationships
-    event = relationship("Event", back_populates="teams")
+    event = relationship("EventModel", back_populates="teams")
     members = relationship("EventParticipant", back_populates="team")
     inventory = relationship("EventTeamInventory", back_populates="team")
     cooldowns = relationship("EventTeamCooldown", back_populates="team")
     effects = relationship("EventTeamEffect", back_populates="team")
 
 
-class EventItems(Base):
+class EventShopItem(Base):
     __tablename__ = 'event_items'
     ## Items that can be used by a team in the event
 
@@ -109,6 +109,7 @@ class EventItems(Base):
     description = Column(Text, nullable=True)
     cost = Column(Integer, nullable=False, default=0)
     effect = Column(Text, nullable=True)
+    effect_long = Column(Text, nullable=True)
     emoji = Column(String(255), nullable=True)
     item_type = Column(String(255), nullable=False)
     cooldown = Column(Integer, nullable=False, default=0)
@@ -116,7 +117,7 @@ class EventItems(Base):
     updated_at = Column(TIMESTAMP, nullable=False, default=func.now(), onupdate=func.now())
     
     # Relationships
-    event = relationship("Event", back_populates="items")
+    event = relationship("EventModel", back_populates="items")
     inventories = relationship("EventTeamInventory", back_populates="item")
 
 
@@ -131,7 +132,7 @@ class EventTeamInventory(Base):
     updated_at = Column(TIMESTAMP, nullable=False, default=func.now(), onupdate=func.now())
     
     # Relationships
-    team = relationship("EventTeam", back_populates="inventory")
+    team = relationship("EventTeamModel", back_populates="inventory")
     item = relationship("EventItems", back_populates="inventories")
 
 
@@ -147,7 +148,7 @@ class EventTeamCooldown(Base):
     updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'))
     
     # Relationship
-    team = relationship("EventTeam", back_populates="cooldowns")
+    team = relationship("EventTeamModel", back_populates="cooldowns")
 
 
 class EventTeamEffect(Base):
@@ -163,7 +164,7 @@ class EventTeamEffect(Base):
     updated_at = Column(DateTime, server_default=text('CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'))
     
     # Relationship
-    team = relationship("EventTeam", back_populates="effects")
+    team = relationship("EventTeamModel", back_populates="effects")
 
 
 class EventParticipant(Base):
@@ -179,11 +180,11 @@ class EventParticipant(Base):
     points = Column(String(255), nullable=False, default=0)
 
     # Relationships
-    event = relationship("Event", back_populates="participants")
+    event = relationship("EventModel", back_populates="participants")
     # Use string references for User and Player
     user = relationship("User")
     player = relationship("Player")
-    team = relationship("EventTeam", back_populates="members")
+    team = relationship("EventTeamModel", back_populates="members")
 
 class EventTask(Base):
     __tablename__ = 'event_tasks'

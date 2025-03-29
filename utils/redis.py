@@ -20,7 +20,12 @@ class RedisClient:
     
     def __init__(self, host: str = '127.0.0.1', port: int = 6379, db: int = 0):
         if not hasattr(self, 'client'):
-            self.client = redis.Redis(host=host, port=port, db=db, password=REDIS_PW)
+            try:
+                self.client = redis.Redis(host=host, port=port, db=db, password=REDIS_PW)
+            except Exception as e:
+                print(f"Error connecting to Redis: {e}")
+                self.client = None
+
     def set(self, key: str, value: str) -> None:
         try:
             self.client.set(key, value)
@@ -69,6 +74,9 @@ def calculate_rank_amongst_groups(group_id, player_ids):
 
     for group_tuple in groups:
         group = group_tuple[0]  # Extract the group_id
+        if group == 2 or group == 0:
+            ## Do not track the global group in ranking listings
+            continue
         # print("Group ID from database:", group)
         # Query all players in this group
         players_in_group = session.query(Player.player_id).join(Player.groups).filter(Group.group_id == group).all()
@@ -96,6 +104,9 @@ def calculate_rank_amongst_groups(group_id, player_ids):
 
 
 def calculate_global_overall_rank(player_id):
+    """ Returns a tuple of the player's rank and the total number of players ranked 
+    rank, total
+    """
     partition = datetime.now().year * 100 + datetime.now().month
     player_totals = {}
     
@@ -117,6 +128,10 @@ def calculate_global_overall_rank(player_id):
     return None, total_ranked
 
 def calculate_clan_overall_rank(player_id, clan_player_ids):
+    """
+    Calculate the overall rank of a player in their clan based on other members
+    using total loot gained this month
+    """
     clan_player_ids = [int(player_id) for player_id in clan_player_ids]
     # print("Clan player IDs:", clan_player_ids)
     partition = datetime.now().year * 100 + datetime.now().month
@@ -142,6 +157,9 @@ def calculate_clan_overall_rank(player_id, clan_player_ids):
     return 0, total_ranked, group_total
 
 def get_true_player_total(player_id):
+    """
+    Get the true, most accurate player total from Redis
+    """
     partition = datetime.now().year * 100 + datetime.now().month
     total_items_key = f"player:{player_id}:{partition}:total_items"
     # Get total items
