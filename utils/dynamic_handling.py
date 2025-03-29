@@ -1,4 +1,6 @@
-# Helpers for dynamic coloring and image display added BY Smoke
+## This file contains helper functions for dynamic handling of images and colors. file: dynamic_handling.py - Created BY Smoke [https://github.com/Varietyz/].
+
+# Helpers for dynamic coloring and image display
 from colorsys import rgb_to_hsv, hsv_to_rgb
 
 def get_dynamic_color(image):
@@ -108,3 +110,4 @@ def get_value_color(numCoins):
         return (255, 255, 0) # OSRS Standard Yellow 
     else:
         return (255, 0, 0) # No Value Red
+
