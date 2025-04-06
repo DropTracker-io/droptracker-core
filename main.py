@@ -11,6 +11,7 @@ import time
 import multiprocessing
 
 from sqlalchemy import text
+from utils.ge_value import get_true_item_value
 from utils.embeds import create_boss_pb_embed, update_boss_pb_embed
 from utils.logger import LoggerClient
 
@@ -40,7 +41,7 @@ from web.api import create_api
 from web.front import create_frontend
 from commands import UserCommands, ClanCommands
 from tickets import Tickets
-from db.models import Group, GroupConfiguration, GroupPatreon, GroupPersonalBestMessage, Guild, User, session, NpcList, ItemList, Webhook, Player
+from db.models import Group, GroupConfiguration, GroupPatreon, GroupPersonalBestMessage, Guild, PersonalBestEntry, PlayerPet, User, session, NpcList, ItemList, Webhook, Player
 from db.update_player_total import start_background_redis_tasks
 from db.ops import associate_player_ids, update_group_members
 from db.ops import DatabaseOperations
@@ -50,7 +51,7 @@ from utils.redis import RedisClient, calculate_clan_overall_rank
 from utils.download import download_player_image
 from utils.github import GithubPagesUpdater
 from data.submissions import ca_processor, drop_processor, pb_processor, clog_processor
-from utils.format import get_sorted_doc_files, format_time_since_update, format_number, get_command_id, get_extension_from_content_type, convert_to_ms, replace_placeholders
+from utils.format import get_sorted_doc_files, format_time_since_update, format_number, get_command_id, get_extension_from_content_type, convert_to_ms, get_true_boss_name, replace_placeholders
 from datetime import datetime, timedelta
 import re
 import logging
@@ -410,6 +411,7 @@ async def on_message_create(event: MessageCreate):
                                 sheet_id = field.value
                             elif field.name == "webhook" and len(field.value) > 10:
                                 pass
+                        item_value = get_true_item_value(item_name, value)
                         attachment_url = None
                         attachment_type = None
                         if message.attachments:
@@ -421,7 +423,7 @@ async def on_message_create(event: MessageCreate):
                                      'item_name': item_name,
                                      'account_hash': account_hash,
                                      'auth_key': token,
-                                     'value': value,
+                                     'value': item_value,
                                      'quantity': quantity,
                                      'player_name': player_name,
                                      'item_id': item_id,
@@ -431,6 +433,70 @@ async def on_message_create(event: MessageCreate):
                         await drop_processor(bot, drop_data)
                         
                         continue
+                elif "adventure_log" in field_values:
+                    if embed.fields:
+                        for field in embed.fields:
+                            if field.name == "player":
+                                player_name = field.value
+                                break
+                    player_object = session.query(Player).filter(Player.player_name == player_name).first()
+                    if player_object:
+                        player_id = player_object.player_id
+                    else:
+                        continue
+                    if embed.fields:
+                        for field in embed.fields:
+                            if field.name == "player":
+                                player_name = field.value
+                            elif field.name == "acc_hash":
+                                account_hash = field.value
+                            if field.name != "type" and field.name != "player" and field.name != "acc_hash":
+                                try:
+                                    field_int = int(field.name)
+                                    pb_content = field.value
+                                    personal_bests = pb_content.split("\n")
+                                    for pb in personal_bests:
+                                        boss_name, rest = pb.split(" - ")
+                                        team_size, time = rest.split(" : ")
+                                        boss_name = boss_name.strip()
+                                        team_size = team_size.strip()
+                                        boss_name, team_size, time = boss_name.replace("`", ""), team_size.replace("`", ""), time.replace("`", "")
+                                        time = time.strip()
+                                        real_boss_name, npc_id = get_true_boss_name(boss_name)
+                                        existing_pb = session.query(PersonalBestEntry).filter(PersonalBestEntry.player_id == player_id, PersonalBestEntry.npc_id == npc_id,
+                                                                                              PersonalBestEntry.team_size == team_size).first()
+                                        time_ms = convert_to_ms(time)
+                                        if existing_pb:
+                                            if time_ms < existing_pb.personal_best:
+                                                existing_pb.personal_best = time_ms
+                                                session.commit()
+                                        else:
+                                            new_pb = PersonalBestEntry(player_id=player_id, npc_id=npc_id, 
+                                                                       team_size=team_size, personal_best=time_ms, 
+                                                                       kill_time=time_ms, new_pb=True)
+                                            session.add(new_pb)
+                                            session.commit()
+                                
+                                except ValueError:
+                                    pet_list = field.value
+                                    pet_list = pet_list.replace("[", "")
+                                    pet_list = pet_list.replace("]", "")
+                                    pet_list = pet_list.split(",")
+                                    if len(pet_list) > 0:
+                                        for pet in pet_list:
+                                            pet = int(pet.strip())
+                                            item_object: ItemList = session.query(ItemList).filter(ItemList.item_id == pet).first()
+                                            if item_object:
+                                                player_pet = PlayerPet(player_id=player_id, item_id=item_object.item_id, pet_name=item_object.item_name)
+                                                try:
+                                                    session.add(player_pet)
+                                                    session.commit()
+                                                    print("Added a pet to the database for", player_name, account_hash, item_object.item_name, item_object.item_id)
+                                                except Exception as e:
+                                                    print("Couldn't add a pet to the database:", e)
+                                                    session.rollback()
+                                            
+
 
 @app.errorhandler(Exception)
 async def handle_exception(e):

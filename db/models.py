@@ -209,6 +209,15 @@ class PersonalBestEntry(Base):
     player = relationship("Player", back_populates="pbs")
     notified_pb = relationship("NotifiedSubmission", back_populates="pb")
 
+class PlayerPet(Base):
+    __tablename__ = 'player_pets'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey('players.player_id'))
+    item_id = Column(Integer, ForeignKey('items.item_id'))
+    pet_name = Column(String(255), nullable=False)
+
+    player = relationship("Player", back_populates="pets")
+
 class Player(Base):
     """ 
     :param: wom_id: The player's WiseOldMan ID
@@ -234,6 +243,7 @@ class Player(Base):
     pbs = relationship("PersonalBestEntry", back_populates="player")
     cas = relationship("CombatAchievementEntry", back_populates="player")
     clogs = relationship("CollectionLogEntry", back_populates="player")  # Add this line
+    pets = relationship("PlayerPet", back_populates="player")
     
     user = relationship("User", back_populates="players")
     drops = relationship("Drop", back_populates="player")
@@ -393,7 +403,13 @@ class Group(Base):
         pass
         #create_xf_group(self, group_id=self.group_id)
 
-
+class PlayerMetric(Base):
+    __tablename__ = 'player_snapshots'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=False)
+    metric_name = Column(String(255), nullable=False)
+    metric_value = Column(Integer, nullable=False)
+    date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
 
 class GroupPersonalBestMessage(Base):
     __tablename__ = 'group_personal_best_message'

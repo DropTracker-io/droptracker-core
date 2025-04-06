@@ -198,8 +198,12 @@ def get_ca_tier_progress(current_points):
         # Calculate progress to next tier
         points_needed = next_tier_points - current_tier_points
         points_gained = current_points - current_tier_points
-        progress = (points_gained / points_needed) * 100
-        return round(progress, 2), next_tier_points
+        try:
+            progress = (points_gained / points_needed) * 100
+            return round(progress, 2), next_tier_points
+        except Exception as e:
+            print("Error calculating CA progress:", e)
+            return 0.0, next_tier_points
 
 def get_current_ca_tier(current_points):
     current_points = int(current_points)    

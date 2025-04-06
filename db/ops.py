@@ -644,12 +644,16 @@ async def notify_group(bot: interactions.Client, type: str, group: Group, member
         else:
             print(f"Channel not found for ID: {channel_id}")
 
-async def update_group_members(bot: interactions.Client):
+async def update_group_members(bot: interactions.Client, forced_id: int = None):
     print("Updating group member association tables...")
-    group_ids = session.query(Group.wom_id).all()
+    if forced_id:
+        group_ids = [forced_id]
+    else:
+        group_ids = session.query(Group.wom_id).all()
     total_updated = 0
     for wom_id in group_ids:
-        wom_id = wom_id[0]
+        if type(wom_id) == list:
+            wom_id = wom_id[0]
         group: Group = session.query(Group).filter(Group.wom_id == wom_id).first()
         if group:
             group_wom_ids = await fetch_group_members(wom_id)

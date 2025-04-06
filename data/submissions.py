@@ -3,7 +3,7 @@ from db.models import CombatAchievementEntry, Drop, NotifiedSubmission, session,
 from utils.embeds import update_boss_pb_embed
 from utils.messages import confirm_new_npc, confirm_new_item, name_change_message, new_player_message
 from utils.semantic_check import get_current_ca_tier, get_ca_tier_progress
-from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id, fetch_group_members
+from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id, fetch_group_members, get_collections_logged
 from utils.redis import RedisClient
 from db.ops import DatabaseOperations, associate_player_ids
 from utils.download import download_player_image
@@ -412,6 +412,7 @@ async def clog_processor(bot: interactions.Client,
                 partition = int(datetime.now().year * 100 + datetime.now().month)
                 player_total_month = f"player:{player.player_id}:{partition}:total_loot"
                 player_month_total = redis_client.get(player_total_month)
+                player_slots = await get_collections_logged(player_name)
                 if player_month_total is None:
                     player_month_total = 0
                 if raw_embed:
@@ -423,7 +424,7 @@ async def clog_processor(bot: interactions.Client,
                                     "{group_rank}": group_placement,
                                     "{total_ranked_group}": total_group,
                                     "{total_tracked}": len(player_ids),
-                                    "{log_slots}": reported_slots,
+                                    "{log_slots}": player_slots,
                                     "{player_loot_month}": format_number(player_month_total),
                                     "{item_id}": item_id,
                                     "{kc_received}": kc}
@@ -915,7 +916,7 @@ async def try_create_player(bot: interactions.Client, player_name, account_hash)
         
         if not player:
             #print("Player not found in database, checking WOM...")
-            wom_player, player_name, wom_player_id = await check_user_by_username(player_name)
+            wom_player, player_name, wom_player_id, log_slots = await check_user_by_username(player_name)
             account_hash = str(account_hash)
             if not wom_player:
                 pass
@@ -931,6 +932,7 @@ async def try_create_player(bot: interactions.Client, player_name, account_hash)
                 if player_name != player.player_name:
                     old_name = player.player_name
                     player.player_name = player_name
+                    player.log_slots = log_slots
                     session.commit()
                     if player.user:
                         user: User = player.user
@@ -960,7 +962,8 @@ async def try_create_player(bot: interactions.Client, player_name, account_hash)
                 new_player = Player(wom_id=wom_player_id, 
                                     player_name=player_name, 
                                     account_hash=account_hash, 
-                                    total_level=total_level)
+                                    total_level=total_level,
+                                    log_slots=log_slots)
                 session.add(new_player)
                 await new_player_message(bot, player_name)
                 session.commit()

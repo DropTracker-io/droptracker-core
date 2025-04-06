@@ -9230,3 +9230,1719 @@ AttributeError: 'EventParticipant' object has no attribute 'player_name'
 2025-03-09 20:35:50,262 - interactions - INFO - Command Called: status with event.ctx.args = [] | event.ctx.kwargs = {}
 2025-03-09 20:36:08,448 - interactions - INFO - Command Called: shop with event.ctx.args = [] | event.ctx.kwargs = {}
 2025-03-09 20:36:35,514 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 15:33:42,416 - events - INFO - Starting bot...
+2025-03-10 15:33:42,964 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 15:33:42,965 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 15:33:43,253 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 15:33:43,579 - events - INFO - Bot is starting up...
+2025-03-10 15:33:43,579 - events - INFO - Game recovery task started
+2025-03-10 15:33:43,664 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:33:43,664 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:33:43,665 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:33:43,666 - events - INFO - Bot is ready!
+2025-03-10 15:33:48,584 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:33:48,585 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:33:48,585 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:33:53,598 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:33:53,600 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:33:53,602 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:33:58,583 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:33:58,584 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:33:58,584 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:34:03,588 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:34:03,588 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:34:03,589 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:34:08,587 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:34:08,588 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:34:08,589 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:34:13,583 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:34:13,584 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:34:13,584 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:34:18,582 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:34:18,582 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:34:18,582 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:34:23,584 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:34:23,584 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:34:23,585 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:34:28,582 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:34:28,582 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:34:28,583 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:34:33,582 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:34:33,583 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:34:33,583 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:34:38,586 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:34:38,586 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:34:38,587 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:34:43,582 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:34:43,582 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:34:43,583 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:34:48,587 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:34:48,587 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:34:48,587 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:34:53,583 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:34:53,584 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:34:53,584 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:34:58,582 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:34:58,583 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:34:58,583 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:35:03,584 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:35:03,585 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:35:03,585 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:35:08,585 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:35:08,585 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:35:08,586 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:35:13,587 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:35:13,587 - events - ERROR - Error recovering game 2: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:35:13,589 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 113, in check_active_games
+    notification_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:35:16,231 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 15:35:17,888 - events - INFO - Starting bot...
+2025-03-10 15:35:18,433 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 15:35:18,433 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 15:35:18,720 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 15:35:19,058 - events - INFO - Bot is starting up...
+2025-03-10 15:35:19,059 - events - INFO - Game recovery task started
+2025-03-10 15:35:19,160 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:35:19,169 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:19,169 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:19,169 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:35:19,171 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:35:19,172 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:35:19,172 - events - INFO - Bot is ready!
+2025-03-10 15:35:24,064 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:35:24,075 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:24,075 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:24,076 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:35:24,076 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:35:24,076 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:35:29,064 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:35:29,072 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:29,073 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:29,073 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:35:29,073 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:35:29,074 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:35:34,061 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:35:34,067 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:34,068 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:34,068 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:35:34,068 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:35:34,069 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:35:39,062 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:35:39,068 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:39,068 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:39,068 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:35:39,068 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:35:39,068 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:35:44,064 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:35:44,072 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:44,072 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:44,072 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:35:44,073 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:35:44,073 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:35:49,063 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:35:49,073 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:49,073 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:49,073 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:35:49,074 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:35:49,074 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:35:54,062 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:35:54,071 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:54,071 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:54,071 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:35:54,072 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:35:54,073 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:35:59,061 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:35:59,068 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:59,069 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:35:59,069 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:35:59,069 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:35:59,070 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:36:04,062 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:36:04,071 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:04,071 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:04,072 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:36:04,072 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:36:04,073 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:36:09,061 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:36:09,069 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:09,069 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:09,069 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:36:09,069 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:36:09,070 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:36:14,065 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:36:14,071 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:14,071 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:14,071 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:36:14,072 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:36:14,072 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:36:19,063 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:36:19,073 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:19,074 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:19,074 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:36:19,074 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:36:19,075 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:36:24,062 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:36:24,069 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:24,069 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:24,069 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:36:24,069 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:36:24,070 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:36:29,061 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:36:29,071 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:29,071 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:29,072 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:36:29,072 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:36:29,072 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:36:34,063 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:36:34,068 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:34,068 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:34,068 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:36:34,069 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:36:34,069 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:36:39,064 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:36:39,073 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:39,073 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:39,074 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:36:39,074 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:36:39,074 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:36:44,065 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:36:44,077 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:44,077 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:44,078 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:36:44,078 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:36:44,078 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:36:49,062 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:36:49,068 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:49,069 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:49,069 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:36:49,069 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:36:49,069 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:36:54,063 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:36:54,071 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:54,071 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:36:54,071 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:36:54,072 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 883, in load_game_state
+    latest_config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:36:54,072 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:36:58,111 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 15:36:59,645 - events - INFO - Starting bot...
+2025-03-10 15:37:00,205 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 15:37:00,205 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 15:37:00,674 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 15:37:01,019 - events - INFO - Bot is starting up...
+2025-03-10 15:37:01,019 - events - INFO - Game recovery task started
+2025-03-10 15:37:01,121 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:37:01,131 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:01,131 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:01,140 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 15:37:01,140 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:37:01,142 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 968, in load_game_state
+    self._load_tasks()
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 301, in _load_tasks
+    config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:37:01,143 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:37:01,143 - events - INFO - Bot is ready!
+2025-03-10 15:37:06,022 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:37:06,028 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:06,028 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:06,033 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 15:37:06,033 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:37:06,033 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 968, in load_game_state
+    self._load_tasks()
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 301, in _load_tasks
+    config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:37:06,033 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:37:11,025 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:37:11,036 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:11,036 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:11,044 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 15:37:11,045 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:37:11,045 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 968, in load_game_state
+    self._load_tasks()
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 301, in _load_tasks
+    config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:37:11,045 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:37:16,024 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:37:16,029 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:16,029 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:16,034 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 15:37:16,034 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:37:16,034 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 968, in load_game_state
+    self._load_tasks()
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 301, in _load_tasks
+    config = session.query(EventConfig).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:37:16,035 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:37:21,023 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:37:21,030 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:21,030 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:21,036 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 15:37:21,037 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:37:21,038 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 968, in load_game_state
+    self._load_tasks()
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 301, in _load_tasks
+    config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:37:21,038 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:37:26,023 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:37:26,029 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:26,030 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:26,036 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 15:37:26,036 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:37:26,036 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 968, in load_game_state
+    self._load_tasks()
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 301, in _load_tasks
+    config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:37:26,037 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:37:31,022 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:37:31,027 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:31,028 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:31,033 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 15:37:31,034 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:37:31,034 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 968, in load_game_state
+    self._load_tasks()
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 301, in _load_tasks
+    config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:37:31,035 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:37:36,024 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:37:36,033 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:36,033 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:36,041 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 15:37:36,042 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:37:36,042 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 968, in load_game_state
+    self._load_tasks()
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 301, in _load_tasks
+    config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:37:36,042 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:37:41,022 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:37:41,027 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:41,032 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:41,038 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 15:37:41,039 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:37:41,040 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 968, in load_game_state
+    self._load_tasks()
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 301, in _load_tasks
+    config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:37:41,040 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:37:46,023 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:37:46,033 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:46,034 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:46,041 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 15:37:46,045 - events - ERROR - Error loading game state: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+2025-03-10 15:37:46,046 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 968, in load_game_state
+    self._load_tasks()
+  File "/store/droptracker/disc/games/events/BoardGame.py", line 301, in _load_tasks
+    config = session.query(EventConfigModel).filter(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/session.py", line 2955, in query
+    return self._query_cls(entities, self, **kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 275, in __init__
+    self._set_entities(entities)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 287, in _set_entities
+    self._raw_columns = [
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/orm/query.py", line 288, in <listcomp>
+    coercions.expect(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 395, in expect
+    resolved = impl._literal_coercion(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 634, in _literal_coercion
+    self._raise_for_expected(element, argname)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 1134, in _raise_for_expected
+    return super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 695, in _raise_for_expected
+    super()._raise_for_expected(
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/sqlalchemy/sql/coercions.py", line 518, in _raise_for_expected
+    raise exc.ArgumentError(msg, code=code) from err
+sqlalchemy.exc.ArgumentError: Column expression, FROM clause, or other columns clause element expected, got <class 'games.events.utils.event_config.EventConfig'>.
+
+2025-03-10 15:37:46,047 - events - ERROR - Failed to load game state for game 2
+2025-03-10 15:37:50,785 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 15:37:52,355 - events - INFO - Starting bot...
+2025-03-10 15:37:52,830 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 15:37:52,831 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 15:37:53,241 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 15:37:53,634 - events - INFO - Bot is starting up...
+2025-03-10 15:37:53,636 - events - INFO - Game recovery task started
+2025-03-10 15:37:53,727 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:37:53,738 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:53,738 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:37:53,746 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 15:37:53,761 - events - INFO - Loaded team cooldowns and effects for event 2
+2025-03-10 15:37:53,761 - events - INFO - Loaded game state version 36 for event 2
+2025-03-10 15:37:53,761 - events - INFO - Successfully recovered game 2
+2025-03-10 15:37:53,912 - events - INFO - Bot is ready!
+2025-03-10 15:38:02,834 - interactions - INFO - Command Called: task with event.ctx.args = [] | event.ctx.kwargs = {}
+2025-03-10 15:39:54,359 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 15:39:56,105 - events - INFO - Starting bot...
+2025-03-10 15:39:56,501 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 15:39:56,502 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 15:39:56,774 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 15:39:57,114 - events - INFO - Bot is starting up...
+2025-03-10 15:39:57,114 - events - INFO - Game recovery task started
+2025-03-10 15:39:57,205 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 15:39:57,218 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:39:57,218 - events - INFO - Loaded event status: active for event 2
+2025-03-10 15:39:57,227 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 15:39:57,244 - events - INFO - Loaded team cooldowns and effects for event 2
+2025-03-10 15:39:57,244 - events - INFO - Loaded game state version 36 for event 2
+2025-03-10 15:39:57,244 - events - INFO - Successfully recovered game 2
+2025-03-10 15:39:57,428 - events - INFO - Bot is ready!
+2025-03-10 15:40:08,199 - interactions - INFO - Command Called: task with event.ctx.args = [] | event.ctx.kwargs = {}
+2025-03-10 16:04:20,863 - interactions - INFO - Shard ID 0 | Successfully resumed connection! Session_ID: 0a174e6a5a23b77e9c430e4061498a0b
+2025-03-10 16:09:33,691 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 16:13:06,309 - events - INFO - Starting bot...
+2025-03-10 16:13:06,784 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 16:13:06,785 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 16:13:07,322 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 16:13:07,637 - interactions - INFO - Overwriting 0 with 7 application commands
+2025-03-10 16:13:07,922 - events - INFO - Bot is starting up...
+2025-03-10 16:13:07,923 - events - INFO - Game recovery task started
+2025-03-10 16:13:08,014 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 16:13:08,018 - events - ERROR - Error recovering game 2: BoardGame.__init__() got an unexpected keyword argument 'event_id'
+2025-03-10 16:13:08,018 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 123, in check_active_games
+    game = BoardGame(
+TypeError: BoardGame.__init__() got an unexpected keyword argument 'event_id'
+
+2025-03-10 16:13:08,018 - events - INFO - Bot is ready!
+2025-03-10 16:13:12,928 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 16:13:12,932 - events - ERROR - Error recovering game 2: BoardGame.__init__() got an unexpected keyword argument 'event_id'
+2025-03-10 16:13:12,933 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/events.py", line 123, in check_active_games
+    game = BoardGame(
+TypeError: BoardGame.__init__() got an unexpected keyword argument 'event_id'
+
+2025-03-10 16:13:13,715 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 16:13:48,921 - events - INFO - Starting bot...
+2025-03-10 16:13:49,391 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 16:13:49,392 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 16:13:49,800 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 16:13:50,110 - events - INFO - Bot is starting up...
+2025-03-10 16:13:50,110 - events - INFO - Game recovery task started
+2025-03-10 16:13:50,224 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 16:13:50,253 - games.events.utils.config_factory - WARNING - Unknown event type 'board_game', using base EventConfig
+2025-03-10 16:13:50,256 - events - INFO - Loaded event status: active for event 2
+2025-03-10 16:13:50,256 - events - INFO - Loaded event status: active for event 2
+2025-03-10 16:13:50,263 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 16:13:50,278 - events - INFO - Loaded team cooldowns and effects for event 2
+2025-03-10 16:13:50,278 - events - INFO - Loaded game state version 36 for event 2
+2025-03-10 16:13:50,278 - events - INFO - Successfully recovered game 2
+2025-03-10 16:13:50,570 - events - INFO - Bot is ready!
+2025-03-10 16:13:56,953 - interactions - INFO - Command Called: task with event.ctx.args = [] | event.ctx.kwargs = {}
+2025-03-10 16:53:11,347 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 17:02:48,256 - events - INFO - Starting bot...
+2025-03-10 17:02:48,715 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 17:02:48,716 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 17:02:49,012 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 17:02:49,175 - events - INFO - Bot is starting up...
+2025-03-10 17:02:50,183 - events - ERROR - Error during startup: object NoneType can't be used in 'await' expression
+2025-03-10 17:02:50,184 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/eventBot.py", line 88, in on_startup
+    await bot.load_extension("commands", "games.events.commands")
+TypeError: object NoneType can't be used in 'await' expression
+
+2025-03-10 17:02:50,637 - interactions - INFO - Overwriting 0 with 13 application commands
+2025-03-10 17:02:58,085 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 17:02:59,757 - events - INFO - Starting bot...
+2025-03-10 17:03:00,318 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 17:03:00,319 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 17:03:00,790 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 17:03:00,944 - events - INFO - Bot is starting up...
+2025-03-10 17:03:01,915 - events - INFO - Game recovery task started
+2025-03-10 17:03:01,969 - events - ERROR - Database error in check_active_games: When initializing mapper Mapper[Event(events)], expression 'EventTeam' failed to locate a name ('EventTeam'). If this is a class name, consider adding this relationship() to the <class 'db.eventmodels.Event'> class after both dependent classes have been defined.
+2025-03-10 17:03:01,969 - events - INFO - Bot is ready!
+2025-03-10 17:03:06,919 - events - ERROR - Database error in check_active_games: One or more mappers failed to initialize - can't proceed with initialization of other mappers. Triggering mapper: 'Mapper[Event(events)]'. Original exception was: When initializing mapper Mapper[Event(events)], expression 'EventTeam' failed to locate a name ('EventTeam'). If this is a class name, consider adding this relationship() to the <class 'db.eventmodels.Event'> class after both dependent classes have been defined.
+2025-03-10 17:03:11,918 - events - ERROR - Database error in check_active_games: One or more mappers failed to initialize - can't proceed with initialization of other mappers. Triggering mapper: 'Mapper[Event(events)]'. Original exception was: When initializing mapper Mapper[Event(events)], expression 'EventTeam' failed to locate a name ('EventTeam'). If this is a class name, consider adding this relationship() to the <class 'db.eventmodels.Event'> class after both dependent classes have been defined.
+2025-03-10 17:03:16,192 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 17:04:08,964 - events - INFO - Starting bot...
+2025-03-10 17:04:09,412 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 17:04:09,413 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 17:04:09,696 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 17:04:09,850 - events - INFO - Bot is starting up...
+2025-03-10 17:04:10,861 - events - INFO - Game recovery task started
+2025-03-10 17:04:10,920 - events - ERROR - Database error in check_active_games: When initializing mapper Mapper[EventModel(events)], expression 'EventTeam' failed to locate a name ('EventTeam'). If this is a class name, consider adding this relationship() to the <class 'db.eventmodels.EventModel'> class after both dependent classes have been defined.
+2025-03-10 17:04:10,920 - events - INFO - Bot is ready!
+2025-03-10 17:04:15,862 - events - ERROR - Database error in check_active_games: One or more mappers failed to initialize - can't proceed with initialization of other mappers. Triggering mapper: 'Mapper[EventModel(events)]'. Original exception was: When initializing mapper Mapper[EventModel(events)], expression 'EventTeam' failed to locate a name ('EventTeam'). If this is a class name, consider adding this relationship() to the <class 'db.eventmodels.EventModel'> class after both dependent classes have been defined.
+2025-03-10 17:04:20,865 - events - ERROR - Database error in check_active_games: One or more mappers failed to initialize - can't proceed with initialization of other mappers. Triggering mapper: 'Mapper[EventModel(events)]'. Original exception was: When initializing mapper Mapper[EventModel(events)], expression 'EventTeam' failed to locate a name ('EventTeam'). If this is a class name, consider adding this relationship() to the <class 'db.eventmodels.EventModel'> class after both dependent classes have been defined.
+2025-03-10 17:04:21,315 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 17:04:25,043 - events - INFO - Starting bot...
+2025-03-10 17:04:25,794 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 17:04:25,795 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 17:04:26,147 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 17:04:26,318 - events - INFO - Bot is starting up...
+2025-03-10 17:04:27,276 - events - INFO - Game recovery task started
+2025-03-10 17:04:27,356 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 17:04:27,379 - games.events.utils.config_factory - WARNING - Unknown event type 'board_game', using base EventConfig
+2025-03-10 17:04:27,381 - events - INFO - Loaded event status: active for event 2
+2025-03-10 17:04:27,381 - events - INFO - Loaded event status: active for event 2
+2025-03-10 17:04:27,389 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 17:04:27,404 - events - INFO - Loaded team cooldowns and effects for event 2
+2025-03-10 17:04:27,404 - events - INFO - Loaded game state version 36 for event 2
+2025-03-10 17:04:27,404 - events - INFO - Successfully recovered game 2
+2025-03-10 17:04:27,580 - events - INFO - Bot is ready!
+2025-03-10 17:05:32,632 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 17:05:34,302 - events - INFO - Starting bot...
+2025-03-10 17:05:34,738 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 17:05:34,739 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 17:05:35,026 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 17:05:35,182 - events - INFO - Bot is starting up...
+2025-03-10 17:05:36,172 - events - INFO - Game recovery task started
+2025-03-10 17:05:36,258 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 17:05:36,283 - events - INFO - Loaded event status: active for event 2
+2025-03-10 17:05:36,283 - events - INFO - Loaded event status: active for event 2
+2025-03-10 17:05:36,290 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 17:05:36,305 - events - INFO - Loaded team cooldowns and effects for event 2
+2025-03-10 17:05:36,305 - events - INFO - Loaded game state version 36 for event 2
+2025-03-10 17:05:36,305 - events - INFO - Successfully recovered game 2
+2025-03-10 17:05:36,603 - events - INFO - Bot is ready!
+2025-03-10 17:21:28,180 - interactions - INFO - Shard ID 0 | Successfully resumed connection! Session_ID: 8eea54ce315ad1687b6b4a55bf8a9ed0
+2025-03-10 18:03:57,283 - events - INFO - Starting bot...
+2025-03-10 18:03:57,727 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 18:03:57,728 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 18:03:58,216 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 18:03:58,366 - events - INFO - Bot is starting up...
+2025-03-10 18:03:59,350 - events - INFO - Game recovery task started
+2025-03-10 18:03:59,432 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 18:03:59,486 - events - INFO - Loaded event status: active for event 2
+2025-03-10 18:03:59,486 - events - INFO - Loaded event status: active for event 2
+2025-03-10 18:03:59,495 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 18:03:59,517 - events - INFO - Loaded team cooldowns and effects for event 2
+2025-03-10 18:03:59,517 - events - INFO - Loaded game state version 36 for event 2
+2025-03-10 18:03:59,517 - events - INFO - Successfully recovered game 2
+2025-03-10 18:03:59,697 - events - INFO - Bot is ready!
+2025-03-10 18:08:01,547 - interactions - ERROR - POST::https://discord.com/api/v10/interactions/1348794521688866918/aW50ZXJhY3Rpb246MTM0ODc5NDUyMTY4ODg2NjkxODozMHFmWVN2b0NJUU1SSU0zcTB5VlFPR3BvYldCQzFvMG1tMVo2RXhCb2lSMWFtSUZKRWlYT01uaHBXSVBhc3JhbDNJcDVKVkRuckhuQXRpNEoxMUFBR1FHckc0NVgxQlVkOElVaTBNekZrNG92bnJjNkg2SW9oSk15ZmM3MkFpdg/callback: 404
+2025-03-10 18:08:01,551 - interactions - INFO - Command Called: testpbs with event.ctx.args = [] | event.ctx.kwargs = {}
+2025-03-10 18:08:01,551 - interactions - ERROR - Ignoring exception in cmd `/testpbs`: HTTPException: 404|Not Found || Unknown interaction
+2025-03-10 18:08:01,921 - interactions - ERROR - POST::https://discord.com/api/v10/interactions/1348794521688866918/aW50ZXJhY3Rpb246MTM0ODc5NDUyMTY4ODg2NjkxODozMHFmWVN2b0NJUU1SSU0zcTB5VlFPR3BvYldCQzFvMG1tMVo2RXhCb2lSMWFtSUZKRWlYT01uaHBXSVBhc3JhbDNJcDVKVkRuckhuQXRpNEoxMUFBR1FHckc0NVgxQlVkOElVaTBNekZrNG92bnJjNkg2SW9oSk15ZmM3MkFpdg/callback: 404
+2025-03-10 18:10:40,231 - events - INFO - Starting bot...
+2025-03-10 18:10:40,693 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 18:10:40,693 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 18:10:41,137 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 18:10:41,302 - events - INFO - Bot is starting up...
+2025-03-10 18:10:41,304 - events - ERROR - Error during startup: No module named 'event_commands'
+2025-03-10 18:10:41,306 - events - ERROR - Traceback (most recent call last):
+  File "/store/droptracker/disc/eventBot.py", line 88, in on_startup
+    bot.load_extension("event_commands", "games.events.event_commands")
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/client.py", line 2126, in load_extension
+    module = importlib.import_module(module_name, package)
+  File "/usr/lib/python3.10/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+  File "<frozen importlib._bootstrap>", line 1050, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1027, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1004, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'event_commands'
+
+2025-03-10 18:10:43,734 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 18:11:26,512 - events - INFO - Starting bot...
+2025-03-10 18:11:27,088 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 18:11:27,089 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 18:11:27,382 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 18:11:27,605 - events - INFO - Bot is starting up...
+2025-03-10 18:11:27,606 - events - ERROR - Error during startup: Unexpected Error loading games.events.event_commands
+2025-03-10 18:11:27,607 - events - ERROR - Traceback (most recent call last):
+  File "/usr/lib/python3.10/inspect.py", line 1899, in _signature_get_partial
+    ba = wrapped_sig.bind_partial(*partial_args, **partial_keywords)
+  File "/usr/lib/python3.10/inspect.py", line 3193, in bind_partial
+    return self._bind(args, kwargs, partial=True)
+  File "/usr/lib/python3.10/inspect.py", line 3107, in _bind
+    raise TypeError('too many positional arguments') from None
+TypeError: too many positional arguments
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/client.py", line 2085, in __load_module
+    obj(self, **load_kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/models/internal/extension.py", line 111, in __new__
+    bot.add_command(val)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/client.py", line 1484, in add_command
+    self.add_interaction(func)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/client.py", line 1376, in add_interaction
+    command._parse_parameters()
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/models/internal/application_commands.py", line 679, in _parse_parameters
+    for param in get_parameters(callback).values():
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/utils/misc_utils.py", line 188, in get_parameters
+    return {p.name: p for p in inspect.signature(callback).parameters.values()}
+  File "/usr/lib/python3.10/inspect.py", line 3254, in signature
+    return Signature.from_callable(obj, follow_wrapped=follow_wrapped,
+  File "/usr/lib/python3.10/inspect.py", line 3002, in from_callable
+    return _signature_from_callable(obj, sigcls=cls,
+  File "/usr/lib/python3.10/inspect.py", line 2473, in _signature_from_callable
+    return _signature_get_partial(wrapped_sig, obj)
+  File "/usr/lib/python3.10/inspect.py", line 1902, in _signature_get_partial
+    raise ValueError(msg) from ex
+ValueError: partial object functools.partial(<function EventCommands.event_command at 0x73d5f0f8c820>, <games.events.event_commands.EventCommands object at 0x73d5f0fab040>, None) has incorrect arguments
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/store/droptracker/disc/eventBot.py", line 88, in on_startup
+    bot.load_extension("games.events.event_commands")
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/client.py", line 2127, in load_extension
+    self.__load_module(module, module_name, **load_kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/client.py", line 2094, in __load_module
+    raise ExtensionLoadException(f"Unexpected Error loading {module_name}") from e
+interactions.client.errors.ExtensionLoadException: Unexpected Error loading games.events.event_commands
+
+2025-03-10 18:12:49,103 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 18:12:50,702 - events - INFO - Starting bot...
+2025-03-10 18:12:51,265 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 18:12:51,266 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 18:12:51,644 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 18:12:51,810 - events - INFO - Bot is starting up...
+2025-03-10 18:12:51,811 - events - ERROR - Error during startup: Unexpected Error loading games.events.event_commands
+2025-03-10 18:12:51,813 - events - ERROR - Traceback (most recent call last):
+  File "/usr/lib/python3.10/inspect.py", line 1899, in _signature_get_partial
+    ba = wrapped_sig.bind_partial(*partial_args, **partial_keywords)
+  File "/usr/lib/python3.10/inspect.py", line 3193, in bind_partial
+    return self._bind(args, kwargs, partial=True)
+  File "/usr/lib/python3.10/inspect.py", line 3107, in _bind
+    raise TypeError('too many positional arguments') from None
+TypeError: too many positional arguments
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/client.py", line 2085, in __load_module
+    obj(self, **load_kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/models/internal/extension.py", line 111, in __new__
+    bot.add_command(val)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/client.py", line 1484, in add_command
+    self.add_interaction(func)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/client.py", line 1376, in add_interaction
+    command._parse_parameters()
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/models/internal/application_commands.py", line 679, in _parse_parameters
+    for param in get_parameters(callback).values():
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/utils/misc_utils.py", line 188, in get_parameters
+    return {p.name: p for p in inspect.signature(callback).parameters.values()}
+  File "/usr/lib/python3.10/inspect.py", line 3254, in signature
+    return Signature.from_callable(obj, follow_wrapped=follow_wrapped,
+  File "/usr/lib/python3.10/inspect.py", line 3002, in from_callable
+    return _signature_from_callable(obj, sigcls=cls,
+  File "/usr/lib/python3.10/inspect.py", line 2473, in _signature_from_callable
+    return _signature_get_partial(wrapped_sig, obj)
+  File "/usr/lib/python3.10/inspect.py", line 1902, in _signature_get_partial
+    raise ValueError(msg) from ex
+ValueError: partial object functools.partial(<function EventCommands.event_command at 0x770de2b74820>, <games.events.event_commands.EventCommands object at 0x770de2bb4790>, None) has incorrect arguments
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/store/droptracker/disc/eventBot.py", line 88, in on_startup
+    bot.load_extension("games.events.event_commands")
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/client.py", line 2127, in load_extension
+    self.__load_module(module, module_name, **load_kwargs)
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/client.py", line 2094, in __load_module
+    raise ExtensionLoadException(f"Unexpected Error loading {module_name}") from e
+interactions.client.errors.ExtensionLoadException: Unexpected Error loading games.events.event_commands
+
+2025-03-10 18:14:15,912 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 18:14:17,557 - events - INFO - Starting bot...
+2025-03-10 18:14:18,106 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 18:14:18,106 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 18:14:18,430 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 18:14:18,705 - events - INFO - Bot is starting up...
+2025-03-10 18:14:18,707 - events - INFO - Game recovery task started
+2025-03-10 18:14:18,803 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 18:14:18,831 - events - INFO - Loaded event status: active for event 2
+2025-03-10 18:14:18,831 - events - INFO - Loaded event status: active for event 2
+2025-03-10 18:14:18,839 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 18:14:18,855 - events - INFO - Loaded team cooldowns and effects for event 2
+2025-03-10 18:14:18,855 - events - INFO - Loaded game state version 36 for event 2
+2025-03-10 18:14:18,855 - events - INFO - Successfully recovered game 2
+2025-03-10 18:14:19,129 - events - INFO - Bot is ready!
+2025-03-10 18:14:19,204 - interactions - INFO - Overwriting 0 with 4 application commands
+2025-03-10 18:16:40,603 - games.events.EventFactory - INFO - Found active event 2 for user 528746710042804247 in group 2
+2025-03-10 18:16:40,606 - games.events.EventFactory - WARNING - Unknown event type 'board_game', using base Event
+2025-03-10 18:16:40,637 - interactions - INFO - Autocomplete Called: $points with event.ctx.focussed_option = SlashCommandOption() | event.ctx.kwargs = {'type': ''}
+2025-03-10 18:16:40,638 - interactions - ERROR - Ignoring exception in Autocomplete Callback for /points - Option: SlashCommandOption():
+Traceback (most recent call last):
+  File "/store/droptracker/disc/venv/lib/python3.10/site-packages/interactions/client/client.py", line 2018, in __dispatch_interaction
+    response = await callback
+  File "/store/droptracker/disc/games/events/event_commands.py", line 580, in points_autocomplete
+    print("Task types: ", [task.type for task in game.tasks])
+AttributeError: 'Event' object has no attribute 'tasks'
+
+2025-03-10 18:17:52,084 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 18:17:53,944 - events - INFO - Starting bot...
+2025-03-10 18:17:54,403 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 18:17:54,404 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 18:17:54,686 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 18:17:54,834 - events - INFO - Bot is starting up...
+2025-03-10 18:17:54,839 - events - INFO - Game recovery task started
+2025-03-10 18:17:54,932 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 18:17:54,958 - events - INFO - Loaded event status: active for event 2
+2025-03-10 18:17:54,959 - events - INFO - Loaded event status: active for event 2
+2025-03-10 18:17:54,966 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 18:17:54,990 - events - INFO - Loaded team cooldowns and effects for event 2
+2025-03-10 18:17:54,990 - events - INFO - Loaded game state version 36 for event 2
+2025-03-10 18:17:54,991 - events - INFO - Successfully recovered game 2
+2025-03-10 18:17:55,197 - events - INFO - Bot is ready!
+2025-03-10 18:18:01,355 - games.events.EventFactory - INFO - Found active event 2 for user 528746710042804247 in group 2
+2025-03-10 18:18:01,378 - events - INFO - Loaded event status: active for event 2
+2025-03-10 18:18:01,524 - interactions - INFO - Autocomplete Called: $points with event.ctx.focussed_option = SlashCommandOption() | event.ctx.kwargs = {'type': ''}
+2025-03-10 18:18:11,136 - games.events.EventFactory - INFO - Found active event 2 for user 528746710042804247 in group 2
+2025-03-10 18:18:11,299 - interactions - INFO - Autocomplete Called: $points with event.ctx.focussed_option = SlashCommandOption() | event.ctx.kwargs = {'type': 'b'}
+2025-03-10 18:18:52,774 - interactions - INFO - Shard ID 0 | Stopping Shard
+2025-03-10 18:18:54,483 - events - INFO - Starting bot...
+2025-03-10 18:18:54,946 - interactions - INFO - Shard ID 0 | Starting Shard
+2025-03-10 18:18:54,947 - interactions - INFO - Shard ID 0 | Shard is attempting to connect to gateway...
+2025-03-10 18:18:55,302 - interactions - INFO - Shard ID 0 | Gateway connection established
+2025-03-10 18:18:55,477 - events - INFO - Bot is starting up...
+2025-03-10 18:18:55,480 - events - INFO - Game recovery task started
+2025-03-10 18:18:55,599 - events - INFO - Recovering game 2 (Board Game)...
+2025-03-10 18:18:55,625 - events - INFO - Loaded event status: active for event 2
+2025-03-10 18:18:55,625 - events - INFO - Loaded event status: active for event 2
+2025-03-10 18:18:55,631 - events - INFO - Loaded 3 teams for event 2
+2025-03-10 18:18:55,647 - events - INFO - Loaded team cooldowns and effects for event 2
+2025-03-10 18:18:55,647 - events - INFO - Loaded game state version 36 for event 2
+2025-03-10 18:18:55,647 - events - INFO - Successfully recovered game 2
+2025-03-10 18:18:55,892 - events - INFO - Bot is ready!
+2025-03-10 18:19:01,438 - games.events.EventFactory - INFO - Found active event 2 for user 528746710042804247 in group 2
+2025-03-10 18:19:01,467 - events - INFO - Loaded event status: active for event 2
+2025-03-10 18:19:01,641 - interactions - INFO - Autocomplete Called: $points with event.ctx.focussed_option = SlashCommandOption() | event.ctx.kwargs = {'type': ''}
+2025-03-10 19:57:16,355 - interactions - WARNING - Heartbeat has not been acknowledged for 41.25 seconds, likely zombied connection. Reconnect!
+2025-03-10 19:57:46,701 - interactions - INFO - Shard ID 0 | Successfully resumed connection! Session_ID: 985fda734433f893a3f926876f55f36e
+2025-03-10 21:03:36,641 - interactions - INFO - Shard ID 0 | Stopping Shard

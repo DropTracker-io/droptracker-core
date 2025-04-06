@@ -46,3 +46,15 @@ games/events/task_store/old2.json
 games/events/task_store/old.json
 games/events/task_store/default_old.json
 games/events/BoardGame.md
+events.log
+games/gielinor_race/tasks.json
+.commands.py.swp
+data/lootboard/
+data/out/
+incorrect_entries.json
+item_export.py
+lb_gen.py
+lb_static_gen.py
+static/assets/exports/
+temp.py
+worker.py

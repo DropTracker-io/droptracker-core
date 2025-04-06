@@ -655,6 +655,7 @@ def get_hourly_partitions_from_day(year, month, day):
                 partitions.append(f"{year}{month}{day}{hour:02d}{minute:02d}")
     return partitions
 
+
 async def generate_timeframe_board(bot: interactions.Client, group_id: int = 0, wom_group_id: int = 0, 
                                   start_time: datetime = None, end_time: datetime = None, npc_id: int = None):
     """
@@ -669,6 +670,8 @@ async def generate_timeframe_board(bot: interactions.Client, group_id: int = 0, 
     :return: Path to the generated image
     """
     # Set default times if not provided
+    if group_id == 1:
+        group_id = 2
     if start_time is None:
         # Default to start of current day
         start_time = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -875,11 +878,8 @@ async def get_drops_for_timeframe(player_ids, time_partitions, granularity, npc_
             
             # Get total items
             total_items = redis_client.client.hgetall(total_items_key)
-            if len(total_items) > 0:
-                print("Got", len(total_items), "total items")
             
             for key, value in total_items.items():
-                print("Got key:", key, "and value:", value)
                 key = key.decode('utf-8')
                 value = value.decode('utf-8')
                 try:

@@ -8,6 +8,7 @@ import aiohttp
 import interactions
 from dateutil.relativedelta import relativedelta
 from PIL import Image, ImageFont, ImageDraw
+from db.models import NpcList, session
 
 DOCS_FOLDER = os.path.join(os.getcwd(), 'templates/docs')
 
@@ -50,6 +51,25 @@ def get_current_partition() -> int:
 
 def normalize_npc_name(npc_name: str):
     return npc_name.replace(" ", "_").strip()
+
+def get_true_boss_name(npc_name: str):
+    """
+        Returns the name of the NPC we are storing in the database for a given npc name passed;
+        generally coming from an adventure log message.
+    """
+    npc = session.query(NpcList).filter(NpcList.npc_name == npc_name).first()
+    if npc:
+        print("Found an exact match for", npc_name, "in the database:", npc.npc_name, npc.npc_id)
+        return npc.npc_name, npc.npc_id
+    else:
+        ## Try to find the closest match in the database
+        npc = session.query(NpcList).filter(NpcList.npc_name.ilike(f"%{npc_name}%")).first()
+        if npc:
+            print("Found a close match for", npc_name, "in the database:", npc.npc_name, npc.npc_id)
+            return npc.npc_name, npc.npc_id
+        else:
+            print("No match found for", npc_name, "in the database")
+            return "Unknown", None
 
 
 async def get_command_id(bot: interactions.Client, command_name: str):

@@ -6,10 +6,10 @@ from db.models import Drop, Player, GroupConfiguration, session
 from datetime import datetime, timedelta
 import json
 import os
+from utils.wiseoldman import get_player_metric, get_player_metric_sync
 from utils.redis import RedisClient
 from utils.format import parse_redis_data
 import logging
-
 
 
 # Initialize Redis
@@ -77,7 +77,14 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
     pipeline = redis_client.client.pipeline(transaction=False)
     
     # Get the player's groups and their minimum values
-    player = session.query(Player).filter(Player.player_id == player_id).options(joinedload(Player.groups)).first()
+    player: Player = session.query(Player).filter(Player.player_id == player_id).options(joinedload(Player.groups)).first()
+    # try:
+    #     player_log_slots = get_player_metric_sync(player.player_name, "collections_logged")
+    #     player.log_slots = player_log_slots
+    #     session.commit()
+    # except Exception as e:
+    #     print(f"Error updating player log slots for {player.player_name}: {e}")
+    #     session.rollback()
     clan_minimums = {}
     
     if player:
@@ -371,6 +378,7 @@ def check_and_update_players(session):
 
     # Query for players who need their data updated (older than 24 hours)
     players_to_update = session.query(Player).filter(Player.date_updated < time_threshold).all()
+    original_length = 0
     if len(players_to_update) > 5:
         original_length = len(players_to_update)
         players_to_update = players_to_update[:1]
