@@ -159,7 +159,7 @@ async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom
 
     bg_img, draw = load_background_image(local_url)
 
-    # Compute the dynamic text color based on the background image. (added BY Smoke)
+    # Compute the dynamic text color based on the background image. (- added BY Smoke [https://github.com/Varietyz/])
     use_dynamic_colors = config.get('use_dynamic_lootboard_colors', True)
     if use_dynamic_colors and use_dynamic_colors == "1":
         use_dynamic_colors = True
@@ -192,7 +192,7 @@ async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom
     #print("Processed player_ids")
     group_items, player_totals, recent_drops, total_loot = await get_drops_for_group(player_ids, partition)
 
-    # Draw elements on the background image (added dynamic_coloring added BY Smoke)
+    # Draw elements on the background image (added dynamic_coloring - added BY Smoke [https://github.com/Varietyz/])
     bg_img = await draw_drops_on_image(bg_img, draw, group_items, group_id, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Pass `group_items` here
     bg_img = await draw_headers(bot, group_id, total_loot, bg_img, draw, partition, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Draw headers
     bg_img = await draw_recent_drops(bg_img, draw, recent_drops, min_value=minimum_value, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Draw recent drops, with a minimum value
@@ -236,7 +236,7 @@ async def draw_headers(bot: interactions.Client, group_id, total_loot, bg_img, d
     
     # Format total loot for display and compute dynamic color using the numeric value.
     this_month_str = format_number(total_loot)
-    value_text_color = get_value_color(total_loot) # (added BY Smoke)
+    value_text_color = get_value_color(total_loot) # (- added BY Smoke [https://github.com/Varietyz/])
     
     # Build the header prefix.
     if int(group_id) == 2:
@@ -260,7 +260,7 @@ async def draw_headers(bot: interactions.Client, group_id, total_loot, bg_img, d
         text_color = get_dynamic_color(bg_img)
     else:
         text_color = yellow
-    # Draw the prefix with a fixed text color (e.g. yellow) and a thicker stroke. (color adjustments added BY Smoke)
+    # Draw the prefix with a fixed text color (e.g. yellow) and a thicker stroke. (color adjustments - added BY Smoke [https://github.com/Varietyz/])
     draw.text((head_loc_x, head_loc_y), prefix, font=main_font,
               fill=text_color, stroke_width=2, stroke_fill=black)
     # Draw the total loot value using the dynamic value_text_color.
@@ -324,7 +324,7 @@ async def draw_leaderboard(bg_img, draw, player_totals, *, dynamic_colors, use_g
         rank_bbox = draw.textbbox((0, 0), rank_num_text, font=pet_font)
         rank_mid_x = rank_x - (rank_bbox[2] - rank_bbox[0]) / 2
 
-        # Draw text for rank, name, and total loot (colors added BY Smoke)
+        # Draw text for rank, name, and total loot (colors - added BY Smoke [https://github.com/Varietyz/])
         if dynamic_colors:
             text_color = get_dynamic_color(bg_img)
         else:
@@ -379,7 +379,7 @@ async def draw_drops_on_image(bg_img, draw, group_items, group_id, *, dynamic_co
         current_pos_y = int(locations[i]['y'])
         img_coords = (current_pos_x - 5, current_pos_y - 12)
 
-        # Load the item image based on the item_id ( Coin dynamic loading based on value added BY Smoke)
+        # Load the item image based on the item_id ( Coin dynamic loading based on value - added BY Smoke [https://github.com/Varietyz/])
         if int(item_id) == 995:
             coin_img_id = get_coin_image_id(quantity)
             item_img = await load_image_from_id(coin_img_id)
@@ -409,7 +409,7 @@ async def draw_drops_on_image(bg_img, draw, group_items, group_id, *, dynamic_co
             value_text_color = get_value_color(total_value)
         else:
             value_text_color = text_color
-        # For coins, since the amount is redundant (equal to the value), display only the value. (added BY Smoke)
+        # For coins, since the amount is redundant (equal to the value), display only the value. (- added BY Smoke [https://github.com/Varietyz/])
         if int(item_id) == 995:
             # Use the value-based color instead of the overall dynamic color.
             draw.text((ctr_x, ctr_y + 47), value_str, font=small_font, fill=value_text_color, stroke_width=1, stroke_fill=black)
@@ -480,7 +480,7 @@ async def draw_recent_drops(bg_img, draw, recent_drops, min_value, *, dynamic_co
                 # Fallback to without microseconds and with space
                 date_obj = datetime.strptime(date_string, '%Y-%m-%d %H:%M:%S')
         
-        # Get the item image based on the item name or ID (Dynamic coins id based on value added BY Smoke)
+        # Get the item image based on the item name or ID (Dynamic coins id based on value - added BY Smoke [https://github.com/Varietyz/])
         item_id = data["item_id"]
         if int(item_id) == 995:
             try:
@@ -521,7 +521,7 @@ async def draw_recent_drops(bg_img, draw, recent_drops, min_value, *, dynamic_co
         else:
             time_since_disp = f"({minutes}m)"
             
-        # coloring added BY Smoke
+        # coloring (- added BY Smoke [https://github.com/Varietyz/])
         if dynamic_colors:
             text_color = get_dynamic_color(bg_img)
         else:
