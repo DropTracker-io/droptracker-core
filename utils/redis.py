@@ -32,6 +32,29 @@ class RedisClient:
         except redis.RedisError as e:
             print(f"Error setting key '{key}': {e}")
 
+    def rpush(self, key: str, value: str) -> None:
+        try:
+            self.client.rpush(key, value)
+        except redis.RedisError as e:
+            print(f"Error rpushing key '{key}': {e}")
+        
+    def lpop(self, key: str) -> Optional[str]:
+        try:
+            return self.client.lpop(key)
+        except redis.RedisError as e:
+            print(f"Error lpopping key '{key}': {e}")
+            return None 
+        
+    def zsum(self, key: str) -> Optional[float]:
+        try:
+            ## Get all scores in the sorted set
+            scores = self.client.zrange(key, 0, -1, withscores=True)
+            ## Sum the scores
+            return sum(score for _, score in scores)
+        except redis.RedisError as e:
+            print(f"Error zsumming key '{key}': {e}")
+            return None
+
     def get(self, key: str) -> Optional[str]:
         try:
             value = self.client.get(key)
@@ -39,6 +62,19 @@ class RedisClient:
         except redis.RedisError as e:
             print(f"Error getting key '{key}': {e}")
             return None
+    
+    def zadd(self, key: str, score: float, value: str) -> None:
+        try:
+            self.client.zadd(key, {value: score})
+        except redis.RedisError as e:
+            print(f"Error zadd key '{key}': {e}")
+    
+    def zrange(self, key: str, start: int, end: int) -> list:
+        try:
+            return self.client.zrange(key, start, end)
+        except redis.RedisError as e:
+            print(f"Error zrange key '{key}': {e}")
+            return []
 
     def delete(self, key: str) -> None:
         try:

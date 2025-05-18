@@ -5,7 +5,8 @@ import json
 import os
 import traceback
 from datetime import datetime, timedelta
-from db.models import Drop, Guild, LootboardStyle, Player, ItemList, session, Group, GroupConfiguration, NpcList
+from db.models import Drop, Guild, LootboardStyle, Player, ItemList, Session, session, Group, GroupConfiguration, NpcList
+from db import models
 from io import BytesIO
 
 import aiohttp
@@ -109,7 +110,17 @@ async def get_drops_for_group(player_ids, partition: str):
     return group_items, player_totals, recent_drops, total_loot
 
 
-async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom_group_id: int = 0, partition: str = None):
+async def get_generated_board_path(group_id: int = 0, wom_group_id: int = 0, partition: str = None):
+    """
+    Get the path to the generated board image.
+    Used for the Discord bot to send/update lootboard images, since the generation method is called every 2 minutes by external processes.
+    """
+    current_date = datetime.now()
+    ydmpart = int(current_date.strftime('%d%m%Y'))
+    file_path = f"/store/droptracker/disc/static/assets/img/clans/{group_id}/lb/lootboard.png"
+    return file_path
+
+async def generate_server_board(group_id: int = 0, wom_group_id: int = 0, partition: str = None, session_to_use = None):
     """
         :param: bot: Instance of the interactions.Client bot object
         :param: group_id: DropTracker GroupID. 0 expects a wom_group_id
@@ -118,6 +129,10 @@ async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom
         Providing neither option (group_id, wom_group_id) uses global drops.
     """
     # Set default partition if none provided
+    if session_to_use is not None:
+        session = session_to_use
+    else:
+        session = models.session
     if partition is None:
         partition = datetime.now().year * 100 + datetime.now().month
     
@@ -147,12 +162,15 @@ async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom
 
     #loot_board_style = 1  # TODO: Implement other boards eventually
     loot_board_style = config.get('loot_board_type', 1)
-    #print(f"Lootboard style: {loot_board_style}")
+    if loot_board_style == 0 or loot_board_style == "":
+        loot_board_style = 1
     minimum_value = config.get('minimum_value_to_notify', 2500000)
     player_wom_ids = []
     # Load background image based on the board style
     loot_board_style = int(loot_board_style)
     target_board = session.query(LootboardStyle).filter(LootboardStyle.id == loot_board_style).first()
+    if not target_board:
+        target_board = session.query(LootboardStyle).filter(LootboardStyle.id == 1).first()
     local_url = target_board.local_url
     if not target_board:
         local_url = "/store/droptracker/disc/lootboard/bank-new-clean-dark.png"
@@ -174,7 +192,7 @@ async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom
             wom_group_id = group.wom_id
         elif wom_group_id != 0:
     # Fetch player WOM IDs and associated Player IDs
-            player_wom_ids = await fetch_group_members(wom_group_id)
+            player_wom_ids = await fetch_group_members(wom_group_id, session_to_use=session)
         else:
             player_wom_ids = []
             raw_wom_ids = session.query(Player.wom_id).all() ## get all users if no wom_group_id is found
@@ -187,14 +205,14 @@ async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom
         #print(f"Got all players: {len(all_players)}")
         for p in all_players:
             player_wom_ids.append(p.wom_id)
-    player_ids = await associate_player_ids(player_wom_ids)
+    player_ids = await associate_player_ids(player_wom_ids, session_to_use=session)
     # Get the drops, recent drops, and total loot for the group
     #print("Processed player_ids")
     group_items, player_totals, recent_drops, total_loot = await get_drops_for_group(player_ids, partition)
 
     # Draw elements on the background image (added dynamic_coloring - added BY Smoke [https://github.com/Varietyz/])
     bg_img = await draw_drops_on_image(bg_img, draw, group_items, group_id, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Pass `group_items` here
-    bg_img = await draw_headers(bot, group_id, total_loot, bg_img, draw, partition, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Draw headers
+    bg_img = await draw_headers(group_id, total_loot, bg_img, draw, partition, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Draw headers
     bg_img = await draw_recent_drops(bg_img, draw, recent_drops, min_value=minimum_value, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Draw recent drops, with a minimum value
     bg_img = await draw_leaderboard(bg_img, draw, player_totals, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Draw leaderboard
     save_image(bg_img, group_id, partition)  # Save the generated image
@@ -208,7 +226,7 @@ async def generate_server_board(bot: interactions.Client, group_id: int = 0, wom
         # For monthly partitions, use the existing format
         current_date = datetime.now()
         ydmpart = int(current_date.strftime('%d%m%Y'))
-        file_path = f"/store/droptracker/disc/static/assets/img/clans/{group_id}/lb/{ydmpart}.png"
+        file_path = f"/store/droptracker/disc/static/assets/img/clans/{group_id}/lb/lootboard.png"
     
     return file_path
 
@@ -217,7 +235,7 @@ def get_year_month_string():
     return datetime.now().strftime('%Y-%m')
 
 
-async def draw_headers(bot: interactions.Client, group_id, total_loot, bg_img, draw, partition=None, *, dynamic_colors, use_gp):
+async def draw_headers(group_id, total_loot, bg_img, draw, partition=None, *, dynamic_colors, use_gp):
     """
     Draw headers on the image, including the title and total loot value.
     The total loot value is displayed using a dynamic color based on its numeric value.
@@ -276,7 +294,7 @@ def load_background_image(filepath):
     return bg_img, draw
 
 
-async def draw_leaderboard(bg_img, draw, player_totals, *, dynamic_colors, use_gp):
+async def draw_leaderboard(bg_img, draw, player_totals, *, dynamic_colors, use_gp, session_to_use = None):
     """
     Draws the leaderboard for players with their total loot values.
     
@@ -285,6 +303,10 @@ async def draw_leaderboard(bg_img, draw, player_totals, *, dynamic_colors, use_g
     :param player_totals: Dictionary of player names and their total loot value.
     :return: Updated background image with the leaderboard drawn on it.
     """
+    if session_to_use is not None:
+        session = session_to_use
+    else:
+        session = models.session
     # Sort players by total loot value in descending order, taking the top 12
     top_players = sorted(player_totals.items(), key=lambda x: x[1], reverse=True)[:12]
     
@@ -601,7 +623,12 @@ async def load_image_from_id(item_id):
         target_item_id = [max(item.stacked, item.item_id) for item in all_items]
         item_id = target_item_id
     if not os.path.exists(file_path):
-        await load_rl_cache_img(item_id)
+        try:
+            image_path = await load_rl_cache_img(item_id)
+            if image_path:
+                file_path = image_path
+        except Exception as e:
+            print(f"Error loading image for item ID {item_id}: {e}")
     loop = asyncio.get_event_loop()
     try:
         # Run the blocking Image.open operation in a thread pool
@@ -614,6 +641,7 @@ async def load_image_from_id(item_id):
 
 async def load_rl_cache_img(item_id):
     url = f"https://static.runelite.net/cache/item/icon/{item_id}.png"
+    print("Attempting to download a new image for item ID", item_id)
     try:
         ## save it here
         async with aiohttp.ClientSession() as session:
@@ -631,7 +659,8 @@ async def load_rl_cache_img(item_id):
                 file_path = f"/store/droptracker/disc/static/assets/img/itemdb/{item_id}.png"
                 # print("Saving")
                 image.save(file_path, "PNG")
-                return image
+                print(f"Saved image to {file_path}")
+                return file_path
 
     except Exception as e:
         print("Unable to load the item.")
@@ -764,7 +793,7 @@ async def generate_timeframe_board(bot: interactions.Client, group_id: int = 0, 
         timeframe_str = f"{start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}"
     
     # Draw headers with custom timeframe string
-    bg_img = await draw_headers(bot, group_id, total_loot, bg_img, draw, timeframe_str, 
+    bg_img = await draw_headers(group_id, total_loot, bg_img, draw, timeframe_str, 
                                dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)
     
     # Draw recent drops and leaderboard

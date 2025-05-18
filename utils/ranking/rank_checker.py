@@ -391,18 +391,3 @@ def refresh_rankings_cache():
     """Force a refresh of the rankings cache"""
     return rankings_cache.force_refresh()
 
-async def associate_player_ids(player_wom_ids, before_date: datetime = None):
-    # This function doesn't need caching as it's not rank-related
-    if before_date:
-        all_players = session.query(Player.wom_id, Player.player_id).filter(Player.date_added < before_date).all()
-    else:
-        all_players = session.query(Player.wom_id, Player.player_id).all()
-    if player_wom_ids is None:
-        return []
-    # Create a mapping of WOM ID to Player ID
-    db_wom_to_ids = [{"wom": player.wom_id, "id": player.player_id} for player in all_players]
-    
-    # Filter out the Player IDs where the WOM ID matches any of the given `player_wom_ids`
-    matched_ids = [player['id'] for player in db_wom_to_ids if player['wom'] in player_wom_ids]
-    
-    return matched_ids

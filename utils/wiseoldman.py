@@ -3,7 +3,8 @@ import asyncio
 import httpx
 from asynciolimiter import Limiter
 from dotenv import load_dotenv
-from db.models import Player, session
+from db.models import Player, Session, session
+from db import models
 import wom
 from wom import Err
 load_dotenv()
@@ -27,7 +28,6 @@ async def check_user_by_username(username: str):
     # TODO -- only grab necessary info and parse it before returning the full player obj?
     await limiter.wait()
     await client.start()  # Initialize the client (if required by the `wom` library)
-
     try:
         result = await client.players.get_details(username=username)
         # Add debug logging
@@ -63,18 +63,19 @@ async def check_user_by_username(username: str):
             try:
                 result = await client.players.update_player(username=username)
             except Exception as e:
-                print("Error updating player:", e)
+                #print("Error updating player:", e)
+                pass
             # Add debug logging
             if not result.is_ok:
-                print(f"Update player failed for {username}. Status: {result.status_code}")
-                
+                #print(f"Update player failed for {username}. Status: {result.status_code}")
+                pass
             if result.is_ok:
                 player = result.unwrap()
                 
                 if player is None:
-                    print(f"Got empty player object after update for {username}")
+                    #print(f"Got empty player object after update for {username}")
                     return None, None, None
-                print("Got player object after update for", username + ":", player)
+                #print("Got player object after update for", username + ":", player)
                 player_id = player.id
                 player_name = player.username
                 snapshot = getattr(player, "latest_snapshot", None)
@@ -95,7 +96,7 @@ async def check_user_by_username(username: str):
                     return 0
                 return player, str(player_name), str(player_id), log_slots
             else:
-                print("Result is not ok, returning None")
+                #print("Result is not ok, returning None")
                 return None, None, None, -1
     except Exception as e:
         print(f"Error checking user {username}: {str(e)}")
@@ -142,13 +143,17 @@ async def check_group_by_id(wom_group_id: int):
     finally:
         pass
 
-async def fetch_group_members(wom_group_id: int):
+async def fetch_group_members(wom_group_id: int, session_to_use = None):
     """ 
     Returns a list of WiseOldMan Player IDs 
     for members of a specified group 
     """
     #print("Fetching group members for ID:", wom_group_id)
     user_list = []
+    if session_to_use is not None:
+        session = session_to_use
+    else:
+        session = models.session
     
     if wom_group_id == 1:
         # Fetch all player WOM IDs from the database directly
@@ -166,6 +171,15 @@ async def fetch_group_members(wom_group_id: int):
             name = details.name
             #print(f"Group name: {name}")
             for member in members:
+                player_name = member.player.display_name
+                existing_player = session.query(Player).filter(Player.wom_id == member.player_id).first()
+                if existing_player:
+                    old_name = existing_player.player_name or ""
+                    new_name = player_name or ""
+                    if old_name != new_name:
+                        print(f"Updated player name for {old_name} to {new_name}")
+                        existing_player.player_name = new_name
+                        session.commit()
                 user_list.append(member.player_id)
             return user_list
         else:

@@ -11,6 +11,21 @@
 /static/assets/css/*
 /static/assets/plugins/*
 
+1.py
+broken*
+missing*.json
+old_submissions.py
+runtime.svg
+test_run_thing.py
+lootboard/themes/*
+bot_state.py
+lb_gen.py
+player_board.py
+
+
+
+/data/logs/*
+
 # templates
 /templates/*
 
@@ -58,3 +73,4 @@ lb_static_gen.py
 static/assets/exports/
 temp.py
 worker.py
+*.png

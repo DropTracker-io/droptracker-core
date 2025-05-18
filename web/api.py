@@ -15,23 +15,25 @@ from quart_jwt_extended import (
 )
 from db.models import CollectionLogEntry, CombatAchievementEntry, Webhook, user_group_association, NotifiedSubmission, User, Group, Guild, Player, NpcList, ItemList, PersonalBestEntry, Drop, UserConfiguration, session as sesh, ItemList, GroupConfiguration
 from concurrent.futures import ThreadPoolExecutor
-from db.ops import DatabaseOperations
-from db.update_player_total import update_player_totals
+from db.ops import DatabaseOperations, associate_player_ids
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from data.submissions import drop_processor
 import interactions
 from lootboard.generator import get_drops_for_group
+from interactions.api.gateway.state import ConnectionState
 #from xf.xenforo import XenForoAPI
 from functools import lru_cache, wraps
 from time import time
 from cachetools import TTLCache
+from io import StringIO
+import csv
 
 log_token = os.getenv("LOGGER_TOKEN")
 logger = logger.LoggerClient(log_token)
 
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from utils.format import format_number, parse_authed_users, convert_from_ms, convert_to_ms, get_current_partition
 from utils.redis import RedisClient, calculate_clan_overall_rank
@@ -200,6 +202,394 @@ def create_api(bot: interactions.Client):
         except Exception as e:
             print(f"Error in get_channels: {str(e)}")
             return jsonify({"error": "Internal server error"}), 500
+        
+    @api_blueprint.route('/heartbeat', methods=['GET'])
+    async def heartbeat():
+        key = request.args.get('key')
+        if key == os.getenv("HEARTBEAT_TOKEN"):
+            ## Attempt to check the bot's heartbeat
+            closed_status = bot.is_closed
+            ready_status = bot.is_ready
+            message = None
+            ## Attempt to send a message
+            try:
+                channel = await bot.fetch_channel(1267605788445245521)
+                message = await channel.fetch_messages(limit=1)
+                if message:
+                    message = message[0]
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                print(f"Error finding message: {e}")
+                message = None
+            return jsonify({"message": "Heartbeat received", "closed_status": closed_status, "ready_status": ready_status,
+                            "message_id": message.id if message else None}), 200
+            
+        else:
+            return jsonify({"error": "Invalid key"}), 403
+        
+    @api_blueprint.route('/csv_export', methods=['GET'])
+    async def csv_export():
+        ## Auth keys should be provided in the query params
+        key = request.args.get('key')
+        correct_key = False  # Initialize to False
+        correct_keys = sesh.query(GroupConfiguration).filter(GroupConfiguration.config_key == "export_api_key").all()
+        print("Found", len(correct_keys), "correct keys")
+        for correct_key_obj in correct_keys:
+            if str(correct_key_obj.config_value).strip() == str(key).strip():
+                correct_key = True
+                break
+        if not correct_key:
+            print("Key did not match any valid keys:", [entry.config_value for entry in correct_keys])
+            print("Key provided:", key)
+            return jsonify({"error": "Invalid key"}), 403
+            
+        ## Find out what parameters this user is searching for
+        _player = request.args.get('player', None)
+        _group = request.args.get('group', None)
+        _npc = request.args.get('npc', None)
+        _start_time = request.args.get('start_time', None)
+        _end_time = request.args.get('end_time', None)
+        _start_date = request.args.get('start_date', None)
+        _end_date = request.args.get('end_date', None)
+        
+        # Initialize lists to store target objects and IDs
+        player_objects = []
+        player_ids = []
+        group_objects = []
+        group_ids = []
+        
+        if _group:
+            group_values = [g.strip() for g in _group.split(',')]
+
+            for group_value in group_values:
+                try:
+                    # Try to parse as integer (ID)
+                    group_id = int(group_value)
+                    group_obj = sesh.query(Group).filter(Group.group_id == group_id).first()
+                    if group_obj:
+                        ## Get all players in the group
+                        query = text("SELECT player_id FROM user_group_association WHERE group_id = :group_id")
+                        group_player_ids = sesh.execute(query, {"group_id": group_id}).fetchall()
+                        group_player_ids = [player_id[0] for player_id in group_player_ids]
+                        # Accumulate player IDs
+                        player_ids.extend(group_player_ids)
+                        group_objects.append(group_obj)
+                        group_ids.append(group_id)
+                except ValueError:
+                    # Handle as string (name)
+                    group_obj = sesh.query(Group).filter(Group.group_name == group_value).first()
+                    if group_obj:
+                        group_objects.append(group_obj)
+                        group_ids.append(group_obj.group_id)
+            
+            # If no valid groups were found, return error
+            if not group_objects and _group:
+                return jsonify({"error": "No valid groups found"}), 404
+
+        ## Process player parameter (can be single value or comma-separated list)
+        if _player:
+            player_values = [p.strip() for p in _player.split(',')]
+            for player_value in player_values:
+                try:
+                    # Try to parse as integer (ID)
+                    player_id = int(player_value)
+                    player_obj = sesh.query(Player).filter(Player.player_id == player_id).first()
+                    if player_obj:
+                        player_objects.append(player_obj)
+                        player_ids.append(player_id)
+                except ValueError:
+                    # Handle as string (name)
+                    player_obj = sesh.query(Player).filter(Player.player_name == player_value).first()
+                    if player_obj:
+                        player_objects.append(player_obj)
+                        player_ids.append(player_obj.player_id)
+            
+            # If no valid players were found, return error
+            if not player_objects and _player:
+                return jsonify({"error": "No valid players found"}), 404
+        
+        
+        
+        # Process NPC parameter (can be single value or comma-separated list)
+        npc_ids = []
+        npc_objects = []
+        if _npc:
+            npc_values = [n.strip() for n in _npc.split(',')]
+            for npc_value in npc_values:
+                try:
+                    # Try to parse as integer (ID)
+                    npc_id = int(npc_value)
+                    npc_obj = sesh.query(NpcList).filter(NpcList.npc_id == npc_id).first()
+                    if npc_obj:
+                        npc_ids.append(npc_id)
+                        npc_objects.append(npc_obj)
+                except ValueError:
+                    # Handle as string (name)
+                    npc_obj = sesh.query(NpcList).filter(NpcList.npc_name == npc_value).first()
+                    if npc_obj:
+                        npc_ids.append(npc_obj.npc_id)
+                        npc_objects.append(npc_obj)
+        
+        # If no NPCs were specified, get all NPCs from the target list
+        if not npc_ids:
+            npc_dict = get_npc_ids_from_target_list()
+            for npc_name, ids in npc_dict.items():
+                for npc_id in ids:
+                    npc_obj = sesh.query(NpcList).filter(NpcList.npc_id == npc_id).first()
+                    if npc_obj:
+                        npc_ids.append(npc_id)
+                        npc_objects.append(npc_obj)
+        
+        # Process date and time parameters and determine optimal data retrieval strategy
+        if not _start_date and not _end_date:
+            # No date range specified - use all-time data
+            use_all_time_data = True
+            minutes_to_process = []
+            days_to_process = []
+            hours_to_process = []
+        else:
+            use_all_time_data = False
+            
+            # Process start date/time
+            if _start_date:
+                try:
+                    # If start time is provided, use it; otherwise, use 00:00
+                    if _start_time:
+                        start_datetime = datetime.strptime(f"{_start_date}{_start_time}", "%Y%m%d%H%M")
+                    else:
+                        start_datetime = datetime.strptime(f"{_start_date}0000", "%Y%m%d%H%M")
+                except ValueError:
+                    return jsonify({"error": "Invalid start date or time format. Use YYYYMMDD for date and HHMM for time."}), 400
+            else:
+                # Default to 30 days ago if no start date is provided
+                start_datetime = datetime.now() - timedelta(days=30)
+            
+            # Process end date/time
+            if _end_date:
+                try:
+                    # If end time is provided, use it; otherwise, use 23:59
+                    if _end_time:
+                        end_datetime = datetime.strptime(f"{_end_date}{_end_time}", "%Y%m%d%H%M")
+                    else:
+                        end_datetime = datetime.strptime(f"{_end_date}2359", "%Y%m%d%H%M")
+                except ValueError:
+                    return jsonify({"error": "Invalid end date or time format. Use YYYYMMDD for date and HHMM for time."}), 400
+            else:
+                # Default to now if no end date is provided
+                end_datetime = datetime.now()
+            
+            # Ensure start_datetime is before end_datetime
+            if start_datetime > end_datetime:
+                return jsonify({"error": "Start date/time must be before end date/time"}), 400
+            
+            # Initialize lists for different time granularities
+            minutes_to_process = []
+            hours_to_process = []
+            days_to_process = []
+            
+            # Current position in the time range
+            current = start_datetime
+            
+            # Process the start date partial day
+            start_day = start_datetime.replace(hour=0, minute=0)
+            next_day = (start_day + timedelta(days=1))
+            
+            if start_datetime.hour > 0 or start_datetime.minute > 0:
+                # Handle partial hours at the start
+                start_hour = start_datetime.replace(minute=0)
+                next_hour = (start_hour + timedelta(hours=1))
+                
+                if start_datetime.minute > 0:
+                    # Add individual minutes for the partial first hour
+                    minute_current = start_datetime
+                    while minute_current < min(next_hour, end_datetime):
+                        minutes_to_process.append(minute_current.strftime("%Y%m%d%H%M"))
+                        minute_current += timedelta(minutes=1)
+                
+                # Add complete hours for the rest of the start day
+                hour_current = next_hour
+                while hour_current < min(next_day, end_datetime):
+                    hours_to_process.append(hour_current.strftime("%Y%m%d%H"))
+                    hour_current += timedelta(hours=1)
+            
+            # Process complete days in the middle
+            day_current = max(start_day, next_day)
+            end_day = end_datetime.replace(hour=0, minute=0)
+            
+            while day_current < end_day:
+                days_to_process.append(day_current.strftime("%Y%m%d"))
+                day_current += timedelta(days=1)
+            
+            # Process the end date partial day
+            if end_datetime > end_day:
+                # Handle complete hours on the end day
+                hour_current = end_day
+                end_hour = end_datetime.replace(minute=0)
+                
+                while hour_current < end_hour:
+                    hours_to_process.append(hour_current.strftime("%Y%m%d%H"))
+                    hour_current += timedelta(hours=1)
+                
+                # Handle remaining minutes in the last partial hour
+                if end_datetime.minute > 0:
+                    minute_current = end_hour
+                    while minute_current <= end_datetime:
+                        minutes_to_process.append(minute_current.strftime("%Y%m%d%H%M"))
+                        minute_current += timedelta(minutes=1)
+            
+            # Calculate total time points to process
+            total_time_points = len(minutes_to_process) + len(hours_to_process) + len(days_to_process)
+            
+            # Log the optimization results
+            print(f"Date range optimization: {len(days_to_process)} days, {len(hours_to_process)} hours, {len(minutes_to_process)} minutes")
+            print(f"Total time points: {total_time_points} vs. {int((end_datetime - start_datetime).total_seconds() / 60)} minutes in range")
+
+        # If no players were specified but groups were, get all players in those groups
+        if not player_objects and group_objects:
+            for group in group_objects:
+                for player in group.players:
+                    if player not in player_objects:
+                        player_objects.append(player)
+                        player_ids.append(player.player_id)
+        
+        # If no players or groups were specified, return an error
+        if not player_objects:
+            return jsonify({"error": "No players specified and no players found in specified groups"}), 400
+        
+        # Prepare data for CSV export
+        csv_data = []
+        
+        # Add header row
+        header = ["Player", "NPC", "Timestamp", "Item ID", "Item Name", "Quantity", "Value"]
+        csv_data.append(header)
+        
+        # Process each player
+        for player in player_objects:
+            player_id = player.player_id
+            player_name = player.player_name
+            
+            if use_all_time_data:
+                # Use all-time data for the player
+                all_items_key = f"player:{player_id}:all:total_items"
+                all_items_data = redis_client.client.hgetall(all_items_key)
+                all_items_data = redis_client.decode_data(all_items_data)
+                
+                all_npcs_key = f"player:{player_id}:all:npc_totals"
+                all_npcs_data = redis_client.client.hgetall(all_npcs_key)
+                all_npcs_data = redis_client.decode_data(all_npcs_data)
+                
+                # Filter by NPCs if specified
+                for npc_id in npc_ids:
+                    if str(npc_id) in all_npcs_data:
+                        npc_obj = next((n for n in npc_objects if n.npc_id == npc_id), None)
+                        if not npc_obj:
+                            continue
+                        
+                        npc_name = npc_obj.npc_name
+                        npc_value = int(all_npcs_data[str(npc_id)])
+                        
+                        # For all-time data, we don't have specific timestamps, so we use "All Time"
+                        timestamp = "All Time"
+                        
+                        # Add a summary row for this NPC
+                        csv_data.append([
+                            player_name,
+                            npc_name,
+                            timestamp,
+                            "",  # No specific item
+                            "All Items",
+                            "",  # No specific quantity
+                            npc_value
+                        ])
+                        
+                        # We could also add individual item breakdowns if needed
+            else:
+                # Process data at each time granularity
+                
+                # Process minute data
+                for minute_key in minutes_to_process:
+                    process_timeframe_data(player_id, player_name, "minute", minute_key, npc_ids, npc_objects, csv_data)
+                
+                # Process hour data
+                for hour_key in hours_to_process:
+                    process_timeframe_data(player_id, player_name, "hourly", hour_key, npc_ids, npc_objects, csv_data)
+                
+                # Process day data
+                for day_key in days_to_process:
+                    process_timeframe_data(player_id, player_name, "daily", day_key, npc_ids, npc_objects, csv_data)
+
+        # If no data was found, return an error
+        if len(csv_data) <= 1:  # Only header row
+            return jsonify({"error": "No data found for the specified parameters"}), 404
+        
+        # Convert to CSV string
+        csv_output = StringIO()
+        csv_writer = csv.writer(csv_output)
+        csv_writer.writerows(csv_data)
+        
+        # Return CSV file
+        response = await make_response(csv_output.getvalue())
+        response.headers["Content-Disposition"] = "attachment; filename=droptracker_export.csv"
+        response.headers["Content-type"] = "text/csv"
+        
+        return response
+    
+
+    def process_timeframe_data(player_id, player_name, prefix, timeframe, npc_ids, npc_objects, csv_data):
+        # Check if there's any loot data for this timeframe
+        total_loot_key = f"player:{player_id}:{prefix}:{timeframe}:total_loot"
+        total_loot = redis_client.client.get(total_loot_key)
+        
+        if total_loot:
+            # Format timestamp for display based on granularity
+            if prefix == "minute":
+                # For minute data, show the exact minute
+                timestamp = datetime.strptime(timeframe, "%Y%m%d%H%M").strftime("%Y-%m-%d %H:%M")
+            elif prefix == "hourly":
+                # For hourly data, show the hour range
+                hour_start = datetime.strptime(timeframe, "%Y%m%d%H")
+                hour_end = hour_start.replace(minute=59)
+                timestamp = f"{hour_start.strftime('%Y-%m-%d %H:00')} - {hour_end.strftime('%H:%M')}"
+            elif prefix == "daily":
+                # For daily data, indicate it's for the entire day
+                timestamp = f"{datetime.strptime(timeframe, '%Y%m%d').strftime('%Y-%m-%d')}"
+            
+            # Process NPCs
+            npcs_key = f"player:{player_id}:{prefix}:{timeframe}:npcs"
+            npcs_data = redis_client.client.hgetall(npcs_key)
+            npcs_data = redis_client.decode_data(npcs_data)
+            
+            # Process NPC items
+            for npc_id in npc_ids:
+                if str(npc_id) in npcs_data:
+                    npc_obj = next((n for n in npc_objects if n.npc_id == npc_id), None)
+                    if not npc_obj:
+                        continue
+                        
+                    npc_name = npc_obj.npc_name
+                    npc_items_key = f"player:{player_id}:{prefix}:{timeframe}:npc_items:{npc_id}"
+                    npc_items_data = redis_client.client.hgetall(npc_items_key)
+                    npc_items_data = redis_client.decode_data(npc_items_data)
+                    
+                    # Add each item to the CSV data
+                    for item_id, item_data in npc_items_data.items():
+                        qty, value = map(int, item_data.split(','))
+                        
+                        # Get item name
+                        item_obj = sesh.query(ItemList).filter(ItemList.item_id == item_id).first()
+                        item_name = item_obj.item_name if item_obj else f"Unknown Item ({item_id})"
+                        
+                        # Add row to CSV data
+                        csv_data.append([
+                            player_name,
+                            npc_name,
+                            timestamp,
+                            item_id,
+                            item_name,
+                            qty,
+                            value
+                        ])
+            return csv_data
 
     @api_blueprint.route('/player/<int:player_id>', methods=['GET'])
     async def get_player_data(player_id):
@@ -236,8 +626,36 @@ def create_api(bot: interactions.Client):
             "recent_items": recent_items
         })
 
-    
+    @api_blueprint.route('/latest_welcome_message', methods=['GET'])
+    async def get_latest_welcome_message():
+        welcomeString = ""
+        channel_id = 1283717633048444968
+        channel = await bot.fetch_channel(channel_id)
+        message_id = 1359303803366674525
+        message = await channel.fetch_message(message_id)
+        welcomeString = message.content
+        print("Welcome string:", welcomeString)
+        welcomeString = welcomeString.replace("```", "")
+        if welcomeString:
+            return str(welcomeString)
+        else:
+            return "No welcome message found", 404
 
+    @api_blueprint.route('/latest_news', methods=['GET'])
+    async def get_latest_news():
+        updateString = ""
+        channel_id = 1283717633048444968
+        channel = await bot.fetch_channel(channel_id)
+        message_id = 1359286032067203175
+        message = await channel.fetch_message(message_id)
+        updateString = message.content
+        updateString = updateString.replace("```", "")
+        if updateString:
+            return str(updateString)
+        else:
+            return "No news found", 404
+    
+    
     @api_blueprint.route('/create_webhook', methods=['POST'])
     async def create_webhook():
         data = await request.get_json()
@@ -582,17 +1000,4 @@ def update_clan_rank(npc_id, partition, player_id, total_loot, clan_id):
     # Add the player to the clan ranking with their total loot as the score
     redis_client.client.zadd(redis_key, {player_id: total_loot})
 
-
-
-async def associate_player_ids(player_wom_ids):
-    # Query the database for all players' WOM IDs and Player IDs
-    all_players = sesh.query(Player.wom_id, Player.player_id).all()
-    
-    # Create a mapping of WOM ID to Player ID
-    db_wom_to_ids = [{"wom": player.wom_id, "id": player.player_id} for player in all_players]
-    
-    # Filter out the Player IDs where the WOM ID matches any of the given `player_wom_ids`
-    matched_ids = [player['id'] for player in db_wom_to_ids if player['wom'] in player_wom_ids]
-    
-    return matched_ids
 

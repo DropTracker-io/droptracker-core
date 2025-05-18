@@ -17,7 +17,8 @@ Base = declarative_base()
 
 # Create engine
 engine = create_engine(f'mysql+pymysql://{DB_USER}:{DB_PASS}@localhost:3306/data', 
-                      pool_size=20, max_overflow=10)
+                      pool_size=20, max_overflow=10,
+                      pool_pre_ping=True)
 
 # Create session factory
 Session = sessionmaker(bind=engine)

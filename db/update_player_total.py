@@ -1,16 +1,20 @@
 import asyncio
+import aiohttp
 from cachetools import TTLCache
+from interactions import IntervalTrigger, Task
 from sqlalchemy import create_engine, func
+import sqlalchemy
 from sqlalchemy.orm import sessionmaker, joinedload
 from db.models import Drop, Player, GroupConfiguration, session
 from datetime import datetime, timedelta
 import json
 import os
+from utils.keys import determine_key
 from utils.wiseoldman import get_player_metric, get_player_metric_sync
 from utils.redis import RedisClient
 from utils.format import parse_redis_data
 import logging
-
+from db.app_logger import AppLogger
 
 # Initialize Redis
 redis_client = RedisClient()
@@ -25,9 +29,23 @@ BATCH_SIZE = 2500  # Number of drops processed at once
 # At the top of the file, after the imports
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
+app_logger = AppLogger()
 already_processed_drops = []
 
+
+debug_level = os.getenv("DEBUG_LEVEL", "info")
+debug = debug_level != "false"
+
+circuit_open = False
+circuit_open_time = None
+circuit_failure_count = 0
+CIRCUIT_THRESHOLD = 5  # Number of failures before opening circuit
+CIRCUIT_RESET_TIME = 300
+
+def debug_print(message):
+    global debug
+    if debug:
+        print(message)
 
 def get_last_processed_drop_id():
     return int(redis_client.get(LAST_DROP_ID_KEY) or 0)
@@ -35,7 +53,7 @@ def get_last_processed_drop_id():
 def set_last_processed_drop_id(drop_id):
     redis_client.set(LAST_DROP_ID_KEY, drop_id)
 
-def update_player_in_redis(player_id, session, force_update=True, batch_drops=None, from_submission=False):
+def update_player_in_redis(player_id, session, force_update=False, batch_drops=None, from_submission=False):
     """Update the player's total loot and related data in Redis."""
     current_partition = datetime.now().year * 100 + datetime.now().month
     
@@ -44,23 +62,26 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
     HOUR_FORMAT = '%Y%m%d%H'
     MINUTE_FORMAT = '%Y%m%d%H%M'
     
-    if force_update:
-        # Wipe all player-related data from Redis
-        keys_to_delete = redis_client.client.keys(f"player:{player_id}:*")
-        if keys_to_delete:
-            redis_client.client.delete(*keys_to_delete)
-    
     # Validate and filter batch_drops
-    if len(batch_drops) == 1 and from_submission == True:
+    debug_print("Validating and filtering batch drops")
+    if batch_drops is None: # Ensure batch_drops is a list
+        batch_drops = []
+
+    if from_submission and len(batch_drops) == 1:
         drop = batch_drops[0]
         if check_if_drop_is_ignored(drop.drop_id):
-            print(f"Drop {drop.drop_id} attempted to re-process as a single entry, skipping")
+            debug_print(f"Drop {drop.drop_id} attempted to re-process as a single entry, skipping")
             return
     else:
-        old_drops = []
+        # Filter out already processed drops for batches or non-submission single drops]
+        debug_print("Not coming from a submission, filtering out already processed drops")
         batch_drops = [drop for drop in batch_drops if drop.drop_id not in already_processed_drops]
-    
+        debug_print("Filtered out already processed drops, total drops: " + str(len(batch_drops)))
+    # Removed the problematic override of force_update based on len(batch_drops)
+    # The force_update parameter passed to the function will now be respected.
+
     # Initialize tracking dictionaries
+    debug_print("Initializing tracking dictionaries")
     partition_totals = {}
     partition_items = {}
     partition_npcs = {}
@@ -70,6 +91,8 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
     time_items = {}   # Will store items for all time granularities
     time_npcs = {}    # Will store NPCs for all time granularities
     time_npc_items = {}  # Will store items by NPC for all time granularities
+
+    player_group_ids = []
     
     player_drops = batch_drops if batch_drops else []
     
@@ -78,12 +101,13 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
     
     # Get the player's groups and their minimum values
     player: Player = session.query(Player).filter(Player.player_id == player_id).options(joinedload(Player.groups)).first()
+    debug_print("Got player")
     # try:
     #     player_log_slots = get_player_metric_sync(player.player_name, "collections_logged")
     #     player.log_slots = player_log_slots
     #     session.commit()
     # except Exception as e:
-    #     print(f"Error updating player log slots for {player.player_name}: {e}")
+    #     debug_print(f"Error updating player log slots for {player.player_name}: {e}")
     #     session.rollback()
     clan_minimums = {}
     
@@ -92,7 +116,7 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
             group_id = group.group_id
             group_config_key = f"group_config:{group_id}"
             group_config = redis_client.client.hgetall(group_config_key)
-            
+            player_group_ids.append(group_id)
             if group_config:
                 group_config = parse_redis_data(group_config)
             
@@ -104,7 +128,7 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
                     redis_client.client.expire(group_config_key, 3600)  # Cache for 1 hour
             
             clan_minimums[group_id] = int(group_config.get('minimum_value_to_notify', 2500000))
-    
+    debug_print("Got player groups and minimum values")
     # Initialize partition and all-time totals
     partition_totals = {}
     all_time_totals = {
@@ -114,9 +138,20 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
     }
     
     # Process each drop
+    if len(player_drops) == 0:
+        debug_print("No drops to process")
+        player.date_updated = datetime.now()
+        session.commit()
+        return True
+    debug_print("Processing each drop (" + str(len(player_drops)) + ")")
+    pipeline_count = 0
     for drop in player_drops:
+        pipeline_count += 1
+        if pipeline_count >= 1000:
+            pipeline.execute()
+            pipeline_count = 0
         if check_if_drop_is_ignored(drop.drop_id):
-            print(f"Drop {drop.drop_id} attempted to re-process during batch processing, skipping")
+            debug_print(f"Drop {drop.drop_id} attempted to re-process during batch processing, skipping")
             continue
         
         drop_partition = drop.partition
@@ -229,6 +264,7 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
                 
                 # Add to partition recent items
                 pipeline.lpush(f"player:{player_id}:{drop_partition}:recent_items", recent_item_data)
+                debug_print("Stored recent item data in this partition: " + recent_item_data)
                 
                 # Add to all-time recent items
                 pipeline.lpush(f"player:{player_id}:all:recent_items", recent_item_data)
@@ -238,60 +274,194 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
         
         # Mark this drop as processed
         add_drop_to_ignore(drop.drop_id)
-    
+    pipeline.execute()
+    debug_print("Executed and processed all drops, storing totals in Redis")
     # Store partition totals in Redis
+    pipeline_count = 0
     for partition, totals in partition_totals.items():
-        # Set total loot for partition
-        currentTotal = redis_client.client.get(f"player:{player_id}:{partition}:total_loot")
-        if currentTotal:
-            currentTotal = int(currentTotal)
-        else:
-            currentTotal = 0
-        pipeline.set(f"player:{player_id}:{partition}:total_loot", totals['total_loot'] + currentTotal)
+        pipeline_count += 1
+        if pipeline_count >= 500:
+            pipeline.execute()
+            pipeline_count = 0
         
+        currentTotal = 0
+        if not force_update:
+            debug_print("Not forcing update")
+            currentTotalBytes = redis_client.client.zscore(f"leaderboard:{partition}", player_id)
+            if currentTotalBytes is not None:  # Changed from 'if currentTotalBytes:'
+                try:
+                    # Handle both float and bytes cases
+                    if isinstance(currentTotalBytes, float):
+                        currentTotal = int(currentTotalBytes)  # Direct conversion if already a float
+                    else:
+                        currentTotal = int(float(currentTotalBytes.decode('utf-8')))  # Decode if bytes
+                except (ValueError, AttributeError):
+                    app_logger.log(log_type="warning", data=f"Malformed zscore for player {player_id}, partition {partition}", app_name="redis_update", description="update_player_in_redis")
+                    currentTotal = 0
+            # else: currentTotal remains 0
+        # else: currentTotal remains 0 for force_update=True
+
+        partition_total = totals['total_loot'] + currentTotal
+        pipeline.set(f"player:{player_id}:{partition}:total_loot", partition_total)
+        rank_key = determine_key(partition=partition)
+        ## Store the player's total in the zset for this partition
+        pipeline.zadd(rank_key, {player_id: partition_total})
+        debug_print("player is in " + str(player_group_ids))
+        for group_id in player_group_ids:
+            rank_key = determine_key(partition=partition, group_id=group_id)
+            ## Store the player's total in the zset for this partition
+            debug_print("Set value for " + str(rank_key) + " to " + str(partition_total))
+            pipeline.zadd(rank_key, {player_id: partition_total})
+
         # Store item totals
-        existing_items = redis_client.client.hgetall(f"player:{player_id}:{partition}:total_items")
+        if not force_update:
+            raw_existing_items = redis_client.client.hgetall(f"player:{player_id}:{partition}:total_items")
+            existing_items_data = {k.decode('utf-8'): v.decode('utf-8') for k, v in raw_existing_items.items()}
+            debug_print("No force update, got existing items data")
+        else:
+            existing_items_data = {}
+            debug_print("Force update, no existing items data")
         for item_id, (qty, value) in totals['items'].items():
-            existing_qty, existing_value = (0, 0)
-            if str(item_id) in existing_items:
-                existing_qty, existing_value = map(int, existing_items[str(item_id)].split(','))
+            existing_qty, existing_value = 0, 0
+            if not force_update:
+                item_id_str = str(item_id)
+                if item_id_str in existing_items_data:
+                    try:
+                        existing_qty, existing_value = map(int, existing_items_data[item_id_str].split(','))
+                    except ValueError:
+                        app_logger.log(log_type="warning", data=f"Malformed item data for player {player_id}, partition {partition}, item {item_id_str}", app_name="redis_update", description="update_player_in_redis")
+                        existing_qty, existing_value = 0,0
+            
             pipeline.hset(
                 f"player:{player_id}:{partition}:total_items",
                 str(item_id),
                 f"{qty + existing_qty},{value + existing_value}"
             )
-        
         # Store NPC totals
-        existing_npcs = redis_client.client.hgetall(f"player:{player_id}:{partition}:npc_totals")
+        if not force_update:
+            raw_existing_npcs = redis_client.client.hgetall(f"player:{player_id}:{partition}:npc_totals")
+            existing_npcs_data = {k.decode('utf-8'): v.decode('utf-8') for k, v in raw_existing_npcs.items()}
+        else:
+            existing_npcs_data = {}
+
         for npc_id, value in totals['npcs'].items():
-            existing_value = int(existing_npcs.get(str(npc_id), 0))
+            existing_value = 0
+            if not force_update:
+                npc_id_str = str(npc_id)
+                if npc_id_str in existing_npcs_data:
+                    try:
+                        existing_value = int(existing_npcs_data[npc_id_str])
+                    except ValueError:
+                        app_logger.log(log_type="warning", data=f"Malformed NPC data for player {player_id}, partition {partition}, NPC {npc_id_str}", app_name="redis_update", description="update_player_in_redis")
+                        existing_value = 0
+            
+            total_npc_value = value + existing_value
             pipeline.hset(
                 f"player:{player_id}:{partition}:npc_totals",
                 str(npc_id),
-                value + existing_value
+                total_npc_value
             )
-    
+            ## Store the player's total in the zset for this npc/partition combination
+            rank_key_npc = determine_key(npc_id=npc_id, partition=partition)
+            pipeline.zadd(rank_key_npc, {player_id: total_npc_value})
+            for group_id in player_group_ids:
+                rank_key_group_npc = determine_key(npc_id=npc_id, partition=partition, group_id=group_id)
+                pipeline.zadd(rank_key_group_npc, {player_id: total_npc_value})
+    debug_print("Stored partition totals, working on all-time totals")
+    pipeline.execute()
+    ## Check the player's stored total_items for this partition ...
+    raw_existing_items = redis_client.client.hgetall(f"player:{player_id}:{partition}:total_items")
+    existing_items_data = {k.decode('utf-8'): v.decode('utf-8') for k, v in raw_existing_items.items()}
+    debug_print("EXISTING ITEMS DATA: " + str(existing_items_data))
     # Store all-time totals
-    pipeline.set(f"player:{player_id}:all:total_loot", all_time_totals['total_loot'])
+    current_all_time_total_val = 0
+    if not force_update:
+        current_all_time_total_bytes = redis_client.client.get(f"player:{player_id}:all:total_loot")
+        if current_all_time_total_bytes:
+            try:
+                current_all_time_total_val = int(current_all_time_total_bytes.decode('utf-8'))
+            except ValueError:
+                app_logger.log(log_type="warning", data=f"Malformed all-time total loot for player {player_id}", app_name="redis_update", description="update_player_in_redis")
+                current_all_time_total_val = 0
+    # else: current_all_time_total_val remains 0 (consistent with original force_update=True logic)
+    
+    all_time_total = all_time_totals['total_loot'] + current_all_time_total_val
+    pipeline.set(f"player:{player_id}:all:total_loot", all_time_total)
+    ## Set the player's total in the zset for all time
+    rank_key_all_time = determine_key()
+    pipeline.zadd(rank_key_all_time, {player_id: all_time_total})
+    for group_id in player_group_ids:
+        group_rank_key_all_time = determine_key(group_id=group_id)
+        pipeline.zadd(group_rank_key_all_time, {player_id: all_time_total})
+
     for item_id, (qty, value) in all_time_totals['items'].items():
+        existing_qty, existing_value = 0, 0
+        if not force_update:
+            existing_item_bytes = redis_client.client.hget(f"player:{player_id}:all:total_items", str(item_id))
+            if existing_item_bytes:
+                try:
+                    existing_qty, existing_value = map(int, existing_item_bytes.decode('utf-8').split(','))
+                except ValueError:
+                    app_logger.log(log_type="warning", data=f"Malformed all-time item data for player {player_id}, item {item_id}", app_name="redis_update", description="update_player_in_redis")
+                    existing_qty, existing_value = 0,0
+        # else: existing_qty, existing_value remain 0,0 (consistent with original force_update=True logic)
+        
+        total_item_qty = qty + existing_qty
+        total_item_value = value + existing_value
         pipeline.hset(
             f"player:{player_id}:all:total_items",
             str(item_id),
-            f"{qty},{value}"
+            f"{total_item_qty},{total_item_value}"
         )
+        ## Store the player's total value for this item in the zset for this item/all time combination
+        rank_key_item_all_time = determine_key(item_id=item_id)
+        pipeline.zadd(rank_key_item_all_time, {player_id: total_item_value}) # Use item-specific value
+        for group_id in player_group_ids: # Added group-specific leaderboard for all-time items
+            group_rank_key_item_all_time = determine_key(item_id=item_id, group_id=group_id)
+            pipeline.zadd(group_rank_key_item_all_time, {player_id: total_item_value})
+    pipeline.execute()
     for npc_id, value in all_time_totals['npcs'].items():
+        existing_value = 0
+        if not force_update:
+            existing_value_bytes = redis_client.client.hget(f"player:{player_id}:all:npc_totals", str(npc_id))
+            if existing_value_bytes:
+                try:
+                    existing_value = int(existing_value_bytes.decode('utf-8'))
+                except ValueError:
+                    app_logger.log(log_type="warning", data=f"Malformed all-time NPC data for player {player_id}, NPC {npc_id}", app_name="redis_update", description="update_player_in_redis")
+                    existing_value = 0
+        # else: existing_value remains 0 (consistent with original force_update=True logic)
+        
+        total_npc_value_all_time = value + existing_value
         pipeline.hset(
             f"player:{player_id}:all:npc_totals",
             str(npc_id),
-            value
+            total_npc_value_all_time
         )
-    
-    # Trim recent items lists
-    pipeline.ltrim(f"player:{player_id}:{current_partition}:recent_items", 0, 99)
-    pipeline.ltrim(f"player:{player_id}:all:recent_items", 0, 99)
-    
+        ## Store the player's total in the zset for this npc/all time combination
+        rank_key_npc_all_time = determine_key(npc_id=npc_id)
+        pipeline.zadd(rank_key_npc_all_time, {player_id: total_npc_value_all_time})
+        for group_id in player_group_ids:
+            rank_key_group_npc_all_time = determine_key(npc_id=npc_id, group_id=group_id)
+            pipeline.zadd(rank_key_group_npc_all_time, {player_id: total_npc_value_all_time})
+    debug_print("Stored all-time totals, trimming recent items lists")
+    debug_print("Original list: " + str(redis_client.client.lrange(f"player:{player_id}:{current_partition}:recent_items", 0, -1)))
+
+    # Trim recent items lists to 10 items
+    pipeline.ltrim(f"player:{player_id}:{current_partition}:recent_items", 0, 10)
+    pipeline.ltrim(f"player:{player_id}:all:recent_items", 0, 10)
+    debug_print("Trimmed recent items lists, storing time-based data in Redis")
+    debug_print("New list: " + str(redis_client.client.lrange(f"player:{player_id}:{current_partition}:recent_items", 0, -1)))
     # Store time-based data in Redis with appropriate prefixes
-    for timeframe, total in time_totals.items():
+    pipeline_count = 0
+    for timeframe, total_data in time_totals.items(): # Renamed 'total' to 'total_data' for clarity
+        pipeline_count += 1
+        if pipeline_count >= 1000:
+            pipeline.execute()
+            pipeline_count = 0
+        
+        prefix = ""
+        ttl = 0
         # Determine the granularity level and set appropriate prefix and TTL
         if len(timeframe) == 8:  # YYYYMMDD (daily)
             prefix = "daily"
@@ -304,46 +474,58 @@ def update_player_in_redis(player_id, session, force_update=True, batch_drops=No
             ttl = 86400  # 1 day
         
         # Store total loot for this timeframe
-        pipeline.set(f"player:{player_id}:{prefix}:{timeframe}:total_loot", total['total_loot'])
+        current_time_frame_total_val = 0
+        if not force_update:
+            current_time_total_bytes = redis_client.client.get(f"player:{player_id}:{prefix}:{timeframe}:total_loot")
+            if current_time_total_bytes:
+                try:
+                    current_time_frame_total_val = int(current_time_total_bytes.decode('utf-8'))
+                except ValueError:
+                    app_logger.log(log_type="warning", data=f"Malformed time-based total loot for player {player_id}, timeframe {timeframe}", app_name="redis_update", description="update_player_in_redis")
+                    current_time_frame_total_val = 0
+            currentTotalBytes = redis_client.client.zscore(f"leaderboard:{timeframe}", player_id)
+            if currentTotalBytes is not None:  # Changed from 'if currentTotalBytes:'
+                try:
+                    # Handle both float and bytes cases
+                    if isinstance(currentTotalBytes, float):
+                        currentTotal = int(currentTotalBytes)  # Direct conversion if already a float
+                    else:
+                        currentTotal = int(float(currentTotalBytes.decode('utf-8')))  # Decode if bytes
+                except (ValueError, AttributeError):
+                    app_logger.log(log_type="warning", data=f"Malformed zscore for player {player_id}, partition {partition}", app_name="redis_update", description="update_player_in_redis")
+                    currentTotal = 0
+        # else: current_time_frame_total_val remains 0 (consistent with original force_update=True logic)
+
+        new_total_loot_for_timeframe = total_data['total_loot'] + current_time_frame_total_val
+        key_total_loot_tf = f"player:{player_id}:{prefix}:{timeframe}:total_loot"
+        pipeline.set(key_total_loot_tf, new_total_loot_for_timeframe)
+        if ttl > 0: pipeline.expire(key_total_loot_tf, ttl)
         
-        # Store item totals for this timeframe
-        if timeframe in time_items:
-            for item_id, (qty, value) in time_items[timeframe].items():
-                pipeline.hset(
-                    f"player:{player_id}:{prefix}:{timeframe}:items",
-                    str(item_id),
-                    f"{qty},{value}"
-                )
+        # Store in the leaderboard zset (not using SET on the leaderboard key)
+        rank_key_tf = determine_key(partition=timeframe)
+        pipeline.zadd(rank_key_tf, {player_id: new_total_loot_for_timeframe})
+        if ttl > 0: pipeline.expire(rank_key_tf, ttl)
         
-        # Store NPC totals for this timeframe
-        if timeframe in time_npcs:
-            for npc_id, value in time_npcs[timeframe].items():
-                pipeline.hset(
-                    f"player:{player_id}:{prefix}:{timeframe}:npcs",
-                    str(npc_id),
-                    value
-                )
+        # Add to group-specific time-based leaderboards
+        for group_id in player_group_ids:
+            group_rank_key_tf = determine_key(partition=timeframe, group_id=group_id)
+            pipeline.zadd(group_rank_key_tf, {player_id: new_total_loot_for_timeframe})
+            if ttl > 0: pipeline.expire(group_rank_key_tf, ttl)
         
-        # Store NPC item totals for this timeframe
-        if timeframe in time_npc_items:
-            for npc_id, items in time_npc_items[timeframe].items():
-                for item_id, (qty, value) in items.items():
-                    pipeline.hset(
-                        f"player:{player_id}:{prefix}:{timeframe}:npc_items:{npc_id}",
-                        str(item_id),
-                        f"{qty},{value}"
-                    )
-    
+        
+
     # Execute all Redis commands
     pipeline.execute()
     
     if force_update:
+        debug_print("Force update flag set")
         # If the force_update flag is set, the player's cache was rendered invalid and wiped.
         # We will update their player object to reflect this change
         player = session.query(Player).filter(Player.player_id == player_id).first()
         if player:
             player.date_updated = datetime.now()
             session.commit()
+            return True
     
     return
 
@@ -369,27 +551,77 @@ def process_drops_batch(batch_drops, session, from_submission=False):
             # logger.error(f"Failed to process drops for player {player_id}: {e}")
             pass
 
-def check_and_update_players(session):
+async def check_and_update_players(session: sqlalchemy.orm.session):
     """
     Check if any player's data needs to be updated in Redis and update if more than 24 hours have passed.
     """
-    # Get time threshold (24 hours ago)
-    time_threshold = datetime.now() - timedelta(hours=24)
-
-    # Query for players who need their data updated (older than 24 hours)
-    players_to_update = session.query(Player).filter(Player.date_updated < time_threshold).all()
-    original_length = 0
-    if len(players_to_update) > 5:
-        original_length = len(players_to_update)
-        players_to_update = players_to_update[:1]
-    for player in players_to_update:
-        player_drops = session.query(Drop).filter(Drop.player_id == player.player_id).all()
-        if original_length > 50:
-            if player.player_id % 10 == 0:
-                print(f"[MASS] Updating player {player.player_id} in Redis.")
+    global circuit_open, circuit_open_time, circuit_failure_count
+    
+    # Check if circuit is open
+    if circuit_open:
+        if datetime.now() - circuit_open_time > timedelta(seconds=CIRCUIT_RESET_TIME):
+            # Reset circuit after timeout
+            circuit_open = False
+            circuit_failure_count = 0
+            app_logger.log(log_type="info", data="Circuit breaker reset, resuming player updates", app_name="main", description="check_and_update_players")
         else:
-            print(f"Updating player {player.player_id} in Redis.")
-        update_player_in_redis(player.player_id, session, force_update=True, batch_drops=player_drops)
+            debug_print("Circuit breaker open, skipping player updates")
+            return
+    
+    try:
+        time_threshold = datetime.now() - timedelta(hours=24)
+        player_to_update = session.query(Player).filter(Player.date_updated < time_threshold).first()
+    except sqlalchemy.exc.PendingRollbackError as e:
+        session.rollback()
+        debug_print("Database needed to be rolled back ....")
+    
+    original_length = 0
+    if player_to_update:
+        debug_print("Found a player to update")
+    
+    if not player_to_update:
+        debug_print("No players need updating")
+        return
+    
+    endpoint = "http://localhost:21475/update"
+
+    async def update_player(player):
+        global circuit_failure_count
+        try:
+            async with aiohttp.ClientSession() as session_http:
+                async with session_http.post(
+                    endpoint, 
+                    json={"player_id": player.player_id},
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status == 200:
+                        debug_print(f"Updated player {player.player_id} in Redis.")
+                        # Reset failure count on success
+                        circuit_failure_count = 0
+                    else:
+                        debug_print(f"Failed to update player {player.player_id}: Status {response.status}")
+                        app_logger.log(log_type="error", data=f"Failed to update player {player.player_id}: Status {response.status}", app_name="main", description="check_and_update_players")
+                        circuit_failure_count += 1
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            debug_print(f"Connection error updating player {player.player_id}: {e}")
+            app_logger.log(log_type="error", data=f"Connection error updating player {player.player_id}: {e}", app_name="main", description="check_and_update_players")
+            circuit_failure_count += 1
+        except Exception as e:
+            debug_print(f"Error updating player {player.player_id}: {e}")
+            app_logger.log(log_type="error", data=f"Error updating player {player.player_id}: {e}", app_name="main", description="check_and_update_players")
+            circuit_failure_count += 1
+        
+        # Check if we should open the circuit
+        if circuit_failure_count >= CIRCUIT_THRESHOLD:
+            circuit_open = True
+            circuit_open_time = datetime.now()
+            app_logger.log(log_type="warning", data=f"Circuit breaker opened after {circuit_failure_count} failures", app_name="main", description="check_and_update_players")
+    
+    try:
+        await update_player(player_to_update)
+    except Exception as e:
+        debug_print(f"Error in update_player: {e}")
+        app_logger.log(log_type="error", data=f"Error in update_player: {e}", app_name="main", description="check_and_update_players")
 
 async def update_player_totals():
     """
@@ -429,18 +661,18 @@ async def update_player_totals():
 
     session.close()
 
+@Task.create(IntervalTrigger(seconds=20))
 async def background_task():
     """
     Background task that runs the update_player_totals function in a loop,
     ensuring the cache is updated periodically without stalling the main application.
     """
-    while True:
-        try:
-            await update_player_totals()
-            check_and_update_players(session)
-        except Exception as e:
-            logger.exception(f"Error in update_player_totals: {e}")
-        await asyncio.sleep(5)  # Wait for 5 seconds before the next run
+    debug_print("Background task cycle")
+    try:
+        await check_and_update_players(session)
+    except Exception as e:
+        debug_print(f"Error in update_player_totals: {e}")
+        #app_logger.log(log_type="error", data=f"Error in update_player_totals: {e}", app_name="main", description="background_task")
 
 async def start_background_redis_tasks():
     """

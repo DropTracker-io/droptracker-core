@@ -4,14 +4,16 @@ import os
 import random
 import re
 from secrets import token_hex
+from data.submissions import try_create_player
 from db.clan_sync import insert_xf_group
 from interactions import AutocompleteContext, BaseContext, GuildText, Permissions, SlashCommand, Button, ButtonStyle, SlashCommandOption, check, is_owner, Extension, slash_command, slash_option, SlashContext, Embed, OptionType, GuildChannel, SlashCommandChoice
 import interactions
 import time
 import subprocess
 import platform
-from db.models import NpcList, User, Group, Guild, Player, Drop, Webhook, session, UserConfiguration, GroupConfiguration
+from db.models import NpcList, Session, User, Group, Guild, Player, Drop, Webhook, session, UserConfiguration, GroupConfiguration
 from pb.leaderboards import create_pb_embeds, get_group_pbs
+from services import message_handler
 from utils.format import format_time_since_update, format_number, get_command_id, get_npc_image_url, replace_placeholders
 from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id, fetch_group_members
 from utils.redis import RedisClient
@@ -19,6 +21,7 @@ from db.ops import DatabaseOperations, associate_player_ids
 from lootboard.generator import generate_server_board, generate_timeframe_board
 from lootboard.player_board import generate_player_board
 from datetime import datetime, timedelta
+from utils.github import GithubPagesUpdater
 import asyncio
 from utils.sheets import sheet_manager
 #from utils.zohomail import send_email
@@ -29,15 +32,21 @@ sheets = sheet_manager.SheetManager()
 redis_client = RedisClient()
 db = DatabaseOperations()
 
+
 # Commands for the general user to interact with the bot
 class UserCommands(Extension):
+    def __init__(self, bot: interactions.Client):
+        self.bot = bot
+        self.message_handler = bot.get_ext("services.message_handler")
+
     @slash_command(name="help",
                    description="View helpful commands/links for the DropTracker")
     
     async def help(self, ctx):
-        user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
+        user = session.query(User).filter_by(discord_id=ctx.user.id).first()
         if not user:
             await try_create_user(ctx=ctx)
+        user = session.query(User).filter(User.discord_id == ctx.author.id).first()
         help_embed = Embed(title="", description="", color=0x0ff000)
 
         help_embed.set_author(name="Help Menu",
@@ -48,30 +57,14 @@ class UserCommands(Extension):
                             value=f"View our <#1317873428199637022> to find answers to common questions from our community, or reach out for <#1210765301042380820>")
         help_embed.add_field(name="User Commands:",
                              value="" +
-                                   f"- </me:{await get_command_id(self.bot, 'me')}> - View your account / stats\n" + 
-                                   f"- </user-config:{await get_command_id(self.bot, 'user-config')}> - Configure your user-specific settings, such as google sheets & webhooks.\n" +
                                    f"- </accounts:{await get_command_id(self.bot, 'accounts')}> - View which RuneScape accounts are associated with your Discord account.\n" +
-                                   f"- </claim-rsn:{await get_command_id(self.bot, 'claim-rsn')}> - Claim a RuneScape character as one that belongs to you.\n"
-                                   f"- </stats:{await get_command_id(self.bot, 'stats')}> - View general DropTracker statistics, or search for a player/clan.\n" +
-                                   f"- </patreon:{await get_command_id(self.bot, 'patreon')}> - View the benefits of contributing to keeping the DropTracker online via Patreon.", inline=False)
+                                   f"- </claim-rsn:{await get_command_id(self.bot, 'claim-rsn')}> - Claim a RuneScape character as one that belongs to you.\n")
         help_embed.add_field(name="Group Leader Commands:",
                              value="<:info:1263916332685201501> - `Note`: Creating groups **requires** a WiseOldMan group ID! *You can make a group without being in a clan*. [Visit the WOM website to create one](https://wiseoldman.net/groups/create).\n" +
                                    f"- </create-group:{await get_command_id(self.bot, 'create-group')}> - Create a new group in the DropTracker database to track your clan's drops.\n" +
-                                   f"- </group:{await get_command_id(self.bot, 'group')}> - View relevant config options, member counts, etc.\n" +
-                                   f"- </group-config:{await get_command_id(self.bot, 'group-config')}> - Begin configuring the DropTracker bot for use in a Discord server, with a step-by-step walkthrough.\n" +
                                    f"- </members:{await get_command_id(self.bot, 'members')}> - View a listing of the top members of your group in real-time.\n" +
-                                   f"- </group-refresh:{await get_command_id(self.bot, 'group-refresh')}> - Request an instant refresh of the database for your group, if something appears missing\n" + 
                                    f"<:info:1263916332685201501> - All 'Group Leader Commands' require **Administrator** privileges in the Discord server you use them inside of.", inline=False)
-        if ctx.guild and ctx.author and ctx.author.roles:
-            if "1176291872143052831" in (str(role) for role in ctx.author.roles):
-                help_embed.add_field(name="`Administrative Commands`:",
-                                     value="" +
-                                           "- `/delete-group` - Completely erase a group from the database, including all members and drops" +
-                                           "- `/delete-user` - Delete a user from the database, including all drops and correlations.\n" +
-                                           "- `/delete-drop` - Remove a drop from the database by providing its ID.\n" +
-                                           "- `/user-info` - View information about a user such as their RSNs, discord affiliation, etc.\n" +
-                                           "- `/restart` - Force a complete server restart.", inline=False)
-                
+        
         help_embed.add_field(name="Helpful Links",
                              value="[Docs](https://www.droptracker.io/docs) | "+
                              "[Join our Discord](https://www.droptracker.io/discord) | " +
@@ -102,6 +95,7 @@ class UserCommands(Extension):
         user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
         if not user:
             await try_create_user(ctx=ctx)
+            user = session.query(User).filter(User.discord_id == ctx.author.id).first()
         if type == "global":
             user.global_ping = not user.global_ping
             session.commit()
@@ -166,6 +160,7 @@ class UserCommands(Extension):
         user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
         if not user:
             await try_create_user(ctx=ctx)
+            user = session.query(User).filter(User.discord_id == ctx.author.id).first()
         if account == "all":
             user.hidden = not user.hidden
             session.commit()
@@ -795,6 +790,7 @@ class UserCommands(Extension):
         user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
         if not user:
             await try_create_user(ctx=ctx)
+            user = session.query(User).filter(User.discord_id == ctx.author.id).first()
         accounts = session.query(Player).filter_by(user_id=user.user_id)
         account_names = ""
         count = 0
@@ -821,12 +817,14 @@ class UserCommands(Extension):
         group = None
         if not user:
             await try_create_user(ctx=ctx)
+            user = session.query(User).filter(User.discord_id == ctx.author.id).first()
         if ctx.guild:
             guild_id = ctx.guild.id
             group = session.query(Group).filter(Group.guild_id.ilike(guild_id)).first()
         if not group:
             group = session.query(Group).filter_by(group_id=2).first()
         player = session.query(Player).filter(Player.player_name.ilike(rsn)).first()
+        ## User should be made now
         if not player:
             try:
                 wom_data = await check_user_by_username(rsn)
@@ -869,7 +867,8 @@ class UserCommands(Extension):
         else:
             joined_time = format_time_since_update(player.date_added)
             if player.user:
-                if str(player.user.user_id) != str(ctx.user.id):
+                user: User = player.user
+                if str(user.discord_id) != str(ctx.user.id):
                     await ctx.send(f"Uh-oh!\n" +
                                 f"It looks like somebody else may have claimed your account {joined_time}!\n" +
                                 f"<@{player.user.discord_id}> (discord id: {player.user.discord_id}) currently owns it in our database.\n" + 
@@ -877,7 +876,7 @@ class UserCommands(Extension):
                                 "https://www.droptracker.io/discord",
                                 ephemeral=True)
                 else:
-                    await ctx.send(f"You already claimed ", player_name, f"(WOM id: `{player.wom_id}`) {joined_time}\n" + 
+                    await ctx.send(f"It looks like you've already claimed this account ({player.player_name}) {joined_time}\n" + 
                                 "\nSomething not seem right?\n" +
                                 "Please reach out in our discord server:\n" + 
                                 "https://www.droptracker.io/discord",
@@ -885,9 +884,89 @@ class UserCommands(Extension):
             else:
                 player.user = user
                 session.commit()
-                await ctx.send(f"Your in-game name has been successfully associated with your Discord account.\n" + 
-                               "Please remember to use your `auth token` in the RuneLite plugin config:\n" + 
-                               f"</get-token:{await get_command_id(ctx.bot, 'get-token')}>",ephemeral=True) 
+                embed = Embed(title="Success!",
+                              description=f"Your in-game name has been successfully associated with your Discord account.\n" +
+                              "That's it!") 
+                embed.add_field(name=f"What's next?",value=f"If you'd like, you can [register an account on our website] to stay informed " + 
+                                "on updates & to make your voice heard relating to bugs & suggestions.",inline=False)
+                embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
+                embed.set_footer(text="Powered by the DropTracker | https://www.droptracker.io/")
+                await ctx.send(embed=embed)
+
+    
+    @slash_command(
+        name="force_msg",
+        description="Force a re-processing of a webhook message",
+        default_member_permissions=Permissions.ADMINISTRATOR,
+    )
+    @slash_option(
+        name="message_id",
+        description="The message ID to re-process",
+        opt_type=OptionType.STRING,
+        required=True
+    )
+    @slash_option(
+        name="channel_id",
+        description="The channel ID the message is inside of",
+        opt_type=OptionType.STRING,
+        required=True
+    )
+    async def force_msg(self, ctx: SlashContext, channel_id: str, message_id: str):
+        await ctx.send("Force message re-processing initiated.")
+        #await message_data_logger.log("force_msg", {"message_id": ctx.message.id, "channel_id": ctx.channel.id})
+        
+        channel = await ctx.bot.fetch_channel(channel_id)
+        message = await channel.fetch_message(message_id)
+        if message:
+            try:
+                print("Re-processing message...")
+                await self.message_handler.on_message_create(self.message_handler, message)
+            except Exception as e:
+                print("Error re-processing message:", e)
+                await ctx.send(f"Error re-processing message: {e}")
+        else:
+            await ctx.send("Message not found.")
+
+
+    @slash_command(name="new_webhook",
+                    description="Generate a new webhook, adding it to the database and the GitHub list.",
+                    default_member_permissions=Permissions.ADMINISTRATOR)
+    async def new_webhook_generator(self, ctx: SlashContext):
+        if not str(ctx.user.id) == "528746710042804247":
+            return await ctx.send("You are not authorized to use this command.", ephemeral=True)
+        await ctx.defer(ephemeral=True)
+        for i in range(30):
+            with Session() as session:
+                main_parent_ids = [1332506635775770624, 1332506742801694751, 1369779266945814569, 1369779329382482005, 1369803376598192128]
+                hooks_parent_ids = [1332506904840372237, 1332506935886348339, 1369779098246975638, 1369779125035991171]
+                hooks_2_parent_ids = [1369777536975900773, 1369777572577284167, 1369778911264641034, 1369778925919670432, 1369778911264641034]
+                hooks_3_parent_ids = [1369780179064590418, 1369780228930670705, 1369780244583547073, 1369780261000183848, 1369780569080332369]
+
+                all_parent_ids = main_parent_ids + hooks_parent_ids + hooks_2_parent_ids + hooks_3_parent_ids
+                try:
+                    parent_id = random.choice(all_parent_ids)
+                    parent_channel = await ctx.bot.fetch_channel(parent_id)
+                    num = 35
+                    channel_name = f"drops-{num}"
+                    while channel_name in [channel.name for channel in parent_channel.channels]:
+                        num += 1
+                        channel_name = f"drops-{num}"
+                    new_channel: GuildText = await parent_channel.create_text_channel(channel_name)
+                    logo_path = '/store/droptracker/disc/static/assets/img/droptracker-small.gif'
+                    avatar = interactions.File(logo_path)
+                    webhook: interactions.Webhook = await new_channel.create_webhook(name=f"DropTracker Webhooks ({num})", avatar=avatar)
+                    webhook_url = webhook.url
+                    db_webhook = Webhook(webhook_id=str(webhook.id), webhook_url=str(webhook_url))
+                    session.add(db_webhook)
+                    session.commit()
+                except Exception as e:
+                    await ctx.send(f"Couldn't create a new webhook:{e}",ephemeral=True)
+            pass
+        print("Created 30 new webhooks.")
+
+
+
+
 
 async def is_admin(ctx: BaseContext):
     perms_value = ctx.author.guild_permissions.value
@@ -895,6 +974,25 @@ async def is_admin(ctx: BaseContext):
     if perms_value & 0x00000008:  # 0x8 is the bit flag for administrator
         return True
     return False
+
+
+
+
+
+
+@slash_command(name="update_github",
+               description="Force an immediate refresh of the GitHub webhooks",
+               default_member_permissions=Permissions.ADMINISTRATOR)
+async def update_github_cmd(self, ctx: SlashContext):
+    GithubUpdater = GithubPagesUpdater()
+    await ctx.send("Attempting to update the GitHub webhooks...", ephemeral=True)
+    try:
+        await GithubUpdater.update_github_pages()
+        await asyncio.sleep(5)
+        await ctx.send("GitHub webhooks updated", ephemeral=True)
+    except Exception as e:
+        #
+        await ctx.send("An error occurred updating the GitHub webhooks", ephemeral=True)
 
 # Commands that help configure or change clan-specifics.
 class ClanCommands(Extension):
@@ -927,36 +1025,37 @@ class ClanCommands(Extension):
                                   date_added=datetime.now())
                 session.add(guild)
                 session.commit()
-            if guild.group_id != None:
+            else:
+                if guild.group_id != None:
                     return await ctx.send(f"This Discord server is already associated with a DropTracker group.\n" + 
                                         "If this is a mistake, please reach out in Discord", ephemeral=True)
+        
+            group = session.query(Group).filter(Group.wom_id == wom_id).first()
+            if group:
+                return await ctx.send(f"This WOM group (`{wom_id}`) already exists in our database.\n" + 
+                                    "Please reach out in our Discord server if this appears to be a mistake.",
+                                    ephemeral=True)
             else:
-                group = session.query(Group).filter(Group.wom_id == wom_id).first()
-                if group:
-                    return await ctx.send(f"This WOM group (`{wom_id}`) already exists in our database.\n" + 
-                                        "Please reach out in our Discord server if this appears to be a mistake.",
-                                        ephemeral=True)
-                else:
-                    group = Group(group_name=group_name,
-                                wom_id=wom_id,
-                                guild_id=guild.guild_id)
-                    session.add(group)
-                    print("Created a group")
-                    user.add_group(group)
-                    try:
-                        group_wom_ids = await fetch_group_members(wom_id)
-                        group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
-                        for member in group_members:
-                            if member.user:
-                                user: User = member.user
-                                user.add_group(group)
-                            member.add_group(group)
-                        total_members = len(group_wom_ids)
-                        total_tracked_already = len(group_members)
-                        session.commit()
-                    except Exception as e:
-                        print("Error fetching group members/assigning them to the group during group creation:", e)
-                        session.rollback()
+                group = Group(group_name=group_name,
+                            wom_id=wom_id,
+                            guild_id=guild.guild_id)
+                session.add(group)
+                print("Created a group")
+                user.add_group(group)
+                try:
+                    group_wom_ids = await fetch_group_members(wom_id)
+                    group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
+                    for member in group_members:
+                        if member.user:
+                            user: User = member.user
+                            user.add_group(group)
+                        member.add_group(group)
+                    total_members = len(group_wom_ids)
+                    total_tracked_already = len(group_members)
+                    session.commit()
+                except Exception as e:
+                    print("Error fetching group members/assigning them to the group during group creation:", e)
+                    session.rollback()
             guild.group_id = group.group_id
             embed = Embed(title="New group created",
                         description=f"Your Group has been created (ID: `{group.group_id}`) with `{total_tracked_already}` DropTracker users already being tracked.")
@@ -1105,9 +1204,6 @@ async def try_create_user(discord_id: str = None, username: str = None, ctx: Sla
             discord_id = ctx.user.id
     user = None
     try:
-        print("Username and discord_id", username, discord_id)
-        auth_token = token_hex(16)
-        auth_token = auth_token[16:]
         group = None
         if ctx:
             if ctx.guild_id:
@@ -1115,9 +1211,9 @@ async def try_create_user(discord_id: str = None, username: str = None, ctx: Sla
                 if guild_ob:
                     group = session.query(Group).filter(Group.group_id == guild_ob.group_id).first()
         if group:
-            new_user: User = User(auth_token=str(auth_token), discord_id=str(discord_id), username=str(username), groups=[group])
+            new_user: User = User(auth_token="", discord_id=str(discord_id), username=str(username), groups=[group])
         else:
-            new_user: User = User(auth_token=str(auth_token), discord_id=str(discord_id), username=str(username))
+            new_user: User = User(auth_token="", discord_id=str(discord_id), username=str(username))
         if new_user:
             session.add(new_user)
             session.commit()

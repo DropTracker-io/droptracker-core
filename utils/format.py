@@ -27,6 +27,12 @@ def format_time_since_update(datetime_object):
     return f"<t:{unix_timestamp}:R>"
 
 def format_number(number):
+    if not number:
+        return "0"
+    try:
+        number = number.decode('utf-8')
+    except:
+        pass
     try:
         number = int(float(number))
     except:
@@ -133,7 +139,7 @@ async def get_npc_image_url(npc_name, npc_id):
             
     
 
-def replace_placeholders(embed: interactions.Embed, value_dict: dict):
+def replace_placeholders(embed: interactions.Embed, value_dict: dict, global_server: bool = False):
 
     # Replace placeholders in the embed title
     #print("replace_placeholders called with value_dict:", value_dict)
@@ -153,7 +159,13 @@ def replace_placeholders(embed: interactions.Embed, value_dict: dict):
     
     # Replace placeholders in the embed description
     if embed.description:
-        embed.description = replace_placeholders_in_text(embed.description, value_dict)
+        if "{kc_received}" in embed.description:
+            if (value_dict.get("{kc_received}", None) == "n/a" or value_dict.get("{npc_name}", None) == "unknown"):
+                embed.description = None
+            else:
+                embed.description = replace_placeholders_in_text(embed.description, value_dict)
+        else:
+            embed.description = replace_placeholders_in_text(embed.description, value_dict)
     
     # Replace placeholders in the embed footer
     if embed.footer and embed.footer.text:
@@ -161,7 +173,11 @@ def replace_placeholders(embed: interactions.Embed, value_dict: dict):
     
     # Replace placeholders in each field's name and value
     if embed.fields:
-        for field in embed.fields:
+        for i, field in enumerate(embed.fields):
+            if global_server:
+                if "Group" in field.name:
+                    embed.fields.pop(i)
+                    continue
             if field.name:
                 field.name = replace_placeholders_in_text(field.name, value_dict)
             if field.value:
@@ -173,7 +189,12 @@ def replace_placeholders(embed: interactions.Embed, value_dict: dict):
     
     # Replace placeholders in the embed's thumbnail URL
     if embed.thumbnail and embed.thumbnail.url:
-        embed.thumbnail.url = replace_placeholders_in_text(embed.thumbnail.url, value_dict)
+        if "{item_id}" in embed.thumbnail.url:
+            item_id = value_dict.get("{item_id}", None)
+            if item_id: 
+                embed.thumbnail.url = f"https://static.runelite.net/cache/item/icon/{item_id}.png"
+        else:
+            embed.thumbnail.url = replace_placeholders_in_text(embed.thumbnail.url, value_dict)
     
     # Replace placeholders in the embed's image URL
     if embed.image and embed.image.url:

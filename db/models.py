@@ -68,6 +68,7 @@ class NotifiedSubmission(Base):
     channel_id = Column(String(35), nullable=False)
     message_id = Column(String(35))
     group_id = Column(Integer, ForeignKey('groups.group_id'), nullable=False)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=True)
     status = Column(String(15))  # 'sent', 'removed', or 'pending'
     date_added = Column(DateTime, index=True, default=func.now())
     date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
@@ -88,7 +89,8 @@ class NotifiedSubmission(Base):
     def __init__(self, channel_id: str, 
                  message_id: str, 
                  group_id: int,
-                 status: str, 
+                 status: str,
+                 player_id: int,
                  drop=None, 
                  clog=None, 
                  ca=None, 
@@ -104,6 +106,7 @@ class NotifiedSubmission(Base):
         self.status = status
         self.drop = drop
         self.clog = clog
+        self.player_id = player_id
         self.ca = ca
         self.pb = pb
 
@@ -205,7 +208,7 @@ class PersonalBestEntry(Base):
     team_size = Column(String(15), nullable=False, default="Solo")
     new_pb = Column(Boolean, default=False)
     image_url = Column(String(150), nullable=True)
-
+    date_added = Column(DateTime, nullable=True, default=func.now())
     player = relationship("Player", back_populates="pbs")
     notified_pb = relationship("NotifiedSubmission", back_populates="pb")
 
@@ -248,6 +251,7 @@ class Player(Base):
     user = relationship("User", back_populates="players")
     drops = relationship("Drop", back_populates="player")
     groups = relationship("Group", secondary=user_group_association, back_populates="players")
+    notifications = relationship("NotificationQueue", back_populates="player")
 
     def add_group(self, group):
         # Check if the association already exists by querying the user_group_association table
@@ -359,6 +363,7 @@ class Group(Base):
     group_embeds = relationship("GroupEmbed", back_populates="group")
     # One-to-One relationship with Guild
     guild = relationship("Guild", back_populates="group", uselist=False, cascade="all, delete-orphan")
+    notifications = relationship("NotificationQueue", back_populates="group")
 
     def add_player(self, player):
         # Check if the association already exists
@@ -437,6 +442,7 @@ class LootboardStyle(Base):
     __tablename__ = 'lootboards'
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255), nullable=False)
+    category = Column(String(255), nullable=False)
     description = Column(String(255), nullable=False)
     local_url = Column(String(255), nullable=False)
     date_added = Column(DateTime, default=func.now())
@@ -551,8 +557,28 @@ class Field(Base):
 
 class Webhook(Base):
     __tablename__ = 'webhooks'
-    webhook_id = Column(Integer, primary_key=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    webhook_id = Column(String(255), nullable=True)
     webhook_url = Column(String(255), unique=True)
+    date_added = Column(DateTime, default=func.now())
+    type = Column(String(255), nullable=True, default="core")
+    date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
+
+class BackupWebhook(Base):
+    __tablename__ = 'backup_webhooks'
+    id = Column(Integer, primary_key=True, autoincrement=True)  
+    webhook_id = Column(String(255), nullable=True)
+    webhook_url = Column(String(255), unique=True)
+    type = Column(String(255), nullable=True, default="core")
+    date_added = Column(DateTime, default=func.now())
+    date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
+
+class WebhookPendingDeletion(Base):
+    __tablename__ = 'webhook_pending_deletion'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    webhook_id = Column(String(255), nullable=True)
+    webhook_url = Column(String(255), unique=True)
+    channel_id = Column(String(255), nullable=True)
     date_added = Column(DateTime, default=func.now())
     date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
 
@@ -563,6 +589,13 @@ class NewWebhook(Base):
     date_added = Column(DateTime, default=func.now())
     date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
 
+
+class LBUpdate(Base):
+    __tablename__ = 'lb_updates'
+    id = Column(Integer, primary_key=True)
+    group_id = Column(Integer, nullable=False)
+    date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
+    
 
 
 class Log(Base):
@@ -726,6 +759,23 @@ class HistoricalMetrics(Base):
     value = Column(INTEGER(11), nullable=False)
     timestamp = Column(TIMESTAMP, server_default=text('current_timestamp()'))
 
+class NotificationQueue(Base):
+    __tablename__ = 'notification_queue'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    notification_type = Column(String(50), nullable=False)  # 'drop', 'pb', 'collection_log', etc.
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=False)
+    data = Column(Text, nullable=False)  # JSON data
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    processed_at = Column(DateTime, nullable=True)
+    status = Column(String(20), default='pending', nullable=False)  # 'pending', 'processing', 'sent', 'failed'
+    group_id = Column(Integer, ForeignKey('groups.group_id'), nullable=True)
+    error_message = Column(Text, nullable=True)
+    
+    # Relationships
+    player = relationship("Player", back_populates="notifications")
+    group = relationship("Group", back_populates="notifications")
+
 # Setup database connection and create tables
 engine = create_engine(
     f"mysql+pymysql://{DB_USER}:{DB_PASS}@localhost/data",
@@ -739,12 +789,17 @@ engine = create_engine(
 
 # Create a session factory that creates new sessions as needed
 Session = sessionmaker(bind=engine)
+xenforo_engine = create_engine(f'mysql+pymysql://{DB_USER}:{DB_PASS}@localhost:3306/xenforo', pool_size=20, max_overflow=10,
+                               pool_pre_ping=True,
+                               pool_timeout=30,
+                               pool_recycle=3600,
+                               isolation_level="READ COMMITTED")
+
+XenforoSession = sessionmaker(bind=xenforo_engine)
 
 # Create a thread-local session registry
 session = scoped_session(Session)
 
-# xenforo_engine = create_engine(f'mysql+pymysql://{DB_USER}:{DB_PASS}@localhost:3306/xf', pool_size=20, max_overflow=10)
-# xenforo_session = sessionmaker(bind=xenforo_engine)()
 
 # def sync_xf_groups():
 #     try:

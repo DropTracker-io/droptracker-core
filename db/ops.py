@@ -1,5 +1,9 @@
 import json
-from db.models import GroupPatreon, NotifiedSubmission, User, Group, Guild, Player, Drop, UserConfiguration, session, ItemList, GroupConfiguration, GroupEmbed, Field as EmbField, NpcList
+from db.models import (
+    GroupPatreon, NotifiedSubmission, Session, User, Group, Guild, Player, Drop, 
+    UserConfiguration, session, XenforoSession, ItemList, GroupConfiguration, 
+    GroupEmbed, Field as EmbField, NpcList, NotificationQueue, user_group_association
+)
 from dotenv import load_dotenv
 from sqlalchemy.dialects import mysql
 from sqlalchemy import func, text
@@ -10,19 +14,21 @@ import os
 import asyncio
 from datetime import datetime, timedelta
 from db.update_player_total import add_drop_to_ignore, process_drops_batch
+from db import models
+from db.xf.recent_submissions import create_xenforo_entry
 from utils.ranking.npc_ranker import check_npc_rank_change_from_drop
 from utils.ranking.rank_checker import check_rank_change_from_drop
 from utils.embeds import get_global_drop_embed
 from utils.download import download_player_image
-from utils.wiseoldman import fetch_group_members
+from utils.wiseoldman import fetch_group_members, check_user_by_id, check_user_by_username
 from utils.redis import RedisClient, calculate_rank_amongst_groups, get_true_player_total
 from utils.format import format_number, get_extension_from_content_type, parse_redis_data, parse_stored_sheet, replace_placeholders
 from utils.sheets.sheet_manager import SheetManager
 from utils.semantic_check import check_drop as verify_item_real
 from db.item_validator import check_item_against_monster
 import pymysql
-from utils.logger import LoggerClient
 from utils.redis import calculate_clan_overall_rank, calculate_global_overall_rank
+from db.app_logger import AppLogger
 
 load_dotenv()
 
@@ -30,7 +36,7 @@ insertion_lock = asyncio.Lock()
 
 sheets = SheetManager()
 
-logger = LoggerClient(token=os.getenv('LOGGER_TOKEN'))
+app_logger = AppLogger()
 
 MAX_DROP_QUEUE_LENGTH = os.getenv("QUEUE_LENGTH")
 
@@ -93,167 +99,6 @@ class DatabaseOperations:
             
             for group_id in player_groups:
                 ## Perform ranking checks for changes
-                
-                if player_id == 1:
-                    # print("Checking this drop for a rank change notification -- from @joelhalen")
-                    results = await check_rank_change_from_drop(player_id=player_id, drop_data=drop_data, specific_group_id=group_id)
-                    npc_results = await check_npc_rank_change_from_drop(player_id, drop_data, group_id)
-                    try:
-                        # print("Got results:", results)
-                        
-                        # Check if player improved globally or in any group
-                        player_improved_globally = results["player_global"]["rank_change"] > 0
-                        
-                        # Check if player improved in the specific group
-                        player_improved_in_group = False
-                        if group_id in results["player_in_group"]:
-                            player_improved_in_group = results["player_in_group"][group_id]["rank_change"] > 0
-                        
-                        if player_improved_globally or player_improved_in_group:
-                            if player.user_id != None:
-                                print("Player has a user ID")
-                                dm_setting = session.query(UserConfiguration).filter_by(user_id=player.user_id,
-                                                                                        config_key="dm_on_global_rank_change").first()
-                                player_min_rank_setting = session.query(UserConfiguration).filter_by(user_id=player.user_id,
-                                                                                        config_key="rank_change_dm_minimum_rank").first()
-                                player_min_changed_setting = session.query(UserConfiguration).filter_by(user_id=player.user_id,
-                                                                                        config_key="rank_change_dm_minimum_rank_change").first()
-                                print("Min rank setting:", player_min_rank_setting.config_value)
-                                print("Min rank change setting:", player_min_changed_setting.config_value)
-                                print("DM setting:", dm_setting.config_value)
-                                
-                                if dm_setting:
-                                    dm_setting = dm_setting.config_value
-                                    if str(dm_setting) == "1":
-                                        print("Checking if we should send a DM")
-                                        player_min_rank = int(player_min_rank_setting.config_value) if player_min_rank_setting else 0
-                                        player_min_change = int(player_min_changed_setting.config_value) if player_min_changed_setting else 0
-                                        
-                                        # Check if the rank change meets the minimum requirements
-                                        global_rank_meets_criteria = results["player_global"]["new_rank"] <= player_min_rank
-                                        global_change_meets_criteria = results["player_global"]["rank_change"] >= player_min_change
-                                        
-                                        
-                                        if global_rank_meets_criteria or global_change_meets_criteria:
-                                            print("Meets criteria for a DM")
-                                            user = session.query(User).filter_by(user_id=player.user_id).first()
-                                            user = await bot.fetch_user(user_id=user.discord_id)
-                                            
-                                            # Create a rich embed for the notification
-                                            embed = Embed(
-                                                title="🏆 Rank Improvement!",
-                                                description=f"Your recent drop has improved your position on the leaderboard!",
-                                                color=0x00FF00  # Green color for positive news
-                                            )
-                                            
-                                            # Add fields with detailed information
-                                            embed.add_field(
-                                                name="📈 Global Rank Change",
-                                                value=f"You climbed **{results['player_global']['rank_change']}** places!",
-                                                inline=False
-                                            )
-                                            
-                                            embed.add_field(
-                                                name="🔢 New Ranking",
-                                                value=f"Your new position: **#{results['player_global']['new_rank']}**\n"
-                                                    f"Previous position: #{results['player_global']['original_rank']}",
-                                                inline=True
-                                            )
-                                            
-                                            embed.add_field(
-                                                name="💧 Drop Value",
-                                                value=f"**{format_number(drop_value)}**",
-                                                inline=True
-                                            )
-                                            
-                                            # Add a footer with timestamp
-                                            embed.set_footer(text="Keep up the great work!")
-                                            embed.timestamp = datetime.now()
-                                            
-                                            # Send the embed
-                                            print("Sending DM to user:", user.username)
-                                            await user.send(embed=embed)
-                            else:
-                                print("Player " + player.player_name + " does not have a user ID.")
-                        # Check if group improved
-                        group_improved = False
-                        if group_id in results["group"]:
-                            group_improved = results["group"][group_id]["rank_change"] > 0
-                            
-                            if group_improved:
-                                enabled_notifications = session.query(GroupConfiguration).filter_by(group_id=group_id,
-                                                                                            config_key="send_rank_notifications").first()
-                                if enabled_notifications and enabled_notifications.config_value == "1":
-                                    group_min_rank_setting = session.query(GroupConfiguration).filter_by(group_id=group_id,
-                                                                                                    config_key="rank_change_notification_minimum_rank").first()
-                                    group_min_changed_setting = session.query(GroupConfiguration).filter_by(group_id=group_id,
-                                                                                                config_key="rank_change_notification_minimum_rank_change").first()
-                                    
-                                    group_min_rank = int(group_min_rank_setting.config_value) if group_min_rank_setting else 999999
-                                    group_min_change = int(group_min_changed_setting.config_value) if group_min_changed_setting else 1
-                                    
-                                    # Get the group's rank change and new rank
-                                    group_rank_change = results["group"][group_id]["rank_change"]
-                                    group_new_rank = results["group"][group_id]["new_rank"]
-                                    
-                                    if group_rank_change >= group_min_change and group_new_rank <= group_min_rank:
-                                        channel_id = session.query(GroupConfiguration).filter_by(group_id=group_id,
-                                                                                            config_key="channel_id_to_send_rank_notifications").first()
-                                        if channel_id:
-                                            channel_id = channel_id.config_value
-                                            try:
-                                                channel = await bot.fetch_channel(channel_id=channel_id)
-                                                if channel:
-                                                    if player.user_id:
-                                                        user = session.query(User).filter_by(user_id=player.user_id).first()
-                                                        player_string = f"<@{user.discord_id}>"
-                                                    else:
-                                                        player_string = f"{player.player_name}"
-                                                    
-                                                    # Create a rich embed for the notification
-                                                    embed = Embed(
-                                                        title="🏆 Rank Improvement!",
-                                                        description=f"{player_string}'s `{item_name}` drop just increased your group's rank to **#{group_new_rank}**!",
-                                                        color=0x00FF00  # Green color for positive news
-                                                    )
-                                                    
-                                                    # Add fields with detailed information
-                                                    embed.add_field(
-                                                        name="📈 Group Rank Change",
-                                                        value=f"You climbed **{group_rank_change}** places!",
-                                                        inline=False
-                                                    )
-                                                    
-                                                    group_name = session.query(Group.group_name).filter_by(group_id=group_id).first()
-                                                    group_name = group_name[0] if group_name else "Unknown"
-                                                    
-                                                    # Get player's rank in group
-                                                    player_in_group_rank = "N/A"
-                                                    if group_id in results["player_in_group"]:
-                                                        player_in_group_rank = results["player_in_group"][group_id]["new_rank"]
-                                                    
-                                                    embed.add_field(
-                                                        name="🔢 Player Rank Change",
-                                                        value=f"Globally: **#{results['player_global']['new_rank']}**\n"
-                                                            f"In {group_name}: **#{player_in_group_rank}**",
-                                                        inline=True
-                                                    )
-                                                    
-                                                    embed.add_field(
-                                                        name="<:GP:1159872376956272640> Drop Value <:GP:1159872376956272640>",
-                                                        value=f"**{format_number(drop_value)}**",
-                                                        inline=True
-                                                    )
-                                                    
-                                                    # Add a footer with timestamp
-                                                    embed.set_footer(text=global_footer)
-                                                    
-                                                    # Send the embed
-                                                    await channel.send(embed=embed)
-                                            except Exception as e:
-                                                print("Error fetching channel:", e)
-                    except Exception as e:
-                        print("Error checking rank change:", e)
                 group_config_key = f"group_config:{group_id}"
                 group_config = redis_client.client.hgetall(group_config_key)
                 if group_config:
@@ -281,6 +126,7 @@ class DatabaseOperations:
                     ## Manually process this instantly in the redis cache
                     try:
                         if drop_data.drop_id not in has_processed:
+                            print("Sending to batch proccessor...")
                             process_drops_batch([drop_data], session, from_submission=True)
                             has_processed[drop_data.drop_id] = True
                     except Exception as e:
@@ -296,6 +142,13 @@ class DatabaseOperations:
                         raw_embed = await self.get_group_embed(embed_type="drop", group_id=group_id)
                         item_name = session.query(ItemList.item_name).filter(ItemList.item_id == drop_data.item_id).first()
                         npc_name = session.query(NpcList.npc_name).filter(NpcList.npc_id == drop_data.npc_id).first()
+                        ## Add this to the XenForo table for recent submissions if it exceeds 5M gp
+                        if int(drop_data.value) * int(drop_data.quantity) > 5000000:
+                            ## Create a session for the operation
+                            try:
+                                await create_xenforo_entry(drop=drop_data)
+                            except Exception as e:
+                                print("Couldn't add the submission to XenForo:", e)
                         #print("replacing embed with values from dict")
                         partition = int(datetime.now().year * 100 + datetime.now().month)
                         # player_total_month = f"player:{player_id}:{partition}:total_loot"
@@ -409,7 +262,8 @@ class DatabaseOperations:
                                                                   message_id=message_id,
                                                                   group_id=group_id,
                                                                   status="sent",
-                                                                  drop=drop)
+                                                                  drop=drop,
+                                                                  player_id=player_id)
                                 session.add(notified_sub)
                                 session.commit()
                         except Exception as e:
@@ -427,14 +281,16 @@ class DatabaseOperations:
             else:
                 pass
 
-        
-
-        
-    async def create_drop_object(self, bot: interactions.Client, item_id, player_id, date_received, npc_id, value, quantity, image_url: str = "", authed: bool = False,
-                                attachment_url: str = "", attachment_type: str = "", add_to_queue: bool = True):
+    async def create_drop_object(self, item_id, player_id, date_received, npc_id, value, quantity, image_url: str = "", authed: bool = False,
+                                attachment_url: str = "", attachment_type: str = "", add_to_queue: bool = True, existing_session=None):
         """
         Create a drop and add it to the queue for inserting to the database.
         """
+        session = models.session
+        use_external_session = existing_session is not None
+        if use_external_session:
+            session = existing_session
+        #print("Create_drop_object called")
         if isinstance(date_received, datetime):
             # Convert to string in the required format without timezone and microseconds
             date_received_str = date_received.strftime('%Y-%m-%d %H:%M:%S')
@@ -499,10 +355,65 @@ class DatabaseOperations:
                 print(f"Couldn't download the image: {e}")
                 session.rollback()
 
-        # Check if the drop meets the criteria for sending a message
-        await self.check_drop(bot, newdrop)
+        # Create notification entries for this drop
+        drop_value = value * quantity
+        
+        # Get player groups and check if notification is needed
+        player_groups = session.query(Group).join(Group.players).filter(Player.player_id == player_id).all()
+        
+        # Get item and npc names for notifications
+        item_name = session.query(ItemList.item_name).filter(ItemList.item_id == item_id).first()
+        item_name = item_name[0] if item_name else "Unknown"
+        
+        npc_name_obj = session.query(NpcList.npc_name).filter(NpcList.npc_id == npc_id).first()
+        npc_name = npc_name_obj[0] if npc_name_obj else "Unknown"
+        
+        player = session.query(Player).filter(Player.player_id == player_id).first()
+        player_name = player.player_name if player else "Unknown"
+        
+        for group in player_groups:
+            group_id = group.group_id
+            
+            # Skip global group (ID 2) for notifications
+            if group_id == 2:
+                continue
+                
+            # Get minimum value to notify for this group
+            min_value_config = session.query(GroupConfiguration).filter(
+                GroupConfiguration.group_id == group_id,
+                GroupConfiguration.config_key == 'min_value_to_notify'
+            ).first()
+            
+            min_value_to_notify = int(min_value_config.config_value) if min_value_config else 2500000
+            
+            # Check if drop value exceeds minimum for notification
+            if drop_value >= min_value_to_notify:
+                # Create notification entry
+                notification_data = {
+                    'drop_id': newdrop.drop_id,
+                    'item_name': item_name,
+                    'npc_name': npc_name,
+                    'value': value,
+                    'quantity': quantity,
+                    'total_value': drop_value,
+                    'player_name': player_name,
+                    'player_id': player_id,
+                    'image_url': newdrop.image_url,
+                    'attachment_type': attachment_type
+                }
+                
+                notification = NotificationQueue(
+                    notification_type='drop',
+                    player_id=player_id,
+                    group_id=group_id,
+                    data=json.dumps(notification_data),
+                    status='pending',
+                    created_at=datetime.now()
+                )
+                session.add(notification)
+                session.commit()
 
-        return newdrop.drop_id
+        return newdrop
 
     async def create_user(self, auth_token, discord_id: str, username: str, ctx = None) -> User:
         """ 
@@ -512,20 +423,55 @@ class DatabaseOperations:
         try:
             session.add(new_user)
             session.commit()
-            await logger.log("access", f"{username} has been created with Discord ID {discord_id}", "create_user")
+            app_logger.log(log_type="new", data=f"{username} has been created with Discord ID {discord_id}", app_name="core", description="create_user")
             if ctx:
                 return await ctx.send(f"Your Discord account has been successfully registered in the DropTracker database!\n" +
                                 "You must now use `/claim-rsn` in order to claim ownership of your accounts.")
-            return new_user
+            default_config = session.query(UserConfiguration).filter(UserConfiguration.user_id == 1).all()
+    ## grab the default configuration options from the database
+            if new_user:
+                user = new_user
+            if not user:
+                user = session.query(User).filter(User.discord_id == discord_id).first()
+
+            new_config = []
+            for option in default_config:
+                option_value = option.config_value
+                default_option = UserConfiguration(
+                    user_id=user.user_id,
+                    config_key=option.config_key,
+                    config_value=option_value,
+                    updated_at=datetime.now()
+                )
+                new_config.append(default_option)
+            try:
+                session.add_all(new_config)
+                session.commit()
+                return new_user
+            except Exception as e:
+                session.rollback()
+            try:
+                droptracker_guild: interactions.Guild = await ctx.bot.fetch_guild(guild_id=1172737525069135962)
+                dt_member = droptracker_guild.get_member(member_id=discord_id)
+                if dt_member:
+                    registered_role = droptracker_guild.get_role(role_id=1210978844190711889)
+                    await dt_member.add_role(role=registered_role)
+            except Exception as e:
+                print("Couldn't add the user to the registered role:", e)
+            # xf_user = await xf_api.try_create_xf_user(discord_id=str(discord_id),
+            #                                 username=username,
+            #                                 auth_key=str(auth_token))
+            # if xf_user:
+            #     user.xf_user_id = xf_user['user_id']
         except Exception as e:
             session.rollback()
-            await logger.log("error", f"Couldn't create a new user with Discord ID {discord_id}: {e}", "create_user")
+            app_logger.log(log_type="error", data=f"Couldn't create a new user with Discord ID {discord_id}: {e}", app_name="core", description="create_user")
             if ctx:
                 return await ctx.send(f"`You don't have a valid account registered, " +
                             "and an error occurred trying to create one. \n" +
                             "Try again later, perhaps.`:" + e, ephemeral=True)
             if new_user:
-                await logger.log("access", f"{new_user.username} has been created with Discord ID {discord_id}", "create_user")
+                app_logger.log(log_type="new", data=f"{new_user.username} has been created with Discord ID {discord_id}", app_name="core", description="create_user")
                 return new_user
             else:
                 return None
@@ -544,15 +490,15 @@ class DatabaseOperations:
                 """ 
                     Only allow the change if the player isn't already claimed.
                 """
-                await logger.log("error", f"{user.username} tried to claim a rs account that was already associated with {player.user.username}'s account", "assign_rsn")
+                app_logger.log(log_type="error", data=f"{user.username} tried to claim a rs account that was already associated with {player.user.username}'s account", app_name="core", description="assign_rsn")
                 return False
             else:
                 player.user = user
                 session.commit()
-                await logger.log("access", f"{player.player_name} has been associated with {user.discord_id}", "assign_rsn")
+                app_logger.log(log_type="access", data=f"{player.player_name} has been associated with {user.discord_id}", app_name="core", description="assign_rsn")
         except Exception as e:
             session.rollback()
-            await logger.log("error", f"Couldn't associate {player.player_name} with {user.discord_id}: {e}", "assign_rsn")
+            app_logger.log(log_type="error", data=f"Couldn't associate {player.player_name} with {user.discord_id}: {e}", app_name="core", description="assign_rsn")
             return False
         finally:
             return True
@@ -598,9 +544,242 @@ class DatabaseOperations:
                 print("No embed found")
                 return None
         except Exception as e:
-            await logger.log("error", f"An error occurred trying to create a {embed_type} embed for group {group_id}: {e}", "get_group_embed")
+            app_logger.log(log_type="error", data=f"An error occurred trying to create a {embed_type} embed for group {group_id}: {e}", app_name="core", description="get_group_embed")
     
+    async def create_notification(self, notification_type, player_id, data, group_id=None):
+        """Create a notification queue entry"""
+        notification = NotificationQueue(
+            notification_type=notification_type,
+            player_id=player_id,
+            data=json.dumps(data),
+            group_id=group_id,
+            status='pending'
+        )
+        session.add(notification)
+        session.commit()
+        return notification.id
+    
+    async def create_player(self, player_name, account_hash):
+        """Create a player without Discord-specific functionality"""
+        account_hash = str(account_hash)
         
+        try:
+            # Check if player exists in WiseOldMan
+            wom_player, player_name, wom_player_id, log_slots = await check_user_by_username(player_name)
+            
+            if not wom_player or not wom_player.latest_snapshot:
+                return None
+            
+            player = session.query(Player).filter(Player.wom_id == wom_player_id).first()
+            if not player:
+                player = session.query(Player).filter(Player.account_hash == account_hash).first()
+            
+            if player is not None:
+                if player_name != player.player_name:
+                    old_name = player.player_name
+                    player.player_name = player_name
+                    player.log_slots = log_slots
+                    session.commit()
+                    
+                    # Create name change notification
+                    notification_data = {
+                        'player_name': player_name,
+                        'player_id': player.player_id,
+                        'old_name': old_name
+                    }
+                    await self.create_notification('name_change', player.player_id, notification_data)
+            else:
+                try:
+                    overall = wom_player.latest_snapshot.data.skills.get('overall')
+                    total_level = overall.level
+                except Exception as e:
+                    total_level = 0
+                
+                new_player = Player(
+                    wom_id=wom_player_id, 
+                    player_name=player_name, 
+                    account_hash=account_hash, 
+                    total_level=total_level,
+                    log_slots=log_slots
+                )
+                session.add(new_player)
+                session.commit()
+                
+                app_logger.log(log_type="access", data=f"{player_name} has been created with ID {new_player.player_id} (hash: {account_hash}) ", app_name="core", description="create_player")
+                
+                # Create new player notification
+                notification_data = {
+                    'player_name': player_name
+                }
+                await self.create_notification('new_player', new_player.player_id, notification_data)
+                
+                return new_player
+        except Exception as e:
+            app_logger.log(log_type="error", data=f"Error creating player: {e}", app_name="core", description="create_player")
+            return None
+        
+        return player
+    
+    async def process_drop(self, drop_data, message_id=None, message_logger=None):
+        """Process a drop submission and create notification entries if needed"""
+        npc_name = drop_data.get('npc_name')
+        item_name = drop_data.get('item_name')
+        value = drop_data.get('value')
+        item_id = drop_data.get('item_id')
+        quantity = drop_data.get('quantity')
+        auth_key = drop_data.get('auth_key')
+        player_name = drop_data.get('player_name')
+        account_hash = drop_data.get('account_hash')
+        attachment_url = drop_data.get('attachment_url')
+        attachment_type = drop_data.get('attachment_type')
+        
+        player_name = str(player_name).strip()
+        account_hash = str(account_hash)
+        
+        # Get or create player
+        player = session.query(Player).filter(Player.player_name.ilike(player_name)).first()
+        if not player:
+            player = await self.create_player(player_name, account_hash)
+            if not player:
+                return None
+        
+        player_id = player.player_id
+        
+        # Check NPC exists
+        npc = session.query(NpcList).filter(NpcList.npc_name == npc_name).first()
+        if not npc:
+            # Create notification for new NPC
+            notification_data = {
+                'npc_name': npc_name,
+                'player_name': player_name,
+                'item_name': item_name,
+                'value': value
+            }
+            
+            await self.create_notification('new_npc', player_id, notification_data)
+            return None
+        
+        npc_id = npc.npc_id
+        
+        # Check item exists
+        item = session.query(ItemList).filter(ItemList.item_id == item_id).first()
+        if not item:
+            # Create notification for new item
+            notification_data = {
+                'item_name': item_name,
+                'player_name': player_name,
+                'item_id': item_id,
+                'npc_name': npc_name,
+                'value': value
+            }
+            
+            await self.create_notification('new_item', player_id, notification_data)
+            return None
+        
+        # Create the drop entry
+        drop_value = int(value) * int(quantity)
+        
+        # Create the drop in the database
+        drop = Drop(
+            player_id=player_id,
+            npc_id=npc_id,
+            npc_name=npc_name,
+            item_id=item_id,
+            item_name=item_name,
+            value=value,
+            quantity=quantity,
+            date_added=datetime.now()
+        )
+        
+        session.add(drop)
+        session.commit()
+        
+        # Process image if provided
+        if attachment_url and attachment_type:
+            try:
+                # Set up the file extension and file name
+                file_extension = get_extension_from_content_type(attachment_type)
+                file_name = f"{item_id}_{npc_id}_{drop.drop_id}"
+                
+                if (value * quantity) > 50000:
+                    dl_path, external_url = await download_player_image(
+                        submission_type="drop",
+                        file_name=str(file_name),
+                        player=player,
+                        attachment_url=str(attachment_url),
+                        file_extension=str(file_extension),
+                        entry_id=str(drop.drop_id),
+                        entry_name=str(item_id),
+                        npc_name=str(npc_id)
+                    )
+                
+                    # Update the image URL in the drop entry
+                    drop.image_url = external_url
+                    session.commit()
+            except Exception as e:
+                app_logger.log(log_type="error", data=f"Couldn't download image: {e}", app_name="core", description="process_drop")
+        
+        # Get player groups
+        player_groups = session.query(Group).join(
+            user_group_association,
+            (user_group_association.c.group_id == Group.group_id) &
+            (user_group_association.c.player_id == player_id)
+        ).all()
+        
+        # Create notifications for each group if the drop meets criteria
+        for group in player_groups:
+            group_id = group.group_id
+            
+            # Skip global group (ID 2)
+            if group_id == 2:
+                continue
+                
+            # Check if drop meets minimum value for notification
+            min_value_config = session.query(GroupConfiguration).filter(
+                GroupConfiguration.group_id == group_id,
+                GroupConfiguration.config_key == 'min_value_to_notify'
+            ).first()
+            
+            min_value_to_notify = 1000000  # Default
+            if min_value_config:
+                min_value_to_notify = int(min_value_config.config_value)
+            
+            if drop_value >= min_value_to_notify:
+                notification_data = {
+                    'drop_id': drop.drop_id,
+                    'item_name': item_name,
+                    'npc_name': npc_name,
+                    'value': value,
+                    'quantity': quantity,
+                    'total_value': drop_value,
+                    'player_name': player_name,
+                    'player_id': player_id,
+                    'image_url': drop.image_url,
+                    'attachment_type': attachment_type
+                }
+                
+                await self.create_notification('drop', player_id, notification_data, group_id)
+        
+        return drop
+
+def get_formatted_name(player_name:str, group_id: int, existing_session = None):
+    use_existing_session = existing_session is not None
+    if use_existing_session:
+        session = existing_session
+    else:
+        session = session
+    player = session.query(Player).filter(Player.player_name == player_name).first()
+    formatted_name = f"[{player.player_name}](https://www.droptracker.io/players/{player.player_id}/view)"
+    if player.user:
+        user: User = session.query(User).filter(User.user_id == player.user.user_id).first()
+        if user:
+            if group_id == 2 and user.global_ping:
+                formatted_name = f"<@{user.discord_id}> (`{player.player_name}`)"
+            elif user.group_ping:
+                formatted_name = f"<@{user.discord_id}> (`{player.player_name}`)"
+    return formatted_name
+    
+
 async def notify_group(bot: interactions.Client, type: str, group: Group, member: Player):
     configured_channel = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group.group_id, GroupConfiguration.config_key == "channel_id_to_send_logs").first()
     if configured_channel and configured_channel.config_value and configured_channel.config_value != "":
@@ -621,7 +800,10 @@ async def notify_group(bot: interactions.Client, type: str, group: Group, member
             embed = Embed(title=f"<:leave:1213802516882530375> Member Removed",
                           description=f"{member.player_name} ({uid}) has been removed from your group during to a WiseOldMan refresh.",
                           color=0x00ff00)
-            embed.add_field(name="Total members:", value=f"{len(group.players)}", inline=True)
+            query = """SELECT COUNT(*) FROM user_group_association WHERE group_id = :group_id"""
+            total_players = session.execute(text(query), {"group_id": group.group_id}).fetchone()
+            total_players = total_players[0] if total_players else 0
+            embed.add_field(name="Total members:", value=f"{total_players}", inline=True)
             embed.set_footer(global_footer)
             await channel.send(embed=embed)
         else:
@@ -645,48 +827,58 @@ async def notify_group(bot: interactions.Client, type: str, group: Group, member
             print(f"Channel not found for ID: {channel_id}")
 
 async def update_group_members(bot: interactions.Client, forced_id: int = None):
-    print("Updating group member association tables...")
+    app_logger.log(log_type="access", data="Updating group member association tables...", app_name="core", description="update_group_members")
     if forced_id:
         group_ids = [forced_id]
     else:
-        group_ids = session.query(Group.wom_id).all()
+        # Use scalar_subquery to get just the values
+        group_ids = session.scalars(session.query(Group.wom_id)).all()
     total_updated = 0
     for wom_id in group_ids:
-        if type(wom_id) == list:
-            wom_id = wom_id[0]
+        # wom_id should now be a simple integer
+        #app_logger.log(log_type="access", data=f"Processing WOM ID: {wom_id}", app_name="core", description="update_group_members")
+        try:
+            wom_id = int(wom_id)
+        except (ValueError, TypeError) as e:
+            #app_logger.log(log_type="error", data=f"Error converting WOM ID to int: {e} - womid: {wom_id} (type: {type(wom_id)})", app_name="core", description="update_group_members")
+            continue
         group: Group = session.query(Group).filter(Group.wom_id == wom_id).first()
         if group:
             group_wom_ids = await fetch_group_members(wom_id)
-            
+            #app_logger.log(log_type="ex_info", data=f"Group WOM IDs: {group_wom_ids}", app_name="core", description="update_group_members")
+                
             # Only proceed with member updates if we successfully got the member list
             if group_wom_ids:
                 # Get current group members from database
                 group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
-                
                 # Remove members no longer in the group
+                app_logger.log(log_type="info", data=f"Found {len(group_members)} from our database in {group.group_name}", app_name="core", description="update_group_members")
                 for member in group.players:
                     if member.wom_id and member.wom_id not in group_wom_ids:
                         member = session.query(Player).filter(Player.player_id == member.player_id).first()
-                        await notify_group(bot, "player_removed", group, member)
-                        print(f"Removing {member.player_name} from {group.group_name}")
+                        app_logger.log(log_type="access", data=f"{member.player_name} has been removed from {group.group_name}", app_name="core", description="update_group_members")
                         member.remove_group(group)
+                        try:
+                            await notify_group(bot, "player_removed", group, member)
+                        except Exception as e:
+                            app_logger.log(log_type="error", data=f"Couldn't notify {group.group_name} that {member.player_name} has been removed: {e}", app_name="core", description="update_group_members")
                 
                 # Add new members to the group
                 for member in group_members:
                     if member not in group.players:
-                        print(f"Adding {member.player_name} to {group.group_name}")
                         if member.user:
                             member.user.add_group(group)
                         member.add_group(group)
                         member = session.query(Player).filter(Player.player_id == member.player_id).first()
-                        await notify_group(bot, "player_added", group, member)
+                        try:
+                            await notify_group(bot, "player_added", group, member)
+                        except Exception as e:
+                            pass
                 group.date_updated = func.now()
                 try:
                     session.commit()
-                    #await logger.log("access", f"Successfully updated {len(group_members)} group associations for {group.group_name} (#{group.group_id})", "update_group_members")
                 except Exception as e:
                     session.rollback()
-                    await logger.log("error", f"Couldn't update group member associations for {group.group_name} (#{group.group_id}): {e}", "update_group_members")
             else:
                 print(f"Failed to fetch member list for group {group.group_name} (WOM ID: {wom_id})")
         else:
@@ -701,8 +893,12 @@ async def update_group_members(bot: interactions.Client, forced_id: int = None):
                 player.add_group(session.query(Group).filter(Group.group_id == 2).first())
                 session.commit()
 
-async def associate_player_ids(player_wom_ids, before_date: datetime = None):
+async def associate_player_ids(player_wom_ids, before_date: datetime = None, session_to_use = None):
     # Query the database for all players' WOM IDs and Player IDs
+    if session_to_use is not None:
+        session = session_to_use
+    else:
+        session = models.session
     if before_date:
         all_players = session.query(Player.wom_id, Player.player_id).filter(Player.date_added < before_date).all()
     else:
@@ -717,4 +913,3 @@ async def associate_player_ids(player_wom_ids, before_date: datetime = None):
     matched_ids = [player['id'] for player in db_wom_to_ids if player['wom'] in player_wom_ids]
     
     return matched_ids
-
