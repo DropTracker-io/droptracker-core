@@ -14,6 +14,9 @@ from utils.ge_value import get_true_item_value
 from utils.format import convert_to_ms, convert_from_ms, get_true_boss_name
 from utils.redis import redis_client
 from db.app_logger import AppLogger
+from interactions import AutocompleteContext, BaseContext, GuildText, Permissions, SlashCommand, UnfurledMediaItem, PartialEmoji, ActionRow, Button, ButtonStyle, SlashCommandOption, check, is_owner, Extension, slash_command, slash_option, SlashContext, Embed, OptionType, GuildChannel, SlashCommandChoice
+from interactions.api.events import Startup, Component, ComponentCompletion, ComponentError, ModalCompletion, ModalError, MessageCreate
+from interactions.models import ContainerComponent, ThumbnailComponent, SeparatorComponent, UserSelectMenu, SlidingWindowSystem, SectionComponent, SeparatorComponent, TextDisplayComponent, ThumbnailComponent, MediaGalleryComponent, MediaGalleryItem, OverwriteType
 
 
 
@@ -40,6 +43,14 @@ class MessageHandler(Extension):
             message = event
         else:
             message = event.message
+        if message.channel.type == ChannelType.GUILD_TEXT:
+            if str(message.channel.id) == "1210765281371365477" or str(message.channel.id) == "1369771179094708254":
+                if "!welcome" in message.content.lower():
+                    await message.delete()
+                    await self.send_welcome_page(message)
+                elif "!invite" in message.content.lower():
+                    await message.delete()
+                    await self.send_invite_page(message)
         if message.author.system:  # or message.author.bot:
             return
         if message.author.id == bot.user.id:
@@ -370,3 +381,138 @@ class MessageHandler(Extension):
             else:
                 await ctx.send("You don't have a valid Patreon subscription, or you already have a group assigned to it.")
                 return
+            
+    async def send_invite_page(self, message: Message):
+        channel = await self.bot.fetch_channel(message.channel.id)
+        invite_components = [
+            ContainerComponent(
+                SeparatorComponent(divider=True),
+                SectionComponent(
+                    components=[
+                        TextDisplayComponent(
+                            content="## Invite me to your Discord Server",
+                        ),
+                    ],
+                    accessory=Button(
+                        label="Invite the DropTracker.io Bot",
+                        style=ButtonStyle.LINK,
+                        url="https://discord.com/oauth2/authorize?client_id=1172933457010245762&permissions=8&scope=bot"
+                    )
+                ),
+                SeparatorComponent(divider=True),
+            )
+        ]
+        components = invite_components
+        await channel.send(components=components)
+
+
+            
+
+    async def send_welcome_page(self, message: Message):
+        channel = await self.bot.fetch_channel(message.channel.id)
+        logo_media = UnfurledMediaItem(
+            url="https://www.droptracker.io/img/droptracker-small.gif"
+        )
+        welcome_page = [
+            ContainerComponent(
+                SeparatorComponent(divider=True),
+                TextDisplayComponent(
+                    content="# Welcome to the DropTracker.io Discord Server"
+                ),
+                SeparatorComponent(divider=True),
+                SectionComponent(
+                    components=[
+                        TextDisplayComponent(
+                            content="-# The DropTracker is an all-in-one loot and achievement" + 
+                            "tracking system, built for Old School RuneScape players & groups.\n" +
+                            "-# Our small team of developers work hard to provide a fun extension to the game:\n\n" + 
+                            "-# <@528746710042804247> - Primary Development\n" +
+                            "-# <@232236164776460288> - RuneLite plugin / community help\n\n" +
+                            "-# We are always looking for more help!\n" + 
+                            "-# If you are interested in joining the team, please reach out.",
+                        ),
+                    ],
+                    accessory=ThumbnailComponent(
+                        media=logo_media
+                    )
+                ),
+                SeparatorComponent(divider=True),
+                SectionComponent(
+                    components=[
+                        TextDisplayComponent(
+                            content="### How do I use this app?",
+                        ),
+                        TextDisplayComponent(
+                            content="-# We strive to provide the most simple integration for players and groups alike.\n" +
+                            "-# All you *need* to do is install our [RuneLite plugin](https://www.droptracker.io/runelite), and your drops & achievements should automatically be tracked by the <@1172933457010245762> Discord bot.\n" +
+                            "\n-# It is highly recommended, however, to enable **API connections** in our plugin configuration to ensure the most reliable tracking functionality."
+                        )
+                        
+                    ],
+                    accessory=ThumbnailComponent(
+                        media=UnfurledMediaItem(
+                            url="https://cdn2.steamgriddb.com/icon/1071f2d716fafebd789062219cec9c83/32/128x128.png"
+                        )
+                    )
+                ),
+                SeparatorComponent(divider=True),
+                SectionComponent(
+                    components=[
+                        TextDisplayComponent(
+                            content="### How does it work?",
+                        ),
+                        TextDisplayComponent(
+                            content=(
+                                "-# The DropTracker has two methods of tracking players using our plugin:\n" + 
+                                "-# - Discord Webhooks\n" + 
+                                "-# - API Connections (*preferred*)\n" +
+                                "-# When you receive a drop or complete an achievement, your client will auto" +
+                                "matically communicate this information with our system through whichever method you choose (by default, using Discord Webhooks).\n\n" +
+                                "-# Once it arrives on our server, we determine based on WiseOldMan and our registered group listings whether or not it qualifies to have a notification sent via Discord.\n"
+                            )
+                        ),
+                    ],
+                    accessory=Button(
+                            label="Read the Wiki",
+                            style=ButtonStyle.LINK,
+                            url="https://www.droptracker.io/wiki"
+                        ),
+                ),
+                SeparatorComponent(divider=True),
+
+                SectionComponent(
+                    components=[
+                        TextDisplayComponent(
+                            content="-# We also offer some additional features for [players who upgrade their accounts](https://www.droptracker.io/account/upgrades).\n" +
+                            "-# Please consider subscribing to support the continued development of the project.",
+                        ),
+                    ],
+                    accessory=Button(
+                        label="Upgrade",
+                        style=ButtonStyle.LINK,
+                        emoji=PartialEmoji(name="supporter", id=1263827303712948304),
+                        url="https://www.droptracker.io/account/upgrades"
+                    )
+                ),
+                SeparatorComponent(divider=True),
+                ActionRow(
+                        Button(
+                            label="View Player Setup/Info",
+                            style=ButtonStyle.GRAY,
+                            emoji=PartialEmoji(name="newmember", id=1263916335184744620),
+                            custom_id="player_setup_info"
+                        ),
+                        Button(
+                            label="View Clan Setup Guide",
+                            style=ButtonStyle.GRAY,
+                            emoji=PartialEmoji(name="developer", id=1263916346954088558),
+                            custom_id="clan_setup_info"
+                        ),
+                ),
+                SeparatorComponent(divider=True)
+            ),
+            
+        ]
+
+        components = welcome_page
+        await channel.send(components=components)

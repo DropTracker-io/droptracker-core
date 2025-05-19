@@ -145,6 +145,7 @@ async def on_startup(event: Startup):
     bot.load_extension("services.bot_state")
     bot.load_extension("services.message_handler")
     bot.load_extension("services.channel_names")
+    bot.load_extension("services.components")
     bot.load_extension("commands")
     bot.load_extension("tickets")
     print("Loaded services.")

@@ -6,7 +6,9 @@ import re
 from secrets import token_hex
 from data.submissions import try_create_player
 from db.clan_sync import insert_xf_group
-from interactions import AutocompleteContext, BaseContext, GuildText, Permissions, SlashCommand, Button, ButtonStyle, SlashCommandOption, check, is_owner, Extension, slash_command, slash_option, SlashContext, Embed, OptionType, GuildChannel, SlashCommandChoice
+from interactions import AutocompleteContext, BaseContext, GuildText, Permissions, SlashCommand, UnfurledMediaItem, PartialEmoji, ActionRow, Button, ButtonStyle, SlashCommandOption, check, is_owner, Extension, slash_command, slash_option, SlashContext, Embed, OptionType, GuildChannel, SlashCommandChoice
+from interactions.api.events import Startup, Component, ComponentCompletion, ComponentError, ModalCompletion, ModalError, MessageCreate
+from interactions.models import ContainerComponent, ThumbnailComponent, SeparatorComponent, UserSelectMenu, SlidingWindowSystem, SectionComponent, SeparatorComponent, TextDisplayComponent, ThumbnailComponent, MediaGalleryComponent, MediaGalleryItem, OverwriteType
 import interactions
 import time
 import subprocess
@@ -1107,6 +1109,13 @@ class ClanCommands(Extension):
             await ctx.send(f"You do not have the necessary permissions to use this command inside of this Discord server.\n" + 
                            "Please ask the server owner to execute this command.",
                            ephemeral=True)
+            
+    
+    
+
+    
+
+    
             
     @slash_command(name="set-lootboard-style",
                    description="Set the style of the lootboard for a group")
