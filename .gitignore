@@ -74,3 +74,4 @@ static/assets/exports/
 temp.py
 worker.py
 *.png
+comp_test.py
