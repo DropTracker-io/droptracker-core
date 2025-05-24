@@ -770,13 +770,14 @@ def get_formatted_name(player_name:str, group_id: int, existing_session = None):
         session = session
     player = session.query(Player).filter(Player.player_name == player_name).first()
     formatted_name = f"[{player.player_name}](https://www.droptracker.io/players/{player.player_id}/view)"
+    url_name = formatted_name
     if player.user:
         user: User = session.query(User).filter(User.user_id == player.user.user_id).first()
         if user:
             if group_id == 2 and user.global_ping:
-                formatted_name = f"<@{user.discord_id}> (`{player.player_name}`)"
+                formatted_name = f"<@{user.discord_id}> ({url_name})"
             elif user.group_ping:
-                formatted_name = f"<@{user.discord_id}> (`{player.player_name}`)"
+                formatted_name = f"<@{user.discord_id}> ({url_name})"
     return formatted_name
     
 

@@ -439,7 +439,7 @@ async def create_player(player_name, account_hash, existing_session=None):
     else:
         stored_account_hash = player.account_hash
         if str(stored_account_hash) != account_hash:
-            debug_print("Potential fake submission from", player_name + " with a changed account hash!!")
+            debug_print("Potential fake submission from" + player_name + " with a changed account hash!!")
         player_list[player_name] = player.player_id
     
     return player
@@ -951,7 +951,7 @@ async def pb_processor(pb_data, external_session=None):
                     player=player,
                     attachment_url=attachment_url,
                     file_extension=file_extension,
-                    entry_id=pb_entry.pb_id,
+                    entry_id=pb_entry.id,
                     entry_name=boss_name
                 )
                 
@@ -1025,6 +1025,7 @@ async def pb_processor(pb_data, external_session=None):
                     'image_url': pb_entry.image_url
                 }
                 print("Creating notification")
+                ## Check if we should send a notification for this npc
                 await create_notification('pb', player_id, notification_data, group_id, existing_session=session if use_external_session else None  )
                 if not has_xf_entry:
                     await create_xenforo_entry(drop=None, clog=None, personal_best=pb_entry, combat_achievement=None)
@@ -1121,7 +1122,7 @@ async def try_create_player(bot: interactions.Client, player_name, account_hash)
         else:
             stored_account_hash = player.account_hash
             if str(stored_account_hash) != account_hash:
-                debug_print("Potential fake submission from", player_name + " with a changed account hash!!")
+                debug_print("Potential fake submission from " + player_name + " with a changed account hash!!")
             player_list[player_name] = player.player_id
 
 

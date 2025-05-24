@@ -6,6 +6,7 @@ from interactions.api.events import MessageCreate, Component
 from db.models import Group, GroupPatreon, PlayerPet, session, Player, ItemList, PersonalBestEntry
 from db.update_player_total import update_player_in_redis
 from db.xf.recent_submissions import create_xenforo_entry
+from services.components import InfoActionRow
 from utils.embeds import update_boss_pb_embed
 from utils.messages import confirm_new_npc, confirm_new_item, name_change_message, new_player_message
 from utils.msg_logger import HighThroughputLogger
@@ -51,6 +52,18 @@ class MessageHandler(Extension):
                 elif "!invite" in message.content.lower():
                     await message.delete()
                     await self.send_invite_page(message)
+            if "!forcehof" in message.content.lower():
+                group_id = 19
+                hall_of_fame = self.bot.get_ext("services.hall_of_fame")
+                if hall_of_fame:
+                    try:
+                        group = session.query(Group).filter(Group.group_id == group_id).first()
+                        if not group:
+                            return await message.channel.send("Group not found.")
+                        await hall_of_fame._update_group_hof(group) 
+                    except Exception as e:
+                        print(f"Error updating boss component: {e}")
+                        pass
         if message.author.system:  # or message.author.bot:
             return
         if message.author.id == bot.user.id:
@@ -363,7 +376,7 @@ class MessageHandler(Extension):
 
     
     @listen(Component)
-    async def on_component(event: Component):
+    async def on_component(self, event: Component):
         ctx = event.ctx
         custom_id = ctx.custom_id
         if custom_id.startswith("patreon_group_"):
@@ -495,20 +508,7 @@ class MessageHandler(Extension):
                     )
                 ),
                 SeparatorComponent(divider=True),
-                ActionRow(
-                        Button(
-                            label="View Player Setup/Info",
-                            style=ButtonStyle.GRAY,
-                            emoji=PartialEmoji(name="newmember", id=1263916335184744620),
-                            custom_id="player_setup_info"
-                        ),
-                        Button(
-                            label="View Clan Setup Guide",
-                            style=ButtonStyle.GRAY,
-                            emoji=PartialEmoji(name="developer", id=1263916346954088558),
-                            custom_id="clan_setup_info"
-                        ),
-                ),
+                InfoActionRow,
                 SeparatorComponent(divider=True)
             ),
             

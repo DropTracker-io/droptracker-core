@@ -16,6 +16,7 @@ import platform
 from db.models import NpcList, Session, User, Group, Guild, Player, Drop, Webhook, session, UserConfiguration, GroupConfiguration
 from pb.leaderboards import create_pb_embeds, get_group_pbs
 from services import message_handler
+from services.components import help_components
 from utils.format import format_time_since_update, format_number, get_command_id, get_npc_image_url, replace_placeholders
 from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id, fetch_group_members
 from utils.redis import RedisClient
@@ -24,7 +25,7 @@ from lootboard.generator import generate_server_board, generate_timeframe_board
 from lootboard.player_board import generate_player_board
 from datetime import datetime, timedelta
 from utils.github import GithubPagesUpdater
-import asyncio
+import asyncio  
 from utils.sheets import sheet_manager
 #from utils.zohomail import send_email
 #from xf.xenforo import XenForoAPI
@@ -49,36 +50,35 @@ class UserCommands(Extension):
         if not user:
             await try_create_user(ctx=ctx)
         user = session.query(User).filter(User.discord_id == ctx.author.id).first()
-        help_embed = Embed(title="", description="", color=0x0ff000)
+        # help_embed = Embed(title="", description="", color=0x0ff000)
 
-        help_embed.set_author(name="Help Menu",
-                              url="https://www.droptracker.io/docs",
-                              icon_url="https://www.droptracker.io/img/droptracker-small.gif")
-        help_embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
-        help_embed.add_field(name="Need more help?",
-                            value=f"View our <#1317873428199637022> to find answers to common questions from our community, or reach out for <#1210765301042380820>")
-        help_embed.add_field(name="User Commands:",
-                             value="" +
-                                   f"- </accounts:{await get_command_id(self.bot, 'accounts')}> - View which RuneScape accounts are associated with your Discord account.\n" +
-                                   f"- </claim-rsn:{await get_command_id(self.bot, 'claim-rsn')}> - Claim a RuneScape character as one that belongs to you.\n")
-        help_embed.add_field(name="Group Leader Commands:",
-                             value="<:info:1263916332685201501> - `Note`: Creating groups **requires** a WiseOldMan group ID! *You can make a group without being in a clan*. [Visit the WOM website to create one](https://wiseoldman.net/groups/create).\n" +
-                                   f"- </create-group:{await get_command_id(self.bot, 'create-group')}> - Create a new group in the DropTracker database to track your clan's drops.\n" +
-                                   f"- </members:{await get_command_id(self.bot, 'members')}> - View a listing of the top members of your group in real-time.\n" +
-                                   f"<:info:1263916332685201501> - All 'Group Leader Commands' require **Administrator** privileges in the Discord server you use them inside of.", inline=False)
+        # help_embed.set_author(name="Help Menu",
+        #                       url="https://www.droptracker.io/docs",
+        #                       icon_url="https://www.droptracker.io/img/droptracker-small.gif")
+        # help_embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
+        # help_embed.add_field(name="Need more help?",
+        #                     value=f"View our <#1317873428199637022> to find answers to common questions from our community, or reach out for <#1210765301042380820>")
+        # help_embed.add_field(name="User Commands:",
+        #                      value="" +
+        #                            f"- </accounts:{await get_command_id(self.bot, 'accounts')}> - View which RuneScape accounts are associated with your Discord account.\n" +
+        #                            f"- </claim-rsn:{await get_command_id(self.bot, 'claim-rsn')}> - Claim a RuneScape character as one that belongs to you.\n")
+        # help_embed.add_field(name="Group Leader Commands:",
+        #                      value="<:info:1263916332685201501> - `Note`: Creating groups **requires** a WiseOldMan group ID! *You can make a group without being in a clan*. [Visit the WOM website to create one](https://wiseoldman.net/groups/create).\n" +
+        #                            f"- </create-group:{await get_command_id(self.bot, 'create-group')}> - Create a new group in the DropTracker database to track your clan's drops.\n" +
+        #                            f"- </members:{await get_command_id(self.bot, 'members')}> - View a listing of the top members of your group in real-time.\n" +
+        #                            f"<:info:1263916332685201501> - All 'Group Leader Commands' require **Administrator** privileges in the Discord server you use them inside of.", inline=False)
         
-        help_embed.add_field(name="Helpful Links",
-                             value="[Docs](https://www.droptracker.io/docs) | "+
-                             "[Join our Discord](https://www.droptracker.io/discord) | " +
-                             "[GitHub](https://www.github.io/joelhalen/droptracker-py) | " + 
-                             "[Patreon](https://www.patreon.com/droptracker)", inline=False)
-        int_latency_ms = int(ctx.bot.latency * 1000)
-        ext_latency_ms = await get_external_latency()
-        help_embed.add_field(name="Latency",
-                             value=f"Discord API: `{int_latency_ms} ms`\n" +
-                                   f"External: `{ext_latency_ms} ms`", inline=False)
-
-        return await ctx.send(embed=help_embed, ephemeral=True)
+        # help_embed.add_field(name="Helpful Links",
+        #                      value="[Docs](https://www.droptracker.io/docs) | "+
+        #                      "[Join our Discord](https://www.droptracker.io/discord) | " +
+        #                      "[GitHub](https://www.github.io/joelhalen/droptracker-py) | " + 
+        #                      "[Patreon](https://www.patreon.com/droptracker)", inline=False)
+        # int_latency_ms = int(ctx.bot.latency * 1000)
+        # ext_latency_ms = await get_external_latency()
+        # help_embed.add_field(name="Latency",
+        #                      value=f"Discord API: `{int_latency_ms} ms`\n" +
+        #                            f"External: `{ext_latency_ms} ms`", inline=False)
+        return await ctx.send(components=help_components, ephemeral=True)
     @slash_command(name="global-board",
                    description="View the current global loot leaderboard")
     async def global_lootboard_cmd(self, ctx: SlashContext):
@@ -896,6 +896,7 @@ class UserCommands(Extension):
                 await ctx.send(embed=embed)
 
     
+
     @slash_command(
         name="force_msg",
         description="Force a re-processing of a webhook message",
@@ -1079,7 +1080,12 @@ class ClanCommands(Extension):
                 if option.config_key == "clan_name":
                     option_value = group_name
                 if option.config_key == "authed_users":
-                    option_value = f'["{str(ctx.author.id)}"]'
+                    authed_list = []
+                    for member in ctx.guild.members:
+                        if member.has_permission(interactions.Permissions.ADMINISTRATOR):
+                            if str(member.id) != str(ctx.author.id):
+                                authed_list.append(member.id)
+                    option_value = f'["{authed_list}, {ctx.author.id}"]'
                 default_option = GroupConfiguration(
                     group_id=group.group_id,
                     config_key=option.config_key,
