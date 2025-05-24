@@ -2,8 +2,9 @@ from datetime import datetime, timedelta
 import interactions
 from interactions import Extension, slash_command
 
-from db.eventmodels import BoardGameModel, EventModel
-
+from db.models import session
+from utils.redis import redis_client
+from events.models import *
 
 
 class Commands(Extension):
@@ -35,7 +36,17 @@ class Commands(Extension):
             min_turns=1
         )
         # Save the event to the database
-        await self.bot.db.add(event)
-        await self.bot.db.commit()
+        session.add(event)
+        session.add(board_game)
+        session.commit()
 
         await ctx.send("Event created successfully!", ephemeral=True)
+
+async def create_event_task(ctx: interactions.SlashContext, *args, **kwargs):
+
+    ## Create a new event task
+
+    from db.models import User
+    user = session.query(User).filter(User.discord_id == str(ctx.author.id)).first()
+    if not user:
+        return await ctx.send("You must be registered to use this command. Please use `/register` first.", ephemeral=True)

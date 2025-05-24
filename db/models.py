@@ -789,6 +789,9 @@ engine = create_engine(
 
 # Create a session factory that creates new sessions as needed
 Session = sessionmaker(bind=engine)
+# Setup database connection and create tables
+
+
 xenforo_engine = create_engine(f'mysql+pymysql://{DB_USER}:{DB_PASS}@localhost:3306/xenforo', pool_size=20, max_overflow=10,
                                pool_pre_ping=True,
                                pool_timeout=30,

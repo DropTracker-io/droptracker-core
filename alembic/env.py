@@ -11,8 +11,19 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../'
 
 from db.base import Base
 import db.models  # Import to register models with Base
-from db.models import LootboardStyle
-import db.eventmodels  # Import to register event models with Base
+
+# Import event models to register them with Base metadata
+# Import individual modules to avoid executing package __init__ 
+from events.models.EventModel import EventModel
+from events.models.EventConfigModel import EventConfigModel
+from events.models.EventTeamModel import EventTeamModel
+from events.models.EventParticipant import EventParticipant
+from events.models.EventShopItem import EventShopItem
+from events.models.EventTeamInventory import EventTeamInventory
+from events.models.EventTeamCooldown import EventTeamCooldown
+from events.models.EventTeamEffect import EventTeamEffect
+from events.models.EventTask import EventTask
+from events.models.types.BoardGame import BoardGameModel
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

@@ -71,7 +71,8 @@ class ChannelNames(Extension):
                                 fin_text = template_str.replace("{month}", month_str).replace("{gp_amount}", format_number(group_total))
                                 await channel.edit(name=f"{fin_text}")
                         else:
-                            print("Channel is not found for group ID", channel_setting.group_id, "and config value", channel_setting.config_value)
+                            continue
+                            #print("Channel is not found for group ID", channel_setting.group_id, "and config value", channel_setting.config_value)
                     except Exception as e:
                         print("Couldn't edit the channel. e:", e)
             member_channel_id_configs = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_droptracker_users',

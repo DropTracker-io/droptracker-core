@@ -33,7 +33,11 @@ class HallOfFame(Extension):
             print("Update hall of fame called")
             groups_to_update = session.query(GroupConfiguration.group_id).filter(GroupConfiguration.config_key == "create_pb_embeds",
                                                                                  GroupConfiguration.config_value == "1").all()
+            group_ids = [group.group_id for group in groups_to_update]
+            print(f"Group IDs to update: {group_ids}")
             for group in groups_to_update:
+                if group.group_id == 2:
+                    continue
                 await self._update_group_hof(group)
             await asyncio.sleep(360)
 
@@ -217,7 +221,8 @@ class HallOfFame(Extension):
         if total_pbs > 0:
             if fastest_kill:
                 fastest_kill[3] = session.query(Player).filter(Player.player_id == fastest_kill[2]).first()
-                fastest_kill_part = f"-# • Fastest kill: `{convert_from_ms(fastest_kill[0])}` ({self._get_team_size_string(fastest_kill[1])})\n"
+                fastest_kill_part = (f"-# • Fastest kill: `{convert_from_ms(fastest_kill[0])}` ({self._get_team_size_string(fastest_kill[1])})\n" +
+                                     f"-# ↳ by {get_formatted_name(fastest_kill[3].player_name, group_id, session)}")
             else:
                 fastest_kill = [0, 0, 0, "No data"]
         partition = get_current_partition()
@@ -260,7 +265,6 @@ class HallOfFame(Extension):
             f"-# • Total PBs tracked: `{total_pbs}`\n" +
             f"{total_loot_part}" +
             f"{fastest_kill_part}" +
-            f"-# ↳ by {get_formatted_name(fastest_kill[3].player_name, group_id, session)}" +
             f"{most_loot_part}"
         )
         #print(f"Summary content: {summary_content}")

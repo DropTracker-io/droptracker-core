@@ -964,7 +964,7 @@ async def pb_processor(pb_data, external_session=None):
         elif downloaded:
             dl_path = image_url
     if pb_entry:
-        print("PB entry found, processing")
+        #print("PB entry found, processing")
         if pb_entry.personal_best < time_ms:
             old_time = pb_entry.personal_best
             pb_entry.personal_best = time_ms  
@@ -988,10 +988,10 @@ async def pb_processor(pb_data, external_session=None):
         session.add(pb_entry)
     
     session.commit()
-    print("Committed PB entry - personal best: " + str(is_personal_best))
+    #print("Committed PB entry - personal best: " + str(is_personal_best))
     # Create notification if it's a new PB
     if is_personal_best:
-        print("Is personal best, creating notification")
+        #print("Is personal best, creating notification")
         # Get player groups
         global_group = session.query(Group).filter(Group.group_id == 2).first()
         if player is None or not player:
