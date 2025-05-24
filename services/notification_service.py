@@ -645,7 +645,13 @@ class NotificationService:
                     notification.error_message = f"No channel configured for group {group_id}"
                     session.commit()
                     return
-            
+            hall_of_fame = self.bot.get_ext("services.hall_of_fame")
+            if hall_of_fame:
+                try:
+                    await hall_of_fame.update_boss_component(group_id, npc_id)
+                except Exception as e:
+                    print(f"Error updating boss component: {e}")
+                    pass
             # Get data
             player_name = data.get('player_name')
             boss_name = data.get('boss_name')

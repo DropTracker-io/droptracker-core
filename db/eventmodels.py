@@ -31,16 +31,19 @@ class EventModel(Base):
     :var author_id: The ID of the author of the event
     """
     __tablename__ = 'events'
-    id = Column(Integer, primary_key=True)
-    name = Column(String(255), nullable=False)
-    type = Column(String(255), nullable=False)
-    description = Column(Text, nullable=True)
-    start_date = Column(DateTime, nullable=False)
-    status = Column(String(255), nullable=False)
-    author_id = Column(Integer, ForeignKey('users.user_id'), nullable=False)
+    event_id = Column(Integer, primary_key=True)
     group_id = Column(Integer, ForeignKey('groups.group_id'), nullable=False)
-    update_number = Column(Integer, nullable=False, default=0)
+    author_id = Column(Integer, ForeignKey('users.user_id'), nullable=False)
+    event_type = Column(String(255), nullable=False)
     created_at = Column(TIMESTAMP, nullable=False, default=func.now())
+    status = Column(String(255), nullable=False)
+    banner_image = Column(String(255), nullable=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    start_date = Column(Integer, nullable=True)
+    end_date = Column(Integer, nullable=True)
+    max_participants = Column(Integer, nullable=True)
+    team_size = Column(Integer, nullable=True)
     updated_at = Column(TIMESTAMP, nullable=False, default=func.now(), onupdate=func.now())
     
     # The group relationship will be added in setup_relationships()
@@ -51,22 +54,17 @@ class EventModel(Base):
     teams = relationship("EventTeamModel", back_populates="event")
     items = relationship("EventItems", back_populates="event")
 
-
-class EventConfigModel(Base):
-    __tablename__ = 'event_configs'
-
-    id = Column(Integer, primary_key=True)
-    event_id = Column(Integer, ForeignKey('events.id'), nullable=False)
-    config_key = Column(String(255), nullable=False)
-    config_value = Column(String(255), nullable=True)
-    long_value = Column(LONGTEXT, nullable=True)
-    update_number = Column(Integer, nullable=False, default=0)
-    created_at = Column(TIMESTAMP, nullable=False, default=func.now())
-    updated_at = Column(TIMESTAMP, nullable=False, default=func.now(), onupdate=func.now())
     
-    # Relationships
-    event = relationship("EventModel", back_populates="configurations")
+class BoardGameModel(EventModel):
+    __tablename__ = 'board_game'
+    board_game_id = Column(Integer, primary_key=True)
+    die_sides = Column(Integer, default=6)
+    total_tiles = Column(Integer, default=100)
+    
+    event_id = Column(Integer, ForeignKey('events.id'), nullable=False)
 
+    #Relationships
+    event = relationship("EventModel", back_populates="board_game")
 
 class EventTeamModel(Base):
     __tablename__ = 'event_teams'

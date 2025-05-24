@@ -16,9 +16,10 @@ def get_encryption_key() -> str:
         else:
             raise Exception("Encryption key not found")
 
-def encrypt_webhook(webhook_url: str) -> str:
+def encrypt_webhook(webhook_url: str, encryption_key: str = None) -> str:
     try:
-        encryption_key = get_encryption_key()
+        if encryption_key is None:
+            encryption_key = get_encryption_key()
         f = Fernet(encryption_key)
         encrypted_webhook = f.encrypt(webhook_url.encode())
         # Return as base64 string for storage

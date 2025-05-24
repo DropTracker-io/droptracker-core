@@ -439,7 +439,7 @@ async def create_player(player_name, account_hash, existing_session=None):
     else:
         stored_account_hash = player.account_hash
         if str(stored_account_hash) != account_hash:
-            debug_print("Potential fake submission from", player_name + " with a changed account hash!!")
+            debug_print("Potential fake submission from" + player_name + " with a changed account hash!!")
         player_list[player_name] = player.player_id
     
     return player
@@ -865,39 +865,49 @@ async def pb_processor(pb_data, external_session=None):
     current_ms = pb_data.get('current_time_ms', 0)
     pb_ms = pb_data.get('personal_best_ms', 0)
     team_size = pb_data.get('team_size', 1)
-    is_personal_best = pb_data.get('is_pb', False)
+    is_personal_best = pb_data.get('is_new_pb', False)
     time_ms = current_ms if current_ms < pb_ms and current_ms != 0 else (pb_ms if pb_ms != 0 else current_ms)
     auth_key = pb_data.get('auth_key', '')
     attachment_url = pb_data.get('attachment_url', None)
     attachment_type = pb_data.get('attachment_type', None)
     downloaded = pb_data.get('downloaded', False)
     image_url = pb_data.get('image_url', None)
+    player = None
     has_xf_entry = False
+    print("Raw pb data: " + str(pb_data))
     dl_path = None
     npc: NpcList = session.query(NpcList.npc_id).filter(NpcList.npc_name == boss_name).first()
     npc_name = boss_name
-    if not npc:
-        try:
-            npc_id = await get_npc_id(npc)
-            if npc_id:
-                npc = NpcList(npc_id=npc_id, npc_name=npc)
-                session.add(npc)
-                session.commit()
-            npc_list[npc_name] = npc.npc_id
-        except Exception as e:
-            debug_print(f"NPC {npc} not found in database, aborting")
+    if npc_name in npc_list:
+        npc_id = npc_list[npc_name]
+    else:
+        npc = session.query(NpcList.npc_id).filter(NpcList.npc_name == npc_name).first()
+        if not npc:
+            npc_id = None
+            npc_obj = session.query(NpcList.npc_id).filter(NpcList.npc_name == npc).first()
+            if not npc_obj:
+                try:
+                    npc_id = await get_npc_id(npc)
+                    if npc_id:
+                        npc = NpcList(npc_id=npc_id, npc_name=npc)
+                        session.add(npc)
+                        session.commit()
+                    npc_list[npc_name] = npc.npc_id
+                except Exception as e:
+                    debug_print(f"NPC {npc} not found in database, aborting")
+                    return
+            if npc_name not in npc_list:
+                debug_print(f"NPC {npc} not found in database")    
+                notification_data = {
+                    'npc_name': npc_name,
+                    'player_name': player_name,
+                    'player_id': player_list[player_name]
+                }
+                await create_notification('new_npc', player_list[player_name], notification_data, existing_session=session if use_external_session else None)
             return
-    if npc_name not in npc_list:
-        debug_print(f"NPC {npc} not found in database")    
-        if player_name in player_list:
-            notification_data = {
-                'npc_name': npc_name,
-                'player_name': player_name,
-                'player_id': player_list[player_name]
-            }
-            await create_notification('new_npc', player_list[player_name], notification_data, existing_session=session if use_external_session else None)
-        return
-    npc_id = npc.npc_id
+        else:
+            npc_list[npc_name] = npc.npc_id
+            npc_id = npc.npc_id
     # Validate player
     if player_name not in player_list:
         player: Player = session.query(Player).filter(Player.player_name.ilike(player_name)).first()
@@ -929,7 +939,8 @@ async def pb_processor(pb_data, external_session=None):
     
     # Process image if available
     if is_personal_best:
-        if attachment_url and is_new_pb and not downloaded:
+        print("Is personal best, processing image")
+        if attachment_url and not downloaded:
             try:
                 file_extension = get_extension_from_content_type(attachment_type)
                 file_name = f"pb_{player_id}_{boss_name.replace(' ', '_')}_{int(time.time())}"
@@ -940,7 +951,7 @@ async def pb_processor(pb_data, external_session=None):
                     player=player,
                     attachment_url=attachment_url,
                     file_extension=file_extension,
-                    entry_id=pb_entry.pb_id,
+                    entry_id=pb_entry.id,
                     entry_name=boss_name
                 )
                 
@@ -948,22 +959,27 @@ async def pb_processor(pb_data, external_session=None):
                     pb_entry.image_url = dl_path
                     session.commit()
             except Exception as e:
+                print(f"Couldn't download PB image: {e}")
                 app_logger.log(log_type="error", data=f"Couldn't download PB image: {e}", app_name="core", description="pb_processor")
-    elif downloaded:
-        dl_path = image_url
+        elif downloaded:
+            dl_path = image_url
     if pb_entry:
+        print("PB entry found, processing")
         if pb_entry.personal_best < time_ms:
             old_time = pb_entry.personal_best
             pb_entry.personal_best = time_ms  
+            pb_entry.new_pb=is_personal_best
             pb_entry.kill_time = current_ms
             pb_entry.date_added = datetime.now()
             pb_entry.image_url = dl_path if dl_path else ""
             is_new_pb = True
     else:
+        print("PB entry not found, creating new entry")
         pb_entry = PersonalBestEntry(
             player_id=player_id,
             npc_id=npc_id,
             team_size=team_size,
+            new_pb=is_personal_best,
             personal_best=time_ms,
             kill_time=current_ms,
             date_added=datetime.now(),
@@ -972,27 +988,30 @@ async def pb_processor(pb_data, external_session=None):
         session.add(pb_entry)
     
     session.commit()
-
+    print("Committed PB entry - personal best: " + str(is_personal_best))
     # Create notification if it's a new PB
     if is_personal_best:
+        print("Is personal best, creating notification")
         # Get player groups
         global_group = session.query(Group).filter(Group.group_id == 2).first()
-        if not player:
+        if player is None or not player:
             player = session.query(Player).filter(Player.account_hash == account_hash).first()
+        if not player:
+            return
         if global_group not in player.groups:
             player.add_group(global_group)
             session.commit()
         player_groups = session.query(Group).join(Group.players).filter(Player.player_id == player_id).all()
         for group in player_groups:
             group_id = group.group_id
-            
+            print("Checking group: " + str(group))
             
             # Check if group has PB notifications enabled
             pb_notify_config = session.query(GroupConfiguration).filter(
                 GroupConfiguration.group_id == group_id,
                 GroupConfiguration.config_key == 'notify_pbs'
             ).first()
-            
+            print("PB notify config: " + str(pb_notify_config))
             if pb_notify_config and pb_notify_config.config_value.lower() == 'true' or int(pb_notify_config.config_value) == 1:
                 notification_data = {
                     'player_name': player_name,
@@ -1005,6 +1024,8 @@ async def pb_processor(pb_data, external_session=None):
                     'kill_time_ms': current_ms,
                     'image_url': pb_entry.image_url
                 }
+                print("Creating notification")
+                ## Check if we should send a notification for this npc
                 await create_notification('pb', player_id, notification_data, group_id, existing_session=session if use_external_session else None  )
                 if not has_xf_entry:
                     await create_xenforo_entry(drop=None, clog=None, personal_best=pb_entry, combat_achievement=None)
@@ -1101,7 +1122,7 @@ async def try_create_player(bot: interactions.Client, player_name, account_hash)
         else:
             stored_account_hash = player.account_hash
             if str(stored_account_hash) != account_hash:
-                debug_print("Potential fake submission from", player_name + " with a changed account hash!!")
+                debug_print("Potential fake submission from " + player_name + " with a changed account hash!!")
             player_list[player_name] = player.player_id
 
 

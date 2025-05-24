@@ -145,6 +145,8 @@ async def on_startup(event: Startup):
     bot.load_extension("services.bot_state")
     bot.load_extension("services.message_handler")
     bot.load_extension("services.channel_names")
+    bot.load_extension("services.components")
+    bot.load_extension("services.hall_of_fame")
     bot.load_extension("commands")
     bot.load_extension("tickets")
     print("Loaded services.")
@@ -219,14 +221,14 @@ async def lootboard_updates():
                         try:
                             message = await channel.fetch_message(message_id=group['message'])
                         except Exception as e:
-                            print("Couldn't fetch the message for this lootboard...:", e)
+                            #print("Couldn't fetch the message for this lootboard...:", e)
                             continue
                             
                     else:
                         try:
                             messages = await channel.fetch_messages(limit=15)
                         except Exception as e:
-                            print("Unable to fetch message history from channel id ", group['channel'], "e:", e)
+                            # print("Unable to fetch message history from channel id ", group['channel'], "e:", e)
                             continue
                         message_to_update = None
                         for message in messages:
@@ -435,6 +437,8 @@ async def main():
         
         # If we get here, tasks completed normally
         break
+
+
 
 
 if __name__ == "__main__":

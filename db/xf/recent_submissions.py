@@ -6,19 +6,22 @@ async def create_xenforo_entry(drop: Drop = None, clog: CollectionLogEntry = Non
         try:
         
             if drop:
-                raw_sql = """
-                    INSERT INTO dt_recent_submissions (type, item_id, npc_id, player_id, total_value, date)
-                    VALUES (:type, :item_id, :npc_id, :player_id, :total_value, :date)
-                """
-                params = {
-                    "type": "drop",
-                    "item_id": drop.item_id,
-                    "npc_id": drop.npc_id,
-                    "player_id": drop.player_id,
-                    "total_value": drop.value * drop.quantity,
-                    "date": drop.date_added.timestamp()
-                }
-                xenforo_session.execute(text(raw_sql), params)
+                if (drop.value * drop.quantity) > 5000000:
+                    raw_sql = """
+                        INSERT INTO dt_recent_submissions (type, item_id, npc_id, player_id, total_value, date)
+                        VALUES (:type, :item_id, :npc_id, :player_id, :total_value, :date)
+                    """
+                    params = {
+                        "type": "drop",
+                        "item_id": drop.item_id,
+                        "npc_id": drop.npc_id,
+                        "player_id": drop.player_id,
+                        "total_value": drop.value * drop.quantity,
+                        "date": drop.date_added.timestamp()
+                    }
+                    xenforo_session.execute(text(raw_sql), params)
+                else:
+                    return True
             elif clog:
                 raw_sql = """
                     INSERT INTO dt_recent_submissions (type, item_id, npc_id, player_id, date)
