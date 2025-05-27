@@ -214,6 +214,30 @@ async def get_collections_logged(username: str):
             return 0
     else:
         return -1
+    
+def get_player_total_kills(wom_id: int):
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(get_player_total_kills(wom_id), loop)
+        return future.result()
+    else:
+        return loop.run_until_complete(get_player_total_kills(wom_id))
+    
+async def get_player_total_kills(wom_id: int):
+    await client.start()
+    await limiter.wait()
+    player_data = await client.players.get_details(id=wom_id)
+    if player_data.is_ok:
+        details = player_data.unwrap()
+        snapshot = getattr(details, "latest_snapshot", None)
+        if snapshot is not None:
+            snapshot_data = getattr(snapshot, "data", None)
+            if snapshot_data is not None:
+                bosses = getattr(snapshot_data, "bosses", {})
+                for boss_name, boss_obj in bosses.items():
+                    kills = getattr(boss_obj, "kills", -1)
+                    if kills > 0:
+                        return kills
 
 def get_player_metric_sync(username: str, metric_name: str):
     """
@@ -236,6 +260,7 @@ async def get_player_metric(username: str, metric_name: str):
     await client.start()
     await limiter.wait()
     player_data = await client.players.get_details(username=username)
+    metric_name = metric_name.replace(" ", "_").replace("'", "")
     if player_data.is_ok:
         details = player_data.unwrap()
         snapshot = getattr(details, "latest_snapshot", None)
@@ -287,8 +312,8 @@ async def get_player_metric(username: str, metric_name: str):
                         "ehb": getattr(boss_obj, "ehb", 0)
                     }
         
-        if metric_name in boss_data:
-            return boss_data[metric_name]
+        if metric_name.lower() in [boss.lower() for boss in boss_data]:
+            return boss_data[metric_name.lower()]
             # Extract activity data - include all activities
         activity_data = {}
         if snapshot and snapshot_data:

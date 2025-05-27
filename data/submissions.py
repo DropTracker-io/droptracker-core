@@ -284,17 +284,13 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
         # Get player groups and check if notification is needed
         debug_print("Getting player groups")
         global_group = session.query(Group).filter(Group.group_id == 2).first()
-        if global_group not in player.groups:
+        player_groups = player.get_groups()
+        if global_group not in player_groups:
             player.add_group(global_group)
             session.commit()
-        player_groups = session.query(Group).join(Group.players).filter(Player.player_id == player_id).all()
-        debug_print(f"Player groups: {player_groups}")
-        if 2 not in [group.group_id for group in player_groups]:
-            global_group = session.query(Group).filter(Group.group_id == 2).first()
-            player_groups.append(global_group)
+        player_groups.add(global_group)
         for group in player_groups:
             group_id = group.group_id
-            
             # Get minimum value to notify for this group
             min_value_config = session.query(GroupConfiguration).filter(
                 GroupConfiguration.group_id == group_id,
@@ -445,13 +441,22 @@ async def create_player(player_name, account_hash, existing_session=None):
     return player
 
 stored_notifications = []
+recently_sent = []
 
 async def create_notification(notification_type, player_id, data, group_id=None, existing_session=None):
     """Create a notification queue entry"""
     global stored_notifications
+    global recently_sent
+    if data in recently_sent:
+        print(f"Skipped creating a duplicate notification...")
+        return
+    recently_sent.append(data)
     if len(stored_notifications) > 100:
         while len(stored_notifications) > 100:
             stored_notifications.pop()
+    if len(recently_sent) > 100:
+        while len(recently_sent) > 100:
+            recently_sent.pop()
     use_existing_session = existing_session is not None
     session = models.session
     if use_existing_session:
@@ -635,10 +640,11 @@ async def clog_processor(clog_data, external_session=None):
         print("New collection log -- Creating notification")
         # Get player groups
         global_group = session.query(Group).filter(Group.group_id == 2).first()
-        if global_group not in player.groups:
+        player_groups = player.get_groups()
+        if global_group not in player_groups:
             player.add_group(global_group)
             session.commit()
-        player_groups = session.query(Group).join(Group.players).filter(Player.player_id == player_id).all()
+        player_groups.add(global_group)
         for group in player_groups:
             group_id = group.group_id
             
@@ -779,11 +785,11 @@ async def ca_processor(ca_data, external_session=None):
         debug_print("New CA entry, creating notification")
         # Get player groups
         global_group = session.query(Group).filter(Group.group_id == 2).first()
-        if global_group not in player.groups:
+        player_groups = player.get_groups()
+        if global_group not in player_groups:
             player.add_group(global_group)
             session.commit()
-        player_groups = session.query(Group).join(Group.players).filter(Player.player_id == player_id).all()
-        debug_print("Player groups: " + str(player_groups))
+        player_groups.add(global_group)
         for group in player_groups:
             debug_print("Checking group: " + str(group))
             group_id = group.group_id
@@ -1001,7 +1007,7 @@ async def pb_processor(pb_data, external_session=None):
         if global_group not in player.groups:
             player.add_group(global_group)
             session.commit()
-        player_groups = session.query(Group).join(Group.players).filter(Player.player_id == player_id).all()
+        player_groups = player.get_groups() 
         for group in player_groups:
             group_id = group.group_id
             print("Checking group: " + str(group))
@@ -1016,6 +1022,7 @@ async def pb_processor(pb_data, external_session=None):
                 notification_data = {
                     'player_name': player_name,
                     'player_id': player_id,
+                    'pb_id': pb_entry.id,
                     'npc_id': npc_id,
                     'boss_name': boss_name,
                     'time_ms': time_ms,

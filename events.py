@@ -13,8 +13,10 @@ from interactions.api.events import MessageCreate, ComponentCompletion, ButtonPr
 from db.models import GroupPersonalBestMessage, ItemList, NpcList, Player, Session, Drop, CombatAchievementEntry, PersonalBestEntry, CollectionLogEntry, XenforoSession, session
 from db.ops import get_formatted_name
 from events.models import *
+from events.models.tasks import lifecycle
 from utils.format import format_number, get_current_partition
 from utils.redis import redis_client
+from events.cogs import *
 
 load_dotenv()
 

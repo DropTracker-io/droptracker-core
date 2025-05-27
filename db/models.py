@@ -273,20 +273,33 @@ class Player(Base):
             self.groups.remove(group)
             session.commit()
 
-    def get_current_total(self):
+    def get_groups(self) -> set:
+        groups = set()
+        for group in self.groups:
+            groups.add(group)
+        return groups
+
+    def get_current_total(self, npc_id: int = None, period: str = None):
         from utils.redis import RedisClient
         redis_client = RedisClient()
         try:
-            partition = datetime.now().year * 100 + datetime.now().month
-            total_loot_key = f"player:{self.player_id}:{partition}:total_loot"
-            # Get total items
-            total_loot = redis_client.client.get(total_loot_key)
-            #print("redis update total items stored:", total_items)
-            if total_loot:
-                total_loot = int(total_loot.decode('utf-8'))
+            if not period:
+                partition = datetime.now().year * 100 + datetime.now().month
             else:
-                total_loot = 0
-            return total_loot
+                partition = period
+            key = f"leaderboard:{partition}"
+            if npc_id:
+                key += f":{npc_id}"
+            currentTotalBytes = redis_client.client.zscore(key, self.player_id)
+            if currentTotalBytes is not None: 
+                try:
+                    if isinstance(currentTotalBytes, float) or isinstance(currentTotalBytes, int):
+                        return int(currentTotalBytes)
+                    else:
+                        return int(float(currentTotalBytes.decode('utf-8')))
+                except (ValueError, AttributeError):
+                    return 0
+            return 0
         except Exception as e:
             print(f"Error getting current total for player {self.player_id}: {e}")
             return 0
@@ -372,6 +385,17 @@ class Group(Base):
             # Only add the player if no association exists
             self.players.append(player)
             session.commit()
+
+    def get_player_count(self):
+        if self.players:
+            return len(self.players.all())
+        return 0
+
+    def get_players(self):
+        """
+        Returns a list of all players in the group
+        """
+        return [player for player in self.players]
 
     def get_current_total(self):
         try:

@@ -22,7 +22,7 @@ from events.models.EventShopItem import EventShopItem
 from events.models.EventTeamInventory import EventTeamInventory
 from events.models.EventTeamCooldown import EventTeamCooldown
 from events.models.EventTeamEffect import EventTeamEffect
-from events.models.EventTask import EventTask
+from events.models.tasks.EventTask import EventTask
 from events.models.types.BoardGame import BoardGameModel
 
 # this is the Alembic Config object, which provides

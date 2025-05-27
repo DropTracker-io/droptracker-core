@@ -1,4 +1,3 @@
-
 ## Libraries
 from quart import Quart, request, jsonify, abort
 from quart_jwt_extended import JWTManager, jwt_required, create_access_token
@@ -20,6 +19,8 @@ from data import submissions
 from data.submissions import ca_processor, clog_processor, drop_processor, pb_processor
 from db.models import Session, session, Player, Group, CollectionLogEntry, PersonalBestEntry, PlayerPet, ItemList, NpcList
 
+from worker import create_blueprint
+
 
 
 ## API Packages
@@ -32,6 +33,9 @@ load_dotenv()
 
 # Initialize Quart app
 app = Quart(__name__)
+
+# Register the blueprint
+app.register_blueprint(create_blueprint(), url_prefix='/')
 rate_limiter = RateLimiter(app)
 
 # Configure app
