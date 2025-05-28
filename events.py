@@ -21,7 +21,8 @@ from events.cogs import *
 load_dotenv()
 
 
-bot = interactions.Client(token=os.getenv("BOT_TOKEN"))
+bot = interactions.Client(token=os.getenv("EVENT_BOT_TOKEN"))
+bot.load_extension("events.cogs.event_commands")
 
 @interactions.listen(MessageCreate)
 async def on_message_create(event: MessageCreate):
@@ -31,7 +32,6 @@ async def on_message_create(event: MessageCreate):
 
 @listen(Startup)
 async def on_startup(event: Startup):
-    bot.load_extension("events.cogs.event_commands")
     print(f"Bot started.")
 
 

@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta
 import interactions
-from interactions import ButtonStyle, Extension, slash_command
+from interactions import ButtonStyle, Extension, OptionType, SlashCommandOption, slash_command
 from interactions import SlashContext, ContainerComponent, Button, SectionComponent, TextDisplayComponent, ActionRow, SeparatorComponent, ThumbnailComponent, UnfurledMediaItem, MediaGalleryComponent, MediaGalleryItem
 
 from db.models import GroupConfiguration, session
 from events.generators import BingoBoardGen
+from events.models.tasks import TaskType
 from utils.redis import redis_client
 from events.models import *
 
@@ -267,3 +268,115 @@ class Commands(Extension):
                 
                 await channel.send(message, components=components)
 
+    @slash_command(
+        name="task",
+        description="View detailed information about a specific task",
+        default_member_permissions=interactions.Permissions.SEND_MESSAGES,
+        options=[
+            SlashCommandOption(
+                name="task",
+                description="Enter the ID or name of the task you want to view",
+                type=OptionType.STRING,
+                required=True,
+                autocomplete=True
+            )
+        ]
+    )
+    async def task(self, ctx: SlashContext, task: str):
+        # Convert the task ID back to get the actual task
+        try:
+            task_id = int(task)
+            task_obj = session.query(BaseTask).filter(BaseTask.id == task_id).first()
+            if task_obj:
+                requirements_str = ""
+                match task_obj.task_type:
+                    case TaskType.ITEM_COLLECTION:
+                        if task_obj.task_config["requires"] == "set":
+                            if len(task_obj.task_config["sets"]) > 1:
+                                requirements_str = "-# Complete one of the following sets:\n"
+                            else:
+                                requirements_str = "-# Complete the following set:\n"
+                            sets: list[list[str]] = task_obj.task_config["sets"]
+                            for set in sets:
+                                if set == sets[-1]:
+                                    requirements_str += f"-# {', '.join(set)}"
+                                else:
+                                    requirements_str += f"-# {', '.join(set)} or\n"
+                        elif task_obj.task_config["requires"] == "any":
+                            if len(task_obj.task_config["items"]) > 1:
+                                requirements_str = "-# Obtain any of the following items:\n"
+                            else:
+                                requirements_str = "-# Obtain the following item:\n"
+                            items: list[str] = task_obj.task_config["items"]
+                            print("Got items for requires: any", items)
+                            for item in items:
+                                if item == items[-1]:
+                                    requirements_str += f"-# {item}"
+                                else:
+                                    requirements_str += f"-# {item} or\n"
+                        elif task_obj.task_config["requires"] == "all":
+                            items: list[str] = task_obj.task_config["required_items"]
+                            if len(items) > 1:
+                                requirements_str = "-# Obtain all of the following items:\n"
+                            else:
+                                requirements_str = "-# Obtain the following item:\n"
+                            for item in items:
+                                if item == items[-1]:
+                                    requirements_str += f"-# {item}"
+                        elif task_obj.task_config["requires"] == "points":
+                            requirements_str = f"-# Obtain {task_obj.task_config['pts_required']} points by receiving the following items:\n"
+                            items: list[tuple[str, int]] = task_obj.task_config["items"]
+                            for item, points in items:
+                                if item == items[-1]:
+                                    requirements_str += f"-# {item} ({points} points)"
+                                else:
+                                    requirements_str += f"-# {item} ({points} points)\n"
+                        else:
+                            raise ValueError(f"Invalid requires value: {task_obj.task_config['requires']}")
+
+                            
+                        components = [
+                            ContainerComponent(
+                                SeparatorComponent(divider=True),
+                        SectionComponent(
+                            components=[
+                                TextDisplayComponent(
+                                    content=f"### {task_obj.name}\n" +
+                                    f"-# {task_obj.description}\n\n" +
+                                    f"-# Difficulty: {task_obj.difficulty} \n" +
+                                    f"-# Task type: {task_obj.task_type}\n" +
+                                    f"-# Score awarded for completion: {task_obj.points}\n" +
+                                    f"-# Requirements: {requirements_str}\n" 
+                                ),
+                                
+                            ],
+                            accessory=ThumbnailComponent(
+                                    UnfurledMediaItem(
+                                        url="https://www.droptracker.io/img/droptracker-small.gif"
+                                    )
+                                )
+                            
+                        )
+                    )
+                ]
+                return await ctx.send(components=components)
+            else:
+                await ctx.send("Task not found", ephemeral=True)
+        except ValueError:
+            await ctx.send("Invalid task ID", ephemeral=True)
+
+    @task.autocomplete("task")
+    async def task_autocomplete(self, ctx: interactions.AutocompleteContext):
+        tasks = session.query(BaseTask).all()
+        
+        if ctx.input_text:
+            if ctx.input_text.isdigit():
+                tasks = [task for task in tasks if str(task.id).startswith(ctx.input_text)]
+            else:
+                tasks = [task for task in tasks if ctx.input_text.lower() in task.name.lower()]
+        
+        # Limit to 25 choices (Discord's limit)
+        tasks = tasks[:25]
+        
+        choices = [{"name": f"{task.name} (ID: {task.id})", "value": str(task.id)} for task in tasks]
+        await ctx.send(choices=choices)

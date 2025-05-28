@@ -287,7 +287,6 @@ class BingoBoard:
             'remaining_cells': total_cells - completed_cells
         }
     
-
     def set_cell_items_with_extras(self, row: int, col: int, item_ids, task_id: int, text: str, badge: str) -> bool:
         """
         Set a text in a cell.
