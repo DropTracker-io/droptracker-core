@@ -113,7 +113,8 @@ async def regenerate_board(bingo_game: BingoGameModel, team_id: int = None):
                         if task.task_id in location_config:
                             i,j = location_config[task.task_id]["loc"]
                             board.mark_cell_completed(i, j)
-    if bingo_game.event.configurations.get("show_free_space", False):
+    show_free_space = [config.config_value for config in bingo_game.event.configurations if config.config_key == "show_free_space"]
+    if show_free_space:
         board.draw_free_space_tile()
     if team_id:
         board.save(f"static/assets/img/bingo_board_{team_id}.png")
