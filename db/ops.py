@@ -914,3 +914,10 @@ async def associate_player_ids(player_wom_ids, before_date: datetime = None, ses
     matched_ids = [player['id'] for player in db_wom_to_ids if player['wom'] in player_wom_ids]
     
     return matched_ids
+
+event_session = None
+
+async def get_ev_session():
+    if event_session is None:
+        event_session = Session()
+    return event_session

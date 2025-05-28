@@ -25,15 +25,6 @@ ignored_list = [] # temporary implementation of a source blacklist
 
 global_footer = os.getenv('DISCORD_MESSAGE_FOOTER')
 
-async def send_update_message(bot: interactions.Client, total_added, current_id):
-    channel = await bot.fetch_channel(channel_id=1281734796116099155)
-    update_embed = interactions.Embed(title="New drops added",
-                                      description="A cycle of the redis cache update has completed.")
-    update_embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
-    update_embed.add_field(name=f"Added a total of {total_added} new entries.",
-                           value=f"Currently up to id #{current_id}")
-    await channel.send(embed=update_embed)
-
 bot = None
 
 async def message_processor(disc_bot: interactions.Client, event: interactions.events.MessageCreate):
@@ -148,50 +139,3 @@ async def joined_guild_msg(bot: interactions.Client, guild: interactions.Guild):
         await user.send(f"Hey, <@{owner_id}>!",embeds=[welcome_embed])
     except Exception as e:
         print("Couldn't DM the server owner when we joined a guild...")
-
-        
-async def send_lootboard_message(bot: interactions.Client, group_id, channel_id, message_id: str = None):
-    embed = interactions.Embed(title="Loot Leaderboard",
-                                        description=f"Powered by [DropTracker.io](https://www.droptracker.io/)",
-                                        color=0x00ff00)
-    embed.add_field(name="Track your drops automatically!",
-                    value="Download the [DropTracker RuneLite plugin]" + 
-                    "(https://www.droptracker.io/runelite)",
-                    inline=True)
-    embed.add_field(name=f"Need some help?",
-                    value=f"Use </help:{await get_command_id(bot, 'help')}>",
-                    inline=True)
-    embed.add_field(name=f"Links",
-                    value=f"[Docs](https://www.droptracker.io/docs)\n" + 
-                            "[Website](https://www.droptracker.io/)\n" + 
-                            f"[Discord](https://www.droptracker.io/discord)")
-    embed.set_footer(global_footer)
-    channel_object = await bot.fetch_channel(channel_id=channel_id)
-    if not message_id:
-        try:
-            
-            if channel_object:
-                lb_msg = await channel_object.send(embeds=embed)
-                new_msg_id = str(lb_msg.id)
-                cfg = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id).first()
-
-                if cfg:
-                    # Find the entry where config_key is 'lootboard_message_id'
-                    if cfg.config_key == 'lootboard_message_id':
-                        # Update the config_value with the new message ID
-                        cfg.config_value = new_msg_id
-                        
-                        # Commit the changes to the database
-                        session.commit()
-                        print(f'Updated lootboard_message_id to {new_msg_id}')
-                    else:
-                        print('config_key for lootboard_message_id not found')
-        except Exception as e:
-            print("Couldn't properly configure a new lootboard channel ID for the group: ", e)
-    else:
-        message = await channel_object.get_message(message_id=message_id)
-        try:
-            await message.edit(embeds=embed)
-        except Exception as e:
-            pass
-

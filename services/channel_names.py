@@ -71,7 +71,8 @@ class ChannelNames(Extension):
                                 fin_text = template_str.replace("{month}", month_str).replace("{gp_amount}", format_number(group_total))
                                 await channel.edit(name=f"{fin_text}")
                         else:
-                            print("Channel is not found for group ID", channel_setting.group_id, "and config value", channel_setting.config_value)
+                            continue
+                            #print("Channel is not found for group ID", channel_setting.group_id, "and config value", channel_setting.config_value)
                     except Exception as e:
                         print("Couldn't edit the channel. e:", e)
             member_channel_id_configs = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_droptracker_users',
@@ -81,9 +82,8 @@ class ChannelNames(Extension):
                 if channel_setting.group_id == 2:
                     total_members = session.query(Player.player_id).count()
                 else:
-                    total_members_query = """SELECT UNIQUE(player_id) FROM user_group_association WHERE group_id = :group_id"""
-                    total_members = session.execute(text(total_members_query), {"group_id": channel_setting.group_id}).fetchall()
-                    total_members = len(total_members)
+                    group = session.query(Group).filter(Group.group_id == channel_setting.group_id).first()
+                    total_members = group.get_player_count()
                 if channel_setting.config_value != "":
                     try:
                         channel = await bot.fetch_channel(channel_id=channel_setting.config_value)
@@ -93,7 +93,7 @@ class ChannelNames(Extension):
                         if template_str == "" or not template_str:
                             template_str = "{member_count} members"
                         if channel:
-                            await channel.edit(name=template_str.replace("{member_count}", str(total_members[0])))
+                            await channel.edit(name=template_str.replace("{member_count}", str(total_members)))
                     except Exception as e:
                         print("Couldn't edit the channel. e:", e)
             await asyncio.sleep(600)

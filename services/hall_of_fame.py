@@ -17,7 +17,7 @@ class HallOfFame(Extension):
     def __init__(self, bot: interactions.Client):
         self.bot = bot
         asyncio.create_task(self.update_hall_of_fame())
-        print("Hall of Fame service initialized.")
+        # print("Hall of Fame service initialized.")
     
 
     def _is_in_development(self):
@@ -30,9 +30,11 @@ class HallOfFame(Extension):
 
     async def update_hall_of_fame(self):
         while True:
-            print("Update hall of fame called")
+            # print("Update hall of fame called")
             groups_to_update = session.query(GroupConfiguration.group_id).filter(GroupConfiguration.config_key == "create_pb_embeds",
                                                                                  GroupConfiguration.config_value == "1").all()
+            group_ids = [group.group_id for group in groups_to_update]
+            # print(f"Group IDs to update: {group_ids}")
             for group in groups_to_update:
                 await self._update_group_hof(group)
             await asyncio.sleep(360)
@@ -55,14 +57,15 @@ class HallOfFame(Extension):
             if boss not in group_bosses:
                 group_bosses.append(boss)
         for boss in group_bosses:
-            print(f"Updating boss: {boss}")
+            # print(f"Updating boss: {boss}")
             boss = boss.replace('"', '')
             npc = session.query(NpcList).filter(NpcList.npc_name == boss).first()
             if npc:
                 components = await self._finalize_boss_components(npc, group)
                 await self._send_boss_components(group.group_id, npc, components)
             else:
-                print(f"NPC not found for {boss}")
+                # print(f"NPC not found for {boss}")
+                pass
 
     async def _should_send_hof(self, group_id: int, npc: NpcList):
         required_bosses: GroupConfiguration = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id, 
@@ -86,7 +89,8 @@ class HallOfFame(Extension):
             components = await self._finalize_boss_components(npc, group)
             await self._send_boss_components(group_id, npc, components)
         else:
-            print(f"No need to update boss component for {npc.npc_name}")
+            # print(f"No need to update boss component for {npc.npc_name}")
+            pass
 
     async def _send_boss_components(self, group_id: int, npc: NpcList, components: List[BaseComponent]):
         group = session.query(Group).filter(Group.group_id == group_id).first()
@@ -97,23 +101,38 @@ class HallOfFame(Extension):
             if existing_message:
                 message_id = existing_message.message_id
                 channel_id = existing_message.channel_id
+                should_update = False
+                update_container: ContainerComponent = components[0]
                 if message_id and message_id != "":
                     try:
                         channel = await self.bot.fetch_channel(channel_id)
                         if channel:
                             message = await channel.fetch_message(message_id)
-                            await message.edit(components=components)
-                            existing_message.date_updated = datetime.datetime.now()
-                            print(f"Message edited for {npc.npc_name}")
-                            await asyncio.sleep(5)
+                            if message.components:
+                                while not should_update:
+                                    for container in message.components:
+                                        if isinstance(container, ContainerComponent):
+                                            for i, component in enumerate(container.components):
+                                                if isinstance(component, type(update_container.components[i])):
+                                                    if not self._components_equal(component, update_container.components[i]):
+                                                        should_update = True
+                                        break
+                            if should_update:
+                                await message.edit(components=components)
+                                existing_message.date_updated = datetime.datetime.now()
+                                print(f"Message edited for {npc.npc_name}")
+                                await asyncio.sleep(5)
+                            else:
+                                print(f"No changes detected for {npc.npc_name} in group {group_id}")    
                             return True
                         else:
-                            print(f"Channel not found for {channel_id}")
+                            # print(f"Channel not found for {channel_id}")
+                            pass
                     except Exception as e:
-                        print(f"Error editing message: {e}")
-                        print(f"Error type: {type(e)}")
+                        # print(f"Error editing message: {e}")
+                        # print(f"Error type: {type(e)}")
                         import traceback
-                        print(f"Traceback: {traceback.format_exc()}")
+                        # print(f"Traceback: {traceback.format_exc()}")
                         return False
             elif channel_cfg and channel_cfg.config_value:
                 channel_id = channel_cfg.config_value
@@ -121,19 +140,19 @@ class HallOfFame(Extension):
                     channel = await self.bot.fetch_channel(channel_id)
                     if channel:
                         message = await channel.send(components=components)
-                        print(f"Message sent to channel for {npc.npc_name}")
+                        # print(f"Message sent to channel for {npc.npc_name}")
                         await asyncio.sleep(5)
                         session.add(GroupPersonalBestMessage(group_id=group_id, message_id=message.id, channel_id=channel_id, boss_name=npc.npc_name))
                         session.commit()
                         return True
                     else:
-                        print(f"Channel not found for {channel_id}")
+                        # print(f"Channel not found for {channel_id}")
                         return False
             else:
-                print(f"Channel not configured for group {group_id}")
+                # print(f"Channel not configured for group {group_id}")
                 return False
         else:
-            print(f"Group not found for {group_id}")
+            # print(f"Group not found for {group_id}")
             return False
 
     async def _finalize_boss_components(self, npc: NpcList, group: Group):
@@ -203,21 +222,22 @@ class HallOfFame(Extension):
         pbs = self._get_pbs(group_id, npc.npc_name)
         components = []
         fastest_kill = None
-        #print(f"Got PBs: {pbs}")
+        # print(f"Got PBs: {pbs}")
         fastest_kill_part = ""
         total_pbs = 0
         for team_size, entries in pbs.items():
-            #print(f"Team size: {team_size}")
+            # print(f"Team size: {team_size}")
             for pb in entries:
-                #print(f"PB: {pb}")
+                # print(f"PB: {pb}")
                 total_pbs += 1
                 if fastest_kill is None or pb.personal_best < fastest_kill[0]:
                     fastest_kill = [pb.personal_best, team_size, pb.player_id, None]
-        #print(f"Fastest kill: {fastest_kill}")
+        # print(f"Fastest kill: {fastest_kill}")
         if total_pbs > 0:
             if fastest_kill:
                 fastest_kill[3] = session.query(Player).filter(Player.player_id == fastest_kill[2]).first()
-                fastest_kill_part = f"-# • Fastest kill: `{convert_from_ms(fastest_kill[0])}` ({self._get_team_size_string(fastest_kill[1])})\n"
+                fastest_kill_part = (f"-# • Fastest kill: `{convert_from_ms(fastest_kill[0])}` ({self._get_team_size_string(fastest_kill[1])})\n" +
+                                     f"-# ↳ by {get_formatted_name(fastest_kill[3].player_name, group_id, session)}")
             else:
                 fastest_kill = [0, 0, 0, "No data"]
         partition = get_current_partition()
@@ -227,7 +247,7 @@ class HallOfFame(Extension):
         else:
             key = f"leaderboard:npc:{npc.npc_id}:{partition}"
             all_key = f"leaderboard:npc:{npc.npc_id}"
-        #print(f"Using key: {key}")
+        # print(f"Using key: {key}")
         most_loot_month = redis_client.client.zrevrange(key, 0, 4, withscores=True)
         most_loot_part = ""
         total_loot_part = ""
@@ -238,7 +258,7 @@ class HallOfFame(Extension):
                 player = session.query(Player).filter(Player.player_id == loot[0]).first()
                 month_looters.append([loot[0], 1, loot[1], player])
             most_loot = month_looters[0]
-            #print(f"Most loot: {most_loot}")
+            # print(f"Most loot: {most_loot}")
             
             most_loot_alltime = redis_client.client.zrevrange(all_key, 0, 4, withscores=True)
             if len(most_loot_alltime) > 1:
@@ -246,9 +266,9 @@ class HallOfFame(Extension):
                 alltime_most_loot = [most_loot_alltime[0], 1, most_loot_alltime[1], None]
             else:
                 alltime_most_loot = [0, 0, 0, "No data"]
-            #print(f"All-time most loot: {alltime_most_loot}")
+            # print(f"All-time most loot: {alltime_most_loot}")
             alltime_most_loot[3] = session.query(Player).filter(Player.player_id == alltime_most_loot[0]).first()
-            #print(f"All-time most loot player: {alltime_most_loot[3]}")
+            # print(f"All-time most loot player: {alltime_most_loot[3]}")
             total_loot = redis_client.zsum(all_key)
             most_loot_part = (f"\n-# • Most Loot: `{format_number(most_loot[2])}` gp (this month)\n" +
                 f"-# ↳ by {get_formatted_name(most_loot[3].player_name, group_id, session)}")
@@ -260,10 +280,9 @@ class HallOfFame(Extension):
             f"-# • Total PBs tracked: `{total_pbs}`\n" +
             f"{total_loot_part}" +
             f"{fastest_kill_part}" +
-            f"-# ↳ by {get_formatted_name(fastest_kill[3].player_name, group_id, session)}" +
             f"{most_loot_part}"
         )
-        #print(f"Summary content: {summary_content}")
+        # print(f"Summary content: {summary_content}")
         
         # summary_component = TextDisplayComponent(content=summary_content)
         # print(f"Summary component type: {type(summary_component)}")
@@ -293,7 +312,7 @@ class HallOfFame(Extension):
             team_size_string = self._get_team_size_string(team_size)
             team_size_component = TextDisplayComponent(content=f"-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + 
                                                        f"-# **{team_size_string}**")
-            #print(f"Team size component type: {type(team_size_component)}")
+            # print(f"Team size component type: {type(team_size_component)}")
             components.append(team_size_component)
             pb_text = ""
             for i, pb in enumerate(entries):
@@ -303,8 +322,8 @@ class HallOfFame(Extension):
                 pb_text += f"-# {i + 1} - `{convert_from_ms(pb.personal_best)}` - {get_formatted_name(pb.player.player_name, group_id, session)}\n"
             pb_component = TextDisplayComponent(content=pb_text)
             components.append(pb_component)
-        #print(f"Final components list: {components}")
-        #print(f"Component types: {[type(c) for c in components]}")
+        # print(f"Final components list: {components}")
+        # print(f"Component types: {[type(c) for c in components]}")
         return components, summary_content
     
     def _get_team_size_string(self, team_size: int):
@@ -324,24 +343,27 @@ class HallOfFame(Extension):
         """
         npc_ids = session.query(NpcList.npc_id).filter(NpcList.npc_name == npc_name).all()
         npc_ids = [npc_id[0] for npc_id in npc_ids]
-        player_ids = session.query(text("player_id FROM user_group_association WHERE group_id = :group_id")).params(group_id=group_id).all()
-        player_ids = [player_id[0] for player_id in player_ids]
+        group = session.query(Group).filter(Group.group_id == group_id).first()
+        players = group.get_players()
+        player_ids = [player.player_id for player in players]
+        # player_ids = session.query(text("player_id FROM user_group_association WHERE group_id = :group_id")).params(group_id=group_id).all()
+        # player_ids = [player_id[0] for player_id in player_ids]
         ## Remove duplicates
         player_ids = list(set(player_ids))
         pbs = session.query(PersonalBestEntry).filter(PersonalBestEntry.player_id.in_(player_ids), PersonalBestEntry.npc_id.in_(npc_ids)).all()
         personal_bests = {}
-        print(f"Got {len(pbs)} pbs")
+        # print(f"Got {len(pbs)} pbs")
         unique_team_sizes = set()
         for pb in pbs:
             if pb.team_size not in unique_team_sizes:
                 unique_team_sizes.add(pb.team_size)
-        print(f"Unique team sizes: {unique_team_sizes}")
+        # print(f"Unique team sizes: {unique_team_sizes}")
         if len(unique_team_sizes) > 5:
             ## Remove the largest team sizes if there are more than 5
             pbs = [pb for pb in pbs if pb.team_size in ["Solo", "2", 2, "3", 3, "4", 4, "5", 5]]
         for pb in pbs:
             if pb.team_size not in personal_bests:
-                print(f"Adding team size: {pb.team_size}")
+                # print(f"Adding team size: {pb.team_size}")
                 personal_bests[pb.team_size] = []
             personal_bests[pb.team_size].append(pb)
         for team_size in personal_bests:
@@ -359,5 +381,52 @@ class HallOfFame(Extension):
         npc_name = npc.npc_name.replace(" ", "-")
         return f"https://www.droptracker.io/npcs/{npc_name}.{npc.npc_id}/view"
 
+    def _components_equal(self, component1, component2):
+        """
+        Compare two components for equality, handling common differences like trailing whitespace
+        """
+        if type(component1) != type(component2):
+            return False
+        
+        dict1 = component1.__dict__.copy()
+        dict2 = component2.__dict__.copy()
+        
+        # Recursively normalize the dictionaries
+        self._normalize_dict(dict1)
+        self._normalize_dict(dict2)
+        
+        return dict1 == dict2
     
-    
+    def _normalize_dict(self, d):
+        """
+        Recursively normalize a dictionary by stripping trailing whitespace from strings
+        and handling nested structures
+        """
+        for key, value in d.items():
+            if isinstance(value, str):
+                # Strip trailing whitespace from strings
+                d[key] = value.rstrip()
+            elif isinstance(value, list):
+                # Handle lists of components or other objects
+                for i, item in enumerate(value):
+                    if hasattr(item, '__dict__'):
+                        # If it's an object with attributes, normalize its dict
+                        item_dict = item.__dict__.copy()
+                        self._normalize_dict(item_dict)
+                        # Update the item's dict in place
+                        for k, v in item_dict.items():
+                            setattr(item, k, v)
+                    elif isinstance(item, str):
+                        # If it's a string in the list, strip it
+                        value[i] = item.rstrip()
+            elif isinstance(value, dict):
+                # Recursively handle nested dictionaries
+                self._normalize_dict(value)
+            elif hasattr(value, '__dict__'):
+                # Handle nested objects with their own attributes
+                nested_dict = value.__dict__.copy()
+                self._normalize_dict(nested_dict)
+                # Update the nested object's attributes
+                for k, v in nested_dict.items():
+                    setattr(value, k, v)
+

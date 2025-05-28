@@ -19,6 +19,12 @@ app_logger = AppLogger()
 global_footer = os.getenv('DISCORD_MESSAGE_FOOTER')
 db = DatabaseOperations()
 
+
+sent_drops = {}
+sent_pbs = {}
+sent_cas = {}
+sent_clogs = {}
+
 class NotificationService:
     def __init__(self, bot: interactions.Client, db_ops: DatabaseOperations):
         self.bot = bot
@@ -77,11 +83,12 @@ class NotificationService:
         if og_length > 0:
             print("Finished processing pending notification data.")
 
-    async def process_notification(self, notification):
+    async def process_notification(self, notification: NotificationQueue):
         """Process a single notification based on its type"""
         try:
             data = json.loads(notification.data)
             notification_type = notification.notification_type
+            
             
             if notification_type == 'drop':
                 await self.send_drop_notification(notification, data)
@@ -320,6 +327,16 @@ class NotificationService:
             group_id = notification.group_id
             player_id = notification.player_id
             print(f"Got raw drop notification data: {data}")
+            drop_id = data.get('drop_id')
+            if notification.group_id not in sent_drops:
+                sent_drops[notification.group_id] = []
+            if drop_id not in sent_drops[notification.group_id]:
+                sent_drops[notification.group_id].append(drop_id)
+                session.delete(notification)
+                print(f"Deleted duplicated notification for group {group_id} and drop {drop_id}")
+                session.commit()
+                return
+
             
             
             # Get channel ID for this group
@@ -694,15 +711,24 @@ class NotificationService:
             group_placement = None
             global_placement = None
             #print("Assembling rankings....")
-            for idx, entry in enumerate(group_ranks, start=1): 
-                if entry.personal_best == current_user_best_ms:
-                    group_placement = idx
-                    break
-            if global_placement is None:
-                global_placement = "`?`"
+            ## For some reason, players occassionally don't appear in group rank listings...
+            if str(player_id) not in [str(entry.player_id) for entry in group_ranks]:
+                # Find where this time would be inserted in the sorted list
+                group_placement = len(group_ranks) + 1  # Default to last place (worst time)
+                for idx, entry in enumerate(group_ranks, start=1):
+                    if current_user_best_ms <= entry.personal_best:
+                        # Current user's time is faster or equal, so they rank at this position
+                        group_placement = idx
+                        break
+            else:
+                for idx, entry in enumerate(group_ranks, start=1): 
+                    if entry.personal_best == current_user_best_ms:
+                        group_placement = idx
+                        break
             ## player's rank globally
+            global_placement = len(all_ranks) + 1  # Default to last place (worst time)
             for idx, entry in enumerate(all_ranks, start=1):
-                if entry.personal_best == current_user_best_ms:
+                if current_user_best_ms <= entry.personal_best:
                     global_placement = idx
                     break
             if group_placement is None:
@@ -955,4 +981,43 @@ class NotificationService:
         if embed.fields:
             embed.fields = [field for field in embed.fields if "Group" not in field.name]
         return embed
-    # Add other notification handlers as needed for PBs, collection log entries, etc. 
+    
+    async def _is_not_sent(self, notification: NotificationQueue, data: dict):
+        ## Ensure that we don't double-send a group notification for the same submission
+        if data.get('drop_id', None) is not None:
+            if notification.group_id not in sent_drops:
+                sent_drops[notification.group_id] = []
+            if data.get('drop_id') not in sent_drops[notification.group_id]:
+                sent_drops[notification.group_id].append(data.get('drop_id'))
+                return True
+            else:
+                session.delete(notification)
+                session.commit()
+                return False
+        if data.get('pb_id', None) is not None:
+            if notification.group_id not in sent_pbs:
+                sent_pbs[notification.group_id] = []
+            if data.get('pb_id') not in sent_pbs[notification.group_id]:
+                sent_pbs[notification.group_id].append(data.get('pb_id'))
+                return True
+            else:
+                session.delete(notification)
+                session.commit()
+                return False
+        if data.get('ca_id', None) is not None:
+            if notification.group_id not in sent_cas:
+                sent_cas[notification.group_id] = []
+            if data.get('ca_id') not in sent_cas[notification.group_id]:
+                sent_cas[notification.group_id].append(data.get('ca_id'))
+                return True
+            else:
+                session.delete(notification)
+                session.commit()
+                return False
+        if data.get('clog_id', None) is not None:
+            if notification.group_id not in sent_clogs:
+                sent_clogs[notification.group_id] = []
+            if data.get('clog_id') not in sent_clogs[notification.group_id]:
+                sent_clogs[notification.group_id].append(data.get('clog_id'))
+                return True
+        return False

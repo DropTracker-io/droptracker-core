@@ -75,3 +75,4 @@ temp.py
 worker.py
 *.png
 comp_test.py
+events/models/README.md
