@@ -79,3 +79,4 @@ events/models/README.md
 api_start.sh
 bingo_test.py
 fix_auth_users.py
+.env.real
