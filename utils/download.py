@@ -54,7 +54,7 @@ async def download_image(sub_type: str,
                 if os.path.exists(os.path.join(directory_path, filename)):
                     filename = generate_unique_filename(directory_path, filename, "jpg")
             else:
-                filename = f"{processed_data.get('entry_name', None)}_{processed_data.get('entry_id', None)}.jpg"
+                filename = f"{processed_data.get('task_name', None)}_{processed_data.get('task_tier', None)}.jpg"
                 if os.path.exists(os.path.join(directory_path, filename)):
                     filename = generate_unique_filename(directory_path, filename, "jpg")
             os.makedirs(directory_path, exist_ok=True)

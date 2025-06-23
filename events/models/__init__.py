@@ -27,13 +27,13 @@ from .EventShopItem import EventShopItem
 from .EventTeamInventory import EventTeamInventory
 from .EventTeamCooldown import EventTeamCooldown
 from .EventTeamEffect import EventTeamEffect
+from .EventNotification import EventNotification
 
 # Import task models from tasks submodule
 from .tasks import EventTask, AssignedTask, BaseTask, TrackedTaskData, TaskType
 
 # Import event type models
 from .types.BoardGame import BoardGameModel
-from .types.bingo import BingoBoardModel, BingoBoardTile, BingoGameModel
 
 # Export all models
 __all__ = [
@@ -50,8 +50,9 @@ __all__ = [
     'TrackedTaskData',
     'BaseTask',
     'BoardGameModel',
-    'BingoBoardModel',
-    'BingoBoardTile',
-    'BingoGameModel'
-] 
+]
+
+# Import bingo models after core models to avoid circular imports
+from .types.bingo import BingoBoardModel, BingoBoardTile, BingoGameModel
+__all__.extend(['BingoBoardModel', 'BingoBoardTile', 'BingoGameModel']) 
 

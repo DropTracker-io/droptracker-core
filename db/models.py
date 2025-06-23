@@ -273,10 +273,13 @@ class Player(Base):
             self.groups.remove(group)
             session.commit()
 
-    def get_groups(self) -> set:
-        groups = set()
-        for group in self.groups:
-            groups.add(group)
+    def get_groups(self, session_to_use: None) -> List:
+        if session_to_use is not None:
+            used_session = session_to_use
+        else:
+            used_session = session
+        subquery = used_session.query(user_group_association.c.group_id).filter(user_group_association.c.player_id == self.player_id).all()
+        groups = used_session.query(Group).filter(Group.group_id.in_(subquery)).all()
         return groups
 
     def get_current_total(self, npc_id: int = None, period: str = None):
@@ -785,7 +788,10 @@ class HistoricalMetrics(Base):
 
 class NotificationQueue(Base):
     __tablename__ = 'notification_queue'
-    
+    __table_args__ = (
+        UniqueConstraint('notification_type', 'player_id', 'group_id', 'data', 
+                        name='uix_notification_unique'),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     notification_type = Column(String(50), nullable=False)  # 'drop', 'pb', 'collection_log', etc.
     player_id = Column(Integer, ForeignKey('players.player_id'), nullable=False)

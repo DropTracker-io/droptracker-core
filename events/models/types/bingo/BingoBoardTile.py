@@ -8,6 +8,7 @@ from db.base import Base
 if TYPE_CHECKING:
     from .BingoBoard import BingoBoardModel
     from ...tasks.AssignedTask import AssignedTask
+    from ...tasks.BaseTask import BaseTask
     from ...EventTeamModel import EventTeamModel
 
 
@@ -16,7 +17,8 @@ class BingoBoardTile(Base):
     Represents a single tile on a bingo board.
     :var tile_id: The ID of the tile
     :var board_id: The ID of the associated bingo board
-    :var task_id: The ID of the task assigned to this tile
+    :var assigned_id: The ID of the assigned task for this tile, can be None if the tile is not assigned to a team currently
+    :var task_id: The ID of the base task this tile represents
     :var position_x: X coordinate on the bingo board (0-4)
     :var position_y: Y coordinate on the bingo board (0-4)
     :var status: Status of the tile ('pending', 'completed', 'claimed')
@@ -29,7 +31,8 @@ class BingoBoardTile(Base):
     
     tile_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     board_id: Mapped[int] = mapped_column(Integer, ForeignKey('bingo_boards.board_id'))
-    task_id: Mapped[int] = mapped_column(Integer, ForeignKey('assigned_tasks.id'))
+    assigned_id: Mapped[int] = mapped_column(Integer, ForeignKey('assigned_tasks.id'), nullable=True)
+    task_id: Mapped[int] = mapped_column(Integer, ForeignKey('base_tasks.id'), nullable=False)
     position_x: Mapped[int] = mapped_column(Integer)  # 0-4 for 5x5 board
     position_y: Mapped[int] = mapped_column(Integer)  # 0-4 for 5x5 board
     status: Mapped[str] = mapped_column(String(50), default='pending')
@@ -42,6 +45,7 @@ class BingoBoardTile(Base):
         self,
         *,
         board_id: int,
+        assigned_id: Optional[int] = None,
         task_id: int,
         position_x: int,
         position_y: int,
@@ -55,7 +59,8 @@ class BingoBoardTile(Base):
         
         Args:
             board_id: The ID of the bingo board this tile belongs to
-            task_id: The ID of the task assigned to this tile
+            assigned_id: The ID of the assigned task for this tile
+            task_id: The ID of the base task this tile represents
             position_x: X coordinate on the board (0-4)
             position_y: Y coordinate on the board (0-4)
             status: Status of the tile (default: 'pending')
@@ -65,6 +70,7 @@ class BingoBoardTile(Base):
         """
         super().__init__(
             board_id=board_id,
+            assigned_id=assigned_id,
             task_id=task_id,
             position_x=position_x,
             position_y=position_y,
@@ -76,7 +82,8 @@ class BingoBoardTile(Base):
 
     # Relationships with proper type hints
     board: Mapped["BingoBoardModel"] = relationship("BingoBoardModel", back_populates="tiles")
-    task: Mapped["AssignedTask"] = relationship("AssignedTask")
+    assigned_task: Mapped["AssignedTask"] = relationship("AssignedTask")
+    task: Mapped["BaseTask"] = relationship("BaseTask")
     completed_by_team: Mapped[Optional["EventTeamModel"]] = relationship("EventTeamModel")
 
     def mark_completed(self, team_id: int) -> None:

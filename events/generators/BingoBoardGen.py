@@ -1,6 +1,9 @@
 from PIL import Image, ImageDraw, ImageFont
 import os
 from typing import Optional, Tuple, Union
+from db.models import Session
+from utils.format import format_number, convert_from_ms, convert_to_ms
+from events.helpers.ids import get_item_id, get_npc_id
 
 class BingoBoard:
     """
@@ -293,6 +296,7 @@ class BingoBoard:
         """
         if not (0 <= row < self.size and 0 <= col < self.size):
             return False
+        
         self.set_cell_items(row, col, item_ids)
         self.draw_cell_text(row, col, text)
         self.draw_cell_task_id(row, col, task_id)
@@ -375,6 +379,9 @@ class BingoBoard:
             ## Set-based task
             self.set_cell_items_sets(row, col, item_ids)
             return True
+        elif isinstance(item_ids, dict):
+            self.set_cell_items_with_numbers(row, col, item_ids)
+            return True
         else:
             if not (0 <= row < self.size and 0 <= col < self.size):
                 return False
@@ -382,6 +389,69 @@ class BingoBoard:
             self.set_cell_items_grid(row, col, item_ids)
             
             return True
+        
+    def set_cell_items_with_numbers(self, row: int, col: int, item_ids: dict) -> bool:
+        """
+        Set a list of item images in a cell with quantities displayed in the bottom right.
+        
+        Args:
+            row: Row index (0-based)
+            col: Column index (0-based)
+            item_ids: Dictionary mapping item IDs to their quantities
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not (0 <= row < self.size and 0 <= col < self.size):
+            return False
+
+        # First set the items in the grid
+        success = self.set_cell_items_grid(row, col, list(item_ids.keys()))
+        if not success:
+            return False
+
+        # Then draw the quantities for each item
+        for item_id, quantity in item_ids.items():
+            self.draw_quantity_on_item(row, col, item_id, quantity)
+
+        return True
+
+    def draw_quantity_on_item(self, row: int, col: int, item_id: int, quantity: int):
+        """
+        Draws a quantity number in the bottom right corner of an item image.
+        """
+        left, top, right, bottom = self._get_cell_position(row, col)
+        item_path = f"static/assets/img/itemdb/{item_id}.png"
+        item_image = self._load_image(item_path)
+        if not item_image or not self.font:
+            return False
+
+        # Get item image size and position
+        item_size = int(self.cell_size * 0.4)  # Match the size used in set_cell_items_grid
+        item_image = item_image.convert('RGBA')
+        item_image.thumbnail((item_size, item_size), Image.Resampling.LANCZOS)
+
+        # Calculate item position (this should match where the item is placed in set_cell_items_grid)
+        CELL_PADDING = int(self.cell_size * 0.1)
+        TOP_PADDING = int(self.cell_size * 0.25)
+        item_x = left + CELL_PADDING
+        item_y = top + TOP_PADDING
+
+        # Text to display
+        text = str(quantity)
+        font = self.font
+        draw = ImageDraw.Draw(self.board)
+        bbox = font.getbbox(text)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+
+        # Place text in bottom right of item image
+        text_x = item_x + item_image.width - text_width - 2
+        text_y = item_y + item_image.height - text_height - 2
+
+        # Draw yellow text with black stroke
+        draw.text((text_x, text_y), text, font=font, fill=(255,220,40), stroke_width=2, stroke_fill=(0,0,0))
+        return True
 
     def set_cell_item(self, row: int, col: int, item_id: int) -> bool:
         """
@@ -592,11 +662,14 @@ class BingoBoard:
         self.board.paste(cell_image, (left, top), cell_image)
         return True
 
-    def set_cell_items_grid(self, row: int, col: int, item_ids: list[int]) -> bool:
+    def set_cell_items_grid(self, row: int, col: int, item_ids: list[int], top_offset: int = None) -> bool:
         """
-        Set multiple item images in a cell, stacking each item in rows of 4, overlapping horizontally (no resizing),
-        and if needed, overlap rows vertically so all items fit. Keeps top padding for text.
+        Set multiple item images in a cell, arranging them in a grid (rows/columns) below the text block if top_offset is provided.
         """
+        print(f"Drawing items: {item_ids} at cell ({row},{col})")
+        left, top, right, bottom = self._get_cell_position(row, col)
+        print(f"Cell position: left={left}, top={top}, right={right}, bottom={bottom}")
+        print(f"Board mode: {self.board.mode}, size: {self.board.size}")
         if not (0 <= row < self.size and 0 <= col < self.size):
             return False
         self.cell_contents[(row, col)] = item_ids
@@ -611,75 +684,63 @@ class BingoBoard:
             return self.set_cell_item(row, col, item_ids[0])
         # Layout constants
         CELL_PADDING = int(self.cell_size * 0.1)
-        TOP_PADDING = int(self.cell_size * 0.25)
-        ITEMS_PER_ROW = 4
+        # If top_offset is provided, use it as the top margin for items
+        if top_offset is not None:
+            items_top = top_offset - top
+        else:
+            items_top = int(self.cell_size * 0.25)
+        available_height = self.cell_size - items_top - CELL_PADDING
         available_width = self.cell_size - 2 * CELL_PADDING
-        available_height = self.cell_size - TOP_PADDING - CELL_PADDING
+        # Determine grid size (try to make it as square as possible)
+        import math
+        cols = math.ceil(math.sqrt(num_items))
+        rows = math.ceil(num_items / cols)
         # Load all images and get their sizes
         images = []
         max_w, max_h = 0, 0
         for item_id in item_ids:
             item_path = f"static/assets/img/itemdb/{item_id}.png"
+            print(f"Loading image: {item_path}")
             img = self._load_image(item_path)
             if img is None:
                 print(f"Item image not found: {item_path}")
                 continue
+            print(f"Loaded image: {item_path}, size: {img.size}, mode: {img.mode}")
             img = img.convert('RGBA')
             images.append(img)
             max_w = max(max_w, img.width)
             max_h = max(max_h, img.height)
         if not images:
             return False
-        # Use max_w, max_h for all items for consistent stacking
-        row_count = (len(images) + ITEMS_PER_ROW - 1) // ITEMS_PER_ROW
-        # Horizontal overlap calculation
-        if ITEMS_PER_ROW == 1 or max_w >= available_width:
-            x_overlap = 0
-        else:
-            total_width = max_w + (ITEMS_PER_ROW - 1) * max_w
-            if total_width <= available_width:
-                x_overlap = 0
-            else:
-                x_overlap = int((ITEMS_PER_ROW * max_w - available_width) / (ITEMS_PER_ROW - 1))
-                x_overlap = min(x_overlap, max_w - 1)
-        # Vertical overlap calculation
-        if row_count == 1 or max_h >= available_height:
-            y_overlap = 0
-        else:
-            total_height = max_h + (row_count - 1) * max_h
-            if total_height <= available_height:
-                y_overlap = 0
-            else:
-                y_overlap = int((row_count * max_h - available_height) / (row_count - 1))
-                y_overlap = min(y_overlap, max_h - 1)
-        # Draw images
+        # Calculate target icon size to fit grid
+        icon_w = min(max_w, available_width // cols)
+        icon_h = min(max_h, available_height // rows)
+        # Draw images in grid
         for idx, img in enumerate(images):
-            row_idx = idx // ITEMS_PER_ROW
-            col_idx = idx % ITEMS_PER_ROW
-            x = CELL_PADDING + col_idx * (max_w - x_overlap)
-            y = TOP_PADDING + row_idx * (max_h - y_overlap)
-            # Don't draw outside the cell
-            if x + img.width > self.cell_size:
-                x = self.cell_size - img.width
-            if y + img.height > self.cell_size:
-                y = self.cell_size - img.height
+            row_idx = idx // cols
+            col_idx = idx % cols
+            # Resize image
+            img = img.copy()
+            img.thumbnail((icon_w, icon_h), Image.Resampling.LANCZOS)
+            x = CELL_PADDING + col_idx * icon_w + (icon_w - img.width) // 2
+            y = items_top + row_idx * icon_h + (icon_h - img.height) // 2
             cell_image.paste(img, (x, y), img)
         self.board.paste(cell_image, (left, top), cell_image)
         return True
 
-    def draw_cell_text(self, row: int, col: int, text: str) -> bool:
+    def draw_cell_text(self, row: int, col: int, text: str) -> int:
         """
         Draws text at the top of the cell, using the RS font, with a 1px black stroke and yellow color.
         Always prints the entire string, line-breaking as needed, even if it overlaps the item images.
+        Returns the bottom y-coordinate of the text block.
         """
         if not self.font:
             print("Font not loaded.")
-            return False
+            return 0
         if not (0 <= row < self.size and 0 <= col < self.size):
-            return False
+            return 0
         left, top, right, bottom = self._get_cell_position(row, col)
         CELL_PADDING = int(self.cell_size * 0.1)
-        TOP_PADDING = int(self.cell_size * 0.25)
         max_width = self.cell_size - 2 * CELL_PADDING
         # Word wrap
         words = text.split()
@@ -704,10 +765,10 @@ class BingoBoard:
             text_width = bbox[2] - bbox[0]
             x = left + (self.cell_size - text_width) // 2
             y = top + CELL_PADDING + i * line_height
-            # Draw yellow text
             draw.text((x,y), line, font=self.font,
               fill=(255,220,40), stroke_width=1, stroke_fill=(0,0,0))
-        return True
+        # Return the bottom y-coordinate of the text block
+        return top + CELL_PADDING + len(lines) * line_height
 
     def draw_free_space_tile(self):
         """
@@ -877,20 +938,45 @@ class BingoBoard:
         self.board.paste(cell_image, (left, top), cell_image)
         return True
 
-    def set_cell_npc_with_extras(self, row: int, col: int, npc_ids: list[int], task_id: int, text: str, badge: str) -> bool:
+    def draw_kc_on_npcs(self, row: int, col: int, npc_ids: list[int], kc_value: str):
+        """
+        Draws the KC value on the NPC image(s) in the cell. If one NPC, center on the NPC. If multiple, center between all NPCs.
+        """
+        left, top, right, bottom = self._get_cell_position(row, col)
+        font = self.font
+        if not font:
+            return False
+        draw = ImageDraw.Draw(self.board)
+        text = kc_value
+        bbox = font.getbbox(text)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        if len(npc_ids) == 1:
+            # Find the NPC image position and size
+            npc_path = f"static/assets/img/npcdb/{npc_ids[0]}.png"
+            npc_image = self._load_image(npc_path)
+            if not npc_image:
+                return False
+            image_size = int(self.cell_size * 0.6)
+            npc_image = npc_image.convert('RGBA')
+            npc_image.thumbnail((image_size, image_size), Image.Resampling.LANCZOS)
+            x_offset = left + (self.cell_size - npc_image.width) // 2
+            y_offset = top + (self.cell_size - npc_image.height) // 2
+            # Place text centered at the bottom of the NPC image
+            text_x = x_offset + (npc_image.width - text_width) // 2
+            text_y = y_offset + npc_image.height - int(text_height * 1.5)
+            draw.text((text_x, text_y), text, font=font, fill=(255,220,40), stroke_width=2, stroke_fill=(0,0,0))
+        else:
+            # Multiple NPCs: center text horizontally between all NPCs, higher above the bottom of the cell
+            text_x = left + (self.cell_size - text_width) // 2
+            text_y = bottom - int(self.cell_size * 0.25) - text_height // 2
+            draw.text((text_x, text_y), text, font=font, fill=(255,220,40), stroke_width=2, stroke_fill=(0,0,0))
+        return True
+
+    def set_cell_npc_with_extras(self, row: int, col: int, npc_ids: list[int], task_id: int, text: str, badge: str, kc_value: str = None) -> bool:
         """
         Set multiple NPCs in a cell with additional elements (text, task ID, badge).
-        
-        Args:
-            row: Row index (0-based)
-            col: Column index (0-based)
-            npc_ids: List of NPC IDs to display
-            task_id: Task ID to display in badge
-            text: Text to display at top of cell
-            badge: Badge text to display
-            
-        Returns:
-            True if successful, False otherwise
+        Optionally, display a KC value on the NPC(s).
         """
         if not (0 <= row < self.size and 0 <= col < self.size):
             return False
@@ -898,6 +984,9 @@ class BingoBoard:
         self.draw_cell_text(row, col, text)
         self.draw_cell_task_id(row, col, task_id)
         self.draw_cell_badge(row, col, badge)
+        # Draw KC value if provided
+        if kc_value:
+            self.draw_kc_on_npcs(row, col, npc_ids, kc_value)
         return True
 
     def set_cell_npc_grid(self, row: int, col: int, npc_ids: list[int]) -> bool:
@@ -992,7 +1081,9 @@ class BingoBoard:
             else:
                 y_overlap = int((row_count * max_h - available_height) / (row_count - 1))
                 y_overlap = min(y_overlap, max_h - 1)
-                
+        
+        coin_path = "static/assets/img/itemdb/1004.png"
+        coin_image = self._load_image(coin_path)
         # Draw images in grid
         for idx, img in enumerate(images):
             row_idx = idx // NPCS_PER_ROW
@@ -1002,8 +1093,8 @@ class BingoBoard:
             y = TOP_PADDING + row_idx * (max_h - y_overlap)
             
             # Don't draw outside the cell
-            if x + img.width > self.cell_size:
-                x = self.cell_size - img.width
+            if x + img.width > self.cell_size - coin_image.width - CELL_PADDING:
+                x = self.cell_size - coin_image.width - CELL_PADDING - img.width
             if y + img.height > self.cell_size:
                 y = self.cell_size - img.height
                 
@@ -1012,20 +1103,40 @@ class BingoBoard:
         self.board.paste(cell_image, (left, top), cell_image)
         return True
 
-    def set_cell_npc_gp_target(self, row: int, col: int, npc_ids: list[int], task_id: int, text: str, badge: str) -> bool:
+    def draw_value_on_coin(self, row: int, col: int, value: str):
+        """
+        Draws a value string right-aligned in the bottom right corner of the coin image (1004.png) in the cell.
+        """
+        left, top, right, bottom = self._get_cell_position(row, col)
+        coin_path = "static/assets/img/itemdb/1004.png"
+        coin_image = self._load_image(coin_path)
+        if not coin_image or not self.font:
+            return False
+        # Coin image size and position (match set_cell_npc_gp_target logic)
+        coin_size = int(self.cell_size * 0.4)
+        coin_image = coin_image.convert('RGBA')
+        coin_image.thumbnail((coin_size, coin_size), Image.Resampling.LANCZOS)
+        coin_x = right - coin_image.width - int(self.cell_size * 0.1)
+        coin_y = top + (self.cell_size - coin_image.height) // 2 + int(self.cell_size * 0.08)
+        # Text to display
+        text = value
+        font = self.font
+        draw = ImageDraw.Draw(self.board)
+        bbox = font.getbbox(text)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        # Place text right-aligned, bottom-aligned in the coin image, but a bit more right and down
+        text_x = coin_x + coin_image.width - text_width + 6
+        text_y = coin_y + coin_image.height - text_height + 6
+        # Draw yellow text with black stroke
+        draw.text((text_x, text_y), text, font=font, fill=(255,220,40), stroke_width=2, stroke_fill=(0,0,0))
+        return True
+
+    def set_cell_npc_gp_target(self, row: int, col: int, npc_ids: list[int], task_id: int, text: str, badge: str, value: str = None, time_target: bool = False) -> bool:
         """
         Set multiple NPC images and a coin stack in a cell for GP target tasks.
-        
-        Args:
-            row: Row index (0-based)
-            col: Column index (0-based)
-            npc_ids: List of NPC IDs to display
-            task_id: Task ID to display in badge
-            text: Text to display at top of cell
-            badge: Badge text to display
-            
-        Returns:
-            True if successful, False otherwise
+        Optionally, display a value string on the coin image.
+        If time_target is True, uses a stopwatch image instead of coins and treats value as time.
         """
         if not (0 <= row < self.size and 0 <= col < self.size):
             return False
@@ -1043,16 +1154,21 @@ class BingoBoard:
         if not npc_images:
             return False
             
-        # Load the coin stack image
-        coin_path = "static/assets/img/itemdb/1004.png"
-        coin_image = self._load_image(coin_path)
+        # Load the appropriate image based on target type
+        if time_target:
+            print(f"Using a different image for time target")
+            image_path = "static/assets/img/metrics/ehb.png"  # Stopwatch image
+        else:
+            image_path = "static/assets/img/itemdb/1004.png"  # Coin stack image
+            
+        target_image = self._load_image(image_path)
         
-        if not coin_image:
-            print(f"Coin image not found: {coin_path}")
+        if not target_image:
+            print(f"Target image not found: {image_path}")
             return False
             
-        # Store the NPC IDs and coin ID
-        self.cell_contents[(row, col)] = (npc_ids, 1004)
+        # Store the NPC IDs and image ID
+        self.cell_contents[(row, col)] = (npc_ids, 20997 if time_target else 1004)
         
         # Get cell position
         left, top, right, bottom = self._get_cell_position(row, col)
@@ -1060,17 +1176,17 @@ class BingoBoard:
         # Calculate image sizes
         if len(npc_images) == 1:
             npc_size = int(self.cell_size * 0.7)
-            coin_size = int(self.cell_size * 0.5)
+            target_size = int(self.cell_size * 0.5)
         else:
             npc_size = int(self.cell_size * 0.5)  # Smaller NPCs when multiple
-            coin_size = int(self.cell_size * 0.4)  # Smaller coin stack
+            target_size = int(self.cell_size * 0.4)  # Smaller target image
             
         # Resize images while maintaining aspect ratio
         for i in range(len(npc_images)):
             npc_images[i] = npc_images[i].convert('RGBA')
             npc_images[i].thumbnail((npc_size, npc_size), Image.Resampling.LANCZOS)
-        coin_image = coin_image.convert('RGBA')
-        coin_image.thumbnail((coin_size, coin_size), Image.Resampling.LANCZOS)
+        target_image = target_image.convert('RGBA')
+        target_image.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
         
         # Convert board to RGBA if needed
         if self.board.mode != 'RGBA':
@@ -1080,25 +1196,25 @@ class BingoBoard:
         cell_image = Image.new('RGBA', (self.cell_size, self.cell_size), (0, 0, 0, 0))
         
         if len(npc_images) == 1:
-            # Single NPC case - place NPC and coin side by side
-            total_width = npc_images[0].width + coin_image.width
+            # Single NPC case - place NPC and target image side by side
+            total_width = npc_images[0].width + target_image.width
             spacing = int(self.cell_size * 0.1)
             x_offset = (self.cell_size - total_width - spacing) // 2
-            y_offset = (self.cell_size - max(npc_images[0].height, coin_image.height)) // 2
+            y_offset = (self.cell_size - max(npc_images[0].height, target_image.height)) // 2
             
             # Paste the NPC image
             cell_image.paste(npc_images[0], (x_offset, y_offset), npc_images[0])
             
-            # Paste the coin image
-            coin_x = x_offset + npc_images[0].width + spacing
-            coin_y = y_offset + (npc_images[0].height - coin_image.height) // 2
-            cell_image.paste(coin_image, (coin_x, coin_y), coin_image)
+            # Paste the target image
+            target_x = x_offset + npc_images[0].width + spacing
+            target_y = y_offset + (npc_images[0].height - target_image.height) // 2
+            cell_image.paste(target_image, (target_x, target_y), target_image)
         else:
-            # Multiple NPCs case - arrange in grid with coin stack
+            # Multiple NPCs case - arrange in grid with target image
             CELL_PADDING = int(self.cell_size * 0.1)
             TOP_PADDING = int(self.cell_size * 0.25)
-            NPCS_PER_ROW = 2  # Fewer NPCs per row to leave space for coin stack
-            available_width = self.cell_size - 2 * CELL_PADDING - coin_image.width - CELL_PADDING
+            NPCS_PER_ROW = 2  # Fewer NPCs per row to leave space for target image
+            available_width = self.cell_size - 2 * CELL_PADDING - target_image.width - CELL_PADDING
             available_height = self.cell_size - TOP_PADDING - CELL_PADDING
             
             # Calculate grid layout
@@ -1137,17 +1253,17 @@ class BingoBoard:
                 y = TOP_PADDING + row_idx * (max_h - y_overlap)
                 
                 # Don't draw outside the cell
-                if x + img.width > self.cell_size - coin_image.width - CELL_PADDING:
-                    x = self.cell_size - coin_image.width - CELL_PADDING - img.width
+                if x + img.width > self.cell_size - target_image.width - CELL_PADDING:
+                    x = self.cell_size - target_image.width - CELL_PADDING - img.width
                 if y + img.height > self.cell_size:
                     y = self.cell_size - img.height
                     
                 cell_image.paste(img, (x, y), img)
                 
-            # Place coin stack on the right
-            coin_x = self.cell_size - coin_image.width - CELL_PADDING
-            coin_y = (self.cell_size - coin_image.height) // 2
-            cell_image.paste(coin_image, (coin_x, coin_y), coin_image)
+            # Place target image on the right
+            target_x = self.cell_size - target_image.width - CELL_PADDING
+            target_y = (self.cell_size - target_image.height) // 2
+            cell_image.paste(target_image, (target_x, target_y), target_image)
             
         # Paste the cell image onto the board
         self.board.paste(cell_image, (left, top), cell_image)
@@ -1156,5 +1272,252 @@ class BingoBoard:
         self.draw_cell_text(row, col, text)
         self.draw_cell_task_id(row, col, task_id)
         self.draw_cell_badge(row, col, badge)
+        # Draw value on target image if provided
+        if value:
+            self.draw_value_on_coin(row, col, value)
         
         return True
+
+    def set_cell_items_with_text_grid(self, row: int, col: int, item_ids: list[int], text: str) -> bool:
+        """
+        Draw text at the top of the cell, then draw items in a grid below the text block.
+        """
+        text_bottom = self.draw_cell_text(row, col, text)
+        return self.set_cell_items_grid(row, col, item_ids, top_offset=text_bottom)
+
+    def create_single_tile(self, task_type: str, task_id: int, task_name: str, badge: str, 
+                          item_ids: list = None, skill_names: list = None, npc_ids: list = None,
+                          kc_value: str = None, gp_value: str = None, time_value: str = None, completed: bool = False) -> bool:
+        print(f"Creating tile with data:")
+        print(f"Task type: {task_type}")
+        print(f"Task ID: {task_id}")
+        print(f"Task name: {task_name}")
+        print(f"Badge: {badge}")
+        print(f"Item IDs: {item_ids}")
+        print(f"Skill names: {skill_names}")
+        print(f"NPC IDs: {npc_ids}")    
+        """
+        Create and save a single tile with the same styling and content as it would appear on the board.
+        
+        Args:
+            task_type: Type of task (e.g., "item_collection", "kc_target", etc.)
+            task_id: ID of the task
+            task_name: Name of the task
+            badge: Badge text to display
+            item_ids: List of item IDs (for item collection tasks)
+            skill_names: List of skill names (for skill tasks)
+            npc_ids: List of NPC IDs (for NPC tasks)
+            kc_value: KC value to display (for KC target tasks)
+            gp_value: GP value to display (for GP target tasks)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        # Create a single cell image with border
+        tile_size = self.cell_size + 2 * self.border_width
+        # Ensure background color is RGBA
+        bg_color = self.background_color
+        if isinstance(bg_color, tuple) and len(bg_color) == 3:
+            bg_color = bg_color + (255,)
+        tile = Image.new('RGBA', (tile_size, tile_size), bg_color)
+        draw = ImageDraw.Draw(tile)
+        
+        # Draw border
+        draw.rectangle([0, 0, tile_size, tile_size], outline=self.border_color, width=self.border_width)
+        
+        # Calculate cell content area (inside border)
+        content_area = (self.border_width, self.border_width, 
+                       tile_size - self.border_width, 
+                       tile_size - self.border_width)
+        
+        # Create a temporary board with just this cell
+        temp_board = BingoBoard(size=1)
+        temp_board.board = tile
+        temp_board.draw = draw
+        temp_board.cell_size = self.cell_size
+        temp_board.font = self.font
+        
+        # Add content based on task type
+        if task_type == "item_collection":
+            if isinstance(item_ids[0], list):  # Set-based task
+                temp_board.set_cell_items_sets(0, 0, item_ids)
+            else:
+                temp_board.set_cell_items_grid(0, 0, item_ids)
+        elif task_type == "xp_target" or task_type == "ehp_target" or task_type == "ehb_target":
+            temp_board.set_cell_skill_grid(0, 0, skill_names)
+        elif task_type == "kc_target":
+            temp_board.set_cell_npc_grid(0, 0, npc_ids)
+            if kc_value:
+                temp_board.draw_kc_on_npcs(0, 0, npc_ids, kc_value)
+        elif task_type == "loot_value":
+            if npc_ids:
+                temp_board.set_cell_npc_gp_target(0, 0, npc_ids, task_id, task_name, badge, gp_value)
+            else:
+                temp_board.set_cell_items_grid(0, 0, [1004])  # Coin stack
+                if gp_value:
+                    temp_board.draw_value_on_coin(0, 0, gp_value)
+        elif task_type == "kill_time":
+            print(f"Setting cell NPC time target with data")
+            temp_board.set_cell_npc_time_target(0, 0, npc_ids, task_id, task_name, badge, time_value)
+        # Add common elements
+        temp_board.draw_cell_task_id(0, 0, task_id)
+        temp_board.draw_cell_badge(0, 0, badge)
+        # Mark as completed if needed
+        if completed:
+            temp_board.mark_cell_completed(0, 0)
+        ## Draw text below everything else in the event it's completd to leave the text visible
+        temp_board.draw_cell_text(0, 0, task_name)
+        
+        # Save the tile
+        if completed:
+            file_name = f"task_{task_id}_completed.png"
+            output_path = f"static/assets/img/task_tiles/{file_name}"
+        else:
+            file_name = f"task_{task_id}.png"
+            output_path = f"static/assets/img/task_tiles/{file_name}"
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        tile.save(output_path)
+        return f"https://www.droptracker.io/img/task_tiles/{file_name}"
+
+    def set_cell_npc_time_target(self, row, col, npc_ids, task_id, text, badge, time_value=None):
+        """
+        Set multiple NPC images and a stopwatch image in a cell for KILL_TIME tasks.
+        Display the time value string on the stopwatch image, just like GP value.
+        """
+        self.set_cell_npc_gp_target(row, col, npc_ids, task_id, text, badge, value=time_value, time_target=True)
+
+
+
+def chunk_list(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+
+def generate_bingo_board(event_id: int, team_id: int = None):
+    """
+    Generate a bingo board for a specific event and optionally for a specific team.
+    
+    Args:
+        event_id: The ID of the event
+        team_id: Optional team ID to generate a team-specific board
+        
+    Returns:
+        URL to the generated board image
+    """
+    # Import models inside the function to prevent circular imports
+    from db.models import Session
+    from events.models import (
+        BingoGameModel,
+        BingoBoardModel,
+        BingoBoardTile,
+        TaskType,
+        AssignedTask
+    )
+    from utils.format import format_number, convert_from_ms
+    from events.helpers.ids import get_item_id, get_npc_id
+
+    print("Generating real board")
+    board = BingoBoard(size=5)
+    
+    with Session() as session:
+        completed_tiles = []
+        bingo_game = session.query(BingoGameModel).filter(BingoGameModel.event_id == event_id).first()
+        board_model = session.query(BingoBoardModel).filter(BingoBoardModel.event_id == event_id).first()
+        tiles = session.query(BingoBoardTile).filter(BingoBoardTile.board_id == board_model.board_id).all()
+        
+        if team_id is not None:
+            team_tasks = session.query(AssignedTask).filter(
+                AssignedTask.team_id == team_id,
+                AssignedTask.event_id == event_id
+            ).all()
+            
+            for task in team_tasks:
+                if task.status == "completed":
+                    for tile in tiles:
+                        if tile.task_id == task.task_id:
+                            completed_tiles.append(tile)
+                            
+        for tile in tiles:
+            print(f"Using tile {tile.task_id} for tile {tile.position_x}, {tile.position_y}")
+            task = tile.task
+            if task.task_type == TaskType.ITEM_COLLECTION:
+                if task.task_config["requires"] == "set":
+                    sets: list[list[str]] = task.task_config["sets"]
+                    ids = [[get_item_id(item) for item in set] for set in sets]
+                    j, i = tile.position_x, tile.position_y
+                    board.set_cell_items_with_extras(i, j, ids, task.id, task.name, "FULL SET")
+                elif task.task_config["requires"] == "points":
+                    ids = [get_item_id(item) for item in task.task_config["items"]]
+                    # Chunk into rows of 5 for better display
+                    ids = list(chunk_list(ids, 5))
+                    j, i = tile.position_x, tile.position_y
+                    board.set_cell_items_with_extras(i, j, ids, task.id, task.name, "POINTS")
+                elif task.task_config["requires"] == "all":
+                    ids = [get_item_id(item) for item in task.task_config["required_items"]]
+                    j, i = tile.position_x, tile.position_y
+                    board.set_cell_items_with_extras(i, j, ids, task.id, task.name, "ALL ITEMS")
+                elif task.task_config["requires"] == "any":
+                    ids = [get_item_id(item) for item in task.task_config["required_items"]]
+                    j, i = tile.position_x, tile.position_y
+                    board.set_cell_items_with_extras(i, j, ids, task.id, task.name, "ANY ITEM")
+                else:
+                    print(f"Task {task.name} has no required items and is not a set-based task")
+            elif task.task_type == TaskType.XP_TARGET:
+                j, i = tile.position_x, tile.position_y
+                board.set_cell_skill_with_extras(i, j, [task.task_config["skill_name"]], task.id, task.name, "XP TARGET")
+            elif task.task_type == TaskType.KC_TARGET:
+                j, i = tile.position_x, tile.position_y
+                npcs = []
+                for npc in task.task_config["source_npcs"]:
+                    if any(existing_npc[:7] == npc[:7] for existing_npc in npcs):
+                        print("Skipping npc", npc)
+                        continue
+                    npcs.append(npc)
+                kc_str = format_number(task.task_config["target_kc"]) + " "
+                board.set_cell_npc_with_extras(i, j, [get_npc_id(npc) for npc in npcs], task.id, task.name, "KC TARGET", kc_value=kc_str)
+            elif task.task_type == TaskType.EHP_TARGET or task.task_type == TaskType.EHB_TARGET:
+                if task.task_config.get("target_ehp", None) is not None:
+                    j, i = tile.position_x, tile.position_y
+                    board.set_cell_skill_with_extras(i, j, ["ehp"], task.id, task.name, "EHP TARGET")
+                elif task.task_config.get("target_ehb", None) is not None:
+                    j, i = tile.position_x, tile.position_y
+                    board.set_cell_skill_with_extras(i, j, ["ehb"], task.id, task.name, "EHB TARGET")
+            elif task.task_type == TaskType.LOOT_VALUE:
+                gp_required = task.task_config.get("target_value", None)
+                if gp_required is not None:
+                    gp_str = format_number(gp_required) + " "
+                else:
+                    gp_str = ""
+                if task.task_config.get("source_npcs", None) is not None:
+                    j, i = tile.position_x, tile.position_y
+                    npcs = []
+                    for npc in task.task_config["source_npcs"]:
+                        if any(existing_npc[:7] == npc[:7] for existing_npc in npcs):
+                            print("Skipping npc", npc)
+                            continue
+                        npcs.append(npc)
+                    board.set_cell_npc_gp_target(i, j, [get_npc_id(npc) for npc in npcs], task.id, task.name, f"TOTAL LOOT", gp_str)
+                else:
+                    j, i = tile.position_x, tile.position_y
+                    board.set_cell_items_with_extras(i, j, [1004], task.id, task.name, f"TOTAL LOOT")
+            elif task.task_type == TaskType.KILL_TIME:
+                j, i = tile.position_x, tile.position_y
+                board.set_cell_npc_time_target(i, j, [get_npc_id(task.task_config['target_npc'])], task.id, task.name, "KILL TIME", time_value=convert_from_ms(task.task_config["target_time"]))
+            elif task.task_type == TaskType.CUSTOM:
+                pass
+        for tile in completed_tiles:
+            tile: BingoBoardTile = tile
+            board.mark_cell_completed(tile.position_x, tile.position_y)
+        if bingo_game.center_free:
+            board.draw_free_space_tile()
+        if team_id:
+            os.makedirs(f"static/assets/img/events/{event_id}", exist_ok=True)
+            board.save(f"static/assets/img/events/{event_id}/bingo_board_{team_id}.png")
+            print(f"Generated real board from database with ID {event_id}")
+            return f"https://www.droptracker.io/img/events/{event_id}/bingo_board_{team_id}.png"
+        else:
+            os.makedirs(f"static/assets/img/events/{event_id}", exist_ok=True)
+            board.save(f"static/assets/img/events/{event_id}/bingo_board_all.png")
+            print(f"Generated real board from database with ID {event_id}")
+            return f"https://www.droptracker.io/img/events/{event_id}/bingo_board_all.png"

@@ -24,6 +24,7 @@ class EventTask(Base):
     :var difficulty: The difficulty of the task
     :var task_type: The type of task (item_collection, kc_target, etc.)
     :var points: The points of the task
+    :var is_active: Whether the task is actively being used in the event
     :var required_items: The items required to complete the task (legacy for item_collection)
     :var task_config: JSON configuration specific to the task type
     :var date_added: The date and time the task was added
@@ -36,8 +37,9 @@ class EventTask(Base):
     name: Mapped[str] = mapped_column(String(100))
     description: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     difficulty: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    task_type: Mapped[TaskType] = mapped_column(Enum(TaskType), default=TaskType.ITEM_COLLECTION)
+    task_type: Mapped[TaskType] = mapped_column(Enum(TaskType, values_callable=lambda obj: [e.value for e in obj]), default=TaskType.ITEM_COLLECTION)
     points: Mapped[int] = mapped_column(Integer)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     required_items: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)  # Legacy field
     task_config: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)  # New flexible config
     date_added: Mapped[datetime] = mapped_column(DateTime, default=func.now())
@@ -52,6 +54,7 @@ class EventTask(Base):
         task_type: TaskType = TaskType.ITEM_COLLECTION,
         description: Optional[str] = None,
         difficulty: Optional[str] = None,
+        is_active: bool = True,
         required_items: Optional[Dict[str, Any]] = None,
         task_config: Optional[Dict[str, Any]] = None,
         **kwargs
@@ -66,6 +69,7 @@ class EventTask(Base):
             task_type: The type of task (default: ITEM_COLLECTION)
             description: Optional description of the task
             difficulty: Optional difficulty level (e.g., "easy", "medium", "hard")
+            is_active: Whether the task is actively being used in the event
             required_items: Optional items required (legacy field for item_collection)
             task_config: Optional JSON configuration specific to the task type
             **kwargs: Additional keyword arguments passed to SQLAlchemy
@@ -77,6 +81,7 @@ class EventTask(Base):
             task_type=task_type,
             description=description,
             difficulty=difficulty,
+            is_active=is_active,
             required_items=required_items,
             task_config=task_config,
             **kwargs
@@ -114,7 +119,7 @@ class EventTask(Base):
         elif self.task_type == TaskType.LOOT_VALUE:
             required_keys = ["target_value"]
             return all(key in self.task_config for key in required_keys)
-        elif self.task_type == TaskType.TIME_BASED:
+        elif self.task_type == TaskType.KILL_TIME:
             required_keys = ["boss_name", "time_limit_seconds"]
             return all(key in self.task_config for key in required_keys)
         

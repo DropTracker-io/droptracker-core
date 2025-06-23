@@ -13,6 +13,7 @@ from collections import defaultdict, deque
 import threading
 import asyncio
 import pymysql
+from quart_cors import cors
 
 ## Core package dependencies
 from data import submissions
@@ -33,7 +34,6 @@ load_dotenv()
 
 # Initialize Quart app
 app = Quart(__name__)
-
 # Register the blueprint
 app.register_blueprint(create_blueprint(), url_prefix='/')
 rate_limiter = RateLimiter(app)
@@ -62,7 +62,6 @@ def get_db_session():
 def reset_db_connections():
     Session.remove()
     engine.dispose()
-    print("Database connections reset")
 
 
 # Initialize metrics tracker
@@ -79,7 +78,7 @@ async def not_found(e):
     return jsonify({"error": "Resource not found"}), 404
 
 @app.errorhandler(500) 
-async def server_error(e):
+async def server_error(e): 
     return jsonify({"error": "Internal server error"}), 500
 
 @app.route("/player", methods=["GET"])
@@ -96,19 +95,16 @@ async def get_player():
 
 @app.route("/metrics", methods=["GET"])
 async def get_metrics():
-    auth_key = request.headers.get("Authorization")
-    if auth_key != os.getenv("BACKEND_ACP_TOKEN"):
-        return jsonify({"error": "Unauthorized"}), 401
     """Get current metrics"""
     return jsonify(metrics.get_stats())
 
 @app.route("/latest_news", methods=["GET"])
 async def get_latest_news():
     """Get the latest news"""
-    return "You have the api enabled & we've connected properly."
+    return "API connected. We are having some issues tracking all submissions. Please report any issues you experience to !droptracker"
 
 @app.route("/webhook", methods=["POST"])
-@rate_limit(limit=10,period=timedelta(seconds=1))
+@rate_limit(limit=100,period=timedelta(seconds=1))
 async def webhook_data():
     """
     Handle Discord webhook-style messages and convert them to the standard format
@@ -116,11 +112,11 @@ async def webhook_data():
     """
     success = False
     request_type = "webhook"
+    submission_type = None
     
     try:
         # Debug the raw request to see what's coming in
         content_type = request.headers.get('Content-Type', '')
-        print("Request content type:", content_type)
         
         # Check if this is a multipart request
         if 'multipart/form-data' in content_type:
@@ -133,21 +129,17 @@ async def webhook_data():
                         boundary = part[9:].strip('"')
                         break
                 
-                print(f"Found boundary: {boundary}")
                 
                 # Get the raw request data
                 body = await request.body
                 body_str = body.decode('latin1')  # Use latin1 to handle binary data
                 
-                # Print the first 200 chars to see the structure
-                print(f"Request body preview: {body_str[:200]}...")
                 
                 # Look for the file part in the raw body
                 file_header = f'Content-Disposition: form-data; name="file"; filename="image.jpeg"'
                 
                 # Process the form data normally
                 form = await request.form
-                print(f"Form keys: {list(form.keys())}")
                 
                 payload_json = form.get('payload_json')
                 if not payload_json:
@@ -160,11 +152,11 @@ async def webhook_data():
                 if webhook_data is None:
                     return jsonify({"error": "Invalid JSON in payload_json"}), 400
                 
-                print("Parsed webhook data:", webhook_data)
+                #("Parsed webhook data:", webhook_data)
                 
                 # Try to get the file directly from the request files
                 files = await request.files
-                print(f"Request files: {files}")
+                #print(f"Request files: {files}")
                 
                 # Handle image file if present
                 image_file = None
@@ -174,48 +166,63 @@ async def webhook_data():
                           f"content_type: {image_file.content_type}")
                 
                 # Extract data from Discord webhook format
-                processed_data = await process_webhook_data(webhook_data)
+                processed_items = await process_webhook_data(webhook_data)
                 
-                if not processed_data:
+                if not processed_items:
                     return jsonify({"error": "Could not process webhook data"}), 400
                 
                 # Add image data to processed_data if available
-                submission_type = processed_data.get("type")
-                processed_data["downloaded"] = False
-                
-                if image_file:
-                    print("Got image file in form data")
-                    processed_data["has_image"] = True
-                    with Session() as session:
-                        player = session.query(Player).filter(Player.player_name == processed_data.get("player", None)).first()
-                        if player:
-                            file_path = await download_image(submission_type, player, image_file, processed_data)
-                            processed_data["image_url"] = file_path
-                            processed_data["downloaded"] = True
+                submission_type = processed_items[0].get("type")
+                processed_items[0]["downloaded"] = False
                 
                 # Create a fresh database connection for each request
                 session = get_db_session()
                 try:
-                    match (submission_type):
-                        case "drop" | "other"| "npc":
-                            print("Sent to drop processor")
-                            await submissions.drop_processor(processed_data, external_session=session)
-                        case "collection_log":
-                            print("Sent to clog processor")
-                            await submissions.clog_processor(processed_data, external_session=session)
-                        case "personal_best":
-                            print("Sent to pb processor")
-                            await submissions.pb_processor(processed_data, external_session=session)
-                        case "combat_achievement":
-                            print("Sent to ca processor")
-                            await submissions.ca_processor(processed_data, external_session=session)
-                        case _:
-                            return jsonify({"error": f"Unknown submission type: {submission_type}"}), 400
+                    downloaded = False
+                    file_path = None
+                    for processed_data in processed_items:
+                        submission_type = processed_data.get("type")
+                        processed_data["downloaded"] = False
+                        
+                        if image_file:
+                            print("Got image file in form data")
+                            processed_data["has_image"] = True
+                            with Session() as session:
+                                player = session.query(Player).filter(Player.player_name == processed_data.get("player", None)).first()
+                                if player:
+                                    file_path = await download_image(submission_type, player, image_file, processed_data)
+                                    processed_data["image_url"] = file_path
+                                    processed_data["downloaded"] = True
+                                    downloaded = True
+                        else:
+                            ## Add the downloaded image from this set of webhook data to each processed_data (individual drop/submission)
+                            if file_path:
+                                processed_data["image_url"] = file_path
+                                processed_data["downloaded"] = True
+                                downloaded = True
+                                
+                        match (submission_type):
+                            case "drop" | "other"| "npc":
+                                submission_type = "drop"
+                                await submissions.drop_processor(processed_data, external_session=session)
+                            case "collection_log":
+                                submission_type = "collection_log"
+                                print(f"Processed data: {processed_data}")
+                                await submissions.clog_processor(processed_data, external_session=session)
+                            case "personal_best" | "kill_time" | "npc_kill":
+                                submission_type = "personal_best"
+                                await submissions.pb_processor(processed_data, external_session=session)
+                            case "combat_achievement":
+                                submission_type = "combat_achievement"
+                                await submissions.ca_processor(processed_data, external_session=session)
+                            case _:
+                                print(f"Unknown submission type: {submission_type}")
+                                continue
                 except Exception as processor_error:
                     print(f"Processor error: {processor_error}")
                     # Roll back on error
                     session.rollback()
-                    return jsonify({"error": f"Error processing data: {str(processor_error)}"}), 500
+                    return jsonify({"error": f"Error processing data: {str(processor_error)}"}), 200
                 finally:
                     # Always close the session
                     reset_db_connections()
@@ -242,7 +249,12 @@ async def webhook_data():
         return jsonify({"error": str(e)}), 500
     finally:
         # Record metrics regardless of success/failure
-        metrics.record_request(request_type, success)
+        if submission_type:
+            metrics.record_request(submission_type, success)
+        else:
+            metrics.record_request(request_type, success)
+
+
 
 async def process_webhook_data(webhook_data):
     """Process webhook data from Discord format to standard format"""
@@ -254,18 +266,19 @@ async def process_webhook_data(webhook_data):
             print("No embeds found in webhook data")
             return None
         
-        # Process the first embed
-        embed = embeds[0]
+        # Process all embeds and return a list of processed data
+        processed_items = []
+        for embed in embeds:
+            # Extract fields from the embed and create the data structure
+            processed_data = {
+                field["name"]: field["value"] for field in embed.get("fields", [])
+            }
+            
+            # Add timestamp
+            processed_data["timestamp"] = datetime.now().isoformat()
+            processed_items.append(processed_data)
         
-        # Extract fields from the embed and create the data structure directly
-        processed_data = {
-            field["name"]: field["value"] for field in embed.get("fields", [])
-        }
-        
-        # Add timestamp
-        processed_data["timestamp"] = datetime.now().isoformat()
-        
-        return processed_data
+        return processed_items
     except Exception as e:
         print(f"Error processing webhook data: {e}")
         return None

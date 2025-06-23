@@ -1,4 +1,4 @@
-from sqlalchemy import JSON, Integer, String, ForeignKey, DateTime, func, Enum
+from sqlalchemy import JSON, Boolean, Integer, String, ForeignKey, DateTime, func, Enum
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from typing import Optional, Dict, Any, TYPE_CHECKING
 from datetime import datetime
@@ -21,6 +21,9 @@ class TrackedTaskData(Base):
     :var team_id: The ID of the team (from the team table)
     :var assigned_task_id: The ID of the AssignedTask
     :var player_id: The ID of the participant (from the event_participants table)
+    :var status: The status of the data (creation defines first entry for task on initialization)
+    :var is_active: Whether the data is active (default: True)
+    :var type: The type of the task
     :var key: The key of the tracked data
     :var value: The value of the tracked data
     """
@@ -32,6 +35,7 @@ class TrackedTaskData(Base):
     assigned_task_id: Mapped[int] = mapped_column(Integer, ForeignKey('assigned_tasks.id'))
     player_id: Mapped[int] = mapped_column(Integer, ForeignKey('event_participants.id'))
     status: Mapped[str] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     type: Mapped[TaskType] = mapped_column(Enum(TaskType))
     key: Mapped[str] = mapped_column(String(255))
     value: Mapped[str] = mapped_column(String(255))
@@ -46,6 +50,7 @@ class TrackedTaskData(Base):
         assigned_task_id: int,
         player_id: int,
         status: str,
+        is_active: bool = True,
         type: TaskType,
         key: str,
         value: str,
@@ -60,6 +65,7 @@ class TrackedTaskData(Base):
             assigned_task_id: The ID of the assigned task
             player_id: The ID of the participant
             status: The status of the data (creation defines first entry for task on initialization)
+            is_active: Whether the data is active (set false if the task is removed from the event)
             type: The type of the task
             key: The key of the data
             value: The value of the data
@@ -71,6 +77,7 @@ class TrackedTaskData(Base):
             assigned_task_id=assigned_task_id,
             player_id=player_id,
             status=status,
+            is_active=is_active,
             type=type,
             key=key,
             value=value,

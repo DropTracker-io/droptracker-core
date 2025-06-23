@@ -76,3 +76,6 @@ worker.py
 *.png
 comp_test.py
 events/models/README.md
+api_start.sh
+bingo_test.py
+fix_auth_users.py

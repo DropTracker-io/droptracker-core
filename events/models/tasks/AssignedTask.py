@@ -1,4 +1,4 @@
-from sqlalchemy import JSON, Integer, String, ForeignKey, DateTime, func
+from sqlalchemy import JSON, Boolean, Integer, String, ForeignKey, DateTime, func
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from typing import Optional, Dict, Any, TYPE_CHECKING, List
 from datetime import datetime
@@ -20,6 +20,7 @@ class AssignedTask(Base):
     :var team_id: The ID of the team (from the team table)
     :var task_id: The ID of the task (from the task table)
     :var status: The status of the task (e.g. "pending", "started", "completed", "skipped", "mercy")
+    :var is_active: Whether the task is active (default: True)
     :var created_at: The date and time the task was created
     :var updated_at: The date and time the task was last updated
     :var data: The json-encoded data for the current task progress
@@ -31,6 +32,7 @@ class AssignedTask(Base):
     team_id: Mapped[int] = mapped_column(Integer, ForeignKey('event_teams.id'))
     task_id: Mapped[int] = mapped_column(Integer, ForeignKey('event_tasks.id'))
     status: Mapped[str] = mapped_column(String(255), default='pending')
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now())
     data: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -42,6 +44,7 @@ class AssignedTask(Base):
         team_id: int,
         task_id: int,
         status: str = 'pending',
+        is_active: bool = True,
         data: Optional[Dict[str, Any]] = None,
         **kwargs
     ) -> None:
@@ -53,6 +56,7 @@ class AssignedTask(Base):
             team_id: The ID of the team
             task_id: The ID of the task
             status: The status of the task (default: 'pending')
+            is_active: Whether the task is active (default: True)
             data: JSON data for task progress (default: empty dict)
             **kwargs: Additional keyword arguments passed to SQLAlchemy
         """
@@ -61,6 +65,7 @@ class AssignedTask(Base):
             team_id=team_id,
             task_id=task_id,
             status=status,
+            is_active=is_active,
             data=data if data is not None else {},
             **kwargs
         )

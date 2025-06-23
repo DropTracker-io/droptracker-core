@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from db.models import Player, Session, session
 from db import models
 import wom
-from wom import Err
+from wom import Err, Result
 load_dotenv()
 
 rate_limit = 100 / 65  # This calculates the rate as 100 requests per 65 seconds
@@ -111,7 +111,7 @@ async def check_user_by_id(uid: int):
     await limiter.wait()
 
     try:
-        result = await client.players.get_details(id=uid)
+        result = await client.players.get_details_by_id(player_id=uid)
         if result.is_ok:
             player = result.unwrap()
             player_id = player.player.id
@@ -226,7 +226,7 @@ def get_player_total_kills(wom_id: int):
 async def get_player_total_kills(wom_id: int):
     await client.start()
     await limiter.wait()
-    player_data = await client.players.get_details(id=wom_id)
+    player_data = await client.players.get_details_by_id(player_id=wom_id)
     if player_data.is_ok:
         details = player_data.unwrap()
         snapshot = getattr(details, "latest_snapshot", None)
@@ -253,13 +253,16 @@ def get_player_metric_sync(username: str, metric_name: str):
         # If no loop is running, we can use loop.run_until_complete
         return loop.run_until_complete(get_player_metric(username, metric_name))
 
-async def get_player_metric(username: str, metric_name: str):
+async def get_player_metric_by_id(wom_id: int, metric_name: str):
     """
     Returns an integer representation of a player's metric according to WiseOldMan
     """
     await client.start()
     await limiter.wait()
-    player_data = await client.players.get_details(username=username)
+    player_data = await client.players.get_details_by_id(wom_id)
+    return await _get_player_metric(player_data, metric_name)
+
+async def _get_player_metric(player_data: Result, metric_name: str):
     metric_name = metric_name.replace(" ", "_").replace("'", "")
     if player_data.is_ok:
         details = player_data.unwrap()
@@ -313,7 +316,8 @@ async def get_player_metric(username: str, metric_name: str):
                     }
         
         if metric_name.lower() in [boss.lower() for boss in boss_data]:
-            return boss_data[metric_name.lower()]
+            boss_data_obj = boss_data[metric_name.lower()]
+            return {"kills": boss_data_obj["kills"]}
             # Extract activity data - include all activities
         activity_data = {}
         if snapshot and snapshot_data:
@@ -341,6 +345,15 @@ async def get_player_metric(username: str, metric_name: str):
         else:
             return -1
     return -1
+
+async def get_player_metric(username: str, metric_name: str):
+    """
+    Returns an integer representation of a player's metric according to WiseOldMan
+    """
+    await client.start()
+    await limiter.wait()
+    player_data = await client.players.get_details(username=username)
+    return await _get_player_metric(player_data, metric_name)
 
 async def get_player_wom_data(username: str):
     """

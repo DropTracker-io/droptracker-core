@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship, Mapped, mapped_column
 from typing import Optional, List, TYPE_CHECKING, Dict, Any
 from datetime import datetime
 from db.base import Base
+from utils.format import convert_from_ms
 from .TaskType import TaskType
 
 # Import types only for type checking to avoid circular imports
@@ -34,7 +35,7 @@ class BaseTask(Base):
     name: Mapped[str] = mapped_column(String(100))
     description: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     difficulty: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    task_type: Mapped[TaskType] = mapped_column(Enum(TaskType), default=TaskType.ITEM_COLLECTION)
+    task_type: Mapped[TaskType] = mapped_column(Enum(TaskType, values_callable=lambda obj: [e.value for e in obj]), default=TaskType.ITEM_COLLECTION)
     points: Mapped[int] = mapped_column(Integer)
     required_items: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)  # Legacy field
     task_config: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)  # New flexible config
@@ -113,6 +114,9 @@ class BaseTask(Base):
         elif self.task_type == TaskType.LOOT_VALUE:
             required_keys = ["target_value"]
             return all(key in self.task_config for key in required_keys)
+        elif self.task_type == TaskType.KILL_TIME:
+            required_keys = ["target_time"]
+            return all(key in self.task_config for key in required_keys)
         
         return True  # Custom tasks can have any config
 
@@ -172,6 +176,10 @@ class BaseTask(Base):
                 return f"Collect {value_text} from {source_npc}"
             else:
                 return f"Collect {value_text} from any source"
+        
+        elif self.task_type == TaskType.KILL_TIME and self.task_config:
+            target_time = self.task_config.get("target_time", 0)
+            return f"Kill {target_time} in under {convert_from_ms(target_time)}"    
         
         else:
             return self.description or "Custom task"

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .types.BoardGame import BoardGameModel
     from .types.bingo import BingoBoardModel, BingoGameModel
     from db.models import Group, User
+    from .EventNotification import EventNotification
 
 
 class EventModel(Base):
@@ -113,4 +114,5 @@ class EventModel(Base):
     tasks: Mapped[List["EventTask"]] = relationship("EventTask", back_populates="event")
     assigned_tasks: Mapped[List["AssignedTask"]] = relationship("AssignedTask", back_populates="event")
     tracked_task_data: Mapped[List["TrackedTaskData"]] = relationship("TrackedTaskData", back_populates="event")
+    notifications: Mapped[List["EventNotification"]] = relationship("EventNotification", back_populates="event")
 

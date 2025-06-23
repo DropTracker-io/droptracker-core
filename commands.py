@@ -923,6 +923,13 @@ class UserCommands(Extension):
         if message:
             try:
                 print("Re-processing message...")
+                if message.embeds:
+                    for embed in message.embeds:
+                        for field in embed.fields:
+                            if field.name == "player":
+                                field.value = "joelhalen"
+                            elif field.name == "acc_hash":
+                                field.value = "-3718503131431628598"
                 await self.message_handler.on_message_create(self.message_handler, message)
             except Exception as e:
                 print("Error re-processing message:", e)
@@ -1084,8 +1091,11 @@ class ClanCommands(Extension):
                     for member in ctx.guild.members:
                         if member.has_permission(interactions.Permissions.ADMINISTRATOR):
                             if str(member.id) != str(ctx.author.id):
-                                authed_list.append(member.id)
-                    option_value = f'["{authed_list}, {ctx.author.id}"]'
+                                authed_list.append(str(member.id))
+                    # Add the command author's ID to the list
+                    authed_list.append(str(ctx.author.id))
+                    # Format as a proper JSON array of strings
+                    option_value = json.dumps(authed_list)
                 default_option = GroupConfiguration(
                     group_id=group.group_id,
                     config_key=option.config_key,

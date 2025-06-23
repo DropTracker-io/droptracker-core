@@ -3,11 +3,14 @@ import interactions
 from interactions import ButtonStyle, Extension, OptionType, SlashCommandOption, slash_command
 from interactions import SlashContext, ContainerComponent, Button, SectionComponent, TextDisplayComponent, ActionRow, SeparatorComponent, ThumbnailComponent, UnfurledMediaItem, MediaGalleryComponent, MediaGalleryItem
 
-from db.models import GroupConfiguration, session
+from db.models import GroupConfiguration, session, Session
 from events.generators import BingoBoardGen
+from events.helpers.images import get_bingo_task_tile_image
 from events.models.tasks import TaskType
 from utils.redis import redis_client
 from events.models import *
+from events.helpers.ids import get_item_id, get_npc_id  
+from utils.format import convert_from_ms, format_number
 
 from events.manager import EventManager
 event_manager = EventManager()
@@ -151,10 +154,11 @@ class Commands(Extension):
         if bingo_game.individual_boards:
             # Generate individual boards for each team
             for team in teams:
-                board = session.query(BingoBoardModel).filter(
-                    BingoBoardModel.event_id == event.id, 
-                    BingoBoardModel.team_id == team.id
-                ).first()
+                with Session() as session:
+                    board = session.query(BingoBoardModel).filter(
+                        BingoBoardModel.event_id == event.id, 
+                        BingoBoardModel.team_id == team.id
+                    ).first()
                 
                 if board:
                     try:
@@ -174,10 +178,11 @@ class Commands(Extension):
                     print(f"No board found for team {team.id}")
         else:
             # Generate shared board (use first team's board as the shared one)
-            shared_board = session.query(BingoBoardModel).filter(
-                BingoBoardModel.event_id == event.id,
-                BingoBoardModel.team_id.is_(None)  # Shared boards have team_id = NULL
-            ).first()
+            with Session() as session:
+                shared_board = session.query(BingoBoardModel).filter(
+                    BingoBoardModel.event_id == event.id,
+                    BingoBoardModel.team_id.is_(None)  # Shared boards have team_id = NULL
+                ).first()
             
             if shared_board:
                 try:
@@ -198,15 +203,17 @@ class Commands(Extension):
     
     async def _send_event_notifications(self, ctx, event, group_id):
         """Send event notifications to the configured channel."""
-        channel_to_notify = session.query(GroupConfiguration).filter(
-            GroupConfiguration.group_id == group_id, 
-            GroupConfiguration.config_key == "event_notice_channel_id"
-        ).first()
+        with Session() as session:
+            channel_to_notify = session.query(GroupConfiguration).filter(
+                GroupConfiguration.group_id == group_id, 
+                GroupConfiguration.config_key == "event_notice_channel_id"
+            ).first()
         
-        ping_to_use = session.query(GroupConfiguration).filter(
-            GroupConfiguration.group_id == group_id, 
-            GroupConfiguration.config_key == "event_notice_ping"
-        ).first()
+        with Session() as session:
+            ping_to_use = session.query(GroupConfiguration).filter(
+                GroupConfiguration.group_id == group_id, 
+                GroupConfiguration.config_key == "event_notice_ping"
+            ).first()
         
         ping_str = ping_to_use.config_value if ping_to_use else ""
         
@@ -285,13 +292,17 @@ class Commands(Extension):
     async def task(self, ctx: SlashContext, task: str):
         # Convert the task ID back to get the actual task
         try:
-            task_id = int(task)
-            task_obj = session.query(BaseTask).filter(BaseTask.id == task_id).first()
+            with Session() as session:
+                task_id = int(task)
+                task_obj = session.query(BaseTask).filter(BaseTask.id == task_id).first()
             if task_obj:
+                # Generate the task tile image
                 requirements_str = ""
+                task_type_str = ""
                 match task_obj.task_type:
                     case TaskType.ITEM_COLLECTION:
                         if task_obj.task_config["requires"] == "set":
+                            task_type_str = "Set Collection"
                             if len(task_obj.task_config["sets"]) > 1:
                                 requirements_str = "-# Complete one of the following sets:\n"
                             else:
@@ -303,63 +314,142 @@ class Commands(Extension):
                                 else:
                                     requirements_str += f"-# {', '.join(set)} or\n"
                         elif task_obj.task_config["requires"] == "any":
-                            if len(task_obj.task_config["items"]) > 1:
-                                requirements_str = "-# Obtain any of the following items:\n"
-                            else:
-                                requirements_str = "-# Obtain the following item:\n"
-                            items: list[str] = task_obj.task_config["items"]
-                            print("Got items for requires: any", items)
-                            for item in items:
-                                if item == items[-1]:
-                                    requirements_str += f"-# {item}"
+                            task_type_str = "Any Item"
+                            items = task_obj.task_config["required_items"]
+                            if isinstance(items, dict):
+                                item_keys = list(items.keys())
+                                if len(item_keys) > 1:
+                                    requirements_str = "Obtain any of the following items:\n"
                                 else:
-                                    requirements_str += f"-# {item} or\n"
+                                    requirements_str = "Obtain the following item:\n"
+                                for idx, item in enumerate(item_keys):
+                                    if idx == len(item_keys) - 1:
+                                        requirements_str += f"-# {item}"
+                                    else:
+                                        requirements_str += f"-# {item} or\n"
+                            else:
+                                if len(items) > 1:
+                                    requirements_str = "Obtain any of the following items:\n"
+                                else:
+                                    requirements_str = "Obtain the following item:\n"
+                                for idx, item in enumerate(items):
+                                    if idx == len(items) - 1:
+                                        requirements_str += f"-# {item}"
+                                    else:
+                                        requirements_str += f"-# {item} or\n"
                         elif task_obj.task_config["requires"] == "all":
-                            items: list[str] = task_obj.task_config["required_items"]
-                            if len(items) > 1:
-                                requirements_str = "-# Obtain all of the following items:\n"
-                            else:
-                                requirements_str = "-# Obtain the following item:\n"
-                            for item in items:
-                                if item == items[-1]:
-                                    requirements_str += f"-# {item}"
-                        elif task_obj.task_config["requires"] == "points":
-                            requirements_str = f"-# Obtain {task_obj.task_config['pts_required']} points by receiving the following items:\n"
-                            items: list[tuple[str, int]] = task_obj.task_config["items"]
-                            for item, points in items:
-                                if item == items[-1]:
-                                    requirements_str += f"-# {item} ({points} points)"
+                            task_type_str = "All Items"
+                            items = task_obj.task_config["required_items"]
+                            if isinstance(items, dict):
+                                item_keys = list(items.keys())
+                                if len(item_keys) > 1:
+                                    requirements_str = "-# Obtain all of the following items:\n"
                                 else:
-                                    requirements_str += f"-# {item} ({points} points)\n"
+                                    requirements_str = "-# Obtain the following item:\n"
+                                for idx, item in enumerate(item_keys):
+                                    if idx == len(item_keys) - 1:
+                                        requirements_str += f"-# {item}"
+                                    else:
+                                        requirements_str += f"-# {item}\n"
+                            else:
+                                if len(items) > 1:
+                                    requirements_str = "-# Obtain all of the following items:\n"
+                                else:
+                                    requirements_str = "-# Obtain the following item:\n"
+                                for idx, item in enumerate(items):
+                                    if idx == len(items) - 1:
+                                        requirements_str += f"-# {item}"
+                                    else:
+                                        requirements_str += f"-# {item}\n"
+                        elif task_obj.task_config["requires"] == "points":
+                            task_type_str = "Points"
+                            items = task_obj.task_config["items"]
+                            if isinstance(items, dict):
+                                requirements_str = f"Obtain {task_obj.task_config['pts_required']} points by receiving the following items:\n"
+                                item_pairs = list(items.items())
+                                for idx, (item, points) in enumerate(item_pairs):
+                                    if idx == len(item_pairs) - 1:
+                                        requirements_str += f"-# {item} ({points} points)"
+                                    else:
+                                        requirements_str += f"-# {item} ({points} points)\n"
+                            else:
+                                requirements_str = f"Obtain {task_obj.task_config['pts_required']} points by receiving the following items:\n"
+                                for idx, (item, points) in enumerate(items):
+                                    if idx == len(items) - 1:
+                                        requirements_str += f"-# {item} ({points} points)"
+                                    else:
+                                        requirements_str += f"-# {item} ({points} points)\n"
                         else:
                             raise ValueError(f"Invalid requires value: {task_obj.task_config['requires']}")
+                    case TaskType.XP_TARGET:
+                        task_type_str = "XP Target"
+                        requirements_str = f"Gain {format_number(task_obj.task_config['target_xp'])} XP"
+                    case TaskType.KC_TARGET:
+                        task_type_str = "KC Target"
+                        npc_str = ""
+                        if len(task_obj.task_config["source_npcs"]) > 1:
+                            for npc in task_obj.task_config["source_npcs"]:
+                                if npc == task_obj.task_config["source_npcs"][-1]:
+                                    npc_str += f"{npc}"
+                                else:
+                                    npc_str += f"{npc}, "
+                        requirements_str = f"Gain {format_number(task_obj.task_config['target_kc'])} KC on {npc_str}"
+                    case TaskType.LOOT_VALUE:
+                        task_type_str = "Loot Value"
+                        npc_str = ""
+                        if len(task_obj.task_config["source_npcs"]) > 1:
+                            for npc in task_obj.task_config["source_npcs"]:
+                                if npc == task_obj.task_config["source_npcs"][-1]:
+                                    npc_str += f"{npc}"
+                                else:
+                                    npc_str += f"{npc}, "
+                        requirements_str = f"Gain {format_number(task_obj.task_config['target_value'])} GP from {npc_str}"
+                    case TaskType.EHP_TARGET:
+                        task_type_str = "EHP Target"
+                        requirements_str = f"Acquire a total of {task_obj.task_config['target_ehp']} efficient hours played."
+                    case TaskType.EHB_TARGET:
+                        task_type_str = "EHB Target"
+                        requirements_str = f"Acquire a total of {task_obj.task_config['target_ehb']} efficient hours bossed."
+                    case TaskType.KILL_TIME:
+                        task_type_str = "Kill Time"
+                        requirements_str = f"Kill {task_obj.task_config['target_npc']} in under {convert_from_ms(task_obj.task_config['target_time'])}."
+                
 
-                            
-                        components = [
-                            ContainerComponent(
-                                SeparatorComponent(divider=True),
+                tile_url = await get_bingo_task_tile_image(task_obj)
+                
+                components = [
+                    ContainerComponent(
+                        SeparatorComponent(divider=True),
                         SectionComponent(
                             components=[
                                 TextDisplayComponent(
                                     content=f"### {task_obj.name}\n" +
                                     f"-# {task_obj.description}\n\n" +
                                     f"-# Difficulty: {task_obj.difficulty} \n" +
-                                    f"-# Task type: {task_obj.task_type}\n" +
+                                    f"-# Task type: {task_type_str}\n" +
                                     f"-# Score awarded for completion: {task_obj.points}\n" +
-                                    f"-# Requirements: {requirements_str}\n" 
+                                    f"-# Requirements:\n{requirements_str}\n" 
                                 ),
-                                
                             ],
                             accessory=ThumbnailComponent(
-                                    UnfurledMediaItem(
-                                        url="https://www.droptracker.io/img/droptracker-small.gif"
-                                    )
+                                UnfurledMediaItem(
+                                    url="https://www.droptracker.io/img/droptracker-small.gif"
                                 )
-                            
+                            )
+                        ),
+                        MediaGalleryComponent(
+                            items=[
+                                MediaGalleryItem(
+                                    media=UnfurledMediaItem(
+                                        url=tile_url
+                                    ),
+                                    description=task_obj.description
+                                )
+                            ]
                         )
                     )
                 ]
-                return await ctx.send(components=components)
+                return await ctx.send(components=components, ephemeral=True)
             else:
                 await ctx.send("Task not found", ephemeral=True)
         except ValueError:
@@ -367,7 +457,8 @@ class Commands(Extension):
 
     @task.autocomplete("task")
     async def task_autocomplete(self, ctx: interactions.AutocompleteContext):
-        tasks = session.query(BaseTask).all()
+        with Session() as session:
+            tasks = session.query(BaseTask).all()
         
         if ctx.input_text:
             if ctx.input_text.isdigit():
