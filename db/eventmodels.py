@@ -19,53 +19,6 @@ DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
 
 
-class EventModel(Base):
-    """
-    Represents an event in the database.
-    :var id: The ID of the event
-    :var name: The name of the event
-    :var type: The type of event
-    :var description: The description of the event
-    :var start_date: The start date of the event
-    :var status: The status of the event
-    :var author_id: The ID of the author of the event
-    """
-    __tablename__ = 'events'
-    event_id = Column(Integer, primary_key=True)
-    group_id = Column(Integer, ForeignKey('groups.group_id'), nullable=False)
-    author_id = Column(Integer, ForeignKey('users.user_id'), nullable=False)
-    event_type = Column(String(255), nullable=False)
-    created_at = Column(TIMESTAMP, nullable=False, default=func.now())
-    status = Column(String(255), nullable=False)
-    banner_image = Column(String(255), nullable=True)
-    title = Column(String(255), nullable=False)
-    description = Column(Text, nullable=True)
-    start_date = Column(Integer, nullable=True)
-    end_date = Column(Integer, nullable=True)
-    max_participants = Column(Integer, nullable=True)
-    team_size = Column(Integer, nullable=True)
-    updated_at = Column(TIMESTAMP, nullable=False, default=func.now(), onupdate=func.now())
-    
-    # The group relationship will be added in setup_relationships()
-    
-    # Other relationships
-    participants = relationship("EventParticipant", back_populates="event")
-    configurations = relationship("EventConfigModel", back_populates="event")
-    teams = relationship("EventTeamModel", back_populates="event")
-    items = relationship("EventItems", back_populates="event")
-
-    
-class BoardGameModel(EventModel):
-    __tablename__ = 'board_game'
-    board_game_id = Column(Integer, primary_key=True)
-    die_sides = Column(Integer, default=6)
-    total_tiles = Column(Integer, default=100)
-    
-    event_id = Column(Integer, ForeignKey('events.id'), nullable=False)
-
-    #Relationships
-    event = relationship("EventModel", back_populates="board_game")
-
 class EventTeamModel(Base):
     __tablename__ = 'event_teams'
 

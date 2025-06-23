@@ -180,6 +180,9 @@ def replace_placeholders(embed: interactions.Embed, value_dict: dict, global_ser
                     continue
             if field.name:
                 field.name = replace_placeholders_in_text(field.name, value_dict)
+            if field.name == "Source:":
+                if value_dict.get("{kill_count}", None) == None:
+                    embed.fields.pop(i)
             if field.value:
                 if field.value == "{team_size}":
                     if value_dict.get("{team_size}", None) != "Solo":

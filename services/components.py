@@ -236,6 +236,8 @@ clan_setup = [
 class Components(Extension):
     def __init__(self, bot: interactions.Client):
         self.bot = bot
+        self.player_setup = player_setup
+        self.clan_setup = clan_setup
         print(f"Components service initialized.")
 
 

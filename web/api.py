@@ -230,6 +230,7 @@ def create_api(bot: interactions.Client):
     @api_blueprint.route('/csv_export', methods=['GET'])
     async def csv_export():
         ## Auth keys should be provided in the query params
+        print(request.args.__dict__)
         key = request.args.get('key')
         correct_key = False  # Initialize to False
         correct_keys = sesh.query(GroupConfiguration).filter(GroupConfiguration.config_key == "export_api_key").all()
@@ -502,7 +503,24 @@ def create_api(bot: interactions.Client):
                             npc_value
                         ])
                         
-                        # We could also add individual item breakdowns if needed
+                        # Add individual item breakdowns
+                        for item_id, item_data in all_items_data.items():
+                            qty, value = map(int, item_data.split(','))
+                            
+                            # Get item name
+                            item_obj = sesh.query(ItemList).filter(ItemList.item_id == item_id).first()
+                            item_name = item_obj.item_name if item_obj else f"Unknown Item ({item_id})"
+                            
+                            # Add row to CSV data
+                            csv_data.append([
+                                player_name,
+                                npc_name,
+                                timestamp,
+                                item_id,
+                                item_name,
+                                qty,
+                                value
+                            ])
             else:
                 # Process data at each time granularity
                 
@@ -554,41 +572,59 @@ def create_api(bot: interactions.Client):
                 # For daily data, indicate it's for the entire day
                 timestamp = f"{datetime.strptime(timeframe, '%Y%m%d').strftime('%Y-%m-%d')}"
             
-            # Process NPCs
-            npcs_key = f"player:{player_id}:{prefix}:{timeframe}:npcs"
-            npcs_data = redis_client.client.hgetall(npcs_key)
-            npcs_data = redis_client.decode_data(npcs_data)
-            
-            # Process NPC items
-            for npc_id in npc_ids:
-                if str(npc_id) in npcs_data:
-                    npc_obj = next((n for n in npc_objects if n.npc_id == npc_id), None)
-                    if not npc_obj:
-                        continue
-                        
-                    npc_name = npc_obj.npc_name
-                    npc_items_key = f"player:{player_id}:{prefix}:{timeframe}:npc_items:{npc_id}"
-                    npc_items_data = redis_client.client.hgetall(npc_items_key)
-                    npc_items_data = redis_client.decode_data(npc_items_data)
+            # Get all items for this timeframe
+            items_key = f"player:{player_id}:{prefix}:{timeframe}:total_items"
+            items_data = redis_client.client.hgetall(items_key)
+            if items_data:
+                items_data = redis_client.decode_data(items_data)
+                
+                # Get NPC totals for this timeframe
+                npc_totals_key = f"player:{player_id}:{prefix}:{timeframe}:npc_totals"
+                npc_totals = redis_client.client.hgetall(npc_totals_key)
+                if npc_totals:
+                    npc_totals = redis_client.decode_data(npc_totals)
                     
-                    # Add each item to the CSV data
-                    for item_id, item_data in npc_items_data.items():
-                        qty, value = map(int, item_data.split(','))
+                    # Process each NPC
+                    for npc_id in npc_ids:
+                        npc_obj = next((n for n in npc_objects if n.npc_id == npc_id), None)
+                        if not npc_obj:
+                            continue
+                            
+                        npc_name = npc_obj.npc_name
                         
-                        # Get item name
-                        item_obj = sesh.query(ItemList).filter(ItemList.item_id == item_id).first()
-                        item_name = item_obj.item_name if item_obj else f"Unknown Item ({item_id})"
-                        
-                        # Add row to CSV data
-                        csv_data.append([
-                            player_name,
-                            npc_name,
-                            timestamp,
-                            item_id,
-                            item_name,
-                            qty,
-                            value
-                        ])
+                        # Get NPC total if it exists
+                        if str(npc_id) in npc_totals:
+                            npc_total = int(npc_totals[str(npc_id)])
+                            
+                            # Add NPC total row
+                            csv_data.append([
+                                player_name,
+                                npc_name,
+                                timestamp,
+                                "",  # No specific item
+                                "All Items",
+                                "",  # No specific quantity
+                                npc_total
+                            ])
+                            
+                            # Add each item to the CSV data
+                            for item_id, item_data in items_data.items():
+                                qty, value = map(int, item_data.split(','))
+                                
+                                # Get item name
+                                item_obj = sesh.query(ItemList).filter(ItemList.item_id == item_id).first()
+                                item_name = item_obj.item_name if item_obj else f"Unknown Item ({item_id})"
+                                
+                                # Add row to CSV data
+                                csv_data.append([
+                                    player_name,
+                                    npc_name,
+                                    timestamp,
+                                    item_id,
+                                    item_name,
+                                    qty,
+                                    value
+                                ])
             return csv_data
 
     @api_blueprint.route('/player/<int:player_id>', methods=['GET'])

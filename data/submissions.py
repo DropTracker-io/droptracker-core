@@ -76,7 +76,7 @@ npc_list = {} # - stores a dict of the npc's and their corresponding IDs to prev
 player_list = {} # - stores a dict of player name:ids, and their last refresh from the DB.
 class RawDropData():
     def __init__(self) -> None:
-        pass
+        pass  
 
 def check_auth(player_name, account_hash, auth_key, external_session=None):
     """
@@ -106,7 +106,7 @@ def check_auth(player_name, account_hash, auth_key, external_session=None):
             existing_player = session.query(Player).filter(Player.account_hash == account_hash).first()
             if existing_player:
                 existing_player.player_name = player_name
-                app_logger.log_sync(log_type="access", data=f"Player {player_name} already exists with account hash {account_hash}, updating player name to {player_name}", app_name="core", description="check_auth")
+                app_logger.log(log_type="access", data=f"Player {player_name} already exists with account hash {account_hash}, updating player name to {player_name}", app_name="core", description="check_auth")
                 try:
                     session.commit()
                 except Exception as e:
@@ -123,23 +123,6 @@ def check_auth(player_name, account_hash, auth_key, external_session=None):
         debug_print("Error checking auth:" + str(e))
         return False, False
 
-def check_verif_user(account_hash: str):
-    """
-    Checks if the user has an account in the database.
-    In the case they do, it ignores their drops if 
-    they have an 'auth' key that is valid in the user configs.
-    """
-    player = session.query(Player).filter(Player.account_hash == account_hash).first()
-    if player:
-        if player.user:
-            user: User = player.user
-            stored_auth = session.query(UserConfiguration.config_value).filter(
-                UserConfiguration.user_id == user.user_id,
-                UserConfiguration.config_key == 'auth'
-            ).first()
-            if stored_auth and stored_auth[0] and stored_auth[0] != 'false':
-                return True
-    return False
 
 async def drop_processor(drop_data: RawDropData, external_session=None):
     """Process a drop submission and create notification entries if needed"""
@@ -159,6 +142,7 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
         auth_key = drop_data.get('auth_key', None)
         player_name = drop_data.get('player_name', drop_data.get('player', None))
         account_hash = drop_data['acc_hash']
+        kill_count = drop_data.get('kill_count', None)
         player_name = str(player_name).strip()
         account_hash = str(account_hash)
         downloaded = drop_data.get('downloaded', False)
@@ -189,7 +173,8 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
         if not user_exists or not authed:
             debug_print(player_name + " failed auth check")
             return
-        
+        #app_logger.log(log_type="drop_processor", data=f"Drop processor running on {quantity} x {item_name} for {player_name}", app_name="core", description="drop_processor")
+                
         if npc_name in npc_list:
             npc_id = npc_list[npc_name]
         else:
@@ -247,6 +232,7 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
             is_from_npc = await verify_item_real(item_name, npc_name)
             if not is_from_npc:
                 return
+        
         # Process attachment
         if drop_data.get('attachment_type', None) is not None:
             attachment_url = drop_data.get('attachment_url', None)
@@ -254,7 +240,8 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
         else:
             attachment_url = image_url
             attachment_type = None
-        debug_print("Creating drop object")
+        #app_logger.log(log_type="drop_processor", data=f"Drop value: {drop_value}; Item ID: {item_id}; Player ID: {player_id}; NPC ID: {npc_id}; Attachment URL: {attachment_url}", app_name="core", description="drop_processor")
+        
         # Create the drop in database
         drop = await db.create_drop_object(
             item_id=item_id,
@@ -269,7 +256,7 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
             attachment_type=attachment_type,
             existing_session=session if use_external_session else None
         )
-        
+        #app_logger.log(log_type="drop_processor", data=f"Drop created: {drop} ({drop.drop_id})", app_name="core", description="drop_processor")
         
         if not drop:
             debug_print("Failed to create drop")
@@ -282,29 +269,37 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
             session.rollback()
             return
         # Get player groups and check if notification is needed
-        debug_print("Getting player groups")
+        #app_logger.log(log_type="drop_processor", data=f"{drop.drop_id}: Getting player groups for {player_name}", app_name="core", description="drop_processor")
         global_group = session.query(Group).filter(Group.group_id == 2).first()
-        if global_group not in player.groups:
+        player_gids = session.execute(text("SELECT group_id FROM user_group_association WHERE player_id = :player_id"), {"player_id": player.player_id}).all()
+        player_groups = []
+        if player_gids:
+            print(f"Got player group ids: {player_gids}")
+            for gid in player_gids:
+                group = session.query(Group).filter(Group.group_id == gid[0]).first()
+                player_groups.append(group)
+        print(f"Player groups: {player_groups}")
+        if global_group not in player_groups:
             player.add_group(global_group)
             session.commit()
-        player_groups = session.query(Group).join(Group.players).filter(Player.player_id == player_id).all()
-        debug_print(f"Player groups: {player_groups}")
-        if 2 not in [group.group_id for group in player_groups]:
-            global_group = session.query(Group).filter(Group.group_id == 2).first()
             player_groups.append(global_group)
+        #app_logger.log(log_type="drop_processor", data=f"{drop.drop_id}: Player groups: {player_groups}", app_name="core", description="drop_processor")
         for group in player_groups:
             group_id = group.group_id
-            
             # Get minimum value to notify for this group
             min_value_config = session.query(GroupConfiguration).filter(
                 GroupConfiguration.group_id == group_id,
                 GroupConfiguration.config_key == 'minimum_value_to_notify'
             ).first()
             
-            min_value_to_notify = int(min_value_config.config_value) if min_value_config else 2500000
             
+            min_value_to_notify = int(min_value_config.config_value) if min_value_config else 2500000
+            #app_logger.log(log_type="drop_processor", data=f"{drop.drop_id}: Checking group {group_id}'s minimum value to notify: ({min_value_to_notify})", app_name="core", description="drop_processor")
+
             # Check if drop value exceeds minimum for notification
             if drop_value >= min_value_to_notify:
+                #app_logger.log(log_type="drop_processor", data=f"{drop.drop_id}: Drop value ({drop_value}) exceeds minimum value to notify ({min_value_to_notify})", app_name="core", description="drop_processor")
+                
                 # Create notification entry
                 notification_data = {
                     'drop_id': drop.drop_id,
@@ -313,6 +308,7 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
                     'value': value,
                     'quantity': quantity,
                     'total_value': drop_value,
+                    'kill_count': kill_count,
                     'player_name': player_name,
                     'player_id': player_id,
                     'image_url': drop.image_url,
@@ -333,14 +329,14 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
                                     should_dm = False
                                 if should_dm:
                                     await create_notification('dm_drop', player_id, notification_data, group_id, existing_session=session if use_external_session else None)
+                #app_logger.log(log_type="drop_processor", data=f"{drop.drop_id}: Creating Xenforo entry for {player_name}", app_name="core", description="drop_processor")
                 await create_xenforo_entry(drop=drop, clog=None, personal_best=None, combat_achievement=None)
+                #app_logger.log(log_type="drop_processor", data=f"{drop.drop_id}: Creating notification for {player_name} in group {group_id}", app_name="core", description="drop_processor")
                 await create_notification('drop', player_id, notification_data, group_id, existing_session=session if use_external_session else None)
-                debug_print(f"Drop created for {player_name} in group {group_id}")
-        
         # At the end of the function, commit if we created our own session
         if not use_external_session:
             session.commit()
-            
+        ##app_logger.log(log_type="drop_processor", data=f"{drop.drop_id}: Drop processor completed", app_name="core", description="drop_processor")
         return drop
         
     except Exception as e:
@@ -444,14 +440,23 @@ async def create_player(player_name, account_hash, existing_session=None):
     
     return player
 
-stored_notifications = []
+stored_notifications = {}
+recently_sent = []
 
 async def create_notification(notification_type, player_id, data, group_id=None, existing_session=None):
     """Create a notification queue entry"""
     global stored_notifications
-    if len(stored_notifications) > 100:
-        while len(stored_notifications) > 100:
-            stored_notifications.pop()
+    debug_test = int(player_id) == 1
+    if group_id is not None:
+        if group_id not in stored_notifications:
+            stored_notifications[group_id] = []
+    else:
+        if 0 not in stored_notifications:
+            stored_notifications[0] = []
+        group_id = 0
+    if len(stored_notifications[group_id]) > 100:
+        while len(stored_notifications[group_id]) > 100:
+            stored_notifications[group_id].pop()
     use_existing_session = existing_session is not None
     session = models.session
     if use_existing_session:
@@ -459,26 +464,36 @@ async def create_notification(notification_type, player_id, data, group_id=None,
     else:
         session = session
     hashed_data = hashlib.sha256(json.dumps(data).encode()).hexdigest()
-    if hashed_data in stored_notifications:
+    if debug_test:
+      await log_to_file(f"hashed data: {hashed_data}")
+    if hashed_data in stored_notifications[group_id]:
+        if debug_test:
+          await log_to_file(f"Debug test: Notification already exists for group {group_id}, returning from create_notification without creation")
+          await log_to_file(f"Existing hashed data: {stored_notifications[group_id]}")
         ## This group notification already got created ...
         return
-    stored_notifications.append(hashed_data)
+    stored_notifications[group_id].append(hashed_data) # Add to the group's list
     notification = NotificationQueue(
         notification_type=notification_type,
         player_id=player_id,
         data=json.dumps(data),
-        group_id=group_id,
+        group_id=group_id if group_id != 0 else None,
         status='pending'
     )
     session.add(notification)
     session.commit()
+    if debug_test:
+      await log_to_file(f"Debug test: Created notification for group {group_id}: {notification.id}")
     return notification.id
 
 async def clog_processor(clog_data, external_session=None):
-    print("clog_processor")
+    debug_test = False
+    print("raw clog data: " + str(clog_data))
     """Process a collection log submission and create notification entries if needed"""
     player_name = clog_data.get('player_name', clog_data.get('player', None))
     session = models.session
+    if player_name == "joelhalen":
+        debug_test = True
     use_external_session = external_session is not None
     if use_external_session:
         session = external_session
@@ -503,6 +518,8 @@ async def clog_processor(clog_data, external_session=None):
 
     killcount = clog_data.get('kc', None)       
     item = session.query(ItemList).filter(ItemList.item_name == item_name).first()
+    if debug_test:
+      await log_to_file(f"Debug test: {clog_data}")
     if not item:
         try:
             item_id = await get_item_id(item_name)
@@ -519,6 +536,8 @@ async def clog_processor(clog_data, external_session=None):
     print(f"NPC: {npc}")
     npc_id = None
     if player_name not in player_list:
+        if debug_test:
+          await log_to_file(f"Debug test: {player_name} not in player_list")
         player = session.query(Player).filter(Player.player_name.ilike(player_name)).first()
         if not player:
             # Create player without Discord-specific code
@@ -532,6 +551,8 @@ async def clog_processor(clog_data, external_session=None):
         else:
             return
     player_id = player_list[player_name]
+    if debug_test:
+      await log_to_file(f"Debug test: got player id after check {player_id}")
     try:
         if npc:
             npc_obj = session.query(NpcList.npc_id).filter(NpcList.npc_name == npc).first()
@@ -565,13 +586,15 @@ async def clog_processor(clog_data, external_session=None):
         return
     # Validate player
     
-    
+    if debug_test:
+      await log_to_file(f"Debug test: got npc id after check {npc_id}")
     # Get the player object for image download
     player = session.query(Player).filter(Player.player_id == player_id).first()
     if not player:
         print("Player not found in database, aborting")
         return
-        
+    if debug_test:
+      await log_to_file(f"Debug test: got player object back after check {player}")
     user_exists, authed = check_auth(player_name, account_hash, auth_key, session)
     if not user_exists or not authed:
         print("user failed auth check")
@@ -589,6 +612,8 @@ async def clog_processor(clog_data, external_session=None):
         return
     if not clog_entry:
         # Create new collection log entry
+        if debug_test:
+          await log_to_file(f"Debug test: This is new entry -- creating new clog entry")
         clog_entry = CollectionLogEntry(
             player_id=player_id,
             reported_slots=reported_slots,
@@ -599,14 +624,16 @@ async def clog_processor(clog_data, external_session=None):
         )
         session.add(clog_entry)
         session.commit()  # Commit to get the log_id
-        
+        if debug_test:
+          await log_to_file(f"Debug test: Committed session, log entry added: {clog_entry.log_id}")
         # Process image if available
         dl_path = ""
         if attachment_url and not downloaded:
             try:
                 file_extension = get_extension_from_content_type(attachment_type)
                 file_name = f"clog_{player_id}_{item_name.replace(' ', '_')}_{int(time.time())}"
-                
+                if debug_test:
+                  await log_to_file(f"Debug test: Downloading image for {file_name}")
                 dl_path, external_url = await download_player_image(
                     submission_type="clog",
                     file_name=file_name,
@@ -616,30 +643,37 @@ async def clog_processor(clog_data, external_session=None):
                     entry_id=clog_entry.log_id,
                     entry_name=item_name
                 )
-                
+                if debug_test:
+                  await log_to_file(f"Debug test: Downloaded image for {file_name}")
                 # Update the image URL
                 clog_entry.image_url = dl_path if dl_path else ""
             except Exception as e:
                 app_logger.log(log_type="error", data=f"Couldn't download collection log image: {e}", app_name="core", description="clog_processor")
         elif downloaded:
-                clog_entry.image_url = image_url
+            clog_entry.image_url = image_url
         
         is_new_clog = True
         print("Added clog to session")
-    
     print("Committing session")
     session.commit()
     
+    if debug_test:
+      await log_to_file(f"Debug test: Added clog to session + committed")
     # Create notification if it's a new collection log entry
     if is_new_clog:
         print("New collection log -- Creating notification")
+        if debug_test:
+          await log_to_file(f"Debug test: New collection log -- Creating notification")
         # Get player groups
-        global_group = session.query(Group).filter(Group.group_id == 2).first()
-        if global_group not in player.groups:
-            player.add_group(global_group)
-            session.commit()
-        player_groups = session.query(Group).join(Group.players).filter(Player.player_id == player_id).all()
+        
+        player_gids = session.execute(text("SELECT group_id FROM user_group_association WHERE player_id = :player_id"), {"player_id": player.player_id}).all()
+        player_groups = []
+        if player_gids:
+            for gid in player_gids:
+                group = session.query(Group).filter(Group.group_id == gid[0]).first()
+                player_groups.append(group)
         for group in player_groups:
+            print(f"CLOG: Checking group: {group}")
             group_id = group.group_id
             
             
@@ -649,7 +683,12 @@ async def clog_processor(clog_data, external_session=None):
                 GroupConfiguration.config_key == 'notify_clogs'
             ).first()
             
-            if clog_notify_config and clog_notify_config.config_value.lower() == 'true' or int(clog_notify_config.config_value) == 1 or group_id == 2:
+            if debug_test:
+              await log_to_file(f"Debug test: Checking group: {group} for clog notifications -- clog_notify_config: {clog_notify_config}")
+            
+            if clog_notify_config and (clog_notify_config.config_value.lower() == 'true' or int(clog_notify_config.config_value) == 1):
+                if debug_test:
+                  await log_to_file(f"Debug test: Group {group} has clog notifications enabled")
                 notification_data = {
                     'player_name': player_name,
                     'player_id': player_id,
@@ -659,10 +698,13 @@ async def clog_processor(clog_data, external_session=None):
                     'kc_received': killcount,
                     'item_id': item_id
                 }
-                print("Creating notification")
+                if debug_test:
+                  await log_to_file(f"Debug test: Creating notification for group {group}")
                 if not has_xf_entry:
                     await create_xenforo_entry(drop=None, clog=clog_entry, personal_best=None, combat_achievement=None)
                     has_xf_entry = True
+                if debug_test:
+                  await log_to_file(f"Debug test: Created XenForo entry for clog")
                 await create_notification('clog', player_id, notification_data, group_id, existing_session=session if use_external_session else None)
         if player:
             if player.user:
@@ -771,7 +813,8 @@ async def ca_processor(ca_data, external_session=None):
                     ca_entry.image_url = dl_path
             except Exception as e:
                 app_logger.log(log_type="error", data=f"Couldn't download CA image: {e}", app_name="core", description="ca_processor")
-        
+        elif downloaded:
+            ca_entry.image_url = image_url
     session.commit()
     debug_print("Committed a new CA entry")
     # Create notification if it's a new CA
@@ -779,11 +822,16 @@ async def ca_processor(ca_data, external_session=None):
         debug_print("New CA entry, creating notification")
         # Get player groups
         global_group = session.query(Group).filter(Group.group_id == 2).first()
-        if global_group not in player.groups:
+        
+        player_gids = session.execute(text("SELECT group_id FROM user_group_association WHERE player_id = :player_id"), {"player_id": player.player_id}).all()
+        player_groups = []
+        if player_gids:
+            for gid in player_gids:
+                group = session.query(Group).filter(Group.group_id == gid[0]).first()
+                player_groups.append(group)
+        if global_group not in player_groups:
             player.add_group(global_group)
             session.commit()
-        player_groups = session.query(Group).join(Group.players).filter(Player.player_id == player_id).all()
-        debug_print("Player groups: " + str(player_groups))
         for group in player_groups:
             debug_print("Checking group: " + str(group))
             group_id = group.group_id
@@ -861,7 +909,7 @@ async def pb_processor(pb_data, external_session=None):
         session = session
     player_name = pb_data['player_name']
     account_hash = pb_data['acc_hash']
-    boss_name = pb_data['npc_name']
+    boss_name = pb_data.get('npc_name', pb_data.get('boss_name', None))
     current_ms = pb_data.get('current_time_ms', 0)
     pb_ms = pb_data.get('personal_best_ms', 0)
     team_size = pb_data.get('team_size', 1)
@@ -874,7 +922,6 @@ async def pb_processor(pb_data, external_session=None):
     image_url = pb_data.get('image_url', None)
     player = None
     has_xf_entry = False
-    print("Raw pb data: " + str(pb_data))
     dl_path = None
     npc: NpcList = session.query(NpcList.npc_id).filter(NpcList.npc_name == boss_name).first()
     npc_name = boss_name
@@ -951,7 +998,7 @@ async def pb_processor(pb_data, external_session=None):
                     player=player,
                     attachment_url=attachment_url,
                     file_extension=file_extension,
-                    entry_id=pb_entry.id,
+                    entry_id=pb_entry.id if pb_entry else 0,
                     entry_name=boss_name
                 )
                 
@@ -964,7 +1011,7 @@ async def pb_processor(pb_data, external_session=None):
         elif downloaded:
             dl_path = image_url
     if pb_entry:
-        print("PB entry found, processing")
+        #print("PB entry found, processing")
         if pb_entry.personal_best < time_ms:
             old_time = pb_entry.personal_best
             pb_entry.personal_best = time_ms  
@@ -986,12 +1033,13 @@ async def pb_processor(pb_data, external_session=None):
             image_url=dl_path if dl_path else ""
         )
         session.add(pb_entry)
-    
+        session.commit()
+        session.refresh(pb_entry)
     session.commit()
-    print("Committed PB entry - personal best: " + str(is_personal_best))
+    #print("Committed PB entry - personal best: " + str(is_personal_best))
     # Create notification if it's a new PB
     if is_personal_best:
-        print("Is personal best, creating notification")
+        #print("Is personal best, creating notification")
         # Get player groups
         global_group = session.query(Group).filter(Group.group_id == 2).first()
         if player is None or not player:
@@ -1001,7 +1049,13 @@ async def pb_processor(pb_data, external_session=None):
         if global_group not in player.groups:
             player.add_group(global_group)
             session.commit()
-        player_groups = session.query(Group).join(Group.players).filter(Player.player_id == player_id).all()
+        
+        player_gids = session.execute(text("SELECT group_id FROM user_group_association WHERE player_id = :player_id"), {"player_id": player.player_id}).all()
+        player_groups = []
+        if player_gids:
+            for gid in player_gids:
+                group = session.query(Group).filter(Group.group_id == gid[0]).first()
+                player_groups.append(group)
         for group in player_groups:
             group_id = group.group_id
             print("Checking group: " + str(group))
@@ -1016,6 +1070,7 @@ async def pb_processor(pb_data, external_session=None):
                 notification_data = {
                     'player_name': player_name,
                     'player_id': player_id,
+                    'pb_id': pb_entry.id,
                     'npc_id': npc_id,
                     'boss_name': boss_name,
                     'time_ms': time_ms,
@@ -1126,3 +1181,12 @@ async def try_create_player(bot: interactions.Client, player_name, account_hash)
             player_list[player_name] = player.player_id
 
 
+async def log_to_file(data):
+    ## Logs a string to a file, appending to the end of the file
+    file_path = "data/logs/debug_test.log"
+    try:
+        with open(file_path, "a") as file:
+            file.write(data + "\n")
+    except Exception as e:
+        debug_print("Couldn't log to file: " + str(e))
+        app_logger.log(log_type="error", data=f"Couldn't log to file: {e}", app_name="core", description="log_to_file")

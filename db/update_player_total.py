@@ -320,7 +320,36 @@ def update_player_in_redis(player_id, session, force_update=False, batch_drops=N
             debug_print("No force update, got existing items data")
         else:
             existing_items_data = {}
+            existing_npcs_time_item_data = {}
             debug_print("Force update, no existing items data")
+        for timeframe, npc_items in time_npc_items.items():
+            if not force_update:
+                raw_existing_npcs_time_data = redis_client.client.hgetall(f"player:{player_id}:{timeframe}:npc_items")
+                existing_npcs_time_item_data = {k.decode('utf-8'): v.decode('utf-8') for k, v in raw_existing_npcs_time_data.items()}
+            else:
+                existing_npcs_time_item_data = {}
+            for npc_id, item_data in npc_items.items():
+                for item_id, (qty, value) in item_data.items():
+                    existing_qty, existing_value = 0, 0
+                    if not force_update:
+                        item_id_str = str(item_id)
+                        if item_id_str in existing_npcs_time_item_data:
+                            try:
+                                existing_qty, existing_value = map(int, existing_npcs_time_item_data[item_id_str].split(','))
+                            except ValueError:
+                                app_logger.log(log_type="warning", data=f"Malformed item data for player {player_id}, partition {partition}, item {item_id_str}", app_name="redis_update", description="update_player_in_redis")
+                                existing_qty, existing_value = 0,0
+            else:
+                existing_qty, existing_value = 0,0
+            total_item_qty = qty + existing_qty
+            total_item_value = value + existing_value
+            pipeline.hset(
+                f"player:{player_id}:{timeframe}:npc_items",
+                str(npc_id),
+                f"{total_item_qty},{total_item_value}"
+            )
+            ## Store the player's total in the zset for this npc/partition combination
+
         for item_id, (qty, value) in totals['items'].items():
             existing_qty, existing_value = 0, 0
             if not force_update:

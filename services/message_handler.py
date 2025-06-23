@@ -32,15 +32,20 @@ class MessageHandler(Extension):
         self.bot = bot
 
 
+
     @listen(MessageCreate)
     async def on_message_create(self, event: MessageCreate):
+        def embed_to_dict(embed: Embed):
+            if embed.fields:
+                return {f.name: f.value for f in embed.fields}
+            return {}
         global last_xf_transfer
         global ignored_list
         bot: interactions.Client = event.bot
         if bot.is_closed:
             await bot.astart(token=bot_token)
         await bot.wait_until_ready()
-        if type(event) == Message:
+        if isinstance(event, Message):
             message = event
         else:
             message = event.message
@@ -64,6 +69,10 @@ class MessageHandler(Extension):
                     except Exception as e:
                         print(f"Error updating boss component: {e}")
                         pass
+        if message.author.id and str(message.author.id) == "528746710042804247":
+            if "!logs" in message.content.lower():
+                    await message.delete()
+                    await self.send_runelite_logs_guide(message)
         if message.author.system:  # or message.author.bot:
             return
         if message.author.id == bot.user.id:
@@ -96,219 +105,33 @@ class MessageHandler(Extension):
             token = ""
             account_hash = ""
             for embed in message.embeds:
+                embed_data = embed_to_dict(embed)
+                if message.attachments:
+                    for attachment in message.attachments:
+                        if attachment.url:
+                            embed_data['attachment_url'] = attachment.url
+                            embed_data['attachment_type'] = attachment.content_type
                 field_names = [field.name for field in embed.fields]
-                if "type" in field_names:
+                if embed_data:
                     field_values = [field.value.lower().strip() for field in embed.fields]
-                    if "source" in field_names and "loot chest" in field_values:
+                    if "source_type" in field_names and "loot chest" in field_values:
                         ## Skip pvp
                         continue
                     rsn = ""
-                    if "collection_log" in field_values:
-                        reported_slots = 1
-                        for field in embed.fields:
-                            if field.name == "item":
-                                item_name = field.value
-                            if field.name == "auth_key":
-                                token = field.value
-                            elif field.name == "player":
-                                rsn = field.value
-                            elif field.name == "item_id":
-                                itemId = field.value
-                            elif field.name == "source":
-                                npcName = field.value
-                            elif field.name == "acc_hash":
-                                account_hash = field.value
-                            elif field.name == "slots":
-                                #print("Slots field:", field.value)
-                                max_slots, reported_slots = field.value.split("/")
-                                reported_slots = reported_slots.replace("/","")
-                                max_slots = max_slots.replace("/","")
-                                #print("reported, max slots:", reported_slots, "/",max_slots)
-                            elif field.name == "rarity":
-                                if field.value != "OptionalDouble.empty":
-                                    rarity = field.value
-                                else:
-                                    rarity = ""
-                            elif field.name == "sheet":
-                                sheet_id = field.value
-                            elif field.name == "kc":
-                                if field.value != "null":
-                                    kc = field.value
-                                else:
-                                    kc = 0
-
-                        imageUrl = ""
-                        if rsn == "":
-                            return
-                        attachment_url = None
-                        attachment_type = None
-                        if message.attachments:
-                            for attachment in message.attachments:
-                                if attachment.url:
-                                    attachment_url = attachment.url
-                                    attachment_type = attachment.content_type
-                        clog_data = {
-                            'player_name': rsn,
-                            'acc_hash': account_hash,
-                            'auth_key': token,
-                            'item_name': item_name,
-                            'source': npcName,
-                            'kc': kc,
-                            'reported_slots': reported_slots,
-                            'attachment_url': attachment_url,
-                            'attachment_type': attachment_type,
-                            'message_id': message.id,
-                            'channel_id': message.channel.id,
-                        }
-                        await clog_processor(clog_data)
+                    if embed_data['type'] == "collection_log":
+                        print("Sending clog data from embed_to_dict:", embed_data)
+                        await clog_processor(embed_data)
                         continue
                     elif "combat_achievement" in field_values:
-                        if embed.fields:
-                            acc_hash, task_type, points_awarded, points_total, completed_tier, auth_key = None, None, None, None, None, None
-                            task_tier = None
-                            for field in embed.fields:
-                                if field.name == "acc_hash":
-                                    acc_hash = field.value
-                                elif field.name == "points":
-                                    points_awarded = field.value
-                                elif field.name == "total_points":
-                                    points_total = field.value
-                                elif field.name == "completed":
-                                    completed_tier = field.value
-                                elif field.name == "auth_key":
-                                    auth_key = field.value
-                                elif field.name == "task":
-                                    task_name = field.value
-                                elif field.name == "tier":
-                                    task_tier = field.value
-                                elif field.name == "player_name":
-                                    player_name = field.value
-                            attachment_url = None
-                            attachment_type = None
-                            if message.attachments:
-                                for attachment in message.attachments:
-                                    if attachment.url:
-                                        attachment_url = attachment.url
-                                        attachment_type = attachment.content_type
-                            ca_data = {
-                                'acc_hash': acc_hash,
-                                'player_name': player_name,
-                                'auth_key': auth_key,
-                                'task': task_name,
-                                'tier': task_tier,
-                                'points': points_awarded,
-                                'total_points': points_total,
-                                'completed': completed_tier,
-                                'attachment_url': attachment_url,
-                                'attachment_type': attachment_type,
-                                'message_id': message.id,
-                                'channel_id': message.channel.id
-                            }
-                            print("Calling ca_processor with data:", ca_data)
-                            await ca_processor(ca_data)
+                        print("Sending ca data from embed_to_dict:", embed_data)
+                        await ca_processor(embed_data)
+                        continue
                     elif "npc_kill" in field_values or "kill_time" in field_values:
-                        npc_name = ""
-                        current_time = ""
-                        personal_best = ""
-                        account_hash = ""
-                        team_size = "Solo"
-                        # print("npc_kill detected")
-                        if embed.fields:
-                            for field in embed.fields:
-                                if field.name == "boss_name":
-                                    npc_name = field.value
-                                elif field.name == "player_name":
-                                    player_name = field.value
-                                if field.name == "auth_key":
-                                    token = field.value
-                                elif field.name == "acc_hash":
-                                    account_hash = field.value
-                                elif field.name == "kill_time":
-                                    current_time = field.value
-                                    current_time_ms = convert_to_ms(current_time)
-                                elif field.name == "best_time":
-                                    personal_best = field.value
-                                    personal_best_ms = convert_to_ms(personal_best)
-                                elif field.name == "is_pb":
-                                    is_new_pb = False if field.value == "false" else True 
-                                    if is_new_pb:
-                                        ## A new PB sends no "pb", but instead a true boolean defining if the current_time is a new pb.
-                                        personal_best_ms = current_time_ms
-                                elif field.name == "team_size":
-                                    team_size = field.value
-                            attachment_url = None
-                            attachment_type = None
-                            if message.attachments:
-                                for attachment in message.attachments:
-                                    if attachment.url:
-                                        attachment_url = attachment.url
-                                        attachment_type = attachment.content_type
-                            pb_data = {
-                                'player_name': player_name,
-                                'acc_hash': account_hash,
-                                'auth_key': token,
-                                'npc_name': npc_name,
-                                'current_time_ms': current_time_ms, 
-                                'personal_best_ms': personal_best_ms,
-                                'team_size': team_size,
-                                'is_new_pb': is_new_pb,
-                                'attachment_url': attachment_url,
-                                'attachment_type': attachment_type,
-                                'message_id': message.id,
-                                'channel_id': message.channel.id,
-                            }
-                            await pb_processor(pb_data)
+                        print("Sending pb data from embed_to_dict:", embed_data)
+                        await pb_processor(embed_data)
+                        continue
                     elif embed.title and "received some drops" in embed.title or "drop" in field_values:
-                        if embed.fields:
-                            for field in embed.fields:
-                                if field.name == "player":
-                                    player_name = field.value.strip()
-                                elif field.name == "item":
-                                    item_name = field.value.strip()
-                                elif field.name == "acc_hash":
-                                    account_hash = field.value.strip()
-                                elif field.name == "id":
-                                    item_id = int(field.value.strip())
-                                if field.name == "auth_key":
-                                    token = field.value
-                                elif field.name == "source":
-                                    npc_name = field.value.strip()
-                                    if npc_name in ignored_list:
-                                        return
-                                elif field.name == "value":
-                                    if field.value:
-                                        value = int(field.value)
-                                    else:
-                                        value = 0
-                                elif field.name == "quantity":
-                                    if field.value:
-                                        quantity = int(field.value)
-                                    else:
-                                        quantity = 1
-                                elif field.name == "sheet_id" or field.name == "sheet":
-                                    sheet_id = field.value
-                                elif field.name == "webhook" and len(field.value) > 10:
-                                    pass
-                            item_value = await get_true_item_value(item_name, value)
-                            attachment_url = None
-                            attachment_type = None
-                            if message.attachments:
-                                for attachment in message.attachments:
-                                    if attachment.url:
-                                        attachment_url = attachment.url
-                                        attachment_type = attachment.content_type
-                        drop_data = {"npc_name": npc_name,
-                                    'item_name': item_name,
-                                    'acc_hash': account_hash,
-                                    'auth_key': token,
-                                    'value': item_value,
-                                    'quantity': quantity,
-                                    'player_name': player_name,
-                                    'item_id': item_id,
-                                    'attachment_url': attachment_url,
-                                    'attachment_type': attachment_type}
-                        # print("Sending drop data:", drop_data)
-                        await drop_processor(drop_data)
+                        await drop_processor(embed_data)
                             
                         continue
                     elif "adventure_log" in field_values:
@@ -419,6 +242,25 @@ class MessageHandler(Extension):
         await channel.send(components=components)
 
 
+    async def send_runelite_logs_guide(self, message: Message):
+        channel = await self.bot.fetch_channel(message.channel.id)
+        log_components = [
+            ContainerComponent(
+                SeparatorComponent(divider=True),
+                TextDisplayComponent(
+                            content="### Finding your RuneLite client logs for debugging purposes:\n" +
+                            "-# There are two primary ways to locate your `client.log` file:\n" +
+                            "-# By right-clicking the <:screenshot:1380839233123651695> screenshot icon in the top-right corner of the RuneLite client\n" +
+                            "-# or, navigate to:\n" +
+                            "-# Windows: `%userprofile%.runelite\logs`\n" +
+                            "-# Linux/MacOS: $HOME/.runelite/logs\n\n"
+                            "-# You should see a file named `client.log` in this folder. Please drag and drop it here.",
+                        ),
+                SeparatorComponent(divider=True),
+            )
+        ]
+        components = log_components
+        await channel.send(components=components)
             
 
     async def send_welcome_page(self, message: Message):
@@ -516,3 +358,4 @@ class MessageHandler(Extension):
 
         components = welcome_page
         await channel.send(components=components)
+

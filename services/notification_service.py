@@ -19,16 +19,26 @@ app_logger = AppLogger()
 global_footer = os.getenv('DISCORD_MESSAGE_FOOTER')
 db = DatabaseOperations()
 
+
+sent_drops = {}
+sent_pbs = {}
+sent_cas = {}
+sent_clogs = {}
+
 class NotificationService:
     def __init__(self, bot: interactions.Client, db_ops: DatabaseOperations):
         self.bot = bot
         self.db_ops = db_ops
         self.notified_users = []
         self.running = False
+        self._processing_lock = asyncio.Lock()
     
     @interactions.Task.create(interactions.IntervalTrigger(seconds=5))
     async def start(self):
         """Start the notification service"""
+        if self.running:
+            return
+            
         self.running = True
         asyncio.create_task(self.process_notifications_loop())
     
@@ -39,50 +49,73 @@ class NotificationService:
     
     async def process_notifications_loop(self):
         """Main loop to process notifications"""
+        cleanup_counter = 0
         while self.running:
             try:
-                await self.process_pending_notifications()
+                async with self._processing_lock:
+                    await self.process_pending_notifications()
+                    
+                    # Clean up tracking dictionaries every 100 iterations
+                    cleanup_counter += 1
+                    if cleanup_counter >= 100:
+                        await self.cleanup_tracking_dicts()
+                        cleanup_counter = 0
+                        
             except Exception as e:
                 app_logger.log(log_type="error", data=f"Error processing notifications: {e}", app_name="notification_service", description="process_notifications_loop")
-            
+            finally:
+                await asyncio.sleep(5)
     
     async def process_pending_notifications(self):
         """Process pending notifications"""
-        notifications = session.query(NotificationQueue).filter(
-            NotificationQueue.status == 'pending'
-        ).order_by(NotificationQueue.created_at.asc()).limit(10).all()
-        og_length = len(notifications)
-        ## Also get pending notifications that have been waiting for more than 20 minutes
-        if og_length < 2:
-            lost_pending_notifications = session.query(NotificationQueue).filter(
-                NotificationQueue.status == 'processing',
-                NotificationQueue.created_at < datetime.now() - timedelta(minutes=20)
-            ).order_by(NotificationQueue.created_at.asc()).limit(2 - og_length).all()
-            notifications.extend(lost_pending_notifications)
-        if og_length > 0:
-            print(f"Processing {og_length} pending notifications...")
-        for notification in notifications:
-            try:
-                # Mark as processing
-                notification.status = 'processing'
-                session.commit()
-                
-                await self.process_notification(notification)
-                
-            except Exception as e:
-                notification.status = 'failed'
-                notification.error_message = str(e)
-                session.commit()
-                app_logger.log(log_type="error", data=f"Error processing notification {notification.id}: {e}", app_name="notification_service", description="process_pending_notifications")
-        if og_length > 0:
-            print("Finished processing pending notification data.")
+        try:
+            # Use SELECT FOR UPDATE to lock the rows
+            notifications = session.query(NotificationQueue).filter(
+                NotificationQueue.status == 'pending'
+            ).with_for_update().order_by(NotificationQueue.created_at.asc()).limit(10).all()
+            
+            og_length = len(notifications)
+            if og_length > 0:
+                print(f"Processing {og_length} pending notifications...")
+            
+            for notification in notifications:
+                try:
+                    # Double check status after lock to ensure it's still pending
+                    if notification.status != 'pending':
+                        continue
+                        
+                    # Mark as processing
+                    notification.status = 'processing'
+                    session.commit()
+                    
+                    await self.process_notification(notification)
+                    
+                except Exception as e:
+                    notification.status = 'failed'
+                    notification.error_message = str(e)
+                    session.commit()
+                    app_logger.log(log_type="error", data=f"Error processing notification {notification.id}: {e}", app_name="notification_service", description="process_pending_notifications")
+            
+            if og_length > 0:
+                print("Finished processing pending notification data.")
+            
+        except Exception as e:
+            app_logger.log(log_type="error", data=f"Error in process_pending_notifications: {e}", app_name="notification_service", description="process_pending_notifications")
 
-    async def process_notification(self, notification):
+    async def process_notification(self, notification: NotificationQueue):
         """Process a single notification based on its type"""
         try:
+            app_logger.log(log_type="info", data=f"Processing notification {notification.id} of type {notification.notification_type}", app_name="notification_service", description="process_notification")
+            
             data = json.loads(notification.data)
             notification_type = notification.notification_type
             
+            # Check for duplicates before processing
+            if not await self._is_not_sent(notification, data):
+                app_logger.log(log_type="info", data=f"Notification {notification.id} was already sent, skipping", app_name="notification_service", description="process_notification")
+                return
+            
+            # Process the notification based on its type
             if notification_type == 'drop':
                 await self.send_drop_notification(notification, data)
             elif notification_type == 'pb':
@@ -108,6 +141,7 @@ class NotificationService:
                 notification.error_message = f"Unknown notification type: {notification_type}"
                 session.commit()
         except Exception as e:
+            app_logger.log(log_type="error", data=f"Error processing notification {notification.id}: {e}", app_name="notification_service", description="process_notification")
             notification.status = 'failed'
             notification.error_message = str(e)
             session.commit()
@@ -316,10 +350,13 @@ class NotificationService:
 
     async def send_drop_notification(self, notification: NotificationQueue, data: dict):
         """Send a drop notification to Discord"""
+        from db.models import NotifiedSubmission
         try:
             group_id = notification.group_id
             player_id = notification.player_id
             print(f"Got raw drop notification data: {data}")
+            drop_id = data.get('drop_id')
+
             
             
             # Get channel ID for this group
@@ -327,6 +364,15 @@ class NotificationService:
                 GroupConfiguration.group_id == group_id,
                 GroupConfiguration.config_key == 'channel_id_to_post_loot'
             ).first()
+
+            existing_notification = session.query(NotifiedSubmission).filter(
+                NotifiedSubmission.player_id == player_id,
+                NotifiedSubmission.group_id == group_id,
+                NotifiedSubmission.drop_id == drop_id
+            ).first()
+            if existing_notification:
+                print(f"Drop was already notified... Skipping")
+                return
             
             if not channel_id_config:
                 notification.status = 'failed'
@@ -346,6 +392,7 @@ class NotificationService:
             # Get player name
             player_name = data.get('player_name')
             item_name = data.get('item_name')
+            kill_count = data.get('kill_count', None)
             item_id = session.query(ItemList).filter(ItemList.item_name == item_name).first()
             if item_id:
                 item_id = item_id.item_id
@@ -451,6 +498,7 @@ class NotificationService:
                 "{item_id}": str(item_id),
                 "{npc_id}": str(npc_id),
                 "{npc_name}": npc_name,
+                "{kill_count}": str(kill_count),
                 "{item_value}": "`" + format_number(int(value) * int(quantity)) + "`",
                 "{quantity}": "`" + str(quantity) + "`",
                 "{total_value}": "`" + str(total_value) + "`",
@@ -490,7 +538,7 @@ class NotificationService:
             notification.processed_at = datetime.now()
             
             # Create NotifiedSubmission entry
-            from db.models import NotifiedSubmission, Drop
+            from db.models import Drop
             drop = session.query(Drop).filter(Drop.drop_id == data.get('drop_id')).first()
             
             if drop and message:
@@ -613,6 +661,7 @@ class NotificationService:
     
     async def send_pb_notification(self, notification: NotificationQueue, data: dict):
         """Send a personal best notification to Discord"""
+        from db.models import NotifiedSubmission
         try:
             group_id = notification.group_id
             player_id = notification.player_id
@@ -622,6 +671,17 @@ class NotificationService:
                 GroupConfiguration.group_id == group_id,
                 GroupConfiguration.config_key == 'channel_id_to_post_pb'
             ).first()
+            pb_id = data.get('pb_id', None)
+            if pb_id:
+                existing_notification = session.query(NotifiedSubmission).filter(
+                    NotifiedSubmission.player_id == player_id,
+                    NotifiedSubmission.group_id == group_id,
+                    NotifiedSubmission.pb_id == pb_id
+                ).first()
+                if existing_notification:
+                    print(f"PB was already notified... Skipping")
+                    return
+            
             
             if not channel_id_config:
                 notification.status = 'failed'
@@ -694,15 +754,24 @@ class NotificationService:
             group_placement = None
             global_placement = None
             #print("Assembling rankings....")
-            for idx, entry in enumerate(group_ranks, start=1): 
-                if entry.personal_best == current_user_best_ms:
-                    group_placement = idx
-                    break
-            if global_placement is None:
-                global_placement = "`?`"
+            ## For some reason, players occassionally don't appear in group rank listings...
+            if str(player_id) not in [str(entry.player_id) for entry in group_ranks]:
+                # Find where this time would be inserted in the sorted list
+                group_placement = len(group_ranks) + 1  # Default to last place (worst time)
+                for idx, entry in enumerate(group_ranks, start=1):
+                    if current_user_best_ms <= entry.personal_best:
+                        # Current user's time is faster or equal, so they rank at this position
+                        group_placement = idx
+                        break
+            else:
+                for idx, entry in enumerate(group_ranks, start=1): 
+                    if entry.personal_best == current_user_best_ms:
+                        group_placement = idx
+                        break
             ## player's rank globally
+            global_placement = len(all_ranks) + 1  # Default to last place (worst time)
             for idx, entry in enumerate(all_ranks, start=1):
-                if entry.personal_best == current_user_best_ms:
+                if current_user_best_ms <= entry.personal_best:
                     global_placement = idx
                     break
             if group_placement is None:
@@ -744,6 +813,7 @@ class NotificationService:
     
     async def send_ca_notification(self, notification: NotificationQueue, data: dict):
         """Send a combat achievement notification to Discord"""
+        from db.models import NotifiedSubmission
         try:
             group_id = notification.group_id
             player_id = notification.player_id
@@ -760,6 +830,17 @@ class NotificationService:
                 notification.error_message = f"No channel configured for group {group_id}"
                 session.commit()
                 return
+            
+            ca_id = data.get('ca_id', None)
+            if ca_id:
+                existing_notification = session.query(NotifiedSubmission).filter(
+                    NotifiedSubmission.player_id == player_id,
+                    NotifiedSubmission.group_id == group_id,
+                    NotifiedSubmission.ca_id == ca_id
+                ).first()
+                if existing_notification:
+                    print(f"CA was already notified... Skipping")
+                    return
             
             channel_id = channel_id_config.config_value
             if channel_id != "":
@@ -858,6 +939,7 @@ class NotificationService:
     
     async def send_clog_notification(self, notification: NotificationQueue, data: dict):
         """Send a collection log notification to Discord"""
+        from db.models import NotifiedSubmission
         try:
             group_id = notification.group_id
             player_id = notification.player_id
@@ -874,6 +956,18 @@ class NotificationService:
                 notification.error_message = f"No channel configured for group {group_id}"
                 session.commit()
                 return
+            
+            clog_id = data.get('clog_id', data.get('log_id', None))
+            if clog_id:
+        
+                existing_notification = session.query(NotifiedSubmission).filter(
+                    NotifiedSubmission.player_id == player_id,
+                    NotifiedSubmission.group_id == group_id,
+                    NotifiedSubmission.clog_id == clog_id
+                ).first()
+                if existing_notification:
+                    print(f"Drop was already notified... Skipping")
+                    return
             
             channel_id = channel_id_config.config_value
             if channel_id and channel_id != "" and len(str(channel_id)) > 10:
@@ -955,4 +1049,81 @@ class NotificationService:
         if embed.fields:
             embed.fields = [field for field in embed.fields if "Group" not in field.name]
         return embed
-    # Add other notification handlers as needed for PBs, collection log entries, etc. 
+    
+    async def _is_not_sent(self, notification: NotificationQueue, data: dict):
+        """Check if a notification has already been sent.
+        Returns True if the notification should be sent, False if it should be skipped."""
+        try:
+            # Get the appropriate tracking dictionary based on notification type
+            tracking_dict = None
+            id_key = None
+            
+            if notification.notification_type == 'drop':
+                tracking_dict = sent_drops
+                id_key = 'drop_id'
+            elif notification.notification_type == 'pb':
+                tracking_dict = sent_pbs
+                id_key = 'pb_id'
+            elif notification.notification_type == 'ca':
+                tracking_dict = sent_cas
+                id_key = 'ca_id'
+            elif notification.notification_type == 'clog':
+                tracking_dict = sent_clogs
+                id_key = 'clog_id'
+            else:
+                return True
+                
+            if not tracking_dict or not id_key:
+                return True
+                
+            # Initialize group tracking if needed
+            if notification.group_id not in tracking_dict:
+                tracking_dict[notification.group_id] = []
+                
+            # Get the ID to check
+            notification_id = data.get(id_key)
+            if not notification_id:
+                return True
+                
+            # Check if this ID has been sent for this group
+            if notification_id in tracking_dict[notification.group_id]:
+                app_logger.log(log_type="info", 
+                             data=f"Notification {notification.id} was already sent for {id_key} {notification_id} in group {notification.group_id}", 
+                             app_name="notification_service", 
+                             description="_is_not_sent")
+                return False  # Return False to prevent sending
+            
+            # Add to tracking and allow sending
+            tracking_dict[notification.group_id].append(notification_id)
+            return True
+            
+        except Exception as e:
+            app_logger.log(log_type="error", 
+                         data=f"Error checking if notification was sent: {e}", 
+                         app_name="notification_service", 
+                         description="_is_not_sent")
+            return True  # On error, allow sending to be safe
+            
+    async def cleanup_tracking_dicts(self):
+        """Clean up the tracking dictionaries to prevent unbounded growth"""
+        try:
+            # Keep only the last 1000 entries per group
+            max_entries = 1000
+            
+            for group_id in list(sent_drops.keys()):
+                sent_drops[group_id] = sent_drops[group_id][-max_entries:]
+                
+            for group_id in list(sent_pbs.keys()):
+                sent_pbs[group_id] = sent_pbs[group_id][-max_entries:]
+                
+            for group_id in list(sent_cas.keys()):
+                sent_cas[group_id] = sent_cas[group_id][-max_entries:]
+                
+            for group_id in list(sent_clogs.keys()):
+                sent_clogs[group_id] = sent_clogs[group_id][-max_entries:]
+                
+        except Exception as e:
+            app_logger.log(log_type="error", 
+                         data=f"Error cleaning up tracking dictionaries: {e}", 
+                         app_name="notification_service", 
+                         description="cleanup_tracking_dicts")

@@ -144,7 +144,6 @@ async def get_most_recent_price_by_name(item_name):
     
     return await get_most_recent_price_by_id(item_id)
 
-# Optionally, add a cleanup function to close the aiohttp sessions on shutdown
 async def close_aiohttp_sessions():
     global prices_session, wiki_session
     if prices_session is not None and not prices_session.closed:

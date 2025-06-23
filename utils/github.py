@@ -264,16 +264,35 @@ class GithubPagesUpdater:
 
         # Also create a date-based backup file with second chunk if available
         if len(webhook_chunks) > 1:
-            date_str = datetime.now().strftime("%Y%m%d")
-            backup_file_name = f"content/{date_str}.json"
-            backup_file_paths = self.find_files_by_name(file_name=f"{date_str}.json")
+            # Get current date and tomorrow's date
+            current_date = datetime.now()
+            tomorrow_date = current_date + timedelta(days=1)
+            
+            # Format dates for filenames
+            current_date_str = current_date.strftime("%Y%m%d")
+            tomorrow_date_str = tomorrow_date.strftime("%Y%m%d")
+            
+            # Create paths for both dates
+            current_backup_file = f"content/{current_date_str}.json"
+            tomorrow_backup_file = f"content/{tomorrow_date_str}.json"
+            
+            # Check if files exist
+            current_file_paths = self.find_files_by_name(file_name=f"{current_date_str}.json")
+            tomorrow_file_paths = self.find_files_by_name(file_name=f"{tomorrow_date_str}.json")
             
             backup_json_content = json.dumps(webhook_chunks[1], indent=4)
             
-            if backup_file_paths:
-                files_to_update.append((backup_file_paths[0], backup_json_content))
+            # Add current date file if it doesn't exist
+            if current_file_paths:
+                files_to_update.append((current_file_paths[0], backup_json_content))
             else:
-                files_to_update.append((backup_file_name, backup_json_content))
+                files_to_update.append((current_backup_file, backup_json_content))
+                
+            # Add tomorrow's date file if it doesn't exist
+            if tomorrow_file_paths:
+                files_to_update.append((tomorrow_file_paths[0], backup_json_content))
+            else:
+                files_to_update.append((tomorrow_backup_file, backup_json_content))
 
         # Only perform the commit if there are files to update
         if files_to_update:
@@ -324,8 +343,18 @@ class GithubPagesUpdater:
             current_encryption_key = session.query(GroupConfiguration).where(GroupConfiguration.group_id == 2,
                                                                             GroupConfiguration.config_key == "encryption-gh").first()
             if current_encryption_key:
-                date_str = datetime.now().strftime("%Y%m%d")
-                encryption_key_file_path = f"content/{date_str}-k.txt"
+                # Get current date and tomorrow's date
+                current_date = datetime.now()
+                tomorrow_date = current_date + timedelta(days=1)
+                
+                # Format dates for filenames
+                current_date_str = current_date.strftime("%Y%m%d")
+                tomorrow_date_str = tomorrow_date.strftime("%Y%m%d")
+                
+                # Create paths for both dates
+                current_key_file = f"content/{current_date_str}-k.txt"
+                tomorrow_key_file = f"content/{tomorrow_date_str}-k.txt"
+                
                 encryption_key_content = current_encryption_key.config_value
                 
                 # Validate the encryption key format
@@ -340,17 +369,28 @@ class GithubPagesUpdater:
                     
                     encryption_key_content = new_key
                 
-                # For encryption keys, we always create a new dated file
-                # Check if today's file already exists
+                # Check if today's file exists
                 try:
-                    self.repo.get_contents(encryption_key_file_path, ref=self.branch)
+                    self.repo.get_contents(current_key_file, ref=self.branch)
                     print(f"Today's encryption key file already exists. Skipping update.")
-                    return None
                 except github.GithubException as e:
                     if e.status == 404:
                         # File doesn't exist, create it
-                        print(f"Creating today's encryption key file: {encryption_key_file_path}")
-                        return (encryption_key_file_path, encryption_key_content)
+                        print(f"Creating today's encryption key file: {current_key_file}")
+                        return (current_key_file, encryption_key_content)
+                    else:
+                        print(f"Error checking encryption key file: {e}")
+                        return None
+                
+                # Check if tomorrow's file exists
+                try:
+                    self.repo.get_contents(tomorrow_key_file, ref=self.branch)
+                    print(f"Tomorrow's encryption key file already exists. Skipping update.")
+                except github.GithubException as e:
+                    if e.status == 404:
+                        # File doesn't exist, create it
+                        print(f"Creating tomorrow's encryption key file: {tomorrow_key_file}")
+                        return (tomorrow_key_file, encryption_key_content)
                     else:
                         print(f"Error checking encryption key file: {e}")
                         return None

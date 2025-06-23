@@ -10,14 +10,32 @@ api_url = 'https://oldschool.runescape.wiki/api.php'
 # Create a single aiohttp session for reuse
 aiohttp_session = None
 
+alt_names = {
+        # Semantic name -> our database name
+        "Rewards Chest (Fortis Colosseum)": "Fortis Colosseum",
+        "Ancient chest": ["Chambers of Xeric", "Chambers of Xeric Challenge Mode"],
+        "Monumental chest": ["Theatre of Blood: Hard Mode", "Theatre of Blood"],
+        "Chest (Tombs of Amascut)": ["Tombs of Amascut", "Tombs of Amascut: Expert Mode"],
+        "Chest (Barrows)": "Barrows",
+        "Reward pool": "Tempoross",
+        "Reward casket (easy)": "Clue Scroll (Easy)",
+        "Reward casket (medium)": "Clue Scroll (Medium)",
+        "Reward casket (hard)": "Clue Scroll (Hard)",
+        "Reward casket (elite)": "Clue Scroll (Elite)",
+        "Reward casket (master)": "Clue Scroll (Master)",
+        "Reward Chest (The Gauntlet)": "Corrupted Gauntlet" ## Semantic has no drops stored for 'Corrupted Gauntlet'.
+    }
+
+
 async def get_aiohttp_session():
     global aiohttp_session
     if aiohttp_session is None or aiohttp_session.closed:
         aiohttp_session = aiohttp.ClientSession(headers={'User-Agent': '@joelhalen - www.droptracker.io'})
     return aiohttp_session
 
-async def do_smwjson_query(query, jsonprops):
-    global g_item_name
+async def do_smwjson_query(query, jsonprops, use_global=True):
+    if use_global:
+        global g_item_name
     # query should be a list of strings
     # jsonprops should be a list of strings, which is the list of properties that should be json.loads-ed
     
@@ -52,7 +70,9 @@ async def do_smwjson_query(query, jsonprops):
                         filtered_vals = []
                         for val in vals:
                             drop_data = json.loads(html.unescape(val))
-                            if drop_data.get('Dropped item') == g_item_name:  # Using the global item_name
+                            if use_global and drop_data.get('Dropped item') == g_item_name:  # Using the global item_name
+                                filtered_vals.append(val)
+                            else:
                                 filtered_vals.append(val)
                         obj[prop] = [json.loads(html.unescape(x)) for x in filtered_vals]
                     else:
@@ -207,6 +227,51 @@ async def get_item_id(item_name: str) -> int:
     finally:
         await close_aiohttp_session()
 
+async def find_related_drops(item_name: str, npc_name: str) -> dict:
+    reverse_alt_names = {}
+    for semantic_name, db_names in alt_names.items():
+        if isinstance(db_names, list):
+            for db_name in db_names:
+                reverse_alt_names[db_name] = semantic_name
+        else:
+            reverse_alt_names[db_names] = semantic_name
+    
+    # Get the semantic name if it exists in our mapping
+    semantic_name = reverse_alt_names.get(npc_name, npc_name)
+    npc_name = semantic_name
+
+    smw_data = await do_smwjson_query([
+        f'[[Has subobject.Dropped from::{npc_name}]]',
+        '?Has subobject.Drop JSON',
+        'limit=10000'
+    ], ['Drop JSON'], use_global=False)
+    
+    all_drops = []
+    checked_npcs = set()
+    
+    for source_name, source_data in smw_data.items():
+        drop_data = source_data.get('Drop JSON', [])
+        for drop in drop_data:
+            dropped_item = drop.get('Dropped item', '')
+            dropped_from = drop.get('Dropped from', '')
+            rarity = drop.get('Rarity', '')
+            
+            if "#" in dropped_from:
+                dropped_from = dropped_from.split("#")[0]
+            
+            if dropped_from.lower() == npc_name.lower():
+                all_drops.append({
+                    "item_name": dropped_item,
+                    "rarity": rarity,
+                    "npc_name": dropped_from
+                })
+    
+    return {
+        "target_item": item_name,
+        "npc_name": npc_name,
+        "all_drops": all_drops
+    }
+
 async def check_drop(item_name: str, npc_name: str) -> bool:
     if item_name == "Enhanced crystal teleport seed" and npc_name == "Elf":
         return True
@@ -215,21 +280,6 @@ async def check_drop(item_name: str, npc_name: str) -> bool:
     if item_name.strip() == "Black tourmaline core":
         if npc_name.strip() == "Dusk":
             return True
-    alt_names = {
-        # Semantic name -> our database name
-        "Rewards Chest (Fortis Colosseum)": "Fortis Colosseum",
-        "Ancient chest": ["Chambers of Xeric", "Chambers of Xeric Challenge Mode"],
-        "Monumental chest": ["Theatre of Blood: Hard Mode", "Theatre of Blood"],
-        "Chest (Tombs of Amascut)": ["Tombs of Amascut", "Tombs of Amascut: Expert Mode"],
-        "Chest (Barrows)": "Barrows",
-        "Reward pool": "Tempoross",
-        "Reward casket (easy)": "Clue Scroll (Easy)",
-        "Reward casket (medium)": "Clue Scroll (Medium)",
-        "Reward casket (hard)": "Clue Scroll (Hard)",
-        "Reward casket (elite)": "Clue Scroll (Elite)",
-        "Reward casket (master)": "Clue Scroll (Master)",
-        "Reward Chest (The Gauntlet)": "Corrupted Gauntlet" ## Semantic has no drops stored for 'Corrupted Gauntlet'.
-    }
     
     # Create reverse mapping that handles lists of values
     reverse_alt_names = {}
@@ -249,7 +299,7 @@ async def check_drop(item_name: str, npc_name: str) -> bool:
         f'[[Has subobject.Dropped item::{item_name}]]',
         '?Has subobject.Drop JSON',
         'limit=10000'
-    ], ['Drop JSON'])
+    ], ['Drop JSON'], use_global=True)
 
     #print("MMG Data:", mmg_data)
 

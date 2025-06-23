@@ -301,9 +301,7 @@ async def lootboard_updates():
                         print("Unable to obtain embed_template for group", group_obj.group_name, "e:", e)
                         continue
                     if group_id != 2:
-                        player_wom_ids = await fetch_group_members(wom_id)
-                        player_ids = await associate_player_ids(player_wom_ids)
-                        total_tracked = len(player_ids)
+                        total_tracked = group_obj.get_player_count()
                     else:
                         total_tracked = session.query(Player.wom_id).count()
                     next_update = datetime.now() + timedelta(minutes=10)
@@ -401,7 +399,7 @@ async def run_discord_bot():
 front = create_frontend(bot)
 api_bp = create_api(bot)
 #admin_cp_bp = create_admin_cp(bot)
-app.register_blueprint(api_bp, url_prefix='/api')
+app.register_blueprint(api_bp, url_prefix='/internal-api')
 app.register_blueprint(front)
 
 async def run_bot():
