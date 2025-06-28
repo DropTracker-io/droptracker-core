@@ -18,11 +18,10 @@ from quart_cors import cors
 ## Core package dependencies
 from data import submissions
 from data.submissions import ca_processor, clog_processor, drop_processor, pb_processor
-from db.models import Session, session, Player, Group, CollectionLogEntry, PersonalBestEntry, PlayerPet, ItemList, NpcList
+# Import session from db.models to avoid conflicts
+from db.models import Session, session, Player, Group, CollectionLogEntry, PersonalBestEntry, PlayerPet, ItemList, NpcList, engine
 
 from worker import create_blueprint
-
-
 
 ## API Packages
 from api.services.metrics import MetricsTracker
@@ -43,30 +42,18 @@ app.config["JWT_SECRET_KEY"] = os.getenv("JWT_TOKEN_KEY")
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(days=1)
 jwt = JWTManager(app)
 
-# Create a single global engine and session factory
-db_url = f"mysql+pymysql://root:{os.getenv('DB_PASS')}@localhost:3306/data"
-engine = create_engine(
-    db_url,
-    pool_recycle=3600,  # Recycle connections after 1 hour
-    pool_pre_ping=True, # Check connection validity before using
-    pool_size=10,       # Maximum number of connections
-    max_overflow=20     # Allow up to 20 connections beyond pool_size
-)
-Session = scoped_session(sessionmaker(bind=engine))
-
-# Simple function to get a fresh session
+# Use the existing session factory from db.models instead of creating a new one
 def get_db_session():
+    """Get a fresh session using the existing session factory"""
     return Session()
 
 # Function to reset all connections
 def reset_db_connections():
-    Session.remove()
-    engine.dispose()
-
+    """Reset database connections using the existing session factory"""
+    session.remove()
 
 # Initialize metrics tracker
 metrics = MetricsTracker()
-
 
 @app.route("/submit", methods=["POST"])
 @rate_limit(limit=10,period=timedelta(seconds=1))
@@ -88,10 +75,16 @@ async def get_player():
     player_name = request.args.get("player_name")
     if not player_name:
         return jsonify({"error": "Player name is required"}), 400
-    player = session.query(Player).filter(Player.player_name == player_name).first()
-    if not player:
-        return jsonify({"error": "Player not found"}), 404
-    return jsonify({"player": player.to_dict()})
+    
+    # Use a proper session scope
+    db_session = get_db_session()
+    try:
+        player = db_session.query(Player).filter(Player.player_name == player_name).first()
+        if not player:
+            return jsonify({"error": "Player not found"}), 404
+        return jsonify({"player": player.to_dict()})
+    finally:
+        db_session.close()
 
 @app.route("/metrics", methods=["GET"])
 async def get_metrics():
@@ -113,6 +106,7 @@ async def webhook_data():
     success = False
     request_type = "webhook"
     submission_type = None
+    db_session = None
     
     try:
         # Debug the raw request to see what's coming in
@@ -176,7 +170,7 @@ async def webhook_data():
                 processed_items[0]["downloaded"] = False
                 
                 # Create a fresh database connection for each request
-                session = get_db_session()
+                db_session = get_db_session()
                 try:
                     downloaded = False
                     file_path = None
@@ -187,47 +181,53 @@ async def webhook_data():
                         if image_file:
                             print("Got image file in form data")
                             processed_data["has_image"] = True
-                            with Session() as session:
-                                player = session.query(Player).filter(Player.player_name == processed_data.get("player", None)).first()
+                            # Use a separate session for image processing to avoid conflicts
+                            image_session = get_db_session()
+                            try:
+                                player = image_session.query(Player).filter(Player.player_name == processed_data.get("player", None)).first()
                                 if player:
                                     file_path = await download_image(submission_type, player, image_file, processed_data)
                                     processed_data["image_url"] = file_path
                                     processed_data["downloaded"] = True
                                     downloaded = True
+                            finally:
+                                image_session.close()
                         else:
                             ## Add the downloaded image from this set of webhook data to each processed_data (individual drop/submission)
                             if file_path:
                                 processed_data["image_url"] = file_path
                                 processed_data["downloaded"] = True
                                 downloaded = True
-                                
+                        processed_data['used_api'] = True
                         match (submission_type):
                             case "drop" | "other"| "npc":
                                 submission_type = "drop"
-                                await submissions.drop_processor(processed_data, external_session=session)
+                                await submissions.drop_processor(processed_data, external_session=db_session)
                             case "collection_log":
                                 submission_type = "collection_log"
                                 print(f"Processed data: {processed_data}")
-                                await submissions.clog_processor(processed_data, external_session=session)
+                                await submissions.clog_processor(processed_data, external_session=db_session)
                             case "personal_best" | "kill_time" | "npc_kill":
                                 submission_type = "personal_best"
-                                await submissions.pb_processor(processed_data, external_session=session)
+                                await submissions.pb_processor(processed_data, external_session=db_session)
                             case "combat_achievement":
                                 submission_type = "combat_achievement"
-                                await submissions.ca_processor(processed_data, external_session=session)
+                                await submissions.ca_processor(processed_data, external_session=db_session)
                             case _:
                                 print(f"Unknown submission type: {submission_type}")
                                 continue
+                    
+                    # Only commit if we successfully processed all items
+                    db_session.commit()
+                    success = True
+                    
                 except Exception as processor_error:
                     print(f"Processor error: {processor_error}")
                     # Roll back on error
-                    session.rollback()
+                    if db_session:
+                        db_session.rollback()
                     return jsonify({"error": f"Error processing data: {str(processor_error)}"}), 200
-                finally:
-                    # Always close the session
-                    reset_db_connections()
                 
-                success = True
                 return jsonify({"message": "Webhook data processed successfully"}), 200
                 
             except Exception as e:
@@ -244,17 +244,24 @@ async def webhook_data():
                 return jsonify({"error": f"Error processing request: {str(e)}"}), 400
     except Exception as e:
         print("Webhook Exception: ", e)
-        # Force cleanup of any lingering sessions
-        reset_db_connections()
         return jsonify({"error": str(e)}), 500
     finally:
+        # Always close the session if it was created
+        if db_session:
+            try:
+                db_session.close()
+            except:
+                pass
+        
+        # Force cleanup of any lingering sessions on error
+        if not success:
+            reset_db_connections()
+        
         # Record metrics regardless of success/failure
         if submission_type:
             metrics.record_request(submission_type, success)
         else:
             metrics.record_request(request_type, success)
-
-
 
 async def process_webhook_data(webhook_data):
     """Process webhook data from Discord format to standard format"""

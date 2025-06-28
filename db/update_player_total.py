@@ -339,15 +339,15 @@ def update_player_in_redis(player_id, session, force_update=False, batch_drops=N
                             except ValueError:
                                 app_logger.log(log_type="warning", data=f"Malformed item data for player {player_id}, partition {partition}, item {item_id_str}", app_name="redis_update", description="update_player_in_redis")
                                 existing_qty, existing_value = 0,0
-            else:
-                existing_qty, existing_value = 0,0
-            total_item_qty = qty + existing_qty
-            total_item_value = value + existing_value
-            pipeline.hset(
-                f"player:{player_id}:{timeframe}:npc_items",
-                str(npc_id),
-                f"{total_item_qty},{total_item_value}"
-            )
+                    else:
+                        existing_qty, existing_value = 0,0
+                    total_item_qty = qty + existing_qty
+                    total_item_value = value + existing_value
+                    pipeline.hset(
+                        f"player:{player_id}:{timeframe}:npc_items",
+                        str(npc_id),
+                        f"{total_item_qty},{total_item_value}"
+                    )
             ## Store the player's total in the zset for this npc/partition combination
 
         for item_id, (qty, value) in totals['items'].items():

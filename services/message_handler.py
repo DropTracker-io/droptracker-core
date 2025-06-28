@@ -118,21 +118,18 @@ class MessageHandler(Extension):
                         ## Skip pvp
                         continue
                     rsn = ""
+                    embed_data['used_api'] = False
                     if embed_data['type'] == "collection_log":
-                        print("Sending clog data from embed_to_dict:", embed_data)
                         await clog_processor(embed_data)
                         continue
                     elif "combat_achievement" in field_values:
-                        print("Sending ca data from embed_to_dict:", embed_data)
                         await ca_processor(embed_data)
                         continue
                     elif "npc_kill" in field_values or "kill_time" in field_values:
-                        print("Sending pb data from embed_to_dict:", embed_data)
                         await pb_processor(embed_data)
                         continue
                     elif embed.title and "received some drops" in embed.title or "drop" in field_values:
                         await drop_processor(embed_data)
-                            
                         continue
                     elif "adventure_log" in field_values:
                         if embed.fields:

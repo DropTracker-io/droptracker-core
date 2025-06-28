@@ -14,7 +14,7 @@ from utils.redis import RedisClient
 from db.ops import DatabaseOperations, associate_player_ids
 from utils.download import download_player_image, download_image
 from sqlalchemy import func, text
-from utils.format import format_number, get_command_id, get_extension_from_content_type, replace_placeholders, convert_from_ms
+from utils.format import convert_to_ms, format_number, get_command_id, get_extension_from_content_type, replace_placeholders, convert_from_ms
 import interactions
 from utils.logger import LoggerClient
 from utils.semantic_check import check_drop as verify_item_real
@@ -127,12 +127,11 @@ def check_auth(player_name, account_hash, auth_key, external_session=None):
 async def drop_processor(drop_data: RawDropData, external_session=None):
     """Process a drop submission and create notification entries if needed"""
     # Use provided session or create a new one
-    session = models.session
     use_external_session = external_session is not None
     if use_external_session:
         session = external_session
     else:
-        session = session
+        session = models.session
     try:
         npc_name = drop_data.get('source', drop_data.get('npc_name', None))
         value = drop_data['value']
@@ -148,6 +147,7 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
         downloaded = drop_data.get('downloaded', False)
         image_url = drop_data.get('image_url', None)
         
+        used_api = drop_data.get('used_api', False)
         item = session.query(ItemList).filter(ItemList.item_id == item_id).first()
         if not item:
             try:
@@ -234,6 +234,9 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
                 return
         
         # Process attachment
+        if downloaded:
+            attachment_url = image_url
+            attachment_type = "downloaded"
         if drop_data.get('attachment_type', None) is not None:
             attachment_url = drop_data.get('attachment_url', None)
             attachment_type = drop_data.get('attachment_type', None)
@@ -250,10 +253,11 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
             npc_id=npc_id,
             value=int(value),
             quantity=int(quantity),
-            image_url="" if attachment_url else None,
+            image_url=attachment_url if attachment_url else None,
             authed=authed,
             attachment_url=attachment_url,
             attachment_type=attachment_type,
+            used_api=used_api,  ## Used to determine if the drop was created from the API or not
             existing_session=session if use_external_session else None
         )
         #app_logger.log(log_type="drop_processor", data=f"Drop created: {drop} ({drop.drop_id})", app_name="core", description="drop_processor")
@@ -274,11 +278,11 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
         player_gids = session.execute(text("SELECT group_id FROM user_group_association WHERE player_id = :player_id"), {"player_id": player.player_id}).all()
         player_groups = []
         if player_gids:
-            print(f"Got player group ids: {player_gids}")
+            #print(f"Got player group ids: {player_gids}")
             for gid in player_gids:
                 group = session.query(Group).filter(Group.group_id == gid[0]).first()
                 player_groups.append(group)
-        print(f"Player groups: {player_groups}")
+        #print(f"Player groups: {player_groups}")
         if global_group not in player_groups:
             player.add_group(global_group)
             session.commit()
@@ -333,14 +337,14 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
                 await create_xenforo_entry(drop=drop, clog=None, personal_best=None, combat_achievement=None)
                 #app_logger.log(log_type="drop_processor", data=f"{drop.drop_id}: Creating notification for {player_name} in group {group_id}", app_name="core", description="drop_processor")
                 await create_notification('drop', player_id, notification_data, group_id, existing_session=session if use_external_session else None)
-        # At the end of the function, commit if we created our own session
+        # Commit the session regardless - external caller will handle transaction management
         if not use_external_session:
             session.commit()
         ##app_logger.log(log_type="drop_processor", data=f"{drop.drop_id}: Drop processor completed", app_name="core", description="drop_processor")
         return drop
         
     except Exception as e:
-        # Roll back if we created our own session
+        # Roll back only if we own the session
         if not use_external_session:
             session.rollback()
         debug_print(f"Error in drop_processor: {e}")
@@ -350,11 +354,10 @@ async def create_player(player_name, account_hash, existing_session=None):
     
     """Create a player without Discord-specific functionality"""
     use_existing_session = existing_session is not None
-    session = models.session
     if use_existing_session:
         session = existing_session
     else:
-        session = session
+        session = models.session
     account_hash = str(account_hash)
     if not account_hash or len(account_hash) < 5:
         debug_print("Account hash is too short, aborting")
@@ -458,11 +461,10 @@ async def create_notification(notification_type, player_id, data, group_id=None,
         while len(stored_notifications[group_id]) > 100:
             stored_notifications[group_id].pop()
     use_existing_session = existing_session is not None
-    session = models.session
     if use_existing_session:
         session = existing_session
     else:
-        session = session
+        session = models.session
     hashed_data = hashlib.sha256(json.dumps(data).encode()).hexdigest()
     if debug_test:
       await log_to_file(f"hashed data: {hashed_data}")
@@ -481,7 +483,9 @@ async def create_notification(notification_type, player_id, data, group_id=None,
         status='pending'
     )
     session.add(notification)
-    session.commit()
+    # Only commit if we own the session
+    if not use_existing_session:
+        session.commit()
     if debug_test:
       await log_to_file(f"Debug test: Created notification for group {group_id}: {notification.id}")
     return notification.id
@@ -491,14 +495,13 @@ async def clog_processor(clog_data, external_session=None):
     print("raw clog data: " + str(clog_data))
     """Process a collection log submission and create notification entries if needed"""
     player_name = clog_data.get('player_name', clog_data.get('player', None))
-    session = models.session
     if player_name == "joelhalen":
         debug_test = True
     use_external_session = external_session is not None
     if use_external_session:
         session = external_session
     else:
-        session = session
+        session = models.session
     if not player_name:
         print("No player name found, aborting")
         return
@@ -515,7 +518,7 @@ async def clog_processor(clog_data, external_session=None):
     reported_slots = clog_data.get('reported_slots', None)
     downloaded = clog_data.get('downloaded', False)
     image_url = clog_data.get('image_url', None)
-
+    used_api = clog_data.get('used_api', False)
     killcount = clog_data.get('kc', None)       
     item = session.query(ItemList).filter(ItemList.item_name == item_name).first()
     if debug_test:
@@ -620,7 +623,8 @@ async def clog_processor(clog_data, external_session=None):
             item_id=item_id,
             npc_id=npc_id,
             date_added=datetime.now(),
-            image_url=""
+            image_url="",
+            used_api=used_api
         )
         session.add(clog_entry)
         session.commit()  # Commit to get the log_id
@@ -731,12 +735,11 @@ async def ca_processor(ca_data, external_session=None):
     """Process a combat achievement submission and create notification entries if needed"""
     # global last_processor_run_at, last_processor_run
     has_xf_entry = False
-    session = models.session
     use_external_session = external_session is not None
     if use_external_session:
         session = external_session
     else:
-        session = session
+        session = models.session
     player_name = ca_data['player_name']
     account_hash = ca_data['acc_hash']
     points_awarded = ca_data['points']
@@ -749,6 +752,7 @@ async def ca_processor(ca_data, external_session=None):
     attachment_type = ca_data.get('attachment_type', None)
     downloaded = ca_data.get('downloaded', False)
     image_url = ca_data.get('image_url', None)
+    used_api = ca_data.get('used_api', False)
     # Validate player
     if player_name not in player_list:
         player: Player = session.query(Player).filter(Player.player_name.ilike(player_name)).first()
@@ -766,6 +770,12 @@ async def ca_processor(ca_data, external_session=None):
             return
     
     player_id = player_list[player_name]
+    # Always ensure we have the player object, whether from cache or database
+    if 'player' not in locals():
+        player: Player = session.query(Player).filter(Player.player_id == player_id).first()
+        if not player:
+            debug_print("Player not found in database by ID, aborting")
+            return
     user_exists, authed = check_auth(player_name, account_hash, auth_key, session)
     if not user_exists or not authed:
         debug_print("User failed auth check")
@@ -786,7 +796,8 @@ async def ca_processor(ca_data, external_session=None):
             player_id=player_id,
             task_name=task_name,
             date_added=datetime.now(),
-            image_url=dl_path
+            image_url=dl_path,
+            used_api=used_api
         )
         session.add(ca_entry)
         is_new_ca = True
@@ -899,27 +910,30 @@ async def ca_processor(ca_data, external_session=None):
     return ca_entry
 
 async def pb_processor(pb_data, external_session=None):
-    debug_print("pb_processor")
+    print("pb_processor called with data: " + str(pb_data))
     """Process a personal best submission and create notification entries if needed"""
-    session = models.session
     use_external_session = external_session is not None
     if use_external_session:
         session = external_session
     else:
-        session = session
+        session = models.session
     player_name = pb_data['player_name']
     account_hash = pb_data['acc_hash']
     boss_name = pb_data.get('npc_name', pb_data.get('boss_name', None))
-    current_ms = pb_data.get('current_time_ms', 0)
-    pb_ms = pb_data.get('personal_best_ms', 0)
+    current_ms = pb_data.get('current_time_ms', pb_data.get('kill_time', 0))
+    pb_ms = pb_data.get('personal_best_ms', pb_data.get('best_time', 0))
+    pb_ms = convert_to_ms(pb_ms)
+    current_ms = convert_to_ms(current_ms)
     team_size = pb_data.get('team_size', 1)
-    is_personal_best = pb_data.get('is_new_pb', False)
+    is_personal_best = pb_data.get('is_new_pb', pb_data.get('is_pb', False))
+    is_personal_best = True if is_personal_best == "true" else False
     time_ms = current_ms if current_ms < pb_ms and current_ms != 0 else (pb_ms if pb_ms != 0 else current_ms)
     auth_key = pb_data.get('auth_key', '')
     attachment_url = pb_data.get('attachment_url', None)
     attachment_type = pb_data.get('attachment_type', None)
     downloaded = pb_data.get('downloaded', False)
     image_url = pb_data.get('image_url', None)
+    used_api = pb_data.get('used_api', False)
     player = None
     has_xf_entry = False
     dl_path = None
@@ -941,10 +955,10 @@ async def pb_processor(pb_data, external_session=None):
                         session.commit()
                     npc_list[npc_name] = npc.npc_id
                 except Exception as e:
-                    debug_print(f"NPC {npc} not found in database, aborting")
+                    print(f"NPC {npc} not found in database, aborting")
                     return
             if npc_name not in npc_list:
-                debug_print(f"NPC {npc} not found in database")    
+                print(f"NPC {npc} not found in database")    
                 notification_data = {
                     'npc_name': npc_name,
                     'player_name': player_name,
@@ -956,7 +970,9 @@ async def pb_processor(pb_data, external_session=None):
             npc_list[npc_name] = npc.npc_id
             npc_id = npc.npc_id
     # Validate player
+    print("player_name: " + str(player_name))
     if player_name not in player_list:
+        print("player_name not in player_list")
         player: Player = session.query(Player).filter(Player.player_name.ilike(player_name)).first()
         if not player:
             # Create player without Discord-specific code
@@ -967,19 +983,21 @@ async def pb_processor(pb_data, external_session=None):
         if player:
             player_list[player_name] = player.player_id
         else:
+            print("player not found")
             return
-    
     player_id = player_list[player_name]
+    print("player_id: " + str(player_id))
     user_exists, authed = check_auth(player_name, account_hash, auth_key, session)
-    
+    print("user_exists: " + str(user_exists))
+    print("authed: " + str(authed))
     # Create or update PB entry
+    print("Creating or updating PB entry")
     pb_entry = session.query(PersonalBestEntry).filter(
         PersonalBestEntry.player_id == player_id,
         PersonalBestEntry.npc_id == npc_id,
         PersonalBestEntry.team_size == team_size
     ).first()
-    
-    is_new_pb = False
+    print("pb_entry: " + str(pb_entry))
     old_time = None
     
     
@@ -1011,17 +1029,26 @@ async def pb_processor(pb_data, external_session=None):
         elif downloaded:
             dl_path = image_url
     if pb_entry:
-        #print("PB entry found, processing")
-        if pb_entry.personal_best < time_ms:
+        print("A pb already exists, checking if it's a new pb")
+        if pb_entry.personal_best > current_ms:
+            print("The existing pb entry is less than the submitted time")
+            print("Existing pb: " + str(pb_entry.personal_best))
+            print("Submitted time: " + str(current_ms))
             old_time = pb_entry.personal_best
             pb_entry.personal_best = time_ms  
             pb_entry.new_pb=is_personal_best
             pb_entry.kill_time = current_ms
             pb_entry.date_added = datetime.now()
             pb_entry.image_url = dl_path if dl_path else ""
-            is_new_pb = True
+            is_personal_best = True
+        else:
+            print("The existing pb entry is greater than the submitted time... not a new pb")
+            print("Existing pb: " + str(pb_entry.personal_best))
+            print("Submitted time: " + str(current_ms))
+            is_personal_best = False
     else:
         print("PB entry not found, creating new entry")
+        print("Is new pb? " + str(is_personal_best))
         pb_entry = PersonalBestEntry(
             player_id=player_id,
             npc_id=npc_id,
@@ -1030,26 +1057,31 @@ async def pb_processor(pb_data, external_session=None):
             personal_best=time_ms,
             kill_time=current_ms,
             date_added=datetime.now(),
-            image_url=dl_path if dl_path else ""
+            image_url=dl_path if dl_path else "",
+            used_api=used_api
         )
         session.add(pb_entry)
         session.commit()
         session.refresh(pb_entry)
+    
     session.commit()
+    print("Committed PB entry -- ID is " + str(pb_entry.id) + " and is_personal_best is " + str(is_personal_best))
     #print("Committed PB entry - personal best: " + str(is_personal_best))
     # Create notification if it's a new PB
     if is_personal_best:
+        print("Is personal best, creating notification")
         #print("Is personal best, creating notification")
         # Get player groups
         global_group = session.query(Group).filter(Group.group_id == 2).first()
         if player is None or not player:
             player = session.query(Player).filter(Player.account_hash == account_hash).first()
         if not player:
+            print("Player not found, aborting")
             return
         if global_group not in player.groups:
             player.add_group(global_group)
             session.commit()
-        
+        print("Player found, getting groups")
         player_gids = session.execute(text("SELECT group_id FROM user_group_association WHERE player_id = :player_id"), {"player_id": player.player_id}).all()
         player_groups = []
         if player_gids:

@@ -282,7 +282,7 @@ class DatabaseOperations:
                 pass
 
     async def create_drop_object(self, item_id, player_id, date_received, npc_id, value, quantity, image_url: str = "", authed: bool = False,
-                                attachment_url: str = "", attachment_type: str = "", add_to_queue: bool = True, existing_session=None):
+                                attachment_url: str = "", attachment_type: str = "", add_to_queue: bool = True, used_api: bool = False, existing_session=None):
         """
         Create a drop and add it to the queue for inserting to the database.
         """
@@ -310,7 +310,8 @@ class DatabaseOperations:
                     value=value,
                     quantity=quantity,
                     authed=authed,
-                    image_url=image_url)
+                    image_url=image_url,
+                    used_api=used_api)
 
         try:
             # Add the drop to the session and commit to generate the drop_id
@@ -323,37 +324,42 @@ class DatabaseOperations:
 
         # Attempt to download the image and update the drop entry
         if attachment_url and attachment_type:
-            try:
-                # Set up the file extension and file name
-                file_extension = get_extension_from_content_type(attachment_type)
-                file_name = f"{item_id}_{npc_id}_{newdrop.drop_id}"  # Create a unique file name
+            if attachment_type == "downloaded":
+                newdrop.image_url = attachment_url
+                session.commit()
+            else:
+                try:
+                    # Set up the file extension and file name
+                    file_extension = get_extension_from_content_type(attachment_type)
+                    file_name = f"{item_id}_{npc_id}_{newdrop.drop_id}"  # Create a unique file name
 
-                player = session.query(Player).filter(Player.player_id == player_id).first()
-                if player:
-                    # Download the image and update the drop with the image URL
-                    if (value * quantity) > 50000:
-                        dl_path, external_url = await download_player_image(
-                            submission_type="drop",
-                            file_name=str(file_name),
-                            player=player,
-                            attachment_url=str(attachment_url),
-                            file_extension=str(file_extension),
-                            entry_id=str(newdrop.drop_id),
-                            entry_name=str(item_id),
-                            npc_name=str(npc_id)
-                        )
-                    
-                        # Update the image URL in the drop entry
-                        newdrop.image_url = external_url
-                        #print(f"Image downloaded and URL set: {external_url}")
+                    player = session.query(Player).filter(Player.player_id == player_id).first()
+                    if player:
+                        # Download the image and update the drop with the image URL
+                        if (value * quantity) > 50000:
+                            dl_path, external_url = await download_player_image(
+                                submission_type="drop",
+                                file_name=str(file_name),
+                                player=player,
+                                attachment_url=str(attachment_url),
+                                file_extension=str(file_extension),
+                                entry_id=str(newdrop.drop_id),
+                                entry_name=str(item_id),
+                                npc_name=str(npc_id)
+                            )
+                            newdrop.used_api = used_api
+                        
+                            # Update the image URL in the drop entry
+                            newdrop.image_url = external_url
+                            #print(f"Image downloaded and URL set: {external_url}")
 
-                        # Commit the updated drop to the database
-                        session.commit()
-                else:
-                    print("Player not found.")
-            except Exception as e:
-                print(f"Couldn't download the image: {e}")
-                session.rollback()
+                            # Commit the updated drop to the database
+                            session.commit()
+                    else:
+                        print("Player not found.")
+                except Exception as e:
+                    print(f"Couldn't download the image: {e}")
+                    session.rollback()
 
         # Create notification entries for this drop
         drop_value = value * quantity
@@ -397,9 +403,10 @@ class DatabaseOperations:
                     'quantity': quantity,
                     'total_value': drop_value,
                     'player_name': player_name,
-                    'player_id': player_id,
+                    'player_id': player_id, 
                     'image_url': newdrop.image_url,
-                    'attachment_type': attachment_type
+                    'attachment_type': attachment_type,
+                    'used_api': used_api
                 }
                 
                 notification = NotificationQueue(

@@ -15,10 +15,31 @@ async def download_image(sub_type: str,
         base_url = "https://www.droptracker.io/img/user-upload/"
         directory_path = os.path.join(base_dir, str(player.wom_id), sub_type)
         sub_type = sub_type if sub_type != "npc" and sub_type != "other" else "drop"
-        url_path = f"{player.wom_id}/{sub_type}/{processed_data.get('npc_name', None)}/"
+        
+        # Get the appropriate field name based on submission type
+        if sub_type == "collection_log" or sub_type == "clog":
+            path_component = processed_data.get('source', 'unknown')
+        elif sub_type == "pb":
+            path_component = processed_data.get('boss_name', 'unknown')
+        else:
+            path_component = processed_data.get('source', processed_data.get('npc_name', 'unknown'))
+        
+        url_path = f"{player.wom_id}/{sub_type}/{path_component}/"
 
-        def generate_unique_filename(directory, file_name, ext):
-            base_name = file_name
+        def sanitize_filename(filename):
+            """Sanitize filename to remove/replace problematic characters"""
+            filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+            filename = re.sub(r'\s+', '_', filename)
+            return filename.strip('. ')
+
+        def generate_unique_filename(directory, base_name_with_ext):
+            """Generate unique filename, handling files that already have extensions"""
+            # Split the filename and extension
+            if '.' in base_name_with_ext:
+                base_name, ext = base_name_with_ext.rsplit('.', 1)
+            else:
+                base_name, ext = base_name_with_ext, 'jpg'
+            
             counter = 1
             unique_file_name = f"{base_name}.{ext}"
             while os.path.exists(os.path.join(directory, unique_file_name)):
@@ -27,36 +48,39 @@ async def download_image(sub_type: str,
             return unique_file_name
         
         try:
-            # Generate unique filename
+            # Generate unique filename based on submission type
             if sub_type == "drop":
-                directory_path = os.path.join(directory_path, processed_data.get("source", None))
-                item_name = processed_data.get("item", None)
-                npc_name = processed_data.get("source", None)
-                if item_name and npc_name:
-                    filename = f"{npc_name}_{item_name}.jpg"
-                    if os.path.exists(os.path.join(directory_path, filename)):
-                        filename = f"{npc_name}_{item_name}_{uuid.uuid4()}.jpg"
+                source_name = processed_data.get("source", "unknown")
+                item_name = processed_data.get("item", "unknown")
+                directory_path = os.path.join(directory_path, source_name)
+                if item_name and source_name:
+                    filename = f"{source_name}_{item_name}.jpg"
                 else:
                     filename = f"{item_name}.jpg"
+                filename = generate_unique_filename(directory_path, filename)
             elif sub_type == "pb":
-                directory_path = os.path.join(directory_path, processed_data.get("boss_name", None))
-                filename = f"{processed_data.get('npc_name', None)}_{processed_data.get('team_size', None)}_{processed_data.get('time', None)}.jpg"
-                if os.path.exists(os.path.join(directory_path, filename)):
-                    filename = generate_unique_filename(directory_path, filename, "jpg")
-            elif sub_type == "clog":
-                directory_path = os.path.join(directory_path, processed_data.get("source", None))
-                filename = f"{processed_data.get('item', None)}.jpg"
-                if os.path.exists(os.path.join(directory_path, filename)):
-                    filename = generate_unique_filename(directory_path, filename, "jpg")
-            elif sub_type == "ca":
-                directory_path = os.path.join(directory_path, processed_data.get("task_name", None))
-                filename = f"{processed_data.get('task_name', None)}_{processed_data.get('task_tier', None)}.jpg"
-                if os.path.exists(os.path.join(directory_path, filename)):
-                    filename = generate_unique_filename(directory_path, filename, "jpg")
+                boss_name = processed_data.get("boss_name", processed_data.get("npc_name", "unknown"))
+                team_size = processed_data.get("team_size", "solo")
+                time_value = processed_data.get("time", "unknown")
+                directory_path = os.path.join(directory_path, boss_name)
+                filename = f"{boss_name}_{team_size}_{time_value}.jpg"
+                filename = generate_unique_filename(directory_path, filename)
+            elif sub_type == "clog" or sub_type == "collection_log":
+                source_name = processed_data.get("source", "unknown")
+                item_name = processed_data.get("item", "unknown")
+                directory_path = os.path.join(directory_path, source_name)
+                filename = f"{item_name}.jpg"
+                filename = generate_unique_filename(directory_path, filename)
+            elif sub_type == "ca" or sub_type == "combat_achievement":
+                task_name = processed_data.get("task_name", processed_data.get("task", "unknown"))
+                task_tier = processed_data.get("task_tier", processed_data.get("tier", "unknown"))
+                directory_path = os.path.join(directory_path, task_tier)
+                filename = f"{task_name}_{task_tier}.jpg"
+                filename = generate_unique_filename(directory_path, filename)
             else:
-                filename = f"{processed_data.get('task_name', None)}_{processed_data.get('task_tier', None)}.jpg"
-                if os.path.exists(os.path.join(directory_path, filename)):
-                    filename = generate_unique_filename(directory_path, filename, "jpg")
+                # Default fallback
+                filename = f"submission_{uuid.uuid4()}.jpg"
+            
             os.makedirs(directory_path, exist_ok=True)
             filepath = os.path.join(directory_path, filename)
             

@@ -1046,32 +1046,68 @@ class ClanCommands(Extension):
                                     "Please reach out in our Discord server if this appears to be a mistake.",
                                     ephemeral=True)
             else:
+                # Create the group but don't commit yet
                 group = Group(group_name=group_name,
                             wom_id=wom_id,
                             guild_id=guild.guild_id)
                 session.add(group)
                 print("Created a group")
                 user.add_group(group)
+                
+                # Initialize these variables with defaults
+                total_members = 0
+                total_tracked_already = 0
+                
                 try:
                     group_wom_ids = await fetch_group_members(wom_id)
                     group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
                     for member in group_members:
                         if member.user:
-                            user: User = member.user
-                            user.add_group(group)
+                            member_user: User = member.user
+                            member_user.add_group(group)
                         member.add_group(group)
                     total_members = len(group_wom_ids)
                     total_tracked_already = len(group_members)
-                    session.commit()
+                    print(f"Successfully processed {total_tracked_already} existing members from WOM group {wom_id}")
                 except Exception as e:
                     print("Error fetching group members/assigning them to the group during group creation:", e)
+                    # Don't rollback here - just continue with group creation without WOM members
+                    
+                # Commit the group creation (this will generate the group_id)
+                try:
+                    session.commit()
+                    print(f"Successfully committed group {group.group_id}")
+                except Exception as e:
                     session.rollback()
+                    print(f"Failed to commit group: {e}")
+                    return await ctx.send(f"Unable to create your group due to a database error.\n" + 
+                                        f"Please try again later or reach out in the DropTracker Discord server.",
+                                        ephemeral=True)
+                    
+            # Now assign the group_id to the guild and commit
             guild.group_id = group.group_id
-            embed = Embed(title="New group created",
-                        description=f"Your Group has been created (ID: `{group.group_id}`) with `{total_tracked_already}` DropTracker users already being tracked.")
-            embed.add_field(name=f"WOM group `{group.wom_id}` (`{total_members}` members) is now assigned to your Discord server `{group.guild_id}`",
-                            value=f"<a:loading:1180923500836421715> Please wait while we initialize some other things for you...",
-                            inline=False)
+            try:
+                session.commit()
+                print(f"Successfully linked guild {guild.guild_id} to group {group.group_id}")
+            except Exception as e:
+                session.rollback()
+                print(f"Error linking guild to group: {e}")
+                
+            # Create success embed with proper variable handling
+            try:
+                embed = Embed(title="New group created",
+                            description=f"Your Group has been created (ID: `{group.group_id}`) with `{total_tracked_already}` DropTracker users already being tracked.")
+                embed.add_field(name=f"WOM group `{group.wom_id}` (`{total_members}` members) is now assigned to your Discord server `{group.guild_id}`",
+                                value=f"<a:loading:1180923500836421715> Please wait while we initialize some other things for you...",
+                                inline=False)
+            except NameError as e:
+                print(f"Variable error in embed creation: {e}")
+                # Fallback embed
+                embed = Embed(title="New group created",
+                            description=f"Your Group has been created (ID: `{group.group_id}`).")
+                embed.add_field(name=f"WOM group `{group.wom_id}` is now assigned to your Discord server",
+                                value=f"<a:loading:1180923500836421715> Please wait while we initialize some other things for you...",
+                                inline=False)
             embed.set_footer(f"https://www.droptracker.io/discord")
             try:
                 await insert_xf_group(group)
@@ -1107,12 +1143,14 @@ class ClanCommands(Extension):
             try:
                 session.add_all(new_config)
                 session.commit()
+                print(f"Successfully created {len(new_config)} configuration entries for group {group.group_id}")
             except Exception as e:
                 session.rollback()
                 print("Error occured trying to save configs::", e)
-                return await ctx.send(f"Unable to create the default configuration options for your clan.\n" + 
-                                      f"Please reach out in the DropTracker Discord server.",
-                                      ephemeral=True)
+                # Don't return here - group is already created, just warn about configs
+                await ctx.send(f"⚠️ Your group was created successfully, but there was an issue setting up default configurations.\n" + 
+                              f"Please visit the website to configure your group settings manually: https://www.droptracker.io/login/discord",
+                              ephemeral=True)
                     # send_email(subject=f"New Group: {group_name}",
                     #         recipients=["support@droptracker.io"],
                     #         body=f"A new group was registered in the database." + 
