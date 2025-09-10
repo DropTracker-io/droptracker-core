@@ -1,7 +1,7 @@
 import asyncio
 import hashlib
 import time
-from db.models import CombatAchievementEntry, Drop, NotifiedSubmission, session, NpcList, Player, ItemList, PersonalBestEntry, CollectionLogEntry, User, Group, GroupConfiguration, UserConfiguration, NotificationQueue
+from db.models import CombatAchievementEntry, Drop, NotifiedSubmission, PlayerPet, session, NpcList, Player, ItemList, PersonalBestEntry, CollectionLogEntry, User, Group, GroupConfiguration, UserConfiguration, NotificationQueue
 from db import models
 from db.update_player_total import update_player_in_redis
 from db.xf.recent_submissions import create_xenforo_entry
@@ -17,7 +17,7 @@ from utils.redis import RedisClient
 from db.ops import DatabaseOperations, associate_player_ids, get_point_divisor
 from utils.download import download_player_image, download_image
 from sqlalchemy import func, text
-from utils.format import convert_to_ms, format_number, get_command_id, get_extension_from_content_type, replace_placeholders, convert_from_ms, normalize_player_display_equivalence
+from utils.format import convert_to_ms, format_number, get_command_id, get_extension_from_content_type, get_true_boss_name, replace_placeholders, convert_from_ms, normalize_player_display_equivalence
 import interactions
 from utils.logger import LoggerClient
 from utils.semantic_check import check_drop as verify_item_real
@@ -658,6 +658,273 @@ async def quest_processor(quest_data, external_session=None):
         session = external_session
     else:
         session = models.session
+
+async def pet_processor(pet_data, external_session=None):
+    """Process a pet submission and create notification entries if needed"""
+    debug_print(f"=== PET PROCESSOR START ===")
+    debug_print(f"Raw pet data: {pet_data}")
+    debug_print(f"External session provided: {external_session is not None}")
+    
+    session, use_external_session = select_session_and_flag(external_session)
+    debug_print(f"Using external session: {use_external_session}")
+    
+    # Extract pet data
+    player_name = pet_data.get('player_name', pet_data.get('player', None))
+    if not player_name:
+        debug_print("No player name found, aborting")
+        return
+    
+    account_hash = pet_data.get('acc_hash', pet_data.get('account_hash', None))
+    if not account_hash:
+        debug_print("No account hash found, aborting")
+        return
+        
+    pet_name = pet_data.get('pet_name', None)
+    if not pet_name:
+        debug_print("No pet name found, aborting")
+        return
+    
+    auth_key = pet_data.get('auth_key', '')
+    attachment_url = pet_data.get('attachment_url', None)
+    attachment_type = pet_data.get('attachment_type', None)
+    downloaded = pet_data.get('downloaded', False)
+    image_url = pet_data.get('image_url', None)
+    used_api = pet_data.get('used_api', False)
+    source = pet_data.get('source', None)  # NPC/source that dropped the pet
+    killcount = pet_data.get('killcount', None)
+    milestone = pet_data.get('milestone', None)
+    duplicate = pet_data.get('duplicate', False)
+    previously_owned = pet_data.get('previously_owned', None)
+    game_message = pet_data.get('game_message', None)
+    
+    debug_print(f"Extracted pet data - Player: {player_name}, Pet: {pet_name}, Source: {source}")
+    debug_print(f"Account hash: {account_hash[:8]}... (truncated), Duplicate: {duplicate}")
+    debug_print(f"Attachment URL: {attachment_url}, Type: {attachment_type}, Downloaded: {downloaded}")
+    
+    has_xf_entry = False
+    
+    # Validate player and auth
+    player, authed, user_exists = await ensure_player_by_name_then_auth(session, player_name, account_hash, auth_key)
+    if not player:
+        debug_print("Player not found in the database, aborting")
+        return
+    
+    player_id = player.player_id
+    if not user_exists or not authed:
+        debug_print("User failed auth check")
+        return
+    
+    # Try to find the pet item in the database
+    pet_item = await ensure_item_by_name(session, pet_name)
+    if not pet_item:
+        debug_print(f"Pet item {pet_name} not found in database")
+        # For pets, we might want to be more lenient and create a notification for unknown pets
+        # rather than aborting completely
+        pet_item_id = None
+    else:
+        pet_item_id = pet_item.item_id
+        debug_print(f"Pet item validated - ID: {pet_item_id}, Name: {pet_name}")
+    
+    # Resolve NPC ID if source is provided
+    npc_id = None
+    npc_name = source
+    if source:
+        npc_id, npc_name = await ensure_npc_id_for_player(session, source, player_id, player_name, use_external_session)
+        debug_print(f"NPC resolved - ID: {npc_id}, Name: {npc_name}")
+    
+    # Check if this pet already exists for this player (avoid duplicates)
+    existing_pet = None
+    new_pet = None
+    if pet_item_id:
+        existing_pet = session.query(PlayerPet).filter(
+            PlayerPet.player_id == player_id,
+            PlayerPet.item_id == pet_item_id
+        ).first()
+    
+    is_new_pet = existing_pet is None
+    
+    # If it's a new pet and we have a valid item_id, store it
+    if is_new_pet and pet_item_id:
+        debug_print(f"Creating new pet entry for {player_name}: {pet_name}")
+        try:
+            new_pet = PlayerPet(
+                player_id=player_id,
+                item_id=pet_item_id,
+                pet_name=pet_name
+            )
+            session.add(new_pet)
+            session.commit()
+            debug_print(f"Pet entry created successfully")
+        except Exception as e:
+            debug_print(f"Error creating pet entry: {e}")
+            if not use_external_session:
+                session.rollback()
+            return
+    elif existing_pet:
+        debug_print(f"Pet {pet_name} already exists for player {player_name}")
+    
+    # Process image if available and it's a new pet
+    dl_path = ""
+    if is_new_pet and attachment_url and not downloaded:
+        try:
+            debug_print(f"Debug - pet attachment_type: '{attachment_type}'")
+            file_extension = get_extension_from_content_type(attachment_type)
+            debug_print(f"Debug - pet file_extension after conversion: '{file_extension}'")
+            file_name = f"pet_{player_id}_{pet_name.replace(' ', '_')}_{int(time.time())}"
+            
+            dl_path, external_url = await download_player_image(
+                submission_type="pet",
+                file_name=file_name,
+                player=player,
+                attachment_url=attachment_url,
+                file_extension=file_extension,
+                entry_id=existing_pet.id if existing_pet else 0,
+                entry_name=pet_name
+            )
+            
+            # Use external_url for serving, not the local path
+            if external_url:
+                dl_path = external_url
+        except Exception as e:
+            app_logger.log(log_type="error", data=f"Couldn't download pet image: {e}", app_name="core", description="pet_processor")
+    elif downloaded:
+        dl_path = image_url
+    
+    # Create notifications for new pets or duplicates (depending on configuration)
+    should_notify = is_new_pet or (duplicate and not is_new_pet)
+    
+    if should_notify:
+        debug_print(f"Creating notifications for pet submission")
+        
+        # Get player groups
+        player_groups = get_player_groups_with_global(session, player)
+        
+        for group in player_groups:
+            debug_print(f"Checking group: {group.group_name}")
+            group_id = group.group_id
+            
+            # Check if group has pet notifications enabled
+            pet_notify_config = session.query(GroupConfiguration).filter(
+                GroupConfiguration.group_id == group_id,
+                GroupConfiguration.config_key == 'notify_pets'
+            ).first()
+            
+            debug_print(f"Pet notify config for group {group_id}: {pet_notify_config.config_value if pet_notify_config else 'None'}")
+            
+            if pet_notify_config and is_truthy_config(pet_notify_config.config_value):
+                debug_print(f"Group {group_id} has pet notifications enabled")
+                
+                notification_data = {
+                    'group_id': group_id,
+                    'player_name': player_name,
+                    'player_id': player_id,
+                    'pet_name': pet_name,
+                    'source': source,
+                    'npc_name': npc_name,
+                    'killcount': killcount,
+                    'milestone': milestone,
+                    'duplicate': duplicate,
+                    'previously_owned': previously_owned,
+                    'game_message': game_message,
+                    'image_url': dl_path,
+                    'item_id': pet_item_id,
+                    'npc_id': npc_id,
+                    'is_new_pet': is_new_pet
+                }
+                
+                # Create XenForo entry (only once)
+                if not has_xf_entry:
+                    try:
+                        # Note: XenForo entry creation might need to be adapted for pets
+                        # For now, we'll skip it or create a generic entry
+                        debug_print("Skipping XenForo entry for pets (not implemented yet)")
+                        has_xf_entry = True
+                    except Exception as e:
+                        debug_print(f"Couldn't add pet to XenForo: {e}")
+                        app_logger.log(log_type="error", data=f"Couldn't add pet to XenForo: {e}", app_name="core", description="pet_processor")
+                
+                # Check for user DM settings
+                if player and player.user:
+                    user = session.query(User).filter(User.user_id == player.user_id).first()
+                    if user and is_user_dm_enabled(session, user.user_id, 'dm_pets'):
+                        debug_print(f"Creating DM notification for user {user.user_id}")
+                        await create_notification('dm_pet', player_id, notification_data, group_id, existing_session=session if use_external_session else None)
+                
+                # Create group notification
+                await create_notification('pet', player_id, notification_data, group_id, existing_session=session if use_external_session else None)
+                debug_print(f"Created pet notification for group {group_id}")
+    
+    debug_print(f"=== PET PROCESSOR END ===")
+    return existing_pet if existing_pet else (new_pet if is_new_pet and pet_item_id else None)
+
+async def adventure_log_processor(adventure_log_data, external_session=None):
+    debug_print("adventure_log_processor")
+    print("Got adventure log data:", adventure_log_data)
+    use_external_session = external_session is not None
+    if use_external_session:
+        session = external_session
+    else:
+        session = models.session
+
+        player_name = adventure_log_data.get('player_name', adventure_log_data.get('player', None))
+        player, authed, user_exists = await ensure_player_by_name_then_auth(session, player_name, account_hash, "")
+        if not player:
+            return
+        player_id = player.player_id
+        if not user_exists or not authed:
+            return
+        player_name = adventure_log_data.get('player_name', adventure_log_data.get('player', None))
+        account_hash = adventure_log_data.get('acc_hash', adventure_log_data.get('account_hash', None))
+        if adventure_log_data.get('adventure_log', None):
+            print("Adventure log data decoded properly...")
+            adventure_log = adventure_log_data.get('adventure_log', None)
+            adventure_log = adventure_log.replace("[", "")
+            adventure_log = adventure_log.replace("]", "")
+            adventure_log = adventure_log.split(",")
+            if len(adventure_log) > 0:
+                try:
+                    pb_content = adventure_log
+                    personal_bests = pb_content.split("\n")
+                    for pb in personal_bests:
+                        boss_name, rest = pb.split(" - ")
+                        team_size, time = rest.split(" : ")
+                        boss_name = boss_name.strip()
+                        team_size = team_size.strip()
+                        boss_name, team_size, time = boss_name.replace("`", ""), team_size.replace("`", ""), time.replace("`", "")
+                        time = time.strip()
+                        real_boss_name, npc_id = get_true_boss_name(boss_name)
+                        existing_pb = session.query(PersonalBestEntry).filter(PersonalBestEntry.player_id == player_id, PersonalBestEntry.npc_id == npc_id,
+                                                                            PersonalBestEntry.team_size == team_size).first()
+                        time_ms = convert_to_ms(time)
+                        if existing_pb:
+                            if time_ms < existing_pb.personal_best:
+                                existing_pb.personal_best = time_ms
+                                session.commit()
+                        else:
+                            new_pb = PersonalBestEntry(player_id=player_id, npc_id=npc_id, 
+                                                    team_size=team_size, personal_best=time_ms, 
+                                                    kill_time=time_ms, new_pb=True)
+                            session.add(new_pb)
+                            session.commit()
+                
+                except ValueError:
+                    pet_list = adventure_log_data.get('pet_list', None)
+                    pet_list = pet_list.replace("[", "")
+                    pet_list = pet_list.replace("]", "")
+                    pet_list = pet_list.split(",")
+                    if len(pet_list) > 0:
+                        for pet in pet_list:
+                            pet = int(pet.strip())
+                            item_object: ItemList = session.query(ItemList).filter(ItemList.item_id == pet).first()
+                            if item_object:
+                                player_pet = PlayerPet(player_id=player_id, item_id=item_object.item_id, pet_name=item_object.item_name)
+                                try:
+                                    session.add(player_pet)
+                                    session.commit()
+                                    print("Added a pet to the database for", player_name, account_hash, item_object.item_name, item_object.item_id)
+                                except Exception as e:
+                                    print("Couldn't add a pet to the database:", e)
+                                    session.rollback()
 
 async def pb_processor(pb_data, external_session=None):
     """Process a personal best submission and create notification entries if needed"""
