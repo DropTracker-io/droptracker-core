@@ -60,6 +60,15 @@ async def get_true_item_value(item_name, provided_value: int = 0):
             return amulet_of_rancour_value - torture_value
         else:
             return provided_value
+    if item_lower == "mokhaiotl cloth":
+        tormented_bracelet_value = await get_most_recent_price_by_name("Tormented bracelet")
+        demon_tear_value = await get_most_recent_price_by_name("Demon tear")
+        confliction_gauntlet_value = await get_most_recent_price_by_name("Confliction gauntlets")
+        if confliction_gauntlet_value and tormented_bracelet_value and demon_tear_value:
+            return confliction_gauntlet_value - tormented_bracelet_value - (demon_tear_value * 10000)
+        else:
+            return 5000000
+
     else:
         return provided_value
 

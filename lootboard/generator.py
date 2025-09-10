@@ -3,9 +3,13 @@ import csv
 import calendar
 import json
 import os
+import time
 import traceback
 from datetime import datetime, timedelta
-from db.models import Drop, Guild, LootboardStyle, Player, ItemList, Session, session, Group, GroupConfiguration, NpcList
+from typing import Dict, List, Tuple
+
+from sqlalchemy import and_, select
+from db.models import Drop, Guild, IgnoredPlayer, LootboardStyle, Player, ItemList, Session, session, Group, GroupConfiguration, NpcList
 from db import models
 from io import BytesIO
 
@@ -30,7 +34,146 @@ rs_font_path = "static/assets/fonts/runescape_uf.ttf"
 tracker_fontpath = 'static/assets/fonts/droptrackerfont.ttf'
 main_font = ImageFont.truetype(rs_font_path, font_size)
 
-async def get_drops_for_group(player_ids, partition: str):
+def get_db_session():
+    """Get a fresh session using the existing session factory"""
+    return Session()
+
+async def get_drops_for_group_optimized(player_ids: List[int], partition: str, group_id: int = None) -> Tuple[Dict, Dict, List, int]:
+    """
+    Optimized version of get_drops_for_group using suggested improvements
+    """
+    verbose = False
+    from collections import defaultdict
+    import heapq
+    
+    overall_start = time.time()
+    
+    # Use defaultdict to avoid key existence checks
+    group_items = defaultdict(lambda: [0, 0])  # [quantity, total_value]
+    player_totals = defaultdict(int)
+    recent_drops_heap = []  # Min heap for top 100 drops by date
+    total_loot = 0
+    
+    # Counter for heap tie-breaking when timestamps are equal
+    drop_counter = 0
+    
+    # Partition processing
+    is_daily = len(str(partition)) > 6 or '-' in str(partition)
+    partition_int = int(partition.replace('-', '')) if is_daily and '-' in str(partition) else int(partition)
+    
+    if verbose:
+        print(f"\n[OPTIMIZED] Processing {len(player_ids)} players with partition {partition_int}")
+    
+    with get_db_session() as session:
+        # Single query for all players
+        query_start = time.time()
+        
+        # Fetch all drops in one query
+        drops_query = select(
+            Drop.drop_id,
+            Drop.player_id,
+            Drop.item_id,
+            Drop.quantity,
+            Drop.value,
+            Drop.date_added,
+            Drop.npc_id
+        ).where(
+            and_(
+                Drop.player_id.in_(player_ids),
+                Drop.partition == partition_int,
+                Drop.value.isnot(None),
+                Drop.quantity.isnot(None),
+                Drop.item_id.isnot(None)
+            )
+        )
+        
+        result = session.execute(drops_query)
+        all_drops = result.fetchall()
+        
+        query_time = time.time() - query_start
+        # Process drops
+        process_start = time.time()
+        if group_id:
+            group_minimum_value = 500000
+            try:
+                group_minimum_value_raw = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
+                                                                               GroupConfiguration.config_key == "minimum_value_to_notify").first().config_value
+                group_minimum_value = int(group_minimum_value_raw)
+            except:
+                pass
+            try:
+                only_include_items_over_minimum = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
+                                                                               GroupConfiguration.config_key == "only_include_items_over_minimum").first().config_value
+                only_include_items_over_minimum = bool(only_include_items_over_minimum)
+            except:
+                only_include_items_over_minimum = False
+        else:
+            group_minimum_value = 500000
+        for drop in all_drops:
+            drop_id, player_id, item_id, quantity, value, date_added, npc_id = drop
+            
+            item_total_value = quantity * value
+            
+            # Check if we should only include items over minimum value
+            if only_include_items_over_minimum and value < group_minimum_value:
+                # Skip this item entirely if it's below minimum value
+                continue
+            
+            # Update group items (using defaultdict)
+            group_items[str(item_id)][0] += quantity
+            group_items[str(item_id)][1] += item_total_value
+            
+            # Update player totals (using defaultdict)
+            player_totals[player_id] += item_total_value
+            
+            # Track recent high-value drops using heap
+            if value >= group_minimum_value:
+                date_str = date_added.isoformat() if isinstance(date_added, datetime) else str(date_added)
+                
+                # For daily partitions, filter by date
+                if not is_daily or not '-' in str(partition) or date_added.strftime('%Y-%m-%d') == partition:
+                    # Use negative drop_id for max heap behavior (highest drop_id first)
+                    heap_key = -drop_id  # Negative for max heap behavior
+                    
+                    drop_data = {
+                        'drop_id': drop_id,
+                        'item_id': item_id,
+                        'player_id': player_id,
+                        'value': value,
+                        'quantity': quantity,
+                        'date_added': date_str,
+                        'npc_id': npc_id
+                    }
+                    
+                    # Increment counter for tie-breaking
+                    drop_counter += 1
+                    
+                    # Push all items to the heap regardless of its size; so we don't lose anything--we can sort later
+                    heapq.heappush(recent_drops_heap, (heap_key, drop_counter, drop_data))
+        
+        process_time = time.time() - process_start
+        
+        # Convert defaultdicts to regular dicts with proper format
+        format_start = time.time()
+        group_items_formatted = {
+            item_id: f"{values[0]},{values[1]}"
+            for item_id, values in group_items.items()
+        }
+        player_totals_dict = dict(player_totals)
+        total_loot = sum(player_totals.values())
+        
+        # Extract recent drops from heap and sort by drop_id descending (most recent first)
+        # Extract the drop_data (3rd element) from each tuple and sort by drop_id descending
+        recent_drops = [drop[2] for drop in sorted(recent_drops_heap)]
+        
+        format_time = time.time() - format_start
+    
+    overall_time = time.time() - overall_start
+    
+    
+    return group_items_formatted, player_totals_dict, recent_drops, total_loot
+
+async def get_drops_for_group(player_ids, partition: str, only_include_items_over_minimum: bool = False, group_minimum_value: int = 500000):
     """ Returns the drops stored in redis cache 
         for the specific list of player_ids
     """
@@ -44,6 +187,7 @@ async def get_drops_for_group(player_ids, partition: str):
     async def process_player(player_id):
         nonlocal total_loot
         player_total = 0
+        player_total_included = 0
         
         # Use different key format based on partition type
         if len(str(partition)) > 6:
@@ -67,7 +211,21 @@ async def get_drops_for_group(player_ids, partition: str):
             key = key.decode('utf-8')
             value = value.decode('utf-8')
             try:
-                quantity, total_value = map(int, value.split(','))
+                # Handle new 5-field format: quantity,total_value,drop_count,first_drop,last_drop
+                parts = value.split(',')
+                if len(parts) >= 2:
+                    quantity = int(parts[0])
+                    total_value = int(parts[1])
+                    # If filtering is enabled, exclude items whose per-item value is below the minimum
+                    if only_include_items_over_minimum:
+                        if quantity <= 0:
+                            continue
+                        per_item_value = total_value // quantity
+                        if per_item_value < int(group_minimum_value):
+                            continue
+                    # Ignore additional fields (drop_count, first_drop, last_drop) for board generation
+                else:
+                    continue
             except ValueError:
                 continue
             
@@ -78,12 +236,19 @@ async def get_drops_for_group(player_ids, partition: str):
                 group_items[key] = f"{new_quantity},{new_total_value}"
             else:
                 group_items[key] = f"{quantity},{total_value}"
+            
+            if only_include_items_over_minimum:
+                player_total_included += total_value
                 
         player_total = redis_client.client.get(loot_key)
         if player_total:
             player_total = int(player_total.decode('utf-8'))
         else:
             player_total = 0
+        
+        # If filtering is enabled, override the player's total to include only allowed items
+        if only_include_items_over_minimum:
+            player_total = player_total_included
             
         # Get recent items and ensure uniqueness
         if len(str(partition)) > 6:
@@ -106,6 +271,12 @@ async def get_drops_for_group(player_ids, partition: str):
         player_totals[player_id] = player_total
         total_loot += player_total
         recent_drops.extend(player_recent_items)
+
+    # Ensure recent drops are in chronological order (newest first)
+    try:
+        recent_drops.sort(key=lambda x: x.get('date_added', ''), reverse=True)
+    except Exception:
+        pass
 
     return group_items, player_totals, recent_drops, total_loot
 
@@ -208,8 +379,11 @@ async def generate_server_board(group_id: int = 0, wom_group_id: int = 0, partit
     player_ids = await associate_player_ids(player_wom_ids, session_to_use=session)
     # Get the drops, recent drops, and total loot for the group
     #print("Processed player_ids")
-    group_items, player_totals, recent_drops, total_loot = await get_drops_for_group(player_ids, partition)
-
+    group_items, player_totals, recent_drops, total_loot = await get_drops_for_group_optimized(player_ids, partition, int(group.group_id))
+    print("Got recent drops:", len(recent_drops))
+    redis_client.client.zadd(f'gleaderboard:{partition}', {group.group_id: total_loot})
+    with open(f"/store/droptracker/disc/static/assets/img/clans/{group_id}/recent_drops.json", "w") as f:
+        json.dump(recent_drops, f, indent=4)
     # Draw elements on the background image (added dynamic_coloring - added BY Smoke [https://github.com/Varietyz/])
     bg_img = await draw_drops_on_image(bg_img, draw, group_items, group_id, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Pass `group_items` here
     bg_img = await draw_headers(group_id, total_loot, bg_img, draw, partition, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Draw headers
@@ -218,7 +392,7 @@ async def generate_server_board(group_id: int = 0, wom_group_id: int = 0, partit
     save_image(bg_img, group_id, partition)  # Save the generated image
     #print("Saved the new image.")
     
-    # When saving the image, use a different naming convention for daily partitions
+    # When saving the image, use a different naming convention for daily partitions 
     if is_daily:
         # For daily partitions, use the date directly
         file_path = f"/store/droptracker/disc/static/assets/img/clans/{group_id}/lb/daily_{partition.replace('-', '')}.png"
@@ -229,6 +403,140 @@ async def generate_server_board(group_id: int = 0, wom_group_id: int = 0, partit
         file_path = f"/store/droptracker/disc/static/assets/img/clans/{group_id}/lb/lootboard.png"
     
     return file_path
+
+
+
+async def generate_server_board_temporary(group_id: int = 0, wom_group_id: int = 0, partition: str = None, session_to_use = None):
+    """
+        :param: bot: Instance of the interactions.Client bot object
+        :param: group_id: DropTracker GroupID. 0 expects a wom_group_id
+        :param: wom_group_id: WiseOldMan groupID. 0 expects a group_id
+        :param: partition: The partition to search drops for (202408 for August 2024 or 2025-03-04 for daily)
+        Providing neither option (group_id, wom_group_id) uses global drops.
+    """
+    # Set default partition if none provided
+    if session_to_use is not None:
+        session = session_to_use
+    else:
+        session = models.session
+    if partition is None:
+        partition = datetime.now().year * 100 + datetime.now().month
+    
+    # Determine if we're using a daily partition
+    if len(str(partition)) > 6:
+        ## Our normal partitioning always uses 6 digits -- YYYYMM
+        is_daily = True
+    else:
+        is_daily = False
+    
+    group = None
+    if group_id != 0: ## we prioritize group_id here
+        group = session.query(Group).filter(Group.group_id == group_id).first()
+    elif wom_group_id != 0:
+        group = session.query(Group).filter(Group.wom_id == wom_group_id).first()
+    
+    if (group_id != 0 or wom_group_id != 0) and not group:
+        print("Cannot generate a lootboard, no group data was properly parsed..")
+    elif (group_id == 0 and wom_group_id == 0):
+        group_id = 1
+    else:
+        group_id = group.group_id
+    
+    group_config = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id).all()
+    # Transform group_config into a dictionary for easy access
+    config = {conf.config_key: conf.config_value for conf in group_config}
+
+    #loot_board_style = 1  # TODO: Implement other boards eventually
+    loot_board_style = config.get('loot_board_type', 1)
+    if loot_board_style == 0 or loot_board_style == "":
+        loot_board_style = 1
+    minimum_value = config.get('minimum_value_to_notify', 2500000)
+    player_wom_ids = []
+    # Load background image based on the board style
+    loot_board_style = int(loot_board_style)
+    target_board = session.query(LootboardStyle).filter(LootboardStyle.id == loot_board_style).first()
+    if not target_board:
+        target_board = session.query(LootboardStyle).filter(LootboardStyle.id == 1).first()
+    local_url = target_board.local_url
+    if not target_board:
+        local_url = "/store/droptracker/disc/lootboard/bank-new-clean-dark.png"
+
+    bg_img, draw = load_background_image(local_url)
+
+    # Compute the dynamic text color based on the background image. (- added BY Smoke [https://github.com/Varietyz/])
+    use_dynamic_colors = config.get('use_dynamic_lootboard_colors', True)
+    if use_dynamic_colors and use_dynamic_colors == "1":
+        use_dynamic_colors = True
+    else:
+        use_dynamic_colors = False
+    use_gp_colors = config.get('use_gp_colors', True)
+    #print(f"Dynamic color selected: {dynamic_color}")
+    if wom_group_id == 0:
+        try:
+            wom_group_id = group.wom_id
+        except Exception as e:
+            print(f"Error getting wom_group_id: {e}")
+            wom_group_id = 0
+    #f"Group ID: {group_id}")
+    if group_id != 2:
+        # Fetch player WOM IDs and associated Player IDs
+            player_wom_ids = await fetch_group_members(wom_group_id, session_to_use=session)
+    else:
+        #print("Group ID is 2...")
+        player_wom_ids = []
+        all_players = session.query(Player.wom_id).all()
+        #print(f"Got all players: {len(all_players)}")
+        for p in all_players:
+            player_wom_ids.append(p.wom_id)
+    player_ids = await associate_player_ids(player_wom_ids, session_to_use=session)
+    ignored_players_existing = session.query(IgnoredPlayer).filter(IgnoredPlayer.group_id == group_id).all()
+    if ignored_players_existing:
+        ignored_players = [player.player_id for player in ignored_players_existing]
+    else:
+        ignored_players = []
+    if len(ignored_players) > 0:
+        print(f"Excluding {len(ignored_players)} ignored players from the lootboard generation for group {group_id}")
+        player_ids = [player_id for player_id in player_ids if player_id not in ignored_players]
+    print("Got a total of ", len(player_ids), "players for group ", group_id)
+    # Get the drops, recent drops, and total loot for the group
+    #print("Processed player_ids")
+    # Respect group config: optionally filter items and totals by minimum value
+    only_include_items_over_minimum_val = config.get('only_include_items_over_minimum', False) if 'config' in locals() else False
+    only_include_items_over_minimum_flag = str(only_include_items_over_minimum_val).lower() in ("1", "true", "yes", "on")
+    try:
+        group_min_value_cfg = int(config.get('minimum_value_to_notify', 500000)) if 'config' in locals() else 500000
+    except Exception:
+        group_min_value_cfg = 500000
+    group_items, player_totals, recent_drops, total_loot = await get_drops_for_group(
+        player_ids,
+        partition,
+        only_include_items_over_minimum=only_include_items_over_minimum_flag,
+        group_minimum_value=group_min_value_cfg
+    )
+    print("Got recent drops:", len(recent_drops))
+    redis_client.client.zadd(f'gleaderboard:{partition}', {group.group_id: total_loot})
+    with open(f"/store/droptracker/disc/static/assets/img/clans/{group_id}/recent_drops.json", "w") as f:
+        json.dump(recent_drops, f, indent=4)
+    # Draw elements on the background image (added dynamic_coloring - added BY Smoke [https://github.com/Varietyz/])
+    bg_img = await draw_drops_on_image(bg_img, draw, group_items, group_id, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Pass `group_items` here
+    bg_img = await draw_headers(group_id, total_loot, bg_img, draw, partition, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Draw headers
+    bg_img = await draw_recent_drops(bg_img, draw, recent_drops, min_value=minimum_value, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Draw recent drops, with a minimum value
+    bg_img = await draw_leaderboard(bg_img, draw, player_totals, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)  # Draw leaderboard
+    save_path = save_image(bg_img, group_id, partition)  # Save the generated image
+    #print("Saved the new image.")
+    
+    # When saving the image, use a different naming convention for daily partitions
+    if is_daily:
+        # For daily partitions, use the date directly
+        file_path = f"/store/droptracker/disc/static/assets/img/clans/{group_id}/lb/daily_{partition.replace('-', '')}.png"
+    else:
+        # For monthly partitions, use the existing format
+        current_date = datetime.now()
+        ydmpart = int(current_date.strftime('%d%m%Y'))
+        file_path = f"/store/droptracker/disc/static/assets/img/lootboard_temp.png"
+    
+    return save_path
+
 
 
 def get_year_month_string():
@@ -459,8 +767,8 @@ async def draw_recent_drops(bg_img, draw, recent_drops, min_value, *, dynamic_co
     # Filter the drops based on their value, keeping only those above the specified min_value
     filtered_recents = [drop for drop in recent_drops if drop['value'] >= min_value]
     
-    # Sort drops by date in descending order and limit to the most recent 12 drops
-    sorted_recents = sorted(filtered_recents, key=lambda x: x['date_added'], reverse=True)[:12]
+    # Drops are already sorted by date from get_drops_for_group_optimized, just limit to 12
+    sorted_recents = filtered_recents[:12]
     
     small_font = ImageFont.truetype(rs_font_path, 18)
     recent_locations = {}
@@ -572,42 +880,69 @@ def save_image(image, server_id, partition):
         server_id: The group/server ID
         partition: The partition string (either YYYYMM or YYYY-MM-DD format)
     """
-    # Create directory if it doesn't exist
-    os.makedirs(f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb", exist_ok=True)
+    base_path = f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb"
     
     # Determine if this is a daily partition
     is_daily = '-' in str(partition)
     
     if is_daily:
-        # For daily partitions, use the date directly (YYYY-MM-DD)
-        # Save as daily_YYYYMMDD.png
-        formatted_date = partition.replace('-', '')
-        file_path = f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/daily_{formatted_date}.png"
+        # For daily partitions (YYYY-MM-DD format)
+        date_parts = partition.split('-')
+        year = int(date_parts[0])
+        month = int(date_parts[1])
+        day = int(date_parts[2])
+        
+        # Get month name (e.g., "August")
+        month_name = calendar.month_name[month]
+        
+        # Create directory structure: /clans/{server_id}/lb/{month_name}/
+        month_dir = f"{base_path}/{month_name}"
+        os.makedirs(month_dir, exist_ok=True)
+        
+        # Save as {day}.png in the month directory
+        file_path = f"{month_dir}/{day}.png"
         image.save(file_path)
+        
+        # Also save with year for uniqueness if needed (e.g., {year}_{day}.png)
+        # This helps distinguish between same days in different years
+        year_file_path = f"{month_dir}/{year}_{day}.png"
+        image.save(year_file_path)
         
         # Check if this is today's date
         current_date = datetime.now().strftime('%Y-%m-%d')
         if partition == current_date:
             # Also save as the default lootboard.png if it's today
-            image.save(f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/lootboard.png")
+            os.makedirs(base_path, exist_ok=True)
+            image.save(f"{base_path}/lootboard.png")
         
         return file_path
     else:
-        # For monthly partitions, use the existing format (YYYYMM)
-        current_date = datetime.now()
-        today_ydmpart = int(current_date.strftime('%d%m%Y'))
+        # For monthly partitions (YYYYMM format)
+        year = int(str(partition)[:4])
+        month = int(str(partition)[4:6])
         
-        # Save with the date format
-        file_path = f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/{partition}.png"
+        # Get month name
+        month_name = calendar.month_name[month]
+        
+        # Create directory structure
+        month_dir = f"{base_path}/{month_name}"
+        os.makedirs(month_dir, exist_ok=True)
+        
+        # Save as monthly summary (e.g., "monthly.png" or "{year}_monthly.png")
+        file_path = f"{month_dir}/{year}_monthly.png"
         image.save(file_path)
         
-        # Also save as today's date format if it's the current month
+        # Also save as just "monthly.png" for the current view
+        monthly_path = f"{month_dir}/monthly.png"
+        image.save(monthly_path)
+        
+        # Check if this is the current month
+        current_date = datetime.now()
         current_month_partition = current_date.year * 100 + current_date.month
         if int(partition) == current_month_partition:
-            today_path = f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/{today_ydmpart}.png"
-            image.save(today_path)
-            # And save as the default lootboard.png
-            image.save(f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb/lootboard.png")
+            # Save as the default lootboard.png
+            os.makedirs(base_path, exist_ok=True)
+            image.save(f"{base_path}/lootboard.png")
         
         return file_path
 
@@ -780,6 +1115,10 @@ async def generate_timeframe_board(bot: interactions.Client, group_id: int = 0, 
     group_items, player_totals, recent_drops, total_loot = await get_drops_for_timeframe(
         player_ids, time_partitions, granularity, npc_id
     )
+
+    print("Got recent drops:", len(recent_drops))
+    with open(f"/store/droptracker/disc/static/assets/img/clans/{group_id}/recent_drops.json", "w") as f:
+        json.dump(recent_drops, f)
     
     # Draw elements on the background image
     bg_img = await draw_drops_on_image(bg_img, draw, group_items, group_id, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)
@@ -946,6 +1285,7 @@ async def get_drops_for_timeframe(player_ids, time_partitions, granularity, npc_
                     # Add to recent drops if not already present
                     if not any(drop['drop_id'] == item_data['drop_id'] for drop in recent_drops):
                         recent_drops.append(item_data)
+                        
         if player_total > 0:
             print(f"Player {player_id} total:", player_total)
         return player_id, player_total, []  # Empty list for recent items as we process them separately

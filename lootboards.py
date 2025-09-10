@@ -1,9 +1,16 @@
+from datetime import datetime, timedelta
+
+from sqlalchemy import text
+from lootboard import generator
 from services.lootboards import generate_server_board
-from db.models import Group, Session
+from db.models import Group, Session, XenforoSession
 import asyncio
 import os
 
 session = None
+xenforo_session = None
+
+last_board_updates = {}
 
 async def lootboard_update_loop():
     print("Starting lootboard update loop")
@@ -22,6 +29,73 @@ def get_fresh_session():
         session.close()
     session = Session()
     return session
+
+def get_fresh_xenforo_session():
+    global xenforo_session
+    if xenforo_session:
+        xenforo_session.reset()
+        xenforo_session.rollback()
+        xenforo_session.close()
+    xenforo_session = XenforoSession()
+    return xenforo_session
+
+async def update_specific_board(group_id: int, force: bool = False):
+    try:
+        # Fetch the group with a short-lived session
+        with Session() as group_session:
+            group = group_session.query(Group).filter(Group.group_id == group_id).first()
+            if not group:
+                print(f"Group {group_id} not found")
+                return
+            if not group.guild_id or group.guild_id == 0:
+                print(f"Group {group_id} has no valid guild_id")
+                return
+
+        # Determine premium status
+        is_premium = False
+        if group_id == 2:
+            is_premium = True
+        else:
+            with get_fresh_xenforo_session() as xf_session:
+                premium_status = xf_session.execute(
+                    text("SELECT * FROM xf_user_upgrade_active WHERE group_id = :group_id"),
+                    {"group_id": group_id}
+                ).first()
+                if premium_status:
+                    is_premium = True
+
+        # Non-premium throttling unless forced
+        if not is_premium and not force:
+            if group_id not in last_board_updates:
+                last_board_updates[group_id] = datetime.now() - timedelta(days=7)
+            if last_board_updates[group_id] > datetime.now() - timedelta(minutes=59):
+                print(f"Skipping group {group_id}: within 60-minute window for non-premium")
+                return
+
+        # Ensure destination directory exists
+        save_dir = f"/store/droptracker/disc/static/assets/img/clans/{group_id}/lb"
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+
+        # Generate using a fresh session
+        with Session() as gen_session:
+            print("Generating board for group:", group_id, "using a fresh session...")
+            try:
+                new_path = await generator.generate_server_board_temporary(
+                    group_id=group_id,
+                    wom_group_id=group.wom_id,
+                    session_to_use=gen_session
+                )
+                print(f"Board generated for {group.group_name}")
+                print(f"Board path: {new_path}")
+                if not is_premium:
+                    last_board_updates[group_id] = datetime.now()
+            except Exception as e:
+                print(f"Error generating board for group {group_id}: {e}")
+    except Exception as e:
+        print(f"Exception in update_specific_board({group_id}): {e}")
+    finally:
+        print("Finished cycle and closed sessions.")
 
 async def update_boards():
     try:
@@ -49,14 +123,35 @@ async def update_boards():
         # Process each group independently with its own session
         print(f"Found {len(groups)} groups to process")
         for group in groups:
+            is_premium = False
+            ## Determine if the group has premium status
+            if group.group_id == 2:
+                is_premium = True
+            else:
+                with get_fresh_xenforo_session() as xenforo_session:
+                    premium_status = xenforo_session.execute(
+                                text("SELECT * FROM xf_user_upgrade_active WHERE group_id = :group_id"), 
+                                {"group_id": group.group_id}
+                            ).first()
+                    if not premium_status:
+                        if group.group_id not in last_board_updates:
+                            last_board_updates[group.group_id] = datetime.now() - timedelta(days=7)
+                        if last_board_updates[group.group_id] > datetime.now() - timedelta(minutes=59):
+                            # Non-premium groups only get a 60-minute board refresh
+                            continue
+                    else:
+                        is_premium = True
+            
+            
             try:
                 if not os.path.exists(f"/store/droptracker/disc/static/assets/img/clans/{group.group_id}/lb"):
                     os.makedirs(f"/store/droptracker/disc/static/assets/img/clans/{group.group_id}/lb")
                 
                 # Create a completely new session for each group
                 with Session() as group_session:
+                    print("Generating board for group:", group.group_id, "using a fresh session...")
                     try:
-                        new_path = await generate_server_board(group_id=group.group_id, wom_group_id=group.wom_id, session_to_use=group_session)
+                        new_path = await generator.generate_server_board_temporary(group_id=group.group_id, wom_group_id=group.wom_id, session_to_use=group_session)
                         print(f"Board generated for {group.group_name}")
                         print(f"Board path: {new_path}")
                     except Exception as e:

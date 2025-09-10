@@ -41,30 +41,31 @@ class AppLogger:
         self.redis_client.rpush("log_queue", json.dumps(log_entry))
 
     def _batch_insert_logs(self, logs):
-        # Create a new session for this batch
-        session = XenforoSession()
-        try:
-            raw_sql = text("""
-            INSERT INTO dt_app_log (date, log_type, log_data, app_name, description)
-            VALUES (:log_date, :log_type, :log_data, :app_name, :description)
-            """)
-            for log in logs:
-                session.execute(
-                    raw_sql,
-                    {
-                        "log_date": time.strftime('%Y-%m-%d %H:%M:%S'),
-                        "log_type": log['type'],
-                        "log_data": log['data'],
-                        "app_name": log['app_name'],
-                        "description": log['description']
-                    }
-                )
-            session.commit()
-        except Exception as e:
-            session.rollback()
-            print(f"[AppLogger] Error during batch insert: {e}")
-        finally:
-            session.close()
+        # # Create a new session for this batch
+        # session = XenforoSession()
+        # try:
+        #     raw_sql = text("""
+        #     INSERT INTO dt_app_log (date, log_type, log_data, app_name, description)
+        #     VALUES (:log_date, :log_type, :log_data, :app_name, :description)
+        #     """)
+        #     for log in logs:
+        #         session.execute(
+        #             raw_sql,
+        #             {
+        #                 "log_date": time.strftime('%Y-%m-%d %H:%M:%S'),
+        #                 "log_type": log['type'],
+        #                 "log_data": log['data'],
+        #                 "app_name": log['app_name'],
+        #                 "description": log['description']
+        #             }
+        #         )
+        #     session.commit()
+        # except Exception as e:
+        #     session.rollback()
+        #     print(f"[AppLogger] Error during batch insert: {e}")
+        # finally:
+        #     session.close()
+        pass
 
     def _log_worker(self):
         while True:

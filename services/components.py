@@ -129,14 +129,34 @@ player_setup = [
     ContainerComponent(
         SeparatorComponent(divider=True),
         TextDisplayComponent(
-            content="## Player Setup - DropTracker.io",
+            content="## Player FAQs - DropTracker.io",
         ),
         SeparatorComponent(divider=True),
         SectionComponent(
             components=[
                 TextDisplayComponent(
-                    content="-# This section will be added soon. For now, all you need to do is install our plugin and ensure your group is configured properly.\n" +
-                    "-# Feel free to visit the [Wiki](https://www.droptracker.io/wiki) for more information."
+                    content="-# **What is the DropTracker?**\n" +
+                    "-# > A community-driven, all-in-one loot and achievement tracking system built for Old School RuneScape groups.\n" +
+                    "-# > We leverage the *[WiseOldMan](https://wiseoldman.net)* to manage group memberships, and provide group leaders a seamless way to configure their group's achievement notification settings.\n\n" +
+                    "-# **How do I get started?**\n" +
+                    "-# > 1. Install the **DropTracker** plugin on your RuneLite client, via the plugin hub.\n" +
+                    "-# > 2. Visit the plugin settings panel (gear tab on RuneLite side panel) to configure which achievements you *personally* want tracked.\n" +
+                    "-# > 3. (Optionally) Claim your in-game-name using the </claim-rsn:1369493380358209537> command to associate your Discord account with your character(s).\n\n" +
+                    "-# **How can I get pinged when my account(s) have notifications sent?**\n" +
+                    "-# > Using the </claim-rsn:1369493380358209537> command, entering your in-game-name **exactly as it appears**.\n\n" +
+                    "-# **How can I prevent my submissions from being shared to the global DropTracker discord channels?**\n" +
+                    "-# > Using the </hideme:1369493380358209544> command, and selecting which account(s)/context(s) you want to be hidden from.\n\n" +
+                    "-# **How can I get (or not get) pinged by the <@1172933457010245762> bot when my account(s) have notifications sent?**\n" +
+                    "-# > Using the </pingme:1369493380358209541> command, and selecting which account(s)/context(s) you do or do not want to receive pings for.\n\n" +
+                    "-# **What types of information does the DropTracker store about me and my account(s)?**\n" +
+                    "-# 1. Your account(s) unique identifier, or 'account hash'. This is provided by Jagex, and is unique to each individual character; remaining consistent thru name changes.\n" +
+                    "-# 2. Your submitted achievements/drops.\n\n" +
+                    "-# 3. Your Discord ID (if you claim your account or execute commands through our bot)\n\n" +
+                    "-# **What can I do to support the continued development of the DropTracker project?**\n\n" +
+                    "-# This passion project began as something far more simple, and has continued to evolve into what you see before you today.\n" + 
+                    "-# Without the continued support of our premium groups, the development work we do would be impossible.\n" +
+                    "-# If you feel as though we've provided a notable value to your OSRS experience, feel free to show support through our [Patreon](https://www.patreon.com/droptracker).\n" +
+                    "-# Players who have subscribed and then upgraded their groups using that subscription are provided early access to new features, alongside a few premium-only functionalities."
                 )
             ],
             accessory=ThumbnailComponent(

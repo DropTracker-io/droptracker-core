@@ -95,47 +95,46 @@ class RedisClient:
 redis_client = RedisClient()
 
 
-def calculate_rank_amongst_groups(group_id, player_ids):
-    # Get all groups except the passed one
-    print("Calculating group rank amongst other groups based on total loot")
-    groups = session.query(Group.group_id).all()
+def calculate_rank_amongst_groups(target_group_id, player_ids, session_to_use=None):
+    if session_to_use:
+        db_session = session_to_use
+    else:
+        db_session = session
+    groups = db_session.query(Group).all()
     
-    # If there are no other groups, return rank 1/1
-    if not groups:
-        print("No other groups exist")
-        return 1, 1
 
     group_totals = {}  # Dictionary to store total loot by group_id
     partition = datetime.now().year * 100 + datetime.now().month
 
-    for group_tuple in groups:
-        group = group_tuple[0]  # Extract the group_id
-        if group == 2 or group == 0:
+    for group_object in groups:
+        group_id = group_object.group_id  # Extract the group_id
+        if group_id == 2 or group_id == 0:
             ## Do not track the global group in ranking listings
             continue
         # print("Group ID from database:", group)
         # Query all players in this group
-        players_in_group = session.query(Player.player_id).join(Player.groups).filter(Group.group_id == group).all()
+        players_in_group = db_session.query(Player.player_id).join(Player.groups).filter(Group.group_id == group_id).all()
 
         # Initialize group total
-        group_totals[group] = 0
+        group_totals[group_id] = 0
 
         # Fetch each player's total loot from Redis
-        for player in players_in_group:
-            player_total = get_true_player_total(player[0])
-            if player_total:
-                group_totals[group] += player_total  # Add player's total loot to group's total
-
-    # Sort groups by total loot, descending
+        try:
+            from services.redis_updates import get_player_list_loot_sum
+            group_month_total = get_player_list_loot_sum([player.player_id for player in players_in_group])
+            group_totals[group_id] = group_month_total
+            #print("Group total for group", group_id, "is", group_month_total)
+        except Exception as e:
+            #print(f"Error getting group total for group {group_id}: {e}")
+            group_totals[group_id] = 0
     sorted_groups = sorted(group_totals.items(), key=lambda x: x[1], reverse=True)
+    print("Sorted groups:", sorted_groups)
     total_groups = len(sorted_groups)
-    # Find the rank of the passed group_id
-    for rank, (g_id, group_total) in enumerate(sorted_groups, start=1):
-        if g_id == group_id:
-            print("This group is ranked", rank)
-            return rank, total_groups
-    
-    return None, total_groups  # If group_id is not found
+    for group_rank, (group_id, group_total) in enumerate(sorted_groups, start=1):
+        print("Rank:", group_rank, "Group ID:", target_group_id, "Group total:", group_total)
+        if group_id == target_group_id:
+            return group_rank, total_groups
+    return None, total_groups
 
 
 

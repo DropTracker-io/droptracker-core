@@ -90,6 +90,7 @@ Quart-JWT-Extended==0.1.0
 quart-rate-limiter==0.11.0
 ratelimiter==1.2.0.post0
 redis==5.0.8
+redis-om==0.2.1
 requests==2.32.3
 requests-oauthlib==2.0.0
 rsa==4.9

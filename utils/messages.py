@@ -5,17 +5,20 @@ from interactions import Embed, Client, listen, ChannelType, Button, ButtonStyle
 from interactions.api.events import MessageCreate, Component
 from db.models import User, Group, Guild, Player, Drop, session, ItemList, Webhook, NpcList, GroupConfiguration
 from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id
+import time
 import re
 import os
 #from utils.zohomail import send_email
 from dotenv import load_dotenv
 
 from utils.format import format_time_since_update, format_number, get_command_id, get_extension_from_content_type
+from services.points import get_player_point_balance
 
 from datetime import datetime, timedelta
 
 from utils.redis import RedisClient, calculate_global_overall_rank, calculate_rank_amongst_groups
 from db.ops import DatabaseOperations
+from webhook_bot import load_update_data
 
 load_dotenv()
 db = DatabaseOperations()
@@ -133,9 +136,21 @@ async def joined_guild_msg(bot: interactions.Client, guild: interactions.Guild):
                                 "**in *your group's* discord server** to register it in our database.",
                                 inline=False)
         welcome_embed.add_field(name="Need some assistance?",
-                                value=f"Check out </help:{await get_command_id(bot, 'help')}> & our [docs](https://www.droptracker.io/docs).\nFeel free to join our [discord server](https://www.droptracker.io/discord) if you still need help.")
+                                value=f"Check out </help:{await get_command_id(bot, 'help')}> & our [docs](https://www.droptracker.io/wiki).\nFeel free to join our [discord server](https://www.droptracker.io/discord) if you still need help.")
         welcome_embed.set_footer(global_footer)
         
         await user.send(f"Hey, <@{owner_id}>!",embeds=[welcome_embed])
     except Exception as e:
         print("Couldn't DM the server owner when we joined a guild...")
+
+def create_points_embed(points, source, expires_in_days, player: Player, user: User):
+    embed = Embed(title=":tada: Points Awarded :tada:",
+                  description=f"You have been awarded `{points}` points to your `{player.player_name}` profile!\n" + 
+                  "You can soon use these points to unlock additional features on our website! [Click here to learn more](https://www.droptracker.io/wiki/points)")
+    embed.add_field(name="Points", value=f"{points}", inline=True)
+    embed.add_field(name="Source", value=f"{source}", inline=True)
+    embed.add_field(name="Expires in", value=f"{expires_in_days} days", inline=True)
+    embed.add_field(name="Your available point balance:", value=f"`{get_player_point_balance(player_id=player.player_id)}`", inline=True)
+    embed.add_field(name="Notice:", value=f"-# Don't want to receive any more messages like this? Use </dm-settings:1413653507705405524> to toggle your DMs.", inline=False)
+    embed.set_footer(global_footer)
+    return embed

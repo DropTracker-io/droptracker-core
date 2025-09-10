@@ -575,7 +575,7 @@ async def test_all_webhooks():
         failed = 0
         async with aiohttp.ClientSession() as http_session:
             for i, webhook in enumerate(all_webhooks):
-                print(f"Testing webhook {i+1}/{len(all_webhooks)}: {webhook.webhook_url}...")
+                #print(f"Testing webhook {i+1}/{len(all_webhooks)}: {webhook.webhook_url}...")
                 result = await test_webhook(webhook, http_session)
                 results.append(result)
                 
@@ -592,7 +592,7 @@ async def test_all_webhooks():
                 if i < len(all_webhooks) - 1:  # Don't delay after the last request
                     await asyncio.sleep(0.25)
         
-        print(f"Checked {len(all_webhooks)} webhooks: {passed} passed, {failed} failed")
+        #print(f"Checked {len(all_webhooks)} webhooks: {passed} passed, {failed} failed")
 
 async def check_limited_webhooks(limit=80):
     """
@@ -614,12 +614,12 @@ async def check_limited_webhooks(limit=80):
             failed = 0
             async with aiohttp.ClientSession() as http_session:
                 for i, webhook in enumerate(webhooks):
-                    print(f"Testing webhook {i+1}/{len(webhooks)}: {webhook.webhook_url}...")
+                    #print(f"Testing webhook {i+1}/{len(webhooks)}: {webhook.webhook_url}...")
                     result = await test_webhook(webhook, http_session)
                     results.append(result)
                     
                     # Print result immediatelyif i % 10 == 0:
-                    print(f"Checked {i+1}/{len(webhooks)} webhooks: so far, {passed} passed, {failed} failed")
+                    #print(f"Checked {i+1}/{len(webhooks)} webhooks: so far, {passed} passed, {failed} failed")
                         
                     if result['ok']:
                         passed += 1
@@ -633,7 +633,7 @@ async def check_limited_webhooks(limit=80):
                     if i < len(webhooks) - 1:  # Don't delay after the last request
                         await asyncio.sleep(0.25)
             
-            print(f"Checked {len(webhooks)} webhooks: {passed} passed, {failed} failed")
+            #print(f"Checked {len(webhooks)} webhooks: {passed} passed, {failed} failed")
         print("Limited webhook check completed")
     except Exception as e:
         print(f"Error checking webhooks: {e}")

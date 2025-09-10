@@ -2,6 +2,7 @@
 # as opposed to holding up the main process's ability to respond to requests, etc.
 
 import asyncio
+from datetime import datetime
 import time
 import aiohttp
 import quart
@@ -12,6 +13,7 @@ import logging
 
 from sqlalchemy import func
 from db.models import Group, LBUpdate, session, Player, User, Drop, Session
+from services import redis_updates
 # from db.update_player_total import update_player_in_redis
 from db.update_player_total import update_player_in_redis
 from lootboard.generator import generate_server_board
@@ -92,6 +94,10 @@ async def update():
     if player_id in recently_updated:
         last_update = recently_updated[player_id]
         time_since_update = current_time - last_update
+        with Session() as session:
+            player = session.query(Player).filter(Player.player_id == player_id).first()
+            player.date_updated = datetime.now()
+            session.commit()
         
         if time_since_update < UPDATE_COOLDOWN:
             minutes_ago = int(time_since_update / 60)
@@ -110,21 +116,16 @@ async def update():
             print("Attempting to get player...")
             player = session.query(Player).filter(Player.player_id == player_id).first()
             if player:
-                print("Player found, attempting to update...")
-                ## Send the request to begin deleting keys first
-                asyncio.create_task(asyncio.to_thread(delete_player_keys, player.player_id))
-                player_drops = session.query(Drop).filter(Drop.player_id == player.player_id).all()
-                updated = None
-                # updated = update_player_in_redis(player.player_id, session, force_update=True, batch_drops=player_drops)
-                print("Sending update")
-                updated = update_player_in_redis(player.player_id, session, force_update=True, batch_drops=player_drops, from_submission=False)
+                print("Player found, attempting to update using optimized method...")
+                # Use the optimized force update method that handles everything internally
+                updated = redis_updates.force_update_player(player.player_id, session)
                 print("Returned:", updated)
                 if updated and updated == True:
                     # Record the update time
                     recently_updated[player_id] = current_time
+                    player.date_updated = datetime.now()
                     session.commit()
                     print("Updated player properly.")
-                    #app_logger.log(log_type="access", data=f"Completed player update for player {player_id}", app_name="player_updates", description="update")
                     return {"status": "updated"}
                 else:
                     print("Didn't update player properly.")
@@ -134,7 +135,6 @@ async def update():
                 return {"status": "player not found"}
         except Exception as e:
             session.rollback()
-            #app_logger.log(log_type="error", data=f"DB error: {e}", app_name="player_updates", description="update")
             return {"status": "failed"}
     
 

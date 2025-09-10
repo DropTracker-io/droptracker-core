@@ -7,6 +7,7 @@ from db.models import Player, Session, session
 from db import models
 import wom
 from wom import Err, Result
+from utils.format import normalize_player_display_equivalence
 load_dotenv()
 
 rate_limit = 100 / 65  # This calculates the rate as 100 requests per 65 seconds
@@ -176,10 +177,12 @@ async def fetch_group_members(wom_group_id: int, session_to_use = None):
                 if existing_player:
                     old_name = existing_player.player_name or ""
                     new_name = player_name or ""
-                    if old_name != new_name:
-                        print(f"Updated player name for {old_name} to {new_name}")
-                        existing_player.player_name = new_name
-                        session.commit()
+                    # Only update if the names differ beyond hyphen/underscore vs space changes
+                    if normalize_player_display_equivalence(old_name) != normalize_player_display_equivalence(new_name):
+                        if old_name != new_name:
+                            print(f"Updated player name for {old_name} to {new_name}")
+                            existing_player.player_name = new_name
+                            session.commit()
                 user_list.append(member.player_id)
             return user_list
         else:
@@ -363,3 +366,62 @@ async def get_player_wom_data(username: str):
     await limiter.wait()
     player_data = await client.players.get_details(username=username)
     return player_data
+
+async def get_player_all_skills(username: str):
+    """
+    Returns all skills and their experience points for a player according to WiseOldMan
+    Returns a dictionary with skill names as keys and experience points as values
+    """
+    await client.start()
+    await limiter.wait()
+    player_data = await client.players.get_details(username=username)
+    
+    if player_data.is_ok:
+        details = player_data.unwrap()
+        snapshot = getattr(details, "latest_snapshot", None)
+        
+        if snapshot:
+            snapshot_data = getattr(snapshot, "data", None)
+            if snapshot_data:
+                skills = getattr(snapshot_data, "skills", {})
+                skills_data = []
+                
+                for skill_name, skill_obj in skills.items():
+                    skill_name_str = str(skill_name).split(".")[-1].lower()
+                    skills_data.append({
+                        f"{skill_name_str}": getattr(skill_obj, "experience", 0)
+                    })
+                
+                return skills_data
+    
+    return {}
+
+async def get_player_all_skills_by_id(wom_id: int):
+    """
+    Returns all skills and their experience points for a player by WOM ID
+    Returns a dictionary with skill names as keys and experience points as values
+    """
+    await client.start()
+    await limiter.wait()
+    player_data = await client.players.get_details_by_id(wom_id)
+    
+    if player_data.is_ok:
+        details = player_data.unwrap()
+        snapshot = getattr(details, "latest_snapshot", None)
+        
+        if snapshot:
+            snapshot_data = getattr(snapshot, "data", None)
+            if snapshot_data:
+                skills = getattr(snapshot_data, "skills", {})
+                skills_data = []
+                
+                for skill_name, skill_obj in skills.items():
+                    skill_name_str = str(skill_name).split(".")[-1].lower()
+                    skills_data.append({
+                        "skill": skill_name_str,
+                        "experience": getattr(skill_obj, "experience", 0)
+                    })
+                
+                return skills_data
+    
+    return {}

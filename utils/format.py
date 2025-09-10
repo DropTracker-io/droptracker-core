@@ -58,6 +58,20 @@ def get_current_partition() -> int:
 def normalize_npc_name(npc_name: str):
     return npc_name.replace(" ", "_").strip()
 
+def normalize_player_display_equivalence(name: str) -> str:
+    """
+    Normalize a player name for equivalence comparison where the external
+    library replaces hyphens/underscores with spaces. This keeps alphanumerics
+    and converts '-', '_' to a single space, then collapses whitespace and
+    lowercases for robust comparison.
+    """
+    if name is None:
+        return ""
+    # Replace '-' and '_' with spaces, collapse whitespace, and lowercase
+    name = str(name).replace('-', ' ').replace('_', ' ')
+    name = " ".join(name.split())
+    return name.lower()
+
 def get_true_boss_name(npc_name: str):
     """
         Returns the name of the NPC we are storing in the database for a given npc name passed;
@@ -99,7 +113,22 @@ async def get_command_id(bot: interactions.Client, command_name: str):
 
 def get_extension_from_content_type(content_type):
     if content_type and '/' in content_type:
-        return content_type.split('/')[-1]
+        # Map common content types to standard extensions
+        content_type_lower = content_type.lower()
+        if 'jpeg' in content_type_lower or content_type_lower == 'image/jpg':
+            return 'jpg'
+        elif 'png' in content_type_lower:
+            return 'png'
+        elif 'gif' in content_type_lower:
+            return 'gif'
+        elif 'webp' in content_type_lower:
+            return 'webp'
+        else:
+            # Default case - extract after the slash but ensure it's a valid extension
+            ext = content_type.split('/')[-1]
+            # Remove any additional parameters (e.g., "jpeg; charset=utf-8")
+            ext = ext.split(';')[0].strip()
+            return ext if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp'] else 'jpg'
     return 'jpg'  # Default to jpg if content type is not provided
 
 

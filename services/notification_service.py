@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import interactions
 from sqlalchemy import text
 from db.models import ItemList, NotificationQueue, NpcList, PersonalBestEntry, User, UserConfiguration, get_current_partition, session, Player, Group, GroupConfiguration
-from db.ops import DatabaseOperations, get_formatted_name
+from db.ops import DatabaseOperations, associate_player_ids, get_formatted_name
 from db.xf.upgrades import check_active_upgrade
 from utils.redis import redis_client
 from utils.embeds import update_boss_pb_embed
@@ -14,6 +14,9 @@ from utils.format import format_number, replace_placeholders, convert_from_ms
 from utils.download import download_player_image
 from db.app_logger import AppLogger
 from utils.semantic_check import get_ca_tier_progress, get_current_ca_tier
+from services.xf_services import get_user_id, create_alert
+from utils.wiseoldman import fetch_group_members
+from services.redis_updates import get_player_list_loot_sum, loot_tracker, get_player_current_month_total
 
 app_logger = AppLogger()
 global_footer = os.getenv('DISCORD_MESSAGE_FOOTER')
@@ -136,6 +139,10 @@ class NotificationService:
                 await self.send_user_upgrade_notification(notification, data)
             elif notification_type == 'group_upgrade':
                 await self.send_group_upgrade_notification(notification, data)
+            elif notification_type == 'update_log':
+                await self.send_update_log_data(notification, data)
+            elif notification_type == 'points_earned':
+                await self.send_points_notification(notification, data)
             else:
                 notification.status = 'failed'
                 notification.error_message = f"Unknown notification type: {notification_type}"
@@ -146,7 +153,68 @@ class NotificationService:
             notification.error_message = str(e)
             session.commit()
             raise
+
     
+    
+    async def send_update_log_data(self, notification: NotificationQueue, data: dict):
+        """Send a update log data notification to Discord"""
+        notification.status = 'processing'
+        session.commit()
+        try:
+            channel_id = 1210765287591256084
+            channel = await self.bot.fetch_channel(channel_id=channel_id)
+            if channel:
+                updates = data.get('updates')
+                updates = ["- " + update + "\n" for update in updates]
+                text = f"### A new update log has been published:\n\n"
+                text += f"".join(updates)
+                await channel.send(text)
+                notification.processed_at = datetime.now()
+                session.commit()
+            else:
+                notification.status = 'failed'
+                notification.error_message = f"Channel not found"
+                session.commit()
+                return
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = str(e)
+            session.commit()
+            app_logger.log(log_type="error", data=f"Error sending update log data notification: {e}", app_name="notification_service", description="send_update_log_data")
+            raise
+    
+    async def send_points_notification(self, notification: NotificationQueue, data: dict):
+        """Send a points earned notification to Discord"""
+        notification.status = 'processing'
+        session.commit()
+        try:
+            scope_earned = data.get('scope_earned')
+            if not scope_earned:
+                return
+            match scope_earned:
+                case 'player':
+                    user_id = data.get('user_id')
+                    user = session.query(User).filter(User.user_id == user_id).first()
+                case 'group':
+                    group_id = data.get('group_id')
+                    group = session.query(Group).filter(Group.group_id == group_id).first()
+            if not user and not group:
+                return
+            if user:
+                user_name = user.username
+            else:
+                user_name = group.group_name
+            amount_earned = data.get('amount_earned')
+            source = data.get('source')
+            new_total = data.get('current_total')
+            comment = data.get('comment')
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = str(e)
+            session.commit()
+            app_logger.log(log_type="error", data=f"Error sending points earned notification: {e}", app_name="notification_service", description="send_points_notification")
+            raise
+
     async def send_group_upgrade_notification(self, notification: NotificationQueue, data: dict):
         """Send a group upgrade notification to Discord"""
         notification.status = 'processing'
@@ -344,20 +412,16 @@ class NotificationService:
             app_logger.log(log_type="error", data=f"Error sending user upgrade notification: {e}", app_name="notification_service", description="send_user_upgrade_notification")
             raise
                 
-            
-            
-            
-
     async def send_drop_notification(self, notification: NotificationQueue, data: dict):
         """Send a drop notification to Discord"""
         from db.models import NotifiedSubmission
         try:
             group_id = notification.group_id
             player_id = notification.player_id
-            print(f"Got raw drop notification data: {data}")
+            #print(f"Got raw drop notification data: {data}")
             drop_id = data.get('drop_id')
 
-            
+
             
             # Get channel ID for this group
             channel_id_config = session.query(GroupConfiguration).filter(
@@ -418,7 +482,7 @@ class NotificationService:
                         image_url = drop.image_url
                 except Exception as e:
                     image_url = None
-            print(f"Debug - image_url: {image_url}, type: {type(image_url)}")
+            #print(f"Debug - image_url: {image_url}, type: {type(image_url)}")
             if not image_url or "droptracker.io" not in image_url:
                 image_url = ""
             
@@ -428,7 +492,7 @@ class NotificationService:
                 embed_template = await self.db_ops.get_group_embed('drop', group_id)
             else:
                 embed_template = await self.db_ops.get_group_embed('drop', 1)
-            print(f"Debug - embed_template: {embed_template}")
+            #print(f"Debug - embed_template: {embed_template}")
             
             if not embed_template:
                 notification.status = 'failed'
@@ -440,9 +504,13 @@ class NotificationService:
             attachment = None
             if image_url:
                 try:
-                    local_path = image_url.replace("https://www.droptracker.io/img", "/store/droptracker/disc/static/assets/img")
-                    print(f"Debug - local_path: {local_path}")
-                    attachment = interactions.File(local_path)
+                    # Convert external URL to local path matching the actual storage structure
+                    local_url = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
+                    if os.path.exists(local_url):
+                        attachment = interactions.File(local_url)
+                    else:
+                        print(f"Debug - Image file not found at: {local_url}")
+                        attachment = None
                 except Exception as e:
                     print(f"Debug - Couldn't get attachment from path: {e}")
                     attachment = None
@@ -456,41 +524,50 @@ class NotificationService:
                     player_id = player.player_id
             
             partition = get_current_partition()
-            player_total_raw = redis_client.client.zscore(f"leaderboard:{partition}", player_id)
-            player_month_total = format_number(player_total_raw)
-            group_month_total = format_number(redis_client.zsum(f"leaderboard:group:{group_id}:{partition}"))
-            group_rank = redis_client.client.zrank(f"leaderboard:group:{group_id}:{partition}", player_id) + 1 if redis_client.client.zrank(f"leaderboard:group:{group_id}:{partition}", player_id) is not None else None
-            global_rank = redis_client.client.zrank(f"leaderboard:{partition}", player_id) + 1 if redis_client.client.zrank(f"leaderboard:{partition}", player_id) is not None else None
-            total_global_players = redis_client.client.zcard(f"leaderboard:{partition}")
-            group_total = redis_client.zsum(f"leaderboard:group:{group_id}:{partition}")
-            user_count = redis_client.client.zcard(f"leaderboard:group:{group_id}:{partition}")
-            total_members = redis_client.client.zcard(f"leaderboard:group:{group_id}:{partition}")
-
-            if group_rank is not None:
-                group_rank = total_members - group_rank
+            # Use monthly total computed by redis_updates player cache
+            month_total_int = self._get_player_month_total(player_id, partition)
+            player_month_total = format_number(month_total_int)
+            players_in_group = session.query(Player.player_id).join(Player.groups).filter(Group.group_id == group_id).all()
+            group_month_total = format_number(get_player_list_loot_sum([player.player_id for player in players_in_group]))
+            # Use centralized rank helper for accuracy
+            global_rank_data = loot_tracker.get_player_rank(player_id, None, partition)
+            group_rank_data = loot_tracker.get_player_rank(player_id, group_id, partition)
+            #print(f"Got group rank data: {group_rank_data}")
+            print(f"Got global rank data: {global_rank_data}")
+            if group_rank_data:
+                group_rank, user_count = group_rank_data
             else:
-                group_rank = None
-            if global_rank is not None:
-                global_rank = total_global_players - global_rank
+                group_rank, user_count = None, redis_client.client.zcard(f"leaderboard:{partition}:group:{group_id}")
+            if global_rank_data:
+                global_rank, total_global_players = global_rank_data
             else:
-                global_rank = None
+                global_rank, total_global_players = None, redis_client.client.zcard(f"leaderboard:{partition}")
             # get all group ranks
             all_groups = session.query(Group.group_id).filter(Group.group_id != 2).all()
             total_groups = len(all_groups) - 1
             group_totals = []
             for group in all_groups:
-                group_total = redis_client.zsum(f"leaderboard:group:{group.group_id}:{partition}")
+                group_total = redis_client.zsum(f"leaderboard:{partition}:group:{group.group_id}")
                 group_totals.append({'id': group.group_id,
                                    'total': group_total})
             sorted_groups = sorted(group_totals, key=lambda x: x['total'], reverse=True)
             group_to_group_rank = str(next((i for i, g in enumerate(sorted_groups) if g['id'] == group_id), 0) + 1)
             formatted_name = get_formatted_name(player_name, group_id, session)
+            # Build rank strings safely
+            if global_rank is not None and total_global_players is not None:
+                global_rank_str = "`" + str(global_rank) + "`" + "/" + "`" + str(total_global_players) + "`"
+            else:
+                global_rank_str = "`?`"
+            if group_rank is not None and user_count is not None:
+                group_rank_str = "`" + str(group_rank) + "`" + "/" + "`" + str(user_count) + "`"
+            else:
+                group_rank_str = "`?`"
             values = {
                 "{item_name}": item_name,
                 "{month_name}": datetime.now().strftime("%B"),
                 "{player_total_month}": "`" + player_month_total + "`",
-                "{global_rank}": "`" + str(global_rank) + "`" + "/" + "`" + str(total_global_players) + "`",
-                "{group_rank}": "`" + str(group_rank) + "`" + "/" + "`" + str(user_count) + "`",
+                "{global_rank}": global_rank_str,
+                "{group_rank}": group_rank_str,
                 "{group_total}": "`" + str(group_total) + "`",
                 "{user_count}": "`" + str(user_count) + "`",
                 "{group_total_month}": "`" + group_month_total + "`",
@@ -499,17 +576,19 @@ class NotificationService:
                 "{npc_id}": str(npc_id),
                 "{npc_name}": npc_name,
                 "{kill_count}": str(kill_count),
-                "{item_value}": "`" + format_number(int(value) * int(quantity)) + "`",
+                "{item_value}": "`" + format_number(total_value) + "`",
                 "{quantity}": "`" + str(quantity) + "`",
                 "{total_value}": "`" + str(total_value) + "`",
                 "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{player_name}.{player_id}/view)",
                 "{image_url}": image_url or ""
             }
-            print("Sending to replace_placeholders")
+            #print("Sending to replace_placeholders")
             
             embed = replace_placeholders(embed_template, values)
             if group_id == 2:
                 embed = await self.remove_group_field(embed)
+            if kill_count is None or int(kill_count) < 1:
+                embed = await self.remove_kc_field(embed)
             image_url = data.get('image_url', None)
             if image_url and "cdn.discordapp.com" in image_url:
                 try:
@@ -526,7 +605,7 @@ class NotificationService:
                     print(f"Debug - Couldn't get attachment from path: {e}")
                     attachment = None
                     pass
-            print("Got the embed...")
+            #print("Got the embed...")
             # Send message
             if attachment:
                 message = await channel.send(f"{formatted_name} received a drop:", embed=embed, files=attachment)
@@ -553,6 +632,9 @@ class NotificationService:
                 session.add(notified_sub)
             
             session.commit()
+            player_notif_data = data.copy()
+            player_notif_data['item_name'] = item_name
+            #await self.send_player_notification(player_id, player_name, player_notif_data, 'drop', data.get('drop_id'))
             
         except Exception as e:
             notification.status = 'failed'
@@ -734,12 +816,21 @@ class NotificationService:
             if group_id == 2:
                 embed_template = await self.remove_group_field(embed_template)
             
-            print(f"Debug - embed_template: {embed_template}")
+            #print(f"Debug - embed_template: {embed_template}")
             partition = get_current_partition()
             player_total_raw = redis_client.client.zscore(f"leaderboard:{partition}", player_id)
-            player_ids = session.query(text("player_id")).from_statement(
-                text("SELECT DISTINCT player_id FROM user_group_association WHERE group_id = :group_id")
-            ).params(group_id=group_id).all()
+            group_wom_id = session.query(Group.wom_id).filter(Group.group_id == group_id).first()
+            if group_wom_id:
+                group_wom_id = group_wom_id[0]
+            wom_member_list = []
+            if group_wom_id:
+                #print("Finding group members?")
+                try:
+                    wom_member_list = await fetch_group_members(wom_group_id=int(group_wom_id))
+                except Exception as e:
+                    #print("Couldn't get the member list", e)
+                    return
+            player_ids = await associate_player_ids(wom_member_list)
             
             group_ranks = session.query(PersonalBestEntry).filter(PersonalBestEntry.player_id.in_(player_ids), PersonalBestEntry.npc_id == int(npc_id),
                                                                         PersonalBestEntry.team_size == team_size).order_by(PersonalBestEntry.personal_best.asc()).all()
@@ -795,9 +886,17 @@ class NotificationService:
             
             # Send message
             if image_url:
-                local_path = image_url.replace("https://www.droptracker.io/", "/store/droptracker/disc/static/assets/")
-                attachment = interactions.File(local_path)
-                message = await channel.send(f"{formatted_name} has achieved a new personal best:", embed=embed, files=attachment)
+                try:
+                    local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
+                    if os.path.exists(local_path):
+                        attachment = interactions.File(local_path)
+                        message = await channel.send(f"{formatted_name} has achieved a new personal best:", embed=embed, files=attachment)
+                    else:
+                        #print(f"Debug - PB image file not found at: {local_path}")
+                        message = await channel.send(f"{formatted_name} has achieved a new personal best:", embed=embed)
+                except Exception as e:
+                    #print(f"Debug - Error loading PB attachment: {e}")
+                    message = await channel.send(f"{formatted_name} has achieved a new personal best:", embed=embed)
             else:
                 message = await channel.send(f"{formatted_name} has achieved a new personal best:", embed=embed)
             
@@ -817,7 +916,7 @@ class NotificationService:
         try:
             group_id = notification.group_id
             player_id = notification.player_id
-            print("Got raw CA data:", data)
+            #print("Got raw CA data:", data)
             
             # Get channel ID for this group
             channel_id_config = session.query(GroupConfiguration).filter(
@@ -897,10 +996,17 @@ class NotificationService:
                 next_tier = "Easy"
             else:
                 next_tier = tier_order[tier_order.index(actual_tier) - 1]
+
             progress, next_tier_points = await get_ca_tier_progress(points_total)
             formatted_task_name = task_name.replace(" ", "_").replace("?", "%3F")
             wiki_url = f"https://oldschool.runescape.wiki/w/{formatted_task_name}"
             formatted_task_name = f"[{task_name}]({wiki_url})"
+            try:
+                if not next_tier_points or next_tier_points == 0:
+                    next_tier_points = 38
+                points_left = int(next_tier_points) - int(points_total)
+            except Exception as e:
+                points_left = "Unknown"
             if embed_template:
                 value_dict = {
                     "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{player_name}.{player_id}/view)",
@@ -912,7 +1018,7 @@ class NotificationService:
                     "{next_tier}": next_tier,
                     "{task_tier}": task_tier,
                     "{next_tier_points}": next_tier_points,
-                    "{points_left}": int(next_tier_points) - int(points_total)
+                    "{points_left}": points_left
                 }
             
             embed = replace_placeholders(embed_template, value_dict)
@@ -921,9 +1027,17 @@ class NotificationService:
             formatted_name = get_formatted_name(player_name, group_id, session)
             
             if image_url:
-                local_path = image_url.replace("https://www.droptracker.io/", "/store/droptracker/disc/static/assets/")
-                attachment = interactions.File(local_path)
-                message = await channel.send(f"{formatted_name} has completed a combat achievement!", embed=embed, files=attachment)
+                try:
+                    local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
+                    if os.path.exists(local_path):
+                        attachment = interactions.File(local_path)
+                        message = await channel.send(f"{formatted_name} has completed a combat achievement!", embed=embed, files=attachment)
+                    else:
+                        #print(f"Debug - CA image file not found at: {local_path}")
+                        message = await channel.send(f"{formatted_name} has completed a combat achievement!", embed=embed)
+                except Exception as e:
+                    #print(f"Debug - Error loading CA attachment: {e}")
+                    message = await channel.send(f"{formatted_name} has completed a combat achievement!", embed=embed)
             else:
                 message = await channel.send(f"{formatted_name} has completed a combat achievement!", embed=embed)
             
@@ -943,14 +1057,14 @@ class NotificationService:
         try:
             group_id = notification.group_id
             player_id = notification.player_id
-            print(f"Found a collection log notification to send in {group_id}")
+            #print(f"Found a collection log notification to send in {group_id}")
             
             # Get channel ID for this group
             channel_id_config = session.query(GroupConfiguration).filter(
                 GroupConfiguration.group_id == group_id,
                 GroupConfiguration.config_key == 'channel_id_to_post_clog'
             ).first()
-            print(f"Found a channel id config for {group_id}")
+            #print(f"Found a channel id config for {group_id}")
             if not channel_id_config or not channel_id_config.config_value:
                 notification.status = 'failed'
                 notification.error_message = f"No channel configured for group {group_id}"
@@ -968,7 +1082,7 @@ class NotificationService:
                 if existing_notification:
                     print(f"Drop was already notified... Skipping")
                     return
-            
+            channel = None
             channel_id = channel_id_config.config_value
             if channel_id and channel_id != "" and len(str(channel_id)) > 10:
                 channel = await self.bot.fetch_channel(channel_id=channel_id)
@@ -981,12 +1095,17 @@ class NotificationService:
                     channel_id = channel_id_config.config_value
                     channel = await self.bot.fetch_channel(channel_id=channel_id)
                 else:
-                    print(f"Invalid channel id: {channel_id}")
+                    #print(f"Invalid channel id: {channel_id}")
                     notification.status = 'failed'
                     notification.error_message = f"Invalid channel id: {channel_id}"
                     session.commit()
                     return
-            
+            if not channel:
+                #print(f"Channel not found for group {group_id} (id was passed as {channel_id})")
+                notification.status = 'failed'
+                notification.error_message = f"Channel not found for group {group_id}"
+                session.commit()
+                return
             # Get data
             player_name = data.get('player_name')
             item_name = data.get('item_name')
@@ -996,8 +1115,8 @@ class NotificationService:
             kc = data.get('kc_received')
             npc_name = data.get('npc_name')
             partition = get_current_partition()
-            player_total_raw = redis_client.client.zscore(f"leaderboard:{partition}", player_id)
-            player_month_total = format_number(player_total_raw)
+            month_total_int = self._get_player_month_total(player_id, partition)
+            player_month_total = format_number(month_total_int)
             
             # Get embed template
             upgrade_active = check_active_upgrade(group_id)
@@ -1009,7 +1128,7 @@ class NotificationService:
             if group_id == 2:
                 embed_template = await self.remove_group_field(embed_template)
 
-            user_count = format_number(redis_client.client.zcard(f"leaderboard:group:{group_id}:{partition}"))
+            user_count = format_number(redis_client.client.zcard(f"leaderboard:{partition}:group:{group_id}"))
             # Replace placeholders
             replacements = {
                 "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{player_name}.{player_id}/view)",
@@ -1028,9 +1147,17 @@ class NotificationService:
             formatted_name = get_formatted_name(player_name, group_id, session)
             
             if image_url:
-                local_path = image_url.replace("https://www.droptracker.io/", "/store/droptracker/disc/static/assets/")
-                attachment = interactions.File(local_path)
-                message = await channel.send(f"{formatted_name} has added an item to their collection log:", embed=embed, files=attachment)
+                try:
+                    local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
+                    if os.path.exists(local_path):
+                        attachment = interactions.File(local_path)
+                        message = await channel.send(f"{formatted_name} has added an item to their collection log:", embed=embed, files=attachment)
+                    else:
+                        print(f"Debug - Collection log image file not found at: {local_path}")
+                        message = await channel.send(f"{formatted_name} has added an item to their collection log!", embed=embed)
+                except Exception as e:
+                    print(f"Debug - Error loading collection log attachment: {e}")
+                    message = await channel.send(f"{formatted_name} has added an item to their collection log!", embed=embed)
             else:
                 message = await channel.send(f"{formatted_name} has added an item to their collection log!", embed=embed)
             
@@ -1044,10 +1171,41 @@ class NotificationService:
             session.commit()
             raise
     
+    async def send_player_notification(self, player_id: int, player_name: str, data: dict, notif_type: str, notif_id: int):
+        """Creates an Alert on the website for a player's submission"""
+        try:
+            xf_user_id = await get_user_id(player_id)
+            if xf_user_id:
+                link_text = f"View your Profile"
+                link_url = f"https://www.droptracker.io/players/{player_name}.{player_id}/view"
+                if notif_type == 'drop':
+                    alert_text = f"Your {data.get('item_name')} drop has been processed & sent to Discord."
+                    link_text = f"View Drop"
+                    link_url = f"https://www.droptracker.io/drops/{notif_id}"
+                elif notif_type == 'clog':
+                    alert_text = f"Your new log slot ({data.get('item_name')}) has been processed & sent to Discord."
+                elif notif_type == 'ca':
+                    alert_text = f"Your {data.get('task_name')} combat achievement has been processed & sent to Discord."
+                elif notif_type == 'pb':
+                    alert_text = f"Your new personal best ({data.get('npc_name')}) has been processed & sent to Discord."
+                else:
+                    return
+
+                await create_alert(xf_user_id, alert_text, link_text, link_url)
+        except Exception as e:
+            app_logger.log(log_type="error", data=f"Error sending player notification: {e}", app_name="notification_service", description="send_player_notification")
+            raise
 
     async def remove_group_field(self, embed: interactions.Embed):
+        """Removes the Group field from the embed"""
         if embed.fields:
             embed.fields = [field for field in embed.fields if "Group" not in field.name]
+        return embed
+    
+    async def remove_kc_field(self, embed: interactions.Embed):
+        """Removes the Kills field from the embed"""
+        if embed.fields:
+            embed.fields = [field for field in embed.fields if "Source:" not in field.name]
         return embed
     
     async def _is_not_sent(self, notification: NotificationQueue, data: dict):
@@ -1127,3 +1285,18 @@ class NotificationService:
                          data=f"Error cleaning up tracking dictionaries: {e}", 
                          app_name="notification_service", 
                          description="cleanup_tracking_dicts")
+
+    def _get_player_month_total(self, player_id: int, partition: int = None) -> int:
+        """Fetch the player's monthly total loot from Redis computed by redis_updates."""
+        try:
+            if partition is None:
+                partition = get_current_partition()
+            key = f"player:{player_id}:{partition}:total_loot"
+            total_str = redis_client.get(key)
+            if total_str is None:
+                # Fallback to global leaderboard score if key missing
+                score = redis_client.client.zscore(f"leaderboard:{partition}", player_id)
+                return int(float(score)) if score is not None else 0
+            return int(float(total_str))
+        except Exception:
+            return 0

@@ -13,10 +13,12 @@ import multiprocessing
 
 from sqlalchemy import text
 from db.update_player_total import background_task, start_background_redis_tasks
+from lootboards import get_fresh_xenforo_session
 from services.notification_service import NotificationService
 from services.bot_state import BotState
 from services.lootboards import Lootboards
 from services.channel_names import ChannelNames
+from services import update_dmer
 from utils.ge_value import get_true_item_value
 from utils.embeds import create_boss_pb_embed, update_boss_pb_embed
 from utils.logger import LoggerClient
@@ -40,7 +42,7 @@ from interactions import GuildText, Intents, Message, user_context_menu, Context
     slash_default_member_permission, Permissions, SlashContext, ButtonStyle, Button, SlashCommand, ComponentContext, \
     component_callback, Modal, ShortText, BaseContext, Extension, GuildChannel
 from interactions.api.events import GuildJoin, GuildLeft, MessageCreate, Component, Startup
-from pb.leaderboards import create_pb_embeds
+#from pb.leaderboards import create_pb_embeds
 from lootboard.generator import generate_server_board, get_generated_board_path
 from utils.cloudflare_update import CloudflareIPUpdater
 from utils.msg_logger import HighThroughputLogger
@@ -48,7 +50,7 @@ from utils.wiseoldman import fetch_group_members
 from web.api import create_api
 from web.front import create_frontend
 from commands import UserCommands, ClanCommands
-from tickets import Tickets
+#from tickets import Tickets
 from db.models import Group, GroupConfiguration, GroupPatreon, GroupPersonalBestMessage, Guild, PersonalBestEntry, PlayerPet, Session, User, WebhookPendingDeletion, session, NpcList, ItemList, Webhook, Player
 
 from db.ops import associate_player_ids, update_group_members
@@ -102,7 +104,7 @@ def create_hypercorn_config():
 
 ## Discord Bot initialization ##
 
-bot = interactions.Client(intents=Intents.ALL,
+bot = interactions.Client(intents=Intents.DIRECT_MESSAGES | Intents.GUILD_INTEGRATIONS,
                           send_command_traceback=False,
                           owner_ids=[528746710042804247, 232236164776460288])
 bot.send_not_ready_messages = True
@@ -142,13 +144,12 @@ async def on_startup(event: Startup):
     app_logger = AppLogger()
     await bot.change_presence(status=interactions.Status.ONLINE,
                               activity=interactions.Activity(name=f" /help", type=interactions.ActivityType.WATCHING))
+    bot.load_extension("services.update_dmer")
+    bot.load_extension("commands")
     bot.load_extension("services.bot_state")
     bot.load_extension("services.message_handler")
     bot.load_extension("services.channel_names")
     bot.load_extension("services.components")
-    bot.load_extension("services.hall_of_fame")
-    bot.load_extension("commands")
-    bot.load_extension("tickets")
     print("Loaded services.")
     print("Set bot to ready")
     await create_tasks()
@@ -206,40 +207,60 @@ async def lootboard_updates():
                                                                             GroupConfiguration.config_key == 'lootboard_channel_id').first()
                 configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
                                                                             GroupConfiguration.config_key == 'lootboard_message_id').first()
+                should_repost = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
+                                                                            GroupConfiguration.config_key == 'repost_lootboard').first()
                 if configured_channel and configured_message:
                     if configured_channel.config_value:
                         groups_to_update[group_id] = {"wom_id": group.wom_id,
                                                     "channel": configured_channel.config_value,
-                                                    "message": configured_message.config_value}
+                                                    "message": configured_message.config_value,
+                                                    "repost": should_repost.config_value}
             
             for group_id, group in groups_to_update.items():
                 try:
                     channel: interactions.Channel = await bot.fetch_channel(channel_id=group['channel'])
+                    if not channel:
+                        #print(f"Channel with id {group['channel']} not found on discord for group {group_id} ({group_obj.group_name}).")
+                        continue
                     message_to_update = None
                     group_obj = session.query(Group).filter(Group.group_id == group_id).first()
-                    if group['message'] != '':
+                    
+                    # Check if we should repost (create new message) or edit existing
+                    should_repost_value = group['repost'] if group['repost'] else "false"
+                    repost_enabled = should_repost_value.lower() in ['true', '1', 'yes', 'on']
+                    
+                    if repost_enabled:
+                        # Check if there's an existing message to delete first
+                        if group['message'] and group['message'] != '' and group['message'] != "0" and group['message'] != 0:
+                            try:
+                                old_message = await channel.fetch_message(message_id=group['message'])
+                                await old_message.delete()
+                                print(f"Deleted previous lootboard message for group {group_id} ({group_obj.group_name})")
+                            except Exception as e:
+                                print(f"Couldn't delete previous message for group {group_id} ({group_obj.group_name}): {e}")
+                                # Continue anyway, we'll try to post a new message
+                        
+                        # Always create a new message when repost is enabled
                         try:
-                            message = await channel.fetch_message(message_id=group['message'])
+                            message = await channel.send(f"<a:loading:1180923500836421715> Please wait while we initialize this Loot Leaderboard....")
+                            configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
+                                                                                        GroupConfiguration.config_key == 'lootboard_message_id').first()
+                            configured_message.config_value = str(message.id)
+                            session.commit()
+                            print(f"Posted new lootboard message for group {group_id} ({group_obj.group_name}) with ID: {message.id}")
                         except Exception as e:
-                            #print("Couldn't fetch the message for this lootboard...:", e)
+                            print(f"Couldn't send a new message to the channel: {e}")
                             continue
-                            
                     else:
-                        try:
-                            messages = await channel.fetch_messages(limit=15)
-                        except Exception as e:
-                            # print("Unable to fetch message history from channel id ", group['channel'], "e:", e)
-                            continue
-                        message_to_update = None
-                        for message in messages:
-                            if message.author.id == bot.user.id and message.embeds:
-                                message_to_update = message
-                                if message_to_update is not None and message.id != message_to_update.id:
-                                    try:
-                                        await message.delete()
-                                    except Exception as e:
-                                        print(f"Couldn't delete an old message for group {group_id}: {e}")
-                        if not message_to_update:
+                        # Use existing logic to find and edit existing message
+                        if group['message'] != '' and group['message'] != "0" and group['message'] != 0:
+                            try:
+                                message = await channel.fetch_message(message_id=group['message'])
+                            except Exception as e:
+                                #print("Couldn't fetch the message for this lootboard...:", e)
+                                continue
+                                
+                        else:
                             print(f"No message ID found for group {group_id} ({group_obj.group_name}). We would have sent a new one right now...")
                             try:
                                 new_board = await channel.send(f"This loot leaderboard is being initialized.... Please wait a few moments.")
@@ -251,40 +272,41 @@ async def lootboard_updates():
                             except Exception as e:
                                 print(f"Couldn't send a message to the channel: {e}")
                                 continue
-                            staffchat = await bot.fetch_channel(channel_id=1210765308239945729)
+                            #staffchat = await bot.fetch_channel(channel_id=1210765308239945729)
 
                             group_obj = session.query(Group).filter(Group.group_id == group_id).first()
                             configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
                                                                                     GroupConfiguration.config_key == 'lootboard_message_id').first()
                             
-                        else: ## found previous message from the bot
-                            message = message_to_update
-                            configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
+                            # else: ## found previous message from the bot
+                            #     message = message_to_update
+                            #     configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
+                            #                                                                     GroupConfiguration.config_key == 'lootboard_message_id').first()
+                            #     if configured_message.config_value != str(message.id):  
+                            #         configured_message.config_value = str(message.id)
+                            #         session.commit()
+                            #     if not message:
+                            #         message = await channel.send(f"<a:loading:1180923500836421715> Please wait while we initialize this Loot Leaderboard....")
+                            #         print(f"No message ID found for group {group_id} ({group_obj.group_name}). Creating a new one...")
+                            #         try:
+                            #             configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
+                            #                                                                     GroupConfiguration.config_key == 'lootboard_message_id').first()
+                            #             configured_message.config_value = str(message.id)
+                            #             session.commit()
+                            #         except Exception as e:
+                            #             print(f"Couldn't update the lootboard message ID with a new one... e: {e}")
+                        
+                        if not message:
+                            print(f"Couldn't get the message to update the loot leaderboard with...")
+                            try:
+                                message = await channel.send(f"<a:loading:1180923500836421715> Please wait while we initialize this Loot Leaderboard....")
+                                configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
                                                                                             GroupConfiguration.config_key == 'lootboard_message_id').first()
-                            if configured_message.config_value != str(message.id):  
                                 configured_message.config_value = str(message.id)
                                 session.commit()
-                            if not message:
-                                message = await channel.send(f"<a:loading:1180923500836421715> Please wait while we initialize this Loot Leaderboard....")
-                                print(f"No message ID found for group {group_id} ({group_obj.group_name}). Creating a new one...")
-                                try:
-                                    configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
-                                                                                            GroupConfiguration.config_key == 'lootboard_message_id').first()
-                                    configured_message.config_value = str(message.id)
-                                    session.commit()
-                                except Exception as e:
-                                    print(f"Couldn't update the lootboard message ID with a new one... e: {e}")
-                    if not message:
-                        print(f"Couldn't get the message to update the loot leaderboard with...")
-                        try:
-                            message = await channel.send(f"<a:loading:1180923500836421715> Please wait while we initialize this Loot Leaderboard....")
-                            configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
-                                                                                        GroupConfiguration.config_key == 'lootboard_message_id').first()
-                            configured_message.config_value = str(message.id)
-                            session.commit()
-                        except Exception as e:
-                            print(f"Couldn't send a new message to the channel: {e}")
-                        continue
+                            except Exception as e:
+                                print(f"Couldn't send a new message to the channel: {e}")
+                            continue
                     
                     wom_id = group['wom_id']
                     if not wom_id:
@@ -304,7 +326,18 @@ async def lootboard_updates():
                         total_tracked = group_obj.get_player_count()
                     else:
                         total_tracked = session.query(Player.wom_id).count()
-                    next_update = datetime.now() + timedelta(minutes=10)
+                    # with get_fresh_xenforo_session() as xenforo_session:
+                    #     # Fix: Use execute() instead of query() when using text() with parameters
+                    #     premium_status = xenforo_session.execute(
+                    #         text("SELECT * FROM xf_user_upgrade_active WHERE group_id = :group_id"), 
+                    #         {"group_id": group_id}
+                    #     ).first()
+                    #     if not premium_status:
+                    #         group_patreon = session.query(GroupPatreon).filter(GroupPatreon.group_id == group_id).first()
+                    #         next_update = datetime.now() + timedelta(seconds=615)
+                    #     else:
+                    #         next_update = datetime.now() + timedelta(seconds=615)
+                    next_update = datetime.now() + timedelta(seconds=615)
                     future_timestamp = int(time.mktime(next_update.timetuple()))
                     value_dict = {
                         "{next_refresh}": f"<t:{future_timestamp}:R>",
@@ -319,7 +352,7 @@ async def lootboard_updates():
                         message.attachments.clear()
                         lootboard = interactions.File(image_path)
                         await message.edit(content="",embed=embed,files=lootboard)
-                        print("Updated the loot leaderboard for group", group_obj.group_name)
+                        #print("Updated the loot leaderboard for group", group_obj.group_name)
                     except Exception as e:
                         print("Unable to edit the message for group", group_obj.group_name, "e:", e)
                         continue

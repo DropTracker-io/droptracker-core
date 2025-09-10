@@ -13,8 +13,8 @@ import interactions
 import time
 import subprocess
 import platform
-from db.models import NpcList, Session, User, Group, Guild, Player, Drop, Webhook, session, UserConfiguration, GroupConfiguration
-from pb.leaderboards import create_pb_embeds, get_group_pbs
+from db.models import GroupEmbed, GroupPatreon, GroupRecentDrops, NotificationQueue, NotifiedSubmission, NpcList, Session, User, Group, Guild, Player, Drop, Webhook, session, UserConfiguration, GroupConfiguration, user_group_association
+#from pb.leaderboards import create_pb_embeds, get_group_pbs
 from services import message_handler
 from services.components import help_components
 from utils.format import format_time_since_update, format_number, get_command_id, get_npc_image_url, replace_placeholders
@@ -50,34 +50,6 @@ class UserCommands(Extension):
         if not user:
             await try_create_user(ctx=ctx)
         user = session.query(User).filter(User.discord_id == ctx.author.id).first()
-        # help_embed = Embed(title="", description="", color=0x0ff000)
-
-        # help_embed.set_author(name="Help Menu",
-        #                       url="https://www.droptracker.io/docs",
-        #                       icon_url="https://www.droptracker.io/img/droptracker-small.gif")
-        # help_embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
-        # help_embed.add_field(name="Need more help?",
-        #                     value=f"View our <#1317873428199637022> to find answers to common questions from our community, or reach out for <#1210765301042380820>")
-        # help_embed.add_field(name="User Commands:",
-        #                      value="" +
-        #                            f"- </accounts:{await get_command_id(self.bot, 'accounts')}> - View which RuneScape accounts are associated with your Discord account.\n" +
-        #                            f"- </claim-rsn:{await get_command_id(self.bot, 'claim-rsn')}> - Claim a RuneScape character as one that belongs to you.\n")
-        # help_embed.add_field(name="Group Leader Commands:",
-        #                      value="<:info:1263916332685201501> - `Note`: Creating groups **requires** a WiseOldMan group ID! *You can make a group without being in a clan*. [Visit the WOM website to create one](https://wiseoldman.net/groups/create).\n" +
-        #                            f"- </create-group:{await get_command_id(self.bot, 'create-group')}> - Create a new group in the DropTracker database to track your clan's drops.\n" +
-        #                            f"- </members:{await get_command_id(self.bot, 'members')}> - View a listing of the top members of your group in real-time.\n" +
-        #                            f"<:info:1263916332685201501> - All 'Group Leader Commands' require **Administrator** privileges in the Discord server you use them inside of.", inline=False)
-        
-        # help_embed.add_field(name="Helpful Links",
-        #                      value="[Docs](https://www.droptracker.io/docs) | "+
-        #                      "[Join our Discord](https://www.droptracker.io/discord) | " +
-        #                      "[GitHub](https://www.github.io/joelhalen/droptracker-py) | " + 
-        #                      "[Patreon](https://www.patreon.com/droptracker)", inline=False)
-        # int_latency_ms = int(ctx.bot.latency * 1000)
-        # ext_latency_ms = await get_external_latency()
-        # help_embed.add_field(name="Latency",
-        #                      value=f"Discord API: `{int_latency_ms} ms`\n" +
-        #                            f"External: `{ext_latency_ms} ms`", inline=False)
         return await ctx.send(components=help_components, ephemeral=True)
     @slash_command(name="global-board",
                    description="View the current global loot leaderboard")
@@ -86,6 +58,107 @@ class UserCommands(Extension):
         return await ctx.send(f"Here you are!", embeds=embed, ephemeral=True)
         pass
 
+    @slash_command(name="dm-settings",
+                   description="View or change your direct message settings")
+    @slash_option(name="dm_type",
+                  description="Select which type of direct message setting you want to edit",
+                  required=True,
+                  opt_type=OptionType.STRING,
+                  autocomplete=True)
+    @slash_option(name="toggle",
+                  description="Select whether you want to enable or disable the direct message setting",
+                  required=True,
+                  opt_type=OptionType.STRING,
+                  autocomplete=True)
+    async def dm_settings_cmd(self, ctx: SlashContext, dm_type: str, toggle: str):
+        def set_dm_config(user, config_keys, value):
+            """Helper to set one or more config values for a user."""
+            for config_key in config_keys:
+                config_entry = session.query(UserConfiguration).filter(
+                    UserConfiguration.user_id == user.user_id,
+                    UserConfiguration.config_key == config_key
+                ).first()
+                if config_entry:
+                    config_entry.config_value = value
+                else:
+                    # If config entry doesn't exist, create it
+                    config_entry = UserConfiguration(
+                        user_id=user.user_id,
+                        config_key=config_key,
+                        config_value=value
+                    )
+                    session.add(config_entry)
+
+        user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
+        if not user:
+            await try_create_user(ctx=ctx)
+            user = session.query(User).filter(User.discord_id == str(ctx.user.id)).first()
+
+        # Determine which config keys to update
+        config_keys = []
+        if dm_type == "updates":
+            config_keys = ["dm_on_update_logs"]
+        elif dm_type == "points":
+            config_keys = ["dm_on_points_earned"]
+        elif dm_type == "both":
+            config_keys = ["dm_on_update_logs", "dm_on_points_earned"]
+
+        value = "true" if toggle == "enable" else "false"
+        set_dm_config(user, config_keys, value)
+        session.commit()
+        if dm_type == "both":
+            desc_ext = "- Update logs\n- Points earned"
+        elif dm_type == "updates":
+            desc_ext = "- Update logs"
+        elif dm_type == "points":
+            desc_ext = "- Points earned"
+
+        if toggle == "enable":
+            embed = Embed(
+                title="Success!",
+                description=f"You have enabled direct-message notifications from me for:\n" + desc_ext
+            )
+        else:
+            embed = Embed(
+                title="Success!",
+                description=f"You have disabled direct-message notifications from me for:\n" + desc_ext
+            )
+        await ctx.send(embed=embed, ephemeral=True)
+
+    @dm_settings_cmd.autocomplete("dm_type")
+    async def dm_settings_autocomplete_dm_type(self, ctx: AutocompleteContext):
+        await ctx.send(
+            choices=[
+                {
+                    "name": "Update Logs",
+                    "value": "updates"
+                },
+                {
+                    "name": "Points earned",
+                    "value": "points"
+                },
+                {
+                    "name": "Both",
+                    "value": "both"
+                }
+            ]
+        )
+
+    @dm_settings_cmd.autocomplete("toggle")
+    async def dm_settings_autocomplete_toggle(self, ctx: AutocompleteContext):
+        await ctx.send(
+            choices=[
+                {
+                    "name": "Enable",
+                    "value": "enable"
+                },
+                {
+                    "name": "Disable", 
+                    "value": "disable"
+                }
+            ]
+        )
+    
     @slash_command(name="pingme",
                    description="Toggle whether or not you want to be pinged when your submissions are sent to Discord")
     @slash_option(name="type",
@@ -229,561 +302,561 @@ class UserCommands(Extension):
         
         return await ctx.send(choices=choices)
     
-    @slash_command(name="group-board",
-                   description="View the current group lootboard")
-    @slash_option(name="start_time",
-                  description="Select the start time you want to view the lootboard for.",
-                  required=False,
-                  opt_type=OptionType.STRING,
-                  autocomplete=True)
-    @slash_option(name="end_time",
-                  description="Select the end time you want to view the lootboard for.",
-                  required=False,
-                  opt_type=OptionType.STRING,
-                  autocomplete=True)
-    @slash_option(name="npc",
-                  description="Select the NPC you want to generate a board for exclusively.",
-                  required=False,
-                  opt_type=OptionType.INTEGER,
-                  autocomplete=True)
-    async def group_lootboard_cmd(self, ctx: SlashContext, start_time: str = None, end_time: str = None, npc: int = None):
-        message_cont = ""
+    # @slash_command(name="group-board",
+    #                description="View the current group lootboard")
+    # @slash_option(name="start_time",
+    #               description="Select the start time you want to view the lootboard for.",
+    #               required=False,
+    #               opt_type=OptionType.STRING,
+    #               autocomplete=True)
+    # @slash_option(name="end_time",
+    #               description="Select the end time you want to view the lootboard for.",
+    #               required=False,
+    #               opt_type=OptionType.STRING,
+    #               autocomplete=True)
+    # @slash_option(name="npc",
+    #               description="Select the NPC you want to generate a board for exclusively.",
+    #               required=False,
+    #               opt_type=OptionType.INTEGER,
+    #               autocomplete=True)
+    # async def group_lootboard_cmd(self, ctx: SlashContext, start_time: str = None, end_time: str = None, npc: int = None):
+    #     message_cont = ""
         
-        # Parse start_time
-        if start_time is None or start_time == "now":
-            start_datetime = datetime.now() - timedelta(days=7)  # Default to 7 days ago
-        elif start_time == "today":
-            start_datetime = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        elif start_time == "yesterday":
-            start_datetime = (datetime.now() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        elif start_time == "week":
-            start_datetime = (datetime.now() - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        elif start_time == "month":
-            start_datetime = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        elif start_time == "year":
-            start_datetime = datetime.now().replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-        else:
-            try:
-                # Try to parse custom date format (YYYY-MM-DD)
-                start_datetime = datetime.strptime(start_time, "%Y-%m-%d")
-            except ValueError:
-                start_datetime = datetime.now() - timedelta(days=7)
-                message_cont += "Invalid start time format. Using default (7 days ago).\n"
+    #     # Parse start_time
+    #     if start_time is None or start_time == "now":
+    #         start_datetime = datetime.now() - timedelta(days=7)  # Default to 7 days ago
+    #     elif start_time == "today":
+    #         start_datetime = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    #     elif start_time == "yesterday":
+    #         start_datetime = (datetime.now() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    #     elif start_time == "week":
+    #         start_datetime = (datetime.now() - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+    #     elif start_time == "month":
+    #         start_datetime = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    #     elif start_time == "year":
+    #         start_datetime = datetime.now().replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    #     else:
+    #         try:
+    #             # Try to parse custom date format (YYYY-MM-DD)
+    #             start_datetime = datetime.strptime(start_time, "%Y-%m-%d")
+    #         except ValueError:
+    #             start_datetime = datetime.now() - timedelta(days=7)
+    #             message_cont += "Invalid start time format. Using default (7 days ago).\n"
         
-        # Parse end_time
-        if end_time is None or end_time == "now":
-            end_datetime = datetime.now()
-        elif end_time == "today":
-            end_datetime = datetime.now().replace(hour=23, minute=59, second=59)
-        elif end_time == "yesterday":
-            end_datetime = (datetime.now() - timedelta(days=1)).replace(hour=23, minute=59, second=59)
-        elif end_time == "week":
-            # End of the current week (Sunday)
-            today = datetime.now()
-            days_until_sunday = 6 - today.weekday()  # 6 is Sunday in Python's weekday() (0-6, Monday is 0)
-            end_datetime = (today + timedelta(days=days_until_sunday)).replace(hour=23, minute=59, second=59)
-        elif end_time == "month":
-            # End of the current month
-            today = datetime.now()
-            next_month = today.replace(day=28) + timedelta(days=4)  # This will never fail
-            end_datetime = next_month.replace(day=1, hour=0, minute=0, second=0) - timedelta(seconds=1)
-        else:
-            try:
-                # Try to parse custom date format (YYYY-MM-DD)
-                end_datetime = datetime.strptime(end_time, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
-            except ValueError:
-                end_datetime = datetime.now()
-                message_cont += "Invalid end time format. Using current time.\n"
+    #     # Parse end_time
+    #     if end_time is None or end_time == "now":
+    #         end_datetime = datetime.now()
+    #     elif end_time == "today":
+    #         end_datetime = datetime.now().replace(hour=23, minute=59, second=59)
+    #     elif end_time == "yesterday":
+    #         end_datetime = (datetime.now() - timedelta(days=1)).replace(hour=23, minute=59, second=59)
+    #     elif end_time == "week":
+    #         # End of the current week (Sunday)
+    #         today = datetime.now()
+    #         days_until_sunday = 6 - today.weekday()  # 6 is Sunday in Python's weekday() (0-6, Monday is 0)
+    #         end_datetime = (today + timedelta(days=days_until_sunday)).replace(hour=23, minute=59, second=59)
+    #     elif end_time == "month":
+    #         # End of the current month
+    #         today = datetime.now()
+    #         next_month = today.replace(day=28) + timedelta(days=4)  # This will never fail
+    #         end_datetime = next_month.replace(day=1, hour=0, minute=0, second=0) - timedelta(seconds=1)
+    #     else:
+    #         try:
+    #             # Try to parse custom date format (YYYY-MM-DD)
+    #             end_datetime = datetime.strptime(end_time, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+    #         except ValueError:
+    #             end_datetime = datetime.now()
+    #             message_cont += "Invalid end time format. Using current time.\n"
         
-        # Get group information
-        user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
-        if not user:
-            return await ctx.send(f"You have not yet registered an account in our database! Try registering first:\n" + 
-                                 f"</claim-rsn:{await get_command_id(self.bot, 'claim-rsn')}>")
-        group = None
-        if ctx.guild:
-            guild_id = ctx.guild_id
-            if str(guild_id) == "1172737525069135962":
-                group_id = 2
-            else:
-                group = session.query(Group).filter_by(guild_id=guild_id).first()
-        if not group:
-            group = session.query(Group).filter_by(group_id=2).first()
+    #     # Get group information
+    #     user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
+    #     if not user:
+    #         return await ctx.send(f"You have not yet registered an account in our database! Try registering first:\n" + 
+    #                              f"</claim-rsn:{await get_command_id(self.bot, 'claim-rsn')}>")
+    #     group = None
+    #     if ctx.guild:
+    #         guild_id = ctx.guild_id
+    #         if str(guild_id) == "1172737525069135962":
+    #             group_id = 2
+    #         else:
+    #             group = session.query(Group).filter_by(guild_id=guild_id).first()
+    #     if not group:
+    #         group = session.query(Group).filter_by(group_id=2).first()
         
-        group_id = group.group_id
-        group_name = group.group_name
+    #     group_id = group.group_id
+    #     group_name = group.group_name
         
-        # Show loading message
-        await ctx.defer()
+    #     # Show loading message
+    #     await ctx.defer()
         
-        # Get NPC name if specified
-        npc_name = None
-        if npc:
-            npc_obj = session.query(NpcList).filter(NpcList.npc_id == npc).first()
-            if npc_obj:
-                npc_name = npc_obj.npc_name
+    #     # Get NPC name if specified
+    #     npc_name = None
+    #     if npc:
+    #         npc_obj = session.query(NpcList).filter(NpcList.npc_id == npc).first()
+    #         if npc_obj:
+    #             npc_name = npc_obj.npc_name
         
-        # Generate the lootboard
-        board = await generate_timeframe_board(
-            self.bot, 
-            group_id=group_id,
-            start_time=start_datetime,
-            end_time=end_datetime,
-            npc_id=npc
-        )
-        print("Board generation called for", group_id, "and npc id", npc)
+    #     # Generate the lootboard
+    #     board = await generate_timeframe_board(
+    #         self.bot, 
+    #         group_id=group_id,
+    #         start_time=start_datetime,
+    #         end_time=end_datetime,
+    #         npc_id=npc
+    #     )
+    #     print("Board generation called for", group_id, "and npc id", npc)
         
-        if board:
-            lootboard = interactions.File(board)
-            embed_template = await db.get_group_embed(embed_type="lb", group_id=group_id)
+    #     if board:
+    #         lootboard = interactions.File(board)
+    #         embed_template = await db.get_group_embed(embed_type="lb", group_id=group_id)
             
-            if group_id != 2:
-                player_wom_ids = await fetch_group_members(group.wom_id)
-                player_ids = await associate_player_ids(player_wom_ids)
-                total_tracked = len(player_ids)
-            else:
-                total_tracked = session.query(Player.wom_id).count()
-            next_update = datetime.now() + timedelta(minutes=10)
-            future_timestamp = int(time.mktime(next_update.timetuple()))
-            value_dict = {
-                "{next_refresh}": f"<t:{future_timestamp}:R>",
-                "{tracked_members}": total_tracked
-            }
-            embed = replace_placeholders(embed_template, value_dict)
-            true_embed = Embed(title=embed.title, description=embed.description)
-            for field in embed.fields:
-                if field.name != "Refreshes" and not str(field.value).startswith("<t:"):
-                    true_embed.add_field(name=field.name, value=field.value,inline=field.inline)
-            await ctx.send(embed=true_embed, files=lootboard)
-        else:
-            await ctx.send(f"An error occurred while generating the group lootboard. Please try again later.")
+    #         if group_id != 2:
+    #             player_wom_ids = await fetch_group_members(group.wom_id)
+    #             player_ids = await associate_player_ids(player_wom_ids)
+    #             total_tracked = len(player_ids)
+    #         else:
+    #             total_tracked = session.query(Player.wom_id).count()
+    #         next_update = datetime.now() + timedelta(minutes=10)
+    #         future_timestamp = int(time.mktime(next_update.timetuple()))
+    #         value_dict = {
+    #             "{next_refresh}": f"<t:{future_timestamp}:R>",
+    #             "{tracked_members}": total_tracked
+    #         }
+    #         embed = replace_placeholders(embed_template, value_dict)
+    #         true_embed = Embed(title=embed.title, description=embed.description)
+    #         for field in embed.fields:
+    #             if field.name != "Refreshes" and not str(field.value).startswith("<t:"):
+    #                 true_embed.add_field(name=field.name, value=field.value,inline=field.inline)
+    #         await ctx.send(embed=true_embed, files=lootboard)
+    #     else:
+    #         await ctx.send(f"An error occurred while generating the group lootboard. Please try again later.")
 
-    @group_lootboard_cmd.autocomplete("start_time")
-    async def group_lootboard_autocomplete_start_time(self, ctx: AutocompleteContext):
-        # Get current date for custom options
-        now = datetime.now()
-        yesterday = now - timedelta(days=1)
-        last_week = now - timedelta(days=7)
-        last_month = now - timedelta(days=30)
+    # @group_lootboard_cmd.autocomplete("start_time")
+    # async def group_lootboard_autocomplete_start_time(self, ctx: AutocompleteContext):
+    #     # Get current date for custom options
+    #     now = datetime.now()
+    #     yesterday = now - timedelta(days=1)
+    #     last_week = now - timedelta(days=7)
+    #     last_month = now - timedelta(days=30)
         
-        # Create standard choices
-        choices = [
-            {
-                "name": "Today (midnight)",
-                "value": "today"
-            },
-            {
-                "name": "Yesterday (midnight)",
-                "value": "yesterday"
-            },
-            {
-                "name": "Last 7 days",
-                "value": "week"
-            },
-            {
-                "name": "This month (from 1st)",
-                "value": "month"
-            },
-            {
-                "name": "This year (from Jan 1st)",
-                "value": "year"
-            },
-            {
-                "name": f"Custom: {yesterday.strftime('%Y-%m-%d')}",
-                "value": yesterday.strftime("%Y-%m-%d")
-            },
-            {
-                "name": f"Custom: {last_week.strftime('%Y-%m-%d')}",
-                "value": last_week.strftime("%Y-%m-%d")
-            },
-            {
-                "name": f"Custom: {last_month.strftime('%Y-%m-%d')}",
-                "value": last_month.strftime("%Y-%m-%d")
-            }
-        ]
+    #     # Create standard choices
+    #     choices = [
+    #         {
+    #             "name": "Today (midnight)",
+    #             "value": "today"
+    #         },
+    #         {
+    #             "name": "Yesterday (midnight)",
+    #             "value": "yesterday"
+    #         },
+    #         {
+    #             "name": "Last 7 days",
+    #             "value": "week"
+    #         },
+    #         {
+    #             "name": "This month (from 1st)",
+    #             "value": "month"
+    #         },
+    #         {
+    #             "name": "This year (from Jan 1st)",
+    #             "value": "year"
+    #         },
+    #         {
+    #             "name": f"Custom: {yesterday.strftime('%Y-%m-%d')}",
+    #             "value": yesterday.strftime("%Y-%m-%d")
+    #         },
+    #         {
+    #             "name": f"Custom: {last_week.strftime('%Y-%m-%d')}",
+    #             "value": last_week.strftime("%Y-%m-%d")
+    #         },
+    #         {
+    #             "name": f"Custom: {last_month.strftime('%Y-%m-%d')}",
+    #             "value": last_month.strftime("%Y-%m-%d")
+    #         }
+    #     ]
         
-        # Filter choices based on user input
-        if ctx.input_text:
-            filtered_choices = [
-                choice for choice in choices 
-                if ctx.input_text.lower() in choice["name"].lower() or ctx.input_text.lower() in choice["value"].lower()
-            ]
+    #     # Filter choices based on user input
+    #     if ctx.input_text:
+    #         filtered_choices = [
+    #             choice for choice in choices 
+    #             if ctx.input_text.lower() in choice["name"].lower() or ctx.input_text.lower() in choice["value"].lower()
+    #         ]
             
-            # Add custom date if it looks like a date format
-            if re.match(r"\d{4}-\d{2}-\d{2}", ctx.input_text) or re.match(r"\d{2}-\d{2}-\d{4}", ctx.input_text):
-                filtered_choices.append({
-                    "name": f"Custom date: {ctx.input_text}",
-                    "value": ctx.input_text
-                })
+    #         # Add custom date if it looks like a date format
+    #         if re.match(r"\d{4}-\d{2}-\d{2}", ctx.input_text) or re.match(r"\d{2}-\d{2}-\d{4}", ctx.input_text):
+    #             filtered_choices.append({
+    #                 "name": f"Custom date: {ctx.input_text}",
+    #                 "value": ctx.input_text
+    #             })
             
-            await ctx.send(choices=filtered_choices[:25])  # Discord limits to 25 choices
-        else:
-            await ctx.send(choices=choices[:25])
+    #         await ctx.send(choices=filtered_choices[:25])  # Discord limits to 25 choices
+    #     else:
+    #         await ctx.send(choices=choices[:25])
 
-    @group_lootboard_cmd.autocomplete("end_time")
-    async def group_lootboard_autocomplete_end_time(self, ctx: AutocompleteContext):
-        # Get current date for custom options
-        now = datetime.now()
-        yesterday = now - timedelta(days=1)
+    # @group_lootboard_cmd.autocomplete("end_time")
+    # async def group_lootboard_autocomplete_end_time(self, ctx: AutocompleteContext):
+    #     # Get current date for custom options
+    #     now = datetime.now()
+    #     yesterday = now - timedelta(days=1)
         
-        # Create standard choices
-        choices = [
-            {
-                "name": "Now (current time)",
-                "value": "now"
-            },
-            {
-                "name": "Today (end of day)",
-                "value": "today"
-            },
-            {
-                "name": "Yesterday (end of day)",
-                "value": "yesterday"
-            },
-            {
-                "name": "End of this week",
-                "value": "week"
-            },
-            {
-                "name": "End of this month",
-                "value": "month"
-            },
-            {
-                "name": f"Custom: {now.strftime('%Y-%m-%d')}",
-                "value": now.strftime("%Y-%m-%d")
-            },
-            {
-                "name": f"Custom: {yesterday.strftime('%Y-%m-%d')}",
-                "value": yesterday.strftime("%Y-%m-%d")
-            }
-        ]
+    #     # Create standard choices
+    #     choices = [
+    #         {
+    #             "name": "Now (current time)",
+    #             "value": "now"
+    #         },
+    #         {
+    #             "name": "Today (end of day)",
+    #             "value": "today"
+    #         },
+    #         {
+    #             "name": "Yesterday (end of day)",
+    #             "value": "yesterday"
+    #         },
+    #         {
+    #             "name": "End of this week",
+    #             "value": "week"
+    #         },
+    #         {
+    #             "name": "End of this month",
+    #             "value": "month"
+    #         },
+    #         {
+    #             "name": f"Custom: {now.strftime('%Y-%m-%d')}",
+    #             "value": now.strftime("%Y-%m-%d")
+    #         },
+    #         {
+    #             "name": f"Custom: {yesterday.strftime('%Y-%m-%d')}",
+    #             "value": yesterday.strftime("%Y-%m-%d")
+    #         }
+    #     ]
         
-        # Filter choices based on user input
-        if ctx.input_text:
-            filtered_choices = [
-                choice for choice in choices 
-                if ctx.input_text.lower() in choice["name"].lower() or ctx.input_text.lower() in choice["value"].lower()
-            ]
+    #     # Filter choices based on user input
+    #     if ctx.input_text:
+    #         filtered_choices = [
+    #             choice for choice in choices 
+    #             if ctx.input_text.lower() in choice["name"].lower() or ctx.input_text.lower() in choice["value"].lower()
+    #         ]
             
-            # Add custom date if it looks like a date format
-            if re.match(r"\d{4}-\d{2}-\d{2}", ctx.input_text) or re.match(r"\d{2}-\d{2}-\d{4}", ctx.input_text):
-                filtered_choices.append({
-                    "name": f"Custom date: {ctx.input_text}",
-                    "value": ctx.input_text
-                })
+    #         # Add custom date if it looks like a date format
+    #         if re.match(r"\d{4}-\d{2}-\d{2}", ctx.input_text) or re.match(r"\d{2}-\d{2}-\d{4}", ctx.input_text):
+    #             filtered_choices.append({
+    #                 "name": f"Custom date: {ctx.input_text}",
+    #                 "value": ctx.input_text
+    #             })
             
-            await ctx.send(choices=filtered_choices[:25])  # Discord limits to 25 choices
-        else:
-            await ctx.send(choices=choices[:25])
+    #         await ctx.send(choices=filtered_choices[:25])  # Discord limits to 25 choices
+    #     else:
+    #         await ctx.send(choices=choices[:25])
 
-    @group_lootboard_cmd.autocomplete("npc")
-    async def group_lootboard_autocomplete_npc(self, ctx: AutocompleteContext):
-        # List of popular NPCs with their IDs
-        popular_npcs = [
-                (8615, "Alchemical Hydra"),
-                (13668, "Araxxor"),
-                (11175, "Araxyte"),
-                (11992, "Artio"),
-                (13729, "Barrows"),
-                (8195, "Bryophyta"),
-                (6503, "Callisto"),
-                (11993, "Calvar'ion"),
-                (5862, "Cerberus"),
-                (13696, "Chambers of Xeric"),
-                (6619, "Chaos Fanatic"),
-                (13948, "Clue Scroll (Beginner)"),
-                (13947, "Clue Scroll (Easy)"),
-                (13944, "Clue Scroll (Elite)"),
-                (13945, "Clue Scroll (Hard)"),
-                (13955, "Clue Scroll (Master)"),
-                (13946, "Clue Scroll (Medium)"),
-                (13979, "Coffin (Hallowed Sepulchre)"),
-                (2205, "Commander Zilyana"),
-                (319, "Corporeal Beast"),
-                (6618, "Crazy archaeologist"),
-                (2267, "Dagannoth Rex"),
-                (2265, "Dagannoth Supreme"),
-                (7144, "Demonic gorilla"),
-                (13680, "Dreadborn Araxyte"),
-                (12191, "Duke Sucellus"),
-                (7851, "Dusk"),
-                (13709, "Elven Crystal Chest"),
-                (13741, "Fortis Colosseum"),
-                (2215, "General Graardor"),
-                (13701, "Herbiboar"),
-                (8583, "Hespori"),
-                (8609, "Hydra"),
-                (3129, "K'ril Tsutsaroth"),
-                (963, "Kalphite Queen"),
-                (239, "King Black Dragon"),
-                (13684, "Kingdom of Miscellania"),
-                (3162, "Kree'arra"),
-                (13718, "Larran's big chest"),
-                (11278, "Nex"),
-                (12077, "Phantom Muspah"),
-                (9416, "Phosani's Nightmare"),
-                (303031, "Revenants"),
-                (13954, "Reward pool (Tempoross)"),
-                (7286, "Skotizo"),
-                (7541, "Tekton"),
-                (7543, "Tekton (enraged)"),
-                (13703, "The Gauntlet"),
-                (13949, "The Hueycoatl"),
-                (12214, "The Leviathan"),
-                (9425, "The Nightmare"),
-                (12204, "The Whisperer"),
-                (13699, "Theatre of Blood"),
-                (499, "Thermonuclear smoke devil"),
-                (13695, "Tombs of Amascut"),
-                (1676, "Torag the Corrupted"),
-                (13599, "Tormented Demon"),
-                (13711, "Unsired"),
-                (12223, "Vardorvis"),
-                (6504, "Venenatis"),
-                (6611, "Vet'ion"),
-                (8060, "Vorkath"),
-                (9049, "Zalcano"),
-                (2042, "Zulrah")
-            ]
+    # @group_lootboard_cmd.autocomplete("npc")
+    # async def group_lootboard_autocomplete_npc(self, ctx: AutocompleteContext):
+    #     # List of popular NPCs with their IDs
+    #     popular_npcs = [
+    #             (8615, "Alchemical Hydra"),
+    #             (13668, "Araxxor"),
+    #             (11175, "Araxyte"),
+    #             (11992, "Artio"),
+    #             (13729, "Barrows"),
+    #             (8195, "Bryophyta"),
+    #             (6503, "Callisto"),
+    #             (11993, "Calvar'ion"),
+    #             (5862, "Cerberus"),
+    #             (13696, "Chambers of Xeric"),
+    #             (6619, "Chaos Fanatic"),
+    #             (13948, "Clue Scroll (Beginner)"),
+    #             (13947, "Clue Scroll (Easy)"),
+    #             (13944, "Clue Scroll (Elite)"),
+    #             (13945, "Clue Scroll (Hard)"),
+    #             (13955, "Clue Scroll (Master)"),
+    #             (13946, "Clue Scroll (Medium)"),
+    #             (13979, "Coffin (Hallowed Sepulchre)"),
+    #             (2205, "Commander Zilyana"),
+    #             (319, "Corporeal Beast"),
+    #             (6618, "Crazy archaeologist"),
+    #             (2267, "Dagannoth Rex"),
+    #             (2265, "Dagannoth Supreme"),
+    #             (7144, "Demonic gorilla"),
+    #             (13680, "Dreadborn Araxyte"),
+    #             (12191, "Duke Sucellus"),
+    #             (7851, "Dusk"),
+    #             (13709, "Elven Crystal Chest"),
+    #             (13741, "Fortis Colosseum"),
+    #             (2215, "General Graardor"),
+    #             (13701, "Herbiboar"),
+    #             (8583, "Hespori"),
+    #             (8609, "Hydra"),
+    #             (3129, "K'ril Tsutsaroth"),
+    #             (963, "Kalphite Queen"),
+    #             (239, "King Black Dragon"),
+    #             (13684, "Kingdom of Miscellania"),
+    #             (3162, "Kree'arra"),
+    #             (13718, "Larran's big chest"),
+    #             (11278, "Nex"),
+    #             (12077, "Phantom Muspah"),
+    #             (9416, "Phosani's Nightmare"),
+    #             (303031, "Revenants"),
+    #             (13954, "Reward pool (Tempoross)"),
+    #             (7286, "Skotizo"),
+    #             (7541, "Tekton"),
+    #             (7543, "Tekton (enraged)"),
+    #             (13703, "The Gauntlet"),
+    #             (13949, "The Hueycoatl"),
+    #             (12214, "The Leviathan"),
+    #             (9425, "The Nightmare"),
+    #             (12204, "The Whisperer"),
+    #             (13699, "Theatre of Blood"),
+    #             (499, "Thermonuclear smoke devil"),
+    #             (13695, "Tombs of Amascut"),
+    #             (1676, "Torag the Corrupted"),
+    #             (13599, "Tormented Demon"),
+    #             (13711, "Unsired"),
+    #             (12223, "Vardorvis"),
+    #             (6504, "Venenatis"),
+    #             (6611, "Vet'ion"),
+    #             (8060, "Vorkath"),
+    #             (9049, "Zalcano"),
+    #             (2042, "Zulrah")
+    #         ]
         
-        # Filter NPCs based on input text
-        if ctx.input_text:
-            filtered_npcs = []
-            for npc_id, npc_name in popular_npcs:
-                if ctx.input_text.lower() in npc_name.lower():
-                    filtered_npcs.append((npc_id, npc_name))
+    #     # Filter NPCs based on input text
+    #     if ctx.input_text:
+    #         filtered_npcs = []
+    #         for npc_id, npc_name in popular_npcs:
+    #             if ctx.input_text.lower() in npc_name.lower():
+    #                 filtered_npcs.append((npc_id, npc_name))
             
-            # Limit to 25 choices for Discord's autocomplete
-            if len(filtered_npcs) > 25:
-                filtered_npcs = filtered_npcs[:25]
-        else:
-            # Use all popular NPCs if no input, limited to 25
-            filtered_npcs = popular_npcs[:25]
+    #         # Limit to 25 choices for Discord's autocomplete
+    #         if len(filtered_npcs) > 25:
+    #             filtered_npcs = filtered_npcs[:25]
+    #     else:
+    #         # Use all popular NPCs if no input, limited to 25
+    #         filtered_npcs = popular_npcs[:25]
         
-        # Format choices correctly for autocomplete
-        choices = []
-        for npc_id, npc_name in filtered_npcs:
-            choices.append({
-                "name": npc_name,
-                "value": npc_id
-            })
+    #     # Format choices correctly for autocomplete
+    #     choices = []
+    #     for npc_id, npc_name in filtered_npcs:
+    #         choices.append({
+    #             "name": npc_name,
+    #             "value": npc_id
+    #         })
         
-        await ctx.send(choices=choices)
+    #     await ctx.send(choices=choices)
 
-    @slash_command(name="my-board",
-                   description="View your personal lootboard")
-    @slash_option(name="start_time",
-                  description="Select the start time you want to view the lootboard for.",
-                  required=False,
-                  opt_type=OptionType.STRING,
-                  autocomplete=True)
-    @slash_option(name="end_time",
-                  description="Select the end time you want to view the lootboard for.",
-                  required=False,
-                  opt_type=OptionType.STRING,
-                  autocomplete=True)
-    async def my_board_cmd(self, ctx: SlashContext, start_time: str = None, end_time: str = None):
-        user = ctx.author
-        user_id = ctx.author.id
-        user = session.query(User).filter_by(discord_id=str(user_id)).first()
-        message_cont = ""
+    # @slash_command(name="my-board",
+    #                description="View your personal lootboard")
+    # @slash_option(name="start_time",
+    #               description="Select the start time you want to view the lootboard for.",
+    #               required=False,
+    #               opt_type=OptionType.STRING,
+    #               autocomplete=True)
+    # @slash_option(name="end_time",
+    #               description="Select the end time you want to view the lootboard for.",
+    #               required=False,
+    #               opt_type=OptionType.STRING,
+    #               autocomplete=True)
+    # async def my_board_cmd(self, ctx: SlashContext, start_time: str = None, end_time: str = None):
+    #     user = ctx.author
+    #     user_id = ctx.author.id
+    #     user = session.query(User).filter_by(discord_id=str(user_id)).first()
+    #     message_cont = ""
         
-        # Parse start_time
-        if start_time is None or start_time == "now":
-            start_datetime = datetime.now() - timedelta(days=7)  # Default to 7 days ago
-        elif start_time == "today":
-            start_datetime = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        elif start_time == "yesterday":
-            start_datetime = (datetime.now() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        elif start_time == "week":
-            start_datetime = (datetime.now() - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
-        elif start_time == "month":
-            start_datetime = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        elif start_time == "year":
-            start_datetime = datetime.now().replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-        else:
-            try:
-                # Try to parse custom date format (YYYY-MM-DD)
-                start_datetime = datetime.strptime(start_time, "%Y-%m-%d")
-            except ValueError:
-                start_datetime = datetime.now() - timedelta(days=7)
-                message_cont += "Invalid start time format. Using default (7 days ago).\n"
+    #     # Parse start_time
+    #     if start_time is None or start_time == "now":
+    #         start_datetime = datetime.now() - timedelta(days=7)  # Default to 7 days ago
+    #     elif start_time == "today":
+    #         start_datetime = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    #     elif start_time == "yesterday":
+    #         start_datetime = (datetime.now() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    #     elif start_time == "week":
+    #         start_datetime = (datetime.now() - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+    #     elif start_time == "month":
+    #         start_datetime = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    #     elif start_time == "year":
+    #         start_datetime = datetime.now().replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    #     else:
+    #         try:
+    #             # Try to parse custom date format (YYYY-MM-DD)
+    #             start_datetime = datetime.strptime(start_time, "%Y-%m-%d")
+    #         except ValueError:
+    #             start_datetime = datetime.now() - timedelta(days=7)
+    #             message_cont += "Invalid start time format. Using default (7 days ago).\n"
         
-        # Parse end_time
-        if end_time is None or end_time == "now":
-            end_datetime = datetime.now()
-        elif end_time == "today":
-            end_datetime = datetime.now().replace(hour=23, minute=59, second=59)
-        elif end_time == "yesterday":
-            end_datetime = (datetime.now() - timedelta(days=1)).replace(hour=23, minute=59, second=59)
-        elif end_time == "week":
-            # End of the current week (Sunday)
-            today = datetime.now()
-            days_until_sunday = 6 - today.weekday()  # 6 is Sunday in Python's weekday() (0-6, Monday is 0)
-            end_datetime = (today + timedelta(days=days_until_sunday)).replace(hour=23, minute=59, second=59)
-        elif end_time == "month":
-            # End of the current month
-            today = datetime.now()
-            next_month = today.replace(day=28) + timedelta(days=4)  # This will never fail
-            end_datetime = next_month.replace(day=1, hour=0, minute=0, second=0) - timedelta(seconds=1)
-        else:
-            try:
-                # Try to parse custom date format (YYYY-MM-DD)
-                end_datetime = datetime.strptime(end_time, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
-            except ValueError:
-                end_datetime = datetime.now()
-                message_cont += "Invalid end time format. Using current time.\n"
+    #     # Parse end_time
+    #     if end_time is None or end_time == "now":
+    #         end_datetime = datetime.now()
+    #     elif end_time == "today":
+    #         end_datetime = datetime.now().replace(hour=23, minute=59, second=59)
+    #     elif end_time == "yesterday":
+    #         end_datetime = (datetime.now() - timedelta(days=1)).replace(hour=23, minute=59, second=59)
+    #     elif end_time == "week":
+    #         # End of the current week (Sunday)
+    #         today = datetime.now()
+    #         days_until_sunday = 6 - today.weekday()  # 6 is Sunday in Python's weekday() (0-6, Monday is 0)
+    #         end_datetime = (today + timedelta(days=days_until_sunday)).replace(hour=23, minute=59, second=59)
+    #     elif end_time == "month":
+    #         # End of the current month
+    #         today = datetime.now()
+    #         next_month = today.replace(day=28) + timedelta(days=4)  # This will never fail
+    #         end_datetime = next_month.replace(day=1, hour=0, minute=0, second=0) - timedelta(seconds=1)
+    #     else:
+    #         try:
+    #             # Try to parse custom date format (YYYY-MM-DD)
+    #             end_datetime = datetime.strptime(end_time, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+    #         except ValueError:
+    #             end_datetime = datetime.now()
+    #             message_cont += "Invalid end time format. Using current time.\n"
         
-        if not user:
-            return await ctx.send(f"You have not yet registered an account in our database! Try registering first:\n" + 
-                                  f"</claim-rsn:{await get_command_id(self.bot, 'claim-rsn')}>")
-        print("User found:", user.user_id)
-        players = session.query(Player).filter_by(user_id=user.user_id).all()
-        if len(players) > 1:
-            message_cont += "You have multiple accounts registered in our database. We are using the first account you registered."
-            player = players[0]
-        else:
-            player = players[0]
-        # Show loading message
-        await ctx.defer()
+    #     if not user:
+    #         return await ctx.send(f"You have not yet registered an account in our database! Try registering first:\n" + 
+    #                               f"</claim-rsn:{await get_command_id(self.bot, 'claim-rsn')}>")
+    #     print("User found:", user.user_id)
+    #     players = session.query(Player).filter_by(user_id=user.user_id).all()
+    #     if len(players) > 1:
+    #         message_cont += "You have multiple accounts registered in our database. We are using the first account you registered."
+    #         player = players[0]
+    #     else:
+    #         player = players[0]
+    #     # Show loading message
+    #     await ctx.defer()
         
-        player_board = await generate_player_board(self.bot, player.player_id, start_datetime, end_datetime)
-        if player_board:
-            lootboard = interactions.File(player_board)
-            embed = Embed(title="Your Personal Lootboard", description=message_cont if message_cont else None)
-            embed.set_footer(text="Powered by the DropTracker | https://www.droptracker.io/")
-            embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
+    #     player_board = await generate_player_board(self.bot, player.player_id, start_datetime, end_datetime)
+    #     if player_board:
+    #         lootboard = interactions.File(player_board)
+    #         embed = Embed(title="Your Personal Lootboard", description=message_cont if message_cont else None)
+    #         embed.set_footer(text="Powered by the DropTracker | https://www.droptracker.io/")
+    #         embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
             
-            # Format dates for display
-            start_str = start_datetime.strftime("%Y-%m-%d %H:%M")
-            end_str = end_datetime.strftime("%Y-%m-%d %H:%M")
+    #         # Format dates for display
+    #         start_str = start_datetime.strftime("%Y-%m-%d %H:%M")
+    #         end_str = end_datetime.strftime("%Y-%m-%d %H:%M")
             
-            embed.add_field(
-                name="Viewing a board for:",
-                value=f"Player: `{player.player_name}`\n" + 
-                      f"Timeframe: `{start_str}` to `{end_str}`"
-            )
-            await ctx.send(embed=embed, files=lootboard)
-        else:
-            await ctx.send(f"An error occurred while generating your lootboard. Please try again later.")
+    #         embed.add_field(
+    #             name="Viewing a board for:",
+    #             value=f"Player: `{player.player_name}`\n" + 
+    #                   f"Timeframe: `{start_str}` to `{end_str}`"
+    #         )
+    #         await ctx.send(embed=embed, files=lootboard)
+    #     else:
+    #         await ctx.send(f"An error occurred while generating your lootboard. Please try again later.")
             
-    @my_board_cmd.autocomplete("start_time")
-    async def my_board_autocomplete_start_time(self, ctx: AutocompleteContext):
-        # Get current date for custom options
-        now = datetime.now()
-        yesterday = now - timedelta(days=1)
-        last_week = now - timedelta(days=7)
-        last_month = now - timedelta(days=30)
+    # @my_board_cmd.autocomplete("start_time")
+    # async def my_board_autocomplete_start_time(self, ctx: AutocompleteContext):
+    #     # Get current date for custom options
+    #     now = datetime.now()
+    #     yesterday = now - timedelta(days=1)
+    #     last_week = now - timedelta(days=7)
+    #     last_month = now - timedelta(days=30)
         
-        # Create standard choices
-        choices = [
-            {
-                "name": "Today (midnight)",
-                "value": "today"
-            },
-            {
-                "name": "Yesterday (midnight)",
-                "value": "yesterday"
-            },
-            {
-                "name": "Last 7 days",
-                "value": "week"
-            },
-            {
-                "name": "This month (from 1st)",
-                "value": "month"
-            },
-            {
-                "name": "This year (from Jan 1st)",
-                "value": "year"
-            },
-            {
-                "name": f"Custom: {yesterday.strftime('%Y-%m-%d')}",
-                "value": yesterday.strftime("%Y-%m-%d")
-            },
-            {
-                "name": f"Custom: {last_week.strftime('%Y-%m-%d')}",
-                "value": last_week.strftime("%Y-%m-%d")
-            },
-            {
-                "name": f"Custom: {last_month.strftime('%Y-%m-%d')}",
-                "value": last_month.strftime("%Y-%m-%d")
-            }
-        ]
+    #     # Create standard choices
+    #     choices = [
+    #         {
+    #             "name": "Today (midnight)",
+    #             "value": "today"
+    #         },
+    #         {
+    #             "name": "Yesterday (midnight)",
+    #             "value": "yesterday"
+    #         },
+    #         {
+    #             "name": "Last 7 days",
+    #             "value": "week"
+    #         },
+    #         {
+    #             "name": "This month (from 1st)",
+    #             "value": "month"
+    #         },
+    #         {
+    #             "name": "This year (from Jan 1st)",
+    #             "value": "year"
+    #         },
+    #         {
+    #             "name": f"Custom: {yesterday.strftime('%Y-%m-%d')}",
+    #             "value": yesterday.strftime("%Y-%m-%d")
+    #         },
+    #         {
+    #             "name": f"Custom: {last_week.strftime('%Y-%m-%d')}",
+    #             "value": last_week.strftime("%Y-%m-%d")
+    #         },
+    #         {
+    #             "name": f"Custom: {last_month.strftime('%Y-%m-%d')}",
+    #             "value": last_month.strftime("%Y-%m-%d")
+    #         }
+    #     ]
         
-        # Filter choices based on user input
-        if ctx.input_text:
-            filtered_choices = [
-                choice for choice in choices 
-                if ctx.input_text.lower() in choice["name"].lower() or ctx.input_text.lower() in choice["value"].lower()
-            ]
+    #     # Filter choices based on user input
+    #     if ctx.input_text:
+    #         filtered_choices = [
+    #             choice for choice in choices 
+    #             if ctx.input_text.lower() in choice["name"].lower() or ctx.input_text.lower() in choice["value"].lower()
+    #         ]
             
-            # Add custom date if it looks like a date format
-            if re.match(r"\d{4}-\d{2}-\d{2}", ctx.input_text) or re.match(r"\d{2}-\d{2}-\d{4}", ctx.input_text):
-                filtered_choices.append({
-                    "name": f"Custom date: {ctx.input_text}",
-                    "value": ctx.input_text
-                })
+    #         # Add custom date if it looks like a date format
+    #         if re.match(r"\d{4}-\d{2}-\d{2}", ctx.input_text) or re.match(r"\d{2}-\d{2}-\d{4}", ctx.input_text):
+    #             filtered_choices.append({
+    #                 "name": f"Custom date: {ctx.input_text}",
+    #                 "value": ctx.input_text
+    #             })
             
-            await ctx.send(choices=filtered_choices[:25])  # Discord limits to 25 choices
-        else:
-            await ctx.send(choices=choices[:25])
+    #         await ctx.send(choices=filtered_choices[:25])  # Discord limits to 25 choices
+    #     else:
+    #         await ctx.send(choices=choices[:25])
 
-    @my_board_cmd.autocomplete("end_time")
-    async def my_board_autocomplete_end_time(self, ctx: AutocompleteContext):
-        # Get current date for custom options
-        now = datetime.now()
-        yesterday = now - timedelta(days=1)
+    # @my_board_cmd.autocomplete("end_time")
+    # async def my_board_autocomplete_end_time(self, ctx: AutocompleteContext):
+    #     # Get current date for custom options
+    #     now = datetime.now()
+    #     yesterday = now - timedelta(days=1)
         
-        # Create standard choices
-        choices = [
-            {
-                "name": "Now (current time)",
-                "value": "now"
-            },
-            {
-                "name": "Today (end of day)",
-                "value": "today"
-            },
-            {
-                "name": "Yesterday (end of day)",
-                "value": "yesterday"
-            },
-            {
-                "name": "End of this week",
-                "value": "week"
-            },
-            {
-                "name": "End of this month",
-                "value": "month"
-            },
-            {
-                "name": f"Custom: {now.strftime('%Y-%m-%d')}",
-                "value": now.strftime("%Y-%m-%d")
-            },
-            {
-                "name": f"Custom: {yesterday.strftime('%Y-%m-%d')}",
-                "value": yesterday.strftime("%Y-%m-%d")
-            }
-        ]
+    #     # Create standard choices
+    #     choices = [
+    #         {
+    #             "name": "Now (current time)",
+    #             "value": "now"
+    #         },
+    #         {
+    #             "name": "Today (end of day)",
+    #             "value": "today"
+    #         },
+    #         {
+    #             "name": "Yesterday (end of day)",
+    #             "value": "yesterday"
+    #         },
+    #         {
+    #             "name": "End of this week",
+    #             "value": "week"
+    #         },
+    #         {
+    #             "name": "End of this month",
+    #             "value": "month"
+    #         },
+    #         {
+    #             "name": f"Custom: {now.strftime('%Y-%m-%d')}",
+    #             "value": now.strftime("%Y-%m-%d")
+    #         },
+    #         {
+    #             "name": f"Custom: {yesterday.strftime('%Y-%m-%d')}",
+    #             "value": yesterday.strftime("%Y-%m-%d")
+    #         }
+    #     ]
         
-        # Filter choices based on user input
-        if ctx.input_text:
-            filtered_choices = [
-                choice for choice in choices 
-                if ctx.input_text.lower() in choice["name"].lower() or ctx.input_text.lower() in choice["value"].lower()
-            ]
+    #     # Filter choices based on user input
+    #     if ctx.input_text:
+    #         filtered_choices = [
+    #             choice for choice in choices 
+    #             if ctx.input_text.lower() in choice["name"].lower() or ctx.input_text.lower() in choice["value"].lower()
+    #         ]
             
-            # Add custom date if it looks like a date format
-            if re.match(r"\d{4}-\d{2}-\d{2}", ctx.input_text) or re.match(r"\d{2}-\d{2}-\d{4}", ctx.input_text):
-                filtered_choices.append({
-                    "name": f"Custom date: {ctx.input_text}",
-                    "value": ctx.input_text
-                })
+    #         # Add custom date if it looks like a date format
+    #         if re.match(r"\d{4}-\d{2}-\d{2}", ctx.input_text) or re.match(r"\d{2}-\d{2}-\d{4}", ctx.input_text):
+    #             filtered_choices.append({
+    #                 "name": f"Custom date: {ctx.input_text}",
+    #                 "value": ctx.input_text
+    #             })
             
-            await ctx.send(choices=filtered_choices[:25])  # Discord limits to 25 choices
-        else:
-            await ctx.send(choices=choices[:25])
+    #         await ctx.send(choices=filtered_choices[:25])  # Discord limits to 25 choices
+    #     else:
+    #         await ctx.send(choices=choices[:25])
         
     @slash_command(name="accounts",
                    description="View your currently claimed RuneScape character names, if you have any")
@@ -895,47 +968,166 @@ class UserCommands(Extension):
                 embed.set_footer(text="Powered by the DropTracker | https://www.droptracker.io/")
                 await ctx.send(embed=embed)
 
-    
+    @slash_command(name="dm-broken-groups",
+                   description="Send a DM to administrators of groups that are not properly configured yet.",
+                   default_member_permissions=Permissions.ADMINISTRATOR)
+    async def dm_broken_groups(self, ctx: SlashContext):
+        if str(ctx.user.id) != "528746710042804247":
+            return await ctx.send("You are not authorized to use this command.", ephemeral=True)
+        await ctx.defer(ephemeral=True)
 
-    @slash_command(
-        name="force_msg",
-        description="Force a re-processing of a webhook message",
-        default_member_permissions=Permissions.ADMINISTRATOR,
-    )
-    @slash_option(
-        name="message_id",
-        description="The message ID to re-process",
-        opt_type=OptionType.STRING,
-        required=True
-    )
-    @slash_option(
-        name="channel_id",
-        description="The channel ID the message is inside of",
-        opt_type=OptionType.STRING,
-        required=True
-    )
-    async def force_msg(self, ctx: SlashContext, channel_id: str, message_id: str):
-        await ctx.send("Force message re-processing initiated.")
-        #await message_data_logger.log("force_msg", {"message_id": ctx.message.id, "channel_id": ctx.channel.id})
+        # ORM-based query to find guilds with broken configuration
+        from db.models import Guild, GroupConfiguration
+
+        # Subquery for lootboard_channel_id = '0'
+        lootboard_subq = (
+            session.query(GroupConfiguration.group_id)
+            .filter(
+                GroupConfiguration.config_key == 'lootboard_channel_id',
+                GroupConfiguration.config_value == '0'
+            )
+            .subquery()
+        )
+
+        # Subquery for authed_users = '[]'
+        authed_users_subq = (
+            session.query(GroupConfiguration.group_id)
+            .filter(
+                GroupConfiguration.config_key == 'authed_users',
+                GroupConfiguration.config_value == '[]'
+            )
+            .subquery()
+        )
+
+        # Intersect the two subqueries to get group_ids that match both
+        broken_group_ids = (
+            session.query(Guild.guild_id)
+            .join(lootboard_subq, Guild.group_id == lootboard_subq.c.group_id)
+            .join(authed_users_subq, Guild.group_id == authed_users_subq.c.group_id)
+            .distinct()
+            .all()
+        )
+        print("Got broken group ids:")
+        print(broken_group_ids)
+
+        async def create_dm_notice(bot: interactions.Client) -> Embed:
+            embed_title = f"⚠️ **NOTICE** ⚠️"
+            embed = interactions.Embed(
+                title=embed_title,
+                color=0x00ff00,
+                timestamp=interactions.Timestamp.now()
+            )
+            description_parts = []
+            description_parts.append(f"### :rotating_light: **Your registered group with the DropTracker has been flagged as improperly configured, or not set up at all.**")
+            description_parts.append("You will have a total of 7 days from the time this message was sent to set our Discord bot up.")
+            description_parts.append("-# __If you don't act before then__, **all of your group data will be wiped & the bot will leave your guild**!\n\n")
+            description_parts.append("**If you need help:**")
+            description_parts.append("- Join our [discord server](https://www.droptracker.io/discord)")
+            description_parts.append(f"- Try the </help:{await get_command_id(bot, 'help')}> command")
+            description_parts.append("You can also optionally remove our bot from your server now, if you decide you don't want to use it.")
+            description_parts.append("**-# We contacted you because you were the owner of the discord guild we were added to.\nThank you for your time!**")
+            embed.description = "\n".join(description_parts).strip()
+            embed.set_footer(text=f"Powered by the DropTracker | https://www.droptracker.io/", icon_url="https://www.droptracker.io/img/droptracker-small.gif")
+            return embed
+
+        # If you want to test with a specific guild, uncomment the next line
+        # broken_group_ids = [(1034567162116972575,)]
+
+        for guild_id_tuple in broken_group_ids:
+            guild_id = guild_id_tuple[0]
+            # Remove the override below to use real guild_id
+            guild = await ctx.bot.fetch_guild(guild_id)
+            if guild:
+                continue ## TODO - dont continue if guild is found once we delete old data
+                try:
+                    #await ctx.channel.send(f"Got guild owner - <@{guild._owner_id}>")
+                    guild_owner = await self.bot.fetch_user(guild._owner_id)
+                    await guild_owner.send(content=f"## Hey, <@{guild._owner_id}>!",embed=await create_dm_notice(ctx.bot))
+                    #await ctx.channel.send(f"Sent DM to guild owner - <@{guild._owner_id}>")
+                except Exception as e:
+                    #await ctx.channel.send(f"Couldn't send DM to guild owner - <@{guild._owner_id}>")
+                    print("Couldn't send DM to guild owner:", e)
+            # Remove break to process all guilds, or keep for only one
+            else:
+                try:
+                    group_id_row = session.query(Guild.group_id).filter(Guild.guild_id == guild_id).first()
+                    group_id = group_id_row[0] if group_id_row else None
+                    if not group_id:
+                        continue
+                    from sqlalchemy import delete
+                    # Prevent premature autoflush while we clean up
+                    with session.no_autoflush:
+                        # Delete association/dependent rows first
+                        session.execute(
+                            delete(user_group_association).where(
+                                user_group_association.c.group_id == group_id
+                            )
+                        )
+                        session.execute(delete(NotificationQueue).where(NotificationQueue.group_id == group_id))
+                        session.execute(delete(NotifiedSubmission).where(NotifiedSubmission.group_id == group_id))
+                        session.execute(delete(GroupEmbed).where(GroupEmbed.group_id == group_id))
+                        session.execute(delete(GroupPatreon).where(GroupPatreon.group_id == group_id))
+                        session.execute(delete(GroupRecentDrops).where(GroupRecentDrops.group_id == group_id))
+                        # Also remove group configuration to avoid FK updates to NULL on flush
+                        session.execute(delete(GroupConfiguration).where(GroupConfiguration.group_id == group_id))
+
+                        # Now delete ORM parents
+                        group = session.query(Group).filter(Group.guild_id == guild_id).first()
+                        if group:
+                            session.delete(group)
+                        guild_obj = session.query(Guild).filter(Guild.guild_id == guild_id).first()
+                        if guild_obj:
+                            session.delete(guild_obj)
+                    session.commit()
+                    await ctx.channel.send(f"Guild with id `{guild_id}` not found & is likely safe to be removed.")
+                except Exception as e:
+                    session.rollback()
+                    await ctx.channel.send(f"Cleanup failed for guild `{guild_id}`: {e}")
+        ## TODO - remove hard coded test
+    
+    
         
-        channel = await ctx.bot.fetch_channel(channel_id)
-        message = await channel.fetch_message(message_id)
-        if message:
-            try:
-                print("Re-processing message...")
-                if message.embeds:
-                    for embed in message.embeds:
-                        for field in embed.fields:
-                            if field.name == "player":
-                                field.value = "joelhalen"
-                            elif field.name == "acc_hash":
-                                field.value = "-3718503131431628598"
-                await self.message_handler.on_message_create(self.message_handler, message)
-            except Exception as e:
-                print("Error re-processing message:", e)
-                await ctx.send(f"Error re-processing message: {e}")
-        else:
-            await ctx.send("Message not found.")
+    
+    
+    # @slash_command(
+    #     name="force_msg",
+    #     description="Force a re-processing of a webhook message",
+    #     default_member_permissions=Permissions.ADMINISTRATOR,
+    # )
+    # @slash_option(
+    #     name="message_id",
+    #     description="The message ID to re-process",
+    #     opt_type=OptionType.STRING,
+    #     required=True
+    # )
+    # @slash_option(
+    #     name="channel_id",
+    #     description="The channel ID the message is inside of",
+    #     opt_type=OptionType.STRING,
+    #     required=True
+    # )
+    # async def force_msg(self, ctx: SlashContext, channel_id: str, message_id: str):
+    #     await ctx.send("Force message re-processing initiated.")
+    #     #await message_data_logger.log("force_msg", {"message_id": ctx.message.id, "channel_id": ctx.channel.id})
+        
+    #     channel = await ctx.bot.fetch_channel(channel_id)
+    #     message = await channel.fetch_message(message_id)
+    #     if message:
+    #         try:
+    #             print("Re-processing message...")
+    #             if message.embeds:
+    #                 for embed in message.embeds:
+    #                     for field in embed.fields:
+    #                         if field.name == "player":
+    #                             field.value = "joelhalen"
+    #                         elif field.name == "acc_hash":
+    #                             field.value = "-3718503131431628598"
+    #             #await self.message_handler.on_message_create(self.message_handler, message)
+    #         except Exception as e:
+    #             print("Error re-processing message:", e)
+    #             await ctx.send(f"Error re-processing message: {e}")
+    #     else:
+    #         await ctx.send("Message not found.")
 
 
     @slash_command(name="new_webhook",
@@ -974,10 +1166,7 @@ class UserCommands(Extension):
             pass
         print("Created 30 new webhooks.")
 
-
-
-
-
+## Auth-related functions ##
 async def is_admin(ctx: BaseContext):
     perms_value = ctx.author.guild_permissions.value
     print("Guild permissions:", perms_value)
@@ -985,24 +1174,30 @@ async def is_admin(ctx: BaseContext):
         return True
     return False
 
+def is_user_authorized(user_id, group: Group):
+    # Check if the user is an admin or an authorized user for this group
+    group_config = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group.group_id).all()
+    # Transform group_config into a dictionary for easy access
+    config = {conf.config_key: conf.config_value for conf in group_config}
+    authed_user = False
+    user_data: User = session.query(User).filter(User.user_id == user_id).first()
+    if user_data:
+        discord_id = user_data.discord_id
+    else:
+        return False
+    if "authed_users" in config:
+        authed_users = config["authed_users"]
+        if isinstance(authed_users, int):
+            authed_users = f"{authed_users}"  # Get the list of authorized user IDs
+        print("Authed users:", authed_users)
+        authed_users = json.loads(authed_users)
+        # Loop over authed_users and check if the current user is authorized
+        for authed_id in authed_users:
+            if str(authed_id) == str(discord_id):  # Compare the authed_id with the current user's ID
+                authed_user = True
+                return True  # Exit the loop once the user is found
+    return authed_user
 
-
-
-
-
-@slash_command(name="update_github",
-               description="Force an immediate refresh of the GitHub webhooks",
-               default_member_permissions=Permissions.ADMINISTRATOR)
-async def update_github_cmd(self, ctx: SlashContext):
-    GithubUpdater = GithubPagesUpdater()
-    await ctx.send("Attempting to update the GitHub webhooks...", ephemeral=True)
-    try:
-        await GithubUpdater.update_github_pages()
-        await asyncio.sleep(5)
-        await ctx.send("GitHub webhooks updated", ephemeral=True)
-    except Exception as e:
-        #
-        await ctx.send("An error occurred updating the GitHub webhooks", ephemeral=True)
 
 # Commands that help configure or change clan-specifics.
 class ClanCommands(Extension):
@@ -1014,14 +1209,20 @@ class ClanCommands(Extension):
                   description="How would you like your group's name to appear?",
                   required=True)
     @slash_option(name="wom_id",
-                  opt_type=OptionType.INTEGER,
+                  opt_type=OptionType.STRING,
                   description="Enter your group's WiseOldMan group ID",
+                  max_length=6,
+                  min_length=3,
                   required=True)
     async def create_group_cmd(self, 
                                ctx: SlashContext, 
                                group_name: str,
-                               wom_id: int):
-        if not ctx.guild:
+                               wom_id: str):
+        try:
+            wom_id = int(wom_id)
+        except Exception as e:
+            pass
+        if not ctx.guild_id:
             return await ctx.send(f"You must use this command in a Discord server")
         if ctx.author_permissions.ALL:
             print("Comparing:")
@@ -1058,20 +1259,20 @@ class ClanCommands(Extension):
                 total_members = 0
                 total_tracked_already = 0
                 
-                try:
-                    group_wom_ids = await fetch_group_members(wom_id)
-                    group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
-                    for member in group_members:
-                        if member.user:
-                            member_user: User = member.user
-                            member_user.add_group(group)
-                        member.add_group(group)
-                    total_members = len(group_wom_ids)
-                    total_tracked_already = len(group_members)
-                    print(f"Successfully processed {total_tracked_already} existing members from WOM group {wom_id}")
-                except Exception as e:
-                    print("Error fetching group members/assigning them to the group during group creation:", e)
-                    # Don't rollback here - just continue with group creation without WOM members
+                #try:
+                #     group_wom_ids = await fetch_group_members(wom_id)
+                #     group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
+                #     for member in group_members:
+                #         if member.user:
+                #             member_user: User = member.user
+                #             member_user.add_group(group)
+                #         member.add_group(group)
+                #     total_members = len(group_wom_ids)
+                #     total_tracked_already = len(group_members)
+                #     print(f"Successfully processed {total_tracked_already} existing members from WOM group {wom_id}")
+                # except Exception as e:
+                #     print("Error fetching group members/assigning them to the group during group creation:", e)
+                #     # Don't rollback here - just continue with group creation without WOM members
                     
                 # Commit the group creation (this will generate the group_id)
                 try:
@@ -1096,7 +1297,7 @@ class ClanCommands(Extension):
             # Create success embed with proper variable handling
             try:
                 embed = Embed(title="New group created",
-                            description=f"Your Group has been created (ID: `{group.group_id}`) with `{total_tracked_already}` DropTracker users already being tracked.")
+                            description=f"Your group has been created (ID: `{group.group_id}`)!")
                 embed.add_field(name=f"WOM group `{group.wom_id}` (`{total_members}` members) is now assigned to your Discord server `{group.guild_id}`",
                                 value=f"<a:loading:1180923500836421715> Please wait while we initialize some other things for you...",
                                 inline=False)
@@ -1124,12 +1325,7 @@ class ClanCommands(Extension):
                     option_value = group_name
                 if option.config_key == "authed_users":
                     authed_list = []
-                    for member in ctx.guild.members:
-                        if member.has_permission(interactions.Permissions.ADMINISTRATOR):
-                            if str(member.id) != str(ctx.author.id):
-                                authed_list.append(str(member.id))
-                    # Add the command author's ID to the list
-                    authed_list.append(str(ctx.author.id))
+                    authed_list.append(str(ctx.author_id))
                     # Format as a proper JSON array of strings
                     option_value = json.dumps(authed_list)
                 default_option = GroupConfiguration(
@@ -1157,108 +1353,64 @@ class ClanCommands(Extension):
                     #                 f"\nDropTracker Group ID: {group.group_id}\n" + 
                     #                 f"Discord server ID: {str(ctx.guild_id)}")
             await asyncio.sleep(5)
-            await ctx.send(f"To continue setting up, please [sign in on the website](https://www.droptracker.io/login/discord)",
+            await ctx.send(f"To continue setting up, please [sign in on the website](https://www.droptracker.io/login) using your Discord account.",
                             ephemeral=True)
         else:
             await ctx.send(f"You do not have the necessary permissions to use this command inside of this Discord server.\n" + 
                            "Please ask the server owner to execute this command.",
                            ephemeral=True)
-            
-    
-    
 
-    
-
-    
-            
-    @slash_command(name="set-lootboard-style",
-                   description="Set the style of the lootboard for a group")
-    @slash_option(name="style",
-                  description="Select which style of board you want to use.",
-                  opt_type=OptionType.STRING,
-                  choices=[
-                    SlashCommandChoice(name="Dark style with outlines", value="1"), # bank-new-clean-dark.png
-                    SlashCommandChoice(name="Light style with outlines", value="2"), # bank-new-clean.png
-                    SlashCommandChoice(name="Dark style with no outlines", value="3"), # lootboard-newest.png
-                    SlashCommandChoice(name="Dark/no outlines/no bg", value="4"), # no_boxes_dark.png
-                    SlashCommandChoice(name="Minimal / no boxes", value="5"), # no_boxes_minimal.png
-                    SlashCommandChoice(name="Halloween", value="6"), # halloween.png
-                  ],
-                  required=True)
-    async def set_lootboard_style(self, ctx: SlashContext, style: str):
-
-        if not ctx.guild:
-            return await ctx.send("You must use this command in a Discord server.", ephemeral=True)
-        if str(ctx.guild_id) == "1172737525069135962":
-            group = session.query(Group).filter(Group.group_id == 2).first()
-        else:
-            group = session.query(Group).filter(Group.guild_id == str(ctx.guild_id)).first()
-        if not group:
-            return await ctx.send("No group found for this server.", ephemeral=True)
-        user = session.query(User).filter(User.discord_id == str(ctx.author.id)).first()
-        if not user:
-            await try_create_user(ctx=ctx)
-            return await ctx.send(f"You are not authorized to use this command in this group.", ephemeral=True)
-        if not is_user_authorized(user.user_id, group):
-            return await ctx.send(f"You are not authorized to use this command in this group.", ephemeral=True)
-        current_style = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group.group_id, GroupConfiguration.config_key == "loot_board_type").first()
-        if current_style:
-            await ctx.send(f"Current value: {current_style.config_value} ({type(current_style.config_value)}) -> changing to {style} ({type(style)})")
-            current_style.config_value = style
-            session.commit()
-            print(f"Committed style change for {group.group_id} to {style}")
-        else:
-            await ctx.send(f"Could not change your configured loot leaderboard style.\n" + 
-                           "Please try again later, or reach out in our Discord server.",
-                           ephemeral=True)
-            return
-
-        current_style = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group.group_id, GroupConfiguration.config_key == "loot_board_type").first()
-        print("Current style:", current_style.config_value)
-        match style:
-            case "1":
-                url = "/store/droptracker/disc/lootboard/bank-new-clean-dark.png"
-            case "2":
-                url = "/store/droptracker/disc/lootboard/bank-new-clean.png"
-            case "3":
-                url = "/store/droptracker/disc/lootboard/lootboard-newest.png"
-            case "4":
-                url = "/store/droptracker/disc/lootboard/no_boxes_dark.png"
-            case "5":
-                url = "/store/droptracker/disc/lootboard/no_boxes_minimal.png"
-            case "6":
-                url = "/store/droptracker/disc/lootboard/halloween.png"
-        
-        try:
-            attachment = interactions.File(url)
-            await ctx.send(f"Changed {group.group_name}'s lootboard style to `{style}`.", ephemeral=True, files=attachment)
-        except Exception as e:
-            await ctx.send(f"Changed {group.group_name}'s lootboard style to `{style}`.", ephemeral=True)
+    @slash_command(name="send_player_faq",
+                   description="Send a message from the DropTracker bot to help outline some player FAQs.",
+                   default_member_permissions=interactions.Permissions.ADMINISTRATOR)
+    async def send_player_faq_cmd(self, ctx: SlashContext):
+        logo_media = UnfurledMediaItem(
+            url="https://www.droptracker.io/img/droptracker-small.gif"
+        )
+        player_setup = [
+            ContainerComponent(
+                SeparatorComponent(divider=True),
+                TextDisplayComponent(
+                    content="## Player FAQs - DropTracker.io",
+                ),
+                SeparatorComponent(divider=True),
+                SectionComponent(
+                    components=[
+                        TextDisplayComponent(
+                            content="-# **What is the DropTracker?**\n" +
+                            "-# > A community-driven, all-in-one loot and achievement tracking system built for Old School RuneScape groups.\n" +
+                            "-# > We leverage the *[WiseOldMan](https://wiseoldman.net)* to manage group memberships, and provide group leaders a seamless way to configure their group's achievement notification settings.\n\n" +
+                            "-# **How do I get started?**\n" +
+                            "-# > 1. Install the **DropTracker** plugin on your RuneLite client, via the plugin hub.\n" +
+                            "-# > 2. Visit the plugin settings panel (gear tab on RuneLite side panel) to configure which achievements you *personally* want tracked.\n" +
+                            "-# > 3. (Optionally) Claim your in-game-name using the </claim-rsn:1369493380358209537> command to associate your Discord account with your character(s).\n\n" +
+                            "-# **How can I get pinged when my account(s) have notifications sent?**\n" +
+                            "-# > Using the </claim-rsn:1369493380358209537> command, entering your in-game-name **exactly as it appears**.\n\n" +
+                            "-# **How can I prevent my submissions from being shared to the global DropTracker discord channels?**\n" +
+                            "-# > Using the </hideme:1369493380358209544> command, and selecting which account(s)/context(s) you want to be hidden from.\n\n" +
+                            "-# **How can I get (or not get) pinged by the <@1172933457010245762> bot when my account(s) have notifications sent?**\n" +
+                            "-# > Using the </pingme:1369493380358209541> command, and selecting which account(s)/context(s) you do or do not want to receive pings for.\n\n" +
+                            "-# **What types of information does the DropTracker store about me and my account(s)?**\n" +
+                            "-# 1. Your account(s) unique identifier, or 'account hash'. This is provided by Jagex, and is unique to each individual character; remaining consistent thru name changes.\n" +
+                            "-# 2. Your submitted achievements/drops.\n\n" +
+                            "-# 3. Your Discord ID (if you claim your account or execute commands through our bot)\n\n" +
+                            "-# **What can I do to support the continued development of the DropTracker project?**\n\n" +
+                            "-# This passion project began as something far more simple, and has continued to evolve into what you see before you today.\n" + 
+                            "-# Without the continued support of our premium groups, the development work we do would be impossible.\n" +
+                            "-# If you feel as though we've provided a notable value to your OSRS experience, feel free to show support through our [Patreon](https://www.patreon.com/droptracker).\n" +
+                            "-# Players who have subscribed and then upgraded their groups using that subscription are provided early access to new features, alongside a few premium-only functionalities."
+                        )
+                    ],
+                    accessory=ThumbnailComponent(
+                        media=logo_media
+                    )
+                ),
+                SeparatorComponent(divider=True),
+            )
+        ]
+        await ctx.channel.send(components=player_setup)
 
 
-def is_user_authorized(user_id, group: Group):
-    # Check if the user is an admin or an authorized user for this group
-    group_config = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group.group_id).all()
-    # Transform group_config into a dictionary for easy access
-    config = {conf.config_key: conf.config_value for conf in group_config}
-    authed_user = False
-    user_data: User = session.query(User).filter(User.user_id == user_id).first()
-    if user_data:
-        discord_id = user_data.discord_id
-    else:
-        return False
-    if "authed_users" in config:
-        authed_users = config["authed_users"]
-        if isinstance(authed_users, int):
-            authed_users = f"{authed_users}"  # Get the list of authorized user IDs
-        print("Authed users:", authed_users)
-        authed_users = json.loads(authed_users)
-        # Loop over authed_users and check if the current user is authorized
-        for authed_id in authed_users:
-            if str(authed_id) == str(discord_id):  # Compare the authed_id with the current user's ID
-                authed_user = True
-                return True  # Exit the loop once the user is found
-    return authed_user
 
 async def try_create_user(discord_id: str = None, username: str = None, ctx: SlashContext = None):
     if discord_id == None and username == None:

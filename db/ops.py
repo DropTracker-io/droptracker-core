@@ -1,6 +1,6 @@
 import json
 from db.models import (
-    GroupPatreon, NotifiedSubmission, Session, User, Group, Guild, Player, Drop, 
+    GroupPatreon, GroupWomAssociation, NotifiedSubmission, Session, User, Group, Guild, Player, Drop, 
     UserConfiguration, session, XenforoSession, ItemList, GroupConfiguration, 
     GroupEmbed, Field as EmbField, NpcList, NotificationQueue, user_group_association
 )
@@ -20,6 +20,7 @@ from utils.ranking.npc_ranker import check_npc_rank_change_from_drop
 from utils.ranking.rank_checker import check_rank_change_from_drop
 from utils.embeds import get_global_drop_embed
 from utils.download import download_player_image
+from utils.format import normalize_player_display_equivalence
 from utils.wiseoldman import fetch_group_members, check_user_by_id, check_user_by_username
 from utils.redis import RedisClient, calculate_rank_amongst_groups, get_true_player_total
 from utils.format import format_number, get_extension_from_content_type, parse_redis_data, parse_stored_sheet, replace_placeholders
@@ -296,10 +297,41 @@ class DatabaseOperations:
             date_received_str = date_received.strftime('%Y-%m-%d %H:%M:%S')
         else:
             date_received_str = date_received  # Assuming it's already a string in the correct format
-        
-
+        item = session.query(ItemList).filter(ItemList.item_id==item_id).first()
+        item_name = item.item_name if item else "Unknown"
+        npc = session.query(NpcList).filter(NpcList.npc_id==npc_id).first()
+        npc_name = npc.npc_name if npc else "Unknown"
+        if attachment_url and attachment_type:
+            # Don't re-download if the image was already downloaded and processed
+            if attachment_type == "downloaded":
+                # Image was already downloaded, use the provided image_url directly
+                print(f"Using already downloaded image for drop {item_name} from {npc_name}")
+                # The image_url should already be set from the original download
+                pass
+            else:
+                # Download the image from the attachment URL
+                player = session.query(Player).filter(Player.player_id == player_id).first()
+                if not player:
+                    print(f"Player not found for drop {item_name} {npc_name} {player_id}")
+                    return None
+                try:
+                    # Convert content type to proper file extension
+                    file_extension = get_extension_from_content_type(attachment_type)
+                    print(f"Debug - create_drop_object attachment_type: '{attachment_type}' -> file_extension: '{file_extension}'")
+                    download_path, image_url = await download_player_image("drop", item_name, player, attachment_url, file_extension, 0, item_name, npc_name)
+                    if download_path is None or image_url is None:
+                        print(f"Failed to download image for drop {item_name} from {npc_name} - using empty image_url")
+                        image_url = ""
+                    else:
+                        print(f"Successfully processed image for drop {item_name} from {npc_name}")
+                except Exception as e:
+                    print(f"Error downloading player image for {item_name} from {npc_name}: {type(e).__name__}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    image_url = ""
+        else:
+            image_url = image_url or ""
         # Initialize image URL with the provided one
-        image_url = image_url or ""
 
         # Create the drop object
         newdrop = Drop(item_id=item_id,
@@ -321,105 +353,6 @@ class DatabaseOperations:
             session.rollback()
             print(f"Error committing new drop to the database: {e}")
             return None
-
-        # Attempt to download the image and update the drop entry
-        if attachment_url and attachment_type:
-            if attachment_type == "downloaded":
-                newdrop.image_url = attachment_url
-                session.commit()
-            else:
-                try:
-                    # Set up the file extension and file name
-                    file_extension = get_extension_from_content_type(attachment_type)
-                    file_name = f"{item_id}_{npc_id}_{newdrop.drop_id}"  # Create a unique file name
-
-                    player = session.query(Player).filter(Player.player_id == player_id).first()
-                    if player:
-                        # Download the image and update the drop with the image URL
-                        if (value * quantity) > 50000:
-                            dl_path, external_url = await download_player_image(
-                                submission_type="drop",
-                                file_name=str(file_name),
-                                player=player,
-                                attachment_url=str(attachment_url),
-                                file_extension=str(file_extension),
-                                entry_id=str(newdrop.drop_id),
-                                entry_name=str(item_id),
-                                npc_name=str(npc_id)
-                            )
-                            newdrop.used_api = used_api
-                        
-                            # Update the image URL in the drop entry
-                            newdrop.image_url = external_url
-                            #print(f"Image downloaded and URL set: {external_url}")
-
-                            # Commit the updated drop to the database
-                            session.commit()
-                    else:
-                        print("Player not found.")
-                except Exception as e:
-                    print(f"Couldn't download the image: {e}")
-                    session.rollback()
-
-        # Create notification entries for this drop
-        drop_value = value * quantity
-        
-        # Get player groups and check if notification is needed
-        player_groups = session.query(Group).join(Group.players).filter(Player.player_id == player_id).all()
-        
-        # Get item and npc names for notifications
-        item_name = session.query(ItemList.item_name).filter(ItemList.item_id == item_id).first()
-        item_name = item_name[0] if item_name else "Unknown"
-        
-        npc_name_obj = session.query(NpcList.npc_name).filter(NpcList.npc_id == npc_id).first()
-        npc_name = npc_name_obj[0] if npc_name_obj else "Unknown"
-        
-        player = session.query(Player).filter(Player.player_id == player_id).first()
-        player_name = player.player_name if player else "Unknown"
-        
-        for group in player_groups:
-            group_id = group.group_id
-            
-            # Skip global group (ID 2) for notifications
-            if group_id == 2:
-                continue
-                
-            # Get minimum value to notify for this group
-            min_value_config = session.query(GroupConfiguration).filter(
-                GroupConfiguration.group_id == group_id,
-                GroupConfiguration.config_key == 'min_value_to_notify'
-            ).first()
-            
-            min_value_to_notify = int(min_value_config.config_value) if min_value_config else 2500000
-            
-            # Check if drop value exceeds minimum for notification
-            if drop_value >= min_value_to_notify:
-                # Create notification entry
-                notification_data = {
-                    'drop_id': newdrop.drop_id,
-                    'item_name': item_name,
-                    'npc_name': npc_name,
-                    'value': value,
-                    'quantity': quantity,
-                    'total_value': drop_value,
-                    'player_name': player_name,
-                    'player_id': player_id, 
-                    'image_url': newdrop.image_url,
-                    'attachment_type': attachment_type,
-                    'used_api': used_api
-                }
-                
-                notification = NotificationQueue(
-                    notification_type='drop',
-                    player_id=player_id,
-                    group_id=group_id,
-                    data=json.dumps(notification_data),
-                    status='pending',
-                    created_at=datetime.now()
-                )
-                session.add(notification)
-                session.commit()
-
         return newdrop
 
     async def create_user(self, auth_token, discord_id: str, username: str, ctx = None) -> User:
@@ -521,6 +454,7 @@ class DatabaseOperations:
             stored_embed = session.query(GroupEmbed).filter(GroupEmbed.group_id == group_id, 
                                                             GroupEmbed.embed_type == embed_type).first()
             if not stored_embed:
+                #print("No embed found for group", group_id, "and embed_type", embed_type)
                 stored_embed = session.query(GroupEmbed).filter(GroupEmbed.group_id == 1,
                                                                 GroupEmbed.embed_type == embed_type).first()
             if stored_embed:
@@ -582,7 +516,7 @@ class DatabaseOperations:
                 player = session.query(Player).filter(Player.account_hash == account_hash).first()
             
             if player is not None:
-                if player_name != player.player_name:
+                if normalize_player_display_equivalence(player_name) != normalize_player_display_equivalence(player.player_name):
                     old_name = player.player_name
                     player.player_name = player_name
                     player.log_slots = log_slots
@@ -705,7 +639,9 @@ class DatabaseOperations:
         if attachment_url and attachment_type:
             try:
                 # Set up the file extension and file name
+                print(f"Debug - attachment_type: '{attachment_type}'")
                 file_extension = get_extension_from_content_type(attachment_type)
+                print(f"Debug - file_extension after conversion: '{file_extension}'")
                 file_name = f"{item_id}_{npc_id}_{drop.drop_id}"
                 
                 if (value * quantity) > 50000:
@@ -746,12 +682,20 @@ class DatabaseOperations:
                 GroupConfiguration.group_id == group_id,
                 GroupConfiguration.config_key == 'min_value_to_notify'
             ).first()
+            should_send_stacks = session.query(GroupConfiguration).filter(
+                GroupConfiguration.group_id == group_id,
+                GroupConfiguration.config_key == 'send_stacks_of_items'
+            ).first()
+            send_stacks = False
+            if should_send_stacks:
+                if should_send_stacks.config_value == '1' or should_send_stacks.config_value == 'true':
+                    send_stacks = True
             
             min_value_to_notify = 1000000  # Default
             if min_value_config:
                 min_value_to_notify = int(min_value_config.config_value)
             
-            if drop_value >= min_value_to_notify:
+            if int(value) >= min_value_to_notify or (send_stacks == True and int(drop_value) > min_value_to_notify):
                 notification_data = {
                     'drop_id': drop.drop_id,
                     'item_name': item_name,
@@ -857,14 +801,24 @@ async def update_group_members(bot: interactions.Client, forced_id: int = None):
                 
             # Only proceed with member updates if we successfully got the member list
             if group_wom_ids:
+                ## We have a valid list of player wom_ids here now
+                for player_wom_id in group_wom_ids:
+                    try:
+                        stored_association = session.query(GroupWomAssociation).filter(GroupWomAssociation.player_wom_id == player_wom_id,
+                                                                                    GroupWomAssociation.group_dt_id == group.group_id).first()
+                        if not stored_association:
+                            new_association = GroupWomAssociation(player_wom_id=player_wom_id, group_dt_id=group.group_id)
+                    except Exception as e:
+                        print(f"Couldn't properly add a GroupWomAssociation for {player_wom_id} (player wom id) to {group.group_name}")
                 # Get current group members from database
                 group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
                 # Remove members no longer in the group
-                app_logger.log(log_type="info", data=f"Found {len(group_members)} from our database in {group.group_name}", app_name="core", description="update_group_members")
+                #app_logger.log(log_type="info", data=f"Found {len(group_members)} from our database in {group.group_name}", app_name="core", description="update_group_members")
                 for member in group.players:
                     if member.wom_id and member.wom_id not in group_wom_ids:
+                        
                         member = session.query(Player).filter(Player.player_id == member.player_id).first()
-                        app_logger.log(log_type="access", data=f"{member.player_name} has been removed from {group.group_name}", app_name="core", description="update_group_members")
+                        app_logger.log(log_type="access", data=f"{member.player_name} has been removed from {group.group_name}\nTheir DropTracker WOM ID is {member.wom_id} - group IDS: {group_wom_ids}", app_name="core", description="update_group_members")
                         member.remove_group(group)
                         try:
                             await notify_group(bot, "player_removed", group, member)
@@ -923,6 +877,41 @@ async def associate_player_ids(player_wom_ids, before_date: datetime = None, ses
     return matched_ids
 
 event_session = None
+
+def get_point_divisor():
+    """
+    Fetch the points divisor from XenForo options. Uses a safe, parameterized
+    query and handles MariaDB/MySQL return types robustly.
+    """
+    try:
+        result = session.execute(
+            text("SELECT option_value FROM xenforo.xf_option WHERE option_id = :option_id LIMIT 1"),
+            {"option_id": "dt_points_gp_per_point"}
+        ).scalar()
+        if result is None:
+            print("No point divisor found, using default of 1000000")
+            return 1000000
+        # Normalize to string for consistent parsing across drivers
+        if isinstance(result, (bytes, bytearray)):
+            raw_value = result.decode("utf-8", errors="ignore").strip()
+        else:
+            raw_value = str(result).strip()
+        # Clean common formatting and extract the first integer sequence
+        import re
+        cleaned = raw_value.replace(",", "").replace("_", " ")
+        match = re.search(r"-?\d+", cleaned)
+        if not match:
+            print(f"Unparseable point divisor '{raw_value}', using default of 1000000")
+            return 1000000
+        divisor = int(match.group(0))
+        if divisor <= 0:
+            print(f"Non-positive point divisor '{divisor}', using default of 1000000")
+            return 1000000
+        print(f"Got point divisor: {divisor}")
+        return divisor
+    except Exception as e:
+        print(f"Error retrieving point divisor: {e} -- using default of 1000000")
+        return 1000000
 
 async def get_ev_session():
     if event_session is None:

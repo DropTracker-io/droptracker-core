@@ -5,10 +5,18 @@ VENV_PATH="/store/droptracker/disc/venv/bin/activate"
 APP_DIR="/store/droptracker/disc"
 MAIN_APP="main.py"
 UPDATE_APP="player_total_update.py"
+API_APP="new_api.py"
+HOF_APP="bots/hall_of_fame.py"
+WEBHOOK_APP="webhook_bot.py"
+LOOTBOARDS_APP="_board_generator.py"
 MAIN_PORT=8080
 UPDATE_PORT=21474
 MAIN_SCREEN="DTcore"
 UPDATE_SCREEN="DT-pu"
+WEBHOOK_SCREEN="DT-webhooks"
+LOOTBOARDS_SCREEN="DT-lootboards"
+API_SCREEN="DT-api"
+HOF_SCREEN="DT-hof"
 USER="droptracker"  # The user that should own the screens
 
 # Check if running as root and re-execute as the correct user if needed
@@ -120,6 +128,18 @@ main() {
     
     # Start player update application
     start_app_in_screen "$UPDATE_SCREEN" "$UPDATE_APP" $UPDATE_PORT
+    
+    # Start webhook bot
+    start_app_in_screen "$WEBHOOK_SCREEN" "$WEBHOOK_APP" $WEBHOOK_PORT
+    
+    # Start lootboard updater
+    start_app_in_screen "$LOOTBOARDS_SCREEN" "$LOOTBOARDS_APP" $LOOTBOARDS_PORT
+    
+    # Start API app
+    start_app_in_screen "$API_SCREEN" "$API_APP" $API_PORT
+    
+    # Start Hall of Fame bot
+    screen -dmS "$HOF_SCREEN" bash -c "cd $APP_DIR && source $VENV_PATH && python3 -m bots.hall_of_fame; exec bash"
     
     echo "=== Startup Complete ==="
     

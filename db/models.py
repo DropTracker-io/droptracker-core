@@ -1,10 +1,10 @@
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import pymysql
 pymysql.install_as_MySQLdb()
 
-from sqlalchemy import BigInteger, Text, Double, UniqueConstraint, ForeignKeyConstraint, create_engine, Table, Integer, Boolean, String, ForeignKey, DateTime, Float, text, Column, Index, Enum, TIMESTAMP, pool
+from sqlalchemy import JSON, BigInteger, Date, Text, Double, UniqueConstraint, ForeignKeyConstraint, create_engine, Table, Integer, Boolean, String, ForeignKey, DateTime, Float, text, Column, Index, Enum, TIMESTAMP, pool
 from sqlalchemy.orm import relationship, scoped_session, sessionmaker, Mapped, declarative_base, relationship
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.mysql import BIGINT, INTEGER, LONGTEXT, TINYINT
@@ -309,6 +309,30 @@ class Player(Base):
         except Exception as e:
             print(f"Error getting current total for player {self.player_id}: {e}")
             return 0
+        
+    def get_score_at_npc(self, npc_id: int, group_id: int = None, partition: int = get_current_partition()):
+        """
+
+        Args:
+            npc_id (int): _description_
+            group_id (int, optional): _description_. Defaults to None.
+            partition (int, optional): _description_. Defaults to None.
+
+        Returns:
+            raw redis zscore response (decoded) as a tuple (player_rank, player_score)
+        """
+        from utils.redis import RedisClient
+        redis_client = RedisClient()
+        base_key = 'leaderboard:'
+        if (group_id != None):
+            base_key += f'group:{group_id}:'
+        base_key += f'npc:{npc_id}:'
+        base_key += f'{partition}'
+        if (base_key.endswith(':')):
+            base_key = base_key[:-1]
+        player_score = redis_client.client.zscore(base_key, self.player_id)
+        player_rank = redis_client.client.zrank(base_key, self.player_id)
+        return player_rank, player_score
 
     def __init__(self, wom_id, player_name, account_hash, user_id=None, user=None, log_slots=0, total_level=0, group=None, hidden=False):
         self.wom_id = wom_id
@@ -356,6 +380,21 @@ class User(Base):
             session.commit()
 
 
+class PlayerLootData(Base):
+    """
+        Stores a more easily-accessible version of the player's total loot data during the specified time period
+        Specifically for use in loot leaderboard generations
+    """
+    __tablename__ = 'player_loot_data'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, nullable=False)
+    npc_id = Column(Integer, nullable=True) ## Optional NPC ID for this data
+    date_updated = Column(DateTime, default=func.now())
+    data = Column(JSON)
+    time_period = Column(Integer, nullable=False) ## Time period, such as the partition (202507), the day (20250701), the hour (2025070101)
+
+
+
 class Group(Base):
     """
     :param: group_name: Publicly-displayed name of the group
@@ -392,16 +431,31 @@ class Group(Base):
             self.players.append(player)
             session.commit()
 
-    def get_player_count(self):
-        if self.players:
-            return len(self.players.all())
-        return 0
+    def get_player_count(self, session_to_use=None):
+        """
+        Return the number of players in this group.
+
+        With lazy='dynamic' the `players` relationship returns an
+        `AppenderQuery`, so we must use `.count()` instead of `len()`.
+        If an explicit session is supplied we count via the association
+        table to stay within that session's context.
+        """
+        if session_to_use is not None:
+            return (session_to_use
+                    .query(user_group_association)
+                    .filter(user_group_association.c.group_id == self.group_id,
+                            user_group_association.c.player_id != None)   # noqa: E711
+                    .count())
+
+        # default – rely on the query bound to this instance's session
+        return self.players.count()
 
     def get_players(self):
         """
-        Returns a list of all players in the group
+        Return a concrete list of all players in the group.
+        `self.players` is an AppenderQuery, so call `.all()`.
         """
-        return [player for player in self.players]
+        return self.players.all()
 
     def get_current_total(self):
         try:
@@ -437,6 +491,20 @@ class Group(Base):
         """Calls after a group is created"""
         pass
         #create_xf_group(self, group_id=self.group_id)
+
+class GroupWomAssociation(Base):
+    ## Defines associated WoM player IDs and the DropTracker group IDs they were found as part of
+    ## So that if a (new) player installs our plugin, we can immediately determine if they exist in any groups when we create their character.
+    __tablename__ = 'wom_group_member_ids'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_wom_id = Column(Integer, nullable=False)
+    group_dt_id = Column(Integer, nullable=False)
+    date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
+
+    def __init__(self, player_wom_id, group_dt_id):
+        """ Create a new GroupWomAssociation entry (during refreshes directly from WoM)"""
+        self.player_wom_id = player_wom_id
+        self.group_dt_id = group_dt_id
 
 class PlayerMetric(Base):
     __tablename__ = 'player_snapshots'
@@ -643,9 +711,123 @@ class Log(Base):
         return f"<Log(id={self.id}, level={self.level}, source={self.source}, timestamp={self.timestamp})>" 
 
 
+### Attempt to design a new method of creating lootboards/leaderboards
+## Using database aggregates (manual materialized views implementation)
 
+class PlayerItemHourlyTotals(Base):
+    """
+    Stores hourly totals for each item per player
+    - player_id: Which player
+    - item_id: Which item
+    - date_hour: YYYY-MM-DD-HH format (e.g., 2024-01-15-14 for 2 PM on Jan 15)
+    - partition: Monthly partition (202401)
+    - quantity: Total quantity of this item received in this hour
+    - total_value: Sum of all values for this item in this hour
+    - drop_count: Number of drops for this item in this hour
+    """
+    __tablename__ = 'player_item_hourly_totals'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=False)
+    item_id = Column(Integer, ForeignKey('items.item_id'), nullable=False)
+    date_hour = Column(String(13), nullable=False)  # YYYY-MM-DD-HH format
+    partition = Column(Integer, nullable=False)
+    quantity = Column(Integer, default=0)
+    total_value = Column(BigInteger, default=0)
+    drop_count = Column(Integer, default=0)
+    last_drop_time = Column(DateTime)
+    
+    __table_args__ = (
+        UniqueConstraint('player_id', 'item_id', 'date_hour', 'partition', name='uq_player_item_hourly'),
+        Index('idx_player_date_hour', 'player_id', 'date_hour'),
+        Index('idx_item_date_hour', 'item_id', 'date_hour'),
+        Index('idx_partition_date_hour', 'partition', 'date_hour')
+    )
 
+class PlayerNpcHourlyTotals(Base):
+    """
+    Stores hourly totals per NPC per player
+    - player_id: Which player
+    - npc_id: Which NPC
+    - date_hour: YYYY-MM-DD-HH format
+    - partition: Monthly partition
+    - total_value: Sum of all loot value from this NPC in this hour
+    - drop_count: Number of drops from this NPC in this hour
+    """
+    __tablename__ = 'player_npc_hourly_totals'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=False)
+    npc_id = Column(Integer, ForeignKey('npc_list.npc_id'), nullable=False)
+    date_hour = Column(String(13), nullable=False)  # YYYY-MM-DD-HH format
+    partition = Column(Integer, nullable=False)
+    total_value = Column(BigInteger, default=0)
+    drop_count = Column(Integer, default=0)
+    last_drop_time = Column(DateTime)
+    
+    __table_args__ = (
+        UniqueConstraint('player_id', 'npc_id', 'date_hour', 'partition', name='uq_player_npc_hourly'),
+        Index('idx_player_npc_date_hour', 'player_id', 'npc_id', 'date_hour'),
+        Index('idx_npc_date_hour', 'npc_id', 'date_hour'),
+        Index('idx_partition_date_hour', 'partition', 'date_hour')
+    )
 
+class GroupRecentDrops(Base):
+    """
+    Stores recent high-value drops with group ownership
+    - group_id: Which group this drop belongs to
+    - drop_id: Reference to the original drop
+    - player_id: Who got the drop
+    - item_id: What item
+    - value: Individual drop value
+    - date_added: When it was added
+    - npc_id: Which NPC dropped it
+    - partition: Monthly partition
+    """
+    __tablename__ = 'group_recent_drops'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_id = Column(Integer, ForeignKey('groups.group_id'), nullable=False)
+    drop_id = Column(Integer, ForeignKey('drops.drop_id'), nullable=False)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=False)
+    item_id = Column(Integer, ForeignKey('items.item_id'), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    value = Column(Integer, nullable=False)
+    date_added = Column(DateTime, nullable=False)
+    npc_id = Column(Integer, ForeignKey('npc_list.npc_id'), nullable=True)
+    partition = Column(Integer, nullable=False)
+    
+    __table_args__ = (
+        Index('idx_group_date', 'group_id', 'date_added'),
+        Index('idx_group_partition', 'group_id', 'partition'),
+        Index('idx_player_date', 'player_id', 'date_added'),
+        Index('idx_date_added', 'date_added')
+    )
+
+class PlayerDailyAggregates(Base):
+    """
+    Stores daily aggregates for quick access
+    - player_id: Which player
+    - date: YYYY-MM-DD format
+    - partition: Monthly partition
+    - total_value: Total loot value for the day
+    - drop_count: Total drops for the day
+    - unique_items: Number of unique items received
+    - unique_npcs: Number of unique NPCs killed
+    """
+    __tablename__ = 'player_daily_aggregates'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=False)
+    date = Column(Date, nullable=False)
+    partition = Column(Integer, nullable=False)
+    total_value = Column(BigInteger, default=0)
+    drop_count = Column(Integer, default=0)
+    unique_items = Column(Integer, default=0)
+    unique_npcs = Column(Integer, default=0)
+    last_drop_time = Column(DateTime)
+    
+    __table_args__ = (
+        UniqueConstraint('player_id', 'date', 'partition', name='uq_player_daily_agg'),
+        Index('idx_player_date', 'player_id', 'date'),
+        Index('idx_partition_date', 'partition', 'date')
+    )
 
 
 
@@ -778,6 +960,16 @@ class XfDtCronLogs(Base):
     message = Column(Text)
     error_message = Column(Text)
 
+class IgnoredPlayer(Base):
+    ## Defines players that are ignored when generating a lootboard for a specific group
+    __tablename__ = 'ignored_players'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=False)
+    group_id = Column(Integer, ForeignKey('groups.group_id'), nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, onupdate=func.now(), default=func.now())
+
+
 class HistoricalMetrics(Base):
     __tablename__ = 'historical_metrics'
     __table_args__ = (
@@ -808,6 +1000,140 @@ class NotificationQueue(Base):
     # Relationships
     player = relationship("Player", back_populates="notifications")
     group = relationship("Group", back_populates="notifications")
+
+class PlayerExperience(Base):
+    __tablename__ = 'player_exp'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=False)
+    attack = Column(Integer, default=0, nullable=False)
+    strength = Column(Integer, default=0, nullable=False)
+    defence = Column(Integer, default=0, nullable=False)
+    ranged = Column(Integer, default=0, nullable=False)
+    prayer = Column(Integer, default=0, nullable=False)
+    magic = Column(Integer, default=0, nullable=False)
+    runecraft = Column(Integer, default=0, nullable=False)
+    hitpoints = Column(Integer, default=0, nullable=False)
+    crafting = Column(Integer, default=0, nullable=False)
+    mining = Column(Integer, default=0, nullable=False)
+    smithing = Column(Integer, default=0, nullable=False)
+    woodcutting = Column(Integer, default=0, nullable=False)
+    farming = Column(Integer, default=0, nullable=False)
+    firemaking = Column(Integer, default=0, nullable=False)
+    fishing = Column(Integer, default=0, nullable=False)
+    hunter = Column(Integer, default=0, nullable=False)
+    herblore = Column(Integer, default=0, nullable=False)
+    cooking = Column(Integer, default=0, nullable=False)
+    thieving = Column(Integer, default=0, nullable=False)
+    construction = Column(Integer, default=0, nullable=False)
+    slayer = Column(Integer, default=0, nullable=False)
+    agility = Column(Integer, default=0, nullable=False)
+    fletching = Column(Integer, default=0, nullable=False)
+    sailing = Column(Integer, default=0, nullable=False)
+    last_updated = Column(DateTime, default=datetime.now, nullable=False)
+
+
+
+class PremiumFeature(Base):
+    __tablename__ = 'premium_features'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key = Column(String(64), unique=True, index=True, nullable=False)
+    name = Column(String(255), nullable=False)
+    description = Column(String(1000))
+    scope = Column(Enum('player', 'group', 'both'), nullable=False, server_default=text("'both'"))
+    cost_points = Column(Integer, nullable=False)              # points per activation/period
+    duration_days = Column(Integer, nullable=False)            # entitlement length
+    allow_multiple = Column(Boolean, nullable=False, server_default=text('0'))
+    active = Column(Boolean, nullable=False, server_default=text('1'))
+    date_added = Column(DateTime, default=func.now())
+    date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
+
+
+class FeatureActivation(Base):
+    __tablename__ = 'feature_activations'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=True)
+    group_id = Column(Integer, ForeignKey('groups.group_id'), nullable=True)
+    feature_id = Column(Integer, ForeignKey('premium_features.id'), nullable=False)
+    start_at = Column(DateTime, nullable=False, default=func.now())
+    end_at = Column(DateTime, nullable=False)
+    auto_renew = Column(Boolean, nullable=False, server_default=text('0'))
+    status = Column(Enum('active','expired','cancelled'), nullable=False, server_default=text("'active'"))
+    date_added = Column(DateTime, default=func.now())
+    date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
+
+    __table_args__ = (
+        Index('idx_activation_owner', 'player_id', 'group_id'),
+        Index('idx_activation_status', 'status'),
+    )
+
+
+class PointCredit(Base):
+    __tablename__ = 'point_credits'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=True)
+    group_id = Column(Integer, ForeignKey('groups.group_id'), nullable=True)
+    source = Column(String(255), nullable=False)
+    amount = Column(Integer, nullable=False)
+    amount_remaining = Column(Integer, nullable=False)
+    earned_at = Column(DateTime, nullable=False, default=func.now())
+    expires_at = Column(DateTime, nullable=True)
+    # For player-owned credits, this may be used by that player for themselves or their groups.
+    # For group-owned credits, usage is restricted to that group only.
+    status = Column(Enum('active','expired','revoked'), nullable=False, server_default=text("'active'"))
+    revoked_at = Column(DateTime, nullable=True)
+    revocation_reason = Column(String(255))
+    date_added = Column(DateTime, default=func.now())
+    date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
+
+    __table_args__ = (
+        Index('idx_credit_owner', 'player_id', 'group_id'),
+        Index('idx_credit_expires', 'expires_at'),
+        Index('idx_credit_status', 'status'),
+    )
+
+
+class PointDebit(Base):
+    __tablename__ = 'point_debits'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # The owner that received the feature/benefit (player or group)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=True)
+    group_id = Column(Integer, ForeignKey('groups.group_id'), nullable=True)
+    # Who paid: either the same group (group credits) or a specific player (player credits)
+    spent_by_player_id = Column(Integer, ForeignKey('players.player_id'), nullable=True)
+
+    amount = Column(Integer, nullable=False)
+    reason = Column(Enum('feature_activation','manual'), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=func.now())
+    # Optional: record how the debit was allocated across credits (credit_id→amount)
+    allocations = Column(JSON, nullable=True)
+    feature_activation_id = Column(Integer, ForeignKey('feature_activations.id'), nullable=True)
+
+    __table_args__ = (
+        Index('idx_debit_owner', 'player_id', 'group_id', 'created_at'),
+    )
+
+
+# Recurring point grants for subscriptions/nitro/custom monthly credits
+class RecurringPointGrant(Base):
+    __tablename__ = 'recurring_point_grants'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=False)
+    source = Column(String(255), nullable=False)
+    external_ref = Column(String(128), nullable=True)
+    amount_per_period = Column(Integer, nullable=False)
+    cadence = Column(Enum('monthly'), nullable=False, server_default=text("'monthly'"))
+    last_granted_at = Column(DateTime, nullable=True)
+    next_due_at = Column(DateTime, nullable=True)
+    status = Column(Enum('active','paused','cancelled'), nullable=False, server_default=text("'active'"))
+    extra_data = Column(JSON, nullable=True)
+    date_added = Column(DateTime, default=func.now())
+    date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
+
+    __table_args__ = (
+        Index('idx_rpg_player_status_due', 'player_id', 'status', 'next_due_at'),
+        Index('idx_rpg_source_ext', 'source', 'external_ref'),
+    )
+
 
 # Setup database connection and create tables
 engine = create_engine(
@@ -983,3 +1309,6 @@ session = scoped_session(Session)
 #     """), {"item_name": item_name, "item_id": item_id, "noted": noted})
 #     create_xf_servicelog("info", f"A new item has been added to the database: {item_name} ({item_id})")
 #     xenforo_session.commit()
+
+# Minimal models
+
