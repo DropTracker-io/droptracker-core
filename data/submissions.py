@@ -266,7 +266,12 @@ async def ensure_player_by_name_then_auth(session, player_name, account_hash, au
     """Name-first player lookup (matching clog/pb/ca flows), create if missing, then auth. Returns (player, authed, user_exists)."""
     player = None
     if player_name:
-        player = session.query(Player).filter(Player.player_name.ilike(player_name)).first()
+        player: Player = session.query(Player).filter(Player.player_name.ilike(player_name)).first()
+        if player and player.player_name != player_name:
+            if player.account_hash == account_hash: ## Verify a matching account hash incase of some inconsistency 
+            ## Always update the player's name if it doesn't match the incoming name
+                player.player_name = player_name
+                session.commit()    
     if not player:
         player = await create_player(player_name, account_hash, existing_session=session)
         if not player:
