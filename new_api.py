@@ -683,6 +683,12 @@ async def webhook_data():
                                 #submission_type = "quest_completion"
                                 #await submissions.quest_processor(processed_data, external_session=db_session)
                                 continue
+                            case "pet":
+                                await submissions.pet_processor(processed_data, external_session=db_session)
+                                continue
+                            case "adventure_log":
+                                await submissions.adventure_log_processor(processed_data, external_session=db_session)
+                                continue
                             case _:
                                 #print(f"Unknown submission type: {submission_type} data: {processed_data}")
                                 continue
