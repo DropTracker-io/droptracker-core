@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from interactions.api.events import MessageCreate, Startup
 from interactions import Embed, Intents, Message, ChannelType, OptionType, slash_command, Permissions, slash_option
 from db.models import Group, ItemList, PersonalBestEntry, PlayerPet, Session, Player, User, UserConfiguration
-from data.submissions import clog_processor, ca_processor, pb_processor, drop_processor
+from data.submissions import adventure_log_processor, clog_processor, ca_processor, pb_processor, drop_processor, pet_processor
 from utils.format import convert_to_ms, get_true_boss_name
 from services.ticket_system import Tickets
 import time
@@ -155,78 +155,12 @@ async def on_message_create(event: MessageCreate):
                 elif "quest_completion" in field_values:
                     #await quest_processor(embed_data)
                     continue
+                elif "pet" in field_values and "pet_name" in field_names:
+                    await pet_processor(embed_data)
+                    continue
                 elif "adventure_log" in field_values:
-                    if embed.fields:
-                        for field in embed.fields:
-                            if field.name == "player":
-                                player_name = field.value
-                                break
-                    # Use local session for database operations
-                    local_session = Session()
-                    try:
-                        player_object = local_session.query(Player).filter(Player.player_name == player_name).first()
-                        if player_object:
-                            player_id = player_object.player_id
-                        else:
-                            continue
-                        
-                        if embed.fields:
-                            for field in embed.fields:
-                                if field.name == "player":
-                                    player_name = field.value
-                                elif field.name == "acc_hash":
-                                    account_hash = field.value
-                                if field.name != "type" and field.name != "player" and field.name != "acc_hash":
-                                    try:
-                                        field_int = int(field.name)
-                                        pb_content = field.value
-                                        personal_bests = pb_content.split("\n")
-                                        for pb in personal_bests:
-                                            boss_name, rest = pb.split(" - ")
-                                            team_size, time = rest.split(" : ")
-                                            boss_name = boss_name.strip()
-                                            team_size = team_size.strip()
-                                            boss_name, team_size, time = boss_name.replace("`", ""), team_size.replace("`", ""), time.replace("`", "")
-                                            time = time.strip()
-                                            real_boss_name, npc_id = get_true_boss_name(boss_name)
-                                            existing_pb = local_session.query(PersonalBestEntry).filter(PersonalBestEntry.player_id == player_id, PersonalBestEntry.npc_id == npc_id,
-                                                                                                PersonalBestEntry.team_size == team_size).first()
-                                            time_ms = convert_to_ms(time)
-                                            if existing_pb:
-                                                if time_ms < existing_pb.personal_best:
-                                                    existing_pb.personal_best = time_ms
-                                                    local_session.commit()
-                                            else:
-                                                new_pb = PersonalBestEntry(player_id=player_id, npc_id=npc_id, 
-                                                                        team_size=team_size, personal_best=time_ms, 
-                                                                        kill_time=time_ms, new_pb=True)
-                                                local_session.add(new_pb)
-                                                local_session.commit()
-                                    
-                                    except ValueError:
-                                        pet_list = field.value
-                                        pet_list = pet_list.replace("[", "")
-                                        pet_list = pet_list.replace("]", "")
-                                        pet_list = pet_list.split(",")
-                                        if len(pet_list) > 0:
-                                            for pet in pet_list:
-                                                pet = int(pet.strip())
-                                                item_object: ItemList = local_session.query(ItemList).filter(ItemList.item_id == pet).first()
-                                                if item_object:
-                                                    player_pet = PlayerPet(player_id=player_id, item_id=item_object.item_id, pet_name=item_object.item_name)
-                                                    try:
-                                                        local_session.add(player_pet)
-                                                        local_session.commit()
-                                                        print("Added a pet to the database for", player_name, account_hash, item_object.item_name, item_object.item_id)
-                                                    except Exception as e:
-                                                        print("Couldn't add a pet to the database:", e)
-                                                        local_session.rollback()
-                    except Exception as e:
-                        local_session.rollback()
-                        print(f"Error processing adventure log: {e}")
-                    finally:
-                        local_session.close()
-
+                    await adventure_log_processor(embed_data)
+                    continue
 
 @interactions.listen(Startup)
 async def on_startup(event: Startup):

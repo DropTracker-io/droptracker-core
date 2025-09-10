@@ -909,7 +909,106 @@ class NotificationService:
             notification.error_message = str(e)
             session.commit()
             raise
-    
+
+    async def send_pet_notification(self, notification: NotificationQueue, data: dict):
+        """Send a pet notification to Discord"""
+        from db.models import NotifiedSubmission
+        group_id = notification.group_id
+        player_id = notification.player_id
+        print("Got pet data:", data)
+        # notification_data = {
+        #         'player_name': player_name,
+        #         'player_id': player_id,
+        #         'pet_name': pet_name,
+        #         'source': source,
+        #         'npc_name': npc_name,
+        #         'killcount': killcount,
+        #         'milestone': milestone,
+        #         'duplicate': duplicate,
+        #         'previously_owned': previously_owned,
+        #         'game_message': game_message,
+        #         'image_url': dl_path,
+        #         'item_id': pet_item_id,
+        #         'npc_id': npc_id,
+        #         'is_new_pet': is_new_pet
+        #     }
+        pet_name = data.get('pet_name')
+        source = data.get('source')
+        npc_name = data.get('npc_name')
+        killcount = data.get('killcount')
+        milestone = data.get('milestone')
+        duplicate = data.get('duplicate')
+        previously_owned = data.get('previously_owned')
+        game_message = data.get('game_message')
+        image_url = data.get('image_url')
+        item_id = data.get('item_id')
+        npc_id = data.get('npc_id')
+        is_new_pet = data.get('is_new_pet')
+        group_id = data.get('group_id')
+        player_name = data.get('player_name')
+        update_active = check_active_upgrade(group_id)
+        if update_active:
+            embed_template = await self.db_ops.get_group_embed('pet', group_id)
+        else:
+            embed_template = await self.db_ops.get_group_embed('pet', 1)
+        
+        if not embed_template:
+            notification.status = 'failed'
+            notification.error_message = f"No embed template for group {group_id}"
+            session.commit()
+            return
+        
+        
+        channel_id_config = session.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == group_id,
+            GroupConfiguration.config_key == 'channel_id_to_post_pets'
+        ).first()
+        
+        
+        if not channel_id_config:
+            notification.status = 'failed'
+            notification.error_message = f"No channel configured for group {group_id}"
+            session.commit()
+            return
+        value_dict = {
+            "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{player_name}.{player_id}/view)",
+            "{pet_name}": pet_name,
+            "{source}": source,
+            "{npc_name}": npc_name,
+            "{killcount}": killcount,
+            "{milestone}": milestone,
+            "{duplicate}": duplicate,
+            "{previously_owned}": previously_owned
+        }
+        try:
+            channel = await self.bot.fetch_channel(channel_id=channel_id_config.config_value)
+            formatted_name = get_formatted_name(player_name, group_id, session)
+            if channel:
+                embed = replace_placeholders(embed_template, value_dict)
+                if group_id == 2:
+                    embed = await self.remove_group_field(embed)
+                
+                if image_url:
+                    try:
+                        local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
+                        if os.path.exists(local_path):
+                            attachment = interactions.File(local_path)
+                            message = await channel.send(f"{formatted_name} has acquired a new pet!", embed=embed, files=attachment)
+                    except Exception as e:
+                        message = await channel.send(f"{formatted_name} has acquired a new pet!", embed=embed)
+                else:
+                    message = await channel.send(f"{formatted_name} has acquired a new pet!", embed=embed)
+                
+                notification.status = 'sent'
+                notification.processed_at = datetime.now()
+                session.commit()
+                return
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = f"Failed to send pet notification: {e}"
+            session.commit()
+            return
+
     async def send_ca_notification(self, notification: NotificationQueue, data: dict):
         """Send a combat achievement notification to Discord"""
         from db.models import NotifiedSubmission
