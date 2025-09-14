@@ -14,7 +14,7 @@ async def download_image(sub_type: str,
                          file_data,
                          processed_data):
         # Validate player has a wom_id
-        print(f"API image download in process..... type: {sub_type} player: {player.player_name} player_wom_id: {player_wom_id} file_data: {file_data} processed_data: {processed_data}")
+        #print(f"API image download in process..... type: {sub_type} player: {player.player_name} player_wom_id: {player_wom_id} file_data: {file_data} processed_data: {processed_data}")
         if not player_wom_id:
             print(f"(download_image) Error: Player missing or has no wom_id: {player_wom_id}")
             return None
@@ -52,12 +52,12 @@ async def download_image(sub_type: str,
             raw_component = processed_data.get('source', processed_data.get('npc_name', 'unknown'))
 
         path_component = sanitize_filename(str(raw_component)) if raw_component else ""
-        print(f"Path component: {path_component}")
+        #print(f"Path component: {path_component}")
         # Build directory and URL paths consistently
         directory_path = os.path.join(base_dir, str(player_wom_id), canonical_type)
         if path_component:
             directory_path = os.path.join(directory_path, path_component)
-        print(f"Directory path: {directory_path}")
+        #print(f"Directory path: {directory_path}")
         url_path = f"{player_wom_id}/{canonical_type}/"
         if path_component:
             url_path = f"{url_path}{path_component}/"
@@ -129,7 +129,7 @@ async def download_image(sub_type: str,
 
             os.makedirs(directory_path, exist_ok=True)
             filepath = os.path.join(directory_path, filename)
-            print(f"Filepath: {filepath}")
+            #print(f"Filepath: {filepath}")
             # Save the file robustly, supporting multiple upload backends
             # Always try to rewind any underlying stream first
             try:
@@ -167,7 +167,8 @@ async def download_image(sub_type: str,
                         await asyncio.to_thread(save_func, filepath)
                     saved = True
                 except Exception as save_err:
-                    print(f"Primary save path failed, will try fallback reader: {type(save_err).__name__}: {save_err}")
+                    #print(f"Primary save path failed, will try fallback reader: {type(save_err).__name__}: {save_err}")
+                    pass
 
             # Case 2: Starlette/FastAPI UploadFile-like interfaces (.read/.file)
             if not saved:
@@ -202,7 +203,8 @@ async def download_image(sub_type: str,
             # Verify file size and retry with streaming if zero bytes
             try:
                 size_bytes = os.path.getsize(filepath)
-                print(f"Saved file to {filepath} ({size_bytes} bytes)")
+                #print(f"Saved file to {filepath} ({size_bytes} bytes)")
+                pass
             except Exception:
                 size_bytes = -1
             if size_bytes == 0:
@@ -233,15 +235,16 @@ async def download_image(sub_type: str,
                             with open(filepath, 'wb') as out_f:
                                 shutil.copyfileobj(file_data.file, out_f)
                         await asyncio.to_thread(_copy_sync_retry)
-                    print(f"Rewrote file to {filepath} ({os.path.getsize(filepath)} bytes)")
+                    #print(f"Rewrote file to {filepath} ({os.path.getsize(filepath)} bytes)")
+                    pass
                 except Exception as retry_err:
                     print(f"Retry save failed: {type(retry_err).__name__}: {retry_err}")
 
             # Add the external URL to the processed data (mirrors filesystem)
             processed_data["image_path"] = f"{base_url}{url_path}{filename}"
             
-            print(f"Saved image to {filepath}")
-            print(f"External URL set to: {processed_data['image_path']}")
+            #print(f"Saved image to {filepath}")
+            #print(f"External URL set to: {processed_data['image_path']}")
             return filepath
         except Exception as e:
             print(f"Error saving image: {e}")

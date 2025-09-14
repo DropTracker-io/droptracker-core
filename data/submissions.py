@@ -162,9 +162,22 @@ async def ensure_npc_id_for_player(session, npc_name, player_id, player_name, us
         return None, None
     if npc_name in npc_list:
         return npc_list[npc_name], npc_name
-    if "Doom" in npc_name and "(Level" in npc_name:
+    if ("doom of mokhaiotl" in npc_name.lower()) and ("(level" in npc_name.lower()):
         import re
-        npc_name = re.sub(r"\(Level (\d+) \)", r"(Level \1)", npc_name)
+        match = re.search(r"\(\s*Level\s*:??\s*(\d+)\s*\)", npc_name, flags=re.IGNORECASE)
+        level_value = None
+        if match:
+            print("Got a match on doom level value:", match.group(1))
+            level_value = int(match.group(1))
+            try:
+                ## Convert to int, as anything that isn't a single floor would send with a hyphen/etc and fail
+                level_value = int(level_value)
+            except Exception as e:
+                ## If we don't find a proper floor value, return default doom id
+                return 14704, npc_name
+            npc_name = re.sub(r"\(\s*Level\s*:??\s*(\d+)\s*\)", r"(Level \1)", npc_name, flags=re.IGNORECASE)
+            print("Parsed doom's name:", npc_name, "Level:", level_value)
+            return (14707 + level_value), npc_name ## Doom's PB npc ids are stored by level; with each level 1 id incremented from the last
         return 14707, npc_name
     npc_row = session.query(NpcList.npc_id).filter(NpcList.npc_name == npc_name).first()
     if npc_row:
@@ -572,21 +585,21 @@ async def ca_processor(ca_data, external_session=None):
     session.commit()
     debug_print("Committed a new CA entry")
     # Create notification if it's a new CA
-    match tier:
-            case 'easy':
-                points = 1
-            case 'medium':
-                points = 2
-            case 'hard':
-                points = 3
-            case 'elite':
-                points = 4
-            case 'master': 
-                points = 5
-            case 'grandmaster':
-                points = 6
-            case _:
-                points = 0
+    match str(tier).strip().lower():
+        case 'easy':
+            points = 1
+        case 'medium':
+            points = 2
+        case 'hard':
+            points = 3
+        case 'elite':
+            points = 4
+        case 'master': 
+            points = 5
+        case 'grandmaster':
+            points = 6
+        case _:
+            points = 1
     try:
         award_points_to_player(player_id=player_id, amount=points, source=f'Combat Achievement: {task_name}', expires_in_days=60)
     except Exception as e:
@@ -979,12 +992,13 @@ async def pb_processor(pb_data, external_session=None):
     downloaded = pb_data.get('downloaded', False)
     image_url = pb_data.get('image_url', None)
     used_api = pb_data.get('used_api', False)
+    unique_id = pb_data.get('')
 
     
-    debug_print(f"Extracted PB data - Player: {player_name}, Boss: {boss_name}, Team size: {team_size}")
-    debug_print(f"Current time: {current_ms}ms, PB time: {pb_ms}ms, Final time: {time_ms}ms")
-    debug_print(f"Is personal best: {is_personal_best}, Used API: {used_api}")
-    debug_print(f"Account hash: {account_hash[:8]}... (truncated)")
+    print(f"Extracted PB data - Player: {player_name}, Boss: {boss_name}, Team size: {team_size}")
+    print(f"Current time: {current_ms}ms, PB time: {pb_ms}ms, Final time: {time_ms}ms")
+    print(f"Is personal best: {is_personal_best}, Used API: {used_api}")
+    print(f"Account hash: {account_hash[:8]}... (truncated)")
     player = None
     has_xf_entry = False
     dl_path = None
@@ -1069,7 +1083,7 @@ async def pb_processor(pb_data, external_session=None):
         #print("Is personal best, creating notification")
         # Get player groups
         ## We need to determine what KC the player has received this PB at
-        current_kc = get_player_metric(player_name, npc_name)
+        current_kc = await get_player_metric(player_name, npc_name)
         if current_kc >= 50:
             award_points_to_player(player_id=player_id, amount=20, source=f'New Personal Best ({convert_from_ms(time_ms)}) at {npc_name}', expires_in_days=60)
         print("Player found, getting groups")

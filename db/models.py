@@ -153,6 +153,10 @@ class Drop(Base):
     authed = Column(Boolean, default=False)
     used_api = Column(Boolean, default=False)
     partition = Column(Integer, default=get_current_partition, index=True)
+
+    
+    ## unique entry ID to prevent duplicates & allow checks for submission status on panels
+    unique_id = Column(String(255), nullable=True)
     
     player = relationship("Player", back_populates="drops")
     notified_drops = relationship("NotifiedSubmission", back_populates="drop")
@@ -176,6 +180,10 @@ class CollectionLogEntry(Base):
     date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
     used_api = Column(Boolean, default=False)
 
+    
+    ## unique entry ID to prevent duplicates & allow checks for submission status on panels
+    unique_id = Column(String(255), nullable=True)
+
     player = relationship("Player", back_populates="clogs")
     notified_clog = relationship("NotifiedSubmission", back_populates="clog")
 
@@ -193,6 +201,11 @@ class CombatAchievementEntry(Base):
     image_url = Column(String(255), nullable=True)
     date_added = Column(DateTime, index=True, default=func.now())
     used_api = Column(Boolean, default=False)
+
+
+    ## unique entry ID to prevent duplicates & allow checks for submission status on panels
+    unique_id = Column(String(255), nullable=True)
+
     player = relationship("Player", back_populates="cas")
     notified_ca = relationship("NotifiedSubmission", back_populates="ca")
 
@@ -212,6 +225,10 @@ class PersonalBestEntry(Base):
     image_url = Column(String(150), nullable=True)
     date_added = Column(DateTime, nullable=True, default=func.now())
     used_api = Column(Boolean, default=False)
+
+    ## unique entry ID to prevent duplicates & allow checks for submission status on panels
+    unique_id = Column(String(255), nullable=True)
+    
     player = relationship("Player", back_populates="pbs")
     notified_pb = relationship("NotifiedSubmission", back_populates="pb")
 

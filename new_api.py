@@ -49,7 +49,9 @@ import logging
 
 # Configure logging to suppress HTTP access logs  
 logging.getLogger('quart.serving').setLevel(logging.ERROR)
-logging.getLogger('hypercorn.access').setLevel(logging.ERROR)
+#logging.getLogger('hypercorn.access').setLevel(logging.ERROR)
+logging.getLogger('hypercorn.access').setLevel(logging.CRITICAL + 1)
+logging.getLogger('hypercorn.access').disabled = True
 
 # Initialize Quart app
 app = Quart(__name__)
@@ -627,16 +629,16 @@ async def webhook_data():
                         processed_data["downloaded"] = False
                         
                         if image_file:
-                            print("Got image file in form data")
+                            #print("Got image file in form data")
                             processed_data["has_image"] = True
                             # Use a separate session for image processing to avoid conflicts
                             image_session = get_db_session()
-                            print(f"Processed data: {processed_data}")
+                            #print(f"Processed data: {processed_data}")
                             player_name = processed_data.get('player', processed_data.get('player_name', None))
-                            print(f"Player name from processed_data: {player_name}")
+                            #print(f"Player name from processed_data: {player_name}")
                             try:
                                 player = image_session.query(Player).filter(Player.player_name == player_name).first()
-                                print(f"Found player: {player}")
+                                #print(f"Found player: {player}")
                                 player_wom_id = player.wom_id if player else None
                                 if player:
                                     file_path = await download_image(sub_type=processed_data.get('type', 'unknown'), player=player, player_wom_id=player_wom_id, file_data=image_file, processed_data=processed_data)
@@ -647,9 +649,10 @@ async def webhook_data():
                                         processed_data["image_url"] = file_path
                                         processed_data["downloaded"] = True
                                         downloaded = True
-                                        print(f"Successfully processed image, external URL: {processed_data['image_url']}")
+                                        #print(f"Successfully processed image, external URL: {processed_data['image_url']}")
                                     else:
-                                        print(f"Failed to process image for {processed_data.get('player', 'unknown player')}")
+                                        pass
+                                        #print(f"Failed to process image for {processed_data.get('player', 'unknown player')}")
                             finally:
                                 image_session.close()
                         else:
@@ -671,6 +674,7 @@ async def webhook_data():
                                 await submissions.clog_processor(processed_data, external_session=db_session)
                             case "personal_best" | "kill_time" | "npc_kill":
                                 submission_type = "personal_best"
+                                print("Got pb processed data: ", processed_data)
                                 await submissions.pb_processor(processed_data, external_session=db_session)
                             case "combat_achievement":
                                 submission_type = "combat_achievement"

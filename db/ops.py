@@ -305,7 +305,7 @@ class DatabaseOperations:
             # Don't re-download if the image was already downloaded and processed
             if attachment_type == "downloaded":
                 # Image was already downloaded, use the provided image_url directly
-                print(f"Using already downloaded image for drop {item_name} from {npc_name}")
+                #print(f"Using already downloaded image for drop {item_name} from {npc_name}")
                 # The image_url should already be set from the original download
                 pass
             else:
