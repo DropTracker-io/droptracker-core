@@ -1238,7 +1238,11 @@ class ClanCommands(Extension):
                 session.commit()
             else:
                 if guild.group_id != None:
-                    return await ctx.send(f"This Discord server is already associated with a DropTracker group.\n" + 
+                    group = session.query(Group).filter(Group.group_id == guild.group_id).first()
+                    if group and group.wom_id == wom_id:
+                        return await ctx.send(f"You have already registered this group with the DropTracker! Please continue to [the website](https://www.droptracker.io/groups/{group.group_id}) to configure your group.")
+                    ## Otherwise the group wom id was different than the one they provided
+                    return await ctx.send(f"This Discord server is already associated with a DropTracker group (using wom id {group.wom_id}).\n" + 
                                         "If this is a mistake, please reach out in Discord", ephemeral=True)
         
             group = session.query(Group).filter(Group.wom_id == wom_id).first()
@@ -1257,24 +1261,6 @@ class ClanCommands(Extension):
                 
                 # Initialize these variables with defaults
                 total_members = 0
-                total_tracked_already = 0
-                
-                #try:
-                #     group_wom_ids = await fetch_group_members(wom_id)
-                #     group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
-                #     for member in group_members:
-                #         if member.user:
-                #             member_user: User = member.user
-                #             member_user.add_group(group)
-                #         member.add_group(group)
-                #     total_members = len(group_wom_ids)
-                #     total_tracked_already = len(group_members)
-                #     print(f"Successfully processed {total_tracked_already} existing members from WOM group {wom_id}")
-                # except Exception as e:
-                #     print("Error fetching group members/assigning them to the group during group creation:", e)
-                #     # Don't rollback here - just continue with group creation without WOM members
-                    
-                # Commit the group creation (this will generate the group_id)
                 try:
                     session.commit()
                     print(f"Successfully committed group {group.group_id}")
