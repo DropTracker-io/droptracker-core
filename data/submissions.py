@@ -5,9 +5,8 @@ from db.models import CombatAchievementEntry, Drop, FeatureActivation, NotifiedS
 from db import models
 from db.update_player_total import update_player_in_redis
 from db.xf.recent_submissions import create_xenforo_entry
-from lootboards import update_specific_board
 from services import redis_updates
-from services.lootboards import instantly_update_board
+from services.lootboard_updater import instantly_update_board
 from services.points import award_points_to_player
 from utils.embeds import update_boss_pb_embed
 from utils.ge_value import get_true_item_value

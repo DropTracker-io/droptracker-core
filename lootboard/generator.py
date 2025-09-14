@@ -495,9 +495,9 @@ async def generate_server_board_temporary(group_id: int = 0, wom_group_id: int =
     else:
         ignored_players = []
     if len(ignored_players) > 0:
-        print(f"Excluding {len(ignored_players)} ignored players from the lootboard generation for group {group_id}")
+        #print(f"Excluding {len(ignored_players)} ignored players from the lootboard generation for group {group_id}")
         player_ids = [player_id for player_id in player_ids if player_id not in ignored_players]
-    print("Got a total of ", len(player_ids), "players for group ", group_id)
+    #print("Got a total of ", len(player_ids), "players for group ", group_id)
     # Get the drops, recent drops, and total loot for the group
     #print("Processed player_ids")
     # Respect group config: optionally filter items and totals by minimum value
@@ -513,7 +513,7 @@ async def generate_server_board_temporary(group_id: int = 0, wom_group_id: int =
         only_include_items_over_minimum=only_include_items_over_minimum_flag,
         group_minimum_value=group_min_value_cfg
     )
-    print("Got recent drops:", len(recent_drops))
+    #print("Got recent drops:", len(recent_drops))
     redis_client.client.zadd(f'gleaderboard:{partition}', {group.group_id: total_loot})
     with open(f"/store/droptracker/disc/static/assets/img/clans/{group_id}/recent_drops.json", "w") as f:
         json.dump(recent_drops, f, indent=4)

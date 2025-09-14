@@ -16,7 +16,7 @@ from db.update_player_total import background_task, start_background_redis_tasks
 from lootboards import get_fresh_xenforo_session
 from services.notification_service import NotificationService
 from services.bot_state import BotState
-from services.lootboards import LootboardServices
+from services.lootboard_updater import LootboardServices
 from services.channel_names import ChannelNames
 #from services import update_dmer
 from utils.ge_value import get_true_item_value
@@ -146,7 +146,7 @@ async def on_startup(event: Startup):
                               activity=interactions.Activity(name=f" /help", type=interactions.ActivityType.WATCHING))
     #bot.load_extension("services.update_dmer")
     bot.load_extension("commands")
-    bot.load_extension("services.lootboards")
+    bot.load_extension("services.lootboard_updater")
     bot.load_extension("services.bot_state")
     bot.load_extension("services.message_handler")
     bot.load_extension("services.channel_names")
