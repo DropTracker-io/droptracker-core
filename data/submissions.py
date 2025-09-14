@@ -1083,9 +1083,14 @@ async def pb_processor(pb_data, external_session=None):
         #print("Is personal best, creating notification")
         # Get player groups
         ## We need to determine what KC the player has received this PB at
-        current_kc = await get_player_metric(player_name, npc_name)
-        if current_kc >= 50:
-            award_points_to_player(player_id=player_id, amount=20, source=f'New Personal Best ({convert_from_ms(time_ms)}) at {npc_name}', expires_in_days=60)
+        try:
+            current_kc = await get_player_metric(player_name, npc_name)
+            print("Got current KC:", current_kc)
+            if current_kc >= 50:
+                award_points_to_player(player_id=player_id, amount=20, source=f'New Personal Best ({convert_from_ms(time_ms)}) at {npc_name}', expires_in_days=60)
+        except Exception as e:
+            print("Couldn't get current KC:")
+            print(e)
         print("Player found, getting groups")
         player_groups = get_player_groups_with_global(session, player)
         for group in player_groups:
