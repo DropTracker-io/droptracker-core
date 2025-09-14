@@ -15,10 +15,19 @@ DB_PASS = os.getenv("DB_PASS")
 # Create base class for declarative models
 Base = declarative_base()
 
-# Create engine
+# Create engine with improved connection handling
 engine = create_engine(f'mysql+pymysql://{DB_USER}:{DB_PASS}@localhost:3306/data', 
-                      pool_size=20, max_overflow=10,
-                      pool_pre_ping=True)
+                      pool_size=20, 
+                      max_overflow=10,
+                      pool_pre_ping=True,  # Test connections before use
+                      pool_recycle=3600,   # Recycle connections every hour
+                      connect_args={
+                          'connect_timeout': 10,    # Connection timeout
+                          'read_timeout': 30,       # Read timeout  
+                          'write_timeout': 30,      # Write timeout
+                          'charset': 'utf8mb4',
+                          'autocommit': False
+                      })
 
 # Create session factory
 Session = sessionmaker(bind=engine)
