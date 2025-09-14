@@ -20,12 +20,6 @@ load_dotenv()
 
 bot = interactions.Client(token=os.getenv("WEBHOOK_TOKEN"), intents=Intents.ALL)
 
-# Debug: Print bot info at startup
-print(f"=== WEBHOOK BOT INITIALIZATION ===")
-print(f"Bot token configured: {'Yes' if os.getenv('WEBHOOK_TOKEN') else 'No'}")
-print(f"Bot intents: {Intents.ALL}")
-print(f"Bot intents value: {Intents.ALL.value}")
-print("=== END INITIALIZATION ===")
 
 # Add a test to verify the event listener is registered
 @bot.event
@@ -37,11 +31,6 @@ async def on_ready():
     for guild in bot.guilds:
         print(f"  - {guild.name} (ID: {guild.id})")
     print("=== END READY ===")
-
-# Test event listener to verify events are working
-@bot.event  
-async def on_guild_create(guild):
-    print(f"Bot joined guild: {guild.name} (ID: {guild.id})")
 
 # Add retry decorator for database operations
 def retry_on_database_error(max_retries=3, delay=1):
@@ -109,14 +98,6 @@ async def process_submission_with_session(submission_type, embed_data):
 
 @interactions.listen(MessageCreate)
 async def on_message_create(event: MessageCreate):
-    print(f"=== MESSAGE EVENT TRIGGERED ===")
-    print(f"Event type: {type(event)}")
-    print(f"Message author: {event.message.author}")
-    print(f"Message guild: {event.message.guild}")
-    print(f"Message channel: {event.message.channel}")
-    print(f"Message content preview: {event.message.content[:50] if event.message.content else 'No content'}")
-    print(f"Message embeds: {len(event.message.embeds)}")
-    print("=== END MESSAGE EVENT DEBUG ===")
     def embed_to_dict(embed: Embed):
         if embed.fields:
             return {f.name: f.value for f in embed.fields}
@@ -200,17 +181,11 @@ async def on_message_create(event: MessageCreate):
         
 @interactions.listen(Startup)
 async def on_startup(event: Startup):
-    print("=== WEBHOOK BOT STARTUP ===")
-    print(f"Bot user: {bot.user}")
-    print(f"Bot ID: {bot.user.id if bot.user else 'Unknown'}")
-    print(f"Bot intents: {bot.intents}")
-    print(f"Bot guilds: {len(bot.guilds) if bot.guilds else 0}")
     
     # Load extensions first (they don't require database)
     try:
         bot.load_extension("services.updates")
         bot.load_extension("services.ticket_system")
-        print("Extensions loaded successfully")
     except Exception as e:
         print(f"Error loading extensions: {e}")
     
@@ -219,12 +194,9 @@ async def on_startup(event: Startup):
     local_session = Session()
     try:
         player_count = local_session.query(Player.player_id).count()
-        print(f"Webhook bot started with {player_count} players")
         await bot.change_presence(status=interactions.Status.ONLINE,
                             activity=interactions.Activity(name=f" ~{player_count} players", type=interactions.ActivityType.WATCHING))
     except (OperationalError, DisconnectionError) as e:
-        print(f"Database connection error during startup: {e}")
-        print("Setting fallback presence...")
         await bot.change_presence(status=interactions.Status.ONLINE,
                             activity=interactions.Activity(name="DropTracker Bot", type=interactions.ActivityType.WATCHING))
     except Exception as e:
@@ -233,9 +205,6 @@ async def on_startup(event: Startup):
                             activity=interactions.Activity(name="DropTracker Bot", type=interactions.ActivityType.WATCHING))
     finally:
         local_session.close()
-    
-    print("=== WEBHOOK BOT STARTUP COMPLETE ===")
-    print("Webhook bot is now ready to receive messages...")
 
 
 

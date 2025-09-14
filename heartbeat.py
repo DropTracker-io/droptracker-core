@@ -40,6 +40,94 @@ load_dotenv()
 
 joel_id = 528746710042804247
 
+# --- Discord constraints and creation throttling ---
+MAX_WEBHOOKS_PER_CHANNEL = 15
+DESIRED_WEBHOOKS_PER_CHANNEL = 1
+MAX_CREATIONS_PER_RUN = 5
+CREATE_RETRY_DELAYS = [2, 5, 10]  # seconds
+
+# Global rate limiting primitives
+creation_semaphore = asyncio.Semaphore(1)
+GLOBAL_CREATION_COOLDOWN_UNTIL: float = 0.0
+
+# Channels that need at least one webhook created
+channels_needing_webhook = set()
+
+
+def get_webhook_type_for_parent(parent_id: int) -> str:
+    webhook_type = "backup"
+    if parent_id in main_parent_ids:
+        webhook_type = "core"
+    elif parent_id in hooks_parent_ids:
+        webhook_type = "hooks"
+    elif parent_id in hooks_2_parent_ids:
+        webhook_type = "hooks-2"
+    elif parent_id in hooks_3_parent_ids:
+        webhook_type = "hooks-3"
+    return webhook_type
+
+
+def webhook_url_exists_anywhere(webhook_url: str) -> bool:
+    try:
+        existing = session.query(Webhook).filter_by(webhook_url=webhook_url).first()
+        if existing:
+            return True
+        existing_pending = session.query(WebhookPendingDeletion).filter_by(webhook_url=webhook_url).first()
+        if existing_pending:
+            return True
+        backup_existing = session.query(BackupWebhook).filter_by(webhook_url=webhook_url).first()
+        if backup_existing:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def add_webhook_to_db_if_missing(webhook: interactions.Webhook, parent_id: int) -> bool:
+    try:
+        webhook_url = webhook.url
+        if webhook_url_exists_anywhere(webhook_url):
+            return False
+        webhook_type = get_webhook_type_for_parent(parent_id)
+        db_webhook = Webhook(webhook_id=webhook.id, webhook_url=webhook_url, type=webhook_type)
+        session.add(db_webhook)
+        session.commit()
+        recently_created_webhook_ids.add(str(webhook.id))
+        return True
+    except sqlalchemy.exc.IntegrityError:
+        session.rollback()
+        return False
+    except Exception:
+        session.rollback()
+        return False
+
+
+async def safe_create_webhook_in_channel(channel: interactions.GuildText, name: str, avatar: interactions.File) -> interactions.Webhook | None:
+    # Retry with simple backoff for transient rate-limit errors; stop immediately on capacity errors
+    global GLOBAL_CREATION_COOLDOWN_UNTIL
+    async with creation_semaphore:
+        # Honor global cooldown window if set
+        now = time.time()
+        if GLOBAL_CREATION_COOLDOWN_UNTIL > now:
+            await asyncio.sleep(GLOBAL_CREATION_COOLDOWN_UNTIL - now)
+        for idx, delay in enumerate([0] + CREATE_RETRY_DELAYS):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                webhook: interactions.Webhook = await channel.create_webhook(name=name, avatar=avatar)
+                return webhook
+            except Exception as e:
+                message = str(e)
+                # Capacity reached -> permanent for this channel until manual cleanup
+                if "Maximum number of webhooks" in message or "Maximum number of webhooks reached" in message:
+                    return None
+                # On obvious rate-limit indicators, set short global cooldown and retry; otherwise, give up
+                if "rate limit" in message.lower() or "429" in message:
+                    GLOBAL_CREATION_COOLDOWN_UNTIL = time.time() + 2
+                    continue
+                return None
+        return None
+
 @slash_command(name="run_creation_loop", description="Run the creation loop manually",
                default_member_permissions=Permissions.ADMINISTRATOR)
 async def run_creation_loop(ctx: interactions.SlashContext):
@@ -160,10 +248,14 @@ async def load_initial_webhook_states():
                                             'channel_id': str(channel.id),
                                             'guild_id': str(guild.id)
                                         }
+                                # If channel has no webhooks, mark it as needing one
+                                if len(webhooks) == 0:
+                                    channels_needing_webhook.add(str(channel.id))
             except Exception as e:
                 print(f"Error loading webhooks for channel {channel.id}: {str(e)}")
             finally:
-                print(f"Finished loading from #{total_loaded}")
+                if total_loaded % 50 == 0:
+                    print(f"Finished loading from #{total_loaded}")
                 total_loaded += 1
     print(f"Loaded webhook states for {len(webhook_states)} channels")
     await bot.change_presence(status=interactions.Status.ONLINE,
@@ -305,6 +397,7 @@ async def run_channel_deletes():#
     global main_parent_ids, hooks_parent_ids, hooks_2_parent_ids, hooks_3_parent_ids
     parent_ids = main_parent_ids + hooks_parent_ids + hooks_2_parent_ids + hooks_3_parent_ids
     notification_channel = await bot.fetch_channel(1369649855194202223)
+    created_this_run = 0
     for guild in bot.guilds:
         for channel in guild.channels:
             if isinstance(channel, GuildText):
@@ -315,11 +408,24 @@ async def run_channel_deletes():#
                                 channel: interactions.GuildText = channel
                                 logo_path = '/store/droptracker/disc/static/assets/img/droptracker-small.gif'
                                 avatar = interactions.File(logo_path)
+                                # Skip if channel already at capacity or already has desired number
+                                existing_hooks = await channel.fetch_webhooks()
+                                if len(existing_hooks) >= MAX_WEBHOOKS_PER_CHANNEL or len(existing_hooks) >= DESIRED_WEBHOOKS_PER_CHANNEL:
+                                    channels_needing_webhook.discard(str(channel.id))
+                                    continue
+                                # Global throttle per run to reduce rate-limit pressure
+                                if created_this_run >= MAX_CREATIONS_PER_RUN:
+                                    # brief backoff before scanning other channels
+                                    await asyncio.sleep(1)
+                                    continue
                     
                                 # Determine a good webhook name based on channel name
                                 webhook_name = f"DropTracker Webhooks ({channel.name.replace('drops-', '')})"
-                                
-                                webhook: interactions.Webhook = await channel.create_webhook(name=webhook_name, avatar=avatar)
+                                webhook = await safe_create_webhook_in_channel(channel, webhook_name, avatar)
+                                if webhook is None:
+                                    # Mark channel to retry later
+                                    channels_needing_webhook.add(str(channel.id))
+                                    continue
                                 webhook_url = webhook.url
                                 print("Created webhook, checking for duplicates in database...")
                                 with session.no_autoflush:
@@ -329,24 +435,20 @@ async def run_channel_deletes():#
                                         return
                                     print("No duplicate found, adding to database...")
                                     # Determine webhook type based on channel's parent category
-                                    webhook_type = "backup"
-                                    if channel.parent_id in main_parent_ids:
-                                        webhook_type = "core"
-                                    elif channel.parent_id in hooks_parent_ids:
-                                        webhook_type = "hooks"
-                                    elif channel.parent_id in hooks_2_parent_ids:
-                                        webhook_type = "hooks-2"
-                                    elif channel.parent_id in hooks_3_parent_ids:
-                                        webhook_type = "hooks-3"
+                                    webhook_type = get_webhook_type_for_parent(channel.parent_id)
                                         
                                     db_webhook = Webhook(webhook_id=webhook.id, webhook_url=webhook.url, type=webhook_type)
                                     session.add(db_webhook)
                                     session.commit()
                                     recently_created_webhook_ids.add(str(webhook.id))
                                     await notification_channel.send(f"Webhook replacement at url {webhook.url} created successfully in <#{channel.id}>")
+                                    created_this_run += 1
+                                    channels_needing_webhook.discard(str(channel.id))
                             except Exception as e:
                                 print(f"Error creating new webhook: {e}")
                                 await notification_channel.send(f"Error creating new webhook: {e}")
+                                # Apply light backoff on error to be gentle on rate limits
+                                await asyncio.sleep(1)
                             finally:
                                 pending_changes.discard(channel.id)
                                 
@@ -370,6 +472,7 @@ async def on_startup():
     check_missing_webhooks.start()
     pending_deletion_cleanup_loop.start()
     github_update_loop.start()
+    # Only attempt creations for channels we know need a webhook
     await run_channel_deletes()
     run_channel_deletes.start()
     # print("Returned from channel delete func")
@@ -480,11 +583,19 @@ async def check_webhook_changes(channel: interactions.BaseChannel):
                     channel: interactions.GuildText = channel
                     logo_path = '/store/droptracker/disc/static/assets/img/droptracker-small.gif'
                     avatar = interactions.File(logo_path)
-        
+                    # Capacity check
+                    existing_hooks = await channel.fetch_webhooks()
+                    if len(existing_hooks) >= MAX_WEBHOOKS_PER_CHANNEL or len(existing_hooks) >= DESIRED_WEBHOOKS_PER_CHANNEL:
+                        pending_changes.discard(channel.id)
+                        channels_needing_webhook.discard(str(channel.id))
+                        continue
                     # Determine a good webhook name based on channel name
                     webhook_name = f"DropTracker Webhooks ({channel.name.replace('drops-', '')})"
-                    
-                    webhook: interactions.Webhook = await channel.create_webhook(name=webhook_name, avatar=avatar)
+                    webhook = await safe_create_webhook_in_channel(channel, webhook_name, avatar)
+                    if webhook is None:
+                        pending_changes.discard(channel.id)
+                        channels_needing_webhook.add(str(channel.id))
+                        continue
                     webhook_url = webhook.url
                     print("Created webhook, checking for duplicates in database...")
                     with session.no_autoflush:
@@ -494,15 +605,7 @@ async def check_webhook_changes(channel: interactions.BaseChannel):
                             return
                         print("No duplicate found, adding to database...")
                         # Determine webhook type based on channel's parent category
-                        webhook_type = "backup"
-                        if channel.parent_id in main_parent_ids:
-                            webhook_type = "core"
-                        elif channel.parent_id in hooks_parent_ids:
-                            webhook_type = "hooks"
-                        elif channel.parent_id in hooks_2_parent_ids:
-                            webhook_type = "hooks-2"
-                        elif channel.parent_id in hooks_3_parent_ids:
-                            webhook_type = "hooks-3"
+                        webhook_type = get_webhook_type_for_parent(channel.parent_id)
                             
                         db_webhook = Webhook(webhook_id=webhook.id, webhook_url=webhook.url, type=webhook_type)
                         session.add(db_webhook)
