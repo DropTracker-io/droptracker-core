@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 
 from utils.redis import RedisClient, calculate_global_overall_rank, calculate_rank_amongst_groups
 from db.ops import DatabaseOperations
-from webhook_bot import load_update_data
+#from webhook_bot import load_update_data
 
 load_dotenv()
 db = DatabaseOperations()

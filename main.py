@@ -18,7 +18,7 @@ from services.notification_service import NotificationService
 from services.bot_state import BotState
 from services.lootboards import Lootboards
 from services.channel_names import ChannelNames
-from services import update_dmer
+#from services import update_dmer
 from utils.ge_value import get_true_item_value
 from utils.embeds import create_boss_pb_embed, update_boss_pb_embed
 from utils.logger import LoggerClient
@@ -144,7 +144,7 @@ async def on_startup(event: Startup):
     app_logger = AppLogger()
     await bot.change_presence(status=interactions.Status.ONLINE,
                               activity=interactions.Activity(name=f" /help", type=interactions.ActivityType.WATCHING))
-    bot.load_extension("services.update_dmer")
+    #bot.load_extension("services.update_dmer")
     bot.load_extension("commands")
     bot.load_extension("services.bot_state")
     bot.load_extension("services.message_handler")
