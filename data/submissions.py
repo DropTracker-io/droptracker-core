@@ -12,7 +12,7 @@ from utils.ge_value import get_true_item_value
 # Removed circular import - these will be imported lazily inside functions
 from utils.msg_logger import HighThroughputLogger
 from utils.semantic_check import check_item_exists, get_current_ca_tier, get_ca_tier_progress, get_item_id, get_npc_id
-from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id, fetch_group_members, get_collections_logged
+from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id, fetch_group_members, get_collections_logged, get_player_metric
 from utils.redis import RedisClient
 from db.ops import DatabaseOperations, associate_player_ids, get_point_divisor
 from utils.download import download_player_image, download_image
@@ -420,6 +420,8 @@ async def clog_processor(clog_data, external_session=None):
         if debug_test:
           await log_to_file(f"Debug test: New collection log -- Creating notification")
         # Get player groups
+        award_points_to_player(player_id=player_id, amount=5, source=f'Collection Log slot: {item_name}', expires_in_days=60)
+        
         
         player_groups = get_player_groups_with_global(session, player)
         for group in player_groups:
@@ -567,14 +569,34 @@ async def ca_processor(ca_data, external_session=None):
     session.commit()
     debug_print("Committed a new CA entry")
     # Create notification if it's a new CA
+    match tier:
+            case 'easy':
+                points = 1
+            case 'medium':
+                points = 2
+            case 'hard':
+                points = 3
+            case 'elite':
+                points = 4
+            case 'master': 
+                points = 5
+            case 'grandmaster':
+                points = 6
+            case _:
+                points = 0
+    try:
+        award_points_to_player(player_id=player_id, amount=points, source=f'Combat Achievement: {task_name}', expires_in_days=60)
+    except Exception as e:
+        debug_print(f"Couldn't award points to player: {e}")
+        app_logger.log(log_type="error", data=f"Couldn't award points to player: {e}", app_name="core", description="ca_processor")
     if is_new_ca:
         debug_print("New CA entry, creating notification")
         # Get player groups
         player_groups = get_player_groups_with_global(session, player)
+        
         for group in player_groups:
             debug_print("Checking group: " + str(group))
             group_id = group.group_id
-            
             
             # Check if group has CA notifications enabled
             ca_notify_config = session.query(GroupConfiguration).filter(
@@ -789,7 +811,8 @@ async def pet_processor(pet_data, external_session=None):
             app_logger.log(log_type="error", data=f"Couldn't download pet image: {e}", app_name="core", description="pet_processor")
     elif downloaded:
         dl_path = image_url
-    
+    if is_new_pet:
+        award_points_to_player(player_id=player_id, amount=50, source=f'Pet: {pet_name}', expires_in_days=60)
     # Create notifications for new pets or duplicates (depending on configuration)
     should_notify = is_new_pet or (duplicate and not is_new_pet)
     
@@ -1042,6 +1065,10 @@ async def pb_processor(pb_data, external_session=None):
     if is_personal_best:
         #print("Is personal best, creating notification")
         # Get player groups
+        ## We need to determine what KC the player has received this PB at
+        current_kc = get_player_metric(player_name, npc_name)
+        if current_kc >= 50:
+            award_points_to_player(player_id=player_id, amount=20, source=f'New Personal Best ({convert_from_ms(time_ms)}) at {npc_name}', expires_in_days=60)
         print("Player found, getting groups")
         player_groups = get_player_groups_with_global(session, player)
         for group in player_groups:
@@ -1256,7 +1283,7 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
                     print(f"Awarding points to {player_name} for drop {item_name} from {npc_name}")
                     has_awarded_points = True
                     points_to_award = int(drop_value / point_divisor)
-                    award_points_to_player(player_id=player_id, amount=points_to_award, source=f'Drop: {item_name} from {npc_name}', expires_in_days=30)
+                    award_points_to_player(player_id=player_id, amount=points_to_award, source=f'Drop: {item_name} from {npc_name}', expires_in_days=60)
                 # Create notification entry
                 notification_data = {
                     'drop_id': drop.drop_id,

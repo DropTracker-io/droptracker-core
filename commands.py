@@ -17,6 +17,7 @@ from db.models import GroupEmbed, GroupPatreon, GroupRecentDrops, NotificationQu
 #from pb.leaderboards import create_pb_embeds, get_group_pbs
 from services import message_handler
 from services.components import help_components
+from services.points import award_points_to_player
 from utils.format import format_time_since_update, format_number, get_command_id, get_npc_image_url, replace_placeholders
 from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id, fetch_group_members
 from utils.redis import RedisClient
@@ -930,6 +931,9 @@ class UserCommands(Extension):
                                             user=user)
                     session.add(new_player)
                     session.commit()
+                    user_players = session.query(Player).filter(Player.user_id == user.user_id).all()
+                    if len(user_players) == 1:
+                        award_points_to_player(player_id=user_players[0].player_id, amount=10, source=f'Claimed account: {rsn}', expires_in_days=60)
                 except Exception as e:
                     print(f"Could not create a new player:", e)
                     session.rollback()
