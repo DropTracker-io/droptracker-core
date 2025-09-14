@@ -4,7 +4,6 @@ import os
 import random
 import time
 import aiohttp
-import requests
 from dotenv import load_dotenv
 import interactions
 from interactions import GuildText, IntervalTrigger, Permissions, Task, listen, slash_command
@@ -19,6 +18,7 @@ load_dotenv()
 # Set up more detailed logging
 # logging.basicConfig(level=logging.DEBUG)
 import os
+from utils.github import GithubPagesUpdater
 bot_token = os.getenv("HEARTBEAT_BOT_TOKEN")
 bot = interactions.Client(token=bot_token)
 
@@ -37,8 +37,6 @@ hooks_3_parent_ids = [1369780179064590418, 1369780228930670705, 1369780244583547
 all_parent_ids = main_parent_ids + hooks_parent_ids + hooks_2_parent_ids + hooks_3_parent_ids
 
 load_dotenv()
-
-url = "https://www.droptracker.io/api/heartbeat"
 
 joel_id = 528746710042804247
 
@@ -292,38 +290,13 @@ async def check_missing_webhooks():
     session.commit()
     print(f"Added {total_added} missing webhooks to the database")
 
-@Task.create(IntervalTrigger(seconds=10))
-async def heartbeat_loop():
-    response = requests.get(url, params={"key": os.getenv("HEARTBEAT_TOKEN")})
-    if response.status_code == 200:
-        data = response.json()
-        if data["closed_status"] == True or data["ready_status"] == False or not data["message_id"]:
-            notification_channel = await bot.fetch_channel(1369649855194202223)
-            await notification_channel.send("@everyone\n" + 
-                                            "Bot appears to have died....... I am restarting it...")
-            await run_restart()
-        else:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            #print(f"[{timestamp}] Heartbeat check passed.")
-    elif response.status_code == 403:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] Invalid heartbeat token... exiting...")
-        exit()
-    else:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            print(response.json())
-        except Exception as e:
-            print(f"[{timestamp}] Could not decode JSON from heartbeat response: {e}")
-            print(f"Response text: {response.text}")
-
-        
-async def run_restart():
-    script = "./restart.sh"
+@Task.create(IntervalTrigger(minutes=15))
+async def github_update_loop():
+    updater = GithubPagesUpdater()
     try:
-        await asyncio.create_subprocess_shell(script)
+        await updater.update_github_pages()
     except Exception as e:
-        print(f"Error running restart script: {e}")
+        print(f"Error updating GitHub Pages: {e}")
 
 
 @Task.create(IntervalTrigger(minutes=30))
@@ -393,7 +366,10 @@ async def on_startup():
     # await check_missing_webhooks()
     # test_all_webhooks.start()
     # await test_all_webhooks()
-    heartbeat_loop.start()
+    # Start ongoing maintenance tasks
+    check_missing_webhooks.start()
+    pending_deletion_cleanup_loop.start()
+    github_update_loop.start()
     await run_channel_deletes()
     run_channel_deletes.start()
     # print("Returned from channel delete func")

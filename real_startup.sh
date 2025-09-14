@@ -15,6 +15,8 @@ MAIN_SCREEN="DTcore"
 UPDATE_SCREEN="DT-pu"
 WEBHOOK_SCREEN="DT-webhooks"
 LOOTBOARDS_SCREEN="DT-lootboards"
+HEARTBEAT_SCREEN="DT-heartbeat"
+HEARTBEAT_APP="heartbeat.py"
 API_SCREEN="DT-api"
 HOF_SCREEN="DT-hof"
 USER="droptracker"  # The user that should own the screens
@@ -88,30 +90,6 @@ start_app_in_screen() {
     return 0
 }
 
-# Function to start the heartbeat application
-start_heartbeat() {
-    local screen_name="DT-heartbeat"
-    local app_name="heartbeat.py"
-
-    # Check if screen already exists (case insensitive)
-    if screen_exists "$screen_name"; then
-        echo "Screen matching '$screen_name' is already running. Skipping..."
-        return 0
-    fi  
-    # Create a new detached screen session and run the application
-    echo "Starting $app_name in screen '$screen_name'..."
-    screen -dmS "$screen_name" bash -c "cd $APP_DIR && source $VENV_PATH && python3 $app_name; exec bash"
-    
-    # Wait a moment to let the application start
-    sleep 3 
-    # Verify the screen is running
-    if screen_exists "$screen_name"; then
-        echo "Successfully started $app_name in screen '$screen_name'"
-    else
-        echo "Failed to start screen '$screen_name'"
-        return 1
-    fi
-}
 
 # Main function
 main() {
@@ -138,6 +116,9 @@ main() {
     # Start API app
     start_app_in_screen "$API_SCREEN" "$API_APP" $API_PORT
     
+    # Start heartbeat bot
+    start_app_in_screen "$HEARTBEAT_SCREEN" "$HEARTBEAT_APP" $HEARTBEAT_PORT
+    
     # Start Hall of Fame bot
     screen -dmS "$HOF_SCREEN" bash -c "cd $APP_DIR && source $VENV_PATH && python3 -m bots.hall_of_fame; exec bash"
     
@@ -150,7 +131,5 @@ main() {
 
 # Run the main function
 main
-# Check if the heartbeater is active
-start_heartbeat
 
 exit 0

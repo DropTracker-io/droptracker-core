@@ -14,6 +14,8 @@ screen -X -S DT-api kill
 echo "Killed API app."
 screen -X -S DT-hof kill
 echo "Killed Hall of Fame bot."
+screen -X -S DT-heartbeat kill
+echo "Killed heartbeat bot."
 ./real_startup.sh
 echo "Bot restarted successfully after a failed heartbeat response."
 exit 0
