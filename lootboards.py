@@ -2,7 +2,6 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import text
 from lootboard import generator
-from services.lootboards import generate_server_board
 from db.models import Group, Session, XenforoSession
 import asyncio
 import os
@@ -38,6 +37,9 @@ def get_fresh_xenforo_session():
         xenforo_session.close()
     xenforo_session = XenforoSession()
     return xenforo_session
+
+
+
 
 async def update_specific_board(group_id: int, force: bool = False):
     try:

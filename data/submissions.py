@@ -1,11 +1,13 @@
 import asyncio
 import hashlib
 import time
-from db.models import CombatAchievementEntry, Drop, NotifiedSubmission, PlayerPet, session, NpcList, Player, ItemList, PersonalBestEntry, CollectionLogEntry, User, Group, GroupConfiguration, UserConfiguration, NotificationQueue
+from db.models import CombatAchievementEntry, Drop, FeatureActivation, NotifiedSubmission, PlayerPet, session, NpcList, Player, ItemList, PersonalBestEntry, CollectionLogEntry, User, Group, GroupConfiguration, UserConfiguration, NotificationQueue
 from db import models
 from db.update_player_total import update_player_in_redis
 from db.xf.recent_submissions import create_xenforo_entry
+from lootboards import update_specific_board
 from services import redis_updates
+from services.lootboards import instantly_update_board
 from services.points import award_points_to_player
 from utils.embeds import update_boss_pb_embed
 from utils.ge_value import get_true_item_value
@@ -29,6 +31,8 @@ from datetime import datetime, timedelta
 from sqlalchemy.engine import Row  # Add this import at the top
 app_logger = AppLogger()
 
+## Store a dict of the last time a group board update was forced to prevent immediate updates within 10 seconds of eachother
+last_board_updates = {}
 
 ## Class to store response data from submission processors to API users
 class SubmissionResponse:
@@ -1313,6 +1317,19 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
                 await create_xenforo_entry(drop=drop, clog=None, personal_best=None, combat_achievement=None)
                 debug_print(f"Creating group notification for {player_name} in group {group_id}")
                 await create_notification('drop', player_id, notification_data, group_id, existing_session=session if use_external_session else None)
+                ## After all of this data is complete, we can check if the group should have their board instantly updated
+                should_instantly_update = session.query(FeatureActivation).filter(FeatureActivation.group_id == group_id,
+                                                                                FeatureActivation.feature_id == 2,
+                                                                                FeatureActivation.status == 'active').first()
+                if group_id == 2 or should_instantly_update:
+                    if group_id not in last_board_updates:
+                        last_board_updates[group_id] = datetime.now() - timedelta(seconds=10)
+                    if last_board_updates[group_id] > datetime.now() - timedelta(seconds=10):
+                        debug_print(f"Skipping group {group_id}: within 10 second window for instant update")
+                        continue
+                    last_board_updates[group_id] = datetime.now()
+                    print(f"Instantly updating group {group_id}'s board")
+                    await instantly_update_board(group_id, force=True)
             else:
                 debug_print(f"Notification criteria NOT met for group {group_id} - skipping")
         # Commit the session regardless - external caller will handle transaction management
