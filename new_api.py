@@ -340,7 +340,7 @@ async def load_config():
                                 "min_value": get_config_value(current_group_configs, "minimum_value_to_notify"),
                                 "minimum_drop_value": get_config_value(current_group_configs, "minimum_value_to_notify"),
                                 "only_screenshots": get_config_value(current_group_configs, "only_send_messages_with_images"),
-                                "send_drops": True if get_config_value(current_group_configs, "minimum_value_to_notify") > 0 else False,
+                                "send_drops": True,
                                 "send_pbs": get_config_value(current_group_configs, "notify_pbs"),
                                 "send_clogs": get_config_value(current_group_configs, "notify_clogs"),
                                 "send_cas": get_config_value(current_group_configs, "notify_cas"),
@@ -840,9 +840,9 @@ async def webhook_data():
         
         # Record metrics regardless of success/failure
         if submission_type:
-            metrics.record_request(submission_type, success)
+            metrics.record_request(submission_type, success, app="new_api")
         else:
-            metrics.record_request(request_type, success)
+            metrics.record_request(request_type, success, app="new_api")
 
 async def process_webhook_data(webhook_data):
     """Process webhook data from Discord format to standard format"""

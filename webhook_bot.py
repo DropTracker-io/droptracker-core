@@ -8,6 +8,7 @@ from interactions.api.events import MessageCreate, Startup
 from interactions import Embed, Intents, Message, ChannelType, OptionType, slash_command, Permissions, slash_option
 from db.models import Group, ItemList, PersonalBestEntry, PlayerPet, Session, Player, User, UserConfiguration
 from data.submissions import adventure_log_processor, clog_processor, ca_processor, pb_processor, drop_processor, pet_processor
+from api.services.metrics import MetricsTracker
 from utils.format import convert_to_ms, get_true_boss_name
 from services.updates import Updates
 from services.ticket_system import Tickets
@@ -19,6 +20,7 @@ channel_id_to_use = 1210765287591256084
 load_dotenv()
 
 bot = interactions.Client(token=os.getenv("WEBHOOK_TOKEN"), intents=Intents.ALL)
+metrics = MetricsTracker()
 
 
 # Add a test to verify the event listener is registered
@@ -66,31 +68,47 @@ def retry_on_database_error(max_retries=3, delay=1):
 async def process_submission_with_session(submission_type, embed_data):
     """Process a submission with a fresh database session"""
     session = Session()
-    print(f"Processing submission with session: {submission_type}")
     try:
+        success = False
         if submission_type == "collection_log":
             result = await clog_processor(embed_data, external_session=session)
+            success = True
         elif submission_type == "combat_achievement":
             result = await ca_processor(embed_data, external_session=session)
+            success = True
         elif submission_type == "personal_best":
             result = await pb_processor(embed_data, external_session=session)
+            success = True
         elif submission_type == "drop":
             result = await drop_processor(embed_data, external_session=session)
+            success = True
         elif submission_type == "pet":
             result = await pet_processor(embed_data, external_session=session)
+            success = True
         elif submission_type == "adventure_log":
             result = await adventure_log_processor(embed_data, external_session=session)
+            success = True
         else:
             result = None
         
         # Commit the session if everything succeeded
         session.commit()
+        try:
+            metrics.record_request(submission_type, success, app="webhook_bot")
+            print(f"Recorded request: {submission_type} {success}")
+        except Exception:
+            print(f"Error recording request: {submission_type} {success}")
+            pass
         return result
         
     except Exception as e:
         # Rollback on any error
         session.rollback()
         print(f"Error processing {submission_type}: {e}")
+        try:
+            metrics.record_request(submission_type, False, app="webhook_bot")
+        except Exception:
+            pass
         raise
     finally:
         # Always close the session
@@ -146,7 +164,6 @@ async def on_message_create(event: MessageCreate):
                 embed_data['used_api'] = False
                 
                 try:
-                    print(f"Processing submission: {embed_data}")
                     if "collection_log" in field_values:
                         await process_submission_with_session("collection_log", embed_data)
                         continue
