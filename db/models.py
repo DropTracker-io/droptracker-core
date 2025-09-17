@@ -1003,6 +1003,8 @@ class NotificationQueue(Base):
     __table_args__ = (
         UniqueConstraint('notification_type', 'player_id', 'group_id', 'data', 
                         name='uix_notification_unique'),
+        Index('idx_notification_status_created', 'status', 'created_at'),
+        Index('idx_notification_status', 'status'),
     )
     id = Column(Integer, primary_key=True, autoincrement=True)
     notification_type = Column(String(50), nullable=False)  # 'drop', 'pb', 'collection_log', etc.

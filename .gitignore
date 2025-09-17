@@ -62,3 +62,6 @@ launch.json
 utils/sheets/sheet_manager.py
 utils/sheets/auth/*
 static/assets/osrs_wiki.py
+
+#Backups from test changes
+*copy.py

@@ -8,6 +8,7 @@ from db import models
 import wom
 from wom import Err, Result
 from utils.format import normalize_player_display_equivalence
+from typing import Optional
 load_dotenv()
 
 rate_limit = 100 / 65  # This calculates the rate as 100 requests per 65 seconds
@@ -242,6 +243,77 @@ async def get_player_total_kills(wom_id: int):
                     if kills > 0:
                         return kills
 
+def get_player_boss_kills_sync(username: str, boss_metric: str) -> Optional[int]:
+    """
+    Synchronous helper to fetch boss kill count by username.
+    Returns int kills if available, 0 if boss not found or non-positive, or None on error.
+    """
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(get_player_boss_kills(username, boss_metric), loop)
+        return future.result()
+    else:
+        return loop.run_until_complete(get_player_boss_kills(username, boss_metric))
+
+async def get_player_boss_kills(username: str, boss_metric: str) -> Optional[int]:
+    """
+    Return the kill count (int) for the specified boss metric for a given username.
+    - Returns 0 if the boss is present but has no recorded kills or not found in the snapshot.
+    - Returns None if data cannot be retrieved (API error or missing snapshot data).
+    """
+    await client.start()
+    await limiter.wait()
+    try:
+        player_data: Result = await client.players.get_details(username=username)
+        return await _extract_boss_kills_from_player_result(player_data, boss_metric)
+    except Exception:
+        return None
+
+async def get_player_boss_kills_by_id(wom_id: int, boss_metric: str) -> Optional[int]:
+    """
+    Return the kill count (int) for the specified boss metric for a given WOM player id.
+    - Returns 0 if the boss is present but has no recorded kills or not found in the snapshot.
+    - Returns None if data cannot be retrieved (API error or missing snapshot data).
+    """
+    await client.start()
+    await limiter.wait()
+    try:
+        player_data: Result = await client.players.get_details_by_id(wom_id)
+        return await _extract_boss_kills_from_player_result(player_data, boss_metric)
+    except Exception:
+        return None
+
+async def _extract_boss_kills_from_player_result(player_data: Result, boss_metric: str) -> Optional[int]:
+    """
+    Internal helper to normalize boss metric name and extract kills from a player Result.
+    Returns int kills, 0 if not found/non-positive, or None if data unavailable.
+    """
+    normalized_target = (
+        boss_metric.strip().lower().replace(" ", "_").replace("-", "_").replace("'", "")
+    )
+    if not player_data or not getattr(player_data, "is_ok", False):
+        return None
+    details = player_data.unwrap()
+    snapshot = getattr(details, "latest_snapshot", None)
+    if not snapshot:
+        return None
+    snapshot_data = getattr(snapshot, "data", None)
+    if not snapshot_data:
+        return None
+    bosses = getattr(snapshot_data, "bosses", {}) or {}
+    # Iterate bosses and match normalized metric key
+    for boss_name, boss_obj in bosses.items():
+        boss_key = str(boss_name).split(".")[-1].lower()
+        if boss_key == normalized_target:
+            kills = getattr(boss_obj, "kills", -1)
+            try:
+                kills_int = int(kills)
+            except Exception:
+                return 0
+            return kills_int if kills_int > 0 else 0
+    # If boss key didn't match any entry, return 0 per spec
+    return 0
+
 def get_player_metric_sync(username: str, metric_name: str):
     """
     Returns an integer representation of a player's metric according to WiseOldMan
@@ -308,6 +380,7 @@ async def _get_player_metric(player_data: Result, metric_name: str):
         boss_data = {}
         if snapshot and snapshot_data:
             bosses = getattr(snapshot_data, "bosses", {})
+            print("Got bosses: " + str(bosses))
             for boss_name, boss_obj in bosses.items():
                 kills = getattr(boss_obj, "kills", -1)
                 if kills > 0:

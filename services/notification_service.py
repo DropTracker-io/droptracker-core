@@ -53,50 +53,77 @@ class NotificationService:
     async def process_notifications_loop(self):
         """Main loop to process notifications"""
         cleanup_counter = 0
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        
         while self.running:
             try:
                 async with self._processing_lock:
                     await self.process_pending_notifications()
                     
-                    # Clean up tracking dictionaries every 100 iterations
+                    # Reset error counter on successful processing
+                    consecutive_errors = 0
+                    
+                    # Clean up tracking dictionaries and stuck notifications every 100 iterations
                     cleanup_counter += 1
                     if cleanup_counter >= 100:
                         await self.cleanup_tracking_dicts()
+                        await self.cleanup_stuck_notifications()
                         cleanup_counter = 0
                         
             except Exception as e:
-                app_logger.log(log_type="error", data=f"Error processing notifications: {e}", app_name="notification_service", description="process_notifications_loop")
+                consecutive_errors += 1
+                app_logger.log(log_type="error", data=f"Error processing notifications (attempt {consecutive_errors}): {e}", app_name="notification_service", description="process_notifications_loop")
+                
+                # If we have too many consecutive errors, increase sleep time
+                if consecutive_errors >= max_consecutive_errors:
+                    app_logger.log(log_type="warning", data=f"Too many consecutive errors ({consecutive_errors}), increasing sleep time", app_name="notification_service", description="process_notifications_loop")
+                    await asyncio.sleep(30)  # Longer sleep on repeated errors
+                    consecutive_errors = 0  # Reset after longer sleep
             finally:
+                # Normal sleep time
                 await asyncio.sleep(5)
     
     async def process_pending_notifications(self):
-        """Process pending notifications"""
+        """Process pending notifications with improved locking strategy"""
         try:
-            # Use SELECT FOR UPDATE to lock the rows
+            # First, get a small batch of pending notifications without locking
             notifications = session.query(NotificationQueue).filter(
                 NotificationQueue.status == 'pending'
-            ).with_for_update().order_by(NotificationQueue.created_at.asc()).limit(10).all()
+            ).order_by(NotificationQueue.created_at.asc()).limit(5).all()
             
             og_length = len(notifications)
             if og_length > 0:
                 print(f"Processing {og_length} pending notifications...")
-            
+            else:
+                print("No pending notifications found, sleeping for 5 seconds")
+                await asyncio.sleep(5)
+                return
             for notification in notifications:
                 try:
-                    # Double check status after lock to ensure it's still pending
-                    if notification.status != 'pending':
+                    # Use a more targeted locking approach - lock only the specific row
+                    locked_notification = session.query(NotificationQueue).filter(
+                        NotificationQueue.id == notification.id,
+                        NotificationQueue.status == 'pending'
+                    ).with_for_update(skip_locked=True).first()
+                    
+                    # Skip if already locked by another process or no longer pending
+                    if not locked_notification:
                         continue
                         
-                    # Mark as processing
-                    notification.status = 'processing'
+                    # Mark as processing immediately after acquiring lock
+                    locked_notification.status = 'processing'
                     session.commit()
                     
-                    await self.process_notification(notification)
+                    # Process the notification
+                    await self.process_notification(locked_notification)
                     
                 except Exception as e:
-                    notification.status = 'failed'
-                    notification.error_message = str(e)
-                    session.commit()
+                    # Ensure we have a valid notification object for error handling
+                    if 'locked_notification' in locals() and locked_notification:
+                        locked_notification.status = 'failed'
+                        locked_notification.error_message = str(e)
+                        session.commit()
                     app_logger.log(log_type="error", data=f"Error processing notification {notification.id}: {e}", app_name="notification_service", description="process_pending_notifications")
             
             if og_length > 0:
@@ -108,7 +135,7 @@ class NotificationService:
     async def process_notification(self, notification: NotificationQueue):
         """Process a single notification based on its type"""
         try:
-            app_logger.log(log_type="info", data=f"Processing notification {notification.id} of type {notification.notification_type}", app_name="notification_service", description="process_notification")
+            app_logger.log(log_type="info", data=f"Processing notification {notification.id} of type '{notification.notification_type}'", app_name="notification_service", description="process_notification")
             
             data = json.loads(notification.data)
             notification_type = notification.notification_type
@@ -127,6 +154,8 @@ class NotificationService:
                 await self.send_ca_notification(notification, data)
             elif notification_type == 'clog':
                 await self.send_clog_notification(notification, data)
+            elif notification_type == 'pet':
+                await self.send_pet_notification(notification, data)
             elif notification_type == 'new_npc':
                 await self.send_new_npc_notification(notification, data)
             elif notification_type == 'new_item':
@@ -146,6 +175,7 @@ class NotificationService:
             else:
                 notification.status = 'failed'
                 notification.error_message = f"Unknown notification type: {notification_type}"
+                print(f"Notification type not found: '{notification_type}'")
                 session.commit()
         except Exception as e:
             app_logger.log(log_type="error", data=f"Error processing notification {notification.id}: {e}", app_name="notification_service", description="process_notification")
@@ -970,13 +1000,15 @@ class NotificationService:
             notification.error_message = f"No channel configured for group {group_id}"
             session.commit()
             return
+        kc_received = milestone if milestone else killcount
+        
         value_dict = {
             "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{player_name}.{player_id}/view)",
             "{pet_name}": pet_name,
             "{source}": source,
             "{npc_name}": npc_name,
-            "{killcount}": killcount,
-            "{milestone}": milestone,
+            "{killcount}": kc_received, 
+            "{milestone}": kc_received,
             "{duplicate}": duplicate,
             "{previously_owned}": previously_owned
         }
@@ -1384,6 +1416,34 @@ class NotificationService:
                          data=f"Error cleaning up tracking dictionaries: {e}", 
                          app_name="notification_service", 
                          description="cleanup_tracking_dicts")
+
+    async def cleanup_stuck_notifications(self):
+        """Reset notifications that have been stuck in 'processing' status for too long"""
+        try:
+            # Find notifications stuck in processing for more than 10 minutes
+            stuck_time = datetime.now() - timedelta(minutes=10)
+            stuck_notifications = session.query(NotificationQueue).filter(
+                NotificationQueue.status == 'processing',
+                NotificationQueue.processed_at.is_(None)
+            ).all()
+            
+            if stuck_notifications:
+                app_logger.log(log_type="warning", 
+                             data=f"Found {len(stuck_notifications)} stuck notifications, resetting to pending", 
+                             app_name="notification_service", 
+                             description="cleanup_stuck_notifications")
+                
+                for notification in stuck_notifications:
+                    notification.status = 'pending'
+                    notification.error_message = 'Reset due to timeout'
+                
+                session.commit()
+                
+        except Exception as e:
+            app_logger.log(log_type="error", 
+                         data=f"Error cleaning up stuck notifications: {e}", 
+                         app_name="notification_service", 
+                         description="cleanup_stuck_notifications")
 
     def _get_player_month_total(self, player_id: int, partition: int = None) -> int:
         """Fetch the player's monthly total loot from Redis computed by redis_updates."""

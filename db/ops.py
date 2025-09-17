@@ -283,7 +283,7 @@ class DatabaseOperations:
                 pass
 
     async def create_drop_object(self, item_id, player_id, date_received, npc_id, value, quantity, image_url: str = "", authed: bool = False,
-                                attachment_url: str = "", attachment_type: str = "", add_to_queue: bool = True, used_api: bool = False, existing_session=None):
+                                attachment_url: str = "", attachment_type: str = "", add_to_queue: bool = True, used_api: bool = False, unique_id: str = None, existing_session=None):
         """
         Create a drop and add it to the queue for inserting to the database.
         """
@@ -343,7 +343,8 @@ class DatabaseOperations:
                     quantity=quantity,
                     authed=authed,
                     image_url=image_url,
-                    used_api=used_api)
+                    used_api=used_api,
+                    unique_id=unique_id)
 
         try:
             # Add the drop to the session and commit to generate the drop_id

@@ -6,9 +6,6 @@ from db.models import Group, Session, XenforoSession
 import asyncio
 import os
 
-session = None
-xenforo_session = None
-
 last_board_updates = {}
 
 async def lootboard_update_loop():
@@ -21,22 +18,12 @@ async def lootboard_update_loop():
     return True
 
 def get_fresh_session():
-    global session
-    if session:
-        session.reset()
-        session.rollback()
-        session.close()
-    session = Session()
-    return session
+    """Create a new database session - no global session management"""
+    return Session()
 
 def get_fresh_xenforo_session():
-    global xenforo_session
-    if xenforo_session:
-        xenforo_session.reset()
-        xenforo_session.rollback()
-        xenforo_session.close()
-    xenforo_session = XenforoSession()
-    return xenforo_session
+    """Create a new XenForo database session - no global session management"""
+    return XenforoSession()
 
 
 
@@ -44,6 +31,7 @@ def get_fresh_xenforo_session():
 async def update_specific_board(group_id: int, force: bool = False):
     try:
         # Fetch the group with a short-lived session
+        group_data = None
         with Session() as group_session:
             group = group_session.query(Group).filter(Group.group_id == group_id).first()
             if not group:
@@ -52,8 +40,13 @@ async def update_specific_board(group_id: int, force: bool = False):
             if not group.guild_id or group.guild_id == 0:
                 print(f"Group {group_id} has no valid guild_id")
                 return
+            # Store group data outside the session
+            group_data = {
+                'group_name': group.group_name,
+                'wom_id': group.wom_id
+            }
 
-        # Determine premium status
+        # Determine premium status with a separate short-lived session
         is_premium = False
         if group_id == 2:
             is_premium = True
@@ -79,21 +72,21 @@ async def update_specific_board(group_id: int, force: bool = False):
         if not os.path.exists(save_dir):
             os.makedirs(save_dir, exist_ok=True)
 
-        # Generate using a fresh session
-        with Session() as gen_session:
-            print("Generating board for group:", group_id, "using a fresh session...")
-            try:
+        # Generate using a fresh session that will be closed quickly
+        print("Generating board for group:", group_id, "using a fresh session...")
+        try:
+            with Session() as gen_session:
                 new_path = await generator.generate_server_board_temporary(
                     group_id=group_id,
-                    wom_group_id=group.wom_id,
+                    wom_group_id=group_data['wom_id'],
                     session_to_use=gen_session
                 )
-                print(f"Board generated for {group.group_name}")
-                print(f"Board path: {new_path}")
-                if not is_premium:
-                    last_board_updates[group_id] = datetime.now()
-            except Exception as e:
-                print(f"Error generating board for group {group_id}: {e}")
+            print(f"Board generated for {group_data['group_name']}")
+            print(f"Board path: {new_path}")
+            if not is_premium:
+                last_board_updates[group_id] = datetime.now()
+        except Exception as e:
+            print(f"Error generating board for group {group_id}: {e}")
     except Exception as e:
         print(f"Exception in update_specific_board({group_id}): {e}")
     finally:
@@ -126,7 +119,7 @@ async def update_boards():
         print(f"Found {len(groups)} groups to process")
         for group in groups:
             is_premium = False
-            ## Determine if the group has premium status
+            ## Determine if the group has premium status with a separate short-lived session
             if group.group_id == 2:
                 is_premium = True
             else:
@@ -144,21 +137,20 @@ async def update_boards():
                     else:
                         is_premium = True
             
-            
             try:
                 if not os.path.exists(f"/store/droptracker/disc/static/assets/img/clans/{group.group_id}/lb"):
                     os.makedirs(f"/store/droptracker/disc/static/assets/img/clans/{group.group_id}/lb")
                 
-                # Create a completely new session for each group
-                with Session() as group_session:
-                    print("Generating board for group:", group.group_id, "using a fresh session...")
-                    try:
+                # Create a completely new session for each group that will be closed quickly
+                print("Generating board for group:", group.group_id, "using a fresh session...")
+                try:
+                    with Session() as group_session:
                         new_path = await generator.generate_server_board_temporary(group_id=group.group_id, wom_group_id=group.wom_id, session_to_use=group_session)
-                        print(f"Board generated for {group.group_name}")
-                        print(f"Board path: {new_path}")
-                    except Exception as e:
-                        print(f"Error generating board for group {group.group_id}: {e}")
-                        # No need to explicitly rollback - the context manager will handle it
+                    print(f"Board generated for {group.group_name}")
+                    print(f"Board path: {new_path}")
+                except Exception as e:
+                    print(f"Error generating board for group {group.group_id}: {e}")
+                    # No need to explicitly rollback - the context manager will handle it
             except Exception as e:
                 print(f"Error in group processing for {group.group_id}: {e}")
                 continue

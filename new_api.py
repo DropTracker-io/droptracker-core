@@ -19,6 +19,7 @@ import pymysql
 from quart_cors import cors, route_cors
 from urllib.parse import quote
 # from new_generator_optimized import OptimizedRedisLootboardGenerator
+from services.points import get_player_lifetime_points_earned
 from utils.format import convert_from_ms, format_number
 from utils.redis import RedisClient, get_true_player_total
 from services.redis_updates import get_player_current_month_total, get_player_list_loot_sum
@@ -31,7 +32,7 @@ redis_client = RedisClient()
 from data import submissions
 from data.submissions import ca_processor, clog_processor, drop_processor, pb_processor
 # Import session from db.models to avoid conflicts
-from db.models import Drop, GroupConfiguration, NotifiedSubmission, Session, get_current_partition, session, Player, Group, CollectionLogEntry, PersonalBestEntry, PlayerPet, ItemList, NpcList, engine
+from db.models import CombatAchievementEntry, Drop, GroupConfiguration, NotifiedSubmission, Session, get_current_partition, session, Player, Group, CollectionLogEntry, PersonalBestEntry, PlayerPet, ItemList, NpcList, engine
 
 from utils.redis import RedisClient, calculate_rank_amongst_groups
 from utils.wiseoldman import fetch_group_members
@@ -95,6 +96,89 @@ async def server_error(e):
 async def ping():
     return jsonify({"message": "Pong"}), 200
 
+@app.post("/check")
+async def check():
+    if not request.is_json:
+        return jsonify({"error": "Content-Type must be application/json"}), 415
+    try:
+        data = await request.get_json()
+        incoming_guid = data.get("uuid")
+        if not incoming_guid:
+            return jsonify({"error": "Missing 'uuid'"}), 422
+
+        print(f"Checking for guid: {incoming_guid}")
+
+        # Run blocking DB lookups in a background thread to avoid stalling the event loop
+        def find_entry(guid: str):
+            session_local = get_db_session()
+            try:
+                entry = session_local.query(Drop).filter(Drop.unique_id == guid,
+                                                        Drop.used_api == True,
+                                                        Drop.date_added > datetime.now() - timedelta(hours=12)).first()
+                if entry:
+                    return entry, "drop"
+                entry = session_local.query(CollectionLogEntry).filter(CollectionLogEntry.unique_id == guid,
+                                                                        CollectionLogEntry.used_api == True,
+                                                                        CollectionLogEntry.date_added > datetime.now() - timedelta(hours=12)).first()
+                if entry:
+                    return entry, "collection_log"
+                entry = session_local.query(PersonalBestEntry).filter(PersonalBestEntry.unique_id == guid,
+                                                                        PersonalBestEntry.used_api == True,
+                                                                        PersonalBestEntry.date_added > datetime.now() - timedelta(hours=12)).first()
+                if entry:
+                    return entry, "personal_best"
+                entry = session_local.query(CombatAchievementEntry).filter(CombatAchievementEntry.unique_id == guid,
+                                                                            CombatAchievementEntry.used_api == True,
+                                                                            CombatAchievementEntry.date_added > datetime.now() - timedelta(hours=12)).first()
+                if entry:
+                    return entry, "combat_achievement"
+                return None, None
+            finally:
+                try:
+                    session_local.close()
+                except:
+                    pass
+
+        try:
+            db_entry, entry_type = await asyncio.wait_for(
+                asyncio.to_thread(find_entry, incoming_guid), timeout=3.0
+            )
+        except asyncio.TimeoutError:
+            print(f"/check lookup timed out for guid: {incoming_guid}")
+            return jsonify({
+                "processed": False,
+                "status": "timeout",
+                "uuid": incoming_guid
+            }), 200
+
+        if not db_entry:
+            print("No database entry found for guid: " + str(incoming_guid))
+            return jsonify({
+                "processed": False,
+                "status": "not_found",
+                "uuid": incoming_guid
+            }), 200
+
+        # Return a minimal, serializable payload (avoid returning ORM objects)
+        payload = {"processed": True, "status": "processed", "uuid": incoming_guid, "type": entry_type}
+        print("Returning payload: " + str(payload))
+        if entry_type == "drop":
+            payload["id"] = getattr(db_entry, "drop_id", None)
+        elif entry_type == "collection_log":
+            payload["id"] = getattr(db_entry, "log_id", None)
+        elif entry_type == "personal_best":
+            payload["id"] = getattr(db_entry, "id", None)
+        elif entry_type == "combat_achievement":
+            payload["id"] = getattr(db_entry, "id", None)
+
+        return jsonify(payload), 200
+    except Exception as e:
+        print(f"/check error: {e}")
+        return jsonify({"error": "Malformed or invalid request"}), 400
+    finally:
+        # No outer DB session is used in /check now
+        pass
+
 @app.route("/player_search", methods=["GET"])
 async def player_search():
     """Search for a player by name"""
@@ -115,9 +199,9 @@ async def player_search():
             return jsonify({"error": f"Player '{player_name}' not found"}), 404
         
         player_recent_submissions = db_session.query(NotifiedSubmission).filter(or_(NotifiedSubmission.pb_id != None, NotifiedSubmission.drop_id != None, NotifiedSubmission.clog_id != None)).filter(NotifiedSubmission.player_id == player.player_id).order_by(NotifiedSubmission.date_added.desc()).limit(10).all()
-        print("Raw submissions:", len(player_recent_submissions))
+        #print("Raw submissions:", len(player_recent_submissions))
         final_submission_data = await assemble_submission_data(player_recent_submissions, db_session)
-        print("Player final submission data:", final_submission_data)
+        #print("Player final submission data:", final_submission_data)
         player_loot = redis_client.client.zscore(
             f"leaderboard:{get_current_partition()}",
             player.player_id
@@ -128,7 +212,7 @@ async def player_search():
         )
         if player_rank is not None:
             player_rank += 1  # Convert from 0-indexed to 1-indexed
-        print("Player loot:", player_loot)
+        #print("Player loot:", player_loot)
         player_npc_ranks = {}
         target_npcs = db_session.query(NpcList).filter(NpcList.npc_id.in_(TOP_NPCS)).all()
         for npc in target_npcs:
@@ -148,6 +232,7 @@ async def player_search():
                                   "loot": format_number(group_object.get_current_total()),
                                   "members": group_object.get_player_count(session_to_use=db_session)})
         player_groups.sort(key=lambda x: x["loot"], reverse=True)
+        player_lifetime_points = get_player_lifetime_points_earned(player_id=player.player_id,session=db_session)
         # Sample data for now - replace with actual implementations later
         response_data = {
             "player_name": player.player_name,
@@ -157,6 +242,7 @@ async def player_search():
             "global_rank": player_rank,
             "top_npc": top_npc_data,
             "best_pb_rank": 42,
+            "points": player_lifetime_points,
             "groups": player_groups,
             "recent_submissions": final_submission_data,
         }
@@ -193,7 +279,7 @@ async def top_players():
             4,
             withscores=True
         )
-        print(f"Got top player data -- partition {get_current_partition()} -- {top_players}")
+        #print(f"Got top player data -- partition {get_current_partition()} -- {top_players}")
         
         top_players_data = []
         for rank, (player_id, player_score) in enumerate(top_players, start=1):
@@ -203,10 +289,10 @@ async def top_players():
                 "player_name": player.player_name,
                 "total_loot": format_number(player_score)
             })
-        print(f"Got top player data -- partition {get_current_partition()} -- {top_players_data}")
+        #print(f"Got top player data -- partition {get_current_partition()} -- {top_players_data}")
         return jsonify({"players": top_players_data}), 200  
     except Exception as e:
-        print(f"Error in top_players: {e}")
+        #print(f"Error in top_players: {e}")
         return jsonify({"error": "Internal server error"}), 500
     finally:
         db_session.close()
@@ -219,6 +305,8 @@ async def load_config():
     if not player_name or not acc_hash:
         return jsonify({"error": "Player name and acc_hash are required"}), 400
     db_session = get_db_session()
+    if player_name == "Ra ine":
+        print("Loading config for player:", player_name, acc_hash)
     try:
         player = db_session.query(Player).filter(Player.player_name == player_name, Player.account_hash == acc_hash).first()
         if not player:
@@ -228,6 +316,8 @@ async def load_config():
         def get_config_value(group_configs: List[GroupConfiguration], key: str):
             for group_config in group_configs:
                 if group_config.config_key == key:
+                    if key == "level_minimum_for_notifications":
+                        return group_config.config_value
                     config_val = group_config.config_value if group_config.config_value and group_config.config_value != "" else group_config.long_value
                     if config_val == "true" or config_val == "1":
                         return True
@@ -239,6 +329,8 @@ async def load_config():
             return ""
         ## TODO -- do not hardcore group ids here
         #player_gids = [(2, 0), (7, 0), (8, 0), (10, 0), (14, 0), (31, 0)]
+        if player_name == "Ra ine":
+            print("Got player gids:", player_gids)
         for group_id in player_gids:
             group_id = group_id[0]
             group = db_session.query(Group).filter(Group.group_id == group_id).first()
@@ -248,13 +340,18 @@ async def load_config():
                                 "min_value": get_config_value(current_group_configs, "minimum_value_to_notify"),
                                 "minimum_drop_value": get_config_value(current_group_configs, "minimum_value_to_notify"),
                                 "only_screenshots": get_config_value(current_group_configs, "only_send_messages_with_images"),
-                                "send_drops": True,
+                                "send_drops": True if get_config_value(current_group_configs, "minimum_value_to_notify") > 0 else False,
                                 "send_pbs": get_config_value(current_group_configs, "notify_pbs"),
                                 "send_clogs": get_config_value(current_group_configs, "notify_clogs"),
                                 "send_cas": get_config_value(current_group_configs, "notify_cas"),
                                 "send_pets": get_config_value(current_group_configs, "send_pets"),
+                                "send_xp": get_config_value(current_group_configs, "notify_levels"),
+                                "minimum_level": get_config_value(current_group_configs, "level_minimum_for_notifications"),
                                 "send_stacked_items": get_config_value(current_group_configs, "send_stacks_of_items"),
                                 "minimum_ca_tier": get_config_value(current_group_configs, "min_ca_tier_to_notify")})
+        
+        if player_name == "Ra ine":
+            print("Group configs:", group_configs)
         return jsonify(group_configs), 200
     finally:
         db_session.close()
@@ -545,6 +642,8 @@ async def get_latest_news():
     """Get the latest news"""
     return "API connected. We are having some issues tracking all submissions. Please report any issues you experience to !droptracker"
 
+
+
 @app.route("/webhook", methods=["POST"])
 @rate_limit(limit=100,period=timedelta(seconds=1))
 async def webhook_data():
@@ -605,8 +704,8 @@ async def webhook_data():
                 image_file = None
                 if 'file' in files:
                     image_file = files['file']
-                    print(f"Received image file: {image_file.filename}, "
-                          f"content_type: {image_file.content_type}")
+                    #print(f"Received image file: {image_file.filename}, "
+                          #f"content_type: {image_file.content_type}")
                 
                 # Extract data from Discord webhook format
                 processed_items = await process_webhook_data(webhook_data)
@@ -674,7 +773,7 @@ async def webhook_data():
                                 await submissions.clog_processor(processed_data, external_session=db_session)
                             case "personal_best" | "kill_time" | "npc_kill":
                                 submission_type = "personal_best"
-                                print("Got pb processed data: ", processed_data)
+                                #print("Got pb processed data: ", processed_data)
                                 await submissions.pb_processor(processed_data, external_session=db_session)
                             case "combat_achievement":
                                 submission_type = "combat_achievement"

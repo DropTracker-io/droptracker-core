@@ -13,7 +13,7 @@ from utils.ge_value import get_true_item_value
 # Removed circular import - these will be imported lazily inside functions
 from utils.msg_logger import HighThroughputLogger
 from utils.semantic_check import check_item_exists, get_current_ca_tier, get_ca_tier_progress, get_item_id, get_npc_id
-from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id, fetch_group_members, get_collections_logged, get_player_metric
+from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id, fetch_group_members, get_collections_logged, get_player_boss_kills, get_player_metric
 from utils.redis import RedisClient
 from db.ops import DatabaseOperations, associate_player_ids, get_point_divisor
 from utils.download import download_player_image, download_image
@@ -326,7 +326,7 @@ async def clog_processor(clog_data, external_session=None):
     image_url = clog_data.get('image_url', None)
     used_api = clog_data.get('used_api', False)
     killcount = clog_data.get('kc', None)
-    
+    unique_id = clog_data.get('guid', None)
     debug_print(f"Extracted clog data - Player: {player_name}, Item: {item_name}")
     debug_print(f"Account hash: {account_hash[:8]}... (truncated), Kill count: {killcount}")
     debug_print(f"Attachment URL: {attachment_url}, Type: {attachment_type}, Downloaded: {downloaded}")       
@@ -389,7 +389,8 @@ async def clog_processor(clog_data, external_session=None):
             npc_id=npc_id,
             date_added=datetime.now(),
             image_url="",
-            used_api=used_api
+            used_api=used_api,
+            unique_id=unique_id
         )
         session.add(clog_entry)
         session.commit()  # Commit to get the log_id
@@ -518,7 +519,7 @@ async def ca_processor(ca_data, external_session=None):
     downloaded = ca_data.get('downloaded', False)
     image_url = ca_data.get('image_url', None)
     used_api = ca_data.get('used_api', False)
-    
+    unique_id = ca_data.get('guid', None)
     if player_name == "Scributles":
         print(f"CA data for Scributles: {ca_data}")
     debug_print(f"Extracted CA data - Player: {player_name}, Task: {task_name}, Tier: {tier}")
@@ -550,7 +551,8 @@ async def ca_processor(ca_data, external_session=None):
             task_name=task_name,
             date_added=datetime.now(),
             image_url=dl_path,
-            used_api=used_api
+            used_api=used_api,
+            unique_id=unique_id
         )
         session.add(ca_entry)
         is_new_ca = True
@@ -992,13 +994,14 @@ async def pb_processor(pb_data, external_session=None):
     downloaded = pb_data.get('downloaded', False)
     image_url = pb_data.get('image_url', None)
     used_api = pb_data.get('used_api', False)
-    unique_id = pb_data.get('')
+    unique_id = pb_data.get('guid', None)
+
 
     
-    print(f"Extracted PB data - Player: {player_name}, Boss: {boss_name}, Team size: {team_size}")
-    print(f"Current time: {current_ms}ms, PB time: {pb_ms}ms, Final time: {time_ms}ms")
-    print(f"Is personal best: {is_personal_best}, Used API: {used_api}")
-    print(f"Account hash: {account_hash[:8]}... (truncated)")
+    # print(f"Extracted PB data - Player: {player_name}, Boss: {boss_name}, Team size: {team_size}")
+    # print(f"Current time: {current_ms}ms, PB time: {pb_ms}ms, Final time: {time_ms}ms")
+    # print(f"Is personal best: {is_personal_best}, Used API: {used_api}")
+    # print(f"Account hash: {account_hash[:8]}... (truncated)")
     player = None
     has_xf_entry = False
     dl_path = None
@@ -1070,7 +1073,8 @@ async def pb_processor(pb_data, external_session=None):
             kill_time=current_ms,
             date_added=datetime.now(),
             image_url=dl_path if dl_path else "",
-            used_api=used_api
+            used_api=used_api,
+            unique_id=unique_id
         )
         session.add(pb_entry)
         session.commit()
@@ -1084,7 +1088,7 @@ async def pb_processor(pb_data, external_session=None):
         # Get player groups
         ## We need to determine what KC the player has received this PB at
         try:
-            current_kc = await get_player_metric(player_name, npc_name)
+            current_kc = await get_player_boss_kills(player_name, npc_name)  # int | 0 | None
             print("Got current KC:", current_kc)
             if current_kc >= 50:
                 award_points_to_player(player_id=player_id, amount=20, source=f'New Personal Best ({convert_from_ms(time_ms)}) at {npc_name}', expires_in_days=60)
@@ -1162,6 +1166,7 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
         kill_count = drop_data.get('kill_count', None)
         player_name = str(player_name).strip()
         account_hash = str(account_hash)
+        guid = drop_data.get('guid', None)
         downloaded = drop_data.get('downloaded', False)
         image_url = drop_data.get('image_url', None)
         
@@ -1248,6 +1253,7 @@ async def drop_processor(drop_data: RawDropData, external_session=None):
             attachment_url=attachment_url,
             attachment_type=attachment_type,
             used_api=used_api,  ## Used to determine if the drop was created from the API or not
+            unique_id=guid,
             existing_session=session if use_external_session else None
         )
         debug_print(f"Drop created successfully - Drop ID: {drop.drop_id if drop else 'None'}")

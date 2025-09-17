@@ -83,15 +83,15 @@ async def get_items():
         print(f"Unexpected error in get_items: {e}")
         return jsonify({"error": str(e)}), 500
     
-@worker_bp.route('/latest_welcome_message', methods=['GET'])
+@worker_bp.route('/latest_welcome', methods=['GET'])
 async def get_latest_welcome_message():
     with get_db_session() as session:
         welcome_message: GroupConfiguration = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == 2,
                                                                               GroupConfiguration.config_key == "welcome_message").first()
         if welcome_message is not None:
-            return jsonify({"message": welcome_message.long_value})
+            return welcome_message.long_value
         else:
-            return jsonify({"message": "No welcome message found"}), 404
+            return "Welcome to the DropTracker", 404
         
 @worker_bp.route('/latest_news', methods=['GET'])
 async def get_latest_news():

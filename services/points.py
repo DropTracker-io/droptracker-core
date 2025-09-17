@@ -3,7 +3,7 @@
 from typing import List, Optional, Dict, Tuple
 from datetime import datetime, timedelta
 
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 
 from db.models import (
     session as db_session,
@@ -401,6 +401,25 @@ def get_available_points_for_group_spend(*, group_id: int, spender_player_id: Op
     if not is_member:
         return total
     return total + get_player_point_balance(player_id=spender_player_id, session=session)
+
+
+# ----------------------------
+# Reporting
+# ----------------------------
+
+def get_player_lifetime_points_earned(*, player_id: int, session=None) -> int:
+    """Total points ever credited to a player, regardless of expiry or status.
+
+    Excludes credits whose source contains 'Upgrade' (case-insensitive).
+    """
+    if session is None:
+        session = db_session
+
+    total = (session.query(func.sum(PointCredit.amount))
+             .filter(PointCredit.player_id == player_id)
+             .filter(or_(PointCredit.source.is_(None), ~PointCredit.source.ilike('%Upgrade%')))
+             .scalar())
+    return int(total or 0)
 
 
 # ----------------------------

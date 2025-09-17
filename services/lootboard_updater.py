@@ -16,17 +16,19 @@ class LootboardServices(Extension):
         print("Lootboard services initialized.")
         self.db = DatabaseOperations()
         self._processing_lock = asyncio.Lock()
-        asyncio.create_task(self.lootboard_updates())
+        self.lootboard_updates.start()
+        #self.lootboard_updates()
 
     async def _update_and_refresh_group(self, session: Session, group_id: int, group_cfg: dict, force: bool = False):
-        """Generate the latest board image for a group and update its Discord message."""
-        try:
-            # Generate latest board image; import locally to avoid circular import
-            from lootboards import update_specific_board
-            await update_specific_board(group_id, force=force)
-        except Exception as e:
-            print(f"Error generating board for group {group_id}: {e}")
-            # Continue to attempt message update if an older image exists
+        """Update Discord message for a group. Only generate new board if force=True."""
+        if force:
+            # Only generate new board image when forced (e.g., new submission)
+            try:
+                from lootboards import update_specific_board
+                await update_specific_board(group_id, force=force)
+            except Exception as e:
+                print(f"Error generating board for group {group_id}: {e}")
+                # Continue to attempt message update if an older image exists
 
         try:
             channel: interactions.Channel = await self.bot.fetch_channel(channel_id=group_cfg['channel'])
@@ -173,6 +175,7 @@ class LootboardServices(Extension):
                     except:
                         pass
 
+    @Task.create(IntervalTrigger(seconds=540))
     async def lootboard_updates(self):
         try:
             if hasattr(self, "_processing_lock") and self._processing_lock.locked():
@@ -253,7 +256,9 @@ class LootboardServices(Extension):
         
 
 async def instantly_update_board(group_id: int, force: bool = False):
-    # Local import to avoid circular import during module initialization
+    """Generate a new board for a specific group. This should only be called when new submissions come in."""
+    # This function should be called from submissions.py when new data comes in
+    # It will generate a new board image
     from lootboards import update_specific_board
     await update_specific_board(group_id, force=force)
 
