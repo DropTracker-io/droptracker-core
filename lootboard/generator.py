@@ -344,7 +344,7 @@ async def generate_server_board(group_id: int = 0, wom_group_id: int = 0, partit
         target_board = session.query(LootboardStyle).filter(LootboardStyle.id == 1).first()
     local_url = target_board.local_url
     if not target_board:
-        local_url = "/store/droptracker/disc/lootboard/bank-new-clean-dark.png"
+        local_url = "/store/droptracker/disc/lootboard/themes/bank-new-clean-dark.png"
 
     bg_img, draw = load_background_image(local_url)
 
@@ -459,7 +459,7 @@ async def generate_server_board_temporary(group_id: int = 0, wom_group_id: int =
         target_board = session.query(LootboardStyle).filter(LootboardStyle.id == 1).first()
     local_url = target_board.local_url
     if not target_board:
-        local_url = "/store/droptracker/disc/lootboard/bank-new-clean-dark.png"
+        local_url = "/store/droptracker/disc/lootboard/themes/bank-new-clean-dark.png"
 
     bg_img, draw = load_background_image(local_url)
 
@@ -878,48 +878,118 @@ def save_image(image, server_id, partition):
     Args:
         image: The PIL Image object to save
         server_id: The group/server ID
-        partition: The partition string (either YYYYMM or YYYY-MM-DD format)
+        partition: The partition string - can be:
+            - YYYYMM (monthly, e.g., "202601")
+            - YYYY-MM-DD (daily, e.g., "2026-01-05")
+            - YYYYMMDDHHMM-YYYYMMDDHHMM (timeframe, e.g., "202512220734-202601190734")
+            - Timeframe with NPC filter: YYYYMMDDHHMM-YYYYMMDDHHMM-npcXXX
     """
     base_path = f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb"
+    os.makedirs(base_path, exist_ok=True)
     
-    # Determine if this is a daily partition
-    is_daily = '-' in str(partition)
+    partition_str = str(partition)
     
-    if is_daily:
-        # For daily partitions (YYYY-MM-DD format)
-        date_parts = partition.split('-')
-        year = int(date_parts[0])
-        month = int(date_parts[1])
-        day = int(date_parts[2])
+    # Check if this is a timeframe partition (format: YYYYMMDDHHMM-YYYYMMDDHHMM or with -npcXXX suffix)
+    # Timeframe partitions have a dash but the parts before/after are long numeric strings (12 digits each)
+    if '-' in partition_str:
+        parts = partition_str.split('-')
+        # Check if first part is a 12-digit timestamp (YYYYMMDDHHMM)
+        if len(parts) >= 2 and len(parts[0]) == 12 and parts[0].isdigit():
+            # This is a timeframe partition
+            start_ts = parts[0]
+            end_ts = parts[1] if len(parts[1]) == 12 and parts[1].isdigit() else parts[1]
+            npc_suffix = ""
+            if len(parts) > 2:
+                npc_suffix = f"_{parts[2]}"  # e.g., "_npc123"
+            
+            # Parse start timestamp for directory organization
+            try:
+                start_year = int(start_ts[:4])
+                start_month = int(start_ts[4:6])
+                start_day = int(start_ts[6:8])
+                start_hour = int(start_ts[8:10])
+                start_min = int(start_ts[10:12])
+                
+                end_year = int(end_ts[:4])
+                end_month = int(end_ts[4:6])
+                end_day = int(end_ts[6:8])
+                end_hour = int(end_ts[8:10])
+                end_min = int(end_ts[10:12])
+            except (ValueError, IndexError):
+                # Fallback: just save with the raw partition string
+                file_path = f"{base_path}/timeframe_{partition_str.replace('-', '_')}.png"
+                image.save(file_path)
+                return file_path
+            
+            # Create timeframes directory
+            timeframe_dir = f"{base_path}/timeframes"
+            os.makedirs(timeframe_dir, exist_ok=True)
+            
+            # Create a readable filename
+            # Format: YYYY-MM-DD_HHMM_to_YYYY-MM-DD_HHMM[_npcXXX].png
+            start_str = f"{start_year}-{start_month:02d}-{start_day:02d}_{start_hour:02d}{start_min:02d}"
+            end_str = f"{end_year}-{end_month:02d}-{end_day:02d}_{end_hour:02d}{end_min:02d}"
+            file_name = f"{start_str}_to_{end_str}{npc_suffix}.png"
+            file_path = f"{timeframe_dir}/{file_name}"
+            image.save(file_path)
+            
+            print(f"Saved timeframe lootboard to: {file_path}")
+            return file_path
         
-        # Get month name (e.g., "August")
-        month_name = calendar.month_name[month]
-        
-        # Create directory structure: /clans/{server_id}/lb/{month_name}/
-        month_dir = f"{base_path}/{month_name}"
-        os.makedirs(month_dir, exist_ok=True)
-        
-        # Save as {day}.png in the month directory
-        file_path = f"{month_dir}/{day}.png"
-        image.save(file_path)
-        
-        # Also save with year for uniqueness if needed (e.g., {year}_{day}.png)
-        # This helps distinguish between same days in different years
-        year_file_path = f"{month_dir}/{year}_{day}.png"
-        image.save(year_file_path)
-        
-        # Check if this is today's date
-        current_date = datetime.now().strftime('%Y-%m-%d')
-        if partition == current_date:
-            # Also save as the default lootboard.png if it's today
-            os.makedirs(base_path, exist_ok=True)
-            image.save(f"{base_path}/lootboard.png")
-        
-        return file_path
+        # Check if it's a daily partition (YYYY-MM-DD format, 4-2-2 digits)
+        elif len(parts) == 3 and len(parts[0]) == 4 and len(parts[1]) == 2 and len(parts[2]) == 2:
+            # For daily partitions (YYYY-MM-DD format)
+            try:
+                year = int(parts[0])
+                month = int(parts[1])
+                day = int(parts[2])
+            except ValueError:
+                # Fallback
+                file_path = f"{base_path}/daily_{partition_str.replace('-', '')}.png"
+                image.save(file_path)
+                return file_path
+            
+            # Get month name (e.g., "August")
+            month_name = calendar.month_name[month]
+            
+            # Create directory structure: /clans/{server_id}/lb/{month_name}/
+            month_dir = f"{base_path}/{month_name}"
+            os.makedirs(month_dir, exist_ok=True)
+            
+            # Save as {day}.png in the month directory
+            file_path = f"{month_dir}/{day}.png"
+            image.save(file_path)
+            
+            # Also save with year for uniqueness if needed (e.g., {year}_{day}.png)
+            year_file_path = f"{month_dir}/{year}_{day}.png"
+            image.save(year_file_path)
+            
+            # Check if this is today's date
+            current_date = datetime.now().strftime('%Y-%m-%d')
+            if partition_str == current_date:
+                # Also save as the default lootboard.png if it's today
+                image.save(f"{base_path}/lootboard.png")
+            
+            return file_path
+        else:
+            # Unknown format with dash - save with sanitized filename
+            safe_partition = partition_str.replace('-', '_').replace(':', '_')
+            file_path = f"{base_path}/custom_{safe_partition}.png"
+            image.save(file_path)
+            return file_path
     else:
-        # For monthly partitions (YYYYMM format)
-        year = int(str(partition)[:4])
-        month = int(str(partition)[4:6])
+        # For monthly partitions (YYYYMM format) or other numeric formats
+        try:
+            year = int(partition_str[:4])
+            month = int(partition_str[4:6])
+            
+            if month < 1 or month > 12:
+                raise ValueError(f"Invalid month: {month}")
+        except (ValueError, IndexError):
+            # Fallback for unrecognized format
+            file_path = f"{base_path}/board_{partition_str}.png"
+            image.save(file_path)
+            return file_path
         
         # Get month name
         month_name = calendar.month_name[month]
@@ -939,10 +1009,14 @@ def save_image(image, server_id, partition):
         # Check if this is the current month
         current_date = datetime.now()
         current_month_partition = current_date.year * 100 + current_date.month
-        if int(partition) == current_month_partition:
-            # Save as the default lootboard.png
-            os.makedirs(base_path, exist_ok=True)
-            image.save(f"{base_path}/lootboard.png")
+        try:
+            if int(partition_str) == current_month_partition:
+                # Save as the default lootboard.png
+                current_date_str = current_date.strftime('%d-%m-%Y')
+                image.save(f"{base_path}/lootboard.png")
+                image.save(f"{base_path}/{current_date_str}.png")
+        except ValueError:
+            pass
         
         return file_path
 
@@ -1020,10 +1094,146 @@ def get_hourly_partitions_from_day(year, month, day):
     return partitions
 
 
-async def generate_timeframe_board(bot: interactions.Client, group_id: int = 0, wom_group_id: int = 0, 
+async def get_drops_for_timeframe_from_db(
+    player_ids: List[int], 
+    start_time: datetime, 
+    end_time: datetime, 
+    group_id: int = None,
+    npc_id: int = None
+) -> Tuple[Dict, Dict, List, int]:
+    """
+    Query drops directly from the database for a specific timeframe.
+    This bypasses Redis and provides accurate results for custom date ranges.
+    
+    :param player_ids: List of player IDs to include
+    :param start_time: Start datetime (inclusive)
+    :param end_time: End datetime (inclusive)
+    :param group_id: Optional group ID for minimum value config
+    :param npc_id: Optional NPC ID to filter by
+    :return: Tuple of (group_items, player_totals, recent_drops, total_loot)
+    """
+    from collections import defaultdict
+    import heapq
+    
+    # Use defaultdict to avoid key existence checks
+    group_items = defaultdict(lambda: [0, 0])  # [quantity, total_value]
+    player_totals = defaultdict(int)
+    recent_drops_heap = []
+    total_loot = 0
+    drop_counter = 0
+    
+    # Get group minimum value config
+    group_minimum_value = 500000
+    only_include_items_over_minimum = False
+    
+    with get_db_session() as db_session:
+        if group_id:
+            try:
+                config = db_session.query(GroupConfiguration).filter(
+                    GroupConfiguration.group_id == group_id,
+                    GroupConfiguration.config_key == "minimum_value_to_notify"
+                ).first()
+                if config:
+                    group_minimum_value = int(config.config_value)
+            except:
+                pass
+            
+            try:
+                config = db_session.query(GroupConfiguration).filter(
+                    GroupConfiguration.group_id == group_id,
+                    GroupConfiguration.config_key == "only_include_items_over_minimum"
+                ).first()
+                if config:
+                    only_include_items_over_minimum = str(config.config_value).lower() in ("1", "true", "yes", "on")
+            except:
+                pass
+        
+        # Build the query with date range filter
+        query = select(
+            Drop.drop_id,
+            Drop.player_id,
+            Drop.item_id,
+            Drop.quantity,
+            Drop.value,
+            Drop.date_added,
+            Drop.npc_id
+        ).where(
+            and_(
+                Drop.player_id.in_(player_ids),
+                Drop.date_added >= start_time,
+                Drop.date_added <= end_time,
+                Drop.value.isnot(None),
+                Drop.quantity.isnot(None),
+                Drop.item_id.isnot(None)
+            )
+        )
+        
+        # Add NPC filter if specified
+        if npc_id:
+            query = query.where(Drop.npc_id == npc_id)
+        
+        result = db_session.execute(query)
+        all_drops = result.fetchall()
+        
+        print(f"[TimeframeDB] Found {len(all_drops)} drops between {start_time} and {end_time}")
+        
+        for drop in all_drops:
+            drop_id, player_id, item_id, quantity, value, date_added, drop_npc_id = drop
+            
+            item_total_value = quantity * value
+            
+            # Check if we should only include items over minimum value
+            if only_include_items_over_minimum and value < group_minimum_value:
+                continue
+            
+            # Update group items
+            group_items[str(item_id)][0] += quantity
+            group_items[str(item_id)][1] += item_total_value
+            
+            # Update player totals
+            player_totals[player_id] += item_total_value
+            
+            # Track recent high-value drops using heap
+            if value >= group_minimum_value:
+                date_str = date_added.isoformat() if isinstance(date_added, datetime) else str(date_added)
+                
+                # Use negative drop_id for max heap behavior (highest drop_id = most recent first)
+                heap_key = -drop_id
+                
+                drop_data = {
+                    'drop_id': drop_id,
+                    'item_id': item_id,
+                    'player_id': player_id,
+                    'value': value,
+                    'quantity': quantity,
+                    'date_added': date_str,
+                    'npc_id': drop_npc_id
+                }
+                
+                drop_counter += 1
+                heapq.heappush(recent_drops_heap, (heap_key, drop_counter, drop_data))
+        
+        # Convert defaultdicts to regular dicts with proper format
+        group_items_formatted = {
+            item_id: f"{values[0]},{values[1]}"
+            for item_id, values in group_items.items()
+        }
+        player_totals_dict = dict(player_totals)
+        total_loot = sum(player_totals.values())
+        
+        # Extract recent drops from heap (sorted by drop_id descending = most recent first)
+        recent_drops = [drop[2] for drop in sorted(recent_drops_heap)]
+    
+    print(f"[TimeframeDB] Total loot: {total_loot:,}, unique items: {len(group_items_formatted)}, players with loot: {len(player_totals_dict)}")
+    
+    return group_items_formatted, player_totals_dict, recent_drops, total_loot
+
+
+async def generate_timeframe_board(group_id: int = 0, wom_group_id: int = 0, 
                                   start_time: datetime = None, end_time: datetime = None, npc_id: int = None):
     """
     Generate a loot board for a specific timeframe and optionally for a specific NPC.
+    Uses direct database queries for accurate timeframe results.
     
     :param bot: Instance of the interactions.Client bot object
     :param group_id: DropTracker GroupID. 0 expects a wom_group_id
@@ -1043,21 +1253,6 @@ async def generate_timeframe_board(bot: interactions.Client, group_id: int = 0, 
     if end_time is None:
         # Default to current time
         end_time = datetime.now()
-    
-    # Determine the appropriate time granularity based on the timeframe
-    time_diff = end_time - start_time
-    if time_diff.days > 30:
-        # For timeframes longer than a month, use monthly partitions
-        granularity = "monthly"
-    elif time_diff.days > 1:
-        # For timeframes longer than a day, use daily partitions
-        granularity = "daily"
-    elif time_diff.seconds > 3600:
-        # For timeframes longer than an hour, use hourly partitions
-        granularity = "hourly"
-    else:
-        # For shorter timeframes, use minute partitions
-        granularity = "minute"
     
     # Get group information
     group = None
@@ -1083,7 +1278,7 @@ async def generate_timeframe_board(bot: interactions.Client, group_id: int = 0, 
     
     # Load background image
     target_board = session.query(LootboardStyle).filter(LootboardStyle.id == loot_board_style).first()
-    local_url = target_board.local_url if target_board else "/store/droptracker/disc/lootboard/bank-new-clean-dark.png"
+    local_url = target_board.local_url if target_board else "/store/droptracker/disc/lootboard/themes/bank-new-clean-dark.png"
     bg_img, draw = load_background_image(local_url)
     
     # Get dynamic color settings
@@ -1108,17 +1303,21 @@ async def generate_timeframe_board(bot: interactions.Client, group_id: int = 0, 
     
     player_ids = await associate_player_ids(player_wom_ids)
     
-    # Generate time partitions to query
-    time_partitions = generate_time_partitions(start_time, end_time, granularity)
-    print("Got", len(time_partitions), "time partitions")
-    # Get the drops, recent drops, and total loot for the group across all partitions
-    group_items, player_totals, recent_drops, total_loot = await get_drops_for_timeframe(
-        player_ids, time_partitions, granularity, npc_id
+    print(f"[TimeframeBoard] Generating board for {len(player_ids)} players from {start_time} to {end_time}")
+    
+    # Query drops directly from database for the timeframe
+    group_items, player_totals, recent_drops, total_loot = await get_drops_for_timeframe_from_db(
+        player_ids, start_time, end_time, group_id, npc_id
     )
 
-    print("Got recent drops:", len(recent_drops))
-    with open(f"/store/droptracker/disc/static/assets/img/clans/{group_id}/recent_drops.json", "w") as f:
-        json.dump(recent_drops, f)
+    print(f"[TimeframeBoard] Got {len(recent_drops)} recent drops, total loot: {total_loot:,}")
+    
+    # Save recent drops JSON
+    try:
+        with open(f"/store/droptracker/disc/static/assets/img/clans/{group_id}/recent_drops.json", "w") as f:
+            json.dump(recent_drops, f)
+    except Exception as e:
+        print(f"Warning: Could not save recent_drops.json: {e}")
     
     # Draw elements on the background image
     bg_img = await draw_drops_on_image(bg_img, draw, group_items, group_id, dynamic_colors=use_dynamic_colors, use_gp=use_gp_colors)

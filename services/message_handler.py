@@ -4,7 +4,7 @@ import interactions
 from interactions import ChannelType, ContextMenuContext, Extension, listen, Message, message_context_menu
 from interactions.api.events import MessageCreate, Component
 from db.models import Group, GroupPatreon, PlayerPet, session, Player, ItemList, PersonalBestEntry
-from db.update_player_total import update_player_in_redis
+#from db.update_player_total import update_player_in_redis
 from db.xf.recent_submissions import create_xenforo_entry
 from services.components import InfoActionRow
 from utils.embeds import update_boss_pb_embed
@@ -339,7 +339,7 @@ class MessageHandler(Extension):
                 SectionComponent(
                     components=[
                         TextDisplayComponent(
-                            content="-# We also offer some additional features for [players who upgrade their accounts](https://www.droptracker.io/account/upgrades).\n" +
+                            content="-# We also offer some additional features for [players who upgrade their accounts](https://www.droptracker.io/groups/upgrades).\n" +
                             "-# Please consider subscribing to support the continued development of the project.",
                         ),
                     ],
@@ -347,7 +347,7 @@ class MessageHandler(Extension):
                         label="Upgrade",
                         style=ButtonStyle.LINK,
                         emoji=PartialEmoji(name="supporter", id=1263827303712948304),
-                        url="https://www.droptracker.io/account/upgrades"
+                        url="https://www.droptracker.io/groups/upgrades"
                     )
                 ),
                 SeparatorComponent(divider=True),

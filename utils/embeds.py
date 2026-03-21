@@ -4,12 +4,12 @@ import os
 import time
 
 from sqlalchemy import text
-from db.models import Group, GroupConfiguration, GroupPersonalBestMessage, NpcList, PersonalBestEntry, Player, session
+from db import (models, Group, GroupConfiguration, GroupPersonalBestMessage, NpcList, PersonalBestEntry, Player, session)
 from utils.redis import redis_client, calculate_global_overall_rank, calculate_rank_amongst_groups
 from utils.format import convert_from_ms, format_number
 import interactions
 from interactions import Embed
-from dotenv import load_dotenv
+from dotenv import load_dotenv  
 
 load_dotenv()
 

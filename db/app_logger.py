@@ -1,4 +1,4 @@
-from db.models import XenforoSession, xenforo_engine
+from db import XenforoSession, xenforo_engine
 import time
 import json
 import redis

@@ -3,7 +3,7 @@ import aiohttp
 import aiofiles
 from interactions import Embed, Client, listen, ChannelType, Button, ButtonStyle
 from interactions.api.events import MessageCreate, Component
-from db.models import User, Group, Guild, Player, Drop, session, ItemList, Webhook, NpcList, GroupConfiguration
+from db import User, Group, Guild, Player, Drop, session, ItemList, Webhook, NpcList, GroupConfiguration, models
 from utils.wiseoldman import check_user_by_id, check_user_by_username, check_group_by_id
 import time
 import re
@@ -75,15 +75,15 @@ async def new_patreon_update(user: User, status: str):
         pass 
 
 async def new_player_message(bot: interactions.Client, player_name):
-    channel_id = 1281734796116099155
-    channel = await bot.fetch_channel(channel_id=1281734796116099155)
+    channel_id = 1421835277932036228
+    channel = await bot.fetch_channel(channel_id=1421835277932036228)
     await channel.send(embeds=Embed(title="New player added",
                                     description=f"{player_name} has made their first appearance in the database.",
                                     color=0x00ff00, footer=global_footer))
     
 async def name_change_message(bot, new_name, player_id, old_name):
-    channel_id = 1281734796116099155
-    channel = await bot.fetch_channel(channel_id=1281734796116099155)
+    channel_id = 1421835277932036228
+    channel = await bot.fetch_channel(channel_id=1421835277932036228)
     await channel.send(embeds=Embed(title="Name changed",
                                     description=f"[{player_id}] `{old_name}` -> `{new_name}`",
                                     color=0x00ff00, footer=global_footer))

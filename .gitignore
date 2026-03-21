@@ -10,6 +10,7 @@
 /static/assets/fonts/*
 /static/assets/css/*
 /static/assets/plugins/*
+/static/img/*
 
 1.py
 broken*
@@ -21,6 +22,7 @@ player_board.py
 
 
 /data/logs/*
+/logs/
 
 # templates
 /templates/*
@@ -30,14 +32,29 @@ alembic.ini
 alembic/versions/*
 
 # General project excludes
+__pycache__/
 *.cpython*
+*.pyc
+*.pyo
 *.mako
 *.pxi
 *.pyi
 *.pyx
 venv/*
+oldvenv/*
 *.zip
 *.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.ttf
+*.bak
+*.bak2
+.DS_Store
+output.json
+names.txt
+video_process
 data/items.json
 db/drop_mem.py
 templates/base.html
@@ -49,6 +66,8 @@ games/gielinor_race/tasks.json
 *.swp
 data/lootboard/
 data/out/
+data/polls/
+data/submissions/Untitled
 *.png
 events/models/README.md
 api_start.sh
@@ -58,7 +77,7 @@ data/updates/
 data/updates/
 static/assets/exports/*
 board_cli.py
-launch.json
+.vscode/
 utils/sheets/sheet_manager.py
 utils/sheets/auth/*
 static/assets/osrs_wiki.py

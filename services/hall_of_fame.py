@@ -1,11 +1,14 @@
 import datetime
 import json
 import hashlib
+import logging
 import random
 import time
 from dataclasses import dataclass
 from collections import deque
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
+
+log = logging.getLogger(__name__)
 from interactions import BaseComponent, Extension, listen
 import interactions
 from interactions import ComponentContext, Extension, ActionRow, Button, ButtonStyle, FileComponent, PartialEmoji, Permissions, SlashContext, UnfurledMediaItem, listen, slash_command
@@ -30,7 +33,10 @@ class HallOfFame(Extension):
         self._global_limiter: RateLimiter = RateLimiter(max_calls=8, period_seconds=1.0)
         self._group_forbidden_until: Dict[int, float] = {}
         self._workers = [asyncio.create_task(self._worker(i)) for i in range(3)]
-        print(f"[HALL OF FAME] Started {len(self._workers)} worker(s)")
+        self._stats_updates = 0
+        self._stats_cleanups = 0
+        self._stats_skipped_hash = 0
+        log.warning("HOF: %d workers started, main loop every 6min", len(self._workers))
         asyncio.create_task(self.update_hall_of_fame())
         # print("Hall of Fame service initialized.")
     
@@ -47,71 +53,115 @@ class HallOfFame(Extension):
             guild = await self.bot.fetch_guild(guild_id)
             return guild.get_member(self.bot.user.id) is not None
         except Exception as e:
-            print("Error checking if guild has bot:", e)
+            log.warning("HOF: guild_has_bot %s failed: %s", guild_id, e)
             return False
-        return False
     
 
     async def update_hall_of_fame(self):
+        iteration = 0
         while True:
-            # print("Update hall of fame called")
-            groups_configured = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == "create_pb_embeds",
-                                                                                 GroupConfiguration.config_value == "1").all()
-            #group_ids = [group.group_id for group in groups_to_update]
-            print(f"[HALL OF FAME] Group IDs to update: {[group.group_id for group in groups_configured]}")
-
-            final_list = []
-            group_obj_list = []
-            for group_cfg in groups_configured:
-                group_id = group_cfg.group_id
-                group_obj = session.query(Group).filter(Group.group_id == group_id).first()
-                guild_id = group_obj.guild_id
-                guild = await self.bot.fetch_guild(guild_id)
-                if not guild:
-                    group_cfg.config_value = "0"
-                    session.commit()
-                    print(f"[HALL OF FAME] Group {group_id} not found, disabling PB embeds")
-                    continue
-                group_obj_list.append(group_obj)
-                if await self.guild_has_bot(guild_id):
-                    print(f"[HALL OF FAME] Group {group_id} has bot, enabling PB embeds")
-                    final_list.append(group_cfg)
-            for group in final_list:
-                group_obj = next((obj for obj in group_obj_list if obj.group_id == group.group_id), None)
-                if not group_obj:
-                    continue
-                print(f"[HALL OF FAME] Updating group {group_obj.group_id}")
-                await self._update_group_hof(group_obj)
+            iteration += 1
+            last_updates = self._stats_updates
+            last_cleanups = self._stats_cleanups
+            last_skipped = self._stats_skipped_hash
+            self._stats_updates = self._stats_cleanups = self._stats_skipped_hash = 0
+            log.warning(
+                "HOF loop %d wake | last 6min: %d updated, %d cleaned (404), %d skipped (no change) | pending=%d",
+                iteration, last_updates, last_cleanups, last_skipped, len(self._pending_jobs)
+            )
+            try:
+                groups_configured = session.query(GroupConfiguration).filter(
+                    GroupConfiguration.config_key == "create_pb_embeds",
+                    GroupConfiguration.config_value == "1"
+                ).all()
+                final_list = []
+                group_obj_list = []
+                skipped_no_group = 0
+                skipped_no_guild = 0
+                skipped_no_bot = 0
+                for group_cfg in groups_configured:
+                    group_id = group_cfg.group_id
+                    group_obj = session.query(Group).filter(Group.group_id == group_id).first()
+                    if not group_obj:
+                        skipped_no_group += 1
+                        continue
+                    guild_id = group_obj.guild_id
+                    try:
+                        guild = await self.bot.fetch_guild(guild_id)
+                    except Exception as e:
+                        log.warning("HOF loop %d: fetch guild %s failed for group %d: %s", iteration, guild_id, group_id, e)
+                        continue
+                    if not guild:
+                        group_cfg.config_value = "0"
+                        session.commit()
+                        skipped_no_guild += 1
+                        continue
+                    group_obj_list.append(group_obj)
+                    if await self.guild_has_bot(guild_id):
+                        final_list.append(group_cfg)
+                    else:
+                        skipped_no_bot += 1
+                jobs_before = len(self._pending_jobs)
+                try:
+                    qsize_before = self._hof_queue.qsize()
+                except Exception:
+                    qsize_before = "?"
+                total_enqueued = 0
+                total_skipped_pending = 0
+                for group in final_list:
+                    group_obj = next((obj for obj in group_obj_list if obj.group_id == group.group_id), None)
+                    if not group_obj:
+                        continue
+                    enqueued, skipped = await self._update_group_hof(group_obj)
+                    total_enqueued += enqueued
+                    total_skipped_pending += skipped
+                try:
+                    qsize_after = self._hof_queue.qsize()
+                except Exception:
+                    qsize_after = "?"
+                skipped_total = skipped_no_guild + skipped_no_group + skipped_no_bot
+                log.warning(
+                    "HOF loop %d done | groups %d→%d active | jobs enq %d (skip %d pending) | queue %s→%s | sleeping 360s",
+                    iteration, len(groups_configured), len(final_list),
+                    total_enqueued, total_skipped_pending, qsize_before, qsize_after
+                )
+                if total_skipped_pending > total_enqueued and total_skipped_pending > 50:
+                    log.warning("HOF loop %d: backlog - %d jobs skipped (already pending)", iteration, total_skipped_pending)
+            except Exception as e:
+                log.exception("HOF loop %d: UNCAUGHT EXCEPTION (loop will continue): %s", iteration, e)
             await asyncio.sleep(360)
 
-    async def _update_group_hof(self, group: Group):
+    async def _update_group_hof(self, group: Group) -> Tuple[int, int]:
+        """Return (enqueued, skipped_pending)."""
         if self._is_in_development() and group.group_id != 2:
-            return
-        group_bosses = []
-        required_bosses: GroupConfiguration = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group.group_id, 
-                                                                                GroupConfiguration.config_key == "personal_best_embed_boss_list").first()
-        boss_list = required_bosses.config_value
+            return 0, 0
+        required_bosses: GroupConfiguration = session.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == group.group_id,
+            GroupConfiguration.config_key == "personal_best_embed_boss_list"
+        ).first()
+        if not required_bosses:
+            log.warning("HOF: group %d has no personal_best_embed_boss_list config", group.group_id)
+            return 0, 0
+        boss_list = required_bosses.config_value or ""
         if boss_list == "" or len(str(boss_list)) < 10:
-            boss_list = required_bosses.long_value
+            boss_list = (required_bosses.long_value or "")
         if boss_list == "" or len(str(boss_list)) < 10:
-            ## Neither field has entries, so we skip this group
-            print(f"[HALL OF FAME] Group {group.group_id} has no bosses to update")
-            return
+            return 0, 0
         bosses_to_update = boss_list.replace("[", "").replace("]", "").split(",")
-        bosses_to_update = [boss.strip() for boss in bosses_to_update]
+        bosses_to_update = [b.strip().replace('"', '') for b in bosses_to_update if b.strip()]
+        enqueued = 0
+        skipped_pending = 0
         for boss in bosses_to_update:
-            if boss not in group_bosses:
-                group_bosses.append(boss)
-        print(f"[HALL OF FAME]Group {group.group_id} bosses to update: {group_bosses}")
-        for boss in group_bosses:
-            boss = boss.replace('"', '')
             npc = session.query(NpcList).filter(NpcList.npc_name == boss).first()
             if npc:
-                print(f"[HALL OF FAME] Enqueuing job for {boss} in group {group.group_id}")
-                await self._enqueue_job(group_id=group.group_id, npc_id=npc.npc_id)
+                added = await self._enqueue_job(group_id=group.group_id, npc_id=npc.npc_id)
+                if added:
+                    enqueued += 1
+                else:
+                    skipped_pending += 1
             else:
-                print(f"[HALL OF FAME] NPC {boss} not found in group {group.group_id}")
-                pass
+                log.warning("HOF: group %d boss '%s' not in NpcList", group.group_id, boss)
+        return enqueued, skipped_pending
 
     async def _should_send_hof(self, group_id: int, npc: NpcList):
         required_bosses: GroupConfiguration = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id, 
@@ -138,54 +188,56 @@ class HallOfFame(Extension):
 
     async def _send_boss_components(self, group_id: int, npc: NpcList, components: List[BaseComponent]):
         group = session.query(Group).filter(Group.group_id == group_id).first()
-        if group:
-            # print(f"[HALL OF FAME] Sending components for {npc.npc_name} in group {group_id}")
-            channel_cfg = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id, GroupConfiguration.config_key == "channel_id_to_send_pb_embeds").first()
-            existing_message = session.query(GroupPersonalBestMessage).filter(GroupPersonalBestMessage.group_id == group_id,
-                                                                              GroupPersonalBestMessage.boss_name == npc.npc_name).first()
-            if existing_message:
-                # print(f"[HALL OF FAME] Existing message found for {npc.npc_name} in group {group_id}: {existing_message.message_id}")
-                message_id = existing_message.message_id
-                channel_id = existing_message.channel_id
-                if message_id and message_id != "":
-                    # print(f"[HALL OF FAME] Message ID: {message_id}")
-                    try:
-                        channel = await self.bot.fetch_channel(int(channel_id))
-                        if channel:
-                            message = await channel.fetch_message(int(message_id))
-                            # Rate-limited edit with retry
-                            await self._rate_limited_send_or_edit("edit", group_id)
-                            await message.edit(components=components)
-                            existing_message.date_updated = datetime.datetime.now()
-                            session.commit()
-                            await asyncio.sleep(random.uniform(0.15, 0.35))
-                            return True
-                        else:
-                            # print(f"[HALL OF FAME]Channel not found for {channel_id}")
-                            pass
-                    except Exception as e:
-                        # Re-raise to allow caller to classify and handle (e.g., 403/429)
-                        raise
-            elif channel_cfg and channel_cfg.config_value:
-                channel_id = channel_cfg.config_value
-                if channel_id != "":
-                    channel = await self.bot.fetch_channel(int(channel_id))
-                    if channel:
-                        await self._rate_limited_send_or_edit("send", group_id)
-                        message = await channel.send(components=components)
-                        # # print(f"[HALL OF FAME]Message sent to channel for {npc.npc_name}")
-                        await asyncio.sleep(random.uniform(0.15, 0.35))
-                        session.add(GroupPersonalBestMessage(group_id=group_id, message_id=message.id, channel_id=channel_id, boss_name=npc.npc_name))
-                        session.commit()
-                        return True
-                    else:
-                        # Channel missing is a hard failure; raise so caller can mark forbidden
-                        raise RuntimeError(f"Channel not found for id {channel_id}")
-            else:
-                # print(f"[HALL OF FAME]Channel not configured for group {group_id}")
+        if not group:
+            log.warning("HOF: group %d not found", group_id)
+            return False
+        channel_cfg = session.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == group_id,
+            GroupConfiguration.config_key == "channel_id_to_send_pb_embeds"
+        ).first()
+        existing_message = session.query(GroupPersonalBestMessage).filter(
+            GroupPersonalBestMessage.group_id == group_id,
+            GroupPersonalBestMessage.boss_name == npc.npc_name
+        ).first()
+        if existing_message:
+            message_id = existing_message.message_id
+            channel_id = existing_message.channel_id
+            if not message_id or message_id == "":
+                log.warning("HOF: group %d boss %s empty message_id", group_id, npc.npc_name)
                 return False
+            try:
+                channel = await self.bot.fetch_channel(int(channel_id))
+                if not channel:
+                    self._cleanup_deleted_message(group_id, npc.npc_name, existing_message)
+                    return "cleaned"
+                message = await channel.fetch_message(int(message_id))
+                if message is None:
+                    self._cleanup_deleted_message(group_id, npc.npc_name, existing_message)
+                    return "cleaned"
+                await self._rate_limited_send_or_edit("edit", group_id)
+                await message.edit(components=components)
+                existing_message.date_updated = datetime.datetime.now()
+                session.commit()
+                await asyncio.sleep(random.uniform(0.15, 0.35))
+                return True
+            except Exception as e:
+                if self._is_message_not_found_error(e):
+                    self._cleanup_deleted_message(group_id, npc.npc_name, existing_message)
+                    return "cleaned"
+                raise
+        elif channel_cfg and channel_cfg.config_value and channel_cfg.config_value != "":
+            channel_id = channel_cfg.config_value
+            channel = await self.bot.fetch_channel(int(channel_id))
+            if not channel:
+                raise RuntimeError(f"Channel not found for id {channel_id}")
+            await self._rate_limited_send_or_edit("send", group_id)
+            message = await channel.send(components=components)
+            session.add(GroupPersonalBestMessage(group_id=group_id, message_id=message.id, channel_id=channel_id, boss_name=npc.npc_name))
+            session.commit()
+            await asyncio.sleep(random.uniform(0.15, 0.35))
+            return True
         else:
-            # print(f"[HALL OF FAME]Group not found for {group_id}")
+            log.warning("HOF: group %d boss %s no channel config for new message", group_id, npc.npc_name)
             return False
 
     async def _finalize_boss_components(self, npc: NpcList, group: Group):
@@ -199,7 +251,7 @@ class HallOfFame(Extension):
             SectionComponent(
                 components=[
                     TextDisplayComponent(
-                        content=f"## 🏆 {self._get_linked_name(npc)} - Hall of Fame 🏆\n" + 
+                        content=f"## {self._get_linked_name(npc)} 🏆\n" + 
                         f"{summary_content}"
                     )
                 ],
@@ -405,7 +457,32 @@ class HallOfFame(Extension):
         return personal_bests
 
     def _get_linked_name(self, npc: NpcList):
-        return f"[{npc.npc_name}]({self._get_npc_url(npc)})"
+        npc_name = npc.npc_name
+        if "Theatre" in npc.npc_name:
+            if "Hard Mode" in npc.npc_name:
+                npc_name = "HM ToB"
+            elif "Entry Mode" in npc.npc_name:
+                npc_name = "EM ToB"
+            else:
+                npc_name = "ToB"
+        if "Chambers" in npc.npc_name:
+            if "Challenge" in npc.npc_name or "CM" in npc.npc_name:
+                npc_name = "CM CoX"
+            else:
+                npc_name = "CoX"
+        if "Tombs" in npc.npc_name:
+            if "Expert" in npc.npc_name:
+                npc_name = "Expert ToA"
+            elif "Entry Mode" in npc.npc_name:
+                npc_name = "Entry ToA"
+            else:
+                npc_name = "ToA"
+        if "Nightmare" in npc.npc_name:
+            if "Phosani" in npc.npc_name:
+                npc_name = "Phosani's"
+            else:
+                npc_name = "NM"
+        return f"[{npc_name}]({self._get_npc_url(npc)})"
 
     def _get_npc_img_url(self, npc: NpcList):
         return f"https://www.droptracker.io/img/npcdb/{npc.npc_id}.png"
@@ -478,33 +555,32 @@ class HallOfFame(Extension):
 
     # -------------------- New: Queue, Rate Limiter and Hashing Utilities --------------------
 
-    async def _enqueue_job(self, group_id: int, npc_id: int):
+    async def _enqueue_job(self, group_id: int, npc_id: int) -> bool:
+        """Enqueue a HOF job. Returns True if job was added, False if skipped (already pending)."""
         key = f"{group_id}:{npc_id}"
         if key in self._pending_jobs:
-            return
+            return False
         self._pending_jobs.add(key)
         job = HOFJob(group_id=group_id, npc_id=npc_id)
         try:
             await self._hof_queue.put(job)
-            try:
-                qsize = self._hof_queue.qsize()
-            except Exception:
-                qsize = "?"
-            print(f"[HALL OF FAME] Job enqueued {key}. Queue size: {qsize}")
-        except Exception:
+            return True
+        except Exception as e:
             self._pending_jobs.discard(key)
+            log.warning("HOF: enqueue %s failed: %s", key, e)
+            return False
 
     async def _worker(self, worker_index: int):
         while True:
-            job: HOFJob = await self._hof_queue.get()
+            try:
+                job: HOFJob = await self._hof_queue.get()
+            except asyncio.CancelledError:
+                raise
             key = f"{job.group_id}:{job.npc_id}"
             try:
-                #print(f"[HALL OF FAME][Worker {worker_index}] Processing job {key}")
                 await self._process_job(job)
-                #print(f"[HALL OF FAME][Worker {worker_index}] Finished job {key}")
-            except Exception as e:
-                import traceback
-                print(f"[HALL OF FAME][Worker {worker_index}] Job {key} failed: {e}\n{traceback.format_exc()}")
+            except Exception:
+                log.exception("HOF worker %d job %s failed", worker_index, key)
             finally:
                 self._hof_queue.task_done()
                 self._pending_jobs.discard(key)
@@ -512,58 +588,76 @@ class HallOfFame(Extension):
     async def _process_job(self, job: "HOFJob"):
         lock = self._get_guild_lock(job.group_id)
         async with lock:
-            # Skip processing if group is temporarily forbidden
             forbidden_until = self._group_forbidden_until.get(job.group_id)
             if forbidden_until and time.monotonic() < forbidden_until:
-                # print(f"[HALL OF FAME] Group {job.group_id} in forbidden cooldown; skipping job")
                 return
             await self._process_boss_update(job)
 
     async def _process_boss_update(self, job: "HOFJob"):
         group = session.query(Group).filter(Group.group_id == job.group_id).first()
-        print(f"[HALL OF FAME] Processing job for group id {job.group_id} (npc id {job.npc_id})")
         npc = session.query(NpcList).filter(NpcList.npc_id == job.npc_id).first()
-        if not group or not npc:
+        if not group:
+            log.warning("HOF: group %d not found", job.group_id)
             return
-        # Ensure the bot is a member of the target guild before proceeding
-        guild = session.query(Group).filter(Group.group_id == job.group_id).first()
-        if not guild or not await self.guild_has_bot(guild.guild_id):
-            guild_id = guild.guild_id if guild else None
-            print(f"[HALL OF FAME] Skipping job {job.group_id}:{job.npc_id} - bot not in guild {guild_id} or guild missing")
+        if not npc:
+            log.warning("HOF: npc %d not found", job.npc_id)
             return
-        # Skip if no changes (hash check)
-        components = await self._finalize_boss_components(npc, group)
+        if not await self.guild_has_bot(group.guild_id):
+            log.warning("HOF: bot not in guild %s (group %d)", group.guild_id, job.group_id)
+            return
+        try:
+            components = await self._finalize_boss_components(npc, group)
+        except Exception:
+            log.exception("HOF: _finalize_boss_components failed group=%d npc=%d", job.group_id, job.npc_id)
+            return
         new_hash = self._compute_components_hash(components)
         if self._is_same_hash(job.group_id, job.npc_id, new_hash):
-            print(f"[HALL OF FAME] Skipping job {job.group_id}:{job.npc_id} - no changes")
+            self._stats_skipped_hash += 1
+            self._maybe_log_progress()
             return
-        # Attempt send/edit with retries and rate limiting
         max_attempts = 5
+        max_429_attempts = 2
         base_delay = 0.5
+        max_sleep = 2.0
         for attempt in range(1, max_attempts + 1):
             try:
                 await self._rate_limited_send_or_edit("send_or_edit", job.group_id)
-                success = await self._send_boss_components(job.group_id, npc, components)
-                if success:
+                result = await self._send_boss_components(job.group_id, npc, components)
+                if result is True:
                     self._store_components_hash(job.group_id, job.npc_id, new_hash)
-                    print(f"[HALL OF FAME] Updated components for {job.group_id}:{job.npc_id}")
+                    self._stats_updates += 1
+                    self._maybe_log_progress()
                     return
+                if result == "cleaned":
+                    self._maybe_log_progress()
+                    return
+                log.warning("HOF: send returned False group=%d npc=%d attempt=%d", job.group_id, job.npc_id, attempt)
             except Exception as e:
-                # If Forbidden (403), put this group into cooldown and stop retrying until next loop
                 if self._is_forbidden_error(e):
                     self._group_forbidden_until[job.group_id] = time.monotonic() + 330.0
-                    print(f"[HALL OF FAME] 403 Forbidden for group {job.group_id}; skipping all jobs for this group until next loop")
+                    log.warning("HOF: 403 Forbidden group %d, cooldown 330s", job.group_id)
                     return
-                # Handle rate-limits and transient errors with backoff
+                is_rate_limit = self._is_rate_limit_error(e)
+                if is_rate_limit and attempt >= max_429_attempts:
+                    log.warning("HOF: group=%d npc=%d rate-limited, failing after %d attempts to free worker", job.group_id, job.npc_id, max_429_attempts)
+                    break
                 retry_after = getattr(e, "retry_after", None)
-                if retry_after is None:
-                    msg = str(e)
-                    if "429" in msg or "rate" in msg.lower():
-                        retry_after = min(2 ** attempt, 15)
+                if retry_after is None and is_rate_limit:
+                    retry_after = 1.0
                 delay = retry_after if retry_after is not None else base_delay * attempt
-                delay += random.uniform(0.05, 0.25)
+                delay = min(float(delay), max_sleep) + random.uniform(0.05, 0.2)
+                log.warning("HOF: group=%d npc=%d attempt %d/%d failed: %s", job.group_id, job.npc_id, attempt, max_attempts, e)
                 await asyncio.sleep(delay)
-                print(f"[HALL OF FAME] Retry {attempt} for {job.group_id}:{job.npc_id} after {delay:.2f}s")
+        log.error("HOF: FAILED after %d attempts group=%d npc=%d (%s)", max_attempts, job.group_id, job.npc_id, npc.npc_name)
+
+    def _maybe_log_progress(self):
+        """Log every 5 jobs processed (update or skip) so we know workers are active."""
+        processed = self._stats_updates + self._stats_skipped_hash + self._stats_cleanups
+        if processed > 0 and processed % 5 == 0:
+            log.warning(
+                "HOF: 5 checked (%d updated, %d unchanged, %d cleaned)",
+                self._stats_updates, self._stats_skipped_hash, self._stats_cleanups
+            )
 
     def _get_guild_lock(self, group_id: int) -> asyncio.Lock:
         lock = self._guild_locks.get(group_id)
@@ -575,8 +669,8 @@ class HallOfFame(Extension):
     def _get_guild_limiter(self, group_id: int) -> "RateLimiter":
         limiter = self._guild_limiters.get(group_id)
         if limiter is None:
-            # Allow up to 2 actions per second per guild
-            limiter = RateLimiter(max_calls=2, period_seconds=1.0)
+            # Discord: 5 edits per 5s per channel. All HOF msgs for a group share one channel.
+            limiter = RateLimiter(max_calls=1, period_seconds=1.1)
             self._guild_limiters[group_id] = limiter
         return limiter
 
@@ -610,9 +704,64 @@ class HallOfFame(Extension):
             return pruned
         return str(obj)
 
+    def _is_message_not_found_error(self, e: Exception) -> bool:
+        """Detect 404 / message deleted / NoneType from fetch_message (incl. wrapped/cause chain)."""
+        seen = set()
+        err = e
+        while err and id(err) not in seen:
+            seen.add(id(err))
+            status = getattr(err, "status", None) or getattr(err, "code", None)
+            if status == 404:
+                return True
+            msg = str(err).lower()
+            if "404" in msg or "not found" in msg:
+                return True
+            if isinstance(err, AttributeError) and ("nonetype" in msg or "none" in msg) and "edit" in msg:
+                return True
+            cls = type(err).__name__
+            if "NotFound" in cls or "notfound" in cls.lower():
+                return True
+            err = getattr(err, "__cause__", None) or getattr(err, "__context__", None)
+        return False
+
+    def _cleanup_deleted_message(self, group_id: int, boss_name: str, existing_message: GroupPersonalBestMessage):
+        """Remove stale DB entry and boss from config when message no longer exists."""
+        session.delete(existing_message)
+        boss_cfg = session.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == group_id,
+            GroupConfiguration.config_key == "personal_best_embed_boss_list"
+        ).first()
+        if boss_cfg:
+            for field in ("config_value", "long_value"):
+                val = getattr(boss_cfg, field) or ""
+                if not val or len(str(val)) < 10:
+                    continue
+                bosses = [b.strip().replace('"', "").strip() for b in str(val).replace("[", "").replace("]", "").split(",") if b.strip()]
+                if boss_name not in bosses:
+                    continue
+                bosses = [b for b in bosses if b and b != boss_name]
+                new_val = "[" + ", ".join(f'"{b}"' for b in bosses) + "]" if bosses else ""
+                setattr(boss_cfg, field, new_val)
+                break
+        session.commit()
+        self._stats_cleanups += 1
+        log.warning("HOF: group %d boss %s - message deleted (404), removed GPBM and config", group_id, boss_name)
+
+    def _is_rate_limit_error(self, e: Exception) -> bool:
+        """Detect 429 / rate limit errors."""
+        try:
+            status = getattr(e, "status", None) or getattr(e, "code", None)
+            if status == 429:
+                return True
+            text = str(e).lower()
+            if "429" in text or "ratelimit" in text or "rate limit" in text or "exceeded its ratelimit" in text:
+                return True
+        except Exception:
+            pass
+        return False
+
     def _is_forbidden_error(self, e: Exception) -> bool:
         try:
-            # interactions Forbidden might present as attribute or type
             status = getattr(e, "status", None) or getattr(e, "code", None)
             if status == 403:
                 return True
@@ -631,8 +780,25 @@ class HallOfFame(Extension):
         s = json.dumps(plain, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
+    # Bump this when changing embed layout to force all messages to refresh
+    _HASH_VERSION = 2
+
     def _hash_key(self, group_id: int, npc_id: int) -> str:
-        return f"hof:hash:{group_id}:{npc_id}"
+        return f"hof:hash:v{self._HASH_VERSION}:{group_id}:{npc_id}"
+
+    def _get_stored_hash(self, group_id: int, npc_id: int) -> Optional[str]:
+        """Return stored hash from Redis, or None if missing/error."""
+        try:
+            key = self._hash_key(group_id, npc_id)
+            existing = redis_client.client.get(key)
+            if not existing:
+                return None
+            if isinstance(existing, bytes):
+                existing = existing.decode("utf-8")
+            return existing
+        except Exception as e:
+            log.debug("HOF _get_stored_hash: Redis error for %d:%d: %s", group_id, npc_id, e)
+            return None
 
     def _is_same_hash(self, group_id: int, npc_id: int, new_hash: str) -> bool:
         try:
@@ -643,16 +809,16 @@ class HallOfFame(Extension):
             if isinstance(existing, bytes):
                 existing = existing.decode("utf-8")
             return existing == new_hash
-        except Exception:
+        except Exception as e:
+            log.debug("HOF _is_same_hash: Redis error for %d:%d: %s, treating as different", group_id, npc_id, e)
             return False
 
     def _store_components_hash(self, group_id: int, npc_id: int, new_hash: str):
         try:
             key = self._hash_key(group_id, npc_id)
-            # Short TTL ensures auto-refresh; 7 days default
             redis_client.client.set(key, new_hash, ex=7 * 24 * 3600)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("HOF _store_components_hash: Redis failed for %d:%d: %s", group_id, npc_id, e)
 
 
 class RateLimiter:

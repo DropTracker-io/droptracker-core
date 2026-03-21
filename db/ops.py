@@ -1,8 +1,29 @@
+"""
+Database Operations Module
+
+This module provides comprehensive database operations for the DropTracker application.
+It handles all database interactions including user management, drop tracking, group
+operations, and data synchronization with external services.
+
+Key Features:
+- Drop insertion and validation
+- User and group management
+- Wise Old Man integration
+- Redis caching operations
+- Notification queue management
+- Database session management
+
+Classes:
+    DatabaseOperations: Main class for all database operations
+
+Author: DropTracker Team
+"""
+
 import json
-from db.models import (
+from db import (
     GroupPatreon, GroupWomAssociation, NotifiedSubmission, Session, User, Group, Guild, Player, Drop, 
     UserConfiguration, session, XenforoSession, ItemList, GroupConfiguration, 
-    GroupEmbed, Field as EmbField, NpcList, NotificationQueue, user_group_association
+    GroupEmbed, Field as EmbField, NpcList, NotificationQueue, user_group_association, models
 )
 from dotenv import load_dotenv
 from sqlalchemy.dialects import mysql
@@ -13,20 +34,19 @@ from interactions import Embed
 import os
 import asyncio
 from datetime import datetime, timedelta
-from db.update_player_total import add_drop_to_ignore, process_drops_batch
-from db import models
-from db.xf.recent_submissions import create_xenforo_entry
-from utils.ranking.npc_ranker import check_npc_rank_change_from_drop
-from utils.ranking.rank_checker import check_rank_change_from_drop
+
+# from db.xf.recent_submissions import create_xenforo_entry
+# from utils.ranking.npc_ranker import check_npc_rank_change_from_drop
+# from utils.ranking.rank_checker import check_rank_change_from_drop
 from utils.embeds import get_global_drop_embed
 from utils.download import download_player_image
 from utils.format import normalize_player_display_equivalence
 from utils.wiseoldman import fetch_group_members, check_user_by_id, check_user_by_username
 from utils.redis import RedisClient, calculate_rank_amongst_groups, get_true_player_total
 from utils.format import format_number, get_extension_from_content_type, parse_redis_data, parse_stored_sheet, replace_placeholders
-from utils.sheets.sheet_manager import SheetManager
-from utils.semantic_check import check_drop as verify_item_real
-from db.item_validator import check_item_against_monster
+#from utils.sheets.sheet_manager import SheetManager
+#rom utils.semantic_check import check_drop as verify_item_real
+#from db.item_validator import check_item_against_monster
 import pymysql
 from utils.redis import calculate_clan_overall_rank, calculate_global_overall_rank
 from db.app_logger import AppLogger
@@ -35,7 +55,7 @@ load_dotenv()
 
 insertion_lock = asyncio.Lock()
 
-sheets = SheetManager()
+#sheets = SheetManager()
 
 app_logger = AppLogger()
 
@@ -49,257 +69,73 @@ global_footer = os.getenv('DISCORD_MESSAGE_FOOTER')
 player_obj_cache = {}
 
 class DatabaseOperations:
+    """
+    Main class for handling all database operations in the DropTracker system.
+    
+    This class provides methods for creating, updating, and managing database entities
+    including users, players, groups, drops, and notifications. It also handles
+    integration with external services like Wise Old Man and Redis caching.
+    
+    Attributes:
+        drop_queue (list): Queue for batching drop insertions for performance
+    """
+    
     def __init__(self) -> None:
+        """
+        Initialize a new DatabaseOperations instance.
+        
+        Sets up the drop queue for batching database operations.
+        """
         self.drop_queue = []
         pass
-
-    async def check_drop(self, bot: interactions.Client, drop_data: Drop):
-        
-        player_id = drop_data.player_id
-        npc_name = session.query(NpcList.npc_name).filter(NpcList.npc_id == drop_data.npc_id).first()
-        npc_name = npc_name[0] if npc_name else None
-        item_name = session.query(ItemList.item_name).filter(ItemList.item_id == drop_data.item_id).first()
-        item_name = item_name[0] if item_name else "Unknown"
-        drop_value = drop_data.value * drop_data.quantity
-        has_processed = {}
-
-        # Check if player is in cache
-        if player_id not in player_obj_cache:
-            # If not in cache, query and add to cache
-            player = session.query(Player).filter(Player.player_id == player_id).first()
-            if player:
-                player_obj_cache[player_id] = player
-        else:
-            # If in cache, retrieve from cache
-            player = player_obj_cache[player_id]
-        if player_id:
-            player_groups_key = f"player_groups:{player_id}"
-            player_groups_js = redis_client.get(player_groups_key)
-
-            if player_groups_js:
-                player_groups = json.loads(player_groups_js)
-            else:
-                player = session.query(Player).filter(Player.player_id == player_id).options(joinedload(Player.user)).first()
-                global_group = session.query(Group).filter(Group.group_id == 2).first()
-                if not player.groups:
-                    player.add_group(global_group)
-                    print(f"{player.player_name} has been added to the global group")
-                if player and player.groups:
-                    player_groups = [group.group_id for group in player.groups]  # Get group IDs
-                    if 2 not in player_groups:
-                        player.add_group(global_group)
-                        print(f"{player.player_name} has been added to the global group")
-                    player_groups_json = json.dumps(player_groups)
-                    redis_client.client.set(player_groups_key, player_groups_json, ex=3600)
-                else:
-                    player_groups = []
-
-            if not player_groups:
-                # print("Player is not in any groups.")
-                return
-            
-            for group_id in player_groups:
-                ## Perform ranking checks for changes
-                group_config_key = f"group_config:{group_id}"
-                group_config = redis_client.client.hgetall(group_config_key)
-                if group_config:
-                    group_config = parse_redis_data(group_config)
-                if not group_config:
-                    # If group config not in Redis, query from the database
-                    configs = session.query(GroupConfiguration).filter_by(group_id=group_id).all()
-                    group_config = {config.config_key: config.config_value for config in configs}
-                    
-                    # Only cache the configuration in Redis if it's not empty
-
-                    if group_config:
-                        redis_client.client.hset(group_config_key, mapping=group_config)  # Use hset instead of hmset
-                        redis_client.client.expire(group_config_key, 1)
-                    else:
-                        print(f"Group config for group_id {group_id} is empty or does not exist.")
-                        return
-                #print("Retrieved group_config:", group_config)
-                # Get minimum value to notify (default to 2.5M if not found)
-                # print("Group config:", group_config)
-                min_value = int(group_config.get('minimum_value_to_notify', 2500000))
-                #print("Min value returned as", min_value)
-                send_stacks = group_config.get('send_stacks_of_items', False)
-                if int(drop_data.value) > min_value or (send_stacks and (int(drop_data.value) * int(drop_data.quantity)) > min_value):
-                    ## Manually process this instantly in the redis cache
-                    try:
-                        if drop_data.drop_id not in has_processed:
-                            print("Sending to batch proccessor...")
-                            process_drops_batch([drop_data], session, from_submission=True)
-                            has_processed[drop_data.drop_id] = True
-                    except Exception as e:
-                        print("Couldn't manually process this drop data...", e)
-                    add_drop_to_ignore(drop_data.drop_id)
-                    # Get channel ID from group config
-                    channel_id = group_config.get('channel_id_to_post_loot')
-                    if channel_id:
-                        #print("Fetching channel from the discord api")
-                        channel = await bot.fetch_channel(channel_id=channel_id)
-                        
-                        #print("Got channel", channel.name)
-                        raw_embed = await self.get_group_embed(embed_type="drop", group_id=group_id)
-                        item_name = session.query(ItemList.item_name).filter(ItemList.item_id == drop_data.item_id).first()
-                        npc_name = session.query(NpcList.npc_name).filter(NpcList.npc_id == drop_data.npc_id).first()
-                        ## Add this to the XenForo table for recent submissions if it exceeds 5M gp
-                        if int(drop_data.value) * int(drop_data.quantity) > 5000000:
-                            ## Create a session for the operation
-                            try:
-                                await create_xenforo_entry(drop=drop_data)
-                            except Exception as e:
-                                print("Couldn't add the submission to XenForo:", e)
-                        #print("replacing embed with values from dict")
-                        partition = int(datetime.now().year * 100 + datetime.now().month)
-                        # player_total_month = f"player:{player_id}:{partition}:total_loot"
-                        # player_month_total = redis_client.get(player_total_month)
-                        # if player_month_total is None:
-                        #     print(f"Warning: Redis key {player_total_month} returned None")
-                        total_items_key = f"player:{player_id}:{partition}:total_items"
-
-                        # Get total items
-                        total_items = redis_client.client.hgetall(total_items_key)
-                        #print("redis update total items stored:", total_items)
-                        player_total = 0
-                        player_month_total = get_true_player_total(player_id)
-                        month_name = datetime.now().strftime("%B")
-                        wom_member_list = None
-                        group_wom_id = session.query(Group.wom_id).filter(Group.group_id == group_id).first()
-                        try:    
-                            if group_wom_id:
-                                group_wom_id = group_wom_id[0]
-                            if group_wom_id:
-                                print("Finding group members?")
-                                wom_member_list = await fetch_group_members(wom_group_id=int(group_wom_id))
-                        except Exception as e:
-                            print("Couldn't get the member list", e)
-                            return
-                        #print("Got wom member list")
-                        player_ids = await associate_player_ids(wom_member_list)
-                        #print("Associated player_ids")
-                        clan_player_ids = wom_member_list if wom_member_list else []
-                        # print("clan_player_ids:", clan_player_ids)
-                        group_rank, ranked_in_group, group_total_month = calculate_clan_overall_rank(player_id, player_ids)
-                        # print("Calculated group rank and group totals")
-                        global_rank, ranked_global = calculate_global_overall_rank(player_id)
-                        # print("Calculated total group/clan members")
-                        total_tracked = len(player_ids)
-                        group_to_group_rank, total_groups = calculate_rank_amongst_groups(group_id, player_ids)
-                        #print("Sending value dict")
-                        try:
-                            # Use fallback values for None types to avoid concatenation errors
-                            # print("Creating value dict with drop data:", drop_data)
-                            # print("Month name:", month_name)
-                            # print("P total / G total:", player_month_total, group_total_month)
-                            # print("Group-to-group:", group_to_group_rank, total_groups)
-                            # print("Global rank", global_rank, ranked_global)
-                            # print("User count", total_tracked)
-                            # print("Item value (q*v)", format_number(int(drop_data.value) * int(drop_data.quantity)))
-                            # print("Item id, npc name", drop_data.item_id, npc_name[0] if npc_name else "Unknown")
-                            value_dict = {
-                                "{item_name}": item_name[0] if item_name else "Unknown",
-                                "{month_name}": month_name,
-                                "{player_total_month}": format_number(player_month_total) if player_month_total is not None else "0",
-                                "{group_total_month}": format_number(group_total_month) if group_total_month is not None else "0",
-                                "{group_to_group_rank}": f"{group_to_group_rank if group_to_group_rank else '0'}/{total_groups if total_groups else '1'}",
-                                "{group_rank}": f"{group_rank or '0'}/{ranked_in_group or '0'}",  # Handle None with '0'
-                                "{global_rank}": f"{global_rank or '0'}/{ranked_global or '0'}",  # Handle None with '0'
-                                "{user_count}": total_tracked if total_tracked is not None else "0",
-                                "{item_value}": format_number(int(drop_data.value) * int(drop_data.quantity)),
-                                "{item_id}": drop_data.item_id if drop_data.item_id else 995,
-                                "{npc_name}": npc_name[0] if npc_name else "Unknown"
-                            }
-                            # print("Passing value dict", value_dict)
-                            if group_id == 2:
-                                try:
-                                    embed: Embed = await get_global_drop_embed(item_name[0] if item_name else "Unknown", drop_data.item_id, player_id, drop_data.quantity, drop_data.value, drop_data.npc_id)
-                                except Exception as e:
-                                    print("Error getting global drop embed:", e)
-                                    embed = replace_placeholders(raw_embed, value_dict)
-                            else:
-                                embed: Embed = replace_placeholders(raw_embed, value_dict)
-                            
-                        except Exception as e:
-                            print("Exception creating embed:", e)
-
-                        image_link = ""
-                        if drop_data.image_url:
-                            image_url = drop_data.image_url
-                            if len(image_url) > 5:
-                                image_link = f"\n" + image_url
-                            else:
-                                pass
-                        player = session.query(Player).filter(Player.player_id == player_id).options(joinedload(Player.user)).first()
-                        user = player.user
-                        if user:
-                            if group_id == 2 and not user.global_ping:
-                                str_name = f"{player.player_name}"
-                            elif not user.group_ping:
-                                str_name = f"{player.player_name}"
-                            else:
-                                if user.username != player.player_name:
-                                    str_name = f"<@{user.discord_id}> (`{player.player_name}`)"
-                                else:
-                                    str_name = f"<@{user.discord_id}>"
-                        else:
-                            str_name = f"{player.player_name}"
-                        embed.set_author(name=player.player_name,icon_url="https://www.droptracker.io/img/droptracker-small.gif")
-                        try:
-                            if drop_data.image_url:
-                                url = drop_data.image_url
-                                local_path = url.replace("https://www.droptracker.io/", "/store/droptracker/disc/static/assets/")
-                                attachment = interactions.File(local_path)
-                                message = await channel.send(f"{str_name} has received a drop:",
-                                                    embed=embed,
-                                                    files=attachment)
-                            else:
-                                message = await channel.send(f"{str_name} has received a drop:",
-                                                    embed=embed)
-                            if message:
-                                message_id = str(message.id)
-                                drop = session.query(Drop).filter(Drop.drop_id == drop_data.drop_id).first()
-                                notified_sub = NotifiedSubmission(channel_id=str(message.channel.id),
-                                                                  message_id=message_id,
-                                                                  group_id=group_id,
-                                                                  status="sent",
-                                                                  drop=drop,
-                                                                  player_id=player_id)
-                                session.add(notified_sub)
-                                session.commit()
-                        except Exception as e:
-                            print("Couldn't send the message for a drop:",e)
-                        #print(f"{drop_data.item_id} - This drop should have a message sent to channel {channel_id}...")
-                    else:
-                        pass
-                        #print(f"{drop_data.item_id} - Channel ID not found, but drop qualifies for notification.")
-                else:
-                    pass
-                    #print(f"{drop_data.item_id} - This drop does not meet the minimum value ({min_value}) to send a message.")
-        else:
-            if not player_id:
-                print("Player id not found for drop:", drop_data)
-            else:
-                pass
 
     async def create_drop_object(self, item_id, player_id, date_received, npc_id, value, quantity, image_url: str = "", authed: bool = False,
                                 attachment_url: str = "", attachment_type: str = "", add_to_queue: bool = True, used_api: bool = False, unique_id: str = None, existing_session=None):
         """
-        Create a drop and add it to the queue for inserting to the database.
+        Create a drop object and optionally add it to the processing queue.
+        
+        This method creates a new Drop database entry with the provided information,
+        handles image processing if attachments are provided, and can optionally
+        add the drop to a queue for batch processing.
+        
+        Args:
+            item_id (int): ID of the item that was dropped
+            player_id (int): ID of the player who received the drop
+            date_received (datetime|str): When the drop was received
+            npc_id (int): ID of the NPC that dropped the item
+            value (int): Grand Exchange value of the drop in GP
+            quantity (int): Number of items dropped
+            image_url (str, optional): URL to image of the drop. Defaults to "".
+            authed (bool, optional): Whether the drop is authenticated. Defaults to False.
+            attachment_url (str, optional): URL to attachment for processing. Defaults to "".
+            attachment_type (str, optional): Type of attachment processing. Defaults to "".
+            add_to_queue (bool, optional): Whether to add to processing queue. Defaults to True.
+            used_api (bool, optional): Whether drop was submitted via API. Defaults to False.
+            unique_id (str, optional): Unique identifier for deduplication. Defaults to None.
+            existing_session (Session, optional): Database session to use. Defaults to None.
+            
+        Returns:
+            Drop: The created Drop object
+            
+        Note:
+            If attachment_url is provided, the method will attempt to download and process
+            the image. The method handles various attachment types including direct downloads
+            and Discord attachments.
         """
-        session = models.session
+        db_session = session
         use_external_session = existing_session is not None
         if use_external_session:
-            session = existing_session
+            db_session = existing_session
         #print("Create_drop_object called")
         if isinstance(date_received, datetime):
-            # Convert to string in the required format without timezone and microseconds
-            date_received_str = date_received.strftime('%Y-%m-%d %H:%M:%S')
+            # Keep datetime objects as datetime so in-memory consumers (Redis updates)
+            # can safely use datetime methods before the outer transaction commits.
+            date_received_value = date_received
         else:
-            date_received_str = date_received  # Assuming it's already a string in the correct format
-        item = session.query(ItemList).filter(ItemList.item_id==item_id).first()
+            date_received_value = date_received
+        item = db_session.query(ItemList).filter(ItemList.item_id==item_id).first()
         item_name = item.item_name if item else "Unknown"
-        npc = session.query(NpcList).filter(NpcList.npc_id==npc_id).first()
+        npc = db_session.query(NpcList).filter(NpcList.npc_id==npc_id).first()
         npc_name = npc.npc_name if npc else "Unknown"
         if attachment_url and attachment_type:
             # Don't re-download if the image was already downloaded and processed
@@ -310,22 +146,22 @@ class DatabaseOperations:
                 pass
             else:
                 # Download the image from the attachment URL
-                player = session.query(Player).filter(Player.player_id == player_id).first()
+                player = db_session.query(Player).filter(Player.player_id == player_id).first()
                 if not player:
-                    print(f"Player not found for drop {item_name} {npc_name} {player_id}")
+                    #print(f"Player not found for drop {item_name} {npc_name} {player_id}")
                     return None
                 try:
                     # Convert content type to proper file extension
                     file_extension = get_extension_from_content_type(attachment_type)
-                    print(f"Debug - create_drop_object attachment_type: '{attachment_type}' -> file_extension: '{file_extension}'")
-                    download_path, image_url = await download_player_image("drop", item_name, player, attachment_url, file_extension, 0, item_name, npc_name)
-                    if download_path is None or image_url is None:
-                        print(f"Failed to download image for drop {item_name} from {npc_name} - using empty image_url")
-                        image_url = ""
+                    if int(value) * int(quantity) < get_xf_option("dt_min_value_for_image"):
+                        pass
                     else:
-                        print(f"Successfully processed image for drop {item_name} from {npc_name}")
+                        download_path, image_url = await download_player_image("drop", item_name, player, attachment_url, file_extension, 0, item_name, npc_name)
+                        if download_path is None or image_url is None:
+                            #print(f"Failed to download image for drop {item_name} from {npc_name} - using empty image_url")
+                            image_url = ""
                 except Exception as e:
-                    print(f"Error downloading player image for {item_name} from {npc_name}: {type(e).__name__}: {e}")
+                    #print(f"Error downloading player image for {item_name} from {npc_name}: {type(e).__name__}: {e}")
                     import traceback
                     traceback.print_exc()
                     image_url = ""
@@ -336,8 +172,8 @@ class DatabaseOperations:
         # Create the drop object
         newdrop = Drop(item_id=item_id,
                     player_id=player_id,
-                    date_added=date_received_str,
-                    date_updated=date_received_str,
+                    date_added=date_received_value,
+                    date_updated=date_received_value,
                     npc_id=npc_id,
                     value=value,
                     quantity=quantity,
@@ -347,18 +183,37 @@ class DatabaseOperations:
                     unique_id=unique_id)
 
         try:
-            # Add the drop to the session and commit to generate the drop_id
-            session.add(newdrop)
-            session.commit()
+            # Add the drop to the session and persist enough to generate drop_id.
+            # If an external session is in use, keep transaction ownership with the caller.
+            db_session.add(newdrop)
+            if use_external_session:
+                db_session.flush()
+            else:
+                db_session.commit()
         except Exception as e:
-            session.rollback()
+            db_session.rollback()
             print(f"Error committing new drop to the database: {e}")
             return None
         return newdrop
 
     async def create_user(self, auth_token, discord_id: str, username: str, ctx = None) -> User:
-        """ 
-            Creates a new 'user' in the database
+        """
+        Create a new user in the database.
+        
+        Creates a new User entry with the provided Discord information and authentication token.
+        The user can optionally be associated with an OSRS username.
+        
+        Args:
+            auth_token (str): 16-character authentication token for API access
+            discord_id (str): Discord user ID
+            username (str): OSRS username (can be None)
+            ctx (Context, optional): Discord command context for additional info. Defaults to None.
+            
+        Returns:
+            User: The created User object
+            
+        Note:
+            This method commits the database session automatically after creating the user.
         """
         new_user = User(discord_id=str(discord_id), auth_token=str(auth_token), username=str(username))
         try:
@@ -418,11 +273,18 @@ class DatabaseOperations:
                 return None
 
     async def assign_rsn(user: User, player: Player):
-        """ 
-        :param: user: User object
-        :param: player: Player object
-            Assigns a 'player' to the specified 'user' object in the database
-            :return: True/False if successful 
+        """
+        Assign a player (RSN) to a user account.
+        
+        Creates the association between a Discord user and an OSRS player account.
+        This allows the user to track drops and participate in group activities.
+        
+        Args:
+            user (User): The User object to associate the player with
+            player (Player): The Player object to associate with the user
+            
+        Note:
+            This method commits the database session automatically after creating the association.
         """
         try:
             if not player.wom_id:
@@ -446,10 +308,31 @@ class DatabaseOperations:
         
     async def get_group_embed(self, embed_type: str, group_id: int):
         """
-        :param: embed_type: "lb", "drop", "ca", "clog", "pb"
-        :param: group_id: int-representation of the DropTracker-based Group ID
-            Returns an interactions.Embed object constructed with the data
-            stored for this group_id and embed_type
+        Retrieve a custom embed configuration for a specific group and embed type.
+        
+        Gets the configured embed template for a group, which can be customized
+        for different types of notifications and displays. Falls back to default
+        group (ID 1) configuration if no custom embed is found.
+        
+        Note: It is expected that verification against whether the group can use custom 
+        embeds has already been completed before calling this method.
+
+        Args:
+            embed_type (str): Type of embed ("lb", "drop", "ca", "clog", "pb")
+                - "lb": Lootboard/leaderboard embeds
+                - "drop": Drop notification embeds  
+                - "ca": Combat achievement embeds
+                - "clog": Collection log embeds
+                - "pb": Personal best embeds
+            group_id (int): ID of the group to get embed configuration for
+            
+        Returns:
+            Embed: Discord embed object with the group's custom configuration,
+                   or default embed if no custom configuration exists
+                   
+        Note:
+            This method handles placeholder replacement and field configuration
+            based on the group's embed settings stored in the database.
         """
         try:
             stored_embed = session.query(GroupEmbed).filter(GroupEmbed.group_id == group_id, 
@@ -489,7 +372,18 @@ class DatabaseOperations:
             app_logger.log(log_type="error", data=f"An error occurred trying to create a {embed_type} embed for group {group_id}: {e}", app_name="core", description="get_group_embed")
     
     async def create_notification(self, notification_type, player_id, data, group_id=None):
-        """Create a notification queue entry"""
+        """
+        Create a notification queue entry.
+        
+        Adds a new entry to the notification queue for a specific player and group.
+        The notification can be for a drop, achievement, or other event.
+        
+        Args:
+            notification_type (str): Type of notification ("drop", "achievement", "other")
+            player_id (int): ID of the player to notify
+            data (dict): Additional data for the notification (e.g. drop details)
+            group_id (int, optional): ID of the group to notify. Defaults to None.
+        """
         notification = NotificationQueue(
             notification_type=notification_type,
             player_id=player_id,
@@ -501,8 +395,24 @@ class DatabaseOperations:
         session.commit()
         return notification.id
     
-    async def create_player(self, player_name, account_hash):
-        """Create a player without Discord-specific functionality"""
+    async def create_player(self, player_name, account_hash) -> Player:
+        """
+        Create a player without Discord-specific functionality.
+        
+        Creates a new Player entry in the database with the provided OSRS username
+        and account hash. Checks if the player already exists based on WOM ID or account hash.
+        
+        Args:
+            player_name (str): OSRS username
+            account_hash (str): Unique hash identifier for the OSRS account
+
+        Returns:
+            Player: The created Player object
+
+        Note:
+            This method creates a new player entry in the database and adds it to the session.
+            It also creates a new player notification entry.    
+        """
         account_hash = str(account_hash)
         
         try:
@@ -563,7 +473,17 @@ class DatabaseOperations:
         return player
     
     async def process_drop(self, drop_data, message_id=None, message_logger=None):
-        """Process a drop submission and create notification entries if needed"""
+        """Process a drop submission and create notification entries if needed.
+        
+        Creates a new Drop entry in the database with the provided drop data.
+        Processes the drop image if provided and creates notifications for the drop.
+        
+        Args:
+            drop_data (dict): Drop data including item name, NPC name, value, quantity, etc.
+            message_id (int, optional): Discord message ID. Defaults to None.
+            message_logger (Logger, optional): Logger for message processing. Defaults to None.
+        """
+        # Extract drop data from the dictionary
         npc_name = drop_data.get('npc_name')
         item_name = drop_data.get('item_name')
         value = drop_data.get('value')
@@ -715,16 +635,31 @@ class DatabaseOperations:
         return drop
 
 def get_formatted_name(player_name:str, group_id: int, existing_session = None):
+    """Get a formatted name for a player.
+    
+    Formats a player's name with a link to their profile and handles pinging in Discord.
+    
+    Args:
+        player_name (str): OSRS username
+        group_id (int): ID of the group to get the formatted name for
+        existing_session (Session, optional): Database session to use. Defaults to None.
+    Returns:
+        str: The Discord-formatted name with ping-privacy considerations
+
+    Note:
+        This method handles pinging in Discord based on the user's settings.
+    """
+    # Determine which session to use
     use_existing_session = existing_session is not None
     if use_existing_session:
-        session = existing_session
+        db_session = existing_session
     else:
-        session = session
-    player = session.query(Player).filter(Player.player_name == player_name).first()
+        db_session = session
+    player = db_session.query(Player).filter(Player.player_name == player_name).first()
     formatted_name = f"[{player.player_name}](https://www.droptracker.io/players/{player.player_id}/view)"
     url_name = formatted_name
     if player.user:
-        user: User = session.query(User).filter(User.user_id == player.user.user_id).first()
+        user: User = db_session.query(User).filter(User.user_id == player.user.user_id).first()
         if user:
             if group_id == 2 and user.global_ping:
                 formatted_name = f"<@{user.discord_id}> ({url_name})"
@@ -797,7 +732,7 @@ async def update_group_members(bot: interactions.Client, forced_id: int = None):
             continue
         group: Group = session.query(Group).filter(Group.wom_id == wom_id).first()
         if group:
-            group_wom_ids = await fetch_group_members(wom_id)
+            group_wom_ids = await fetch_group_members(wom_id, force_refresh=True)
             #app_logger.log(log_type="ex_info", data=f"Group WOM IDs: {group_wom_ids}", app_name="core", description="update_group_members")
                 
             # Only proceed with member updates if we successfully got the member list
@@ -859,13 +794,13 @@ async def update_group_members(bot: interactions.Client, forced_id: int = None):
 async def associate_player_ids(player_wom_ids, before_date: datetime = None, session_to_use = None):
     # Query the database for all players' WOM IDs and Player IDs
     if session_to_use is not None:
-        session = session_to_use
+        db_session = session_to_use
     else:
-        session = models.session
+        db_session = session
     if before_date:
-        all_players = session.query(Player.wom_id, Player.player_id).filter(Player.date_added < before_date).all()
+        all_players = db_session.query(Player.wom_id, Player.player_id).filter(Player.date_added < before_date).all()
     else:
-        all_players = session.query(Player.wom_id, Player.player_id).all()
+        all_players = db_session.query(Player.wom_id, Player.player_id).all()
     if player_wom_ids is None:
         return []
     all_players = [player for player in all_players if player.player_id != None and player.wom_id != None]
@@ -884,35 +819,105 @@ def get_point_divisor():
     Fetch the points divisor from XenForo options. Uses a safe, parameterized
     query and handles MariaDB/MySQL return types robustly.
     """
-    try:
-        result = session.execute(
-            text("SELECT option_value FROM xenforo.xf_option WHERE option_id = :option_id LIMIT 1"),
-            {"option_id": "dt_points_gp_per_point"}
-        ).scalar()
-        if result is None:
-            print("No point divisor found, using default of 1000000")
-            return 1000000
-        # Normalize to string for consistent parsing across drivers
-        if isinstance(result, (bytes, bytearray)):
-            raw_value = result.decode("utf-8", errors="ignore").strip()
-        else:
-            raw_value = str(result).strip()
-        # Clean common formatting and extract the first integer sequence
-        import re
-        cleaned = raw_value.replace(",", "").replace("_", " ")
-        match = re.search(r"-?\d+", cleaned)
-        if not match:
-            print(f"Unparseable point divisor '{raw_value}', using default of 1000000")
-            return 1000000
-        divisor = int(match.group(0))
-        if divisor <= 0:
-            print(f"Non-positive point divisor '{divisor}', using default of 1000000")
-            return 1000000
-        print(f"Got point divisor: {divisor}")
-        return divisor
-    except Exception as e:
-        print(f"Error retrieving point divisor: {e} -- using default of 1000000")
+    return get_xf_option("dt_points_gp_per_point")
+
+def get_xf_option(option_id: str):
+    ## Assumes that the option will be stored under the standard table
+    result = session.execute(
+        text("SELECT option_value FROM xenforo.xf_option WHERE option_id = :option_id LIMIT 1"),
+        {"option_id": option_id}
+    ).scalar()
+    if result is None:
+        print(f"No option found for {option_id}, using default of 1000000")
         return 1000000
+    try:
+        if isinstance(result, (bytes, bytearray)):
+            value_str = result.decode("utf-8", errors="ignore").strip()
+        else:
+            value_str = str(result).strip()
+        lower_val = value_str.lower()
+        if lower_val in ("true", "yes", "on"):
+            return 1
+        if lower_val in ("false", "no", "off"):
+            return 0
+        try:
+            return int(value_str)
+        except ValueError:
+            return int(float(value_str))
+    except Exception:
+        return 1000000
+    
+
+async def update_group_members_silent(forced_id: int = None):
+    """
+    Duplicate of update_group_members function without Discord bot dependencies and notifications.
+    Updates group member association tables silently without sending any Discord notifications.
+    """
+    app_logger.log(log_type="access", data="Updating group member association tables (silent mode)...", app_name="core", description="update_group_members_silent")
+    if forced_id:
+        group_ids = [forced_id]
+    else:
+        # Use scalar_subquery to get just the values
+        group_ids = session.scalars(session.query(Group.wom_id)).all()
+    total_updated = 0
+    for wom_id in group_ids:
+        # wom_id should now be a simple integer
+        try:
+            wom_id = int(wom_id)
+        except (ValueError, TypeError) as e:
+            continue
+        group: Group = session.query(Group).filter(Group.wom_id == wom_id).first()
+        if group:
+            group_wom_ids = await fetch_group_members(wom_id, force_refresh=True)
+            print("Got a total of ", len(group_wom_ids), "members for group ", group.group_name)
+            # Only proceed with member updates if we successfully got the member list
+            if group_wom_ids:
+                ## We have a valid list of player wom_ids here now
+                for player_wom_id in group_wom_ids:
+                    try:
+                        stored_association = session.query(GroupWomAssociation).filter(GroupWomAssociation.player_wom_id == player_wom_id,
+                                                                                    GroupWomAssociation.group_dt_id == group.group_id).first()
+                        if not stored_association:
+                            new_association = GroupWomAssociation(player_wom_id=player_wom_id, group_dt_id=group.group_id)
+                    except Exception as e:
+                        print(f"Couldn't properly add a GroupWomAssociation for {player_wom_id} (player wom id) to {group.group_name}")
+                # Get current group members from database
+                group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
+                # Remove members no longer in the group
+                for member in group.players:
+                    if member.wom_id and member.wom_id not in group_wom_ids:
+                        member = session.query(Player).filter(Player.player_id == member.player_id).first()
+                        app_logger.log(log_type="access", data=f"{member.player_name} has been removed from {group.group_name}\nTheir DropTracker WOM ID is {member.wom_id} - group IDS: {group_wom_ids}", app_name="core", description="update_group_members_silent")
+                        member.remove_group(group)
+                        # Note: Discord notification removed - silent operation
+                        print(f"{member.player_name} has been removed from {group.group_name}\nTheir DropTracker WOM ID is {member.wom_id} - group IDS: {group_wom_ids}")
+                # Add new members to the group
+                for member in group_members:
+                    if member not in group.players:
+                        if member.user:
+                            member.user.add_group(group)
+                        member.add_group(group)
+                        member = session.query(Player).filter(Player.player_id == member.player_id).first()
+                        # Note: Discord notification removed - silent operation
+                        print(f"{member.player_name} has been added to {group.group_name}\nTheir DropTracker WOM ID is {member.wom_id} - group IDS: {group_wom_ids}")
+                group.date_updated = func.now()
+                try:
+                    session.commit()
+                except Exception as e:
+                    session.rollback()
+            else:
+                print(f"Failed to fetch member list for group {group.group_name} (WOM ID: {wom_id})")
+        else:
+            print("Group not found for wom_id", wom_id)
+
+    ## Update the global group
+    player_ids = session.query(Player.player_id).all()
+    for player_id in player_ids:
+        player = session.query(Player).filter(Player.player_id == player_id).first()
+        if player:
+            if 2 not in [group.group_id for group in player.groups]:
+                player.add_group(session.query(Group).filter(Group.group_id == 2).first())
+                session.commit()
 
 async def get_ev_session():
     if event_session is None:

@@ -2,7 +2,6 @@ import asyncio
 from events.generators.BingoBoardGen import generate_bingo_board
 from events.helpers.images import get_bingo_task_tile_image
 from events.models import EventModel, EventNotification
-from utils.semantic_check import get_npc_id, get_item_id
 from utils.wiseoldman import check_user_by_username
 import asyncio
 from datetime import datetime, timedelta
@@ -25,6 +24,10 @@ from utils import wiseoldman
 
 # Create the blueprint
 worker_bp = Blueprint('worker', __name__)
+
+# Enable CORS for this blueprint so requests from the web app are allowed
+# This ensures responses include 'Access-Control-Allow-Origin' for the frontend origin
+worker_bp = cors(worker_bp, allow_origin="https://www.droptracker.io")
 
 # Load environment variables
 load_dotenv()

@@ -1,15 +1,16 @@
 ### Contains the new functional implementation for interacting with the redis dicts for players' drops
 ## As it relates to generating new loot leaderboards
-from db.models import Drop, Player, session, Group
+from db import Drop, Player, session, Group, models
 from utils.format import format_number
 from utils.redis import redis_client
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple, Set
+from typing import List, Dict, Optional, Tuple, Set, Iterable
 import json
 import threading
 import time
 from dataclasses import dataclass
-from enum import Enum   
+from enum import Enum
+from sqlalchemy import text
 from sqlalchemy.orm import joinedload
 from utils.format import get_current_partition
 
@@ -60,10 +61,26 @@ class RedisLootTracker:
         
     def _get_partition(self, dt: datetime = None) -> int:
         return get_current_partition()  
+
+    def _coerce_drop_datetime(self, drop_date) -> datetime:
+        """Best-effort normalization for drop timestamp values."""
+        if isinstance(drop_date, datetime):
+            return drop_date
+        if isinstance(drop_date, str):
+            try:
+                return datetime.fromisoformat(drop_date)
+            except Exception:
+                pass
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    return datetime.strptime(drop_date, fmt)
+                except Exception:
+                    continue
+        return datetime.now()
     
-    def _get_redis_keys(self, player_id: int, partition: int) -> Dict[str, str]:
+    def _get_redis_keys(self, player_id: int, partition: int, drop_date: datetime = None) -> Dict[str, str]:
         """Generate Redis keys for a player and partition"""
-        return {
+        base_keys = {
             'total_items': f"player:{player_id}:{partition}:total_items",
             'total_loot': f"player:{player_id}:{partition}:total_loot",
             'recent_items': f"player:{player_id}:{partition}:recent_items",
@@ -74,6 +91,19 @@ class RedisLootTracker:
             'all_time_recent_items': f"player:{player_id}:all:recent_items",
             'all_time_high_value_items': f"player:{player_id}:all:high_value_items"
         }
+        
+        # Add daily keys if drop_date is provided
+        if drop_date:
+            daily_partition = drop_date.strftime('%Y%m%d')  # YYYYMMDD format
+            base_keys.update({
+                'daily_total_items': f"player:{player_id}:daily:{daily_partition}:total_items",
+                'daily_total_loot': f"player:{player_id}:daily:{daily_partition}:total_loot",
+                'daily_recent_items': f"player:{player_id}:daily:{daily_partition}:recent_items",
+                'daily_drop_history': f"player:{player_id}:daily:{daily_partition}:drop_history",
+                'daily_high_value_items': f"player:{player_id}:daily:{daily_partition}:high_value_items"
+            })
+        
+        return base_keys
     
     def _atomic_hash_update_script(self) -> str:
         """Lua script for atomic hash updates"""
@@ -131,7 +161,7 @@ class RedisLootTracker:
     def add_to_player(self, player: Player, drop: Drop) -> bool:
         """
         Add a single drop to a player's Redis cache (incremental update).
-        Thread-safe and atomic.
+        Thread-safe and atomic. Also updates leaderboards.
         """
         with self._lock:
             if player.player_id in self._processing_players:
@@ -139,24 +169,60 @@ class RedisLootTracker:
                 return False
             
             try:
-                return self._add_drop_incremental(player.player_id, drop)
+                result = self._add_drop_incremental(player.player_id, drop)
+                if result:
+                    # Update leaderboards after successful drop addition
+                    partition = self._get_partition(drop.date_added)
+                    total_value = drop.value * drop.quantity
+                    
+                    # Get player's group IDs for group leaderboards
+                    player_group_ids = [group.group_id for group in player.groups] if player.groups else []
+                    
+                    # Update leaderboards incrementally using ZINCRBY instead of full recalculation
+                    self._increment_leaderboards(player.player_id, total_value, partition, player_group_ids)
+                
+                return result
             except Exception as e:
                 print(f"Error adding drop {drop.drop_id} to player {player.player_id}: {e}")
                 return False
     
+    def _increment_leaderboards(self, player_id: int, value_delta: int, 
+                                partition: Optional[int] = None, group_ids: Optional[List[int]] = None):
+        """
+        Incrementally update leaderboards by adding value_delta to player's score.
+        More efficient than full recalculation for individual drop additions.
+        """
+        if partition is None:
+            partition = self._get_partition()
+        
+        pipeline = redis_client.client.pipeline(transaction=True)
+        
+        # Update global leaderboard
+        global_key = f"leaderboard:{partition}"
+        pipeline.zincrby(global_key, value_delta, player_id)
+        
+        # Update group leaderboards
+        if group_ids:
+            for group_id in group_ids:
+                group_key = f"leaderboard:{partition}:group:{group_id}"
+                pipeline.zincrby(group_key, value_delta, player_id)
+        
+        pipeline.execute()
+    
     def _add_drop_incremental(self, player_id: int, drop: Drop) -> bool:
         """Internal method for incremental drop addition"""
-        partition = self._get_partition(drop.date_added)
-        keys = self._get_redis_keys(player_id, partition)
+        drop_date = self._coerce_drop_datetime(drop.date_added)
+        partition = self._get_partition(drop_date)
+        keys = self._get_redis_keys(player_id, partition, drop_date)  # Pass drop_date for daily keys
         
         # Calculate drop values
         total_value = drop.value * drop.quantity
-        drop_timestamp = drop.date_added.strftime('%Y-%m-%d %H:%M:%S')
+        drop_timestamp = drop_date.strftime('%Y-%m-%d %H:%M:%S')
         
         # Use pipeline for atomic operations
         pipeline = redis_client.client.pipeline(transaction=True)
         
-        # Update item totals
+        # Update monthly item totals
         pipeline.eval(
             self._atomic_hash_update_script(),
             1,
@@ -184,9 +250,25 @@ class RedisLootTracker:
             drop_timestamp
         )
         
-        # Update total loot
-        pipeline.incrbyfloat(keys['total_loot'], total_value)
-        pipeline.incrbyfloat(keys['all_time_total_loot'], total_value)
+        # Update daily item totals
+        pipeline.eval(
+            self._atomic_hash_update_script(),
+            1,
+            keys['daily_total_items'],
+            str(drop.item_id),
+            str(drop.quantity),
+            str(total_value),
+            "false",
+            "1",
+            drop_timestamp,
+            drop_timestamp
+        )
+        
+        # Update total loot for all granularities
+        pipeline.incrbyfloat(keys['total_loot'], total_value)  # Monthly
+        pipeline.incrbyfloat(keys['all_time_total_loot'], total_value)  # All-time
+        pipeline.incrbyfloat(keys['daily_total_loot'], total_value)  # Daily
+        
         if int(drop.value * drop.quantity) > 1000000:
             # Add to recent items
             recent_item_data = {
@@ -200,12 +282,15 @@ class RedisLootTracker:
                 'partition': partition
             }
             
-            pipeline.lpush(keys['recent_items'], json.dumps(recent_item_data))
-            pipeline.lpush(keys['all_time_recent_items'], json.dumps(recent_item_data))
+            # Add to all granularities
+            pipeline.lpush(keys['recent_items'], json.dumps(recent_item_data))  # Monthly
+            pipeline.lpush(keys['all_time_recent_items'], json.dumps(recent_item_data))  # All-time
+            pipeline.lpush(keys['daily_recent_items'], json.dumps(recent_item_data))  # Daily
             
             # Trim recent items lists
-            pipeline.ltrim(keys['recent_items'], 0, 49)  # Keep last 50 items
-            pipeline.ltrim(keys['all_time_recent_items'], 0, 99)  # Keep last 100 items
+            pipeline.ltrim(keys['recent_items'], 0, 49)  # Keep last 50 items (monthly)
+            pipeline.ltrim(keys['all_time_recent_items'], 0, 99)  # Keep last 100 items (all-time)
+            pipeline.ltrim(keys['daily_recent_items'], 0, 24)  # Keep last 25 items (daily)
         
         # Execute all operations atomically
         try:
@@ -249,9 +334,10 @@ class RedisLootTracker:
             player_group_ids = [group.group_id for group in player.groups]
             print(f"Player {player_id} belongs to groups: {player_group_ids}")
             
-            # Get all drops for the player
+            # Get all visible drops for the player (exclude hidden)
             player_drops = session_to_use.query(Drop).filter(
-                Drop.player_id == player_id
+                Drop.player_id == player_id,
+                Drop.hidden != True,
             ).order_by(Drop.date_added.asc()).all()
             
             if not player_drops:
@@ -260,24 +346,38 @@ class RedisLootTracker:
                 self._remove_from_leaderboards(player_id, player_group_ids)
                 return True
             
-            # Group drops by partition
-            partition_drops = {}
+            # Group drops by partition (monthly) and by day
+            partition_drops = {}  # monthly partitions
+            daily_drops = {}      # daily partitions
+            
             for drop in player_drops:
+                # Monthly partition
                 partition = drop.partition
                 if partition not in partition_drops:
                     partition_drops[partition] = []
                 partition_drops[partition].append(drop)
+                
+                # Daily partition
+                daily_partition = drop.date_added.strftime('%Y%m%d')
+                if daily_partition not in daily_drops:
+                    daily_drops[daily_partition] = []
+                daily_drops[daily_partition].append(drop)
             
             # Clear existing Redis data
             self._clear_player_redis_data(player_id)
             self._remove_from_leaderboards(player_id, player_group_ids)
             
-            # Rebuild Redis data for each partition and update leaderboards
+            # Rebuild Redis data for each monthly partition and update leaderboards
             for partition, drops in partition_drops.items():
                 total_loot = self._rebuild_partition_data(player_id, partition, drops)
                 # Update leaderboards for this partition
                 self.update_leaderboards(player_id, total_loot, partition, player_group_ids)
                 print(f"Updated leaderboards for player {player_id} in partition {partition}")
+            
+            # Rebuild Redis data for each daily partition
+            for daily_partition, drops in daily_drops.items():
+                self._rebuild_daily_data(player_id, daily_partition, drops)
+                print(f"Updated daily data for player {player_id} on {daily_partition}")
             # Update player's last update timestamp
             player.date_updated = datetime.now()
             session_to_use.commit()
@@ -369,6 +469,79 @@ class RedisLootTracker:
             pipeline.delete(keys['all_time_recent_items'])
             pipeline.lpush(keys['recent_items'], *recent_items)  # Use recent_items, not recent_items_raw
             pipeline.lpush(keys['all_time_recent_items'], *recent_items)  # Use recent_items, not recent_items_raw
+        
+        # Execute all operations
+        pipeline.execute()
+        
+        return total_loot
+    
+    def _rebuild_daily_data(self, player_id: int, daily_partition: str, drops: List[Drop]) -> int:
+        """Rebuild Redis data for a specific daily partition. Returns total loot value."""
+        # Generate daily keys
+        daily_keys = {
+            'daily_total_items': f"player:{player_id}:daily:{daily_partition}:total_items",
+            'daily_total_loot': f"player:{player_id}:daily:{daily_partition}:total_loot",
+            'daily_recent_items': f"player:{player_id}:daily:{daily_partition}:recent_items",
+            'daily_drop_history': f"player:{player_id}:daily:{daily_partition}:drop_history",
+            'daily_high_value_items': f"player:{player_id}:daily:{daily_partition}:high_value_items"
+        }
+        
+        # Aggregate data for this day
+        item_data = {}  # item_id -> (quantity, total_value, drop_count, first_drop, last_drop)
+        total_loot = 0
+        recent_items_raw = []
+        
+        for drop in drops:
+            total_value = drop.value * drop.quantity
+            total_loot += total_value
+            drop_timestamp = drop.date_added.strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Aggregate item data
+            if drop.item_id not in item_data:
+                item_data[drop.item_id] = (0, 0, 0, drop_timestamp, drop_timestamp)
+            
+            qty, val, count, first, _ = item_data[drop.item_id]
+            item_data[drop.item_id] = (qty + drop.quantity, val + total_value, count + 1, first, drop_timestamp)
+            
+            if int(drop.value * drop.quantity) > 1000000:
+                # Add to recent items
+                recent_item_data = {
+                    'drop_id': drop.drop_id,
+                    'item_id': drop.item_id,
+                    'npc_id': drop.npc_id,
+                    'value': drop.value,
+                    'quantity': drop.quantity,
+                    'total_value': total_value,
+                    'date_added': drop_timestamp,
+                    'daily_partition': daily_partition
+                }
+                recent_items_raw.append(recent_item_data)
+        
+        # Use pipeline for atomic updates
+        pipeline = redis_client.client.pipeline(transaction=True)
+        
+        # Set daily total loot
+        pipeline.set(daily_keys['daily_total_loot'], total_loot)
+        
+        # Sort recent items by time
+        recent_items_raw.sort(key=lambda x: x['date_added'])
+        recent_items = [json.dumps(item) for item in recent_items_raw]
+        
+        # Set daily item data
+        for item_id, (qty, val, count, first, last) in item_data.items():
+            item_value = f"{qty},{val},{count},{first},{last}"
+            pipeline.hset(daily_keys['daily_total_items'], item_id, item_value)
+        
+        # Set daily recent items
+        if recent_items_raw:
+            pipeline.delete(daily_keys['daily_recent_items'])
+            pipeline.lpush(daily_keys['daily_recent_items'], *recent_items)
+        
+        # Set expiration for daily keys (optional - expire after 90 days to save memory)
+        expiration_days = 90
+        expiration_seconds = expiration_days * 24 * 60 * 60
+        for key in daily_keys.values():
+            pipeline.expire(key, expiration_seconds)
         
         # Execute all operations
         pipeline.execute()
@@ -592,5 +765,456 @@ def generate_loot_leaderboard(query: LootLeaderboardQuery) -> Dict:
     return loot_tracker.generate_loot_leaderboard(query)
 
 
+def sync_leaderboards_from_redis(partition: Optional[int] = None, session_to_use=None) -> int:
+    """
+    Sync leaderboards from existing Redis total_loot data.
+    
+    This is useful when:
+    - Leaderboards are empty but player total_loot keys exist
+    - After Redis restart where only some keys were persisted
+    - Initial migration after adding the leaderboard update fix
+    
+    Returns the number of players synced.
+    """
+    if partition is None:
+        now = datetime.now()
+        partition = now.year * 100 + now.month
+    
+    if session_to_use is None:
+        session_to_use = session
+    
+    synced_count = 0
+    
+    # Get all players with their groups
+    players = session_to_use.query(Player).options(joinedload(Player.groups)).all()
+    
+    print(f"Syncing leaderboards for {len(players)} players in partition {partition}...")
+    
+    pipeline = redis_client.client.pipeline(transaction=True)
+    batch_count = 0
+    
+    for player in players:
+        # Get player's total loot from Redis
+        total_loot_key = f"player:{player.player_id}:{partition}:total_loot"
+        total_loot = redis_client.get(total_loot_key)
+        
+        if total_loot is None:
+            continue
+        
+        try:
+            total_loot_value = int(float(total_loot))
+        except (ValueError, TypeError):
+            continue
+        
+        if total_loot_value <= 0:
+            continue
+        
+        # Update global leaderboard
+        global_key = f"leaderboard:{partition}"
+        pipeline.zadd(global_key, {player.player_id: total_loot_value})
+        
+        # Update group leaderboards
+        for group in player.groups:
+            group_key = f"leaderboard:{partition}:group:{group.group_id}"
+            pipeline.zadd(group_key, {player.player_id: total_loot_value})
+        
+        synced_count += 1
+        batch_count += 1
+        
+        # Execute in batches of 100 to avoid huge pipelines
+        if batch_count >= 100:
+            pipeline.execute()
+            pipeline = redis_client.client.pipeline(transaction=True)
+            batch_count = 0
+            print(f"Synced {synced_count} players...")
+    
+    # Execute remaining
+    if batch_count > 0:
+        pipeline.execute()
+    
+    print(f"Leaderboard sync complete. Synced {synced_count} players.")
+    return synced_count
+
+
+class BulkRedisUpdater:
+    """
+    Class for performing bulk Redis operations on multiple players.
+    Handles batch processing with progress tracking and error handling.
+    """
+    
+    def __init__(self, batch_size: int = 50, max_workers: int = 5, player_fetch_chunk_size: int = 50000):
+        if batch_size <= 0:
+            raise ValueError("batch_size must be greater than zero")
+        if player_fetch_chunk_size <= 0:
+            raise ValueError("player_fetch_chunk_size must be greater than zero")
+
+        self.batch_size = batch_size
+        self.max_workers = max_workers
+        self.player_fetch_chunk_size = player_fetch_chunk_size
+        self.loot_tracker = loot_tracker
+
+    def _stream_player_ids_for_partition(
+        self,
+        session_to_use,
+        partition: int,
+        chunk_size: int
+    ) -> Iterable[int]:
+        """
+        Stream unique player IDs for a given partition in chunks to avoid long-running queries.
+        """
+        last_player_id = -1
+        prev_emitted = None
+
+        stmt = text(
+            """
+            SELECT drops.player_id
+            FROM drops
+            WHERE drops.`partition` = :partition_value
+              AND drops.player_id > :last_player_id
+            ORDER BY drops.player_id
+            LIMIT :chunk_size
+            """
+        )
+
+        while True:
+            result = session_to_use.execute(
+                stmt,
+                {
+                    "partition_value": partition,
+                    "last_player_id": last_player_id,
+                    "chunk_size": chunk_size,
+                },
+            )
+            rows = result.fetchall()
+            result.close()
+
+            if not rows:
+                break
+
+            last_player_id = rows[-1][0]
+
+            for row in rows:
+                player_id = row[0]
+                if prev_emitted == player_id:
+                    continue
+                prev_emitted = player_id
+                yield player_id
+        
+    def iter_players_with_current_month_drops(
+        self,
+        session_to_use=None,
+        chunk_size: Optional[int] = None
+    ) -> Iterable[int]:
+        """
+        Stream player IDs who have received drops in the current calendar month.
+        """
+        if session_to_use is None:
+            session_to_use = session
+
+        effective_chunk_size = chunk_size or self.player_fetch_chunk_size
+
+        try:
+            current_partition = self.loot_tracker._get_partition()
+            yield from self._stream_player_ids_for_partition(
+                session_to_use,
+                current_partition,
+                effective_chunk_size
+            )
+        except Exception as e:
+            print(f"Error streaming players with current month drops: {e}")
+            return
+
+    def get_players_with_current_month_drops(self, session_to_use=None, chunk_size: Optional[int] = None) -> List[int]:
+        """
+        Get all player IDs who have received drops in the current calendar month.
+        
+        Args:
+            session_to_use: Optional database session to use
+            
+        Returns:
+            List[int]: List of player IDs with drops in current month
+        """
+        if session_to_use is None:
+            session_to_use = session
+
+        effective_chunk_size = chunk_size or self.player_fetch_chunk_size
+
+        try:
+            return list(
+                self.iter_players_with_current_month_drops(
+                    session_to_use=session_to_use,
+                    chunk_size=effective_chunk_size
+                )
+            )
+        except Exception as e:
+            print(f"Error getting players with current month drops: {e}")
+            return []
+    
+    def force_update_all_current_month_players(self, session_to_use=None, 
+                                             progress_callback=None) -> Dict:
+        """
+        Force update Redis cache for all players who have drops in the current month.
+        
+        Args:
+            session_to_use: Optional database session to use for getting player list only
+            progress_callback: Optional callback function for progress updates
+            
+        Returns:
+            Dict: Summary of the bulk update operation
+        """
+        start_time = datetime.now()
+        result = {
+            'started_at': start_time.isoformat(),
+            'total_players': 0,
+            'successful_updates': 0,
+            'failed_updates': 0,
+            'errors': [],
+            'completed_at': None,
+            'duration_seconds': 0
+        }
+        
+        # Use a fresh session just for getting the player list
+        list_session = None
+        try:
+            if session_to_use is None:
+                from db.models.base import get_fresh_session
+                list_session = get_fresh_session()
+                session_for_list = list_session
+            else:
+                session_for_list = session_to_use
+            
+            # Get all players with current month drops
+            player_ids = self.get_players_with_current_month_drops(session_for_list)
+            result['total_players'] = len(player_ids)
+            
+            if not player_ids:
+                print("No players found with drops in current month")
+                result['completed_at'] = datetime.now().isoformat()
+                result['duration_seconds'] = 0
+                return result
+            
+            print(f"Starting bulk Redis update for {len(player_ids)} players with current month drops")
+            
+            # Process players in batches
+            for i in range(0, len(player_ids), self.batch_size):
+                batch = player_ids[i:i + self.batch_size]
+                batch_num = (i // self.batch_size) + 1
+                total_batches = (len(player_ids) + self.batch_size - 1) // self.batch_size
+                
+                print(f"Processing batch {batch_num}/{total_batches} ({len(batch)} players)")
+                
+                # Process each player in the batch with its own fresh session
+                for player_id in batch:
+                    player_session = None
+                    try:
+                        # Create a fresh session for each player to avoid transaction issues
+                        from db.models.base import get_fresh_session
+                        player_session = get_fresh_session()
+                        
+                        success = self.loot_tracker.force_update_player(player_id, player_session)
+                        if success:
+                            result['successful_updates'] += 1
+                            print(f"✓ Updated player {player_id}")
+                        else:
+                            result['failed_updates'] += 1
+                            error_msg = f"Force update returned False for player {player_id}"
+                            result['errors'].append(error_msg)
+                            print(f"✗ Failed to update player {player_id}")
+                            
+                    except Exception as e:
+                        result['failed_updates'] += 1
+                        error_msg = f"Exception updating player {player_id}: {str(e)}"
+                        result['errors'].append(error_msg)
+                        print(f"✗ Error updating player {player_id}: {e}")
+                    finally:
+                        # Always close the player session
+                        if player_session:
+                            try:
+                                player_session.close()
+                            except Exception as e:
+                                print(f"Warning: Error closing session for player {player_id}: {e}")
+                
+                # Progress callback
+                if progress_callback:
+                    progress = {
+                        'batch': batch_num,
+                        'total_batches': total_batches,
+                        'completed_players': result['successful_updates'] + result['failed_updates'],
+                        'total_players': result['total_players'],
+                        'successful': result['successful_updates'],
+                        'failed': result['failed_updates']
+                    }
+                    progress_callback(progress)
+                
+                # Small delay between batches to avoid overwhelming the system
+                if batch_num < total_batches:
+                    time.sleep(0.5)
+            
+            end_time = datetime.now()
+            result['completed_at'] = end_time.isoformat()
+            result['duration_seconds'] = (end_time - start_time).total_seconds()
+            
+            print(f"\nBulk update completed:")
+            print(f"  Total players: {result['total_players']}")
+            print(f"  Successful: {result['successful_updates']}")
+            print(f"  Failed: {result['failed_updates']}")
+            print(f"  Duration: {result['duration_seconds']:.2f} seconds")
+            
+            if result['errors']:
+                print(f"  Errors encountered: {len(result['errors'])}")
+                for error in result['errors'][:5]:  # Show first 5 errors
+                    print(f"    - {error}")
+                if len(result['errors']) > 5:
+                    print(f"    ... and {len(result['errors']) - 5} more errors")
+            
+            return result
+            
+        except Exception as e:
+            end_time = datetime.now()
+            result['completed_at'] = end_time.isoformat()
+            result['duration_seconds'] = (end_time - start_time).total_seconds()
+            error_msg = f"Fatal error in bulk update: {str(e)}"
+            result['errors'].append(error_msg)
+            print(f"Fatal error in bulk update: {e}")
+            return result
+        finally:
+            # Close the list session if we created it
+            if list_session:
+                try:
+                    list_session.close()
+                except Exception as e:
+                    print(f"Warning: Error closing list session: {e}")
+    
+    def force_update_specific_players(self, player_ids: List[int], 
+                                    session_to_use=None, progress_callback=None) -> Dict:
+        """
+        Force update Redis cache for specific players.
+        
+        Args:
+            player_ids: List of player IDs to update
+            session_to_use: Optional database session to use (ignored, fresh sessions created per player)
+            progress_callback: Optional callback function for progress updates
+            
+        Returns:
+            Dict: Summary of the bulk update operation
+        """
+        start_time = datetime.now()
+        result = {
+            'started_at': start_time.isoformat(),
+            'total_players': len(player_ids),
+            'successful_updates': 0,
+            'failed_updates': 0,
+            'errors': [],
+            'completed_at': None,
+            'duration_seconds': 0
+        }
+        
+        try:
+            print(f"Starting bulk Redis update for {len(player_ids)} specific players")
+            
+            # Process players in batches
+            for i in range(0, len(player_ids), self.batch_size):
+                batch = player_ids[i:i + self.batch_size]
+                batch_num = (i // self.batch_size) + 1
+                total_batches = (len(player_ids) + self.batch_size - 1) // self.batch_size
+                
+                print(f"Processing batch {batch_num}/{total_batches} ({len(batch)} players)")
+                
+                # Process each player in the batch with its own fresh session
+                for player_id in batch:
+                    player_session = None
+                    try:
+                        # Create a fresh session for each player to avoid transaction issues
+                        from db.models.base import get_fresh_session
+                        player_session = get_fresh_session()
+                        
+                        success = self.loot_tracker.force_update_player(player_id, player_session)
+                        if success:
+                            result['successful_updates'] += 1
+                            print(f"✓ Updated player {player_id}")
+                        else:
+                            result['failed_updates'] += 1
+                            error_msg = f"Force update returned False for player {player_id}"
+                            result['errors'].append(error_msg)
+                            print(f"✗ Failed to update player {player_id}")
+                            
+                    except Exception as e:
+                        result['failed_updates'] += 1
+                        error_msg = f"Exception updating player {player_id}: {str(e)}"
+                        result['errors'].append(error_msg)
+                        print(f"✗ Error updating player {player_id}: {e}")
+                    finally:
+                        # Always close the player session
+                        if player_session:
+                            try:
+                                player_session.close()
+                            except Exception as e:
+                                print(f"Warning: Error closing session for player {player_id}: {e}")
+                
+                # Progress callback
+                if progress_callback:
+                    progress = {
+                        'batch': batch_num,
+                        'total_batches': total_batches,
+                        'completed_players': result['successful_updates'] + result['failed_updates'],
+                        'total_players': result['total_players'],
+                        'successful': result['successful_updates'],
+                        'failed': result['failed_updates']
+                    }
+                    progress_callback(progress)
+                
+                # Small delay between batches
+                if batch_num < total_batches:
+                    time.sleep(0.5)
+            
+            end_time = datetime.now()
+            result['completed_at'] = end_time.isoformat()
+            result['duration_seconds'] = (end_time - start_time).total_seconds()
+            
+            print(f"\nBulk update completed:")
+            print(f"  Total players: {result['total_players']}")
+            print(f"  Successful: {result['successful_updates']}")
+            print(f"  Failed: {result['failed_updates']}")
+            print(f"  Duration: {result['duration_seconds']:.2f} seconds")
+            
+            return result
+            
+        except Exception as e:
+            end_time = datetime.now()
+            result['completed_at'] = end_time.isoformat()
+            result['duration_seconds'] = (end_time - start_time).total_seconds()
+            error_msg = f"Fatal error in bulk update: {str(e)}"
+            result['errors'].append(error_msg)
+            print(f"Fatal error in bulk update: {e}")
+            return result
+
+# Global instance for bulk operations
+bulk_updater = BulkRedisUpdater()
+
+# Convenience functions for bulk operations
+def force_update_all_current_month_players(session_to_use=None, progress_callback=None) -> Dict:
+    """Force update all players with drops in current month"""
+    return bulk_updater.force_update_all_current_month_players(session_to_use, progress_callback)
+
+def force_update_specific_players(player_ids: List[int], session_to_use=None, progress_callback=None) -> Dict:
+    """Force update specific players"""
+    return bulk_updater.force_update_specific_players(player_ids, session_to_use, progress_callback)
+
+def get_players_with_current_month_drops(session_to_use=None) -> List[int]:
+    """Get all player IDs with drops in current month"""
+    return bulk_updater.get_players_with_current_month_drops(session_to_use)
+
+
 if __name__ == "__main__":
-    force_update_player(795, session)
+    # Example usage
+    print("Testing bulk Redis updater...")
+    
+    # Get players with current month drops
+    current_month_players = get_players_with_current_month_drops()
+    print(f"Found {len(current_month_players)} players with current month drops")
+    
+    # Example: Update all current month players
+    # result = force_update_all_current_month_players()
+    
+    # Example: Update specific players
+    # result = force_update_specific_players([795, 123, 456])

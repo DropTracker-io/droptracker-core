@@ -8,7 +8,7 @@ import aiohttp
 import interactions
 from dateutil.relativedelta import relativedelta
 from PIL import Image, ImageFont, ImageDraw
-from db.models import NpcList, session
+from db import NpcList, session, models
 
 DOCS_FOLDER = os.path.join(os.getcwd(), 'templates/docs')
 
@@ -77,6 +77,8 @@ def get_true_boss_name(npc_name: str):
         Returns the name of the NPC we are storing in the database for a given npc name passed;
         generally coming from an adventure log message.
     """
+    if npc_name == "Theatre of Blood Hard Mode":
+        npc_name = "Theatre of Blood: Hard Mode"
     npc = session.query(NpcList).filter(NpcList.npc_name == npc_name).first()
     if npc:
         print("Found an exact match for", npc_name, "in the database:", npc.npc_name, npc.npc_id)
@@ -200,24 +202,49 @@ def replace_placeholders(embed: interactions.Embed, value_dict: dict, global_ser
     if embed.footer and embed.footer.text:
         embed.footer.text = replace_placeholders_in_text(embed.footer.text, value_dict)
     
-    # Replace placeholders in each field's name and value
+    # Replace placeholders in each field's name and value.
+    # Build a new field list to avoid index/pop skipping issues.
     if embed.fields:
-        for i, field in enumerate(embed.fields):
-            if global_server:
-                if "Group" in field.name:
-                    embed.fields.pop(i)
-                    continue
-            if field.name:
-                field.name = replace_placeholders_in_text(field.name, value_dict)
-            if field.name == "Source:":
-                if value_dict.get("{kill_count}", None) == None:
-                    embed.fields.pop(i)
-            if field.value:
-                if field.value == "{team_size}":
+        kept_fields = []
+        group_point_placeholders = (
+            "{group_points_awarded}",
+            "{group_points_receiver_total}",
+            "{group_points_member_count}",
+            "{group_points_members_awarded}",
+        )
+        for field in embed.fields:
+            field_name = field.name or ""
+            field_value = field.value or ""
+
+            if global_server and "Group" in field_name:
+                continue
+
+            if field_name:
+                field_name = replace_placeholders_in_text(field_name, value_dict)
+
+            if field_name == "Source:" and value_dict.get("{kill_count}", None) is None:
+                continue
+
+            if field_value:
+                if field_value == "{team_size}":
                     if value_dict.get("{team_size}", None) != "Solo":
                         original_value = value_dict["{team_size}"]
                         value_dict["{team_size}"] = f"{original_value} players"
-                field.value = replace_placeholders_in_text(field.value, value_dict)
+                field_value = replace_placeholders_in_text(field_value, value_dict)
+
+            # If group-point placeholders are still present after replacement,
+            # data was unavailable for this event; suppress that field.
+            combined = f"{field_name} {field_value}"
+            if any(placeholder in combined for placeholder in group_point_placeholders):
+                continue
+
+            if str(field_value).strip() == "":
+                continue
+
+            field.name = field_name
+            field.value = field_value
+            kept_fields.append(field)
+        embed.fields = kept_fields
     
     # Replace placeholders in the embed's thumbnail URL
     if embed.thumbnail and embed.thumbnail.url:

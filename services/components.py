@@ -95,7 +95,7 @@ help_components = [
             Button(
                 label="Support us",
                 style=ButtonStyle.URL,
-                url="https://www.droptracker.io/account/upgrades"
+                url="https://www.droptracker.io/groups/upgrades"
             )
         ),
         SeparatorComponent(divider=True),
@@ -223,7 +223,7 @@ clan_setup = [
         SectionComponent(
             components=[
                 TextDisplayComponent(
-                    content="-# We also offer some premium features for groups when they [upgrade their account](https://www.droptracker.io/account/upgrades).\n" +
+                    content="-# We also offer some premium features for groups when they [upgrade their account](https://www.droptracker.io/groups/upgrades).\n" +
                     "-# Please consider subscribing to support the development of the project.",
                 ),
             ],
@@ -231,7 +231,7 @@ clan_setup = [
                 label="Upgrade",
                 style=ButtonStyle.LINK,
                 emoji=PartialEmoji(name="supporter", id=1263827303712948304),
-                url="https://www.droptracker.io/account/upgrades"
+                url="https://www.droptracker.io/groups/upgrades"
             )
         ),
         SeparatorComponent(divider=True),

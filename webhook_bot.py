@@ -2,17 +2,22 @@ import interactions
 import os
 import json
 import asyncio
+import signal
+import sys
 from datetime import datetime
 from dotenv import load_dotenv
-from interactions.api.events import MessageCreate, Startup
-from interactions import Embed, Intents, Message, ChannelType, OptionType, slash_command, Permissions, slash_option
+from interactions.api.events import MemberUpdate, MessageCreate, MessageReactionAdd, Startup
+from interactions import Embed, Intents, Message, ChannelType, OptionType, listen, slash_command, Permissions, slash_option
+from interactions.models import Member
 from db.models import Group, ItemList, PersonalBestEntry, PlayerPet, Session, Player, User, UserConfiguration
 from data.submissions import adventure_log_processor, clog_processor, ca_processor, pb_processor, drop_processor, pet_processor
 from api.services.metrics import MetricsTracker
+from services.points import award_points_to_player
 from utils.format import convert_to_ms, get_true_boss_name
 from services.updates import Updates
 from services.ticket_system import Tickets
 from sqlalchemy.exc import OperationalError, DisconnectionError
+from monitor.sdnotifier import SystemdWatchdog
 import time
 
 channel_id_to_use = 1210765287591256084
@@ -21,18 +26,70 @@ load_dotenv()
 
 bot = interactions.Client(token=os.getenv("WEBHOOK_TOKEN"), intents=Intents.ALL)
 metrics = MetricsTracker()
+watchdog = None
+shutdown_event = asyncio.Event()
 
+# Health check function for systemd watchdog
+async def health_check():
+    """Comprehensive health check for the webhook bot"""
+    try:
+        # Check if bot is ready and connected
+        if not bot.is_ready:
+            return False
+        
+        # Check if metrics tracker is running
+        if metrics is None:
+            return False
+        
+        return True
+    except Exception as e:
+        print(f"Health check failed: {e}")
+        return False
 
-# Add a test to verify the event listener is registered
-@bot.event
-async def on_ready():
-    print("=== BOT IS READY ===")
-    print(f"Bot logged in as: {bot.user}")
-    print(f"Bot ID: {bot.user.id}")
-    print(f"Connected to {len(bot.guilds)} guilds")
-    for guild in bot.guilds:
-        print(f"  - {guild.name} (ID: {guild.id})")
-    print("=== END READY ===")
+# Signal handlers for graceful shutdown
+def signal_handler(signum, frame):
+    """Handle shutdown signals"""
+    print(f"Received signal {signum}, initiating graceful shutdown...")
+    shutdown_event.set()
+
+def setup_signal_handlers():
+    """Setup signal handlers for graceful shutdown"""
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGHUP, signal_handler)
+
+@listen(MemberUpdate)
+async def on_member_update(event: MemberUpdate):
+    try:
+        local_session = Session()
+        if event.guild_id == 1172737525069135962:
+            previously_boosting = False
+            if event.before.roles != event.after.roles:
+                for role in event.before.roles:
+                    if role.id == 1172737525069135962:
+                        previously_boosting = True
+                for role in event.after.roles:
+                    if role.id == 1172737525069135962:
+                        if not previously_boosting:
+                            ## This event contains the player's boost role update -- we need to apply points here
+                            await award_nitro_boost(event.before.user.id)
+    except Exception as e:
+        print(f"Error processing member update: {e}")
+    finally:
+        local_session.close()
+
+async def award_nitro_boost(user_id: int, session_to_use = None):
+    if not session_to_use:
+        local_session = Session()
+    else:
+        local_session = session_to_use
+    user = local_session.query(User).filter(User.discord_id == user_id).first()
+    user_players = local_session.query(Player).filter(Player.user_id == user.user_id).all()
+    print(f"Awarding nitro boost to {user_players[0].player_name}...")
+    award_points_to_player(player_id=user_players[0].player_id, amount=250, source='Nitro Boost Upgrade',expires_in_days=60,session=local_session)
+    if not session_to_use:
+        local_session.close()
+
 
 # Add retry decorator for database operations
 def retry_on_database_error(max_retries=3, delay=1):
@@ -95,16 +152,16 @@ async def process_submission_with_session(submission_type, embed_data):
         session.commit()
         try:
             metrics.record_request(submission_type, success, app="webhook_bot")
-            print(f"Recorded request: {submission_type} {success}")
+            #print(f"Recorded request: {submission_type} {success}")
         except Exception:
-            print(f"Error recording request: {submission_type} {success}")
+            #print(f"Error recording request: {submission_type} {success}")
             pass
         return result
         
     except Exception as e:
         # Rollback on any error
         session.rollback()
-        print(f"Error processing {submission_type}: {e}")
+        #print(f"Error processing {submission_type}: {e}")
         try:
             metrics.record_request(submission_type, False, app="webhook_bot")
         except Exception:
@@ -121,7 +178,6 @@ async def on_message_create(event: MessageCreate):
             return {f.name: f.value for f in embed.fields}
         return {}
     
-    print("Got a message...")
     bot: interactions.Client = event.bot
     if bot.is_closed:
         await bot.astart(token=os.getenv("WEBHOOK_TOKEN"))
@@ -205,11 +261,11 @@ async def on_startup(event: Startup):
         bot.load_extension("services.ticket_system")
     except Exception as e:
         print(f"Error loading extensions: {e}")
-    
     # Then handle database operations with proper session management
     player_count = 0
     local_session = Session()
     try:
+        
         player_count = local_session.query(Player.player_id).count()
         await bot.change_presence(status=interactions.Status.ONLINE,
                             activity=interactions.Activity(name=f" ~{player_count} players", type=interactions.ActivityType.WATCHING))
@@ -222,9 +278,67 @@ async def on_startup(event: Startup):
                             activity=interactions.Activity(name="DropTracker Bot", type=interactions.ActivityType.WATCHING))
     finally:
         local_session.close()
+    
+    
 
+@interactions.listen(MessageReactionAdd)
+async def on_message_reaction_add(event: MessageReactionAdd):
+    if event.message.id == 1418542197661372599 or event.message.id == 1374171689780510821 or event.message.id == 1374171698793943040:
+        if event.emoji.id == 1346787143778963497:
+            emoji_user = event.author
+            dt_guild = bot.get_guild(1172737525069135962)
+            member = dt_guild.get_member(member_id=emoji_user.id)
+            if member:
+                await member.add_role(role=1418537699408871495)
+            return
 
-
+async def main():
+    """Main function with systemd watchdog integration"""
+    global watchdog
+    
+    # Setup signal handlers
+    setup_signal_handlers()
+    
+    # Initialize systemd watchdog
+    watchdog = SystemdWatchdog()
+    watchdog.set_health_check(health_check)
+    
+    try:
+        async with watchdog:
+            # Notify systemd that we're ready
+            await watchdog.notify_ready()
+            print("Systemd watchdog initialized and ready notification sent")
+            
+            # Start the bot
+            bot_task = asyncio.create_task(bot.astart(token=os.getenv("WEBHOOK_TOKEN")))
+            
+            # Wait for either bot to complete or shutdown signal
+            done, pending = await asyncio.wait(
+                [bot_task, asyncio.create_task(shutdown_event.wait())],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            
+            # If shutdown was requested, cancel the bot task
+            if shutdown_event.is_set():
+                print("Shutdown requested, stopping bot...")
+                if not bot_task.done():
+                    bot_task.cancel()
+                    try:
+                        await bot_task
+                    except asyncio.CancelledError:
+                        pass
+                
+                # Bot will be closed automatically when the process exits
+            
+            print("Webhook bot shutting down gracefully...")
+            
+    except KeyboardInterrupt:
+        print("Received keyboard interrupt")
+    except Exception as e:
+        print(f"Fatal error in main: {e}")
+        raise
+    finally:
+        print("Webhook bot cleanup completed")
 
 if __name__ == "__main__":
-    bot.start()
+    asyncio.run(main())

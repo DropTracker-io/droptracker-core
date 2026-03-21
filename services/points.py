@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import or_, func
 
-from db.models import (
+from db import (
     session as db_session,
     PremiumFeature,
     FeatureActivation,
@@ -13,6 +13,7 @@ from db.models import (
     PointDebit,
     RecurringPointGrant,
     user_group_association,
+    models
 )
 
 
@@ -20,7 +21,15 @@ from db.models import (
 # Awarding credits
 # ----------------------------
 
-def award_points_to_player(*, player_id: int, amount: int, source: str = 'ingame', expires_in_days: Optional[int] = None, session=None) -> int:
+def award_points_to_player(
+    *,
+    player_id: int,
+    amount: int,
+    source: str = "ingame",
+    expires_in_days: Optional[int] = None,
+    group_id: Optional[int] = None,
+    session=None,
+) -> int:
     """Create a PointCredit for a player (achievement, nitro via user, admin, etc.).
 
     Returns the new credit id.
@@ -33,24 +42,31 @@ def award_points_to_player(*, player_id: int, amount: int, source: str = 'ingame
         session = db_session
         own_session = True
 
+    # expires_in_days semantics:
+    # - None: never expires
+    # - 0 or negative: treat as never expires (callers historically used 0 to mean "no expiry")
+    # - positive: expires in that many days
     expires_at = None
-    if expires_in_days is not None:
+    if expires_in_days is not None and expires_in_days > 0:
         expires_at = datetime.now() + timedelta(days=expires_in_days)
 
     credit = PointCredit(
         player_id=player_id,
-        group_id=None,
+        group_id=group_id,
         source=source,
         amount=amount,
         amount_remaining=amount,
-        expires_at=expires_at,
+        expires_at=expires_at,  
         status='active'
     )
     session.add(credit)
     session.flush()
     if own_session:
         session.commit()
-    return get_player_point_balance(player_id=player_id, session=session)
+    # Return a sensible balance depending on scope
+    if group_id is None:
+        return get_player_point_balance(player_id=player_id, session=session)
+    return get_player_point_balance_for_group(player_id=player_id, group_id=group_id, session=session)
 
 
 def award_points_to_group(*, group_id: int, amount: int, source: str = 'admin', expires_in_days: Optional[int] = None, session=None) -> int:
@@ -94,17 +110,29 @@ def _active_credit_filter(now: datetime):
 
 
 def get_player_point_balance(*, player_id: int, session=None) -> int:
-    """Sum of a player's active, non-expired, remaining points."""
+    """Sum of a player's *global* (non-group-scoped) active, non-expired, remaining points."""
     if session is None:
         session = db_session
     now = datetime.now()
     filters = _active_credit_filter(now)
     total = (session.query(PointCredit)
-             .filter(PointCredit.player_id == player_id, *filters)
+             .filter(PointCredit.player_id == player_id, PointCredit.group_id.is_(None), *filters)
              .with_entities(PointCredit.amount_remaining)
              .all())
     return int(sum(r[0] for r in total))
 
+
+def get_player_point_balance_for_group(*, player_id: int, group_id: int, session=None) -> int:
+    """Sum of a player's active points scoped to a specific group."""
+    if session is None:
+        session = db_session
+    now = datetime.now()
+    filters = _active_credit_filter(now)
+    total = (session.query(PointCredit)
+             .filter(PointCredit.player_id == player_id, PointCredit.group_id == group_id, *filters)
+             .with_entities(PointCredit.amount_remaining)
+             .all())
+    return int(sum(r[0] for r in total))
 
 def get_group_point_balance(*, group_id: int, session=None) -> int:
     """Sum of a group's active, non-expired, remaining points."""

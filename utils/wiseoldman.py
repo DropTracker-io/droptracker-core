@@ -1,15 +1,19 @@
 import os
 import asyncio
-import httpx
+import logging
+import time
 from asynciolimiter import Limiter
 from dotenv import load_dotenv
-from db.models import Player, Session, session
-from db import models
+from db import Player, session, models
+
 import wom
 from wom import Err, Result
 from utils.format import normalize_player_display_equivalence
-from typing import Optional
+from typing import Optional, Dict, Any, List, Tuple
 load_dotenv()
+
+logger = logging.getLogger("utils.wiseoldman")
+logger.setLevel(logging.INFO)
 
 rate_limit = 100 / 65  # This calculates the rate as 100 requests per 65 seconds
 limiter = Limiter(rate_limit)  # Create a Limiter instance
@@ -23,21 +27,100 @@ client = wom.Client(
     user_agent="@joelhalen"
 )
 
-async def check_user_by_username(username: str):
+PLAYER_CACHE_TTL = int(os.getenv("WOM_PLAYER_CACHE_TTL", "900"))
+PLAYER_FAIL_CACHE_TTL = int(os.getenv("WOM_PLAYER_FAIL_CACHE_TTL", "300"))
+GROUP_CACHE_TTL = int(os.getenv("WOM_GROUP_CACHE_TTL", "900"))
+
+def _now() -> float:
+    return time.monotonic()
+
+
+class _CacheEntry:
+    __slots__ = ("value", "expires_at")
+
+    def __init__(self, value: Any, expires_at: float):
+        self.value = value
+        self.expires_at = expires_at
+
+
+_player_cache: Dict[str, _CacheEntry] = {}
+_player_fail_cache: Dict[str, _CacheEntry] = {}
+_group_cache: Dict[int, _CacheEntry] = {}
+
+_player_cache_lock = asyncio.Lock()
+_group_cache_lock = asyncio.Lock()
+
+async def _get_cached_player(username: str, force_refresh: bool) -> Optional[Tuple[Any, float]]:
+    normalized = username.strip().lower()
+    now = _now()
+    async with _player_cache_lock:
+        if not force_refresh:
+            entry = _player_cache.get(normalized)
+            if entry and entry.expires_at > now:
+                return entry.value, entry.expires_at
+            fail_entry = _player_fail_cache.get(normalized)
+            if fail_entry and fail_entry.expires_at > now:
+                return fail_entry.value, fail_entry.expires_at
+    return None
+
+
+async def _store_player_cache(username: str, value: Any, success: bool):
+    normalized = username.strip().lower()
+    expires_in = PLAYER_CACHE_TTL if success else PLAYER_FAIL_CACHE_TTL
+    entry = _CacheEntry(value, _now() + expires_in)
+    async with _player_cache_lock:
+        target_cache = _player_cache if success else _player_fail_cache
+        target_cache[normalized] = entry
+        if success and normalized in _player_fail_cache:
+            del _player_fail_cache[normalized]
+        # Basic eviction to avoid unbounded growth
+        if len(target_cache) > 1000:
+            target_cache.pop(next(iter(target_cache)))
+
+
+async def _get_cached_group(wom_group_id: int, force_refresh: bool) -> Optional[List[int]]:
+    now = _now()
+    async with _group_cache_lock:
+        if not force_refresh:
+            entry = _group_cache.get(wom_group_id)
+            if entry and entry.expires_at > now:
+                return entry.value
+    return None
+
+
+async def _store_group_cache(wom_group_id: int, value: List[int]):
+    async with _group_cache_lock:
+        _group_cache[wom_group_id] = _CacheEntry(value, _now() + GROUP_CACHE_TTL)
+        if len(_group_cache) > 1000:
+            _group_cache.pop(next(iter(_group_cache)))
+
+
+def _log_wom_call(action: str, **kwargs):
+    if logger.isEnabledFor(logging.INFO):
+        logger.info("WOM API call: %s %s", action, kwargs)
+
+async def check_user_by_username(username: str, *, force_refresh: bool = False) -> tuple[Player, str, int, int]:
     """ Check a user in the WiseOldMan database, returning their "player" object,
         their WOM ID, and their displayName.
+        Returns (player, player_name, player_wom_id, log_slots)
     """
+    # Cached results (success or failure) prevent hammering the API for unchanged data.
+    cached = await _get_cached_player(username, force_refresh)
+    if cached:
+        return cached[0]
+
     # TODO -- only grab necessary info and parse it before returning the full player obj?
     await limiter.wait()
     await client.start()  # Initialize the client (if required by the `wom` library)
     try:
+        _log_wom_call("players.get_details", username=username, force_refresh=force_refresh)
         result = await client.players.get_details(username=username)
         # Add debug logging
         try:
             if result.is_ok:
                 player = result.unwrap()
                 if player is None:
-                    return None, None, None
+                    return None, None, None, -1
                 log_slots = 0
                 snapshot_data = None
                 snapshot = getattr(player, "latest_snapshot", None)
@@ -52,7 +135,9 @@ async def check_user_by_username(username: str):
                         score = getattr(activity_obj, "score", -1)
                         if activity_name_str == "collections_logged":
                             log_slots = score
-                return player, player.username, player.id, log_slots
+                payload = (player, player.username, player.id, log_slots)
+                await _store_player_cache(username, payload, success=True)
+                return payload
         except Exception as e:
             error = result.unwrap_err()
             if isinstance(error, Err):
@@ -63,21 +148,23 @@ async def check_user_by_username(username: str):
                 pass
             # Try update if get fails
             try:
+                _log_wom_call("players.update_player", username=username)
                 result = await client.players.update_player(username=username)
             except Exception as e:
-                #print("Error updating player:", e)
+                print("Error updating player:", e)
                 pass
             # Add debug logging
             if not result.is_ok:
-                #print(f"Update player failed for {username}. Status: {result.status_code}")
+                print(f"Update player failed for {username}. Status: {result.status_code}")
                 pass
             if result.is_ok:
                 player = result.unwrap()
                 
                 if player is None:
-                    #print(f"Got empty player object after update for {username}")
-                    return None, None, None
-                #print("Got player object after update for", username + ":", player)
+                    print(f"Got empty player object after update for {username}")
+                    await _store_player_cache(username, (None, None, None, -1), success=False)
+                    return None, None, None, -1
+                print("Got player object after update for", username + ":", player)
                 player_id = player.id
                 player_name = player.username
                 snapshot = getattr(player, "latest_snapshot", None)
@@ -95,37 +182,53 @@ async def check_user_by_username(username: str):
                         if activity_name_str == "collections_logged":
                             log_slots = score
                 else:
-                    return 0
-                return player, str(player_name), str(player_id), log_slots
+                    payload = 0
+                    await _store_player_cache(username, payload, success=False)
+                    return payload
+                payload = (player, str(player_name), str(player_id), log_slots)
+                await _store_player_cache(username, payload, success=True)
+                return payload
             else:
-                #print("Result is not ok, returning None")
+                print("Result is not ok, returning None")
+                await _store_player_cache(username, (None, None, None, -1), success=False)
                 return None, None, None, -1
     except Exception as e:
         print(f"Error checking user {username}: {str(e)}")
+        await _store_player_cache(username, (None, None, None, -1), success=False)
         return None, None, None, -1
 
-async def check_user_by_id(uid: int):
+async def check_user_by_id(uid: int, *, force_refresh: bool = False):
     """ Check a user in the WiseOldMan database, returning their "player" object,
         their WOM ID, and their displayName.
     """
+    cache_key = f"id:{uid}"
+    cached = await _get_cached_player(cache_key, force_refresh)
+    if cached:
+        return cached[0]
+
     await client.start()  # Initialize the client (if required by the `wom` library)
 
     await limiter.wait()
 
     try:
+        _log_wom_call("players.get_details_by_id", player_id=uid, force_refresh=force_refresh)
         result = await client.players.get_details_by_id(player_id=uid)
         if result.is_ok:
             player = result.unwrap()
             player_id = player.player.id
             player_name = player.player.display_name
+            payload = (player, str(player_name), str(player_id))
+            await _store_player_cache(cache_key, payload, success=True)
+            await _store_player_cache(str(player_name), (player, player_name, player_id, getattr(player, "log_slots", -1)), success=True)
             return player, str(player_name), str(player_id)
         else:
             # Handle the case where the request failed
+            await _store_player_cache(cache_key, (None, None, None), success=False)
             return None, None, None
     finally:
         pass
 
-async def check_group_by_id(wom_group_id: int):
+async def check_group_by_id(wom_group_id: int, *, force_refresh: bool = False):
     """ Searches for a group on WiseOldMan by a passed group ID 
         Returns group_name, member_count and members (list)    
     """
@@ -133,19 +236,28 @@ async def check_group_by_id(wom_group_id: int):
     await client.start()
     await limiter.wait()
     try:
+        _log_wom_call("groups.get_details", id=wom_id, force_refresh=force_refresh)
         result = await client.groups.get_details(id=wom_id)
         if result.is_ok:
             details = result.unwrap()
             members = details.memberships
             member_count = details.group.member_count
             group_name = details.group.name
+            member_ids = [member.player_id for member in members]
+            await _store_group_cache(wom_group_id, member_ids)
             return group_name, member_count, members
         else:
             return None, None, None
     finally:
         pass
 
-async def fetch_group_members(wom_group_id: int, session_to_use = None):
+async def fetch_group_members(
+    wom_group_id: int,
+    session_to_use = None,
+    *,
+    force_refresh: bool = False,
+    use_cache: bool = True
+):
     """ 
     Returns a list of WiseOldMan Player IDs 
     for members of a specified group 
@@ -157,15 +269,45 @@ async def fetch_group_members(wom_group_id: int, session_to_use = None):
     else:
         session = models.session
     
+    if not force_refresh:
+        # Attempt to satisfy from local database first
+        db_session = session_to_use or models.session
+        try:
+            group_obj = (
+                db_session.query(models.Group)
+                .filter(models.Group.wom_id == wom_group_id)
+                .first()
+            )
+            if group_obj:
+                local_members = (
+                    db_session.query(models.Player.wom_id)
+                    .join(
+                        models.user_group_association,
+                        (models.user_group_association.c.player_id == models.Player.player_id),
+                    )
+                    .filter(
+                        models.user_group_association.c.group_id == group_obj.group_id,
+                        models.Player.wom_id != None,
+                    )
+                    .all()
+                )
+                if local_members:
+                    return [member.wom_id for member in local_members if member.wom_id is not None]
+        except Exception as db_ex:
+            logger.debug("Local member lookup failed for WOM group %s: %s", wom_group_id, db_ex)
     if wom_group_id == 1:
         # Fetch all player WOM IDs from the database directly
         players = session.query(Player.wom_id).all()
         # Unpack the list of tuples returned by SQLAlchemy
         user_list = [player.wom_id for player in players] 
         return user_list
+    cached = await _get_cached_group(wom_group_id, force_refresh or not use_cache)
+    if cached is not None:
+        return cached
     await client.start()
     await limiter.wait()
     try:
+        _log_wom_call("groups.get_details", id=wom_group_id, force_refresh=force_refresh)
         result = await client.groups.get_details(wom_group_id)
         if result.is_ok:
             details = result.unwrap()
@@ -185,6 +327,7 @@ async def fetch_group_members(wom_group_id: int, session_to_use = None):
                             existing_player.player_name = new_name
                             session.commit()
                 user_list.append(member.player_id)
+            await _store_group_cache(wom_group_id, user_list)
             return user_list
         else:
             return []
@@ -199,6 +342,7 @@ async def get_collections_logged(username: str):
     """
     await client.start()
     await limiter.wait()
+    _log_wom_call("players.get_details", username=username)
     player_data = await client.players.get_details(username=username)
     if player_data.is_ok:
         details = player_data.unwrap()
@@ -230,6 +374,7 @@ def get_player_total_kills(wom_id: int):
 async def get_player_total_kills(wom_id: int):
     await client.start()
     await limiter.wait()
+    _log_wom_call("players.get_details_by_id", player_id=wom_id)
     player_data = await client.players.get_details_by_id(player_id=wom_id)
     if player_data.is_ok:
         details = player_data.unwrap()
@@ -264,6 +409,7 @@ async def get_player_boss_kills(username: str, boss_metric: str) -> Optional[int
     await client.start()
     await limiter.wait()
     try:
+        _log_wom_call("players.get_details", username=username)
         player_data: Result = await client.players.get_details(username=username)
         return await _extract_boss_kills_from_player_result(player_data, boss_metric)
     except Exception:
@@ -278,6 +424,7 @@ async def get_player_boss_kills_by_id(wom_id: int, boss_metric: str) -> Optional
     await client.start()
     await limiter.wait()
     try:
+        _log_wom_call("players.get_details_by_id", player_id=wom_id)
         player_data: Result = await client.players.get_details_by_id(wom_id)
         return await _extract_boss_kills_from_player_result(player_data, boss_metric)
     except Exception:
@@ -334,6 +481,7 @@ async def get_player_metric_by_id(wom_id: int, metric_name: str):
     """
     await client.start()
     await limiter.wait()
+    _log_wom_call("players.get_details_by_id", player_id=wom_id)
     player_data = await client.players.get_details_by_id(wom_id)
     return await _get_player_metric(player_data, metric_name)
 
@@ -428,6 +576,7 @@ async def get_player_metric(username: str, metric_name: str):
     """
     await client.start()
     await limiter.wait()
+    _log_wom_call("players.get_details", username=username)
     player_data = await client.players.get_details(username=username)
     return await _get_player_metric(player_data, metric_name)
 
@@ -437,6 +586,7 @@ async def get_player_wom_data(username: str):
     """
     await client.start()
     await limiter.wait()
+    _log_wom_call("players.get_details", username=username)
     player_data = await client.players.get_details(username=username)
     return player_data
 
@@ -447,6 +597,7 @@ async def get_player_all_skills(username: str):
     """
     await client.start()
     await limiter.wait()
+    _log_wom_call("players.get_details", username=username)
     player_data = await client.players.get_details(username=username)
     
     if player_data.is_ok:
@@ -476,6 +627,7 @@ async def get_player_all_skills_by_id(wom_id: int):
     """
     await client.start()
     await limiter.wait()
+    _log_wom_call("players.get_details_by_id", player_id=wom_id)
     player_data = await client.players.get_details_by_id(wom_id)
     
     if player_data.is_ok:

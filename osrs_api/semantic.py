@@ -40,6 +40,16 @@ class SemanticAPI:
         self.client = client
         self._ca_tiers_cache = None  # Cache for Combat Achievement tiers
     
+    def _bucket_quote(self, value: str) -> str:
+        """
+        Safely quote a string for Bucket API queries using double quotes and escaping.
+        """
+        if value is None:
+            return '""'
+        # Escape backslashes and double quotes
+        escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    
     async def _bucket_query(self, query: str) -> Dict[str, Any]:
         """
         Execute a bucket query against the OSRS Wiki API.
@@ -81,9 +91,12 @@ class SemanticAPI:
             The first item ID as an integer, or None if not found
         """
         try:
-            # Escape the item name for the query
-            escaped_name = quote(item_name)
-            query = f"bucket('infobox_item').select('item_id').where('item_name', '{item_name}').run()"
+            # Build a safe query using properly quoted value
+            query = (
+                "bucket('infobox_item')"
+                ".select('item_id')"
+                f".where('item_name', {self._bucket_quote(item_name)}).run()"
+            )
             
             result = await self._bucket_query(query)
             bucket_data = result.get('bucket', [])
@@ -115,7 +128,11 @@ class SemanticAPI:
             if npc_name == "Corrupted Gauntlet":
                 return 9035
             
-            query = f"bucket('infobox_monster').select('id').where('name', '{npc_name}').run()"
+            query = (
+                "bucket('infobox_monster')"
+                ".select('id')"
+                f".where('name', {self._bucket_quote(npc_name)}).run()"
+            )
             
             result = await self._bucket_query(query)
             bucket_data = result.get('bucket', [])
@@ -178,7 +195,11 @@ class SemanticAPI:
                 print(f"Using semantic name: {semantic_name} for {npc_name}")
             
             # Query the dropsline bucket to find NPCs that drop this item
-            query = f"bucket('dropsline').select('page_name').where('item_name', '{item_name}').run()"
+            query = (
+                "bucket('dropsline')"
+                ".select('page_name')"
+                f".where('item_name', {self._bucket_quote(item_name)}).run()"
+            )
             
             result = await self._bucket_query(query)
             bucket_data = result.get('bucket', [])
@@ -228,7 +249,11 @@ class SemanticAPI:
             semantic_name = reverse_alt_names.get(npc_name, npc_name)
             
             # Query all drops from this NPC
-            query = f"bucket('dropsline').select('item_name', 'page_name').where('page_name', '{semantic_name}').run()"
+            query = (
+                "bucket('dropsline')"
+                ".select('item_name', 'page_name')"
+                f".where('page_name', {self._bucket_quote(semantic_name)}).run()"
+            )
             
             result = await self._bucket_query(query)
             bucket_data = result.get('bucket', [])

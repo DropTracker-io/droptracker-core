@@ -1,7 +1,7 @@
 import aiofiles
 import os
 import re
-from db.models import Player
+from db import Player, models
 import uuid
 
 import aiohttp
@@ -16,7 +16,7 @@ async def download_image(sub_type: str,
         # Validate player has a wom_id
         #print(f"API image download in process..... type: {sub_type} player: {player.player_name} player_wom_id: {player_wom_id} file_data: {file_data} processed_data: {processed_data}")
         if not player_wom_id:
-            print(f"(download_image) Error: Player missing or has no wom_id: {player_wom_id}")
+            #print(f"(download_image) Error: Player missing or has no wom_id: {player_wom_id}")
             return None
             
         base_dir = "/store/droptracker/disc/static/assets/img/user-upload/"

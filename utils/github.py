@@ -156,7 +156,7 @@ class GithubPagesUpdater:
                 # print(f"Error response from GitHub: {e.data}")
                 pass
 
-    async def update_github_pages(self):
+    async def update_github_pages(self, watchdog=None):
         global total_hooks, updates
 
         ex_hooks = db_sesh.query(Webhook).count()
@@ -164,7 +164,7 @@ class GithubPagesUpdater:
         print("Loading initial total webhook data & sending update...")
         total_hooks = ex_hooks
         # Check only the webhooks we'll use
-        await check_limited_webhooks(80)
+        await check_limited_webhooks(80, watchdog)
         await asyncio.to_thread(self._update_github_pages)
 
     def _update_github_pages(self):
@@ -594,13 +594,14 @@ async def test_all_webhooks():
         
         #print(f"Checked {len(all_webhooks)} webhooks: {passed} passed, {failed} failed")
 
-async def check_limited_webhooks(limit=80):
+async def check_limited_webhooks(limit=80, watchdog=None):
     """
     Check only a limited number of webhooks to ensure they're working before updating GitHub Pages.
     This removes non-working webhooks from the database.
     
     Args:
         limit: Maximum number of webhooks to check
+        watchdog: SystemdWatchdog instance to notify during long operations
     """
     print(f"Checking up to {limit} webhooks before GitHub update...")
     try:
@@ -628,6 +629,9 @@ async def check_limited_webhooks(limit=80):
                         ## Remove it from the database
                         session.delete(webhook)
                         session.commit()
+                    
+                    # The watchdog is automatically notified by the SystemdWatchdog heartbeat loop
+                    # No manual notification needed
                     
                     # Add delay between requests
                     if i < len(webhooks) - 1:  # Don't delay after the last request
