@@ -189,6 +189,7 @@ async def group_custom_board(group_id: int):
         db_session.close()
 
 @groups_bp.get("/groups/board_update/<int:group_id>")
+@groups_bp.post("/groups/board_update/<int:group_id>")
 @route_cors(allow_origin="https://www.droptracker.io")
 async def group_board_update(group_id: int):
     try:
@@ -220,6 +221,54 @@ async def group_board_update(group_id: int):
         }), status_code
     except Exception as e:
         return jsonify({"error": f"Failed to run board update: {e}"}), 500
+
+
+@groups_bp.get("/groups/admin_diagnostics/<int:group_id>")
+@route_cors(allow_origin="https://www.droptracker.io")
+async def group_admin_diagnostics(group_id: int):
+    db_session = get_db_session()
+    try:
+        group = db_session.query(Group).filter(Group.group_id == group_id).first()
+        if not group:
+            return jsonify({"success": False, "error": "Group not found"}), 404
+
+        # Pipeline heartbeat checks mirror existing website assumptions.
+        last_webhook_drop = db_session.execute(
+            text("SELECT MAX(date_added) FROM drops WHERE used_api = 0")
+        ).scalar()
+        last_api_drop = db_session.execute(
+            text("SELECT MAX(date_added) FROM drops WHERE used_api = 1")
+        ).scalar()
+        last_group_submission = db_session.query(NotifiedSubmission.date_added).filter(
+            NotifiedSubmission.group_id == group_id
+        ).order_by(NotifiedSubmission.date_added.desc()).first()
+
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        recent_submission_count = db_session.query(NotifiedSubmission).filter(
+            NotifiedSubmission.group_id == group_id,
+            NotifiedSubmission.date_added >= seven_days_ago
+        ).count()
+
+        return jsonify({
+            "success": True,
+            "group_id": group_id,
+            "pipeline": {
+                "webhook_bot": {
+                    "online": bool(last_webhook_drop),
+                    "last_seen": str(last_webhook_drop) if last_webhook_drop else None,
+                },
+                "api_pipeline": {
+                    "online": bool(last_api_drop),
+                    "last_seen": str(last_api_drop) if last_api_drop else None,
+                },
+            },
+            "group_activity": {
+                "recent_submission_count_7d": int(recent_submission_count),
+                "last_submission": str(last_group_submission[0]) if last_group_submission else None,
+            }
+        }), 200
+    finally:
+        db_session.close()
 
 
 # ==============================================================================

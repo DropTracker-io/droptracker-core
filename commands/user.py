@@ -255,11 +255,11 @@ class UserCommands(Extension):
             session.commit()
             if user.hidden:
                 embed = Embed(title="Success!", 
-                              description=f"All of your accounts will **no longer** be visible in our global listings.")
+                              description=f"All of your accounts will **no longer** be visible in our global listings.\nYou can also manage this from the website account settings page.")
                 return await ctx.send(embed=embed, ephemeral=True)
             else:
                 embed = Embed(title="Success!",
-                              description=f"All of your accounts will now **be visible** in our global listings.")
+                              description=f"All of your accounts will now **be visible** in our global listings.\nYou can also manage this from the website account settings page.")
                 return await ctx.send(embed=embed, ephemeral=True)
         else:
             player = session.query(Player).filter_by(player_name=account).first()
@@ -269,11 +269,11 @@ class UserCommands(Extension):
             session.commit()
             if player.hidden:
                 embed = Embed(title="Success!",
-                              description=f"Your account, `{player.player_name}` will **no longer** be visible in our global listings.")
+                              description=f"Your account, `{player.player_name}` will **no longer** be visible in our global listings.\nYou can also change this from your website account page.")
                 return await ctx.send(embed=embed, ephemeral=True)
             else:
                 embed = Embed(title="Success!",
-                              description=f"Your account, `{player.player_name}` will now **be visible** in our global listings.")
+                              description=f"Your account, `{player.player_name}` will now **be visible** in our global listings.\nYou can also change this from your website account page.")
                 return await ctx.send(embed=embed, ephemeral=True)
 
     @hideme_cmd.autocomplete("account")
