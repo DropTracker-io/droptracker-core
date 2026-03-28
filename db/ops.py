@@ -26,7 +26,7 @@ from db import (
     GroupEmbed, Field as EmbField, NpcList, NotificationQueue, user_group_association, models
 )
 from dotenv import load_dotenv
-from sqlalchemy.dialects import mysql
+from sqlalchemy.dialects import mysql 
 from sqlalchemy import func, text
 from sqlalchemy.orm import joinedload
 import interactions

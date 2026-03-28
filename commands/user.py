@@ -18,7 +18,7 @@ from interactions import AutocompleteContext, SlashContext, Embed, OptionType, E
 from db.models import Session, User, Group, Guild, Player, UserConfiguration, session
 from services.components import help_components
 from services.points import award_points_to_player
-from utils.format import format_time_since_update, get_command_id
+from utils.format import format_time_since_update, get_command_id, get_player_by_claim_rsn
 from utils.wiseoldman import check_user_by_username
 from .utils import try_create_user
 
@@ -362,9 +362,9 @@ class UserCommands(Extension):
             group = session.query(Group).filter(Group.guild_id.ilike(guild_id)).first()
         if not group:
             group = session.query(Group).filter_by(group_id=2).first()
-            
-        player = session.query(Player).filter(Player.player_name.ilike(rsn)).first()
-        
+
+        player = get_player_by_claim_rsn(session, Player, rsn)
+
         if not player:
             embed = Embed(title="Player not found!",
                           description=f"`{rsn}` was not yet found in our database.\n" +
