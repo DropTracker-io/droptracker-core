@@ -47,6 +47,8 @@ async def try_create_user(discord_id: str = None, username: str = None, ctx: Sla
         if ctx:
             username = ctx.user.username
             discord_id = ctx.user.id
+            if len(username) > 20:
+                username = username[:20] # truncuate name to 20 characters for database limits
     user = None
     try:
         group = None
