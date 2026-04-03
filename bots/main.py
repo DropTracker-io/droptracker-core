@@ -91,6 +91,8 @@ redis_client = RedisClient()
 ## Category IDs that contain DropTracker webhooks that receive messages from the RuneLite client
 load_dotenv()
 
+next_sync_time = datetime.now() + timedelta(minutes=5)
+
 # Hypercorn configuration
 def create_hypercorn_config():
     config = hypercorn.Config()
@@ -252,12 +254,29 @@ def should_group_sync():
     else:
         return False
 
+async def update_group_members_task_channel():
+    channel_id = 1489188732602024027
+    channel = await bot.fetch_channel(channel_id=channel_id)
+    global next_sync_time
+    if channel:
+        time_left = (next_sync_time - datetime.now()).total_seconds() / 60
+        await channel.edit(name=f"Next WOM Refresh: ~{time_left:.0f}min")")
+
 @Task.create(IntervalTrigger(minutes=60))
 async def start_group_sync():
     if should_group_sync():
+        await update_group_members_task_channel()
         await update_group_members(bot)
+    global next_sync_time
+    next_sync_time = datetime.now() + timedelta(minutes=70)
     #await logger.log("access", "update_group_members completed...", "start_group_sync")
 
+
+@Task.create(IntervalTrigger(minutes=3))
+async def update_group_members_task_channel_loop():
+    while True:
+        await update_group_members_task_channel()
+        await asyncio.sleep(60)
 
 @Task.create(IntervalTrigger(minutes=8))
 async def lootboard_updates():
@@ -477,6 +496,7 @@ async def create_tasks():
     print("Syncing group member association tables...")
     await start_group_sync()
     start_group_sync.start()
+    update_group_members_task_channel_loop.start()
     await logger.log("access", "Startup tasks completed.", "create_tasks")
     print("Starting heartbeat monitoring...")
     heartbeat_check.start()
