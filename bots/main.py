@@ -260,7 +260,7 @@ async def update_group_members_task_channel():
     global next_sync_time
     if channel:
         time_left = (next_sync_time - datetime.now()).total_seconds() / 60
-        await channel.edit(name=f"Next WOM Refresh: ~{time_left:.0f}min")")
+        await channel.edit(name=f"Next WOM Refresh: ~{time_left:.0f}min")
 
 @Task.create(IntervalTrigger(minutes=60))
 async def start_group_sync():

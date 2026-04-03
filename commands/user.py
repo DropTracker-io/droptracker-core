@@ -21,6 +21,7 @@ from services.points import award_points_to_player
 from utils.format import format_time_since_update, get_command_id, get_player_by_claim_rsn
 from utils.wiseoldman import check_user_by_username
 from .utils import try_create_user
+from sqlalchemy import func
 
 
 class UserCommands(Extension):
