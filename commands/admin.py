@@ -23,7 +23,7 @@ from sqlalchemy import delete
 from db.clan_sync import insert_xf_group
 from db.models import (
     Session, User, Group, Guild, GroupConfiguration, GroupEmbed, GroupPatreon, 
-    GroupRecentDrops, NotificationQueue, NotifiedSubmission, Webhook, 
+    GroupRecentDrops, NotificationQueue, NotifiedSubmission, PlayerPoints, Webhook, 
     user_group_association, session
 )
 from utils.format import get_command_id
@@ -297,6 +297,62 @@ class ClanCommands(Extension):
                 except Exception as e:
                     session.rollback()
                     await ctx.channel.send(f"Cleanup failed for guild `{guild_id}`: {e}")
+
+    @slash_command(
+        name="reset-group-points",
+        description="Reset your server group's points back to zero",
+        default_member_permissions=Permissions.ADMINISTRATOR
+    )
+    @slash_option(
+        name="confirm_text",
+        opt_type=OptionType.STRING,
+        description="Type RESET to confirm this irreversible action",
+        required=True
+    )
+    async def reset_group_points_cmd(self, ctx: SlashContext, confirm_text: str):
+        if not ctx.guild_id:
+            return await ctx.send("Use this command inside your group's Discord server.", ephemeral=True)
+
+        if str(confirm_text).strip().upper() != "RESET":
+            return await ctx.send(
+                "Confirmation failed. Please run the command again and set `confirm_text` to `RESET`.",
+                ephemeral=True
+            )
+
+        guild = session.query(Guild).filter(Guild.guild_id == str(ctx.guild_id)).first()
+        if not guild or not guild.group_id:
+            return await ctx.send("This server is not linked to a DropTracker group.", ephemeral=True)
+
+        group = session.query(Group).filter(Group.group_id == guild.group_id).first()
+        if not group:
+            return await ctx.send("Group record was not found for this server.", ephemeral=True)
+
+        try:
+            removed_count = (
+                session.query(PlayerPoints)
+                .filter(PlayerPoints.group_id == group.group_id)
+                .count()
+            )
+            (
+                session.query(PlayerPoints)
+                .filter(PlayerPoints.group_id == group.group_id)
+                .delete(synchronize_session=False)
+            )
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            return await ctx.send(f"Failed to reset points: {e}", ephemeral=True)
+
+        embed = Embed(
+            title="Group Points Reset",
+            description=(
+                f"All points for **{group.group_name}** were reset to zero.\n"
+                f"Removed **{removed_count:,}** award row(s)."
+            ),
+            color=0xE74C3C
+        )
+        embed.set_footer(text="This action is irreversible.")
+        await ctx.send(embed=embed, ephemeral=True)
 
     @slash_command(name="new_webhook",
                     description="Generate a new webhook, adding it to the database and the GitHub list.",
