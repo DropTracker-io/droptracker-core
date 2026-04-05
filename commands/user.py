@@ -15,7 +15,7 @@ import json
 from secrets import token_hex
 from data.submissions import try_create_player
 from interactions import AutocompleteContext, SlashContext, Embed, OptionType, Extension, slash_command, slash_option
-from db.models import Session, User, Group, Guild, Player, UserConfiguration, session
+from db.models import Session, User, Group, Guild, Player, UserConfiguration, session, PlayerPoints
 from services.components import help_components
 from services.points import award_points_to_player
 from utils.format import format_time_since_update, get_command_id, get_player_by_claim_rsn
@@ -42,6 +42,15 @@ class UserCommands(Extension):
         self.bot = bot
         self.message_handler = bot.get_ext("services.message_handler")
 
+    def _refresh_session(self):
+        """
+        Reset scoped session state before handling a new interaction.
+
+        This prevents long-lived transaction snapshots from returning stale
+        reads when underlying data was changed by another process.
+        """
+        session.remove()
+
 
     def _get_group_for_guild(self, guild_id):
         if not guild_id:
@@ -64,6 +73,7 @@ class UserCommands(Extension):
         Args:
             ctx (SlashContext): The slash command context
         """
+        self._refresh_session()
         user = session.query(User).filter_by(discord_id=ctx.user.id).first()
         if not user:
             await try_create_user(ctx=ctx)
@@ -94,6 +104,8 @@ class UserCommands(Extension):
             dm_type (str): Type of DM setting ("updates", "points", "both")
             toggle (str): Whether to "enable" or "disable" the setting
         """
+        self._refresh_session()
+
         def set_dm_config(user, config_keys, value):
             """Helper to set one or more config values for a user."""
             for config_key in config_keys:
@@ -188,6 +200,7 @@ class UserCommands(Extension):
             ctx (SlashContext): The slash command context
             type (str): Ping type ("global", "group", "everywhere")
         """
+        self._refresh_session()
         user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
         if not user:
             await try_create_user(ctx=ctx)
@@ -256,6 +269,7 @@ class UserCommands(Extension):
             ctx (SlashContext): The slash command context
             account (str): Account name to hide, or "all" for all accounts
         """
+        self._refresh_session()
         user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
         if not user:
             await try_create_user(ctx=ctx)
@@ -290,6 +304,7 @@ class UserCommands(Extension):
     @hideme_cmd.autocomplete("account")
     async def hideme_autocomplete_account(self, ctx: AutocompleteContext):
         """Provide autocomplete options for user accounts."""
+        self._refresh_session()
         user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
         
         if not user:
@@ -325,6 +340,7 @@ class UserCommands(Extension):
         Args:
             ctx (SlashContext): The slash command context
         """
+        self._refresh_session()
         user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
         if not user:
             await try_create_user(ctx=ctx)
@@ -362,6 +378,7 @@ class UserCommands(Extension):
             ctx (SlashContext): The slash command context
             rsn (str): The RuneScape username to claim
         """
+        self._refresh_session()
         user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
         group = None
         if not user:
@@ -466,6 +483,7 @@ class UserCommands(Extension):
         description="View your earned points across your groups",
     )
     async def my_points_cmd(self, ctx: SlashContext):
+        self._refresh_session()
         user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
         if not user:
             await try_create_user(ctx=ctx)
@@ -563,6 +581,7 @@ class UserCommands(Extension):
         description="View this server group's point standings",
     )
     async def group_points_cmd(self, ctx: SlashContext):
+        self._refresh_session()
         if not ctx.guild_id:
             return await ctx.send("Use this command inside your group's Discord server.", ephemeral=True)
 

@@ -715,7 +715,7 @@ class NotificationService:
                 group = db_session.query(Group).filter(Group.group_id == group_id).first()
                 if group:
                     guild_id = group.guild_id
-                    authorized_users = await get_authorized_users(db_session, group_id)
+                    authorized_users = await get_authorized_users(group_id)
                     for user in authorized_users:
                         try:
                             discord_user = await self.bot.fetch_user(user_id=user)
