@@ -400,8 +400,15 @@ class HallOfFame(Extension):
 
         directory_url = self._get_directory_jump_url(group)
         footer_text = "-# Powered by the [DropTracker](https://www.droptracker.io) • [View all Personal Bests](https://www.droptracker.io/personal_bests)"
+
+        trailing_components: List[BaseComponent] = [
+            TextDisplayComponent(content=footer_text),
+            SeparatorComponent(divider=True),
+        ]
         if directory_url:
-            footer_text += f"\n-# [📋 Back to Directory]({directory_url})"
+            trailing_components.append(
+                TextDisplayComponent(content=f"-# [📋 Back to Directory]({directory_url})")
+            )
 
         container = ContainerComponent(
             SeparatorComponent(divider=True),
@@ -421,8 +428,7 @@ class HallOfFame(Extension):
             SeparatorComponent(divider=True),
             *pb_components,
             SeparatorComponent(divider=True),
-            TextDisplayComponent(content=footer_text),
-            SeparatorComponent(divider=True),
+            *trailing_components,
         )
 
         components = [container]
@@ -965,8 +971,15 @@ class HallOfFame(Extension):
 
         directory_url = self._get_directory_jump_url(group)
         footer_text = "-# Powered by the [DropTracker](https://www.droptracker.io) • [View all Personal Bests](https://www.droptracker.io/personal_bests)"
+
+        trailing_components: List[BaseComponent] = [
+            TextDisplayComponent(content=footer_text),
+            SeparatorComponent(divider=True),
+        ]
         if directory_url:
-            footer_text += f"\n-# [📋 Back to Directory]({directory_url})"
+            trailing_components.append(
+                TextDisplayComponent(content=f"-# [📋 Back to Directory]({directory_url})")
+            )
 
         container = ContainerComponent(
             SeparatorComponent(divider=True),
@@ -982,8 +995,7 @@ class HallOfFame(Extension):
             ),
             SeparatorComponent(divider=True),
             *grouped_components,
-            TextDisplayComponent(content=footer_text),
-            SeparatorComponent(divider=True),
+            *trailing_components,
         )
         return [container]
 
@@ -1152,7 +1164,7 @@ class HallOfFame(Extension):
         return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
     # Bump this when changing embed layout to force all messages to refresh
-    _HASH_VERSION = 4
+    _HASH_VERSION = 5
 
     def _hash_key(self, group_id: int, npc_id: int) -> str:
         return f"hof:hash:v{self._HASH_VERSION}:{group_id}:{npc_id}"
