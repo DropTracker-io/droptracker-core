@@ -451,11 +451,15 @@ class UserCommands(Extension):
                                 ephemeral=True)
             else:
                 player.user = user
+                if group and group not in player.groups:
+                    player.add_group(group)
                 session.commit()
                 embed = Embed(title="Success!",
-                              description=f"Your in-game name has been successfully associated with your Discord account.\\n" +
-                              "That's it!") 
-                embed.add_field(name=f"What's next?",value=f"If you'd like, you can [register an account on our website](https://www.droptracker.io/register) to stay informed " + 
+                              description=f"Your in-game name has been successfully associated with your Discord account.\n" +
+                              "That's it!")
+                if group and group.group_id != 2:
+                    embed.add_field(name="Group", value=f"You've been added to **{group.group_name}**.", inline=False)
+                embed.add_field(name=f"What's next?",value=f"If you'd like, you can [register an account on our website](https://www.droptracker.io/register) to stay informed " +
                                 "on updates & to make your voice heard relating to bugs & suggestions.",inline=False)
                 embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
                 embed.set_footer(text="Powered by the DropTracker | https://www.droptracker.io/")

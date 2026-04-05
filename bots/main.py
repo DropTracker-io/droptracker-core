@@ -260,7 +260,10 @@ async def update_group_members_task_channel():
     global next_sync_time
     if channel:
         time_left = (next_sync_time - datetime.now()).total_seconds() / 60
-        await channel.edit(name=f"Next WOM Refresh: ~{time_left:.0f}min")
+        if time_left < 0:
+            await channel.edit(name=f"Next WOM Refresh: soon")
+        else:
+            await channel.edit(name=f"Next WOM Refresh: ~{time_left:.0f}min")
 
 @Task.create(IntervalTrigger(minutes=60))
 async def start_group_sync():
@@ -274,9 +277,7 @@ async def start_group_sync():
 
 @Task.create(IntervalTrigger(minutes=3))
 async def update_group_members_task_channel_loop():
-    while True:
-        await update_group_members_task_channel()
-        await asyncio.sleep(60)
+    await update_group_members_task_channel()
 
 @Task.create(IntervalTrigger(minutes=8))
 async def lootboard_updates():
