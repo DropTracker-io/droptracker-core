@@ -174,6 +174,26 @@ class HallOfFame(Extension):
             return 0, 0
 
         bosses_to_update.sort(key=str.casefold)
+
+        # Build the desired display-name order (with raid canonicals deduplicated)
+        desired_display_names: List[str] = []
+        seen_canonical: set[str] = set()
+        for boss_name in bosses_to_update:
+            canonical = _RAID_VARIANT_TO_CANONICAL.get(boss_name)
+            if _SEPULCHRE_FLOOR_RE.match(boss_name):
+                canonical = _SEPULCHRE_CANONICAL
+            if canonical:
+                if canonical in seen_canonical:
+                    continue
+                seen_canonical.add(canonical)
+                desired_display_names.append(canonical)
+            else:
+                desired_display_names.append(boss_name)
+        desired_display_names.sort(key=str.casefold)
+
+        # Reorder existing messages so channel order matches alphabetical order
+        await self._reorder_group_messages(group, desired_display_names)
+
         enqueued = 0
         skipped_pending = 0
         grouped_bosses: Dict[str, set[int]] = {}
@@ -216,6 +236,70 @@ class HallOfFame(Extension):
             skipped_pending += 1
 
         return enqueued, skipped_pending
+
+    async def _reorder_group_messages(self, group: Group, desired_display_names: List[str]):
+        """Swap GPBM boss_name assignments so channel message order matches alphabetical order.
+
+        Messages cannot be moved in Discord, but we can edit their content.
+        By reassigning which boss_name maps to which message_id slot, the
+        subsequent update jobs will write the correct content into the correct
+        position, achieving alphabetical ordering in the channel.
+
+        The directory message (if present) is pinned to the first slot so it
+        always appears at the top of the channel.
+        """
+        rows = session.query(GroupPersonalBestMessage).filter(
+            GroupPersonalBestMessage.group_id == group.group_id
+        ).all()
+        if len(rows) < 2:
+            return
+
+        # Sort all rows by message_id (channel position – lower = earlier)
+        rows.sort(key=lambda r: int(r.message_id))
+
+        # Build desired full ordering: directory first, then bosses alphabetically
+        has_directory = any(r.boss_name == _DIRECTORY_BOSS_NAME for r in rows)
+        desired_order: List[str] = []
+        if has_directory:
+            desired_order.append(_DIRECTORY_BOSS_NAME)
+
+        # Only include display names that already have a message
+        existing_names = {r.boss_name for r in rows}
+        for name in desired_display_names:
+            if name in existing_names:
+                desired_order.append(name)
+
+        # Append any existing names not in the desired list (safety net)
+        for r in rows:
+            if r.boss_name not in desired_order:
+                desired_order.append(r.boss_name)
+
+        current_order = [r.boss_name for r in rows]
+        if current_order == desired_order:
+            return  # Already in the correct order
+
+        log.warning(
+            "HOF: reordering group %d (%d messages): %s -> %s",
+            group.group_id, len(rows), current_order, desired_order,
+        )
+
+        for i, row in enumerate(rows):
+            if i < len(desired_order):
+                row.boss_name = desired_order[i]
+        session.commit()
+
+        # Clear all cached component hashes for this group to force a full refresh
+        try:
+            pattern = f"hof:hash:v*:{group.group_id}:*"
+            cursor = 0
+            while True:
+                cursor, keys = redis_client.client.scan(cursor, match=pattern, count=200)
+                if keys:
+                    redis_client.client.delete(*keys)
+                if cursor == 0:
+                    break
+        except Exception as e:
+            log.warning("HOF: failed to clear hash cache after reorder for group %d: %s", group.group_id, e)
 
     async def _should_send_hof(self, group_id: int, npc: NpcList):
         required_bosses: GroupConfiguration = session.query(GroupConfiguration).filter(
@@ -300,18 +384,31 @@ class HallOfFame(Extension):
             log.warning("HOF: group %d boss %s no channel config for new message", group_id, boss_name)
             return False
 
+    def _get_directory_jump_url(self, group: Group) -> Optional[str]:
+        """Return the Discord jump URL for the directory message, or None."""
+        row = session.query(GroupPersonalBestMessage).filter(
+            GroupPersonalBestMessage.group_id == group.group_id,
+            GroupPersonalBestMessage.boss_name == _DIRECTORY_BOSS_NAME
+        ).first()
+        if row and row.channel_id and row.message_id:
+            return f"https://discord.com/channels/{group.guild_id}/{row.channel_id}/{row.message_id}"
+        return None
+
     async def _finalize_boss_components(self, npc: NpcList, group: Group):
         # Create components matching message_handler.py structure
         pb_components, summary_content = self._create_pb_components(group.group_id, npc)
-        # print(f"[HALL OF FAME]PB components returned: {pb_components}")
-        # print(f"[HALL OF FAME]PB component types: {[type(c) for c in pb_components]}")
+
+        directory_url = self._get_directory_jump_url(group)
+        footer_text = "-# Powered by the [DropTracker](https://www.droptracker.io) • [View all Personal Bests](https://www.droptracker.io/personal_bests)"
+        if directory_url:
+            footer_text += f"\n-# [📋 Back to Directory]({directory_url})"
 
         container = ContainerComponent(
             SeparatorComponent(divider=True),
             SectionComponent(
                 components=[
                     TextDisplayComponent(
-                        content=f"## {self._get_linked_name(npc)} 🏆\n" + 
+                        content=f"## {self._get_linked_name(npc)} 🏆\n" +
                         f"{summary_content}"
                     )
                 ],
@@ -324,9 +421,7 @@ class HallOfFame(Extension):
             SeparatorComponent(divider=True),
             *pb_components,
             SeparatorComponent(divider=True),
-            TextDisplayComponent(
-                content=f"-# Powered by the [DropTracker](https://www.droptracker.io) • [View all Personal Bests](https://www.droptracker.io/personal_bests)"
-            ),
+            TextDisplayComponent(content=footer_text),
             SeparatorComponent(divider=True),
         )
 
@@ -868,6 +963,11 @@ class HallOfFame(Extension):
             grouped_components.extend(pb_components)
             grouped_components.append(SeparatorComponent(divider=True))
 
+        directory_url = self._get_directory_jump_url(group)
+        footer_text = "-# Powered by the [DropTracker](https://www.droptracker.io) • [View all Personal Bests](https://www.droptracker.io/personal_bests)"
+        if directory_url:
+            footer_text += f"\n-# [📋 Back to Directory]({directory_url})"
+
         container = ContainerComponent(
             SeparatorComponent(divider=True),
             SectionComponent(
@@ -882,9 +982,7 @@ class HallOfFame(Extension):
             ),
             SeparatorComponent(divider=True),
             *grouped_components,
-            TextDisplayComponent(
-                content="-# Powered by the [DropTracker](https://www.droptracker.io) • [View all Personal Bests](https://www.droptracker.io/personal_bests)"
-            ),
+            TextDisplayComponent(content=footer_text),
             SeparatorComponent(divider=True),
         )
         return [container]
@@ -1054,7 +1152,7 @@ class HallOfFame(Extension):
         return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
     # Bump this when changing embed layout to force all messages to refresh
-    _HASH_VERSION = 3
+    _HASH_VERSION = 4
 
     def _hash_key(self, group_id: int, npc_id: int) -> str:
         return f"hof:hash:v{self._HASH_VERSION}:{group_id}:{npc_id}"
