@@ -290,6 +290,11 @@ def main():
             guid=guid,
             extra_fields=extra_fields,
         )
+        print(
+            "Submission debug: "
+            f"guid={guid}, player_name={player_name}, item_name={item_name}, "
+            f"players_included={split_members if split_members else None}"
+        )
         # Prepare multipart
         files = {}
         if image_url:

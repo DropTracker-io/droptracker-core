@@ -5,6 +5,7 @@ They are stored in `player_points` with a `group_id` so per-group balances can b
 without affecting global credits used for premium features.
 """
 
+import json
 from datetime import datetime
 
 from db import PlayerPoints, GroupPointConfig
@@ -19,8 +20,14 @@ from db.models import (
 import time
 
 
+class PointDebugSettings:
+    enabled = True
+
+
 def _point_debug(message: str):
     """Uniform debug output for point/split investigation."""
+    if not PointDebugSettings.enabled:
+        return
     print(f"[PointDebug] {message}")
 
 
@@ -249,6 +256,7 @@ async def check_and_award_points(
     npc_id=None,
     quantity=None,
     entry_id=None,
+    submission_guid=None,
     submission_timestamp=None,
     *,
     external_session=None,
@@ -269,11 +277,20 @@ async def check_and_award_points(
         "total_points_awarded": 0,
         "awarded_members": [],
     }
-    _point_debug(
+    debug_context = (
+        f"guid={submission_guid or 'unknown'} "
+        f"entry_id={entry_id if entry_id not in (None, '') else 'unknown'} "
+        f"group_id={group_id}"
+    )
+
+    def point_log(message: str):
+        _point_debug(f"{debug_context} {message}")
+
+    point_log(
         "start "
-        f"reason={reason} group_id={group_id} receiver_player_id={receiver_player_id} "
+        f"reason={reason} receiver_player_id={receiver_player_id} "
         f"value={value} quantity={quantity} item_id={item_id} npc_id={npc_id} "
-        f"entry_id={entry_id} raw_players_included={players_included}"
+        f"raw_players_included={players_included}"
     )
 
     def _current_total_for(target_player_id) -> int:
@@ -327,14 +344,14 @@ async def check_and_award_points(
         )
 
     if not check_group_point_system_active(group_id, external_session):
-        _point_debug(f"group_id={group_id} point system inactive; skipping")
+        point_log("point system inactive; skipping")
         return result
     group_config = await get_point_config(group_id, external_session)
     rawaward = group_config.get(reason)
-    _point_debug(f"group_id={group_id} point_config[{reason}]={rawaward}")
+    point_log(f"point_config[{reason}]={rawaward}")
     if not rawaward:
         # No configured award for this reason
-        _point_debug(f"group_id={group_id} no config for reason={reason}; skipping")
+        point_log(f"no config for reason={reason}; skipping")
         return result
 
     # Normalize quantity once (drops may be stacked)
@@ -352,10 +369,10 @@ async def check_and_award_points(
         default_divisor = int(parts[1]) if len(parts) > 1 else 1
     except Exception:
         # If config is malformed, fail closed (no points) rather than throwing
-        _point_debug(f"group_id={group_id} malformed config rawaward={rawaward}; skipping")
+        point_log(f"malformed config rawaward={rawaward}; skipping")
         return result
-    _point_debug(
-        f"group_id={group_id} parsed_config default_award={default_award} default_divisor={default_divisor}"
+    point_log(
+        f"parsed_config default_award={default_award} default_divisor={default_divisor}"
     )
 
     award = default_award
@@ -384,8 +401,8 @@ async def check_and_award_points(
         npc_id=incoming_npc_id,
         external_session=external_session,
     )
-    _point_debug(
-        f"group_id={group_id} point_list_rules allow_award={allow_award} force_no_split={force_no_split} "
+    point_log(
+        f"point_list_rules allow_award={allow_award} force_no_split={force_no_split} "
         f"incoming_item_id={incoming_item_id} incoming_npc_id={incoming_npc_id}"
     )
     if not allow_award:
@@ -413,8 +430,8 @@ async def check_and_award_points(
                     divisor = int(mod.divisor) if int(mod.divisor) != 0 else 1
                 except Exception:
                     divisor = default_divisor if default_divisor != 0 else 1
-                _point_debug(
-                    f"group_id={group_id} matched_mod item_id={mod_item_id} npc_id={mod_npc_id} "
+                point_log(
+                    f"matched_mod item_id={mod_item_id} npc_id={mod_npc_id} "
                     f"award={award} divisor={divisor}"
                 )
                 break
@@ -451,15 +468,15 @@ async def check_and_award_points(
     else:
         # Other event types: flat award
         point_award = int(award)
-    _point_debug(
-        f"group_id={group_id} pre_split_point_award={point_award} "
+    point_log(
+        f"pre_split_point_award={point_award} "
         f"has_mod_override={has_mod_override} award={award} divisor={divisor} qty={qty}"
     )
 
     receiver_player_name = _get_player_name_by_id(receiver_player_id, session)
     included_player_names = _normalize_player_names(players_included, receiver_player_name)
-    _point_debug(
-        f"group_id={group_id} receiver_player_name={receiver_player_name} "
+    point_log(
+        f"receiver_player_name={receiver_player_name} "
         f"normalized_players_included={included_player_names} force_no_split={force_no_split}"
     )
 
@@ -467,46 +484,46 @@ async def check_and_award_points(
     # When enabled, points are awarded only for solo content or for group content
     # where at least one additional listed participant is in this same group.
     require_group_only = await check_points_require_group_only_mode(group_id, external_session)
-    _point_debug(f"group_id={group_id} require_group_only={require_group_only}")
+    point_log(f"require_group_only={require_group_only}")
     if require_group_only and included_player_names:
         has_in_group_participant = False
         for participant_name in included_player_names:
             participant_id = _get_player_id_by_name(participant_name, session)
             if participant_id is None:
-                _point_debug(
-                    f"group_id={group_id} require_group_only participant='{participant_name}' not found in DB"
+                point_log(
+                    f"require_group_only participant='{participant_name}' not found in DB"
                 )
                 continue
             if await check_split_capability(group_id, participant_id, external_session):
                 has_in_group_participant = True
-                _point_debug(
-                    f"group_id={group_id} require_group_only participant='{participant_name}' id={participant_id} in group"
+                point_log(
+                    f"require_group_only participant='{participant_name}' id={participant_id} in group"
                 )
                 break
             else:
-                _point_debug(
-                    f"group_id={group_id} require_group_only participant='{participant_name}' id={participant_id} not in group"
+                point_log(
+                    f"require_group_only participant='{participant_name}' id={participant_id} not in group"
                 )
                 continue
         if not has_in_group_participant:
-            _point_debug(
-                f"group_id={group_id} require_group_only blocked all points for reason={reason} entry_id={entry_id}"
+            point_log(
+                f"require_group_only blocked all points for reason={reason}"
             )
             return result
 
     min_submission_pts, max_submission_pts = await get_group_submission_point_limits(group_id, external_session)
-    _point_debug(
-        f"group_id={group_id} submission_point_limits min={min_submission_pts} max={max_submission_pts}"
+    point_log(
+        f"submission_point_limits min={min_submission_pts} max={max_submission_pts}"
     )
 
     if force_no_split:
-        _point_debug(f"group_id={group_id} no_split rule matched; only receiver can be awarded")
+        point_log("no_split rule matched; only receiver can be awarded")
     if not included_player_names:
-        _point_debug(f"group_id={group_id} no additional normalized participants detected for split")
+        point_log("no additional normalized participants detected for split")
     if included_player_names and not force_no_split:
         should_share_points, split_method = await check_group_points_sharing(group_id, external_session)
-        _point_debug(
-            f"group_id={group_id} split_settings should_share_points={should_share_points} "
+        point_log(
+            f"split_settings should_share_points={should_share_points} "
             f"split_method={split_method}"
         )
         if should_share_points:
@@ -515,23 +532,23 @@ async def check_and_award_points(
                 try:
                     nearby_player_id = _get_player_id_by_name(nearby_player, session)
                     if nearby_player_id is None:
-                        _point_debug(
-                            f"group_id={group_id} split_target='{nearby_player}' not found in DB; skipping"
+                        point_log(
+                            f"split_target='{nearby_player}' not found in DB; skipping"
                         )
                         continue
                     check_split_capable = await check_split_capability(group_id, nearby_player_id, external_session)
                     if not check_split_capable:
-                        _point_debug(
-                            f"group_id={group_id} split_target='{nearby_player}' id={nearby_player_id} "
+                        point_log(
+                            f"split_target='{nearby_player}' id={nearby_player_id} "
                             f"not in group; skipping"
                         )
                         continue
                     valid_share_targets.append((nearby_player_id, nearby_player))
                 except Exception as e:
-                    _point_debug(f"group_id={group_id} split_target='{nearby_player}' resolution error: {e}")
+                    point_log(f"split_target='{nearby_player}' resolution error: {e}")
                     continue
-            _point_debug(
-                f"group_id={group_id} valid_share_targets={valid_share_targets} target_count={len(valid_share_targets)}"
+            point_log(
+                f"valid_share_targets={valid_share_targets} target_count={len(valid_share_targets)}"
             )
             target_count = len(valid_share_targets)
             if target_count > 0:
@@ -567,8 +584,8 @@ async def check_and_award_points(
                         max_submission_pts=max_submission_pts,
                     )
                     if points_to_award > 0:
-                        _point_debug(
-                            f"group_id={group_id} awarding shared points={points_to_award} "
+                        point_log(
+                            f"awarding shared points={points_to_award} "
                             f"to target_player_id={target_player_id} split_method={split_method}"
                         )
                         shared_awarded = await award_player_points(
@@ -589,12 +606,12 @@ async def check_and_award_points(
                 # Reduce the receiver's award to their equal share
                 if per_person is not None:
                     point_award = per_person
-                    _point_debug(
-                        f"group_id={group_id} equal_split total_participants={total_participants} "
+                    point_log(
+                        f"equal_split total_participants={total_participants} "
                         f"per_person={per_person}"
                     )
         else:
-            _point_debug(f"group_id={group_id} point_sharing disabled; split awards skipped")
+            point_log("point_sharing disabled; split awards skipped")
     point_award = await modify_for_event(
         reason,
         group_id,
@@ -610,11 +627,11 @@ async def check_and_award_points(
         min_submission_pts=min_submission_pts,
         max_submission_pts=max_submission_pts,
     )
-    _point_debug(f"group_id={group_id} receiver_award_after_bounds={point_award}")
+    point_log(f"receiver_award_after_bounds={point_award}")
 
     if point_award > 0:
-        _point_debug(
-            f"group_id={group_id} awarding receiver points={point_award} receiver_player_id={receiver_player_id}"
+        point_log(
+            f"awarding receiver points={point_award} receiver_player_id={receiver_player_id}"
         )
         receiver_awarded = await award_player_points(
             reason,
@@ -625,7 +642,7 @@ async def check_and_award_points(
             external_session=external_session,
         )
         _record_award(receiver_player_id, receiver_player_name, receiver_awarded)
-    _point_debug(f"group_id={group_id} final_award_result={result}")
+    point_log(f"final_award_result={result}")
     return result
 
 def _extract_scalar(value):
@@ -663,11 +680,31 @@ def _normalize_player_names(players_included, receiver_player_name):
     if not players_included:
         return []
     if isinstance(players_included, str):
-        raw_source = [
-            part.strip()
-            for part in players_included.replace("\n", ",").split(",")
-            if part.strip()
-        ]
+        raw_text = players_included.strip()
+        if not raw_text:
+            raw_source = []
+        elif raw_text.startswith("["):
+            parsed_list = None
+            try:
+                parsed = json.loads(raw_text)
+                if isinstance(parsed, list):
+                    parsed_list = parsed
+            except Exception:
+                parsed_list = None
+            if parsed_list is not None:
+                raw_source = parsed_list
+            else:
+                raw_source = [
+                    part.strip()
+                    for part in raw_text.replace("\n", ",").split(",")
+                    if part.strip()
+                ]
+        else:
+            raw_source = [
+                part.strip()
+                for part in raw_text.replace("\n", ",").split(",")
+                if part.strip()
+            ]
     elif isinstance(players_included, dict):
         raw_source = players_included.values()
     else:

@@ -1,6 +1,7 @@
 """Drop submissions processor."""
 
 import asyncio
+import json
 from datetime import datetime, timedelta
 import time
 
@@ -31,6 +32,33 @@ from .common import (
 redis_client = RedisClient()
 db = DatabaseOperations()
 last_board_updates = {}
+
+
+def _normalize_incoming_players(players_included):
+    """Normalize participant payloads from all drop ingestion paths."""
+    if players_included is None:
+        return None
+    if isinstance(players_included, list):
+        cleaned = [str(name).strip() for name in players_included if name and str(name).strip()]
+        return cleaned or None
+    if isinstance(players_included, str):
+        raw_text = players_included.strip()
+        if not raw_text:
+            return None
+        if raw_text.startswith("["):
+            try:
+                parsed = json.loads(raw_text)
+                if isinstance(parsed, list):
+                    cleaned = [str(name).strip() for name in parsed if name and str(name).strip()]
+                    return cleaned or None
+            except Exception:
+                pass
+        cleaned = [part.strip() for part in raw_text.replace("\n", ",").split(",") if part.strip()]
+        return cleaned or None
+    if isinstance(players_included, dict):
+        cleaned = [str(name).strip() for name in players_included.values() if name and str(name).strip()]
+        return cleaned or None
+    return None
 
 
 async def drop_processor(drop_data, external_session=None):
@@ -75,9 +103,12 @@ async def drop_processor(drop_data, external_session=None):
         downloaded = drop_data.get("downloaded", False)
         image_url = drop_data.get("image_url", None)
         used_api = drop_data.get("used_api", False)
-        players_included = drop_data.get("players_included", None)
+        raw_players_included = drop_data.get("players_included", drop_data.get("nearby_players"))
+        players_included = _normalize_incoming_players(raw_players_included)
         debug_print(
-            f"Drop split payload players_included type={type(players_included).__name__} value={players_included}"
+            "Drop split payload players_included "
+            f"raw_type={type(raw_players_included).__name__} raw_value={raw_players_included} "
+            f"normalized_type={type(players_included).__name__} normalized_value={players_included}"
         )
 
         # dedupe via NotifiedSubmission cache in caller; keep local prevention via ensure_can_create
@@ -292,6 +323,7 @@ async def drop_processor(drop_data, external_session=None):
                         npc_id=npc_id,
                         quantity=int(drop.quantity),
                         entry_id=getattr(drop, "drop_id", None),
+                        submission_guid=guid,
                         submission_timestamp=drop_data.get("timestamp"),
                         external_session=session,
                     )

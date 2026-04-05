@@ -18,6 +18,11 @@ from utils.video_storage import backend_for_video_record, get_public_video_url
 webhook_bp = Blueprint("webhook", __name__)
 
 
+def _drop_request_debug(message: str):
+    """Consistent logging for drop request ingestion diagnostics."""
+    print(f"[DropRequestDebug] {message}")
+
+
 async def _link_video_to_submission(processed_data, db_session):
     """
     If the processed webhook data contains a video_key, look up the
@@ -207,6 +212,15 @@ async def _process_webhook_request(req_start):
                                 case "drop" | "other"| "npc":
                                     submission_type = "drop"
                                     g.submission_type = submission_type
+                                    _drop_request_debug(
+                                        "dispatch_to_drop_processor "
+                                        f"guid={processed_data.get('guid')} "
+                                        f"player_name={processed_data.get('player_name') or processed_data.get('player')} "
+                                        f"players_included_type={type(processed_data.get('players_included')).__name__} "
+                                        f"players_included={processed_data.get('players_included')} "
+                                        f"nearby_players_type={type(processed_data.get('nearby_players')).__name__} "
+                                        f"nearby_players={processed_data.get('nearby_players')}"
+                                    )
                                     response = await submissions.drop_processor(processed_data, external_session=db_session)
                                     log_phase("drop_processed")
                                     # After creating the drop, try to link the video to the Drop row
@@ -306,6 +320,25 @@ async def process_webhook_data(webhook_data):
             }
             if not processed_data.get("timestamp"):
                 processed_data["timestamp"] = int(datetime.now().timestamp())
+            submission_type = str(processed_data.get("type", "")).lower()
+            if submission_type in ("drop", "npc", "other"):
+                raw_nearby_players = processed_data.get("nearby_players")
+                raw_players_included = processed_data.get("players_included")
+                normalized_players = _parse_nearby_players(
+                    raw_nearby_players if raw_nearby_players is not None else raw_players_included
+                )
+                processed_data["players_included"] = normalized_players
+                processed_data["nearby_players"] = normalized_players
+                _drop_request_debug(
+                    "parsed_embed_fields "
+                    f"guid={processed_data.get('guid')} "
+                    f"player_name={processed_data.get('player_name') or processed_data.get('player')} "
+                    f"item_name={processed_data.get('item_name') or processed_data.get('item')} "
+                    f"source={processed_data.get('source') or processed_data.get('npc_name')} "
+                    f"raw_players_included={raw_players_included} "
+                    f"raw_nearby_players={raw_nearby_players} "
+                    f"normalized_players_included={normalized_players}"
+                )
             processed_items.append(processed_data)
         return processed_items
     except Exception as e:
