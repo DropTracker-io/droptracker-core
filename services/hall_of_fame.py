@@ -3,6 +3,7 @@ import json
 import hashlib
 import logging
 import random
+import re
 import time
 from dataclasses import dataclass
 from collections import deque
@@ -21,6 +22,23 @@ from db.ops import get_formatted_name
 from utils.format import convert_from_ms, format_number, get_npc_image_url
 import asyncio
 from utils.redis import redis_client
+
+_MEDAL_EMOJIS = {1: "🥇", 2: "🥈", 3: "🥉"}
+_DIRECTORY_BOSS_NAME = "_hof_directory"
+_SEPULCHRE_CANONICAL = "Hallowed Sepulchre"
+_SEPULCHRE_FLOOR_RE = re.compile(r"^Hallowed Sepulchre Floor \d+$")
+_RAID_GROUPS = {
+    "Chambers of Xeric": ["Chambers of Xeric", "Chambers of Xeric: Challenge Mode"],
+    "Theatre of Blood": ["Theatre of Blood", "Theatre of Blood: Entry Mode", "Theatre of Blood: Hard Mode"],
+    "Tombs of Amascut": ["Tombs of Amascut", "Tombs of Amascut: Entry Mode", "Tombs of Amascut: Expert Mode"],
+    "Nightmare of Ashihama": ["Nightmare", "Phosani's Nightmare", "Nightmare of Ashihama"],
+    "The Gauntlet": ["The Gauntlet", "The Corrupted Gauntlet"],
+}
+_RAID_VARIANT_TO_CANONICAL = {
+    variant: canonical
+    for canonical, variants in _RAID_GROUPS.items()
+    for variant in variants
+}
 
 class HallOfFame(Extension):
     def __init__(self, bot: interactions.Client):
@@ -55,6 +73,15 @@ class HallOfFame(Extension):
         except Exception as e:
             log.warning("HOF: guild_has_bot %s failed: %s", guild_id, e)
             return False
+
+    def _parse_group_boss_list(self, required_bosses: GroupConfiguration) -> List[str]:
+        boss_list = required_bosses.config_value or ""
+        if boss_list == "" or len(str(boss_list)) < 10:
+            boss_list = required_bosses.long_value or ""
+        if boss_list == "" or len(str(boss_list)) < 10:
+            return []
+        bosses = boss_list.replace("[", "").replace("]", "").split(",")
+        return [boss.strip().replace('"', '') for boss in bosses if boss.strip()]
     
 
     async def update_hall_of_fame(self):
@@ -142,39 +169,61 @@ class HallOfFame(Extension):
         if not required_bosses:
             log.warning("HOF: group %d has no personal_best_embed_boss_list config", group.group_id)
             return 0, 0
-        boss_list = required_bosses.config_value or ""
-        if boss_list == "" or len(str(boss_list)) < 10:
-            boss_list = (required_bosses.long_value or "")
-        if boss_list == "" or len(str(boss_list)) < 10:
+        bosses_to_update = self._parse_group_boss_list(required_bosses)
+        if not bosses_to_update:
             return 0, 0
-        bosses_to_update = boss_list.replace("[", "").replace("]", "").split(",")
-        bosses_to_update = [b.strip().replace('"', '') for b in bosses_to_update if b.strip()]
+
+        bosses_to_update.sort(key=str.casefold)
         enqueued = 0
         skipped_pending = 0
+        grouped_bosses: Dict[str, set[int]] = {}
+
         for boss in bosses_to_update:
+            canonical_name = _RAID_VARIANT_TO_CANONICAL.get(boss)
+            if _SEPULCHRE_FLOOR_RE.match(boss):
+                canonical_name = _SEPULCHRE_CANONICAL
+
             npc = session.query(NpcList).filter(NpcList.npc_name == boss).first()
-            if npc:
-                added = await self._enqueue_job(group_id=group.group_id, npc_id=npc.npc_id)
-                if added:
-                    enqueued += 1
-                else:
-                    skipped_pending += 1
-            else:
+            if not npc:
                 log.warning("HOF: group %d boss '%s' not in NpcList", group.group_id, boss)
+                continue
+
+            if canonical_name:
+                grouped_bosses.setdefault(canonical_name, set()).add(npc.npc_id)
+                continue
+
+            added = await self._enqueue_job(group_id=group.group_id, npc_id=npc.npc_id)
+            if added:
+                enqueued += 1
+            else:
+                skipped_pending += 1
+
+        for canonical_name, npc_ids in grouped_bosses.items():
+            added = await self._enqueue_grouped_job(
+                group_id=group.group_id,
+                raid_canonical=canonical_name,
+                npc_ids=sorted(npc_ids),
+            )
+            if added:
+                enqueued += 1
+            else:
+                skipped_pending += 1
+
+        directory_added = await self._enqueue_directory_job(group.group_id)
+        if directory_added:
+            enqueued += 1
+        else:
+            skipped_pending += 1
+
         return enqueued, skipped_pending
 
     async def _should_send_hof(self, group_id: int, npc: NpcList):
-        required_bosses: GroupConfiguration = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id, 
-                                                                                GroupConfiguration.config_key == "personal_best_embed_boss_list").first()
-        if required_bosses and required_bosses.config_value:
-            boss_list = required_bosses.config_value
-            if boss_list == "" or len(str(boss_list)) < 10:
-                boss_list = required_bosses.long_value
-            if boss_list == "" or len(str(boss_list)) < 10:
-                ## Neither field has entries, so we skip this group
-                return False
-            bosses_to_update = boss_list.replace("[", "").replace("]", "").split(",")
-            bosses_to_update = [boss.strip() for boss in bosses_to_update]
+        required_bosses: GroupConfiguration = session.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == group_id,
+            GroupConfiguration.config_key == "personal_best_embed_boss_list"
+        ).first()
+        if required_bosses:
+            bosses_to_update = self._parse_group_boss_list(required_bosses)
             if npc.npc_name in bosses_to_update:
                 return True
         return False
@@ -186,33 +235,44 @@ class HallOfFame(Extension):
             # # print(f"[HALL OF FAME]No need to update boss component for {npc.npc_name}")
             pass
 
-    async def _send_boss_components(self, group_id: int, npc: NpcList, components: List[BaseComponent]):
+    async def _send_boss_components(
+        self,
+        group_id: int,
+        npc: Optional[NpcList],
+        components: List[BaseComponent],
+        boss_name_override: Optional[str] = None,
+    ):
         group = session.query(Group).filter(Group.group_id == group_id).first()
         if not group:
             log.warning("HOF: group %d not found", group_id)
             return False
+        boss_name = boss_name_override or (npc.npc_name if npc else None)
+        if not boss_name:
+            log.warning("HOF: group %d unable to resolve boss name", group_id)
+            return False
+        skip_config_update = boss_name_override is not None
         channel_cfg = session.query(GroupConfiguration).filter(
             GroupConfiguration.group_id == group_id,
             GroupConfiguration.config_key == "channel_id_to_send_pb_embeds"
         ).first()
         existing_message = session.query(GroupPersonalBestMessage).filter(
             GroupPersonalBestMessage.group_id == group_id,
-            GroupPersonalBestMessage.boss_name == npc.npc_name
+            GroupPersonalBestMessage.boss_name == boss_name
         ).first()
         if existing_message:
             message_id = existing_message.message_id
             channel_id = existing_message.channel_id
             if not message_id or message_id == "":
-                log.warning("HOF: group %d boss %s empty message_id", group_id, npc.npc_name)
+                log.warning("HOF: group %d boss %s empty message_id", group_id, boss_name)
                 return False
             try:
                 channel = await self.bot.fetch_channel(int(channel_id))
                 if not channel:
-                    self._cleanup_deleted_message(group_id, npc.npc_name, existing_message)
+                    self._cleanup_deleted_message(group_id, boss_name, existing_message, skip_config_update=skip_config_update)
                     return "cleaned"
                 message = await channel.fetch_message(int(message_id))
                 if message is None:
-                    self._cleanup_deleted_message(group_id, npc.npc_name, existing_message)
+                    self._cleanup_deleted_message(group_id, boss_name, existing_message, skip_config_update=skip_config_update)
                     return "cleaned"
                 await self._rate_limited_send_or_edit("edit", group_id)
                 await message.edit(components=components)
@@ -222,7 +282,7 @@ class HallOfFame(Extension):
                 return True
             except Exception as e:
                 if self._is_message_not_found_error(e):
-                    self._cleanup_deleted_message(group_id, npc.npc_name, existing_message)
+                    self._cleanup_deleted_message(group_id, boss_name, existing_message, skip_config_update=skip_config_update)
                     return "cleaned"
                 raise
         elif channel_cfg and channel_cfg.config_value and channel_cfg.config_value != "":
@@ -232,12 +292,12 @@ class HallOfFame(Extension):
                 raise RuntimeError(f"Channel not found for id {channel_id}")
             await self._rate_limited_send_or_edit("send", group_id)
             message = await channel.send(components=components)
-            session.add(GroupPersonalBestMessage(group_id=group_id, message_id=message.id, channel_id=channel_id, boss_name=npc.npc_name))
+            session.add(GroupPersonalBestMessage(group_id=group_id, message_id=message.id, channel_id=channel_id, boss_name=boss_name))
             session.commit()
             await asyncio.sleep(random.uniform(0.15, 0.35))
             return True
         else:
-            log.warning("HOF: group %d boss %s no channel config for new message", group_id, npc.npc_name)
+            log.warning("HOF: group %d boss %s no channel config for new message", group_id, boss_name)
             return False
 
     async def _finalize_boss_components(self, npc: NpcList, group: Group):
@@ -375,7 +435,9 @@ class HallOfFame(Extension):
         if len(most_loot_month) > 1:
             loot_str = ""
             for i in range(len(most_loot_month)):
-                loot_str += f"-# {i + 1}. {get_formatted_name(month_looters[i][3].player_name, group_id, session)} - `{format_number(month_looters[i][2])}` gp\n"
+                rank = i + 1
+                rank_prefix = _MEDAL_EMOJIS.get(rank, f"{rank}.")
+                loot_str += f"-# {rank_prefix} {get_formatted_name(month_looters[i][3].player_name, group_id, session)} - `{format_number(month_looters[i][2])}` gp\n"
             looters_content = (
                 f"💰 **__Loot Leaderboard__**\n" +
                 f"-# Top 5 players (this month):\n" +
@@ -404,7 +466,9 @@ class HallOfFame(Extension):
                 if i >= 5:
                     break
                 pb: PersonalBestEntry = pb
-                pb_text += f"-# {i + 1} - `{convert_from_ms(pb.personal_best)}` - {get_formatted_name(pb.player.player_name, group_id, session)}\n"
+                rank = i + 1
+                rank_prefix = _MEDAL_EMOJIS.get(rank, f"{rank}.")
+                pb_text += f"-# {rank_prefix} `{convert_from_ms(pb.personal_best)}` - {get_formatted_name(pb.player.player_name, group_id, session)}\n"
             pb_component = TextDisplayComponent(content=pb_text)
             components.append(pb_component)
         # print(f"[HALL OF FAME]Final components list: {components}")
@@ -555,13 +619,23 @@ class HallOfFame(Extension):
 
     # -------------------- New: Queue, Rate Limiter and Hashing Utilities --------------------
 
+    def _job_key(self, job: "HOFJob") -> str:
+        if job.update_directory:
+            return f"{job.group_id}:directory"
+        if job.raid_canonical:
+            return f"{job.group_id}:grouped:{job.raid_canonical}"
+        return f"{job.group_id}:{job.npc_id}"
+
+    def _grouped_npc_id(self, npc_ids: List[int]) -> int:
+        return min(npc_ids) if npc_ids else 0
+
     async def _enqueue_job(self, group_id: int, npc_id: int) -> bool:
-        """Enqueue a HOF job. Returns True if job was added, False if skipped (already pending)."""
-        key = f"{group_id}:{npc_id}"
+        """Enqueue a normal HOF boss job."""
+        job = HOFJob(group_id=group_id, npc_id=npc_id)
+        key = self._job_key(job)
         if key in self._pending_jobs:
             return False
         self._pending_jobs.add(key)
-        job = HOFJob(group_id=group_id, npc_id=npc_id)
         try:
             await self._hof_queue.put(job)
             return True
@@ -570,13 +644,49 @@ class HallOfFame(Extension):
             log.warning("HOF: enqueue %s failed: %s", key, e)
             return False
 
+    async def _enqueue_grouped_job(self, group_id: int, raid_canonical: str, npc_ids: List[int]) -> bool:
+        unique_npc_ids = sorted(set(npc_ids))
+        if not unique_npc_ids:
+            return False
+        job = HOFJob(
+            group_id=group_id,
+            npc_id=self._grouped_npc_id(unique_npc_ids),
+            raid_canonical=raid_canonical,
+            npc_ids=unique_npc_ids,
+        )
+        key = self._job_key(job)
+        if key in self._pending_jobs:
+            return False
+        self._pending_jobs.add(key)
+        try:
+            await self._hof_queue.put(job)
+            return True
+        except Exception as e:
+            self._pending_jobs.discard(key)
+            log.warning("HOF: enqueue grouped %s failed: %s", key, e)
+            return False
+
+    async def _enqueue_directory_job(self, group_id: int) -> bool:
+        job = HOFJob(group_id=group_id, npc_id=0, update_directory=True)
+        key = self._job_key(job)
+        if key in self._pending_jobs:
+            return False
+        self._pending_jobs.add(key)
+        try:
+            await self._hof_queue.put(job)
+            return True
+        except Exception as e:
+            self._pending_jobs.discard(key)
+            log.warning("HOF: enqueue directory %s failed: %s", key, e)
+            return False
+
     async def _worker(self, worker_index: int):
         while True:
             try:
                 job: HOFJob = await self._hof_queue.get()
             except asyncio.CancelledError:
                 raise
-            key = f"{job.group_id}:{job.npc_id}"
+            key = self._job_key(job)
             try:
                 await self._process_job(job)
             except Exception:
@@ -595,20 +705,65 @@ class HallOfFame(Extension):
 
     async def _process_boss_update(self, job: "HOFJob"):
         group = session.query(Group).filter(Group.group_id == job.group_id).first()
-        npc = session.query(NpcList).filter(NpcList.npc_id == job.npc_id).first()
         if not group:
             log.warning("HOF: group %d not found", job.group_id)
-            return
-        if not npc:
-            log.warning("HOF: npc %d not found", job.npc_id)
             return
         if not await self.guild_has_bot(group.guild_id):
             log.warning("HOF: bot not in guild %s (group %d)", group.guild_id, job.group_id)
             return
+
+        if job.update_directory:
+            try:
+                components = await self._update_directory_message(group)
+            except Exception:
+                log.exception("HOF: _update_directory_message failed group=%d", job.group_id)
+                return
+            new_hash = self._compute_components_hash(components)
+            if self._is_same_hash(job.group_id, job.npc_id, new_hash):
+                self._stats_skipped_hash += 1
+                self._maybe_log_progress()
+                return
+            try:
+                result = await self._send_boss_components(
+                    job.group_id,
+                    None,
+                    components,
+                    boss_name_override=_DIRECTORY_BOSS_NAME,
+                )
+                if result is True:
+                    self._store_components_hash(job.group_id, job.npc_id, new_hash)
+                    self._stats_updates += 1
+                    self._maybe_log_progress()
+                elif result == "cleaned":
+                    self._maybe_log_progress()
+                return
+            except Exception:
+                log.exception("HOF: sending directory failed group=%d", job.group_id)
+                return
+
+        npc = session.query(NpcList).filter(NpcList.npc_id == job.npc_id).first()
+        if not npc:
+            log.warning("HOF: npc %d not found", job.npc_id)
+            return
+
+        boss_name_override = None
         try:
-            components = await self._finalize_boss_components(npc, group)
+            if job.raid_canonical and job.npc_ids:
+                npcs = session.query(NpcList).filter(NpcList.npc_id.in_(job.npc_ids)).all()
+                if not npcs:
+                    log.warning("HOF: grouped npcs missing for group=%d canonical=%s", job.group_id, job.raid_canonical)
+                    return
+                npcs_by_id = {n.npc_id: n for n in npcs}
+                ordered_npcs = [npcs_by_id[nid] for nid in job.npc_ids if nid in npcs_by_id]
+                if not ordered_npcs:
+                    return
+                npc = ordered_npcs[0]
+                components = await self._finalize_raid_components(group, job.raid_canonical, ordered_npcs)
+                boss_name_override = job.raid_canonical
+            else:
+                components = await self._finalize_boss_components(npc, group)
         except Exception:
-            log.exception("HOF: _finalize_boss_components failed group=%d npc=%d", job.group_id, job.npc_id)
+            log.exception("HOF: finalize components failed group=%d npc=%d", job.group_id, job.npc_id)
             return
         new_hash = self._compute_components_hash(components)
         if self._is_same_hash(job.group_id, job.npc_id, new_hash):
@@ -622,7 +777,12 @@ class HallOfFame(Extension):
         for attempt in range(1, max_attempts + 1):
             try:
                 await self._rate_limited_send_or_edit("send_or_edit", job.group_id)
-                result = await self._send_boss_components(job.group_id, npc, components)
+                result = await self._send_boss_components(
+                    job.group_id,
+                    npc,
+                    components,
+                    boss_name_override=boss_name_override,
+                )
                 if result is True:
                     self._store_components_hash(job.group_id, job.npc_id, new_hash)
                     self._stats_updates += 1
@@ -649,6 +809,126 @@ class HallOfFame(Extension):
                 log.warning("HOF: group=%d npc=%d attempt %d/%d failed: %s", job.group_id, job.npc_id, attempt, max_attempts, e)
                 await asyncio.sleep(delay)
         log.error("HOF: FAILED after %d attempts group=%d npc=%d (%s)", max_attempts, job.group_id, job.npc_id, npc.npc_name)
+
+    def _get_variant_mode_name(self, canonical_name: str, npc_name: str) -> str:
+        if canonical_name == "Chambers of Xeric":
+            if "Challenge" in npc_name or "CM" in npc_name:
+                return "Challenge Mode"
+            return "Normal"
+        if canonical_name == "Theatre of Blood":
+            if "Entry Mode" in npc_name:
+                return "Entry"
+            if "Hard Mode" in npc_name:
+                return "Hard Mode"
+            return "Normal"
+        if canonical_name == "Tombs of Amascut":
+            if "Entry Mode" in npc_name:
+                return "Entry"
+            if "Expert" in npc_name:
+                return "Expert"
+            return "Normal"
+        if canonical_name == "Nightmare of Ashihama":
+            if "Phosani" in npc_name:
+                return "Phosani's Nightmare"
+            return "Nightmare"
+        if canonical_name == "The Gauntlet":
+            if "Corrupted" in npc_name:
+                return "Corrupted"
+            return "Crystalline"
+        if canonical_name == _SEPULCHRE_CANONICAL:
+            floor_match = re.search(r"Floor\s+(\d+)", npc_name)
+            if floor_match:
+                return f"Floor {floor_match.group(1)}"
+        return npc_name
+
+    async def _finalize_raid_components(self, group: Group, canonical_name: str, npcs: List[NpcList]):
+        mode_order = {
+            "Entry": 0,
+            "Normal": 1,
+            "Hard Mode": 2,
+            "Challenge Mode": 2,
+            "Expert": 2,
+            "Nightmare": 0,
+            "Phosani's Nightmare": 1,
+            "Crystalline": 0,
+            "Corrupted": 1,
+        }
+        mode_npcs = [(self._get_variant_mode_name(canonical_name, npc.npc_name), npc) for npc in npcs]
+        mode_npcs.sort(key=lambda item: (mode_order.get(item[0], 50), item[0].casefold()))
+
+        grouped_components: List[BaseComponent] = []
+        for mode_name, mode_npc in mode_npcs:
+            pb_components, summary_content = self._create_pb_components(group.group_id, mode_npc)
+            grouped_components.append(
+                TextDisplayComponent(content=f"### {mode_name}\n{summary_content}")
+            )
+            grouped_components.extend(pb_components)
+            grouped_components.append(SeparatorComponent(divider=True))
+
+        container = ContainerComponent(
+            SeparatorComponent(divider=True),
+            SectionComponent(
+                components=[
+                    TextDisplayComponent(content=f"## {canonical_name} 🏆")
+                ],
+                accessory=ThumbnailComponent(
+                    media=UnfurledMediaItem(
+                        url=self._get_npc_img_url(npcs[0])
+                    )
+                )
+            ),
+            SeparatorComponent(divider=True),
+            *grouped_components,
+            TextDisplayComponent(
+                content="-# Powered by the [DropTracker](https://www.droptracker.io) • [View all Personal Bests](https://www.droptracker.io/personal_bests)"
+            ),
+            SeparatorComponent(divider=True),
+        )
+        return [container]
+
+    async def _update_directory_message(self, group: Group) -> List[BaseComponent]:
+        required_bosses: GroupConfiguration = session.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == group.group_id,
+            GroupConfiguration.config_key == "personal_best_embed_boss_list"
+        ).first()
+        boss_names = self._parse_group_boss_list(required_bosses) if required_bosses else []
+        boss_names.sort(key=str.casefold)
+
+        display_names: List[str] = []
+        seen_canonical = set()
+        for boss_name in boss_names:
+            canonical_name = _RAID_VARIANT_TO_CANONICAL.get(boss_name)
+            if _SEPULCHRE_FLOOR_RE.match(boss_name):
+                canonical_name = _SEPULCHRE_CANONICAL
+            if canonical_name:
+                if canonical_name in seen_canonical:
+                    continue
+                seen_canonical.add(canonical_name)
+                display_names.append(canonical_name)
+            else:
+                display_names.append(boss_name)
+        display_names.sort(key=str.casefold)
+
+        message_rows = session.query(GroupPersonalBestMessage).filter(
+            GroupPersonalBestMessage.group_id == group.group_id
+        ).all()
+        message_by_name = {row.boss_name: row for row in message_rows}
+        directory_lines = []
+        for name in display_names:
+            row = message_by_name.get(name)
+            if row and row.channel_id and row.message_id:
+                jump_url = f"https://discord.com/channels/{group.guild_id}/{row.channel_id}/{row.message_id}"
+                directory_lines.append(f"- [{name}]({jump_url})")
+            else:
+                directory_lines.append(f"- {name}")
+
+        directory_body = "\n".join(directory_lines) if directory_lines else "- No Hall of Fame bosses configured yet."
+        container = ContainerComponent(
+            SeparatorComponent(divider=True),
+            TextDisplayComponent(content=f"## Hall of Fame Directory\n{directory_body}"),
+            SeparatorComponent(divider=True),
+        )
+        return [container]
 
     def _maybe_log_progress(self):
         """Log every 5 jobs processed (update or skip) so we know workers are active."""
@@ -724,28 +1004,38 @@ class HallOfFame(Extension):
             err = getattr(err, "__cause__", None) or getattr(err, "__context__", None)
         return False
 
-    def _cleanup_deleted_message(self, group_id: int, boss_name: str, existing_message: GroupPersonalBestMessage):
+    def _cleanup_deleted_message(
+        self,
+        group_id: int,
+        boss_name: str,
+        existing_message: GroupPersonalBestMessage,
+        skip_config_update: bool = False,
+    ):
         """Remove stale DB entry and boss from config when message no longer exists."""
         session.delete(existing_message)
-        boss_cfg = session.query(GroupConfiguration).filter(
-            GroupConfiguration.group_id == group_id,
-            GroupConfiguration.config_key == "personal_best_embed_boss_list"
-        ).first()
-        if boss_cfg:
-            for field in ("config_value", "long_value"):
-                val = getattr(boss_cfg, field) or ""
-                if not val or len(str(val)) < 10:
-                    continue
-                bosses = [b.strip().replace('"', "").strip() for b in str(val).replace("[", "").replace("]", "").split(",") if b.strip()]
-                if boss_name not in bosses:
-                    continue
-                bosses = [b for b in bosses if b and b != boss_name]
-                new_val = "[" + ", ".join(f'"{b}"' for b in bosses) + "]" if bosses else ""
-                setattr(boss_cfg, field, new_val)
-                break
+        if not skip_config_update:
+            boss_cfg = session.query(GroupConfiguration).filter(
+                GroupConfiguration.group_id == group_id,
+                GroupConfiguration.config_key == "personal_best_embed_boss_list"
+            ).first()
+            if boss_cfg:
+                for field in ("config_value", "long_value"):
+                    val = getattr(boss_cfg, field) or ""
+                    if not val or len(str(val)) < 10:
+                        continue
+                    bosses = [b.strip().replace('"', "").strip() for b in str(val).replace("[", "").replace("]", "").split(",") if b.strip()]
+                    if boss_name not in bosses:
+                        continue
+                    bosses = [b for b in bosses if b and b != boss_name]
+                    new_val = "[" + ", ".join(f'"{b}"' for b in bosses) + "]" if bosses else ""
+                    setattr(boss_cfg, field, new_val)
+                    break
         session.commit()
         self._stats_cleanups += 1
-        log.warning("HOF: group %d boss %s - message deleted (404), removed GPBM and config", group_id, boss_name)
+        if skip_config_update:
+            log.warning("HOF: group %d entry %s - message deleted (404), removed GPBM only", group_id, boss_name)
+        else:
+            log.warning("HOF: group %d boss %s - message deleted (404), removed GPBM and config", group_id, boss_name)
 
     def _is_rate_limit_error(self, e: Exception) -> bool:
         """Detect 429 / rate limit errors."""
@@ -781,7 +1071,7 @@ class HallOfFame(Extension):
         return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
     # Bump this when changing embed layout to force all messages to refresh
-    _HASH_VERSION = 2
+    _HASH_VERSION = 3
 
     def _hash_key(self, group_id: int, npc_id: int) -> str:
         return f"hof:hash:v{self._HASH_VERSION}:{group_id}:{npc_id}"
@@ -851,4 +1141,7 @@ class RateLimiter:
 class HOFJob:
     group_id: int
     npc_id: int
+    raid_canonical: Optional[str] = None
+    npc_ids: Optional[List[int]] = None
+    update_directory: bool = False
 
