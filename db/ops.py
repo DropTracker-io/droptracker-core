@@ -714,82 +714,116 @@ async def notify_group(bot: interactions.Client, type: str, group: Group, member
         else:
             print(f"Channel not found for ID: {channel_id}")
 
+async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove=None):
+    """
+    Core logic for syncing a single group's membership from the WOM API.
+
+    on_add(member) and on_remove(member) are optional async callbacks
+    invoked after a player is added/removed from the group.
+    """
+    group_wom_ids = await fetch_group_members(wom_id, force_refresh=True)
+    if not group_wom_ids:
+        print(f"Failed to fetch member list for group {group.group_name} (WOM ID: {wom_id})")
+        return
+
+    # Ensure GroupWomAssociation rows exist for every WOM member
+    for player_wom_id in group_wom_ids:
+        try:
+            stored = session.query(GroupWomAssociation).filter(
+                GroupWomAssociation.player_wom_id == player_wom_id,
+                GroupWomAssociation.group_dt_id == group.group_id
+            ).first()
+            if not stored:
+                session.add(GroupWomAssociation(player_wom_id=player_wom_id, group_dt_id=group.group_id))
+        except Exception as e:
+            print(f"Couldn't add GroupWomAssociation for {player_wom_id} to {group.group_name}")
+
+    group_wom_id_set = set(group_wom_ids)
+    group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
+
+    # Remove members no longer in the WOM group
+    for member in list(group.players):
+        if member.wom_id and member.wom_id not in group_wom_id_set:
+            member = session.query(Player).filter(Player.player_id == member.player_id).first()
+            app_logger.log(log_type="access",
+                           data=f"{member.player_name} has been removed from {group.group_name}\nTheir DropTracker WOM ID is {member.wom_id}",
+                           app_name="core", description="sync_group_from_wom")
+            member.remove_group(group)
+            if on_remove:
+                await on_remove(member)
+
+    # Add new members to the group
+    current_player_ids = {p.player_id for p in group.players}
+    for member in group_members:
+        if member.player_id not in current_player_ids:
+            if member.user:
+                member.user.add_group(group)
+            member.add_group(group)
+            member = session.query(Player).filter(Player.player_id == member.player_id).first()
+            if on_add:
+                await on_add(member)
+
+    group.date_updated = func.now()
+    try:
+        session.commit()
+    except Exception as e:
+        session.rollback()
+
+
+def _sync_global_group():
+    """Ensure every player is a member of the global group (group_id=2)."""
+    global_group = session.query(Group).filter(Group.group_id == 2).first()
+    if not global_group:
+        return
+    existing_player_ids = {row.player_id for row in session.query(
+        user_group_association.c.player_id
+    ).filter(user_group_association.c.group_id == 2).all()}
+    all_player_ids = {row.player_id for row in session.query(Player.player_id).all()}
+    missing_ids = all_player_ids - existing_player_ids
+    if missing_ids:
+        for player in session.query(Player).filter(Player.player_id.in_(missing_ids)).all():
+            player.add_group(global_group)
+        try:
+            session.commit()
+        except Exception as e:
+            session.rollback()
+
+
 async def update_group_members(bot: interactions.Client, forced_id: int = None):
     app_logger.log(log_type="access", data="Updating group member association tables...", app_name="core", description="update_group_members")
     if forced_id:
         group_ids = [forced_id]
     else:
-        # Use scalar_subquery to get just the values
         group_ids = session.scalars(session.query(Group.wom_id)).all()
-    total_updated = 0
+
     for wom_id in group_ids:
-        # wom_id should now be a simple integer
-        #app_logger.log(log_type="access", data=f"Processing WOM ID: {wom_id}", app_name="core", description="update_group_members")
         try:
             wom_id = int(wom_id)
-        except (ValueError, TypeError) as e:
-            #app_logger.log(log_type="error", data=f"Error converting WOM ID to int: {e} - womid: {wom_id} (type: {type(wom_id)})", app_name="core", description="update_group_members")
+        except (ValueError, TypeError):
             continue
         group: Group = session.query(Group).filter(Group.wom_id == wom_id).first()
-        if group:
-            group_wom_ids = await fetch_group_members(wom_id, force_refresh=True)
-            #app_logger.log(log_type="ex_info", data=f"Group WOM IDs: {group_wom_ids}", app_name="core", description="update_group_members")
-                
-            # Only proceed with member updates if we successfully got the member list
-            if group_wom_ids:
-                ## We have a valid list of player wom_ids here now
-                for player_wom_id in group_wom_ids:
-                    try:
-                        stored_association = session.query(GroupWomAssociation).filter(GroupWomAssociation.player_wom_id == player_wom_id,
-                                                                                    GroupWomAssociation.group_dt_id == group.group_id).first()
-                        if not stored_association:
-                            new_association = GroupWomAssociation(player_wom_id=player_wom_id, group_dt_id=group.group_id)
-                    except Exception as e:
-                        print(f"Couldn't properly add a GroupWomAssociation for {player_wom_id} (player wom id) to {group.group_name}")
-                # Get current group members from database
-                group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
-                # Remove members no longer in the group
-                #app_logger.log(log_type="info", data=f"Found {len(group_members)} from our database in {group.group_name}", app_name="core", description="update_group_members")
-                for member in group.players:
-                    if member.wom_id and member.wom_id not in group_wom_ids:
-                        
-                        member = session.query(Player).filter(Player.player_id == member.player_id).first()
-                        app_logger.log(log_type="access", data=f"{member.player_name} has been removed from {group.group_name}\nTheir DropTracker WOM ID is {member.wom_id} - group IDS: {group_wom_ids}", app_name="core", description="update_group_members")
-                        member.remove_group(group)
-                        try:
-                            await notify_group(bot, "player_removed", group, member)
-                        except Exception as e:
-                            app_logger.log(log_type="error", data=f"Couldn't notify {group.group_name} that {member.player_name} has been removed: {e}", app_name="core", description="update_group_members")
-                
-                # Add new members to the group
-                for member in group_members:
-                    if member not in group.players:
-                        if member.user:
-                            member.user.add_group(group)
-                        member.add_group(group)
-                        member = session.query(Player).filter(Player.player_id == member.player_id).first()
-                        try:
-                            await notify_group(bot, "player_added", group, member)
-                        except Exception as e:
-                            pass
-                group.date_updated = func.now()
-                try:
-                    session.commit()
-                except Exception as e:
-                    session.rollback()
-            else:
-                print(f"Failed to fetch member list for group {group.group_name} (WOM ID: {wom_id})")
-        else:
+        if not group:
             print("Group not found for wom_id", wom_id)
+            continue
 
-    ## Update the global group
-    player_ids = session.query(Player.player_id).all()
-    for player_id in player_ids:
-        player = session.query(Player).filter(Player.player_id == player_id).first()
-        if player:
-            if 2 not in [group.group_id for group in player.groups]:
-                player.add_group(session.query(Group).filter(Group.group_id == 2).first())
-                session.commit()
+        async def _on_remove(member):
+            try:
+                await notify_group(bot, "player_removed", group, member)
+            except Exception as e:
+                app_logger.log(log_type="error",
+                               data=f"Couldn't notify {group.group_name} that {member.player_name} has been removed: {e}",
+                               app_name="core", description="update_group_members")
+
+        async def _on_add(member):
+            try:
+                await notify_group(bot, "player_added", group, member)
+            except Exception:
+                pass
+
+        await _sync_group_from_wom(group, wom_id, on_add=_on_add, on_remove=_on_remove)
+
+    _sync_global_group()
+
 
 async def associate_player_ids(player_wom_ids, before_date: datetime = None, session_to_use = None):
     # Query the database for all players' WOM IDs and Player IDs
@@ -806,10 +840,10 @@ async def associate_player_ids(player_wom_ids, before_date: datetime = None, ses
     all_players = [player for player in all_players if player.player_id != None and player.wom_id != None]
     # Create a mapping of WOM ID to Player ID
     db_wom_to_ids = [{"wom": player.wom_id, "id": player.player_id} for player in all_players]
-    
+
     # Filter out the Player IDs where the WOM ID matches any of the given `player_wom_ids`
     matched_ids = [player['id'] for player in db_wom_to_ids if player['wom'] in player_wom_ids]
-    
+
     return matched_ids
 
 event_session = None
@@ -846,78 +880,31 @@ def get_xf_option(option_id: str):
             return int(float(value_str))
     except Exception:
         return 1000000
-    
+
 
 async def update_group_members_silent(forced_id: int = None):
     """
-    Duplicate of update_group_members function without Discord bot dependencies and notifications.
     Updates group member association tables silently without sending any Discord notifications.
     """
     app_logger.log(log_type="access", data="Updating group member association tables (silent mode)...", app_name="core", description="update_group_members_silent")
     if forced_id:
         group_ids = [forced_id]
     else:
-        # Use scalar_subquery to get just the values
         group_ids = session.scalars(session.query(Group.wom_id)).all()
-    total_updated = 0
+
     for wom_id in group_ids:
-        # wom_id should now be a simple integer
         try:
             wom_id = int(wom_id)
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError):
             continue
         group: Group = session.query(Group).filter(Group.wom_id == wom_id).first()
-        if group:
-            group_wom_ids = await fetch_group_members(wom_id, force_refresh=True)
-            print("Got a total of ", len(group_wom_ids), "members for group ", group.group_name)
-            # Only proceed with member updates if we successfully got the member list
-            if group_wom_ids:
-                ## We have a valid list of player wom_ids here now
-                for player_wom_id in group_wom_ids:
-                    try:
-                        stored_association = session.query(GroupWomAssociation).filter(GroupWomAssociation.player_wom_id == player_wom_id,
-                                                                                    GroupWomAssociation.group_dt_id == group.group_id).first()
-                        if not stored_association:
-                            new_association = GroupWomAssociation(player_wom_id=player_wom_id, group_dt_id=group.group_id)
-                    except Exception as e:
-                        print(f"Couldn't properly add a GroupWomAssociation for {player_wom_id} (player wom id) to {group.group_name}")
-                # Get current group members from database
-                group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
-                # Remove members no longer in the group
-                for member in group.players:
-                    if member.wom_id and member.wom_id not in group_wom_ids:
-                        member = session.query(Player).filter(Player.player_id == member.player_id).first()
-                        app_logger.log(log_type="access", data=f"{member.player_name} has been removed from {group.group_name}\nTheir DropTracker WOM ID is {member.wom_id} - group IDS: {group_wom_ids}", app_name="core", description="update_group_members_silent")
-                        member.remove_group(group)
-                        # Note: Discord notification removed - silent operation
-                        print(f"{member.player_name} has been removed from {group.group_name}\nTheir DropTracker WOM ID is {member.wom_id} - group IDS: {group_wom_ids}")
-                # Add new members to the group
-                for member in group_members:
-                    if member not in group.players:
-                        if member.user:
-                            member.user.add_group(group)
-                        member.add_group(group)
-                        member = session.query(Player).filter(Player.player_id == member.player_id).first()
-                        # Note: Discord notification removed - silent operation
-                        print(f"{member.player_name} has been added to {group.group_name}\nTheir DropTracker WOM ID is {member.wom_id} - group IDS: {group_wom_ids}")
-                group.date_updated = func.now()
-                try:
-                    session.commit()
-                except Exception as e:
-                    session.rollback()
-            else:
-                print(f"Failed to fetch member list for group {group.group_name} (WOM ID: {wom_id})")
-        else:
+        if not group:
             print("Group not found for wom_id", wom_id)
+            continue
+        await _sync_group_from_wom(group, wom_id)
 
-    ## Update the global group
-    player_ids = session.query(Player.player_id).all()
-    for player_id in player_ids:
-        player = session.query(Player).filter(Player.player_id == player_id).first()
-        if player:
-            if 2 not in [group.group_id for group in player.groups]:
-                player.add_group(session.query(Group).filter(Group.group_id == 2).first())
-                session.commit()
+    _sync_global_group()
+
 
 async def get_ev_session():
     if event_session is None:
