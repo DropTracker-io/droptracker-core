@@ -704,6 +704,9 @@ class HallOfFame(Extension):
             await self._process_boss_update(job)
 
     async def _process_boss_update(self, job: "HOFJob"):
+        # Avoid stale identity-map results across loop cycles.
+        # This ensures newly inserted PB rows are visible to every job run.
+        session.expire_all()
         group = session.query(Group).filter(Group.group_id == job.group_id).first()
         if not group:
             log.warning("HOF: group %d not found", job.group_id)
@@ -1011,31 +1014,11 @@ class HallOfFame(Extension):
         existing_message: GroupPersonalBestMessage,
         skip_config_update: bool = False,
     ):
-        """Remove stale DB entry and boss from config when message no longer exists."""
+        """Remove only the stale message row; keep boss configuration intact."""
         session.delete(existing_message)
-        if not skip_config_update:
-            boss_cfg = session.query(GroupConfiguration).filter(
-                GroupConfiguration.group_id == group_id,
-                GroupConfiguration.config_key == "personal_best_embed_boss_list"
-            ).first()
-            if boss_cfg:
-                for field in ("config_value", "long_value"):
-                    val = getattr(boss_cfg, field) or ""
-                    if not val or len(str(val)) < 10:
-                        continue
-                    bosses = [b.strip().replace('"', "").strip() for b in str(val).replace("[", "").replace("]", "").split(",") if b.strip()]
-                    if boss_name not in bosses:
-                        continue
-                    bosses = [b for b in bosses if b and b != boss_name]
-                    new_val = "[" + ", ".join(f'"{b}"' for b in bosses) + "]" if bosses else ""
-                    setattr(boss_cfg, field, new_val)
-                    break
         session.commit()
         self._stats_cleanups += 1
-        if skip_config_update:
-            log.warning("HOF: group %d entry %s - message deleted (404), removed GPBM only", group_id, boss_name)
-        else:
-            log.warning("HOF: group %d boss %s - message deleted (404), removed GPBM and config", group_id, boss_name)
+        log.warning("HOF: group %d entry %s - message deleted (404), removed GPBM only", group_id, boss_name)
 
     def _is_rate_limit_error(self, e: Exception) -> bool:
         """Detect 429 / rate limit errors."""
