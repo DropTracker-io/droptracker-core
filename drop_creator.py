@@ -157,6 +157,52 @@ def build_payload_json(player_name: str,
     return json.dumps(payload)
 
 
+def parse_split_members_input(raw_input: str) -> List[str]:
+    """Parse split-member input into a clean list of names.
+
+    Supports:
+    - comma-separated names
+    - JSON array string: ["name1", "name2"]
+    """
+    if not raw_input:
+        return []
+    text = raw_input.strip()
+    if not text:
+        return []
+
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                cleaned = []
+                seen = set()
+                for value in parsed:
+                    name = str(value).strip() if value is not None else ""
+                    if not name:
+                        continue
+                    key = name.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    cleaned.append(name)
+                return cleaned
+        except Exception:
+            pass
+
+    cleaned = []
+    seen = set()
+    for part in text.replace("\n", ",").split(","):
+        name = part.strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(name)
+    return cleaned
+
+
 def download_image_from_url(url: str) -> Optional[Tuple[str, bytes, str]]:
     """Download image bytes from a URL for multipart upload. Returns (filename, bytes, content_type)."""
     try:
@@ -218,6 +264,20 @@ def main():
             # Add informational field; server will use uploaded file as source,
             # but we keep the original URL in the payload for reference.
             extra_fields.append({"name": "image_url", "value": image_url})
+        # 6) Optional split members
+        split_members_raw = prompt(
+            "Enter split members (comma-separated or JSON array, optional)",
+            "",
+        )
+        split_members = parse_split_members_input(split_members_raw)
+        if split_members:
+            # Send as JSON string so webhook parser can decode robustly.
+            extra_fields.append(
+                {"name": "players_included", "value": json.dumps(split_members)}
+            )
+            print(f"Split members included: {split_members}")
+        else:
+            print("No split members included.")
         guid = str(uuid.uuid4())
         payload_json = build_payload_json(
             player_name=player_name,

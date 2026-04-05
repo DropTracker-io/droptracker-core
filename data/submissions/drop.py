@@ -76,6 +76,9 @@ async def drop_processor(drop_data, external_session=None):
         image_url = drop_data.get("image_url", None)
         used_api = drop_data.get("used_api", False)
         players_included = drop_data.get("players_included", None)
+        debug_print(
+            f"Drop split payload players_included type={type(players_included).__name__} value={players_included}"
+        )
 
         # dedupe via NotifiedSubmission cache in caller; keep local prevention via ensure_can_create
         from .common import ensure_can_create
@@ -229,6 +232,17 @@ async def drop_processor(drop_data, external_session=None):
             )
             for config in config_rows:
                 group_config_values[(config.group_id, config.config_key)] = config.config_value
+            debug_print(
+                "Loaded group notification configs: "
+                + ", ".join(
+                    [
+                        f"group_id={cfg.group_id} {cfg.config_key}={cfg.config_value}"
+                        for cfg in config_rows
+                    ]
+                )
+                if config_rows
+                else "Loaded group notification configs: none"
+            )
 
             instant_update_rows = (
                 session.query(FeatureActivation.group_id)
@@ -260,7 +274,13 @@ async def drop_processor(drop_data, external_session=None):
             async def perform_point_check():
                 nonlocal has_awarded_points, group_points_result
                 from .common import check_group_point_system_active
-                if check_group_point_system_active(group_id, session):
+                point_system_active = check_group_point_system_active(group_id, session)
+                debug_print(
+                    f"Group {group_id} point check start: active={point_system_active}, "
+                    f"players_included={players_included}, item_id={item_id}, npc_id={npc_id}, "
+                    f"value={int(drop.value) * int(drop.quantity)}, quantity={int(drop.quantity)}"
+                )
+                if point_system_active:
                     from .point_awards import check_and_award_points
                     group_points_result = await check_and_award_points(
                         "drop",
@@ -274,6 +294,13 @@ async def drop_processor(drop_data, external_session=None):
                         entry_id=getattr(drop, "drop_id", None),
                         submission_timestamp=drop_data.get("timestamp"),
                         external_session=session,
+                    )
+                    debug_print(
+                        f"Group {group_id} point check result: receiver_points_awarded="
+                        f"{group_points_result.get('receiver_points_awarded', 0)} "
+                        f"receiver_current_points={group_points_result.get('receiver_current_points', 0)} "
+                        f"total_points_awarded={group_points_result.get('total_points_awarded', 0)} "
+                        f"awarded_members={group_points_result.get('awarded_members', [])}"
                     )
                     if int(group_points_result.get("total_points_awarded", 0)) > 0:
                         has_awarded_points = True
@@ -294,6 +321,11 @@ async def drop_processor(drop_data, external_session=None):
 
             send_stacks_value = group_config_values.get((group_id, "send_stacks_of_items"))
             send_stacks = str(send_stacks_value).lower() in ("1", "true") if send_stacks_value is not None else False
+            debug_print(
+                f"Group {group_id} config snapshot: minimum_value_to_notify_raw={min_value_raw}, "
+                f"minimum_value_to_notify={min_value_to_notify}, send_stacks_of_items_raw={send_stacks_value}, "
+                f"send_stacks_of_items={send_stacks}"
+            )
 
             debug_print(
                 f"Checking notification criteria - Raw value: {raw_drop_value}, Drop value: {drop_value}, Send stacks: {send_stacks}"
