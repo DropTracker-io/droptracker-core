@@ -407,7 +407,7 @@ class HallOfFame(Extension):
         ]
         if directory_url:
             trailing_components.append(
-                TextDisplayComponent(content=f"-# [📋 Back to Directory]({directory_url})")
+                TextDisplayComponent(content=f"-# 📋 [Back to Directory]({directory_url})")
             )
 
         container = ContainerComponent(
@@ -978,7 +978,7 @@ class HallOfFame(Extension):
         ]
         if directory_url:
             trailing_components.append(
-                TextDisplayComponent(content=f"-# [📋 Back to Directory]({directory_url})")
+                TextDisplayComponent(content=f"-# 📋 [Back to Directory]({directory_url})")
             )
 
         container = ContainerComponent(
