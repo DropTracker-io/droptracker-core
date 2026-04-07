@@ -496,9 +496,13 @@ class HallOfFame(Extension):
         return components
     
 
-    def _create_pb_components(self, group_id: int, npc: NpcList):
+    def _create_pb_components(self, group_id: int, npc: NpcList, max_entries: int = 5):
         """
-        Create the personal best components for a given group and npc
+        Create the personal best components for a given group and npc.
+
+        max_entries caps the leaderboard rows shown per team-size bracket.
+        Use a lower value (e.g. 3) for raid messages that combine multiple
+        modes to stay within Discord's 40-component / 4000-char limits.
         """
         pbs = self._get_pbs(group_id, npc.npc_name)
         components = []
@@ -591,22 +595,21 @@ class HallOfFame(Extension):
         team_size_order = ["Solo", "1", "2", "3", "4", "5", "6+", "7", "8", "9", "10"]
         pbs = {k: v for k, v in sorted(pbs.items(), key=lambda item: team_size_order.index(str(item[0])) if str(item[0]) in team_size_order else len(team_size_order))}
 
+        # Each team-size bracket is rendered as a single TextDisplayComponent
+        # (header + entries merged) to keep the total component count low.
+        # Two separate components per bracket × many team sizes × multiple raid
+        # modes quickly exceeds Discord's 40-component-per-message limit.
         for team_size, entries in pbs.items():
             team_size_string = self._get_team_size_string(team_size)
-            team_size_component = TextDisplayComponent(content=f"-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + 
-                                                       f"-# **{team_size_string}**")
-            # print(f"[HALL OF FAME]Team size component type: {type(team_size_component)}")
-            components.append(team_size_component)
-            pb_text = ""
+            pb_text = f"-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n-# **{team_size_string}**\n"
             for i, pb in enumerate(entries):
-                if i >= 5:
+                if i >= max_entries:
                     break
                 pb: PersonalBestEntry = pb
                 rank = i + 1
                 rank_prefix = _MEDAL_EMOJIS.get(rank, f"{rank}.")
                 pb_text += f"-# {rank_prefix} `{convert_from_ms(pb.personal_best)}` - {get_formatted_name(pb.player.player_name, group_id, session)}\n"
-            pb_component = TextDisplayComponent(content=pb_text)
-            components.append(pb_component)
+            components.append(TextDisplayComponent(content=pb_text))
         # print(f"[HALL OF FAME]Final components list: {components}")
         # print(f"[HALL OF FAME]Component types: {[type(c) for c in components]}")
         return components, summary_content
@@ -928,6 +931,10 @@ class HallOfFame(Extension):
             self._stats_skipped_hash += 1
             self._maybe_log_progress()
             return
+        label = f"group={job.group_id} npc={job.npc_id} ({npc.npc_name})"
+        if not self._check_component_limits(components, label):
+            log.error("HOF: aborting send for %s – components exceed Discord limits", label)
+            return
         max_attempts = 5
         max_429_attempts = 2
         base_delay = 0.5
@@ -1014,9 +1021,14 @@ class HallOfFame(Extension):
         mode_npcs = [(self._get_variant_mode_name(canonical_name, npc.npc_name), npc) for npc in npcs]
         mode_npcs.sort(key=lambda item: (mode_order.get(item[0], 50), item[0].casefold()))
 
+        # Multi-mode raid messages combine several modes into one Discord message.
+        # Use max_entries=3 (instead of 5) to stay within Discord's 40-component
+        # and 4000-character limits: 3 modes × ~8 components/mode + container
+        # overhead ≈ 30 children, well under the cap.
+        raid_max_entries = 3
         grouped_components: List[BaseComponent] = []
         for mode_name, mode_npc in mode_npcs:
-            pb_components, summary_content = self._create_pb_components(group.group_id, mode_npc)
+            pb_components, summary_content = self._create_pb_components(group.group_id, mode_npc, max_entries=raid_max_entries)
             grouped_components.append(
                 TextDisplayComponent(content=f"### {mode_name}\n{summary_content}")
             )
@@ -1158,6 +1170,50 @@ class HallOfFame(Extension):
             pruned["__class__"] = obj.__class__.__name__
             return pruned
         return str(obj)
+
+    # Discord component limits
+    _MAX_CONTAINER_CHILDREN = 40
+    _MAX_TEXT_CHARS = 4000
+
+    def _check_component_limits(self, components: List[BaseComponent], label: str) -> bool:
+        """Return True if the component list is within Discord limits, else log and return False."""
+        ok = True
+        for i, comp in enumerate(components):
+            children = getattr(comp, "components", None) or []
+            if len(children) > self._MAX_CONTAINER_CHILDREN:
+                log.error(
+                    "HOF LIMIT: %s component[%d] has %d children (max %d) – message will be rejected",
+                    label, i, len(children), self._MAX_CONTAINER_CHILDREN,
+                )
+                ok = False
+        # Estimate total displayable text
+        total_text = self._estimate_text_length(components)
+        if total_text > self._MAX_TEXT_CHARS:
+            log.error(
+                "HOF LIMIT: %s estimated text length %d chars exceeds %d – message will be rejected",
+                label, total_text, self._MAX_TEXT_CHARS,
+            )
+            ok = False
+        return ok
+
+    def _estimate_text_length(self, obj, visited=None) -> int:
+        if visited is None:
+            visited = set()
+        oid = id(obj)
+        if oid in visited:
+            return 0
+        visited.add(oid)
+        if isinstance(obj, str):
+            return len(obj)
+        if isinstance(obj, list):
+            return sum(self._estimate_text_length(x, visited) for x in obj)
+        content = getattr(obj, "content", None)
+        total = len(content) if isinstance(content, str) else 0
+        for attr in ("components", "accessory"):
+            child = getattr(obj, attr, None)
+            if child is not None:
+                total += self._estimate_text_length(child, visited)
+        return total
 
     def _is_message_not_found_error(self, e: Exception) -> bool:
         """Detect 404 / message deleted / NoneType from fetch_message (incl. wrapped/cause chain)."""
