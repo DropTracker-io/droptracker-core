@@ -205,7 +205,14 @@ class HallOfFame(Extension):
 
         enqueued = 0
         skipped_pending = 0
+
+        # Collect individual and grouped bosses separately, then merge into a
+        # single alphabetically-sorted list before enqueueing.  Because the
+        # async worker holds a per-group lock and the queue is FIFO, the enqueue
+        # order equals the Discord send order.  Sending in the correct order from
+        # the start avoids the edit-round-trip that was needed before.
         grouped_bosses: Dict[str, set[int]] = {}
+        individual_bosses: List[Tuple[str, int]] = []  # (display_name, npc_id)
 
         for boss in bosses_to_update:
             canonical_name = _RAID_VARIANT_TO_CANONICAL.get(boss)
@@ -219,30 +226,38 @@ class HallOfFame(Extension):
 
             if canonical_name:
                 grouped_bosses.setdefault(canonical_name, set()).add(npc.npc_id)
-                continue
-
-            added = await self._enqueue_job(group_id=group.group_id, npc_id=npc.npc_id)
-            if added:
-                enqueued += 1
             else:
-                skipped_pending += 1
+                individual_bosses.append((boss, npc.npc_id))
 
+        # Build one unified list sorted alphabetically by display name
+        all_entries: List[Tuple[str, str, object]] = []  # (display_name, kind, args)
+        for boss_name, npc_id in individual_bosses:
+            all_entries.append((boss_name, "individual", npc_id))
         for canonical_name, npc_ids in grouped_bosses.items():
-            added = await self._enqueue_grouped_job(
-                group_id=group.group_id,
-                raid_canonical=canonical_name,
-                npc_ids=sorted(npc_ids),
-            )
-            if added:
-                enqueued += 1
-            else:
-                skipped_pending += 1
+            all_entries.append((canonical_name, "grouped", (canonical_name, sorted(npc_ids))))
+        all_entries.sort(key=lambda x: x[0].casefold())
 
+        # Enqueue: top directory → bosses (alphabetical) → bottom directory
         directory_added = await self._enqueue_directory_job(group.group_id)
         if directory_added:
             enqueued += 1
         else:
             skipped_pending += 1
+
+        for display_name, kind, args in all_entries:
+            if kind == "individual":
+                added = await self._enqueue_job(group_id=group.group_id, npc_id=args)
+            else:
+                canonical_name, npc_ids = args
+                added = await self._enqueue_grouped_job(
+                    group_id=group.group_id,
+                    raid_canonical=canonical_name,
+                    npc_ids=npc_ids,
+                )
+            if added:
+                enqueued += 1
+            else:
+                skipped_pending += 1
 
         directory_bottom_added = await self._enqueue_directory_bottom_job(group.group_id)
         if directory_bottom_added:
