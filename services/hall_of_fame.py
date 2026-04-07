@@ -1111,10 +1111,30 @@ class HallOfFame(Extension):
             else:
                 directory_lines.append(f"- {name}")
 
-        directory_body = "\n".join(directory_lines) if directory_lines else "- No Hall of Fame bosses configured yet."
+        if not directory_lines:
+            directory_lines = ["- No Hall of Fame bosses configured yet."]
+
+        # A single TextDisplayComponent content field is capped at 4000 chars.
+        # Groups with many bosses can exceed this, so we chunk the lines into
+        # multiple TextDisplayComponents that each fit within the limit.
+        _CONTENT_LIMIT = 3900  # leave some margin
+        header = "## Hall of Fame Directory\n"
+        body_components: List[BaseComponent] = []
+        current_chunk = header
+        for line in directory_lines:
+            candidate = (current_chunk + line + "\n")
+            if len(candidate) > _CONTENT_LIMIT and len(current_chunk) > len(header):
+                # Flush the current chunk and start a new one (no repeated header)
+                body_components.append(TextDisplayComponent(content=current_chunk.rstrip("\n")))
+                current_chunk = line + "\n"
+            else:
+                current_chunk = candidate
+        if current_chunk.strip():
+            body_components.append(TextDisplayComponent(content=current_chunk.rstrip("\n")))
+
         container = ContainerComponent(
             SeparatorComponent(divider=True),
-            TextDisplayComponent(content=f"## Hall of Fame Directory\n{directory_body}"),
+            *body_components,
             SeparatorComponent(divider=True),
         )
         return [container]
