@@ -25,6 +25,7 @@ from utils.redis import redis_client
 
 _MEDAL_EMOJIS = {1: "🥇", 2: "🥈", 3: "🥉"}
 _DIRECTORY_BOSS_NAME = "_hof_directory"
+_DIRECTORY_BOTTOM_BOSS_NAME = "_hof_directory_bottom"
 _SEPULCHRE_CANONICAL = "Hallowed Sepulchre"
 _SEPULCHRE_FLOOR_RE = re.compile(r"^Hallowed Sepulchre Floor \d+$")
 _RAID_GROUPS = {
@@ -191,6 +192,14 @@ class HallOfFame(Extension):
                 desired_display_names.append(boss_name)
         desired_display_names.sort(key=str.casefold)
 
+        # Clean up orphaned bot messages not tracked in the DB (e.g. after version bumps)
+        channel_cfg = session.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == group.group_id,
+            GroupConfiguration.config_key == "channel_id_to_send_pb_embeds"
+        ).first()
+        if channel_cfg and channel_cfg.config_value:
+            await self._cleanup_stale_channel_messages(group, channel_cfg.config_value)
+
         # Reorder existing messages so channel order matches alphabetical order
         await self._reorder_group_messages(group, desired_display_names)
 
@@ -235,6 +244,12 @@ class HallOfFame(Extension):
         else:
             skipped_pending += 1
 
+        directory_bottom_added = await self._enqueue_directory_bottom_job(group.group_id)
+        if directory_bottom_added:
+            enqueued += 1
+        else:
+            skipped_pending += 1
+
         return enqueued, skipped_pending
 
     async def _reorder_group_messages(self, group: Group, desired_display_names: List[str]):
@@ -257,8 +272,9 @@ class HallOfFame(Extension):
         # Sort all rows by message_id (channel position – lower = earlier)
         rows.sort(key=lambda r: int(r.message_id))
 
-        # Build desired full ordering: directory first, then bosses alphabetically
+        # Build desired full ordering: directory first, bosses alphabetically, bottom directory last
         has_directory = any(r.boss_name == _DIRECTORY_BOSS_NAME for r in rows)
+        has_directory_bottom = any(r.boss_name == _DIRECTORY_BOTTOM_BOSS_NAME for r in rows)
         desired_order: List[str] = []
         if has_directory:
             desired_order.append(_DIRECTORY_BOSS_NAME)
@@ -269,10 +285,14 @@ class HallOfFame(Extension):
             if name in existing_names:
                 desired_order.append(name)
 
-        # Append any existing names not in the desired list (safety net)
+        # Append any existing names not in the desired list (safety net), excluding bottom directory
         for r in rows:
-            if r.boss_name not in desired_order:
+            if r.boss_name not in desired_order and r.boss_name != _DIRECTORY_BOTTOM_BOSS_NAME:
                 desired_order.append(r.boss_name)
+
+        # Bottom directory always goes last
+        if has_directory_bottom:
+            desired_order.append(_DIRECTORY_BOTTOM_BOSS_NAME)
 
         current_order = [r.boss_name for r in rows]
         if current_order == desired_order:
@@ -721,6 +741,8 @@ class HallOfFame(Extension):
     # -------------------- New: Queue, Rate Limiter and Hashing Utilities --------------------
 
     def _job_key(self, job: "HOFJob") -> str:
+        if job.update_directory_bottom:
+            return f"{job.group_id}:directory_bottom"
         if job.update_directory:
             return f"{job.group_id}:directory"
         if job.raid_canonical:
@@ -781,6 +803,20 @@ class HallOfFame(Extension):
             log.warning("HOF: enqueue directory %s failed: %s", key, e)
             return False
 
+    async def _enqueue_directory_bottom_job(self, group_id: int) -> bool:
+        job = HOFJob(group_id=group_id, npc_id=0, update_directory_bottom=True)
+        key = self._job_key(job)
+        if key in self._pending_jobs:
+            return False
+        self._pending_jobs.add(key)
+        try:
+            await self._hof_queue.put(job)
+            return True
+        except Exception as e:
+            self._pending_jobs.discard(key)
+            log.warning("HOF: enqueue directory_bottom %s failed: %s", key, e)
+            return False
+
     async def _worker(self, worker_index: int):
         while True:
             try:
@@ -816,14 +852,17 @@ class HallOfFame(Extension):
             log.warning("HOF: bot not in guild %s (group %d)", group.guild_id, job.group_id)
             return
 
-        if job.update_directory:
+        if job.update_directory or job.update_directory_bottom:
+            dir_boss_name = _DIRECTORY_BOTTOM_BOSS_NAME if job.update_directory_bottom else _DIRECTORY_BOSS_NAME
+            # Use a distinct npc_id slot for the bottom directory hash (use -1)
+            dir_npc_id = -1 if job.update_directory_bottom else job.npc_id
             try:
                 components = await self._update_directory_message(group)
             except Exception:
-                log.exception("HOF: _update_directory_message failed group=%d", job.group_id)
+                log.exception("HOF: _update_directory_message failed group=%d dir=%s", job.group_id, dir_boss_name)
                 return
             new_hash = self._compute_components_hash(components)
-            if self._is_same_hash(job.group_id, job.npc_id, new_hash):
+            if self._is_same_hash(job.group_id, dir_npc_id, new_hash):
                 self._stats_skipped_hash += 1
                 self._maybe_log_progress()
                 return
@@ -832,17 +871,17 @@ class HallOfFame(Extension):
                     job.group_id,
                     None,
                     components,
-                    boss_name_override=_DIRECTORY_BOSS_NAME,
+                    boss_name_override=dir_boss_name,
                 )
                 if result is True:
-                    self._store_components_hash(job.group_id, job.npc_id, new_hash)
+                    self._store_components_hash(job.group_id, dir_npc_id, new_hash)
                     self._stats_updates += 1
                     self._maybe_log_progress()
                 elif result == "cleaned":
                     self._maybe_log_progress()
                 return
             except Exception:
-                log.exception("HOF: sending directory failed group=%d", job.group_id)
+                log.exception("HOF: sending directory failed group=%d dir=%s", job.group_id, dir_boss_name)
                 return
 
         npc = session.query(NpcList).filter(NpcList.npc_id == job.npc_id).first()
@@ -1026,6 +1065,14 @@ class HallOfFame(Extension):
             GroupPersonalBestMessage.group_id == group.group_id
         ).all()
         message_by_name = {row.boss_name: row for row in message_rows}
+        # Alias any legacy variant-named rows under their canonical name so links resolve
+        for variant, canonical in _RAID_VARIANT_TO_CANONICAL.items():
+            if variant in message_by_name and canonical not in message_by_name:
+                message_by_name[canonical] = message_by_name[variant]
+        # Alias Sepulchre floors under the canonical name
+        for row in message_rows:
+            if _SEPULCHRE_FLOOR_RE.match(row.boss_name) and _SEPULCHRE_CANONICAL not in message_by_name:
+                message_by_name[_SEPULCHRE_CANONICAL] = row
         directory_lines = []
         for name in display_names:
             row = message_by_name.get(name)
@@ -1129,6 +1176,35 @@ class HallOfFame(Extension):
         session.commit()
         self._stats_cleanups += 1
         log.warning("HOF: group %d entry %s - message deleted (404), removed GPBM only", group_id, boss_name)
+
+    async def _cleanup_stale_channel_messages(self, group: Group, channel_id: str):
+        """Delete bot messages in the HOF channel that are not tracked in the DB.
+
+        Called at the start of each HOF cycle to remove duplicate or orphaned
+        messages left behind after version bumps or bot restarts.
+        """
+        try:
+            channel = await self.bot.fetch_channel(int(channel_id))
+            if not channel:
+                return
+            tracked_rows = session.query(GroupPersonalBestMessage).filter(
+                GroupPersonalBestMessage.group_id == group.group_id
+            ).all()
+            tracked_message_ids = {str(row.message_id) for row in tracked_rows}
+            bot_user_id = str(self.bot.user.id)
+            deleted = 0
+            async for message in channel.history(limit=200):
+                if str(message.author.id) == bot_user_id and str(message.id) not in tracked_message_ids:
+                    try:
+                        await message.delete()
+                        deleted += 1
+                        await asyncio.sleep(0.5)
+                    except Exception as del_err:
+                        log.warning("HOF: failed to delete stale message %s in channel %s: %s", message.id, channel_id, del_err)
+            if deleted:
+                log.warning("HOF: group %d cleaned up %d stale message(s) from channel %s", group.group_id, deleted, channel_id)
+        except Exception as e:
+            log.warning("HOF: _cleanup_stale_channel_messages failed for group %d: %s", group.group_id, e)
 
     def _is_rate_limit_error(self, e: Exception) -> bool:
         """Detect 429 / rate limit errors."""
@@ -1237,4 +1313,5 @@ class HOFJob:
     raid_canonical: Optional[str] = None
     npc_ids: Optional[List[int]] = None
     update_directory: bool = False
+    update_directory_bottom: bool = False
 
