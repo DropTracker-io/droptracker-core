@@ -32,7 +32,9 @@ class SemanticAPI:
         "Reward casket (hard)": "Clue Scroll (Hard)",
         "Reward casket (elite)": "Clue Scroll (Elite)",
         "Reward casket (master)": "Clue Scroll (Master)",
-        "Reward Chest (The Gauntlet)": "Corrupted Gauntlet"
+        # Important: keys in dict must be unique; this needs to be a list.
+        # The Wiki drop source is the reward chest page, not the encounter name.
+        "Reward Chest (The Gauntlet)": ["Corrupted Gauntlet", "The Corrupted Gauntlet", "The Gauntlet"],
     }
     
     def __init__(self, client):

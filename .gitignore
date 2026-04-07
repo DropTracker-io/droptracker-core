@@ -84,3 +84,4 @@ static/assets/osrs_wiki.py
 
 #Backups from test changes
 *copy.py
+utils/osrs_api/semantic.py
