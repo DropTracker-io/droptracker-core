@@ -496,13 +496,15 @@ class HallOfFame(Extension):
         return components
     
 
-    def _create_pb_components(self, group_id: int, npc: NpcList, max_entries: int = 5):
+    def _create_pb_components(self, group_id: int, npc: NpcList, max_entries: int = 5,
+                               include_loot: bool = True):
         """
         Create the personal best components for a given group and npc.
 
         max_entries caps the leaderboard rows shown per team-size bracket.
-        Use a lower value (e.g. 3) for raid messages that combine multiple
-        modes to stay within Discord's 40-component / 4000-char limits.
+        include_loot controls whether the loot leaderboard block is included.
+        Both should be reduced for raid messages that combine multiple modes,
+        to stay within Discord's 40-component / 4000-character limits.
         """
         pbs = self._get_pbs(group_id, npc.npc_name)
         components = []
@@ -536,30 +538,24 @@ class HallOfFame(Extension):
         most_loot_month = redis_client.client.zrevrange(key, 0, 4, withscores=True)
         most_loot_part = ""
         total_loot_part = ""
-        if len(most_loot_month) > 1:
-       
-            month_looters = []
+        month_looters = []
+        if len(most_loot_month) > 1 and include_loot:
             for loot in most_loot_month:
                 player = session.query(Player).filter(Player.player_id == loot[0]).first()
                 month_looters.append([loot[0], 1, loot[1], player])
             most_loot = month_looters[0]
-            # print(f"[HALL OF FAME]Most loot: {most_loot}")
-            
             most_loot_alltime = redis_client.client.zrevrange(all_key, 0, 4, withscores=True)
             if len(most_loot_alltime) > 1:
                 most_loot_alltime = most_loot_alltime[0]
                 alltime_most_loot = [most_loot_alltime[0], 1, most_loot_alltime[1], None]
             else:
                 alltime_most_loot = [0, 0, 0, "No data"]
-            # print(f"[HALL OF FAME]All-time most loot: {alltime_most_loot}")
             alltime_most_loot[3] = session.query(Player).filter(Player.player_id == alltime_most_loot[0]).first()
-            # print(f"[HALL OF FAME]All-time most loot player: {alltime_most_loot[3]}")
             total_loot = redis_client.zsum(all_key)
             most_loot_part = (f"\n-# • Most Loot: `{format_number(most_loot[2])}` gp (this month)\n" +
                 f"-# ↳ by {get_formatted_name(most_loot[3].player_name, group_id, session)}")
             total_loot_part = f"-# • Total loot tracked: `{format_number(total_loot)}` gp\n"
-            
-        # Debug the content being created
+
         summary_content = (
             f"📊 **__Overview__**\n" +
             f"-# • Total PBs tracked: `{total_pbs}`\n" +
@@ -567,14 +563,10 @@ class HallOfFame(Extension):
             f"{fastest_kill_part}" +
             f"{most_loot_part}"
         )
-        # # print(f"[HALL OF FAME]Summary content: {summary_content}")
-        
-        # summary_component = TextDisplayComponent(content=summary_content)
-        # # print(f"[HALL OF FAME]Summary component type: {type(summary_component)}")
-        # components.append(summary_component)
-        if len(most_loot_month) > 1:
+
+        if month_looters:
             loot_str = ""
-            for i in range(len(most_loot_month)):
+            for i in range(len(month_looters)):
                 rank = i + 1
                 rank_prefix = _MEDAL_EMOJIS.get(rank, f"{rank}.")
                 loot_str += f"-# {rank_prefix} {get_formatted_name(month_looters[i][3].player_name, group_id, session)} - `{format_number(month_looters[i][2])}` gp\n"
@@ -1021,23 +1013,8 @@ class HallOfFame(Extension):
         mode_npcs = [(self._get_variant_mode_name(canonical_name, npc.npc_name), npc) for npc in npcs]
         mode_npcs.sort(key=lambda item: (mode_order.get(item[0], 50), item[0].casefold()))
 
-        # Multi-mode raid messages combine several modes into one Discord message.
-        # Use max_entries=3 (instead of 5) to stay within Discord's 40-component
-        # and 4000-character limits: 3 modes × ~8 components/mode + container
-        # overhead ≈ 30 children, well under the cap.
-        raid_max_entries = 3
-        grouped_components: List[BaseComponent] = []
-        for mode_name, mode_npc in mode_npcs:
-            pb_components, summary_content = self._create_pb_components(group.group_id, mode_npc, max_entries=raid_max_entries)
-            grouped_components.append(
-                TextDisplayComponent(content=f"### {mode_name}\n{summary_content}")
-            )
-            grouped_components.extend(pb_components)
-            grouped_components.append(SeparatorComponent(divider=True))
-
         directory_url = self._get_directory_jump_url(group)
         footer_text = "-# Powered by the [DropTracker](https://www.droptracker.io) • [View all Personal Bests](https://www.droptracker.io/personal_bests)"
-
         trailing_components: List[BaseComponent] = [
             TextDisplayComponent(content=footer_text),
             SeparatorComponent(divider=True),
@@ -1047,23 +1024,48 @@ class HallOfFame(Extension):
                 TextDisplayComponent(content=f"-# 📋 [Back to Directory]({directory_url})")
             )
 
-        container = ContainerComponent(
-            SeparatorComponent(divider=True),
-            SectionComponent(
-                components=[
-                    TextDisplayComponent(content=f"## {canonical_name} 🏆")
-                ],
-                accessory=ThumbnailComponent(
-                    media=UnfurledMediaItem(
-                        url=self._get_npc_img_url(npcs[0])
-                    )
+        # Multi-mode raid messages combine several modes into one Discord message.
+        # Loot leaderboards are omitted per-mode (include_loot=False) to keep
+        # text under 4000 chars.  If text is still over after assembling with
+        # max_entries=3, we progressively reduce to 2 then 1 entry per bracket.
+        for raid_max_entries in (3, 2, 1):
+            grouped_components: List[BaseComponent] = []
+            for mode_name, mode_npc in mode_npcs:
+                pb_components, summary_content = self._create_pb_components(
+                    group.group_id, mode_npc,
+                    max_entries=raid_max_entries,
+                    include_loot=False,
                 )
-            ),
-            SeparatorComponent(divider=True),
-            *grouped_components,
-            *trailing_components,
-        )
-        return [container]
+                grouped_components.append(
+                    TextDisplayComponent(content=f"### {mode_name}\n{summary_content}")
+                )
+                grouped_components.extend(pb_components)
+                grouped_components.append(SeparatorComponent(divider=True))
+
+            container = ContainerComponent(
+                SeparatorComponent(divider=True),
+                SectionComponent(
+                    components=[
+                        TextDisplayComponent(content=f"## {canonical_name} 🏆")
+                    ],
+                    accessory=ThumbnailComponent(
+                        media=UnfurledMediaItem(
+                            url=self._get_npc_img_url(npcs[0])
+                        )
+                    )
+                ),
+                SeparatorComponent(divider=True),
+                *grouped_components,
+                *trailing_components,
+            )
+            result = [container]
+            if self._estimate_text_length(result) <= self._MAX_TEXT_CHARS:
+                break
+            log.warning(
+                "HOF: raid %s text too long at max_entries=%d, retrying with %d",
+                canonical_name, raid_max_entries, raid_max_entries - 1,
+            )
+        return result
 
     async def _update_directory_message(self, group: Group) -> List[BaseComponent]:
         required_bosses: GroupConfiguration = session.query(GroupConfiguration).filter(
