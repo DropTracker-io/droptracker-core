@@ -47,6 +47,10 @@ _player_cache: Dict[str, _CacheEntry] = {}
 _player_fail_cache: Dict[str, _CacheEntry] = {}
 _group_cache: Dict[int, _CacheEntry] = {}
 
+# Stores the WOM-reported total member_count per group (populated during API calls).
+# Used by _sync_group_from_wom to detect incomplete API responses before removing members.
+_group_member_count: Dict[int, int] = {}
+
 _player_cache_lock = asyncio.Lock()
 _group_cache_lock = asyncio.Lock()
 
@@ -312,6 +316,14 @@ async def fetch_group_members(
         if result.is_ok:
             details = result.unwrap()
             members = details.memberships
+            # Store the WOM-reported expected member count so _sync_group_from_wom
+            # can detect and refuse to act on incomplete API responses.
+            try:
+                wom_expected_count = details.group.member_count
+            except AttributeError:
+                wom_expected_count = None
+            if wom_expected_count is not None:
+                _group_member_count[wom_group_id] = int(wom_expected_count)
             name = details.name
             #print(f"Group name: {name}")
             for member in members:

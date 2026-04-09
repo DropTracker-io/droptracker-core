@@ -41,7 +41,7 @@ from datetime import datetime, timedelta
 from utils.embeds import get_global_drop_embed
 from utils.download import download_player_image
 from utils.format import normalize_player_display_equivalence
-from utils.wiseoldman import fetch_group_members, check_user_by_id, check_user_by_username
+from utils.wiseoldman import fetch_group_members, check_user_by_id, check_user_by_username, _group_member_count as _wom_group_member_count
 from utils.redis import RedisClient, calculate_rank_amongst_groups, get_true_player_total
 from utils.format import format_number, get_extension_from_content_type, parse_redis_data, parse_stored_sheet, replace_placeholders
 #from utils.sheets.sheet_manager import SheetManager
@@ -726,6 +726,27 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
         print(f"Failed to fetch member list for group {group.group_name} (WOM ID: {wom_id})")
         return
 
+    # Safety check: if WOM's own reported member_count differs from the number of
+    # memberships returned in the same response, the list is incomplete (e.g. due to
+    # a transient API issue or an undocumented pagination cap). Removing members based
+    # on an incomplete list would incorrectly evict valid members, so we skip the
+    # removal pass in that case and only process additions.
+    wom_expected_count = _wom_group_member_count.get(wom_id)
+    returned_count = len(group_wom_ids)
+    skip_removals = False
+    if wom_expected_count is not None and returned_count < wom_expected_count:
+        skip_removals = True
+        app_logger.log(
+            log_type="warning",
+            data=(
+                f"WOM returned {returned_count} members for {group.group_name} "
+                f"(wom_id={wom_id}) but member_count in the response was {wom_expected_count}. "
+                f"Skipping removal pass to avoid evicting valid members from an incomplete list."
+            ),
+            app_name="core",
+            description="sync_group_from_wom",
+        )
+
     # Ensure GroupWomAssociation rows exist for every WOM member
     for player_wom_id in group_wom_ids:
         try:
@@ -741,24 +762,26 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
     group_wom_id_set = set(group_wom_ids)
     group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
 
-    # Remove members no longer in the WOM group
-    for member in list(group.players):
-        if member.wom_id and member.wom_id not in group_wom_id_set:
-            member = session.query(Player).filter(Player.player_id == member.player_id).first()
-            app_logger.log(
-                log_type="access",
-                data=(
-                    f"{member.player_name} has been removed from {group.group_name}\n"
-                    f"Their DropTracker WOM ID is {member.wom_id}\n"
-                    f"WOM group {wom_id} returned {len(group_wom_ids)} members; "
-                    f"wom_id {member.wom_id} was not present in the returned list."
-                ),
-                app_name="core",
-                description="sync_group_from_wom",
-            )
-            member.remove_group(group)
-            if on_remove:
-                await on_remove(member)
+    # Remove members no longer in the WOM group (skipped when the API returned a
+    # partial/incomplete member list — see skip_removals flag above).
+    if not skip_removals:
+        for member in list(group.players):
+            if member.wom_id and member.wom_id not in group_wom_id_set:
+                member = session.query(Player).filter(Player.player_id == member.player_id).first()
+                app_logger.log(
+                    log_type="access",
+                    data=(
+                        f"{member.player_name} has been removed from {group.group_name}\n"
+                        f"Their DropTracker WOM ID is {member.wom_id}\n"
+                        f"WOM group {wom_id} returned {returned_count} of {wom_expected_count or '?'} "
+                        f"expected members; wom_id {member.wom_id} was not present in the returned list."
+                    ),
+                    app_name="core",
+                    description="sync_group_from_wom",
+                )
+                member.remove_group(group)
+                if on_remove:
+                    await on_remove(member)
 
     # Add new members to the group
     current_player_ids = {p.player_id for p in group.players}
