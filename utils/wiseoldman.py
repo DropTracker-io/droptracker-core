@@ -47,6 +47,10 @@ _player_cache: Dict[str, _CacheEntry] = {}
 _player_fail_cache: Dict[str, _CacheEntry] = {}
 _group_cache: Dict[int, _CacheEntry] = {}
 
+# Stores the WOM-reported total member_count per group (populated during API calls).
+# Used by _sync_group_from_wom to detect incomplete API responses before removing members.
+_group_member_count: Dict[int, int] = {}
+
 _player_cache_lock = asyncio.Lock()
 _group_cache_lock = asyncio.Lock()
 
@@ -312,11 +316,20 @@ async def fetch_group_members(
         if result.is_ok:
             details = result.unwrap()
             members = details.memberships
+            # Store the WOM-reported expected member count so _sync_group_from_wom
+            # can detect and refuse to act on incomplete API responses.
+            try:
+                wom_expected_count = details.group.member_count
+            except AttributeError:
+                wom_expected_count = None
+            if wom_expected_count is not None:
+                _group_member_count[wom_group_id] = int(wom_expected_count)
             name = details.name
             #print(f"Group name: {name}")
             for member in members:
                 player_name = member.player.display_name
-                existing_player = session.query(Player).filter(Player.wom_id == member.player_id).first()
+                member_wom_id = member.player_id
+                existing_player = session.query(Player).filter(Player.wom_id == member_wom_id).first()
                 if existing_player:
                     old_name = existing_player.player_name or ""
                     new_name = player_name or ""
@@ -326,7 +339,32 @@ async def fetch_group_members(
                             print(f"Updated player name for {old_name} to {new_name}")
                             existing_player.player_name = new_name
                             session.commit()
-                user_list.append(member.player_id)
+                else:
+                    # No player found by WOM ID. A stale wom_id (e.g. after an RSN change
+                    # that created a new WOM identity) would cause the sync to incorrectly
+                    # remove a valid group member. Try matching by player name to detect and
+                    # correct this before the removal pass runs.
+                    if player_name:
+                        player_by_name = (
+                            session.query(Player)
+                            .filter(Player.player_name == player_name)
+                            .first()
+                        )
+                        if player_by_name is not None and player_by_name.wom_id != member_wom_id:
+                            logger.info(
+                                "Correcting stale WOM ID for player '%s': %s -> %s",
+                                player_name, player_by_name.wom_id, member_wom_id,
+                            )
+                            player_by_name.wom_id = member_wom_id
+                            try:
+                                session.commit()
+                            except Exception as commit_err:
+                                logger.warning(
+                                    "Failed to correct WOM ID for '%s': %s",
+                                    player_name, commit_err,
+                                )
+                                session.rollback()
+                user_list.append(member_wom_id)
             await _store_group_cache(wom_group_id, user_list)
             return user_list
         else:
