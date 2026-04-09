@@ -745,9 +745,17 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
     for member in list(group.players):
         if member.wom_id and member.wom_id not in group_wom_id_set:
             member = session.query(Player).filter(Player.player_id == member.player_id).first()
-            app_logger.log(log_type="access",
-                           data=f"{member.player_name} has been removed from {group.group_name}\nTheir DropTracker WOM ID is {member.wom_id}",
-                           app_name="core", description="sync_group_from_wom")
+            app_logger.log(
+                log_type="access",
+                data=(
+                    f"{member.player_name} has been removed from {group.group_name}\n"
+                    f"Their DropTracker WOM ID is {member.wom_id}\n"
+                    f"WOM group {wom_id} returned {len(group_wom_ids)} members; "
+                    f"wom_id {member.wom_id} was not present in the returned list."
+                ),
+                app_name="core",
+                description="sync_group_from_wom",
+            )
             member.remove_group(group)
             if on_remove:
                 await on_remove(member)
