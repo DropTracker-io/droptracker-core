@@ -245,8 +245,8 @@ async def check_group_by_id(wom_group_id: int, *, force_refresh: bool = False):
         if result.is_ok:
             details = result.unwrap()
             members = details.memberships
-            member_count = details.group.member_count
-            group_name = details.group.name
+            member_count = details.member_count
+            group_name = details.name
             member_ids = [member.player_id for member in members]
             await _store_group_cache(wom_group_id, member_ids)
             return group_name, member_count, members
@@ -318,10 +318,7 @@ async def fetch_group_members(
             members = details.memberships
             # Store the WOM-reported expected member count so _sync_group_from_wom
             # can detect and refuse to act on incomplete API responses.
-            try:
-                wom_expected_count = details.group.member_count
-            except AttributeError:
-                wom_expected_count = None
+            wom_expected_count = getattr(details, "member_count", None)
             if wom_expected_count is not None:
                 _group_member_count[wom_group_id] = int(wom_expected_count)
             name = details.name

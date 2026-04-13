@@ -84,57 +84,55 @@ def _check_db(player_name: str, wom_group_id: int):
     return player, group
 
 
-async def _check_wom(wom_group_id: int, player_wom_id: int | None):
+async def _check_wom(wom_group_id: int, player_wom_id: int | None, player_name: str = ""):
     WOM_API_KEY = os.getenv("WOM_API_KEY")
     client = wom_lib.Client(WOM_API_KEY, user_agent="@joelhalen-diagnostic")
     await client.start()
 
-    _hr("WOM API: raw group details")
-    result = await client.groups.get_details(wom_group_id)
-    if not result.is_ok:
-        print(f"  [ERROR] WOM API call failed: {result}")
-        await client.close()
-        return None, None
-
-    details = result.unwrap()
-    wom_members = details.memberships
     try:
-        reported_count = details.group.member_count
-    except AttributeError:
-        reported_count = None
-    wom_name = details.group.name
+        _hr("WOM API: raw group details")
+        result = await client.groups.get_details(wom_group_id)
+        if not result.is_ok:
+            print(f"  [ERROR] WOM API call failed: {result}")
+            return None, None
 
-    print(f"  Group name     : {wom_name}")
-    print(f"  member_count   : {reported_count}  (as reported by the API response)")
-    print(f"  Memberships len: {len(wom_members)}  (actual items in memberships list)")
+        details = result.unwrap()
+        wom_members = details.memberships
+        reported_count = getattr(details, "member_count", None)
+        wom_name = details.name
 
-    if reported_count is not None and len(wom_members) < reported_count:
-        print(
-            f"\n  *** INCOMPLETE RESPONSE DETECTED ***\n"
-            f"  WOM returned {len(wom_members)} member records but claims {reported_count} members.\n"
-            f"  The skip_removals guard introduced in this fix would prevent erroneous removals."
-        )
-    elif reported_count is not None:
-        print(f"\n  Response looks complete ({len(wom_members)} == {reported_count}).")
+        print(f"  Group name     : {wom_name}")
+        print(f"  member_count   : {reported_count}  (as reported by the API response)")
+        print(f"  Memberships len: {len(wom_members)}  (actual items in memberships list)")
 
-    wom_ids = {m.player_id for m in wom_members}
+        if reported_count is not None and len(wom_members) < reported_count:
+            print(
+                f"\n  *** INCOMPLETE RESPONSE DETECTED ***\n"
+                f"  WOM returned {len(wom_members)} member records but claims {reported_count} members.\n"
+                f"  The skip_removals guard introduced in this fix would prevent erroneous removals."
+            )
+        elif reported_count is not None:
+            print(f"\n  Response looks complete ({len(wom_members)} == {reported_count}).")
 
-    _hr("WOM API: target player membership check")
-    if player_wom_id is not None:
-        if player_wom_id in wom_ids:
-            print(f"  [PRESENT]  wom_id {player_wom_id} IS in the WOM member list.")
+        wom_ids = {m.player_id for m in wom_members}
+
+        _hr("WOM API: target player membership check")
+        target_name = player_name
+        if player_wom_id is not None:
+            if player_wom_id in wom_ids:
+                print(f"  [PRESENT]  wom_id {player_wom_id} IS in the WOM member list.")
+            else:
+                print(f"  [ABSENT]   wom_id {player_wom_id} is NOT in the WOM member list.")
+                for m in wom_members:
+                    if m.player and m.player.display_name and target_name.lower() in m.player.display_name.lower():
+                        print(f"  HINT: found a member whose name contains the target string: "
+                              f"id={m.player_id}  name={m.player.display_name}")
         else:
-            print(f"  [ABSENT]   wom_id {player_wom_id} is NOT in the WOM member list.")
-            # Try to find the player by name
-            for m in wom_members:
-                if m.player and m.player.display_name and "kerzington" in m.player.display_name.lower():
-                    print(f"  HINT: found a member whose name contains the target string: "
-                          f"id={m.player_id}  name={m.player.display_name}")
-    else:
-        print("  Cannot check: player has no wom_id in the DB.")
+            print("  Cannot check: player has no wom_id in the DB.")
 
-    await client.close()
-    return wom_ids, wom_members
+        return wom_ids, wom_members
+    finally:
+        await client.close()
 
 
 def _dry_run_sync(player: Player, group: Group, wom_ids: set, wom_members):
@@ -201,7 +199,7 @@ async def main():
     player, group = _check_db(player_name, wom_group_id)
     player_wom_id = player.wom_id if player else None
 
-    wom_ids, wom_members = await _check_wom(wom_group_id, player_wom_id)
+    wom_ids, wom_members = await _check_wom(wom_group_id, player_wom_id, player_name)
 
     if group is not None and wom_ids is not None:
         _dry_run_sync(player, group, wom_ids, wom_members)
