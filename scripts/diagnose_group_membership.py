@@ -38,6 +38,31 @@ def _hr(title: str = ""):
     print("\n" + ("─" * 60) + (f"  {title}" if title else ""))
 
 
+def _extract_group_metadata(details):
+    """
+    Support multiple wom.py response shapes.
+
+    Some versions expose group metadata directly on the details object
+    (`details.name`, `details.member_count`) while others nest it under
+    `details.group`.
+    """
+    nested_group = getattr(details, "group", None)
+    wom_name = getattr(nested_group, "name", None)
+    member_count = getattr(nested_group, "member_count", None)
+
+    if wom_name is None:
+        wom_name = getattr(details, "name", None)
+    if member_count is None:
+        member_count = getattr(details, "member_count", None)
+
+    try:
+        member_count = int(member_count) if member_count is not None else None
+    except (TypeError, ValueError):
+        member_count = None
+
+    return wom_name, member_count
+
+
 def _check_db(player_name: str, wom_group_id: int):
     _hr("DB: player record")
     player = db_session.query(Player).filter(Player.player_name == player_name).first()
@@ -88,7 +113,6 @@ async def _check_wom(wom_group_id: int, player_wom_id: int | None, player_name: 
     WOM_API_KEY = os.getenv("WOM_API_KEY")
     client = wom_lib.Client(WOM_API_KEY, user_agent="@joelhalen-diagnostic")
     await client.start()
-
     try:
         _hr("WOM API: raw group details")
         result = await client.groups.get_details(wom_group_id)
@@ -98,8 +122,7 @@ async def _check_wom(wom_group_id: int, player_wom_id: int | None, player_name: 
 
         details = result.unwrap()
         wom_members = details.memberships
-        reported_count = getattr(details, "member_count", None)
-        wom_name = details.name
+        wom_name, reported_count = _extract_group_metadata(details)
 
         print(f"  Group name     : {wom_name}")
         print(f"  member_count   : {reported_count}  (as reported by the API response)")
@@ -117,16 +140,20 @@ async def _check_wom(wom_group_id: int, player_wom_id: int | None, player_name: 
         wom_ids = {m.player_id for m in wom_members}
 
         _hr("WOM API: target player membership check")
-        target_name = player_name
+        target_name = (player_name or "").lower()
         if player_wom_id is not None:
             if player_wom_id in wom_ids:
                 print(f"  [PRESENT]  wom_id {player_wom_id} IS in the WOM member list.")
             else:
                 print(f"  [ABSENT]   wom_id {player_wom_id} is NOT in the WOM member list.")
                 for m in wom_members:
-                    if m.player and m.player.display_name and target_name.lower() in m.player.display_name.lower():
-                        print(f"  HINT: found a member whose name contains the target string: "
-                              f"id={m.player_id}  name={m.player.display_name}")
+                    m_player = getattr(m, "player", None)
+                    display_name = getattr(m_player, "display_name", None)
+                    if target_name and display_name and target_name in display_name.lower():
+                        print(
+                            "  HINT: found a member whose name contains the target string: "
+                            f"id={m.player_id}  name={display_name}"
+                        )
         else:
             print("  Cannot check: player has no wom_id in the DB.")
 
