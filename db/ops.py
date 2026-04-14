@@ -736,17 +736,22 @@ async def notify_group(bot: interactions.Client, type: str, group: Group, member
         else:
             print(f"Channel not found for ID: {channel_id}")
 
-async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove=None):
+async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove=None) -> dict:
     """
     Core logic for syncing a single group's membership from the WOM API.
 
     on_add(member) and on_remove(member) are optional async callbacks
     invoked after a player is added/removed from the group.
+
+    Returns a dict with keys:
+        added (int): number of players added
+        removed (int): number of players removed
+        skipped_removals (bool): True when removal pass was skipped due to incomplete WOM response
     """
     group_wom_ids = await fetch_group_members(wom_id, force_refresh=True)
     if not group_wom_ids:
         print(f"Failed to fetch member list for group {group.group_name} (WOM ID: {wom_id})")
-        return
+        return {"added": 0, "removed": 0, "skipped_removals": False}
 
     # Safety check: if WOM's own reported member_count differs from the number of
     # memberships returned in the same response, the list is incomplete (e.g. due to
@@ -784,6 +789,9 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
     group_wom_id_set = set(group_wom_ids)
     group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
 
+    removed_count = 0
+    added_count = 0
+
     # Remove members no longer in the WOM group (skipped when the API returned a
     # partial/incomplete member list — see skip_removals flag above).
     if not skip_removals:
@@ -802,6 +810,7 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
                     description="sync_group_from_wom",
                 )
                 member.remove_group(group)
+                removed_count += 1
                 if on_remove:
                     await on_remove(member)
 
@@ -813,6 +822,7 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
                 member.user.add_group(group)
             member.add_group(group)
             member = session.query(Player).filter(Player.player_id == member.player_id).first()
+            added_count += 1
             if on_add:
                 await on_add(member)
 
@@ -830,6 +840,8 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
             description="sync_group_from_wom",
         )
         session.rollback()
+
+    return {"added": added_count, "removed": removed_count, "skipped_removals": skip_removals}
 
 
 def _sync_global_group():
@@ -992,6 +1004,107 @@ async def update_group_members_silent(forced_id: int = None):
             continue
 
     _sync_global_group()
+
+
+_WOM_SYNC_COOLDOWN_SECONDS = 3600  # 1 hour
+
+
+async def sync_group_from_wom_with_stats(wom_id: int) -> dict:
+    """
+    Sync a single group from WOM and return a detailed result dict.
+
+    Enforces a 1-hour per-group cooldown tracked via GroupConfiguration
+    (key: ``last_wom_sync``).  Callers should check the ``on_cooldown``
+    key before using the rest of the result.
+
+    Returns a dict with keys:
+        on_cooldown (bool): True when the request was rejected due to cooldown.
+        cooldown_remaining_seconds (int): Seconds until the cooldown expires
+            (only present when ``on_cooldown`` is True).
+        group_name (str): Human-readable group name.
+        group_id (int): DropTracker group primary key.
+        wom_id (int): Wise Old Man group ID.
+        added (list[str]): Names of players added during this sync.
+        removed (list[str]): Names of players removed during this sync.
+        total_members (int): Group member count after the sync.
+        skipped_removals (bool): True when the removal pass was skipped
+            because WOM returned an incomplete member list.
+        duration_seconds (float): Wall-clock time taken for the sync.
+    """
+    group: Group = session.query(Group).filter(Group.wom_id == wom_id).first()
+    if not group:
+        raise ValueError(f"No DropTracker group found with WOM ID {wom_id}")
+
+    # --- Cooldown check ---
+    cooldown_cfg = session.query(GroupConfiguration).filter(
+        GroupConfiguration.group_id == group.group_id,
+        GroupConfiguration.config_key == "last_wom_sync",
+    ).first()
+
+    if cooldown_cfg and cooldown_cfg.config_value:
+        try:
+            last_sync = datetime.fromisoformat(cooldown_cfg.config_value)
+            elapsed = (datetime.utcnow() - last_sync).total_seconds()
+            if elapsed < _WOM_SYNC_COOLDOWN_SECONDS:
+                return {
+                    "on_cooldown": True,
+                    "cooldown_remaining_seconds": int(_WOM_SYNC_COOLDOWN_SECONDS - elapsed),
+                    "group_name": group.group_name,
+                    "group_id": group.group_id,
+                    "wom_id": wom_id,
+                }
+        except (ValueError, TypeError):
+            pass  # Malformed timestamp — treat as no cooldown
+
+    # --- Sync ---
+    added_names: list = []
+    removed_names: list = []
+
+    async def _on_add(member):
+        added_names.append(member.player_name)
+
+    async def _on_remove(member):
+        removed_names.append(member.player_name)
+
+    started_at = datetime.utcnow()
+    try:
+        stats = await _sync_group_from_wom(group, wom_id, on_add=_on_add, on_remove=_on_remove)
+        _sync_global_group()
+    except Exception as e:
+        session.rollback()
+        raise
+
+    duration = (datetime.utcnow() - started_at).total_seconds()
+
+    # --- Update cooldown timestamp ---
+    now_iso = datetime.utcnow().isoformat()
+    if cooldown_cfg:
+        cooldown_cfg.config_value = now_iso
+    else:
+        session.add(GroupConfiguration(
+            group_id=group.group_id,
+            config_key="last_wom_sync",
+            config_value=now_iso,
+        ))
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+
+    session.refresh(group)
+    total_members = group.get_player_count()
+
+    return {
+        "on_cooldown": False,
+        "group_name": group.group_name,
+        "group_id": group.group_id,
+        "wom_id": wom_id,
+        "added": added_names,
+        "removed": removed_names,
+        "total_members": total_members,
+        "skipped_removals": stats.get("skipped_removals", False),
+        "duration_seconds": round(duration, 2),
+    }
 
 
 async def get_ev_session():

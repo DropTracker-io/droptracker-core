@@ -20,7 +20,7 @@ from services.components import help_components
 from services.points import award_points_to_player
 from utils.format import format_time_since_update, get_command_id, get_player_by_claim_rsn
 from utils.wiseoldman import check_user_by_username
-from .utils import try_create_user
+from .utils import try_create_user, is_admin, is_user_authorized
 from sqlalchemy import func
 
 
@@ -715,4 +715,111 @@ class UserCommands(Extension):
         else:
             embed.add_field(name="Top Players", value="No points have been awarded yet.", inline=False)
 
+        await ctx.send(embed=embed, ephemeral=True)
+
+    @slash_command(
+        name="sync-wom",
+        description="Request an immediate WiseOldMan membership sync for this group (1-hour cooldown)",
+    )
+    async def sync_wom_cmd(self, ctx: SlashContext):
+        """
+        Trigger a WiseOldMan membership sync for the group linked to this Discord server.
+
+        Available to guild administrators and users listed in the group's ``authed_users``
+        configuration.  Enforces a 1-hour per-group cooldown to avoid hammering the WOM API.
+        The response is deferred so the interaction won't time out during a long sync.
+        """
+        self._refresh_session()
+
+        if not ctx.guild_id:
+            return await ctx.send(
+                "This command must be used inside your group's Discord server.",
+                ephemeral=True,
+            )
+
+        guild = session.query(Guild).filter(Guild.guild_id == str(ctx.guild_id)).first()
+        if not guild or not guild.group_id:
+            return await ctx.send(
+                "This Discord server is not linked to a DropTracker group.",
+                ephemeral=True,
+            )
+
+        group = session.query(Group).filter(Group.group_id == guild.group_id).first()
+        if not group or not group.wom_id:
+            return await ctx.send(
+                "The linked group has no WOM ID configured.",
+                ephemeral=True,
+            )
+
+        # Authorization: guild administrator OR listed in the group's authed_users config
+        user = session.query(User).filter(User.discord_id == str(ctx.author.id)).first()
+        if not is_admin(ctx) and not (user and is_user_authorized(user.user_id, group)):
+            return await ctx.send(
+                "You are not authorized to request a WOM sync for this group.",
+                ephemeral=True,
+            )
+
+        await ctx.defer(ephemeral=True)
+
+        try:
+            from db.ops import sync_group_from_wom_with_stats
+            result = await sync_group_from_wom_with_stats(wom_id=int(group.wom_id))
+        except Exception as e:
+            return await ctx.send(f"WOM sync failed: {e}", ephemeral=True)
+
+        if result["on_cooldown"]:
+            remaining = result["cooldown_remaining_seconds"]
+            hours, rem = divmod(remaining, 3600)
+            minutes = rem // 60
+            time_str = f"{hours}h {minutes}m" if hours else f"{minutes}m"
+            embed = Embed(
+                title="Sync on Cooldown",
+                description=(
+                    f"**{group.group_name}** was synced recently.\n"
+                    f"Please wait **{time_str}** before requesting another sync."
+                ),
+                color=0xE67E22,
+            )
+            return await ctx.send(embed=embed, ephemeral=True)
+
+        added = result["added"]
+        removed = result["removed"]
+
+        def _player_list(names, max_shown=15):
+            if not names:
+                return "None"
+            shown = names[:max_shown]
+            extra = len(names) - max_shown
+            text = ", ".join(f"`{n}`" for n in shown)
+            if extra > 0:
+                text += f" *(+{extra} more)*"
+            return text
+
+        embed = Embed(
+            title="WOM Sync Complete",
+            description=f"Membership sync with WiseOldMan finished for **{result['group_name']}**.",
+            color=0x2ECC71,
+        )
+        embed.add_field(name="Total Members", value=str(result["total_members"]), inline=True)
+        embed.add_field(name="Added", value=str(len(added)), inline=True)
+        embed.add_field(name="Removed", value=str(len(removed)), inline=True)
+
+        if added:
+            embed.add_field(name="New Members", value=_player_list(added), inline=False)
+        if removed:
+            embed.add_field(name="Removed Members", value=_player_list(removed), inline=False)
+
+        if result["skipped_removals"]:
+            embed.add_field(
+                name="Warning: Removal Pass Skipped",
+                value=(
+                    "WOM returned an incomplete member list — no members were removed "
+                    "this cycle to prevent incorrectly evicting valid members."
+                ),
+                inline=False,
+            )
+
+        embed.set_footer(
+            text=f"WOM ID: {result['wom_id']} • Duration: {result['duration_seconds']:.1f}s"
+        )
         await ctx.send(embed=embed, ephemeral=True)
