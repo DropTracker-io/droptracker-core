@@ -820,6 +820,15 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
     try:
         session.commit()
     except Exception as e:
+        app_logger.log(
+            log_type="error",
+            data=(
+                f"Failed final commit while syncing group {group.group_name} "
+                f"(wom_id={wom_id}): {e}"
+            ),
+            app_name="core",
+            description="sync_group_from_wom",
+        )
         session.rollback()
 
 
@@ -873,7 +882,20 @@ async def update_group_members(bot: interactions.Client, forced_id: int = None):
             except Exception:
                 pass
 
-        await _sync_group_from_wom(group, wom_id, on_add=_on_add, on_remove=_on_remove)
+        try:
+            await _sync_group_from_wom(group, wom_id, on_add=_on_add, on_remove=_on_remove)
+        except Exception as e:
+            session.rollback()
+            app_logger.log(
+                log_type="error",
+                data=(
+                    f"Group membership sync failed for {group.group_name} "
+                    f"(wom_id={wom_id}): {e}"
+                ),
+                app_name="core",
+                description="update_group_members",
+            )
+            continue
 
     _sync_global_group()
 
@@ -954,7 +976,20 @@ async def update_group_members_silent(forced_id: int = None):
         if not group:
             print("Group not found for wom_id", wom_id)
             continue
-        await _sync_group_from_wom(group, wom_id)
+        try:
+            await _sync_group_from_wom(group, wom_id)
+        except Exception as e:
+            session.rollback()
+            app_logger.log(
+                log_type="error",
+                data=(
+                    f"Silent group membership sync failed for {group.group_name} "
+                    f"(wom_id={wom_id}): {e}"
+                ),
+                app_name="core",
+                description="update_group_members_silent",
+            )
+            continue
 
     _sync_global_group()
 

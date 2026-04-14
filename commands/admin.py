@@ -354,6 +354,81 @@ class ClanCommands(Extension):
         embed.set_footer(text="This action is irreversible.")
         await ctx.send(embed=embed, ephemeral=True)
 
+    @slash_command(
+        name="force-group-sync",
+        description="Force a WiseOldMan membership sync for one group",
+        default_member_permissions=Permissions.ADMINISTRATOR
+    )
+    @slash_option(
+        name="wom_id",
+        opt_type=OptionType.STRING,
+        description="Optional WOM group ID. If omitted, uses this server's linked group.",
+        required=False
+    )
+    async def force_group_sync_cmd(self, ctx: SlashContext, wom_id: str = None):
+        if wom_id:
+            try:
+                target_wom_id = int(str(wom_id).strip())
+            except Exception:
+                return await ctx.send(
+                    "Invalid `wom_id`. Please provide digits only.",
+                    ephemeral=True
+                )
+            target_group = session.query(Group).filter(Group.wom_id == target_wom_id).first()
+            if not target_group:
+                return await ctx.send(
+                    f"No DropTracker group found with WOM ID `{target_wom_id}`.",
+                    ephemeral=True
+                )
+        else:
+            if not ctx.guild_id:
+                return await ctx.send(
+                    "When not providing `wom_id`, this command must be used in a server linked to a group.",
+                    ephemeral=True
+                )
+            guild = session.query(Guild).filter(Guild.guild_id == str(ctx.guild_id)).first()
+            if not guild or not guild.group_id:
+                return await ctx.send(
+                    "This Discord server is not linked to a DropTracker group.",
+                    ephemeral=True
+                )
+            target_group = session.query(Group).filter(Group.group_id == guild.group_id).first()
+            if not target_group or not target_group.wom_id:
+                return await ctx.send(
+                    "A linked group exists, but it has no WOM ID configured.",
+                    ephemeral=True
+                )
+            target_wom_id = int(target_group.wom_id)
+
+        await ctx.defer(ephemeral=True)
+        started_at = datetime.now()
+        try:
+            # Import lazily to avoid unnecessary startup overhead for command modules.
+            from db.ops import update_group_members_silent
+            await update_group_members_silent(forced_id=target_wom_id)
+            session.refresh(target_group)
+            member_count = target_group.get_player_count()
+        except Exception as e:
+            session.rollback()
+            return await ctx.send(
+                f"Force sync failed for WOM group `{target_wom_id}`: {e}",
+                ephemeral=True
+            )
+
+        elapsed_seconds = max((datetime.now() - started_at).total_seconds(), 0.0)
+        embed = Embed(
+            title="Group Sync Completed",
+            description=(
+                f"Forced WOM sync finished for **{target_group.group_name}**.\n"
+                f"- WOM ID: `{target_wom_id}`\n"
+                f"- DropTracker Group ID: `{target_group.group_id}`\n"
+                f"- Current tracked members: `{member_count}`\n"
+                f"- Duration: `{elapsed_seconds:.1f}s`"
+            ),
+            color=0x2ECC71
+        )
+        await ctx.send(embed=embed, ephemeral=True)
+
     @slash_command(name="new_webhook",
                     description="Generate a new webhook, adding it to the database and the GitHub list.",
                     default_member_permissions=Permissions.ADMINISTRATOR)
