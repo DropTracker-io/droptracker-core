@@ -17,7 +17,7 @@ from services.redis_updates import get_player_list_loot_sum
 from utils.format import format_number
 from utils.wiseoldman import fetch_group_members
 from db import Player, Group, GroupConfiguration, NotifiedSubmission, NpcList, get_current_partition
-from db.ops import associate_player_ids
+from db.ops import associate_player_ids, sync_group_from_wom_with_stats
 from utils.redis import calculate_rank_amongst_groups
 
 
@@ -524,4 +524,112 @@ async def generate_timeframe_board_endpoint():
     except Exception as e:
         print(f"[TimeframeBoardAPI] Unexpected error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ==============================================================================
+# WOM SYNC ENDPOINT
+# ==============================================================================
+# Trigger an on-demand WOM membership sync for a group, identical to what the
+# /sync-wom Discord command performs.  Intended for the website's "Sync" button.
+#
+# AUTHENTICATION
+#   Pass the group's export API key (GroupConfiguration key = "export_api_key")
+#   as either:
+#     • JSON body field: { "api_key": "<key>", ... }
+#     • Authorization header: Bearer <key>
+#
+# REQUEST FORMAT (POST /groups/<group_id>/wom-sync):
+#   { "group_id": int }   — group_id in the URL path is sufficient; body is optional.
+#
+# RESPONSE FORMAT:
+#   Success (200): {
+#     "success": true,
+#     "group_name": str,
+#     "group_id": int,
+#     "wom_id": int,
+#     "added": [str, ...],
+#     "removed": [str, ...],
+#     "total_members": int,
+#     "skipped_removals": bool,
+#     "duration_seconds": float
+#   }
+#   Cooldown (429): {
+#     "success": false,
+#     "on_cooldown": true,
+#     "cooldown_remaining_seconds": int,
+#     "group_name": str
+#   }
+#   Auth failure (401/403): { "success": false, "error": str }
+#   Not found    (404):      { "success": false, "error": str }
+# ==============================================================================
+
+@groups_bp.post("/groups/<int:group_id>/wom-sync")
+@route_cors(allow_origin="https://www.droptracker.io")
+@rate_limit(limit=10, period=timedelta(seconds=60))
+async def group_wom_sync(group_id: int):
+    """Trigger an on-demand WOM membership sync for the given group."""
+    db_session = get_db_session()
+    try:
+        # --- Resolve group ---
+        group = db_session.query(Group).filter(Group.group_id == group_id).first()
+        if not group:
+            return jsonify({"success": False, "error": f"Group {group_id} not found"}), 404
+
+        if not group.wom_id:
+            return jsonify({"success": False, "error": "This group has no WOM ID configured"}), 400
+
+        # --- Authenticate ---
+        # Accept the key from either the Authorization header or the JSON body.
+        api_key = None
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            api_key = auth_header[7:].strip()
+
+        if not api_key:
+            try:
+                body = await request.get_json(silent=True) or {}
+                api_key = body.get("api_key", "")
+            except Exception:
+                api_key = ""
+
+        if not api_key:
+            return jsonify({"success": False, "error": "API key required"}), 401
+
+        key_cfg = db_session.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == group_id,
+            GroupConfiguration.config_key == "export_api_key",
+        ).first()
+
+        if not key_cfg or str(key_cfg.config_value).strip() != str(api_key).strip():
+            return jsonify({"success": False, "error": "Invalid API key"}), 403
+
+        # --- Perform sync ---
+        try:
+            result = await sync_group_from_wom_with_stats(wom_id=int(group.wom_id))
+        except Exception as e:
+            print(f"[WomSyncAPI] Sync error for group {group_id}: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
+        if result["on_cooldown"]:
+            return jsonify({
+                "success": False,
+                "on_cooldown": True,
+                "cooldown_remaining_seconds": result["cooldown_remaining_seconds"],
+                "group_name": result["group_name"],
+            }), 429
+
+        return jsonify({
+            "success": True,
+            "group_name": result["group_name"],
+            "group_id": result["group_id"],
+            "wom_id": result["wom_id"],
+            "added": result["added"],
+            "removed": result["removed"],
+            "total_members": result["total_members"],
+            "skipped_removals": result["skipped_removals"],
+            "duration_seconds": result["duration_seconds"],
+        }), 200
+
+    finally:
+        db_session.close()
 
