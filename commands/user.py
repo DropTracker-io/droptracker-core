@@ -16,7 +16,7 @@ from secrets import token_hex
 from data.submissions import try_create_player
 from interactions import AutocompleteContext, SlashContext, Embed, OptionType, Extension, slash_command, slash_option
 from db.models import Session, User, Group, Guild, Player, UserConfiguration, session, PlayerPoints
-from services.components import help_components
+from services.components import build_help_components
 from services.points import award_points_to_player
 from utils.format import format_time_since_update, get_command_id, get_player_by_claim_rsn
 from utils.wiseoldman import check_user_by_username
@@ -78,7 +78,7 @@ class UserCommands(Extension):
         if not user:
             await try_create_user(ctx=ctx)
         user = session.query(User).filter(User.discord_id == ctx.author.id).first()
-        return await ctx.send(components=help_components, ephemeral=True)
+        return await ctx.send(components=await build_help_components(self.bot), ephemeral=True)
 
     @slash_command(name="dm-settings",
                    description="View or change your direct message settings")
