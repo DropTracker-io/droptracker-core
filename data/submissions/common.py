@@ -36,6 +36,12 @@ from db import (
     GroupConfiguration,
     UserConfiguration,
     NotificationQueue,
+    SeasonalDrop,
+    SeasonalPersonalBestEntry,
+    SeasonalCollectionLogEntry,
+    SeasonalCombatAchievementEntry,
+    SeasonalPlayerPet,
+    SeasonalQuestCompletionEntry,
 )
 from db.ops import DatabaseOperations, associate_player_ids, get_point_divisor
 from sqlalchemy import func, text
@@ -81,6 +87,30 @@ def debug_print(message, **kwargs):
     if debug:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{timestamp}] DEBUG: {message}", **kwargs)
+
+
+SEASONAL_WORLD_TYPE = "seasonal"
+
+
+def get_config_prefix(world_type: str) -> str:
+    """Return the GroupConfiguration key prefix for the given world type.
+
+    Seasonal submissions use config keys prefixed with "seasonal_" so groups
+    can define separate channel IDs, limits, and enabled flags for each mode.
+    """
+    return "seasonal_" if world_type == SEASONAL_WORLD_TYPE else ""
+
+
+def get_seasonal_model(submission_type: str):
+    """Return the seasonal ORM model class for the given submission type string."""
+    return {
+        "drop": SeasonalDrop,
+        "personal_best": SeasonalPersonalBestEntry,
+        "collection_log": SeasonalCollectionLogEntry,
+        "combat_achievement": SeasonalCombatAchievementEntry,
+        "pet": SeasonalPlayerPet,
+        "quest": SeasonalQuestCompletionEntry,
+    }.get(submission_type)
 
 
 global_footer = os.getenv("DISCORD_MESSAGE_FOOTER")
@@ -598,6 +628,37 @@ async def ensure_can_create(session, unique_id, submission_type) -> bool:
                 return session.query(QuestCompletionEntry).filter(
                     QuestCompletionEntry.unique_id == unique_id,
                     QuestCompletionEntry.date_added > cutoff,
+                ).first()
+            case "seasonal_drop":
+                return session.query(SeasonalDrop).filter(
+                    SeasonalDrop.unique_id == unique_id,
+                    SeasonalDrop.used_api == True,
+                    SeasonalDrop.date_added > cutoff,
+                ).first()
+            case "seasonal_pb":
+                return session.query(SeasonalPersonalBestEntry).filter(
+                    SeasonalPersonalBestEntry.unique_id == unique_id,
+                    SeasonalPersonalBestEntry.date_added > cutoff,
+                ).first()
+            case "seasonal_clog":
+                return session.query(SeasonalCollectionLogEntry).filter(
+                    SeasonalCollectionLogEntry.unique_id == unique_id,
+                    SeasonalCollectionLogEntry.date_added > cutoff,
+                ).first()
+            case "seasonal_ca":
+                return session.query(SeasonalCombatAchievementEntry).filter(
+                    SeasonalCombatAchievementEntry.unique_id == unique_id,
+                    SeasonalCombatAchievementEntry.date_added > cutoff,
+                ).first()
+            case "seasonal_pet":
+                return session.query(SeasonalPlayerPet).filter(
+                    SeasonalPlayerPet.unique_id == unique_id,
+                    SeasonalPlayerPet.date_added > cutoff,
+                ).first()
+            case "seasonal_quest":
+                return session.query(SeasonalQuestCompletionEntry).filter(
+                    SeasonalQuestCompletionEntry.unique_id == unique_id,
+                    SeasonalQuestCompletionEntry.date_added > cutoff,
                 ).first()
         return None
     

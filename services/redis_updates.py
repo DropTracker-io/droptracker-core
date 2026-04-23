@@ -78,31 +78,37 @@ class RedisLootTracker:
                     continue
         return datetime.now()
     
-    def _get_redis_keys(self, player_id: int, partition: int, drop_date: datetime = None) -> Dict[str, str]:
-        """Generate Redis keys for a player and partition"""
+    def _get_redis_keys(self, player_id: int, partition: int, drop_date: datetime = None, world_type: str = "main") -> Dict[str, str]:
+        """Generate Redis keys for a player and partition.
+
+        Seasonal submissions are stored under a separate key namespace
+        (``seasonal:player:...``) to keep them completely isolated from
+        main-world data.
+        """
+        ns = "seasonal:player" if world_type == "seasonal" else "player"
         base_keys = {
-            'total_items': f"player:{player_id}:{partition}:total_items",
-            'total_loot': f"player:{player_id}:{partition}:total_loot",
-            'recent_items': f"player:{player_id}:{partition}:recent_items",
-            'drop_history': f"player:{player_id}:{partition}:drop_history",
-            'high_value_items': f"player:{player_id}:{partition}:high_value_items",
-            'all_time_total_items': f"player:{player_id}:all:total_items",
-            'all_time_total_loot': f"player:{player_id}:all:total_loot",
-            'all_time_recent_items': f"player:{player_id}:all:recent_items",
-            'all_time_high_value_items': f"player:{player_id}:all:high_value_items"
+            'total_items': f"{ns}:{player_id}:{partition}:total_items",
+            'total_loot': f"{ns}:{player_id}:{partition}:total_loot",
+            'recent_items': f"{ns}:{player_id}:{partition}:recent_items",
+            'drop_history': f"{ns}:{player_id}:{partition}:drop_history",
+            'high_value_items': f"{ns}:{player_id}:{partition}:high_value_items",
+            'all_time_total_items': f"{ns}:{player_id}:all:total_items",
+            'all_time_total_loot': f"{ns}:{player_id}:all:total_loot",
+            'all_time_recent_items': f"{ns}:{player_id}:all:recent_items",
+            'all_time_high_value_items': f"{ns}:{player_id}:all:high_value_items"
         }
-        
+
         # Add daily keys if drop_date is provided
         if drop_date:
             daily_partition = drop_date.strftime('%Y%m%d')  # YYYYMMDD format
             base_keys.update({
-                'daily_total_items': f"player:{player_id}:daily:{daily_partition}:total_items",
-                'daily_total_loot': f"player:{player_id}:daily:{daily_partition}:total_loot",
-                'daily_recent_items': f"player:{player_id}:daily:{daily_partition}:recent_items",
-                'daily_drop_history': f"player:{player_id}:daily:{daily_partition}:drop_history",
-                'daily_high_value_items': f"player:{player_id}:daily:{daily_partition}:high_value_items"
+                'daily_total_items': f"{ns}:{player_id}:daily:{daily_partition}:total_items",
+                'daily_total_loot': f"{ns}:{player_id}:daily:{daily_partition}:total_loot",
+                'daily_recent_items': f"{ns}:{player_id}:daily:{daily_partition}:recent_items",
+                'daily_drop_history': f"{ns}:{player_id}:daily:{daily_partition}:drop_history",
+                'daily_high_value_items': f"{ns}:{player_id}:daily:{daily_partition}:high_value_items"
             })
-        
+
         return base_keys
     
     def _atomic_hash_update_script(self) -> str:
@@ -158,62 +164,70 @@ class RedisLootTracker:
         return result
         """
     
-    def add_to_player(self, player: Player, drop: Drop) -> bool:
+    def add_to_player(self, player: Player, drop, world_type: str = "main") -> bool:
         """
         Add a single drop to a player's Redis cache (incremental update).
         Thread-safe and atomic. Also updates leaderboards.
+
+        Pass ``world_type="seasonal"`` to write into the seasonal key namespace
+        so that seasonal and main-world data are stored completely separately.
         """
         with self._lock:
             if player.player_id in self._processing_players:
                 # Player is being force-updated, skip incremental update
                 return False
-            
+
             try:
-                result = self._add_drop_incremental(player.player_id, drop)
+                result = self._add_drop_incremental(player.player_id, drop, world_type=world_type)
                 if result:
                     # Update leaderboards after successful drop addition
                     partition = self._get_partition(drop.date_added)
                     total_value = drop.value * drop.quantity
-                    
+
                     # Get player's group IDs for group leaderboards
                     player_group_ids = [group.group_id for group in player.groups] if player.groups else []
-                    
+
                     # Update leaderboards incrementally using ZINCRBY instead of full recalculation
-                    self._increment_leaderboards(player.player_id, total_value, partition, player_group_ids)
-                
+                    self._increment_leaderboards(player.player_id, total_value, partition, player_group_ids, world_type=world_type)
+
                 return result
             except Exception as e:
-                print(f"Error adding drop {drop.drop_id} to player {player.player_id}: {e}")
+                print(f"Error adding drop {getattr(drop, 'drop_id', '?')} to player {player.player_id}: {e}")
                 return False
     
-    def _increment_leaderboards(self, player_id: int, value_delta: int, 
-                                partition: Optional[int] = None, group_ids: Optional[List[int]] = None):
+    def _increment_leaderboards(self, player_id: int, value_delta: int,
+                                partition: Optional[int] = None, group_ids: Optional[List[int]] = None,
+                                world_type: str = "main"):
         """
         Incrementally update leaderboards by adding value_delta to player's score.
         More efficient than full recalculation for individual drop additions.
+
+        Seasonal leaderboard keys are prefixed with ``seasonal:`` to keep them
+        separate from main-world rankings.
         """
         if partition is None:
             partition = self._get_partition()
-        
+
+        prefix = "seasonal:" if world_type == "seasonal" else ""
         pipeline = redis_client.client.pipeline(transaction=True)
-        
+
         # Update global leaderboard
-        global_key = f"leaderboard:{partition}"
+        global_key = f"{prefix}leaderboard:{partition}"
         pipeline.zincrby(global_key, value_delta, player_id)
-        
+
         # Update group leaderboards
         if group_ids:
             for group_id in group_ids:
-                group_key = f"leaderboard:{partition}:group:{group_id}"
+                group_key = f"{prefix}leaderboard:{partition}:group:{group_id}"
                 pipeline.zincrby(group_key, value_delta, player_id)
-        
+
         pipeline.execute()
     
-    def _add_drop_incremental(self, player_id: int, drop: Drop) -> bool:
+    def _add_drop_incremental(self, player_id: int, drop, world_type: str = "main") -> bool:
         """Internal method for incremental drop addition"""
         drop_date = self._coerce_drop_datetime(drop.date_added)
         partition = self._get_partition(drop_date)
-        keys = self._get_redis_keys(player_id, partition, drop_date)  # Pass drop_date for daily keys
+        keys = self._get_redis_keys(player_id, partition, drop_date, world_type=world_type)
         
         # Calculate drop values
         total_value = drop.value * drop.quantity

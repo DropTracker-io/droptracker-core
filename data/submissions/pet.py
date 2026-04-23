@@ -17,14 +17,19 @@ from .common import (
     debug_print,
     GroupConfiguration,
     award_points_to_player,
+    get_config_prefix,
+    SEASONAL_WORLD_TYPE,
+    SeasonalPlayerPet,
 )
 
 
-async def pet_processor(pet_data, external_session=None):
-    debug_print(f"=== PET PROCESSOR START ===")
+async def pet_processor(pet_data, external_session=None, world_type="main"):
+    debug_print(f"=== PET PROCESSOR START (world_type={world_type}) ===")
     debug_print(f"Raw pet data: {pet_data}")
     debug_print(f"External session provided: {external_session is not None}")
 
+    config_prefix = get_config_prefix(world_type)
+    is_seasonal = world_type == SEASONAL_WORLD_TYPE
     session, use_external_session = select_session_and_flag(external_session)
     debug_print(f"Using external session: {use_external_session}")
 
@@ -56,7 +61,8 @@ async def pet_processor(pet_data, external_session=None):
     unique_id = pet_data.get("guid", None)
     video_key = pet_data.get("video_key")
     notice = ""
-    if not await ensure_can_create(session, unique_id, "pet"):
+    dedup_type = "seasonal_pet" if is_seasonal else "pet"
+    if not await ensure_can_create(session, unique_id, dedup_type):
         print(
             f"Pet entry with Unique ID {unique_id} already exists in the database, aborting"
         )
@@ -96,12 +102,13 @@ async def pet_processor(pet_data, external_session=None):
 
     from db import PlayerPet, User
 
+    pet_model = SeasonalPlayerPet if is_seasonal else PlayerPet
     existing_pet = None
     new_pet = None
     if pet_item_id:
         existing_pet = (
-            session.query(PlayerPet)
-            .filter(PlayerPet.player_id == player_id, PlayerPet.item_id == pet_item_id)
+            session.query(pet_model)
+            .filter(pet_model.player_id == player_id, pet_model.item_id == pet_item_id)
             .first()
         )
 
@@ -110,7 +117,7 @@ async def pet_processor(pet_data, external_session=None):
     if is_new_pet and pet_item_id:
         debug_print(f"Creating new pet entry for {player_name}: {pet_name}")
         try:
-            new_pet = PlayerPet(player_id=player_id, item_id=pet_item_id, pet_name=pet_name, unique_id=unique_id, date_added=datetime.now())
+            new_pet = pet_model(player_id=player_id, item_id=pet_item_id, pet_name=pet_name, unique_id=unique_id, date_added=datetime.now())
             session.add(new_pet)
             session.commit()
             debug_print(f"Pet entry created successfully")
@@ -150,7 +157,7 @@ async def pet_processor(pet_data, external_session=None):
             )
     elif downloaded:
         dl_path = image_url
-    if is_new_pet:
+    if is_new_pet and not is_seasonal:
         award_points_to_player(
             player_id=player_id, amount=50, source=f"Pet: {pet_name}", expires_in_days=60
         )
@@ -166,7 +173,7 @@ async def pet_processor(pet_data, external_session=None):
                 session.query(GroupConfiguration)
                 .filter(
                     GroupConfiguration.group_id == group_id,
-                    GroupConfiguration.config_key == "notify_pets",
+                    GroupConfiguration.config_key == f"{config_prefix}notify_pets",
                 )
                 .first()
             )
@@ -176,33 +183,38 @@ async def pet_processor(pet_data, external_session=None):
                 "total_points_awarded": 0,
                 "awarded_members": [],
             }
-            async def perform_point_check():
-                nonlocal group_points_result
-                from .common import check_group_point_system_active
-                if check_group_point_system_active(group_id, session):
-                    from .point_awards import check_and_award_points
-                    pet_entry_id = None
-                    if new_pet is not None:
-                        pet_entry_id = getattr(new_pet, "id", None)
-                    elif existing_pet is not None:
-                        pet_entry_id = getattr(existing_pet, "id", None)
-
-                    group_points_result = await check_and_award_points(
-                        "pet",
-                        group_id,
-                        player_id,
-                        1,
-                        entry_id=pet_entry_id,
-                        submission_timestamp=pet_data.get("timestamp"),
-                        external_session=session,
-                    )
-                else:
-                    pass # print("Group does not have custom point system active")
-            try:
-                await perform_point_check()
-            except Exception as e:
-                print(f"Couldn't perform check against group point awards... e: {e}")
+            if is_seasonal:
+                # TODO: award group points for seasonal pets once award_points_in_leagues
+                # config key is supported.
                 pass
+            else:
+                async def perform_point_check():
+                    nonlocal group_points_result
+                    from .common import check_group_point_system_active
+                    if check_group_point_system_active(group_id, session):
+                        from .point_awards import check_and_award_points
+                        pet_entry_id = None
+                        if new_pet is not None:
+                            pet_entry_id = getattr(new_pet, "id", None)
+                        elif existing_pet is not None:
+                            pet_entry_id = getattr(existing_pet, "id", None)
+
+                        group_points_result = await check_and_award_points(
+                            "pet",
+                            group_id,
+                            player_id,
+                            1,
+                            entry_id=pet_entry_id,
+                            submission_timestamp=pet_data.get("timestamp"),
+                            external_session=session,
+                        )
+                    else:
+                        pass
+                try:
+                    await perform_point_check()
+                except Exception as e:
+                    print(f"Couldn't perform check against group point awards... e: {e}")
+                    pass
             debug_print(
                 f"Pet notify config for group {group_id}: {pet_notify_config.config_value if pet_notify_config else 'None'}"
             )
@@ -236,6 +248,7 @@ async def pet_processor(pet_data, external_session=None):
                     "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
                     "group_points_member_count": len(awarded_members),
                     "group_points_members_awarded": awarded_members,
+                    "world_type": world_type,
                 }
                 if player and player.user:
                     user = session.query(User).filter(User.user_id == player.user_id).first()

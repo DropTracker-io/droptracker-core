@@ -90,7 +90,7 @@ class DatabaseOperations:
         pass
 
     async def create_drop_object(self, item_id, player_id, date_received, npc_id, value, quantity, image_url: str = "", authed: bool = False,
-                                attachment_url: str = "", attachment_type: str = "", add_to_queue: bool = True, used_api: bool = False, unique_id: str = None, existing_session=None):
+                                attachment_url: str = "", attachment_type: str = "", add_to_queue: bool = True, used_api: bool = False, unique_id: str = None, existing_session=None, model_class=None):
         """
         Create a drop object and optionally add it to the processing queue.
         
@@ -169,8 +169,9 @@ class DatabaseOperations:
             image_url = image_url or ""
         # Initialize image URL with the provided one
 
-        # Create the drop object
-        newdrop = Drop(item_id=item_id,
+        # Create the drop object using the provided model class (default: Drop)
+        drop_model = model_class if model_class is not None else Drop
+        newdrop = drop_model(item_id=item_id,
                     player_id=player_id,
                     date_added=date_received_value,
                     date_updated=date_received_value,
