@@ -16,14 +16,19 @@ from .common import (
     debug_print,
     GroupConfiguration,
     award_points_to_player,
+    get_config_prefix,
+    SEASONAL_WORLD_TYPE,
+    SeasonalCollectionLogEntry,
 )
 
 
-async def clog_processor(clog_data, external_session=None):
-    debug_print(f"=== CLOG PROCESSOR START ===")
+async def clog_processor(clog_data, external_session=None, world_type="main"):
+    debug_print(f"=== CLOG PROCESSOR START (world_type={world_type}) ===")
     debug_print(f"Raw clog data: {clog_data}")
     debug_print(f"External session provided: {external_session is not None}")
 
+    config_prefix = get_config_prefix(world_type)
+    is_seasonal = world_type == SEASONAL_WORLD_TYPE
     debug_test = False
     player_name = clog_data.get("player_name", clog_data.get("player", None))
     if player_name == "joelhalen":
@@ -54,7 +59,8 @@ async def clog_processor(clog_data, external_session=None):
     notice = ""
     item = await ensure_item_by_name(session, item_name)
 
-    if not await ensure_can_create(session, unique_id, "clog"):
+    dedup_type = "seasonal_clog" if is_seasonal else "clog"
+    if not await ensure_can_create(session, unique_id, dedup_type):
         print(
             f"Collection Log entry with Unique ID {unique_id} already exists in the database, aborting"
         )
@@ -91,11 +97,12 @@ async def clog_processor(clog_data, external_session=None):
 
     from db import CollectionLogEntry, User, UserConfiguration
 
+    clog_model = SeasonalCollectionLogEntry if is_seasonal else CollectionLogEntry
     clog_entry = (
-        session.query(CollectionLogEntry)
+        session.query(clog_model)
         .filter(
-            CollectionLogEntry.player_id == player_id,
-            CollectionLogEntry.item_id == item_id,
+            clog_model.player_id == player_id,
+            clog_model.item_id == item_id,
         )
         .first()
     )
@@ -105,7 +112,7 @@ async def clog_processor(clog_data, external_session=None):
         print(f"We did not find an npc for {npc_name}, aborting")
         return
     if not clog_entry:
-        clog_entry = CollectionLogEntry(
+        clog_entry = clog_model(
             player_id=player_id,
             reported_slots=reported_slots,
             item_id=item_id,
@@ -156,12 +163,13 @@ async def clog_processor(clog_data, external_session=None):
 
     if is_new_clog:
         print("New collection log -- Creating notification")
-        award_points_to_player(
-            player_id=player_id,
-            amount=5,
-            source=f"Collection Log slot: {item_name}",
-            expires_in_days=60,
-        )
+        if not is_seasonal:
+            award_points_to_player(
+                player_id=player_id,
+                amount=5,
+                source=f"Collection Log slot: {item_name}",
+                expires_in_days=60,
+            )
         player_groups = get_player_groups_with_global(session, player)
         for group in player_groups:
             print(f"CLOG: Checking group: {group}")
@@ -172,32 +180,37 @@ async def clog_processor(clog_data, external_session=None):
                 "total_points_awarded": 0,
                 "awarded_members": [],
             }
-            async def perform_point_check():
-                nonlocal group_points_result
-                from .common import check_group_point_system_active
-                if check_group_point_system_active(group_id, session):
-                    from .point_awards import check_and_award_points
-                    group_points_result = await check_and_award_points(
-                        "clog",
-                        group_id,
-                        player_id,
-                        1,
-                        entry_id=getattr(clog_entry, "log_id", None),
-                        submission_timestamp=clog_data.get("timestamp"),
-                        external_session=session,
-                    )
-                else:
-                    pass # print("Group does not have custom point system active")
-            try:
-                await perform_point_check()
-            except Exception as e:
-                print(f"Couldn't perform check against group point awards... e: {e}")
+            if is_seasonal:
+                # TODO: award group points for seasonal collection log entries once
+                # award_points_in_leagues config key is supported.
                 pass
+            else:
+                async def perform_point_check():
+                    nonlocal group_points_result
+                    from .common import check_group_point_system_active
+                    if check_group_point_system_active(group_id, session):
+                        from .point_awards import check_and_award_points
+                        group_points_result = await check_and_award_points(
+                            "clog",
+                            group_id,
+                            player_id,
+                            1,
+                            entry_id=getattr(clog_entry, "log_id", None),
+                            submission_timestamp=clog_data.get("timestamp"),
+                            external_session=session,
+                        )
+                    else:
+                        pass
+                try:
+                    await perform_point_check()
+                except Exception as e:
+                    print(f"Couldn't perform check against group point awards... e: {e}")
+                    pass
             clog_notify_config = (
                 session.query(GroupConfiguration)
                 .filter(
                     GroupConfiguration.group_id == group_id,
-                    GroupConfiguration.config_key == "notify_clogs",
+                    GroupConfiguration.config_key == f"{config_prefix}notify_clogs",
                 )
                 .first()
             )
@@ -224,6 +237,7 @@ async def clog_processor(clog_data, external_session=None):
                     "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
                     "group_points_member_count": len(group_points_result.get("awarded_members", []) or []),
                     "group_points_members_awarded": group_points_result.get("awarded_members", []) or [],
+                    "world_type": world_type,
                 }
                 await create_notification(
                     "clog",

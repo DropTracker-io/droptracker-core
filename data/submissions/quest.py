@@ -17,6 +17,9 @@ from .common import (
     ensure_can_create,
     debug_print,
     GroupConfiguration,
+    get_config_prefix,
+    SEASONAL_WORLD_TYPE,
+    SeasonalQuestCompletionEntry,
 )
 
 
@@ -29,7 +32,7 @@ def _safe_int(value):
         return None
 
 
-async def quest_processor(quest_data, external_session=None):
+async def quest_processor(quest_data, external_session=None, world_type="main"):
     """
     Process quest completion submissions.
 
@@ -44,9 +47,11 @@ async def quest_processor(quest_data, external_session=None):
       - image_url / image_path (optional)
       - video_key / video_url (optional; supported for consistency)
     """
-    print("=== QUEST PROCESSOR START ===")
+    print(f"=== QUEST PROCESSOR START (world_type={world_type}) ===")
     print(f"[QUEST] Raw quest data: {quest_data}")
 
+    config_prefix = get_config_prefix(world_type)
+    is_seasonal = world_type == SEASONAL_WORLD_TYPE
     session, use_external_session = select_session_and_flag(external_session)
 
     player_name = quest_data.get("player_name") or quest_data.get("player")
@@ -82,7 +87,8 @@ async def quest_processor(quest_data, external_session=None):
         return SubmissionResponse(success=False, message="Missing player_name or acc_hash.")
     if not quest_name:
         return SubmissionResponse(success=False, message="Missing quest_name.")
-    if unique_id and not await ensure_can_create(session, unique_id, "quest"):
+    dedup_type = "seasonal_quest" if is_seasonal else "quest"
+    if unique_id and not await ensure_can_create(session, unique_id, dedup_type):
         return SubmissionResponse(success=True, message="Quest already processed (duplicate guid).")
 
     # Authenticate player
@@ -95,7 +101,8 @@ async def quest_processor(quest_data, external_session=None):
         return SubmissionResponse(success=False, message="Player authentication failed.")
 
     player_id = player.player_id
-    quest_entry = QuestCompletionEntry(
+    quest_model = SeasonalQuestCompletionEntry if is_seasonal else QuestCompletionEntry
+    quest_entry = quest_model(
         player_id=player_id,
         quest_name=quest_name,
         quests_completed=_safe_int(quests_completed),
@@ -132,7 +139,7 @@ async def quest_processor(quest_data, external_session=None):
             session.query(GroupConfiguration)
             .filter(
                 GroupConfiguration.group_id == group_id,
-                GroupConfiguration.config_key == "notify_quests",
+                GroupConfiguration.config_key == f"{config_prefix}notify_quests",
             )
             .first()
         )
@@ -169,6 +176,7 @@ async def quest_processor(quest_data, external_session=None):
             "image_url": image_url or "",
             "video_key": video_key,
             "video_url": video_url,
+            "world_type": world_type,
         }
         print(f"Notification data: {notification_data}")
 

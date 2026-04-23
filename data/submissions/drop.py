@@ -26,6 +26,9 @@ from .common import (
     award_points_to_player,
     player_list,
     redis_updates,
+    get_config_prefix,
+    SEASONAL_WORLD_TYPE,
+    SeasonalDrop,
 )
 
 
@@ -61,10 +64,10 @@ def _normalize_incoming_players(players_included):
     return None
 
 
-async def drop_processor(drop_data, external_session=None):
+async def drop_processor(drop_data, external_session=None, world_type="main"):
     """Process a drop submission and create notifications when appropriate."""
 
-    debug_print(f"=== DROP PROCESSOR START ===")
+    debug_print(f"=== DROP PROCESSOR START (world_type={world_type}) ===")
     debug_print(f"Raw drop data: {drop_data}")
     debug_print(f"External session provided: {external_session is not None}")
 
@@ -111,10 +114,14 @@ async def drop_processor(drop_data, external_session=None):
             f"normalized_type={type(players_included).__name__} normalized_value={players_included}"
         )
 
+        config_prefix = get_config_prefix(world_type)
+        is_seasonal = world_type == SEASONAL_WORLD_TYPE
+        dedup_type = "seasonal_drop" if is_seasonal else "drop"
+
         # dedupe via NotifiedSubmission cache in caller; keep local prevention via ensure_can_create
         from .common import ensure_can_create
 
-        if not await ensure_can_create(session, guid, "drop"):
+        if not await ensure_can_create(session, guid, dedup_type):
             return
 
         debug_print(
@@ -223,6 +230,7 @@ async def drop_processor(drop_data, external_session=None):
             used_api=used_api,
             unique_id=guid,
             existing_session=session if use_external_session else None,
+            model_class=SeasonalDrop if is_seasonal else None,
         )
         
 
@@ -235,7 +243,7 @@ async def drop_processor(drop_data, external_session=None):
         log_checkpoint("create_drop_object")
         try:
             debug_print("Updating player in redis...")
-            redis_updates.add_to_player(player, drop)
+            redis_updates.add_to_player(player, drop, world_type=world_type)
             debug_print("Player redis update completed")
         except Exception as e:
             debug_print(f"Error updating player in redis: {e}")
@@ -256,7 +264,10 @@ async def drop_processor(drop_data, external_session=None):
                 .filter(
                     GroupConfiguration.group_id.in_(group_ids),
                     GroupConfiguration.config_key.in_(
-                        ["minimum_value_to_notify", "send_stacks_of_items"]
+                        [
+                            f"{config_prefix}minimum_value_to_notify",
+                            f"{config_prefix}send_stacks_of_items",
+                        ]
                     ),
                 )
                 .all()
@@ -302,56 +313,62 @@ async def drop_processor(drop_data, external_session=None):
             # print(f"Processing group: {group.group_name} (ID: {group_id})")
             """ Here we can process the drop to determine if it needs to be calculated for a point award (group-specific points) """
 
-            async def perform_point_check():
-                nonlocal has_awarded_points, group_points_result
-                from .common import check_group_point_system_active
-                point_system_active = check_group_point_system_active(group_id, session)
-                debug_print(
-                    f"Group {group_id} point check start: active={point_system_active}, "
-                    f"players_included={players_included}, item_id={item_id}, npc_id={npc_id}, "
-                    f"value={int(drop.value) * int(drop.quantity)}, quantity={int(drop.quantity)}"
-                )
-                if point_system_active:
-                    from .point_awards import check_and_award_points
-                    group_points_result = await check_and_award_points(
-                        "drop",
-                        group_id,
-                        player_id,
-                        int(drop.value) * int(drop.quantity),
-                        players_included=players_included,
-                        item_id=item_id,
-                        npc_id=npc_id,
-                        quantity=int(drop.quantity),
-                        entry_id=getattr(drop, "drop_id", None),
-                        submission_guid=guid,
-                        submission_timestamp=drop_data.get("timestamp"),
-                        external_session=session,
-                    )
-                    debug_print(
-                        f"Group {group_id} point check result: receiver_points_awarded="
-                        f"{group_points_result.get('receiver_points_awarded', 0)} "
-                        f"receiver_current_points={group_points_result.get('receiver_current_points', 0)} "
-                        f"total_points_awarded={group_points_result.get('total_points_awarded', 0)} "
-                        f"awarded_members={group_points_result.get('awarded_members', [])}"
-                    )
-                    if int(group_points_result.get("total_points_awarded", 0)) > 0:
-                        has_awarded_points = True
-                else:
-                    pass # print("Group does not have custom point system active")
-
-            try:
-                await perform_point_check()
-            except Exception as e:
-                print(f"Couldn't perform check against group point awards... e: {e}")
+            if is_seasonal:
+                # TODO: award group points for seasonal drops once award_points_in_leagues
+                # config key is supported. Check group config for "award_points_in_leagues"
+                # before calling check_and_award_points with the seasonal entry_id.
                 pass
-            min_value_raw = group_config_values.get((group_id, "minimum_value_to_notify"))
+            else:
+                async def perform_point_check():
+                    nonlocal has_awarded_points, group_points_result
+                    from .common import check_group_point_system_active
+                    point_system_active = check_group_point_system_active(group_id, session)
+                    debug_print(
+                        f"Group {group_id} point check start: active={point_system_active}, "
+                        f"players_included={players_included}, item_id={item_id}, npc_id={npc_id}, "
+                        f"value={int(drop.value) * int(drop.quantity)}, quantity={int(drop.quantity)}"
+                    )
+                    if point_system_active:
+                        from .point_awards import check_and_award_points
+                        group_points_result = await check_and_award_points(
+                            "drop",
+                            group_id,
+                            player_id,
+                            int(drop.value) * int(drop.quantity),
+                            players_included=players_included,
+                            item_id=item_id,
+                            npc_id=npc_id,
+                            quantity=int(drop.quantity),
+                            entry_id=getattr(drop, "drop_id", None),
+                            submission_guid=guid,
+                            submission_timestamp=drop_data.get("timestamp"),
+                            external_session=session,
+                        )
+                        debug_print(
+                            f"Group {group_id} point check result: receiver_points_awarded="
+                            f"{group_points_result.get('receiver_points_awarded', 0)} "
+                            f"receiver_current_points={group_points_result.get('receiver_current_points', 0)} "
+                            f"total_points_awarded={group_points_result.get('total_points_awarded', 0)} "
+                            f"awarded_members={group_points_result.get('awarded_members', [])}"
+                        )
+                        if int(group_points_result.get("total_points_awarded", 0)) > 0:
+                            has_awarded_points = True
+                    else:
+                        pass # print("Group does not have custom point system active")
+
+                try:
+                    await perform_point_check()
+                except Exception as e:
+                    print(f"Couldn't perform check against group point awards... e: {e}")
+                    pass
+            min_value_raw = group_config_values.get((group_id, f"{config_prefix}minimum_value_to_notify"))
             try:
                 min_value_to_notify = int(min_value_raw) if min_value_raw is not None else 2500000
             except (TypeError, ValueError):
                 min_value_to_notify = 2500000
             debug_print(f"Group {group_id} minimum value to notify: {min_value_to_notify}")
 
-            send_stacks_value = group_config_values.get((group_id, "send_stacks_of_items"))
+            send_stacks_value = group_config_values.get((group_id, f"{config_prefix}send_stacks_of_items"))
             send_stacks = str(send_stacks_value).lower() in ("1", "true") if send_stacks_value is not None else False
             debug_print(
                 f"Group {group_id} config snapshot: minimum_value_to_notify_raw={min_value_raw}, "
@@ -376,20 +393,21 @@ async def drop_processor(drop_data, external_session=None):
                         continue ## Skipping this group in the loop; as there is no image despite the group's requirement of one
 
                 debug_print(f"Notification criteria met for group {group_id}")
-                point_divisor = get_point_divisor()
-                if group_id != 2 and has_awarded_points == False and int(drop_value) > point_divisor:
-                    print(
-                        f"Awarding points to {player_name} for drop {item_name} from {npc_name}"
-                    )
-                    has_awarded_points = True
-                    points_to_award = int(drop_value / point_divisor)
-                    # Global points award (not group-scoped)
-                    award_points_to_player(
-                        player_id=player_id,
-                        amount=points_to_award,
-                        source=f"Drop: {item_name} from {npc_name}",
-                        expires_in_days=60,
-                    )
+                if not is_seasonal:
+                    point_divisor = get_point_divisor()
+                    if group_id != 2 and has_awarded_points == False and int(drop_value) > point_divisor:
+                        print(
+                            f"Awarding points to {player_name} for drop {item_name} from {npc_name}"
+                        )
+                        has_awarded_points = True
+                        points_to_award = int(drop_value / point_divisor)
+                        # Global points award (not group-scoped)
+                        award_points_to_player(
+                            player_id=player_id,
+                            amount=points_to_award,
+                            source=f"Drop: {item_name} from {npc_name}",
+                            expires_in_days=60,
+                        )
                 notification_data = {
                     "drop_id": drop.drop_id,
                     "guid": guid,
@@ -410,6 +428,7 @@ async def drop_processor(drop_data, external_session=None):
                     "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
                     "group_points_member_count": len(awarded_members),
                     "group_points_members_awarded": awarded_members,
+                    "world_type": world_type,
                 }
                 if group_id > 2:
                     sent_group_notifications.append(group.group_name)

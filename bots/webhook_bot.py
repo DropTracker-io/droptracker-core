@@ -73,28 +73,30 @@ def _normalize_submission_type(raw_submission_type):
             return normalized
 
 
-def _dispatch_non_main_submission(world_type, submission_type):
-    """Route non-main submissions by type (currently no-op handlers)."""
-    match world_type:
-        case "seasonal":
-            match submission_type:
-                case (
-                    "drop"
-                    | "collection_log"
-                    | "personal_best"
-                    | "combat_achievement"
-                    | "experience"
-                    | "quest"
-                    | "pet"
-                    | "adventure_log"
-                ):
-                    # Seasonal routing placeholder for future handlers.
-                    pass
-                case _:
-                    pass
+async def _dispatch_seasonal_submission(submission_type, embed_data, session):
+    """Route seasonal submissions to their respective processors with world_type='seasonal'."""
+    match submission_type:
+        case "drop":
+            from data.submissions import drop_processor
+            return await drop_processor(embed_data, external_session=session, world_type="seasonal")
+        case "collection_log":
+            from data.submissions import clog_processor
+            return await clog_processor(embed_data, external_session=session, world_type="seasonal")
+        case "personal_best":
+            from data.submissions import pb_processor
+            return await pb_processor(embed_data, external_session=session, world_type="seasonal")
+        case "combat_achievement":
+            from data.submissions import ca_processor
+            return await ca_processor(embed_data, external_session=session, world_type="seasonal")
+        case "pet":
+            from data.submissions import pet_processor
+            return await pet_processor(embed_data, external_session=session, world_type="seasonal")
+        case "quest":
+            from data.submissions import quest_processor
+            return await quest_processor(embed_data, external_session=session, world_type="seasonal")
         case _:
-            # Ignore unsupported world types for now.
-            pass
+            # experience and adventure_log not yet tracked for seasonal worlds
+            return None
 
 RETRYABLE_DB_ERROR_STRINGS = (
     "server has gone away",
@@ -260,8 +262,10 @@ async def process_submission_with_session(submission_type, embed_data):
     session = Session()
     try:
         success = False
-        if world_type != MAIN_WORLD_TYPE:
-            _dispatch_non_main_submission(world_type, normalized_submission_type)
+        if world_type == "seasonal":
+            result = await _dispatch_seasonal_submission(normalized_submission_type, embed_data, session)
+            success = True
+        elif world_type != MAIN_WORLD_TYPE:
             result = None
             success = True
         elif normalized_submission_type == "collection_log":
