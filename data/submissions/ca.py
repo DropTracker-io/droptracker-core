@@ -14,14 +14,19 @@ from .common import (
     debug_print,
     GroupConfiguration,
     is_truthy_config,
+    get_config_prefix,
+    SEASONAL_WORLD_TYPE,
+    SeasonalCombatAchievementEntry,
 )
 
 
-async def ca_processor(ca_data, external_session=None):
-    debug_print(f"=== CA PROCESSOR START ===")
+async def ca_processor(ca_data, external_session=None, world_type="main"):
+    debug_print(f"=== CA PROCESSOR START (world_type={world_type}) ===")
     debug_print(f"Raw CA data: {ca_data}")
     debug_print(f"External session provided: {external_session is not None}")
 
+    config_prefix = get_config_prefix(world_type)
+    is_seasonal = world_type == SEASONAL_WORLD_TYPE
     has_xf_entry = False
     session, use_external_session = select_session_and_flag(external_session)
     debug_print(f"Using external session: {use_external_session}")
@@ -63,18 +68,20 @@ async def ca_processor(ca_data, external_session=None):
         debug_print("User failed auth check")
         return
 
-    if not await ensure_can_create(session, unique_id, "ca"):
+    dedup_type = "seasonal_ca" if is_seasonal else "ca"
+    if not await ensure_can_create(session, unique_id, dedup_type):
         debug_print(
             f"Combat Achievement entry with Unique ID {unique_id} already exists in the database, aborting"
         )
         return
     from db import CombatAchievementEntry
 
+    ca_model = SeasonalCombatAchievementEntry if is_seasonal else CombatAchievementEntry
     ca_entry = (
-        session.query(CombatAchievementEntry)
+        session.query(ca_model)
         .filter(
-            CombatAchievementEntry.player_id == player_id,
-            CombatAchievementEntry.task_name == task_name,
+            ca_model.player_id == player_id,
+            ca_model.task_name == task_name,
         )
         .first()
     )
@@ -86,7 +93,7 @@ async def ca_processor(ca_data, external_session=None):
             + str(tier)
         )
         dl_path = ""
-        ca_entry = CombatAchievementEntry(
+        ca_entry = ca_model(
             player_id=player_id,
             task_name=task_name,
             date_added=datetime.now(),
@@ -155,22 +162,23 @@ async def ca_processor(ca_data, external_session=None):
             ca_tier = "grandmaster_ca"
         case _:
             points = 1
-    try:
-        award_points_to_player(
-            player_id=player_id,
-            amount=points,
-            source=f"Combat Achievement: {task_name}",
-            expires_in_days=60,
-        )
-    except Exception as e:
-        debug_print(f"Couldn't award points to player: {e}")
-        from .common import app_logger
-        app_logger.log(
-            log_type="error",
-            data=f"Couldn't award points to player: {e}",
-            app_name="core",
-            description="ca_processor",
-        )
+    if not is_seasonal:
+        try:
+            award_points_to_player(
+                player_id=player_id,
+                amount=points,
+                source=f"Combat Achievement: {task_name}",
+                expires_in_days=60,
+            )
+        except Exception as e:
+            debug_print(f"Couldn't award points to player: {e}")
+            from .common import app_logger
+            app_logger.log(
+                log_type="error",
+                data=f"Couldn't award points to player: {e}",
+                app_name="core",
+                description="ca_processor",
+            )
     if is_new_ca:
         debug_print("New CA entry, creating notification")
         player_groups = get_player_groups_with_global(session, player)
@@ -183,28 +191,31 @@ async def ca_processor(ca_data, external_session=None):
                 "total_points_awarded": 0,
                 "awarded_members": [],
             }
-            # Group-specific point awards (custom points system)
-            try:
-                from .common import check_group_point_system_active
-                if check_group_point_system_active(group_id, session):
-                    from .point_awards import check_and_award_points
-                    group_points_result = await check_and_award_points(
-                        ca_tier,
-                        group_id,
-                        player_id,
-                        1,
-                        entry_id=getattr(ca_entry, "id", None),
-                        submission_timestamp=ca_data.get("timestamp"),
-                        external_session=session,
-                    )
-                    
-            except Exception as e:
-                print(f"Couldn't perform check against group point awards... e: {e}")
+            if is_seasonal:
+                # TODO: award group points for seasonal CAs once award_points_in_leagues
+                # config key is supported.
+                pass
+            else:
+                try:
+                    from .common import check_group_point_system_active
+                    if check_group_point_system_active(group_id, session):
+                        from .point_awards import check_and_award_points
+                        group_points_result = await check_and_award_points(
+                            ca_tier,
+                            group_id,
+                            player_id,
+                            1,
+                            entry_id=getattr(ca_entry, "id", None),
+                            submission_timestamp=ca_data.get("timestamp"),
+                            external_session=session,
+                        )
+                except Exception as e:
+                    print(f"Couldn't perform check against group point awards... e: {e}")
             ca_notify_config = (
                 session.query(GroupConfiguration)
                 .filter(
                     GroupConfiguration.group_id == group_id,
-                    GroupConfiguration.config_key == "notify_cas",
+                    GroupConfiguration.config_key == f"{config_prefix}notify_cas",
                 )
                 .first()
             )
@@ -218,7 +229,7 @@ async def ca_processor(ca_data, external_session=None):
                 min_tier = (
                     session.query(GroupConfiguration.config_value)
                     .filter(
-                        GroupConfiguration.config_key == "min_ca_tier_to_notify",
+                        GroupConfiguration.config_key == f"{config_prefix}min_ca_tier_to_notify",
                         GroupConfiguration.group_id == group_id,
                     )
                     .first()
@@ -256,6 +267,7 @@ async def ca_processor(ca_data, external_session=None):
                                 "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
                                 "group_points_member_count": len(group_points_result.get("awarded_members", []) or []),
                                 "group_points_members_awarded": group_points_result.get("awarded_members", []) or [],
+                                "world_type": world_type,
                             }
                             if player and player.user:
                                 user = session.query(type(player.user)).filter(type(player.user).user_id == player.user_id).first()

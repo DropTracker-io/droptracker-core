@@ -41,6 +41,12 @@ from .premium_features import (
 from .tickets import Ticket
 from .group_points import PlayerPoints, GroupPointConfig, GroupPointMods, GroupPointTimedEvent, GroupPointBlacklist
 from .video_upload import VideoUpload
+from .seasonal_drop import SeasonalDrop
+from .seasonal_personal_best import SeasonalPersonalBestEntry
+from .seasonal_collection_log import SeasonalCollectionLogEntry
+from .seasonal_combat_achievement import SeasonalCombatAchievementEntry
+from .seasonal_pet import SeasonalPlayerPet
+from .seasonal_quest_completion import SeasonalQuestCompletionEntry
 
 
 def get_current_partition() -> int:
@@ -108,4 +114,10 @@ __all__ = [
     "GroupPointTimedEvent",
     "GroupPointBlacklist",
     "VideoUpload",
+    "SeasonalDrop",
+    "SeasonalPersonalBestEntry",
+    "SeasonalCollectionLogEntry",
+    "SeasonalCombatAchievementEntry",
+    "SeasonalPlayerPet",
+    "SeasonalQuestCompletionEntry",
 ]

@@ -46,28 +46,24 @@ def _normalize_submission_type(raw_submission_type):
             return normalized
 
 
-def _dispatch_non_main_submission(world_type, submission_type):
-    """Route non-main submissions by type (currently no-op handlers)."""
-    match world_type:
-        case "seasonal":
-            match submission_type:
-                case (
-                    "drop"
-                    | "collection_log"
-                    | "personal_best"
-                    | "combat_achievement"
-                    | "experience"
-                    | "quest"
-                    | "pet"
-                    | "adventure_log"
-                ):
-                    # Seasonal routing placeholder for future handlers.
-                    pass
-                case _:
-                    pass
+async def _dispatch_seasonal_submission(submission_type, processed_data, db_session):
+    """Route seasonal submissions to their respective processors with world_type='seasonal'."""
+    match submission_type:
+        case "drop" | "other" | "npc":
+            return await submissions.drop_processor(processed_data, external_session=db_session, world_type="seasonal")
+        case "collection_log":
+            return await submissions.clog_processor(processed_data, external_session=db_session, world_type="seasonal")
+        case "personal_best" | "kill_time" | "npc_kill":
+            return await submissions.pb_processor(processed_data, external_session=db_session, world_type="seasonal")
+        case "combat_achievement":
+            return await submissions.ca_processor(processed_data, external_session=db_session, world_type="seasonal")
+        case "pet":
+            return await submissions.pet_processor(processed_data, external_session=db_session, world_type="seasonal")
+        case "quest" | "quest_completion":
+            return await submissions.quest_processor(processed_data, external_session=db_session, world_type="seasonal")
         case _:
-            # Ignore all unsupported world types for now.
-            pass
+            # experience and adventure_log not yet tracked for seasonal worlds
+            return None
 
 
 async def _link_video_to_submission(processed_data, db_session):
@@ -225,11 +221,15 @@ async def _process_webhook_request(req_start):
                         world_type = _normalize_world_type(processed_data.get("world_type"))
                         processed_data["world_type"] = world_type
 
-                        if world_type != MAIN_WORLD_TYPE:
-                            _dispatch_non_main_submission(
-                                world_type,
+                        if world_type == "seasonal":
+                            response = await _dispatch_seasonal_submission(
                                 _normalize_submission_type(submission_type),
+                                processed_data,
+                                db_session,
                             )
+                            db_session.commit()
+                            continue
+                        elif world_type != MAIN_WORLD_TYPE:
                             continue
 
                         if image_file:

@@ -19,16 +19,21 @@ from .common import (
     debug_print,
     GroupConfiguration,
     is_truthy_config,
+    get_config_prefix,
+    SEASONAL_WORLD_TYPE,
+    SeasonalPersonalBestEntry,
 )
 
 
-async def pb_processor(pb_data, external_session=None):
-    debug_print(f"=== PB PROCESSOR START ===")
+async def pb_processor(pb_data, external_session=None, world_type="main"):
+    debug_print(f"=== PB PROCESSOR START (world_type={world_type}) ===")
     debug_print(f"Raw PB data: {pb_data}")
     debug_print(f"External session provided: {external_session is not None}")
 
     session, use_external_session = select_session_and_flag(external_session)
     debug_print(f"Using external session: {use_external_session}")
+    config_prefix = get_config_prefix(world_type)
+    is_seasonal = world_type == SEASONAL_WORLD_TYPE
     player_name = pb_data["player_name"]
     account_hash = pb_data["acc_hash"]
     boss_name = pb_data.get("npc_name", pb_data.get("boss_name", None))
@@ -56,7 +61,8 @@ async def pb_processor(pb_data, external_session=None):
 
     notice = ""
 
-    if not await ensure_can_create(session, unique_id, "pb"):
+    dedup_type = "seasonal_pb" if is_seasonal else "pb"
+    if not await ensure_can_create(session, unique_id, dedup_type):
         debug_print(
             f"Personal Best entry with Unique ID {unique_id} already exists in the database, aborting"
         )
@@ -80,12 +86,13 @@ async def pb_processor(pb_data, external_session=None):
         return
     from db import PersonalBestEntry
 
+    pb_model = SeasonalPersonalBestEntry if is_seasonal else PersonalBestEntry
     pb_entry = (
-        session.query(PersonalBestEntry)
+        session.query(pb_model)
         .filter(
-            PersonalBestEntry.player_id == player_id,
-            PersonalBestEntry.npc_id == npc_id,
-            PersonalBestEntry.team_size == team_size,
+            pb_model.player_id == player_id,
+            pb_model.npc_id == npc_id,
+            pb_model.team_size == team_size,
         )
         .first()
     )
@@ -134,7 +141,7 @@ async def pb_processor(pb_data, external_session=None):
         else:
             is_personal_best = False
     else:
-        pb_entry = PersonalBestEntry(
+        pb_entry = pb_model(
             player_id=player_id,
             npc_id=npc_id,
             team_size=team_size,
@@ -162,7 +169,7 @@ async def pb_processor(pb_data, external_session=None):
                 session.query(GroupConfiguration)
                 .filter(
                     GroupConfiguration.group_id.in_(group_ids),
-                    GroupConfiguration.config_key == "notify_pbs",
+                    GroupConfiguration.config_key == f"{config_prefix}notify_pbs",
                 )
                 .all()
             )
@@ -179,27 +186,33 @@ async def pb_processor(pb_data, external_session=None):
                 "total_points_awarded": 0,
                 "awarded_members": [],
             }
-            async def perform_point_check():
-                nonlocal group_points_result
-                from .common import check_group_point_system_active
-                if check_group_point_system_active(group_id, session):
-                    from .point_awards import check_and_award_points
-                    group_points_result = await check_and_award_points(
-                        "pb",
-                        group_id,
-                        player_id,
-                        1,
-                        entry_id=getattr(pb_entry, "id", None),
-                        submission_timestamp=pb_data.get("timestamp"),
-                        external_session=session,
-                    )
-                else:
-                    pass # print("Group does not have custom point system active")
-            try:
-                await perform_point_check()
-            except Exception as e:
-                print(f"Couldn't perform check against group point awards... e: {e}")
+            if is_seasonal:
+                # TODO: award group points for seasonal PBs once award_points_in_leagues
+                # config key is supported. Check group config for "award_points_in_leagues"
+                # before calling check_and_award_points with the seasonal entry_id.
                 pass
+            else:
+                async def perform_point_check():
+                    nonlocal group_points_result
+                    from .common import check_group_point_system_active
+                    if check_group_point_system_active(group_id, session):
+                        from .point_awards import check_and_award_points
+                        group_points_result = await check_and_award_points(
+                            "pb",
+                            group_id,
+                            player_id,
+                            1,
+                            entry_id=getattr(pb_entry, "id", None),
+                            submission_timestamp=pb_data.get("timestamp"),
+                            external_session=session,
+                        )
+                    else:
+                        pass
+                try:
+                    await perform_point_check()
+                except Exception as e:
+                    print(f"Couldn't perform check against group point awards... e: {e}")
+                    pass
             if pb_notify_config and is_truthy_config(getattr(pb_notify_config, "config_value", None)):
                 if (await screenshot_required(session, group_id)):
                     # Treat video submissions as satisfying screenshot requirement
@@ -224,6 +237,7 @@ async def pb_processor(pb_data, external_session=None):
                     "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
                     "group_points_member_count": len(group_points_result.get("awarded_members", []) or []),
                     "group_points_members_awarded": group_points_result.get("awarded_members", []) or [],
+                    "world_type": world_type,
                 }
                 await create_notification(
                     "pb",
