@@ -766,9 +766,9 @@ def get_player_list_loot_sum(player_ids: List[int]):
         return 0
 
 # Convenience functions for backward compatibility
-def add_to_player(player: Player, drop: Drop) -> bool:
+def add_to_player(player: Player, drop: Drop, world_type: str = "main") -> bool:
     """Add a drop to a player's Redis cache"""
-    return loot_tracker.add_to_player(player, drop)
+    return loot_tracker.add_to_player(player, drop, world_type=world_type)
 
 def force_update_player(player_id: int, session_to_use=None) -> bool:
     """Force update a player's Redis cache from database"""
