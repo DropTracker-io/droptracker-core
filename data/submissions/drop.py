@@ -190,7 +190,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             )
 
         debug_print(f"Calculating drop value...")
-        raw_drop_value = await get_true_item_value(item_name, int(value))
+        raw_drop_value = await get_true_item_value(item_name, int(value), item_id=item_id)
         drop_value = int(raw_drop_value) * int(quantity)
         debug_print(
             f"Drop value calculated - Raw: {raw_drop_value}, Total: {drop_value} ({quantity}x)"

@@ -3,9 +3,14 @@ import asyncio
 from datetime import datetime
 import sys
 
+from utils.redis import RedisClient
+
 # Base URLs for the APIs
 PRICES_API_BASE = "https://prices.runescape.wiki/api/v1/osrs"
 WIKI_API_BASE = "https://oldschool.runescape.wiki/api.php"
+
+_redis_client = RedisClient()
+ITEM_PRICE_CACHE_TTL = 3600  # seconds (1 hour)
 
 # Create a single aiohttp session for reuse
 prices_session = None
@@ -27,7 +32,29 @@ async def get_wiki_session():
         })
     return wiki_session
 
-async def get_true_item_value(item_name, provided_value: int = 0):
+async def _lookup_and_cache_ge_price(item_name: str, item_id=None) -> int:
+    """Fetch GE price for an item and cache it in Redis. Returns 0 on failure."""
+    cache_key = f"item_price:{item_id}" if item_id else f"item_price_name:{item_name.lower()}"
+    cached = _redis_client.get(cache_key)
+    if cached is not None:
+        try:
+            return int(cached)
+        except (ValueError, TypeError):
+            pass
+
+    price = None
+    if item_id:
+        price = await get_most_recent_price_by_id(item_id)
+    if not price:
+        price = await get_most_recent_price_by_name(item_name)
+
+    if price:
+        _redis_client.setex(cache_key, ITEM_PRICE_CACHE_TTL, str(price))
+        return int(price)
+    return 0
+
+
+async def get_true_item_value(item_name, provided_value: int = 0, item_id=None):
     # Check if an incoming item matches our defined list of
     # untradeables or otherwise unvalued items that hold a value indirectly
     # for example, an ultor vestige has a 5M untradeable drop value, but actually is worth
@@ -70,6 +97,10 @@ async def get_true_item_value(item_name, provided_value: int = 0):
             return 5000000
 
     else:
+        # When the client reports 0 gp, try to recover the real GE price so that
+        # notification thresholds and point awards aren't silently skipped.
+        if provided_value == 0:
+            return await _lookup_and_cache_ge_price(item_name, item_id)
         return provided_value
 
 async def get_mapping():
