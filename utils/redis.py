@@ -74,6 +74,12 @@ class RedisClient:
             print(f"Error zrange key '{key}': {e}")
             return []
 
+    def setex(self, key: str, seconds: int, value: str) -> None:
+        try:
+            self.client.setex(key, seconds, value)
+        except redis.RedisError as e:
+            print(f"Error setting key '{key}' with expiry: {e}")
+
     def delete(self, key: str) -> None:
         try:
             self.client.delete(key)
