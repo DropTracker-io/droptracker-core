@@ -38,6 +38,7 @@ from sqlalchemy import func as sa_func
 from db.models import (
     Drop,
     Group,
+    GroupConfiguration,
     Guild,
     ItemList,
     NotifiedSubmission,
@@ -47,6 +48,7 @@ from db.models import (
     Session,
     get_current_partition,
 )
+from db.models.drop_split import DropSplit
 from services.redis_updates import RedisLootTracker, loot_tracker, get_player_list_loot_sum
 from utils.redis import redis_client
 
@@ -530,6 +532,55 @@ def _redis_force_update(player_id: int, db):
     tracker.force_update_player(player_id, session_to_use=db)
 
 
+def _group_has_split_tracking(group_id: int, db) -> bool:
+    cfg = (
+        db.query(GroupConfiguration)
+        .filter(
+            GroupConfiguration.group_id == group_id,
+            GroupConfiguration.config_key == "split_gp_tracking",
+            GroupConfiguration.config_value == "1",
+        )
+        .first()
+    )
+    return cfg is not None
+
+
+def _get_split_records(drop_id: int, group_id: int, db):
+    """Return all DropSplit rows for this drop+group."""
+    return (
+        db.query(DropSplit)
+        .filter(DropSplit.drop_id == drop_id, DropSplit.group_id == group_id)
+        .all()
+    )
+
+
+def _reverse_split_credits(drop_id: int, group_id: int, drop_value: int, drop_partition: int, db):
+    """
+    Remove all group leaderboard credits associated with split records for a drop.
+    Call this before deleting/hiding a split drop so leaderboard scores stay correct.
+    Also restores the receiver's score to the full value (undoes the original
+    downward adjustment).
+    """
+    from services.redis_updates import loot_tracker
+
+    split_rows = _get_split_records(drop_id, group_id, db)
+    if not split_rows:
+        return
+
+    # Each participant loses their split credit
+    for row in split_rows:
+        loot_tracker.add_split_credit(row.player_id, -row.split_value, drop_partition, group_id)
+
+    # The receiver's original adjustment was (split_value - drop_value); reverse it
+    split_value = split_rows[0].split_value
+    receiver_restore = drop_value - split_value  # positive — restores receiver
+    if receiver_restore > 0:
+        # We don't have receiver_player_id here directly; get it from the drop
+        drop = db.query(Drop).filter(Drop.drop_id == drop_id).first()
+        if drop:
+            loot_tracker.add_split_credit(drop.player_id, receiver_restore, drop_partition, group_id)
+
+
 async def _try_delete_discord_message(bot, channel_id: str, message_id: str):
     try:
         channel = await bot.fetch_channel(int(channel_id))
@@ -736,18 +787,30 @@ class EntryModifier(Extension):
             # 1. Delete points across all groups
             _delete_points_for_drop_all_groups(drop.drop_id, db)
 
-            # 2. Delete all NotifiedSubmission records for this drop
+            # 2. Reverse split GP credits on group leaderboards for every group
+            #    that has split tracking enabled, then delete the split records.
+            all_split_rows = db.query(DropSplit).filter(DropSplit.drop_id == drop.drop_id).all()
+            affected_split_players = {row.player_id for row in all_split_rows}
+            for row in all_split_rows:
+                if _group_has_split_tracking(row.group_id, db):
+                    drop_value = drop.value * drop.quantity
+                    _reverse_split_credits(drop.drop_id, row.group_id, drop_value, drop.partition, db)
+            db.query(DropSplit).filter(DropSplit.drop_id == drop.drop_id).delete(synchronize_session="fetch")
+
+            # 3. Delete all NotifiedSubmission records for this drop
             db.query(NotifiedSubmission).filter(NotifiedSubmission.drop_id == drop.drop_id).delete(synchronize_session="fetch")
 
-            # 3. Delete the drop itself
+            # 4. Delete the drop itself
             db.query(Drop).filter(Drop.drop_id == drop.drop_id).delete(synchronize_session="fetch")
 
             db.commit()
 
-            # 4. Force update Redis
+            # 5. Force update Redis for receiver and all split participants
             _redis_force_update(player_id, db)
+            for split_player_id in affected_split_players:
+                _redis_force_update(split_player_id, db)
 
-            # 5. Delete the original Discord message
+            # 6. Delete the original Discord message
             await _try_delete_discord_message(self.bot, orig_channel_id, orig_message_id)
 
             await ctx.edit_origin(
@@ -793,6 +856,14 @@ class EntryModifier(Extension):
                 notified.status = "hidden"
                 db.commit()
 
+                # Reverse split GP credits (preserve DropSplit rows for unhide)
+                if _group_has_split_tracking(notified.group_id, db):
+                    drop_value = drop.value * drop.quantity
+                    split_rows = _get_split_records(drop.drop_id, notified.group_id, db)
+                    _reverse_split_credits(drop.drop_id, notified.group_id, drop_value, drop.partition, db)
+                    for row in split_rows:
+                        _redis_force_update(row.player_id, db)
+
                 _redis_force_update(player_id, db)
 
                 hidden_embed = Embed(
@@ -824,6 +895,19 @@ class EntryModifier(Extension):
                     split_names = _get_split_player_names(drop.drop_id, group.group_id, drop.player_id, db)
                     await _re_award_points(drop, group.group_id, split_names or None, db)
                 db.commit()
+
+                # Re-apply split GP credits from preserved DropSplit rows
+                if _group_has_split_tracking(notified.group_id, db):
+                    drop_value = drop.value * drop.quantity
+                    split_rows = _get_split_records(drop.drop_id, notified.group_id, db)
+                    if split_rows:
+                        split_value = split_rows[0].split_value
+                        receiver_adjustment = split_value - drop_value
+                        from services.redis_updates import loot_tracker
+                        loot_tracker.add_split_credit(player_id, receiver_adjustment, drop.partition, notified.group_id)
+                        for row in split_rows:
+                            loot_tracker.add_split_credit(row.player_id, row.split_value, drop.partition, notified.group_id)
+                            _redis_force_update(row.player_id, db)
 
                 _redis_force_update(player_id, db)
 
@@ -967,8 +1051,36 @@ class EntryModifier(Extension):
                 await _re_award_points(drop, group.group_id, split_names or None, db)
             db.commit()
 
-            # 4. Force update Redis
+            # 3b. Recalculate split GP credits for groups with split tracking
+            new_full_value = new_value * drop.quantity
+            affected_split_players: set = set()
+            for group in player_groups:
+                if not _group_has_split_tracking(group.group_id, db):
+                    continue
+                split_rows = _get_split_records(drop.drop_id, group.group_id, db)
+                if not split_rows:
+                    continue
+                old_split_value = split_rows[0].split_value
+                total_count = 1 + len(split_rows)
+                new_split_value = new_full_value // total_count
+                from services.redis_updates import loot_tracker
+                # Adjust each participant's leaderboard score by the delta
+                participant_delta = new_split_value - old_split_value
+                for row in split_rows:
+                    loot_tracker.add_split_credit(row.player_id, participant_delta, drop.partition, group.group_id)
+                    row.split_value = new_split_value
+                    affected_split_players.add(row.player_id)
+                # Adjust receiver: old offset was (old_split_value - old_full_value),
+                # new offset is (new_split_value - new_full_value); apply the net delta
+                old_full_value = old_split_value * total_count
+                receiver_delta = (new_split_value - new_full_value) - (old_split_value - old_full_value)
+                loot_tracker.add_split_credit(drop.player_id, receiver_delta, drop.partition, group.group_id)
+            db.commit()
+
+            # 4. Force update Redis for receiver and all split participants
             _redis_force_update(drop.player_id, db)
+            for sp_id in affected_split_players:
+                _redis_force_update(sp_id, db)
 
             # 5. Rebuild the notification embed so all fields reflect the change
             await _rebuild_and_edit_message(
@@ -1005,19 +1117,76 @@ class EntryModifier(Extension):
             _delete_points_for_drop(drop.drop_id, notified.group_id, db)
             db.commit()
 
-            # 2. Re-award with new split list
-            await _re_award_points(drop, notified.group_id, new_split_names or None, db)
+            # 2. Reverse split GP credits if group has split tracking
+            affected_split_players: set = set()
+            group_id = notified.group_id
+            drop_value = drop.value * drop.quantity
+            if _group_has_split_tracking(group_id, db):
+                old_split_rows = _get_split_records(drop.drop_id, group_id, db)
+                if old_split_rows:
+                    _reverse_split_credits(drop.drop_id, group_id, drop_value, drop.partition, db)
+                    for row in old_split_rows:
+                        affected_split_players.add(row.player_id)
+                    db.query(DropSplit).filter(
+                        DropSplit.drop_id == drop.drop_id,
+                        DropSplit.group_id == group_id,
+                    ).delete(synchronize_session="fetch")
+                    db.commit()
+
+            # 3. Re-award points with new split list
+            await _re_award_points(drop, group_id, new_split_names or None, db)
             notified.edited_by = None
             db.commit()
 
-            # 3. Rebuild the notification embed so all fields reflect the change
+            # 4. Apply new split GP credits for the new participant list
+            if _group_has_split_tracking(group_id, db) and new_split_names:
+                from db.models import Player, user_group_association
+                from services.redis_updates import loot_tracker
+                valid_new = []
+                for name in new_split_names:
+                    p = db.query(Player).filter(Player.player_name == name).first()
+                    if p is None:
+                        continue
+                    is_member = (
+                        db.query(user_group_association)
+                        .filter(
+                            user_group_association.c.player_id == p.player_id,
+                            user_group_association.c.group_id == group_id,
+                        )
+                        .first()
+                    )
+                    if is_member:
+                        valid_new.append(p)
+                if valid_new:
+                    total_count = 1 + len(valid_new)
+                    new_split_value = drop_value // total_count
+                    receiver_adjustment = new_split_value - drop_value
+                    loot_tracker.add_split_credit(drop.player_id, receiver_adjustment, drop.partition, group_id)
+                    for p in valid_new:
+                        split_row = DropSplit(
+                            drop_id=drop.drop_id,
+                            player_id=p.player_id,
+                            group_id=group_id,
+                            split_value=new_split_value,
+                        )
+                        db.add(split_row)
+                        loot_tracker.add_split_credit(p.player_id, new_split_value, drop.partition, group_id)
+                        affected_split_players.add(p.player_id)
+                    db.commit()
+
+            # 5. Force update Redis for receiver and all affected participants
+            _redis_force_update(drop.player_id, db)
+            for sp_id in affected_split_players:
+                _redis_force_update(sp_id, db)
+
+            # 6. Rebuild the notification embed so all fields reflect the change
             split_note = f"Split updated: {', '.join(new_split_names)}" if new_split_names else "Splits removed"
             await _rebuild_and_edit_message(
                 self.bot, drop, data["player"], data["item"], data["npc"], notified, db,
                 history_line=split_note,
             )
 
-            # 4. Show updated overview
+            # 7. Show updated overview
             await _send_overview(ctx, notified_id, db)
         except Exception as e:
             db.rollback()

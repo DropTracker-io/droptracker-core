@@ -47,6 +47,7 @@ from .seasonal_collection_log import SeasonalCollectionLogEntry
 from .seasonal_combat_achievement import SeasonalCombatAchievementEntry
 from .seasonal_pet import SeasonalPlayerPet
 from .seasonal_quest_completion import SeasonalQuestCompletionEntry
+from .drop_split import DropSplit
 
 
 def get_current_partition() -> int:
@@ -120,4 +121,5 @@ __all__ = [
     "SeasonalCombatAchievementEntry",
     "SeasonalPlayerPet",
     "SeasonalQuestCompletionEntry",
+    "DropSplit",
 ]
