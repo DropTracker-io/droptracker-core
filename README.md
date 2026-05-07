@@ -12,7 +12,7 @@ The code is quite heavily intermingled for the different portions of our app, bu
 
 Furthermore, the following files outline the primary entry points for the different "modules" or "cogs":
 - Database models: `db/models/**`
-- Submission processing: `data/submissions.py`
+- Submission processing: `data/submissions/**` (common.py is used within all submission handlers)
 - Sending notifications: `services/notification_handler.py`
 - Points system: `services/points.py`
 - Redis infrastructure: `services/redis_updates.py`
