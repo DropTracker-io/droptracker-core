@@ -11,12 +11,13 @@ The code is quite heavily intermingled for the different portions of our app, bu
 - API - `new_api.py`
 
 Furthermore, the following files outline the primary entry points for the different "modules" or "cogs":
-- Database models: `db/models.py`
+- Database models: `db/models/**`
 - Submission processing: `data/submissions.py`
 - Sending notifications: `services/notification_handler.py`
 - Points system: `services/points.py`
 - Redis infrastructure: `services/redis_updates.py`
 - Hall of Fame generation logic: `services/hall_of_fame.py`
+- Loot Leaderboard Updates: `lootboard/_board_generator.py`
 
 
 
