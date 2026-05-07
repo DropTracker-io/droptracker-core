@@ -392,16 +392,67 @@ class RedisLootTracker:
             for daily_partition, drops in daily_drops.items():
                 self._rebuild_daily_data(player_id, daily_partition, drops)
                 print(f"Updated daily data for player {player_id} on {daily_partition}")
+
+            # Re-apply split GP credits earned as a participant in other players' drops.
+            # These are not in the player's own Drop rows, so they must be reconstructed
+            # from drop_splits separately.
+            self._apply_split_credits(player_id, session_to_use)
+
             # Update player's last update timestamp
             player.date_updated = datetime.now()
             session_to_use.commit()
-            
+
             return True
             
         except Exception as e:
             print(f"Force update failed for player {player_id}: {e}")
             return False
     
+    def _apply_split_credits(self, player_id: int, session_to_use) -> None:
+        """
+        After a full Redis rebuild, re-apply group leaderboard credits that come
+        from drop_splits rows (i.e. drops the player participated in but did not
+        receive).  Only rows for groups that currently have split_gp_tracking
+        enabled are processed so that stale rows from before the flag was enabled
+        are silently ignored.
+        """
+        try:
+            from db.models.drop_split import DropSplit
+            from db.models import GroupConfiguration, Drop
+
+            split_rows = (
+                session_to_use.query(DropSplit)
+                .filter(DropSplit.player_id == player_id)
+                .all()
+            )
+            if not split_rows:
+                return
+
+            # Build a set of group_ids that have split_gp_tracking enabled
+            unique_group_ids = {row.group_id for row in split_rows}
+            enabled_configs = (
+                session_to_use.query(GroupConfiguration.group_id)
+                .filter(
+                    GroupConfiguration.group_id.in_(unique_group_ids),
+                    GroupConfiguration.config_key == "split_gp_tracking",
+                    GroupConfiguration.config_value == "1",
+                )
+                .all()
+            )
+            enabled_groups = {row.group_id for row in enabled_configs}
+
+            for row in split_rows:
+                if row.group_id not in enabled_groups:
+                    continue
+                # Determine the partition from the parent drop
+                drop = session_to_use.query(Drop).filter(Drop.drop_id == row.drop_id).first()
+                if not drop or drop.hidden:
+                    continue
+                partition = drop.partition
+                self.add_split_credit(player_id, row.split_value, partition, row.group_id)
+        except Exception as e:
+            print(f"[RedisLootTracker] _apply_split_credits failed for player {player_id}: {e}")
+
     def _clear_player_redis_data(self, player_id: int):
         """Clear all Redis data for a player"""
         # Get all keys for this player
@@ -716,26 +767,42 @@ class RedisLootTracker:
         
         return (int(rank) + 1, total_players)  # Redis ranks are 0-based
     
-    def update_leaderboards(self, player_id: int, total_value: int, 
+    def update_leaderboards(self, player_id: int, total_value: int,
                            partition: Optional[int] = None, group_ids: Optional[List[int]] = None):
         """Update leaderboards for a player"""
         if partition is None:
             partition = self._get_partition()
-        
+
         pipeline = redis_client.client.pipeline(transaction=True)
-        
+
         # Update global leaderboard
         global_key = f"leaderboard:{partition}"
         pipeline.zadd(global_key, {player_id: total_value})
-        
+
         # Update group leaderboards
         if group_ids:
             for group_id in group_ids:
                 group_key = f"leaderboard:{partition}:group:{group_id}"
                 pipeline.zadd(group_key, {player_id: total_value})
                 print(f"Updated group leaderboard {group_id} for player {player_id} with value {total_value:,}")
-        
+
         pipeline.execute()
+
+    def add_split_credit(self, player_id: int, split_value: int, partition: int,
+                         group_id: int, world_type: str = "main") -> None:
+        """
+        Atomically adjust a player's score in a single group leaderboard by split_value.
+
+        Pass a positive delta to credit a split participant, or a negative delta
+        (split_value - full_value) to bring the drop receiver's group score down
+        from the full drop value to their equal share.
+
+        Only the group leaderboard sorted set is touched — global leaderboard and
+        individual player:*:total_loot keys are never modified.
+        """
+        prefix = "seasonal:" if world_type == "seasonal" else ""
+        key = f"{prefix}leaderboard:{partition}:group:{group_id}"
+        redis_client.client.zincrby(key, split_value, player_id)
 
 # Global instance
 loot_tracker = RedisLootTracker()
