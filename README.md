@@ -17,7 +17,7 @@ Furthermore, the following files outline the primary entry points for the differ
 - Points system: `services/points.py`
 - Redis infrastructure: `services/redis_updates.py`
 - Hall of Fame generation logic: `services/hall_of_fame.py`
-- Loot Leaderboard Updates: `
+- Loot Leaderboard Updates: `lootboard/_board_generator.py`
 
 
 
