@@ -37,6 +37,87 @@ db = DatabaseOperations()
 last_board_updates = {}
 
 
+async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
+                                   players_included: list, drop_value: int,
+                                   world_type: str = "main") -> None:
+    """
+    For groups with split_gp_tracking enabled, distribute group leaderboard GP
+    credit equally among all split participants (including the receiver).
+
+    - Non-receiver participants get split_value credited via add_split_credit().
+    - The receiver's group leaderboard score is reduced by (full_value - split_value)
+      so their net group credit equals split_value rather than the full drop value.
+    - A DropSplit row is persisted for each non-receiver participant as the
+      source-of-truth for Redis force-rebuilds.
+
+    The global leaderboard and individual player:*:total_loot keys are never
+    modified here.
+    """
+    from db.models.drop_split import DropSplit
+    from db.models import Player, user_group_association
+
+    group_id = group.group_id
+    partition = drop.partition
+
+    # Resolve included player names to Player rows that are in this group
+    valid_participants = []
+    for name in players_included:
+        p = session.query(Player).filter(Player.player_name == name).first()
+        if p is None:
+            continue
+        # Verify the player is a member of this group
+        is_member = (
+            session.query(user_group_association)
+            .filter(
+                user_group_association.c.player_id == p.player_id,
+                user_group_association.c.group_id == group_id,
+            )
+            .first()
+        )
+        if is_member:
+            valid_participants.append(p)
+
+    if not valid_participants:
+        return
+
+    # Total participants = receiver + valid split members
+    total_count = 1 + len(valid_participants)
+    split_value = drop_value // total_count
+
+    # Guard: nothing to do if split equals full value (1-way "split")
+    if split_value >= drop_value:
+        return
+
+    # 1. Adjust receiver's group leaderboard down from full_value to split_value
+    receiver_adjustment = split_value - drop_value  # negative
+    redis_updates.add_split_credit(receiver_player_id, receiver_adjustment, partition, group_id, world_type)
+
+    # 2. Credit each non-receiver participant
+    for p in valid_participants:
+        # Persist the split record (skip if already exists to avoid duplicates)
+        existing = (
+            session.query(DropSplit)
+            .filter(
+                DropSplit.drop_id == drop.drop_id,
+                DropSplit.player_id == p.player_id,
+                DropSplit.group_id == group_id,
+            )
+            .first()
+        )
+        if existing is None:
+            split_row = DropSplit(
+                drop_id=drop.drop_id,
+                player_id=p.player_id,
+                group_id=group_id,
+                split_value=split_value,
+            )
+            session.add(split_row)
+
+        redis_updates.add_split_credit(p.player_id, split_value, partition, group_id, world_type)
+
+    session.flush()
+
+
 def _normalize_incoming_players(players_included):
     """Normalize participant payloads from all drop ingestion paths."""
     if players_included is None:
@@ -267,6 +348,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                         [
                             f"{config_prefix}minimum_value_to_notify",
                             f"{config_prefix}send_stacks_of_items",
+                            "split_gp_tracking",
                         ]
                     ),
                 )
@@ -361,6 +443,25 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                 except Exception as e:
                     print(f"Couldn't perform check against group point awards... e: {e}")
                     pass
+
+            # --- Split GP tracking ---
+            split_tracking_enabled = (
+                group_config_values.get((group_id, "split_gp_tracking")) == "1"
+            )
+            if split_tracking_enabled and players_included and not is_seasonal:
+                try:
+                    await _award_split_gp_credits(
+                        session=session,
+                        drop=drop,
+                        group=group,
+                        receiver_player_id=player_id,
+                        players_included=players_included,
+                        drop_value=drop_value,
+                        world_type=world_type,
+                    )
+                except Exception as e:
+                    print(f"[SplitTracking] Failed to apply split credits for group {group_id}: {e}")
+
             min_value_raw = group_config_values.get((group_id, f"{config_prefix}minimum_value_to_notify"))
             try:
                 min_value_to_notify = int(min_value_raw) if min_value_raw is not None else 2500000

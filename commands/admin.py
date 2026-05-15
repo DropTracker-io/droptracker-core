@@ -527,3 +527,56 @@ class ClanCommands(Extension):
             )
         ]
         await ctx.channel.send(components=player_setup)
+
+    @slash_command(
+        name="toggle-split-tracking",
+        description="Enable or disable split GP tracking for this server's group",
+        default_member_permissions=Permissions.ADMINISTRATOR,
+    )
+    async def toggle_split_tracking_cmd(self, ctx: SlashContext):
+        if not ctx.guild_id:
+            return await ctx.send("Use this command inside your group's Discord server.", ephemeral=True)
+
+        guild = session.query(Guild).filter(Guild.guild_id == str(ctx.guild_id)).first()
+        if not guild or not guild.group_id:
+            return await ctx.send("This server is not linked to a DropTracker group.", ephemeral=True)
+
+        group = session.query(Group).filter(Group.group_id == guild.group_id).first()
+        if not group:
+            return await ctx.send("Group record was not found for this server.", ephemeral=True)
+
+        try:
+            existing = (
+                session.query(GroupConfiguration)
+                .filter(
+                    GroupConfiguration.group_id == guild.group_id,
+                    GroupConfiguration.config_key == "split_gp_tracking",
+                )
+                .first()
+            )
+            if existing:
+                new_value = "0" if existing.config_value == "1" else "1"
+                existing.config_value = new_value
+            else:
+                new_value = "1"
+                session.add(GroupConfiguration(
+                    group_id=guild.group_id,
+                    config_key="split_gp_tracking",
+                    config_value=new_value,
+                ))
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            return await ctx.send(f"Failed to update setting: {e}", ephemeral=True)
+
+        state = "**enabled**" if new_value == "1" else "**disabled**"
+        embed = Embed(
+            title="Split GP Tracking Updated",
+            description=(
+                f"Split GP tracking is now {state} for **{group.group_name}**.\n\n"
+                "When enabled, group leaderboard GP credit is distributed equally among "
+                "all split participants rather than crediting the full value to the drop receiver."
+            ),
+            color=0x2ECC71 if new_value == "1" else 0xE74C3C,
+        )
+        await ctx.send(embed=embed, ephemeral=True)
