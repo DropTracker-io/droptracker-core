@@ -137,6 +137,10 @@ async def is_admin(ctx: BaseContext):
     """
     Check if the user has administrator permissions in the current guild.
 
+    Uses ctx.author_permissions (populated from the interaction payload) rather
+    than ctx.author.guild_permissions, which is not available in interactions v5
+    when the member object is not fully cached.
+
     Args:
         ctx (BaseContext): The command context
 
@@ -144,11 +148,11 @@ async def is_admin(ctx: BaseContext):
         bool: True if user has administrator permissions, False otherwise
     """
     try:
-        perms_value = ctx.author.guild_permissions.value
-        if perms_value & 0x00000008:  # 0x8 is the bit flag for administrator
+        # author_permissions is the correct interactions v5 API for slash contexts
+        perms = getattr(ctx, 'author_permissions', None)
+        if perms is not None and int(perms) & 0x00000008:
             return True
-    except AttributeError:
-        # guild_permissions is not available (e.g. member cache miss); fall through
+    except (AttributeError, TypeError):
         pass
     return False
 
