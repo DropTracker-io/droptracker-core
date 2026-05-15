@@ -136,17 +136,24 @@ async def try_create_user(discord_id: str = None, username: str = None, ctx: Sla
 async def is_admin(ctx: BaseContext):
     """
     Check if the user has administrator permissions in the current guild.
-    
+
+    Uses ctx.author_permissions (populated from the interaction payload) rather
+    than ctx.author.guild_permissions, which is not available in interactions v5
+    when the member object is not fully cached.
+
     Args:
         ctx (BaseContext): The command context
-        
+
     Returns:
         bool: True if user has administrator permissions, False otherwise
     """
-    perms_value = ctx.author.guild_permissions.value
-    print("Guild permissions:", perms_value)
-    if perms_value & 0x00000008:  # 0x8 is the bit flag for administrator
-        return True
+    try:
+        # author_permissions is the correct interactions v5 API for slash contexts
+        perms = getattr(ctx, 'author_permissions', None)
+        if perms is not None and int(perms) & 0x00000008:
+            return True
+    except (AttributeError, TypeError):
+        pass
     return False
 
 
