@@ -136,17 +136,20 @@ async def try_create_user(discord_id: str = None, username: str = None, ctx: Sla
 async def is_admin(ctx: BaseContext):
     """
     Check if the user has administrator permissions in the current guild.
-    
+
     Args:
         ctx (BaseContext): The command context
-        
+
     Returns:
         bool: True if user has administrator permissions, False otherwise
     """
-    perms_value = ctx.author.guild_permissions.value
-    print("Guild permissions:", perms_value)
-    if perms_value & 0x00000008:  # 0x8 is the bit flag for administrator
-        return True
+    try:
+        perms_value = ctx.author.guild_permissions.value
+        if perms_value & 0x00000008:  # 0x8 is the bit flag for administrator
+            return True
+    except AttributeError:
+        # guild_permissions is not available (e.g. member cache miss); fall through
+        pass
     return False
 
 
