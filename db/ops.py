@@ -749,7 +749,13 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
         removed (int): number of players removed
         skipped_removals (bool): True when removal pass was skipped due to incomplete WOM response
     """
-    group_wom_ids = await fetch_group_members(wom_id, force_refresh=True)
+    provision_cfg = session.query(GroupConfiguration).filter(
+        GroupConfiguration.group_id == group.group_id,
+        GroupConfiguration.config_key == "auto_provision_members",
+    ).first()
+    provision_missing = provision_cfg is not None and provision_cfg.config_value.lower() == "true"
+
+    group_wom_ids = await fetch_group_members(wom_id, force_refresh=True, provision_missing=provision_missing)
     if not group_wom_ids:
         print(f"Failed to fetch member list for group {group.group_name} (WOM ID: {wom_id})")
         return {"added": 0, "removed": 0, "skipped_removals": False}
