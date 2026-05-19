@@ -284,11 +284,12 @@ async def fetch_group_members(
     session_to_use = None,
     *,
     force_refresh: bool = False,
-    use_cache: bool = True
+    use_cache: bool = True,
+    provision_missing: bool = False,
 ):
-    """ 
-    Returns a list of WiseOldMan Player IDs 
-    for members of a specified group 
+    """
+    Returns a list of WiseOldMan Player IDs
+    for members of a specified group
     """
     #print("Fetching group members for ID:", wom_group_id)
     user_list = []
@@ -387,7 +388,7 @@ async def fetch_group_members(
                                     player_name, commit_err,
                                 )
                                 session.rollback()
-                    if player_by_name is None:
+                    if player_by_name is None and provision_missing:
                         # Player has never used the plugin — create a stub with a temporary
                         # account hash so they can be tracked in groups right away.
                         _create_player_from_wom_member(session, member_wom_id, player_name, player_obj)
