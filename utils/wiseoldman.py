@@ -366,6 +366,7 @@ async def fetch_group_members(
                     # that created a new WOM identity) would cause the sync to incorrectly
                     # remove a valid group member. Try matching by player name to detect and
                     # correct this before the removal pass runs.
+                    player_by_name = None
                     if player_name:
                         player_by_name = (
                             session.query(Player)
@@ -386,6 +387,10 @@ async def fetch_group_members(
                                     player_name, commit_err,
                                 )
                                 session.rollback()
+                    if player_by_name is None:
+                        # Player has never used the plugin — create a stub with a temporary
+                        # account hash so they can be tracked in groups right away.
+                        _create_player_from_wom_member(session, member_wom_id, player_name, player_obj)
                 user_list.append(member_wom_id)
             await _store_group_cache(wom_group_id, user_list)
             return user_list
@@ -394,6 +399,45 @@ async def fetch_group_members(
     except Exception as e:
         print("Couldn't find WOM group members... Error:", e)
         return []
+
+def _create_player_from_wom_member(db_session, wom_id: int, player_name: Optional[str], player_obj=None) -> Optional[Player]:
+    """Create a Player record for a WOM group member with no local account.
+
+    The temporary account hash (wom_temp_<wom_id>) is replaced automatically
+    when the player first authenticates via the RuneLite plugin.
+    """
+    temp_hash = f"wom_temp_{wom_id}"
+    existing = db_session.query(Player).filter(Player.account_hash == temp_hash).first()
+    if existing:
+        return existing
+
+    total_level = 0
+    try:
+        if player_obj and getattr(player_obj, "latest_snapshot", None):
+            overall = player_obj.latest_snapshot.data.skills.get("overall")
+            if overall:
+                total_level = overall.level
+    except Exception:
+        pass
+
+    name = player_name or f"Unknown_{wom_id}"
+    new_player = Player(
+        wom_id=wom_id,
+        player_name=name,
+        account_hash=temp_hash,
+        total_level=total_level,
+        log_slots=0,
+    )
+    db_session.add(new_player)
+    try:
+        db_session.commit()
+        logger.info("Created WOM-imported player '%s' (wom_id=%s) with temporary hash", name, wom_id)
+        return new_player
+    except Exception as e:
+        logger.warning("Failed to create WOM-imported player '%s' (wom_id=%s): %s", name, wom_id, e)
+        db_session.rollback()
+        return None
+
 
 async def get_collections_logged(username: str):
     """

@@ -273,6 +273,11 @@ class RawDropData:
         pass
 
 
+def _is_temp_account_hash(hash_value) -> bool:
+    """True when hash_value is a temporary placeholder assigned during WOM group import."""
+    return hash_value is not None and str(hash_value).startswith("wom_temp_")
+
+
 def check_auth(
     player_name,
     account_hash,
@@ -302,10 +307,35 @@ def check_auth(
             return False, False
 
         if player.account_hash:
-            if str(account_hash) != str(player.account_hash):
-                return True, False
-            else:
+            if str(account_hash) == str(player.account_hash):
                 return True, True
+            # A temporary WOM-import hash can be replaced by the player's real hash
+            # the first time they authenticate via the RuneLite plugin.
+            if _is_temp_account_hash(player.account_hash):
+                conflicting = (
+                    db_session.query(Player)
+                    .filter(Player.account_hash == str(account_hash))
+                    .first()
+                    if account_hash
+                    else None
+                )
+                if conflicting and conflicting.player_id != player.player_id:
+                    return True, False
+                player.account_hash = str(account_hash)
+                try:
+                    db_session.commit()
+                    app_logger.log(
+                        log_type="access",
+                        data=f"Replaced temporary account hash for {player_name} (wom_id={player.wom_id})",
+                        app_name="core",
+                        description="check_auth",
+                    )
+                except Exception as e:
+                    debug_print("Error replacing temp hash: " + str(e))
+                    db_session.rollback()
+                    return True, False
+                return True, True
+            return True, False
         else:
             # Never bind an account hash to a name-resolved row unless WOM identity was verified.
             if resolved_by_name:
@@ -528,14 +558,16 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
                     debug_print("Error committing WOM identity reconciliation: " + str(e))
                     session.rollback()
 
-        # Hash conflicts are still treated as auth failures.
+        # Hash conflicts are auth failures, unless the stored hash is a temporary
+        # WOM-import placeholder — in that case check_auth() handles the replacement.
         if account_hash and player and player.account_hash and str(player.account_hash) != account_hash:
-            logger.log_sync(
-                "warning",
-                f"ensure_player_and_auth: hash mismatch for WOM {expected_wom_id}; refusing auth for {player_name}",
-            )
-            player_list[player_name] = player.player_id
-            return player, False, True
+            if not _is_temp_account_hash(player.account_hash):
+                logger.log_sync(
+                    "warning",
+                    f"ensure_player_and_auth: hash mismatch for WOM {expected_wom_id}; refusing auth for {player_name}",
+                )
+                player_list[player_name] = player.player_id
+                return player, False, True
     elif not player:
         # WOM unavailable + no deterministic local match.
         logger.log_sync(
