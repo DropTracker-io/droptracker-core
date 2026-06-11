@@ -12,6 +12,7 @@ from api.core import log_pool_status
 from api.routes.health import health_bp
 from api.routes.players import players_bp
 from api.routes.groups import groups_bp
+from api.routes.group_create import group_create_bp
 from api.routes.utils import utils_bp
 from api.routes.webhook import webhook_bp
 from api.routes.video import video_bp
@@ -86,6 +87,7 @@ def create_app() -> Quart:
     app.register_blueprint(health_bp, url_prefix='/')
     app.register_blueprint(players_bp, url_prefix='/')
     app.register_blueprint(groups_bp, url_prefix='/')
+    app.register_blueprint(group_create_bp, url_prefix='/')
     app.register_blueprint(utils_bp, url_prefix='/')
     app.register_blueprint(webhook_bp, url_prefix='/')
     app.register_blueprint(video_bp, url_prefix='/')

@@ -1,0 +1,364 @@
+"""
+Shared group-creation service.
+
+This module centralizes the logic required to register a brand new DropTracker
+group so that it can be invoked from more than one place (currently the Discord
+``/create-group`` slash command and the website's web-based creation wizard).
+
+IMPORTANT - parity with the Discord bot:
+    The behavior here is a faithful, 1:1 replica of
+    ``ClanCommands.create_group_cmd`` in ``commands.py``. The Discord command
+    itself is intentionally left untouched; this module exists so the *website*
+    can produce an identical result without going through Discord. If you change
+    the creation flow, keep both paths in sync.
+
+The function is deliberately *context free* - it accepts plain primitives
+(Discord IDs as strings/ints) instead of an ``interactions`` ``SlashContext`` so
+that it can run inside the Quart API process without importing the Discord bot
+stack.
+
+Author: DropTracker
+"""
+
+import hashlib
+import json
+import os
+import secrets
+from datetime import datetime, timezone
+from typing import Optional, TypedDict
+
+from db.clan_sync import insert_xf_group
+from db.models import (
+    Group,
+    GroupConfiguration,
+    Guild,
+    User,
+    UserConfiguration,
+    session,
+)
+
+# Template group whose configuration rows are cloned onto every new group.
+# This mirrors the Discord bot, which copies all rows from ``group_id = 1``.
+TEMPLATE_GROUP_ID = 1
+# Template user whose configuration rows are cloned when we have to create the
+# owner's DropTracker user account on the fly (mirrors ``try_create_user``).
+TEMPLATE_USER_ID = 1
+
+# Config key holding the per-group API key used for WOM sync / CSV export auth.
+EXPORT_API_KEY = "export_api_key"
+# Pepper used when minting export API keys. Kept in sync with
+# ``scripts/group_export_keygen.py``; override via the EXPORT_API_KEY_PEPPER env.
+_EXPORT_API_KEY_PEPPER = os.getenv(
+    "EXPORT_API_KEY_PEPPER", "nJ8Rih8TU4MdkMyAMBSDhr2i"
+)
+
+
+def generate_export_api_key(group_id: int) -> str:
+    """Mint a unique, unguessable export API key for a group.
+
+    Mirrors the algorithm in ``scripts/group_export_keygen.py`` (a random salt
+    plus a timestamp and secret pepper, hashed with SHA-256) so the two code
+    paths produce keys of the same shape.
+    """
+    salt = secrets.token_hex(24)
+    timestamp = datetime.now(timezone.utc).isoformat()
+    raw = f"{group_id}:{salt}:{timestamp}:{_EXPORT_API_KEY_PEPPER}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+class GroupCreationResult(TypedDict, total=False):
+    """Structured outcome returned by :func:`create_web_group`.
+
+    ``status`` is one of:
+        ``created``             - the group was created successfully.
+        ``already_registered``  - the guild already owns a group with this WOM id.
+        ``guild_conflict``      - the guild already owns a *different* group.
+        ``wom_conflict``        - the WOM id is already registered to another group.
+        ``invalid_wom``         - the supplied WOM id was not a valid integer.
+        ``db_error``            - an unexpected database error occurred.
+    """
+
+    success: bool
+    status: str
+    message: str
+    group_id: Optional[int]
+    wom_id: Optional[int]
+    guild_id: Optional[str]
+
+
+def _ensure_user(discord_user_id: str, username: Optional[str]) -> Optional[User]:
+    """Return the :class:`User` for ``discord_user_id``, creating it if needed.
+
+    This replicates the database-only portion of ``try_create_user`` (the Discord
+    role assignment / DM steps are bot-only and intentionally skipped here).
+    """
+    discord_user_id = str(discord_user_id)
+    user = session.query(User).filter(User.discord_id == discord_user_id).first()
+    if user:
+        return user
+
+    if username and len(username) > 20:
+        # Match the column limit enforced by the bot.
+        username = username[:20]
+
+    try:
+        new_user = User(
+            auth_token="",
+            discord_id=discord_user_id,
+            username=str(username) if username else None,
+        )
+        session.add(new_user)
+        session.commit()
+    except Exception as exc:  # noqa: BLE001 - mirror bot's defensive handling
+        session.rollback()
+        print(f"[create_web_group] Failed to create user {discord_user_id}: {exc}")
+        return None
+
+    # Clone the default user configuration rows from the template user.
+    try:
+        default_config = (
+            session.query(UserConfiguration)
+            .filter(UserConfiguration.user_id == TEMPLATE_USER_ID)
+            .all()
+        )
+        new_config = [
+            UserConfiguration(
+                user_id=new_user.user_id,
+                config_key=option.config_key,
+                config_value=option.config_value,
+                updated_at=datetime.now(),
+            )
+            for option in default_config
+        ]
+        if new_config:
+            session.add_all(new_config)
+            session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        print(
+            f"[create_web_group] Failed to seed user config for {discord_user_id}: {exc}"
+        )
+
+    return new_user
+
+
+def _clone_group_configurations(group: Group, group_name: str, owner_discord_id: str):
+    """Clone the template group's configuration onto ``group``.
+
+    Mirrors the Discord bot exactly: every row from ``group_id = 1`` is copied,
+    with ``clan_name`` overridden to the new group's name and ``authed_users``
+    set to a JSON array containing the owner's Discord id.
+    """
+    default_config = (
+        session.query(GroupConfiguration)
+        .filter(GroupConfiguration.group_id == TEMPLATE_GROUP_ID)
+        .all()
+    )
+
+    new_config = []
+    saw_export_key = False
+    for option in default_config:
+        option_value = option.config_value
+        if option.config_key == "clan_name":
+            option_value = group_name
+        if option.config_key == "authed_users":
+            option_value = json.dumps([str(owner_discord_id)])
+        if option.config_key == EXPORT_API_KEY:
+            # Never reuse the template group's key; mint a unique one so each
+            # group's WOM-sync / export API access is isolated.
+            saw_export_key = True
+            option_value = generate_export_api_key(group.group_id)
+        new_config.append(
+            GroupConfiguration(
+                group_id=group.group_id,
+                config_key=option.config_key,
+                config_value=option_value,
+                updated_at=datetime.now(),
+                group=group,
+            )
+        )
+
+    # Guarantee the group always has an export API key even if the template
+    # group is missing the row.
+    if not saw_export_key:
+        new_config.append(
+            GroupConfiguration(
+                group_id=group.group_id,
+                config_key=EXPORT_API_KEY,
+                config_value=generate_export_api_key(group.group_id),
+                updated_at=datetime.now(),
+                group=group,
+            )
+        )
+
+    session.add_all(new_config)
+    session.commit()
+    return len(new_config)
+
+
+async def create_web_group(
+    *,
+    group_name: str,
+    wom_id,
+    guild_id,
+    owner_discord_id,
+    owner_username: Optional[str] = None,
+) -> GroupCreationResult:
+    """Create a new DropTracker group on behalf of a website user.
+
+    This is a 1:1 functional replica of the Discord ``/create-group`` command,
+    minus the Discord-only presentation (embeds, ephemeral messages, sleeps).
+
+    Args:
+        group_name: Desired display name for the group.
+        wom_id: WiseOldMan group id (accepts ``int`` or numeric ``str``).
+        guild_id: Discord server (guild) id the group is being created for.
+        owner_discord_id: Discord user id of the person creating the group; this
+            becomes the sole entry in the group's ``authed_users``.
+        owner_username: Optional Discord username, used only if we have to create
+            the owner's DropTracker user account on the fly.
+
+    Returns:
+        A :class:`GroupCreationResult` describing the outcome.
+    """
+    # --- Validate WOM id (the bot coerces to int) ---
+    try:
+        wom_id = int(wom_id)
+    except (TypeError, ValueError):
+        return GroupCreationResult(
+            success=False,
+            status="invalid_wom",
+            message="The WiseOldMan group ID must be a number.",
+            group_id=None,
+            wom_id=None,
+            guild_id=str(guild_id) if guild_id is not None else None,
+        )
+
+    if not guild_id:
+        return GroupCreationResult(
+            success=False,
+            status="guild_conflict",
+            message="A Discord server must be selected to create a group.",
+            group_id=None,
+            wom_id=wom_id,
+            guild_id=None,
+        )
+
+    guild_id = str(guild_id)
+    owner_discord_id = str(owner_discord_id)
+
+    # --- Ensure the owner has a DropTracker user account ---
+    user = _ensure_user(owner_discord_id, owner_username)
+    if not user:
+        return GroupCreationResult(
+            success=False,
+            status="db_error",
+            message="Unable to resolve your DropTracker account. Please try again later.",
+            group_id=None,
+            wom_id=wom_id,
+            guild_id=guild_id,
+        )
+
+    # --- Ensure the guild row exists ---
+    guild = session.query(Guild).filter(Guild.guild_id == guild_id).first()
+    if not guild:
+        guild = Guild(guild_id=guild_id, date_added=datetime.now())
+        session.add(guild)
+        session.commit()
+    else:
+        if guild.group_id is not None:
+            existing = (
+                session.query(Group).filter(Group.group_id == guild.group_id).first()
+            )
+            if existing and existing.wom_id == wom_id:
+                return GroupCreationResult(
+                    success=False,
+                    status="already_registered",
+                    message="This Discord server already has a group registered with the DropTracker.",
+                    group_id=existing.group_id,
+                    wom_id=existing.wom_id,
+                    guild_id=guild_id,
+                )
+            return GroupCreationResult(
+                success=False,
+                status="guild_conflict",
+                message=(
+                    "This Discord server is already associated with a different "
+                    f"DropTracker group (WOM id {existing.wom_id if existing else 'unknown'})."
+                ),
+                group_id=existing.group_id if existing else None,
+                wom_id=existing.wom_id if existing else None,
+                guild_id=guild_id,
+            )
+
+    # --- Enforce global WOM id uniqueness ---
+    existing_wom_group = session.query(Group).filter(Group.wom_id == wom_id).first()
+    if existing_wom_group:
+        return GroupCreationResult(
+            success=False,
+            status="wom_conflict",
+            message=f"This WiseOldMan group ({wom_id}) is already registered with the DropTracker.",
+            group_id=existing_wom_group.group_id,
+            wom_id=wom_id,
+            guild_id=guild_id,
+        )
+
+    # --- Create the group ---
+    group = Group(group_name=group_name, wom_id=wom_id, guild_id=guild.guild_id)
+    session.add(group)
+    user.add_group(group)
+    try:
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        print(f"[create_web_group] Failed to commit group: {exc}")
+        return GroupCreationResult(
+            success=False,
+            status="db_error",
+            message="Unable to create your group due to a database error. Please try again later.",
+            group_id=None,
+            wom_id=wom_id,
+            guild_id=guild_id,
+        )
+
+    # --- Link the guild to the new group ---
+    guild.group_id = group.group_id
+    try:
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        print(f"[create_web_group] Failed to link guild to group: {exc}")
+
+    # --- Mirror into the XenForo database (best effort, matches bot) ---
+    try:
+        await insert_xf_group(group)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[create_web_group] Error inserting group into XenForo: {exc}")
+
+    # --- Clone the default configuration from the template group ---
+    try:
+        _clone_group_configurations(group, group_name, owner_discord_id)
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        print(f"[create_web_group] Error creating default configs: {exc}")
+        # The group itself exists; surface a soft warning rather than failing.
+        return GroupCreationResult(
+            success=True,
+            status="created",
+            message=(
+                "Your group was created, but default settings could not be applied "
+                "automatically. You can configure them on the website."
+            ),
+            group_id=group.group_id,
+            wom_id=wom_id,
+            guild_id=guild_id,
+        )
+
+    return GroupCreationResult(
+        success=True,
+        status="created",
+        message="Your group has been created successfully.",
+        group_id=group.group_id,
+        wom_id=wom_id,
+        guild_id=guild_id,
+    )
