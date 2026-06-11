@@ -216,6 +216,8 @@ class PricingAPI:
                     return confliction_gauntlet_value - tormented_bracelet_value - (demon_tear_value * 10000)
                 else:
                     return 5000000
+            if item_lower == "eye of ayak (uncharged)":
+                return await self.get_most_recent_price_by_name("Eye of ayak (uncharged)")
             
             # Default case - return provided value
             return provided_value
