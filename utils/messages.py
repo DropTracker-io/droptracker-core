@@ -88,40 +88,44 @@ async def name_change_message(bot, new_name, player_id, old_name):
                                     description=f"[{player_id}] `{old_name}` -> `{new_name}`",
                                     color=0x00ff00, footer=global_footer))
                                 
-sent_npc_email_list = []
+# Tracks unknown NPCs/items we've already sent a Discord embed for during this run
+# of the bot, so repeated submissions referencing the same unresolved NPC/item
+# don't spam the channel or re-trigger the notification flow.
+notified_unknown_npcs = set()
+notified_unknown_items = set()
+
 async def confirm_new_npc(bot: interactions.Client, npc_name, player_name, item_name, value):
     if npc_name == "Loot Chest":
         return
-    else:
-        channel_id = 1350412061141762110
-        channel = await bot.fetch_channel(channel_id=channel_id)
-        if channel:
-            embed = Embed(title="New NPC Detected",
-                          description=f"Player: `{player_name}`\n" + 
-                          f"Item: `{item_name}`\n" + 
-                          f"**Unknown NPC:** `{npc_name}`\n" + 
-                          f"Value: `{value}`")
-            await channel.send(f"@everyone\nAn NPC has arrived thru a submission that we are not yet tracking:", embeds=embed)
-        
-
-
-sent_item_email_list = []
-async def confirm_new_item(bot: interactions.Client, item_name, player_name, item_id, npc_name, value):
-    if item_name not in sent_item_email_list:
-        channel_id = 1350412061141762110
-        channel = await bot.fetch_channel(channel_id=channel_id)
-        if channel:
-            embed = Embed(title="New item Detected",
-                          description=f"Player: `{player_name}`\n" + 
-                          f"**Unknown Item:** `{item_name}`\n" + 
-                          f"Item ID: `{item_id}`\n" + 
-                          f"NPC: `{npc_name}`\n" + 
-                          f"Value: `{value}`")
-            
-            await channel.send(f"@everyone\nAn NPC has arrived thru a submission that we are not yet tracking:", embeds=embed)
-        sent_item_email_list.append(item_name)
-    else:
+    if npc_name in notified_unknown_npcs:
         return
+    notified_unknown_npcs.add(npc_name)
+    channel_id = 1350412061141762110
+    channel = await bot.fetch_channel(channel_id=channel_id)
+    if channel:
+        embed = Embed(title="New NPC Detected",
+                      description=f"Player: `{player_name}`\n" +
+                      f"Item: `{item_name}`\n" +
+                      f"**Unknown NPC:** `{npc_name}`\n" +
+                      f"Value: `{value}`")
+        await channel.send(f"@everyone\nAn NPC has arrived thru a submission that we are not yet tracking:", embeds=embed)
+
+
+async def confirm_new_item(bot: interactions.Client, item_name, player_name, item_id, npc_name, value):
+    if item_id in notified_unknown_items:
+        return
+    notified_unknown_items.add(item_id)
+    channel_id = 1350412061141762110
+    channel = await bot.fetch_channel(channel_id=channel_id)
+    if channel:
+        embed = Embed(title="New item Detected",
+                      description=f"Player: `{player_name}`\n" +
+                      f"**Unknown Item:** `{item_name}`\n" +
+                      f"Item ID: `{item_id}`\n" +
+                      f"NPC: `{npc_name}`\n" +
+                      f"Value: `{value}`")
+
+        await channel.send(f"@everyone\nAn NPC has arrived thru a submission that we are not yet tracking:", embeds=embed)
 
 async def joined_guild_msg(bot: interactions.Client, guild: interactions.Guild):
     try:
