@@ -446,15 +446,9 @@ async def ensure_item_for_drop(session, item_id, item_name):
 
 async def screenshot_required(session, group_id) -> bool:
     """ Checks whether a group has configured that screenshots must be included for notifications to be created """
-    config_key = "only_send_messages_with_images"
-    config: GroupConfiguration = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
-                                                      GroupConfiguration.config_key == config_key).first()
-    if config:
-        # "1" or "true" means screenshots ARE required; "0" or "false" means NOT required
-        if config.config_value == "1" or config.config_value.lower() == "true":
-            return True
-        return False
-    return False
+    from utils import group_config as gc
+    value = gc.get(session, group_id, gc.ONLY_SEND_MESSAGES_WITH_IMAGES)
+    return gc.is_truthy(value)
 
 _group_point_system_cache = {}
 _GROUP_POINT_CACHE_TTL = 60
@@ -793,25 +787,10 @@ def is_truthy_config(value):
 
 def get_group_drop_notify_settings(session, group_id):
     """Return (min_value_to_notify:int, send_stacks:bool)."""
-
-    min_value_config = (
-        session.query(GroupConfiguration)
-        .filter(
-            GroupConfiguration.group_id == group_id,
-            GroupConfiguration.config_key == "minimum_value_to_notify",
-        )
-        .first()
-    )
-    min_value_to_notify = int(min_value_config.config_value) if min_value_config else 2500000
-    should_send_stacks = (
-        session.query(GroupConfiguration)
-        .filter(
-            GroupConfiguration.group_id == group_id,
-            GroupConfiguration.config_key == "send_stacks_of_items",
-        )
-        .first()
-    )
-    send_stacks = is_truthy_config(should_send_stacks.config_value) if should_send_stacks else False
+    from utils import group_config as gc
+    min_value_raw = gc.get(session, group_id, gc.MINIMUM_VALUE_TO_NOTIFY)
+    min_value_to_notify = int(min_value_raw) if min_value_raw is not None else 2500000
+    send_stacks = gc.is_truthy(gc.get(session, group_id, gc.SEND_STACKS_OF_ITEMS))
     return min_value_to_notify, send_stacks
 
 

@@ -265,3 +265,19 @@ def reset_notification_cache():
         common_module.stored_notifications = {}
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def reset_group_config_cache():
+    """Clear the in-process TTL cache in utils.group_config between tests."""
+    try:
+        import utils.group_config as gc
+        gc._cache.clear()
+    except Exception:
+        pass
+    yield
+    try:
+        import utils.group_config as gc
+        gc._cache.clear()
+    except Exception:
+        pass
