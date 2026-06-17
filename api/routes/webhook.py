@@ -18,6 +18,11 @@ from utils.video_storage import backend_for_video_record, get_public_video_url
 webhook_bp = Blueprint("webhook", __name__)
 MAIN_WORLD_TYPE = "main"
 
+# Queue-mode: when WEBHOOK_QUEUE_MODE=true the acceptors push to Redis and
+# return immediately; a separate workers/webhook_consumer.py drains the queue.
+_QUEUE_MODE = os.getenv("WEBHOOK_QUEUE_MODE", "").lower() in ("true", "1", "yes")
+_WEBHOOK_TEMP_DIR = os.getenv("WEBHOOK_TEMP_DIR", "/tmp/webhook_uploads")
+
 
 def _drop_request_debug(message: str):
     """Consistent logging for drop request ingestion diagnostics."""
@@ -150,6 +155,110 @@ async def _try_attach_video_url_to_drop(processed_data, db_session):
         print(f"[Webhook] Error attaching video URL to drop: {e}")
 
 
+async def _save_upload_to_temp(image_file) -> tuple:
+    """Save a Quart FileStorage object to a temp path. Returns (path, filename, content_type)."""
+    import inspect
+    import aiofiles
+
+    os.makedirs(_WEBHOOK_TEMP_DIR, exist_ok=True)
+
+    filename = getattr(image_file, "filename", None) or "upload.jpg"
+    content_type = (
+        getattr(image_file, "content_type", None)
+        or getattr(image_file, "mimetype", None)
+        or "image/jpeg"
+    )
+
+    ext = "jpg"
+    if filename and "." in filename:
+        cand = filename.rsplit(".", 1)[1].lower()
+        if cand in {"jpg", "jpeg", "png", "gif", "webp"}:
+            ext = "jpg" if cand == "jpeg" else cand
+    elif "png" in content_type:
+        ext = "png"
+    elif "gif" in content_type:
+        ext = "gif"
+    elif "webp" in content_type:
+        ext = "webp"
+
+    tmp_path = os.path.join(_WEBHOOK_TEMP_DIR, f"{uuid.uuid4().hex}.{ext}")
+
+    try:
+        if hasattr(image_file, "save"):
+            save_fn = image_file.save
+            if inspect.iscoroutinefunction(save_fn):
+                await save_fn(tmp_path)
+            else:
+                await asyncio.to_thread(save_fn, tmp_path)
+        elif hasattr(image_file, "read") and inspect.iscoroutinefunction(
+            getattr(image_file, "read", None)
+        ):
+            async with aiofiles.open(tmp_path, "wb") as f:
+                data = await image_file.read()
+                await f.write(data)
+        elif hasattr(image_file, "file"):
+            def _sync_copy():
+                import shutil
+                try:
+                    image_file.file.seek(0)
+                except Exception:
+                    pass
+                with open(tmp_path, "wb") as out:
+                    shutil.copyfileobj(image_file.file, out)
+            await asyncio.to_thread(_sync_copy)
+        return tmp_path, filename, content_type
+    except Exception as e:
+        logger.log_sync("error", f"[QueueAcceptor] Failed to save upload to temp: {e}")
+        return None, filename, content_type
+
+
+async def _queue_webhook_request():
+    """Fast-path acceptor: validate, save image to temp, push to Redis queue, return 200."""
+    import json
+    from utils.redis import RedisClient
+
+    try:
+        content_type = request.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            return jsonify({"error": "Expected multipart/form-data"}), 400
+
+        form = await request.form
+        payload_json = form.get("payload_json")
+        if not payload_json:
+            return jsonify({"error": "No payload_json found in form data"}), 400
+
+        try:
+            webhook_payload = json.loads(payload_json)
+        except Exception:
+            return jsonify({"error": "Invalid JSON in payload_json"}), 400
+
+        if not webhook_payload:
+            return jsonify({"error": "Empty payload"}), 400
+
+        files = await request.files
+        image_file = files.get("file") if files else None
+
+        image_tmp_path = image_filename = image_content_type = None
+        if image_file:
+            image_tmp_path, image_filename, image_content_type = await _save_upload_to_temp(image_file)
+
+        entry = {
+            "payload": webhook_payload,
+            "image_tmp_path": image_tmp_path,
+            "image_filename": image_filename,
+            "image_content_type": image_content_type,
+            "enqueued_at": datetime.utcnow().isoformat(),
+        }
+
+        rc = RedisClient()
+        rc.rpush("webhook:queue", json.dumps(entry))
+        return jsonify({"message": "Queued"}), 200
+
+    except Exception as e:
+        logger.log_sync("error", f"[QueueAcceptor] Error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @webhook_bp.post("/submit")
 @rate_limit(limit=10, period=timedelta(seconds=1))
 async def submit_data():
@@ -159,6 +268,8 @@ async def submit_data():
 @webhook_bp.post("/webhook")
 @rate_limit(limit=100, period=timedelta(seconds=1))
 async def webhook_data():
+    if _QUEUE_MODE:
+        return await _queue_webhook_request()
     import time
     req_start = time.perf_counter()
     return await _process_webhook_request(req_start)
