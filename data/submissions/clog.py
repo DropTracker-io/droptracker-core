@@ -14,7 +14,6 @@ from .common import (
     select_session_and_flag,
     ensure_can_create,
     debug_print,
-    GroupConfiguration,
     award_points_to_player,
     get_config_prefix,
     SEASONAL_WORLD_TYPE,
@@ -206,18 +205,8 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                 except Exception as e:
                     print(f"Couldn't perform check against group point awards... e: {e}")
                     pass
-            clog_notify_config = (
-                session.query(GroupConfiguration)
-                .filter(
-                    GroupConfiguration.group_id == group_id,
-                    GroupConfiguration.config_key == f"{config_prefix}notify_clogs",
-                )
-                .first()
-            )
-            if clog_notify_config and (
-                clog_notify_config.config_value.lower() == "true"
-                or int(clog_notify_config.config_value) == 1
-            ):
+            from utils import group_config as gc
+            if gc.is_truthy(gc.get(session, group_id, f"{config_prefix}notify_clogs")):
                 if await screenshot_required(session, group_id):
                     # Treat video submissions as satisfying screenshot requirement
                     if not clog_entry.image_url and not video_key:

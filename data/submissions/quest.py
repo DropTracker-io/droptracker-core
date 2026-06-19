@@ -11,12 +11,10 @@ from .common import (
     get_player_groups_with_global,
     is_user_dm_enabled,
     create_notification,
-    is_truthy_config,
     screenshot_required,
     select_session_and_flag,
     ensure_can_create,
     debug_print,
-    GroupConfiguration,
     get_config_prefix,
     SEASONAL_WORLD_TYPE,
     SeasonalQuestCompletionEntry,
@@ -135,16 +133,8 @@ async def quest_processor(quest_data, external_session=None, world_type="main"):
         await asyncio.sleep(0)
         group_id = group.group_id
 
-        quest_notify_config = (
-            session.query(GroupConfiguration)
-            .filter(
-                GroupConfiguration.group_id == group_id,
-                GroupConfiguration.config_key == f"{config_prefix}notify_quests",
-            )
-            .first()
-        )
-
-        if not quest_notify_config or not is_truthy_config(getattr(quest_notify_config, "config_value", None)):
+        from utils import group_config as gc
+        if not gc.is_truthy(gc.get(session, group_id, f"{config_prefix}notify_quests")):
             print(f"Quest notifications are disabled for group {group.group_name}")
             continue
 

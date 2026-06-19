@@ -17,7 +17,6 @@ from .common import (
     select_session_and_flag,
     ensure_can_create,
     debug_print,
-    GroupConfiguration,
     is_truthy_config,
     get_config_prefix,
     SEASONAL_WORLD_TYPE,
@@ -165,16 +164,9 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
         group_ids = [g.group_id for g in player_groups]
         pb_notify_configs = {}
         if group_ids:
-            notify_rows = (
-                session.query(GroupConfiguration)
-                .filter(
-                    GroupConfiguration.group_id.in_(group_ids),
-                    GroupConfiguration.config_key == f"{config_prefix}notify_pbs",
-                )
-                .all()
-            )
-            for row in notify_rows:
-                pb_notify_configs[row.group_id] = row
+            from utils import group_config as gc
+            bulk = gc.get_bulk(session, group_ids, [f"{config_prefix}notify_pbs"])
+            pb_notify_configs = {gid: val for (gid, _key), val in bulk.items()}
 
         for group in player_groups:
             await asyncio.sleep(0)
@@ -213,7 +205,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                 except Exception as e:
                     print(f"Couldn't perform check against group point awards... e: {e}")
                     pass
-            if pb_notify_config and is_truthy_config(getattr(pb_notify_config, "config_value", None)):
+            if is_truthy_config(pb_notify_configs.get(group_id)):
                 if (await screenshot_required(session, group_id)):
                     # Treat video submissions as satisfying screenshot requirement
                     if not pb_entry.image_url and not video_key:
