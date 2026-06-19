@@ -12,8 +12,6 @@ from .common import (
     get_player_groups_with_global,
     award_points_to_player,
     debug_print,
-    GroupConfiguration,
-    is_truthy_config,
     get_config_prefix,
     SEASONAL_WORLD_TYPE,
     SeasonalCombatAchievementEntry,
@@ -211,29 +209,13 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
                         )
                 except Exception as e:
                     print(f"Couldn't perform check against group point awards... e: {e}")
-            ca_notify_config = (
-                session.query(GroupConfiguration)
-                .filter(
-                    GroupConfiguration.group_id == group_id,
-                    GroupConfiguration.config_key == f"{config_prefix}notify_cas",
-                )
-                .first()
-            )
-            debug_print(
-                "CA notify config: "
-                + str(getattr(ca_notify_config, "config_value", None))
-            )
-            if ca_notify_config and is_truthy_config(
-                getattr(ca_notify_config, "config_value", None)
-            ):
-                min_tier = (
-                    session.query(GroupConfiguration.config_value)
-                    .filter(
-                        GroupConfiguration.config_key == f"{config_prefix}min_ca_tier_to_notify",
-                        GroupConfiguration.group_id == group_id,
-                    )
-                    .first()
-                )
+            from utils import group_config as gc
+            ca_notify_val = gc.get(session, group_id, f"{config_prefix}notify_cas")
+            debug_print("CA notify config: " + str(ca_notify_val))
+            if gc.is_truthy(ca_notify_val):
+                min_tier_raw = gc.get(session, group_id, f"{config_prefix}min_ca_tier_to_notify")
+                # Wrap in a 1-tuple to preserve the existing min_tier[0] access pattern below
+                min_tier = (min_tier_raw,) if min_tier_raw is not None else None
                 tier_order = ["easy", "medium", "hard", "elite", "master", "grandmaster"]
                 if min_tier != "disabled" or group_id == 2:
                     if (min_tier and min_tier[0].lower() in tier_order) or group_id == 2:

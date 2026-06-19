@@ -21,7 +21,6 @@ from .common import (
     RedisClient,
     DatabaseOperations,
     debug_print,
-    GroupConfiguration,
     FeatureActivation,
     award_points_to_player,
     player_list,
@@ -340,31 +339,23 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         group_config_values = {}
         instant_update_group_ids = set()
         if group_ids:
-            config_rows = (
-                session.query(GroupConfiguration)
-                .filter(
-                    GroupConfiguration.group_id.in_(group_ids),
-                    GroupConfiguration.config_key.in_(
-                        [
-                            f"{config_prefix}minimum_value_to_notify",
-                            f"{config_prefix}send_stacks_of_items",
-                            "split_gp_tracking",
-                        ]
-                    ),
-                )
-                .all()
+            from utils import group_config as gc
+            group_config_values = gc.get_bulk(
+                session,
+                group_ids,
+                [
+                    f"{config_prefix}minimum_value_to_notify",
+                    f"{config_prefix}send_stacks_of_items",
+                    "split_gp_tracking",
+                ],
             )
-            for config in config_rows:
-                group_config_values[(config.group_id, config.config_key)] = config.config_value
             debug_print(
                 "Loaded group notification configs: "
                 + ", ".join(
-                    [
-                        f"group_id={cfg.group_id} {cfg.config_key}={cfg.config_value}"
-                        for cfg in config_rows
-                    ]
+                    f"group_id={gid} {key}={val}"
+                    for (gid, key), val in group_config_values.items()
                 )
-                if config_rows
+                if group_config_values
                 else "Loaded group notification configs: none"
             )
 

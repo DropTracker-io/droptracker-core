@@ -121,7 +121,13 @@ main() {
     
     # Start Hall of Fame bot
     screen -dmS "$HOF_SCREEN" bash -c "cd $APP_DIR && source $VENV_PATH && python3 -m bots.hall_of_fame; exec bash"
-    
+
+    # Start webhook queue consumer (only needed when WEBHOOK_QUEUE_MODE=true in .env)
+    if grep -qE '^\s*WEBHOOK_QUEUE_MODE\s*=\s*(true|1|yes)\s*$' "$APP_DIR/.env" 2>/dev/null; then
+        screen -dmS "DT-consumer" bash -c "cd $APP_DIR && source $VENV_PATH && python3 -m workers.webhook_consumer; exec bash"
+        echo "Started webhook queue consumer in screen 'DT-consumer'"
+    fi
+
     echo "=== Startup Complete ==="
     
     # List all running screens
