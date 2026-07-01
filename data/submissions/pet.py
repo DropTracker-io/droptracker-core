@@ -10,12 +10,10 @@ from .common import (
     get_player_groups_with_global,
     is_user_dm_enabled,
     create_notification,
-    is_truthy_config,
     screenshot_required,
     select_session_and_flag,
     ensure_can_create,
     debug_print,
-    GroupConfiguration,
     award_points_to_player,
     get_config_prefix,
     SEASONAL_WORLD_TYPE,
@@ -169,14 +167,8 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
         for group in player_groups:
             debug_print(f"Checking group: {group.group_name}")
             group_id = group.group_id
-            pet_notify_config = (
-                session.query(GroupConfiguration)
-                .filter(
-                    GroupConfiguration.group_id == group_id,
-                    GroupConfiguration.config_key == f"{config_prefix}notify_pets",
-                )
-                .first()
-            )
+            from utils import group_config as gc
+            pet_notify_val = gc.get(session, group_id, f"{config_prefix}notify_pets")
             group_points_result = {
                 "receiver_points_awarded": 0,
                 "receiver_current_points": 0,
@@ -215,15 +207,13 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                 except Exception as e:
                     print(f"Couldn't perform check against group point awards... e: {e}")
                     pass
-            debug_print(
-                f"Pet notify config for group {group_id}: {pet_notify_config.config_value if pet_notify_config else 'None'}"
-            )
+            debug_print(f"Pet notify config for group {group_id}: {pet_notify_val}")
             if await screenshot_required(session, group_id):
                 # Treat video submissions as satisfying screenshot requirement
                 if not dl_path and not video_key:
                     notice = f"Your pet submission did not include a screenshot (required for {group.group_name}). Please enable screenshots in the DropTracker plugin configuration to accurately share your achievements!"
                     continue
-            if pet_notify_config and is_truthy_config(pet_notify_config.config_value):
+            if gc.is_truthy(pet_notify_val):
                 debug_print(f"Group {group_id} has pet notifications enabled")
                 awarded_members = group_points_result.get("awarded_members", []) or []
                 notification_data = {

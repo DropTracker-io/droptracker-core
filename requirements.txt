@@ -36,9 +36,7 @@ google-auth-oauthlib==1.2.1
 requests==2.32.3
 wom.py==1.0.0
 
-# Graphing & Visualization (Requires system libs installed above)
-pygraphviz==1.13
-ERAlchemy==1.2.10
+# Graphing & Visualization
 pillow==10.4.0
 
 # Utilities & Parsing

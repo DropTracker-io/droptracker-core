@@ -19,9 +19,7 @@ from monitor.sdnotifier import SystemdWatchdog
 from sqlalchemy import text
 from services.notification_service import NotificationService
 from services.bot_state import BotState
-#from services.lootboards import Lootboards
 from services.channel_names import ChannelNames
-#from services import update_dmer
 from utils.ge_value import get_true_item_value
 from utils.embeds import create_boss_pb_embed, update_boss_pb_embed
 from utils.logger import LoggerClient
@@ -45,14 +43,12 @@ from interactions import GuildText, Intents, Message, user_context_menu, Context
     slash_default_member_permission, Permissions, SlashContext, ButtonStyle, Button, SlashCommand, ComponentContext, \
     component_callback, Modal, ShortText, BaseContext, Extension, GuildChannel
 from interactions.api.events import GuildJoin, GuildLeft, MessageCreate, Component, Startup
-#from pb.leaderboards import create_pb_embeds
 from lootboard.generator import generate_server_board, get_generated_board_path
 from utils.cloudflare_update import CloudflareIPUpdater
 from utils.msg_logger import HighThroughputLogger
 from utils.wiseoldman import fetch_group_members
 from web.front import create_frontend
 from commands import UserCommands, ClanCommands
-#from tickets import Tickets
 from db.models import Group, GroupConfiguration, GroupPatreon, GroupPersonalBestMessage, Guild, PersonalBestEntry, PlayerPet, Session, User, WebhookPendingDeletion, session, NpcList, ItemList, Webhook, Player
 
 from db.ops import associate_player_ids, update_group_members
@@ -365,24 +361,6 @@ async def lootboard_updates():
                             configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
                                                                                     GroupConfiguration.config_key == 'lootboard_message_id').first()
                             
-                            # else: ## found previous message from the bot
-                            #     message = message_to_update
-                            #     configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
-                            #                                                                     GroupConfiguration.config_key == 'lootboard_message_id').first()
-                            #     if configured_message.config_value != str(message.id):  
-                            #         configured_message.config_value = str(message.id)
-                            #         session.commit()
-                            #     if not message:
-                            #         message = await channel.send(f"<a:loading:1180923500836421715> Please wait while we initialize this Loot Leaderboard....")
-                            #         print(f"No message ID found for group {group_id} ({group_obj.group_name}). Creating a new one...")
-                            #         try:
-                            #             configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
-                            #                                                                     GroupConfiguration.config_key == 'lootboard_message_id').first()
-                            #             configured_message.config_value = str(message.id)
-                            #             session.commit()
-                            #         except Exception as e:
-                            #             print(f"Couldn't update the lootboard message ID with a new one... e: {e}")
-                        
                         if not message:
                             print(f"Couldn't get the message to update the loot leaderboard with...")
                             try:
@@ -413,17 +391,6 @@ async def lootboard_updates():
                         total_tracked = group_obj.get_player_count()
                     else:
                         total_tracked = session.query(Player.wom_id).count()
-                    # with get_fresh_xenforo_session() as xenforo_session:
-                    #     # Fix: Use execute() instead of query() when using text() with parameters
-                    #     premium_status = xenforo_session.execute(
-                    #         text("SELECT * FROM xf_user_upgrade_active WHERE group_id = :group_id"), 
-                    #         {"group_id": group_id}
-                    #     ).first()
-                    #     if not premium_status:
-                    #         group_patreon = session.query(GroupPatreon).filter(GroupPatreon.group_id == group_id).first()
-                    #         next_update = datetime.now() + timedelta(seconds=615)
-                    #     else:
-                    #         next_update = datetime.now() + timedelta(seconds=615)
                     next_update = datetime.now() + timedelta(seconds=615)
                     future_timestamp = int(time.mktime(next_update.timetuple()))
                     value_dict = {
