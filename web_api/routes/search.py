@@ -11,7 +11,13 @@ import asyncio
 from quart import Blueprint, jsonify, request
 
 from db import Player, Group
-from web_api.common import db_session, money, period_to_partition, player_month_total
+from web_api.common import (
+    db_session,
+    money,
+    period_to_partition,
+    player_month_total,
+    with_cache_headers,
+)
 
 search_bp = Blueprint("v1_search", __name__)
 
@@ -60,7 +66,7 @@ async def combined_search():
             partition = period_to_partition("all")
             return {"players": _search_players(s, q, partition), "groups": _search_groups(s, q)}
 
-    return jsonify(await asyncio.to_thread(_load))
+    return with_cache_headers(jsonify(await asyncio.to_thread(_load)), max_age=10)
 
 
 @search_bp.get("/players/search")

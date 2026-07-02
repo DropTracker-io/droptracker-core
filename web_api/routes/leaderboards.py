@@ -20,11 +20,15 @@ from web_api.common import (
     cache_set,
     db_session,
     decode_member,
+    group_totals_key,
     leaderboard_key,
     money,
+    npc_leaderboard_key,
     parse_page,
     period_to_partition,
     player_list_loot_sum,
+    resolve_period,
+    with_cache_headers,
     _rc,
 )
 
@@ -38,7 +42,7 @@ async def leaderboards_players():
     period = request.args.get("period", "all")
     scope = request.args.get("scope", "global")
     page, limit = parse_page(request)
-    partition = period_to_partition(period)
+    token = resolve_period(period)
 
     group_id = None
     npc_id = None
@@ -53,7 +57,10 @@ async def leaderboards_players():
         except Exception:
             npc_id = None
 
-    key = leaderboard_key(partition, group_id=group_id, npc_id=npc_id)
+    if npc_id is not None:
+        key = npc_leaderboard_key(token, npc_id, group_id=group_id)
+    else:
+        key = leaderboard_key(token, group_id=group_id)
     conn = _rc()
 
     entries = []
@@ -92,12 +99,35 @@ async def leaderboards_players():
                 "loot": money(loot),
             })
 
-    return jsonify({
-        "period": period,
+    resp = jsonify({
+        "period": token,
         "scope": scope,
         "entries": entries,
         "meta": {"page": page, "limit": limit, "total": int(total)},
     })
+    return with_cache_headers(resp, max_age=15)
+
+
+def _read_group_totals_precomputed(token):
+    """Read the precomputed group-total sorted set (`gleaderboard:{token}`,
+    maintained by the lootboard generator). Returns a sorted desc list of
+    (group_id, score) or None if the set is empty/absent."""
+    conn = _rc()
+    if conn is None:
+        return None
+    try:
+        raw = conn.zrevrange(group_totals_key(token), 0, -1, withscores=True)
+    except Exception:
+        return None
+    if not raw:
+        return None
+    out = []
+    for member_raw, score in raw:
+        gid = decode_member(member_raw)
+        if gid is None or gid in (0, 2):
+            continue
+        out.append((gid, int(float(score))))
+    return out or None
 
 
 def _compute_group_totals(partition: int):
@@ -133,24 +163,59 @@ def _compute_group_totals(partition: int):
 async def leaderboards_groups():
     period = request.args.get("period", "all")
     page, limit = parse_page(request)
+    token = resolve_period(period)
     partition = period_to_partition(period)
 
-    totals = await asyncio.to_thread(_compute_group_totals, partition)
+    def _load():
+        # Prefer the precomputed group-total set (O(page), no full recompute).
+        precomputed = _read_group_totals_precomputed(token)
+        if precomputed is not None:
+            total_count = len(precomputed)
+            start = (page - 1) * limit
+            window = precomputed[start:start + limit]
+            gids = [gid for gid, _ in window]
+            names = {}
+            if gids:
+                with db_session() as s:
+                    rows = (
+                        s.query(Group.group_id, Group.group_name)
+                        .filter(Group.group_id.in_(gids))
+                        .all()
+                    )
+                    names = {gid: name for gid, name in rows}
+            entries = [
+                {
+                    "rank": start + i + 1,
+                    "id": gid,
+                    "name": names.get(gid, f"Group {gid}"),
+                    "loot": money(total),
+                }
+                for i, (gid, total) in enumerate(window)
+            ]
+            return entries, total_count
 
-    start = (page - 1) * limit
-    window = totals[start:start + limit]
-    entries = []
-    for i, (gid, name, total, _members) in enumerate(window):
-        entries.append({
-            "rank": start + i + 1,
-            "id": gid,
-            "name": name,
-            "loot": money(total),
-        })
+        # Fallback: compute across members (cached). Used for periods the
+        # precompute doesn't cover.
+        totals = _compute_group_totals(partition)
+        start = (page - 1) * limit
+        window = totals[start:start + limit]
+        entries = [
+            {
+                "rank": start + i + 1,
+                "id": gid,
+                "name": name,
+                "loot": money(total),
+            }
+            for i, (gid, name, total, _members) in enumerate(window)
+        ]
+        return entries, len(totals)
 
-    return jsonify({
-        "period": period,
+    entries, total_count = await asyncio.to_thread(_load)
+
+    resp = jsonify({
+        "period": token,
         "scope": "groups",
         "entries": entries,
-        "meta": {"page": page, "limit": limit, "total": len(totals)},
+        "meta": {"page": page, "limit": limit, "total": total_count},
     })
+    return with_cache_headers(resp, max_age=15)

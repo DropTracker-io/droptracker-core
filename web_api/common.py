@@ -76,15 +76,24 @@ def get_current_partition() -> int:
 
 
 def period_to_partition(period: Optional[str]) -> int:
-    """Map a `period` query param to a Redis monthly partition int.
+    """Map a `period` query param to a Redis **monthly** partition int.
 
-    `YYYYMM` is honored directly. `all`, `YYYYWW`, and `YYYYMMDD` are not yet
-    backed by dedicated leaderboard sorted sets, so they fall back to the
-    current month (documented limitation until Task 07 lands).
+    Used for the per-player monthly total keys (`player:{id}:{YYYYMM}:total_loot`)
+    that only exist monthly. Leaderboard sorted-set reads should use
+    `resolve_period` (token-based) instead, which supports day/week/all-time.
     """
     if period and re.fullmatch(r"\d{6}", period):
         return int(period)
     return get_current_partition()
+
+
+def resolve_period(period: Optional[str]) -> str:
+    """Normalize a `period` query param to a canonical partition token
+    (`YYYYMM` | `YYYYWww` | `YYYYMMDD` | `all`), shared with the write path
+    (`utils.partitions`). Unknown forms fall back to the current month."""
+    from utils.partitions import resolve_period as _resolve
+
+    return _resolve(period)
 
 
 # --------------------------------------------------------------------------- #
@@ -102,13 +111,41 @@ def db_session():
 # --------------------------------------------------------------------------- #
 # Redis convenience (canonical key scheme, §8.5 / Task 07 Part A).
 # --------------------------------------------------------------------------- #
-def leaderboard_key(partition: int, group_id: Optional[int] = None, npc_id: Optional[int] = None) -> str:
+def leaderboard_key(partition, group_id: Optional[int] = None, npc_id: Optional[int] = None) -> str:
+    """Canonical player-board key: ``leaderboard:{token}[:group:{gid}]``.
+
+    ``partition`` may be a monthly int or any partition token string
+    (see ``resolve_period``). For NPC boards use ``npc_leaderboard_key`` —
+    those live under a distinct, pre-existing scheme (see below).
+    """
     key = f"leaderboard:{partition}"
     if group_id:
         key += f":group:{group_id}"
     if npc_id:
         key += f":npc:{npc_id}"
     return key
+
+
+def npc_leaderboard_key(partition, npc_id: int, group_id: Optional[int] = None) -> str:
+    """NPC player-board key in the scheme actually populated today by
+    ``player.get_score_at_npc`` / ``services.hall_of_fame``:
+
+        leaderboard:npc:{npcId}:{token}
+        leaderboard:group:{groupId}:npc:{npcId}:{token}
+
+    (The §8.5 canonical form nests the token first; unifying the writers is a
+    separate bot-side migration. The Web API reads what exists so NPC scopes
+    return live data.)
+    """
+    if group_id:
+        return f"leaderboard:group:{group_id}:npc:{npc_id}:{partition}"
+    return f"leaderboard:npc:{npc_id}:{partition}"
+
+
+# Group-total precompute already maintained by the lootboard generator
+# (`gleaderboard:{monthly_partition}` — member=group_id, score=total_loot).
+def group_totals_key(partition) -> str:
+    return f"gleaderboard:{partition}"
 
 
 def _rc():
@@ -195,6 +232,51 @@ def problem(status: int, title: str, detail: Optional[str] = None):
     resp.status_code = status
     resp.headers["content-type"] = "application/problem+json"
     return resp
+
+
+class ProblemException(Exception):
+    """Raise from anywhere in a request to abort with an RFC-7807 response.
+
+    A single Quart error handler (registered in ``create_app``) converts it to a
+    ``problem()`` response, so route/dependency helpers can bail out early
+    without threading a response object back up the call stack.
+    """
+
+    def __init__(self, status: int, title: str, detail: Optional[str] = None):
+        super().__init__(title)
+        self.status = status
+        self.title = title
+        self.detail = detail
+
+    def to_response(self):
+        return problem(self.status, self.title, self.detail)
+
+
+def abort_problem(status: int, title: str, detail: Optional[str] = None):
+    raise ProblemException(status, title, detail)
+
+
+# --------------------------------------------------------------------------- #
+# Caching helpers for public reads (§6.5). Authed reads use `no_store`.
+# --------------------------------------------------------------------------- #
+def with_cache_headers(response, max_age: int = 15, etag_seed: Optional[str] = None):
+    """Attach `Cache-Control` + (optional) weak `ETag` to a public read.
+
+    The BFF layers ISR on top of this. `etag_seed` should be a cheap,
+    deterministic string for the payload (e.g. the JSON body).
+    """
+    response.headers["Cache-Control"] = f"public, max-age={max_age}"
+    if etag_seed is not None:
+        import hashlib
+
+        digest = hashlib.sha1(etag_seed.encode("utf-8", "ignore")).hexdigest()[:16]
+        response.headers["ETag"] = f'W/"{digest}"'
+    return response
+
+
+def private_no_store(response):
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 def parse_page(request, default_limit: int = 25, max_limit: int = 100) -> tuple[int, int]:

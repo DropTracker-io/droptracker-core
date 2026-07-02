@@ -32,6 +32,7 @@ from web_api.common import (
     player_list_loot_sum,
     player_month_total,
     problem,
+    with_cache_headers,
     _rc,
 )
 from web_api.routes.leaderboards import _compute_group_totals
@@ -39,6 +40,40 @@ from web_api.routes.leaderboards import _compute_group_totals
 profiles_bp = Blueprint("v1_profiles", __name__)
 
 IMG_BASE = "https://www.droptracker.io/img"
+
+
+def _player_points(s, player_id: int):
+    """Lifetime points earned (best-effort; omitted on error)."""
+    try:
+        from services.points import get_player_lifetime_points_earned
+
+        return int(get_player_lifetime_points_earned(player_id=player_id, session=s))
+    except Exception:
+        return None
+
+
+def _player_top_npc(s, player: Player):
+    """The player's highest-loot NPC name over the tracked NPC set
+    (best-effort; omitted on error). Mirrors the intake `/player_search`."""
+    try:
+        from data.TOP_NPCS import TOP_NPCS
+        from db import NpcList
+
+        best_name = None
+        best_loot = -1
+        npcs = s.query(NpcList).filter(NpcList.npc_id.in_(TOP_NPCS)).all()
+        for npc in npcs:
+            try:
+                _rank, score = player.get_score_at_npc(npc.npc_id)
+            except Exception:
+                continue
+            loot = int(float(score)) if score is not None else 0
+            if loot > best_loot:
+                best_loot = loot
+                best_name = npc.npc_name
+        return best_name if best_loot > 0 else None
+    except Exception:
+        return None
 
 
 def _convert_from_ms(ms: int) -> str:
@@ -58,8 +93,14 @@ def _convert_from_ms(ms: int) -> str:
     return f"{minutes}:{seconds:02}.{tenths}"
 
 
-def _build_submissions(rows, s, partition):
-    """Map NotifiedSubmission rows to the contract SubmissionSchema list."""
+def _build_submissions(rows, s, partition, player_names: dict | None = None):
+    """Map NotifiedSubmission rows to the contract SubmissionSchema list.
+
+    ``player_names`` (player_id -> name) is supplied by the caller so group-scope
+    listings can show who received each submission without an extra round trip
+    per row; player-scope callers pass a single-entry map for their own id.
+    """
+    player_names = player_names or {}
     out = []
     seen = set()
     for sub in rows:
@@ -67,6 +108,8 @@ def _build_submissions(rows, s, partition):
             ts = int(sub.date_added.timestamp()) if sub.date_added else 0
         except Exception:
             ts = 0
+        player_id = getattr(sub, "player_id", None)
+        player_name = player_names.get(player_id) if player_id else None
 
         if getattr(sub, "drop_id", None):
             key = ("drop", sub.drop_id)
@@ -78,12 +121,17 @@ def _build_submissions(rows, s, partition):
                 continue
             item = s.query(ItemList).filter(ItemList.item_id == drop.item_id).first()
             label = item.item_name if item else f"Item {drop.item_id}"
+            npc = s.query(NpcList).filter(NpcList.npc_id == drop.npc_id).first() if drop.npc_id else None
             out.append({
                 "id": int(sub.drop_id),
                 "type": "drop",
                 "label": label,
                 "value": money((drop.value or 0) * (drop.quantity or 1)),
+                "quantity": int(drop.quantity or 1),
                 "image_url": f"{IMG_BASE}/itemdb/{drop.item_id}.png",
+                "npc_name": npc.npc_name if npc else None,
+                "player_id": player_id,
+                "player_name": player_name,
                 "ts": ts,
             })
         elif getattr(sub, "clog_id", None):
@@ -96,11 +144,15 @@ def _build_submissions(rows, s, partition):
                 continue
             item = s.query(ItemList).filter(ItemList.item_id == clog.item_id).first()
             label = item.item_name if item else f"Item {clog.item_id}"
+            npc = s.query(NpcList).filter(NpcList.npc_id == clog.npc_id).first() if clog.npc_id else None
             out.append({
                 "id": int(sub.clog_id),
                 "type": "clog",
                 "label": label,
                 "image_url": f"{IMG_BASE}/itemdb/{clog.item_id}.png",
+                "npc_name": npc.npc_name if npc else None,
+                "player_id": player_id,
+                "player_name": player_name,
                 "ts": ts,
             })
         elif getattr(sub, "pb_id", None):
@@ -124,6 +176,9 @@ def _build_submissions(rows, s, partition):
                 "type": "pb",
                 "label": label,
                 "image_url": f"{IMG_BASE}/npcdb/{pb.npc_id}.png",
+                "npc_name": npc_name,
+                "player_id": player_id,
+                "player_name": player_name,
                 "ts": ts,
             })
     return out
@@ -160,7 +215,7 @@ async def player_profile(player_id: int):
                 .limit(10)
                 .all()
             )
-            submissions = _build_submissions(recent, s, partition)
+            submissions = _build_submissions(recent, s, partition, {player_id: player.player_name})
 
             loot = player_month_total(player_id, partition)
             rank = player_global_rank(player_id, partition)
@@ -174,12 +229,18 @@ async def player_profile(player_id: int):
             }
             if rank is not None:
                 payload["global_rank"] = rank
+            points = _player_points(s, player_id)
+            if points is not None:
+                payload["points"] = points
+            top_npc = _player_top_npc(s, player)
+            if top_npc:
+                payload["top_npc"] = top_npc
             return payload
 
     payload = await asyncio.to_thread(_load)
     if payload is None:
         return problem(404, "Player not found", f"No player with id {player_id}")
-    return jsonify(payload)
+    return with_cache_headers(jsonify(payload), max_age=30)
 
 
 @profiles_bp.get("/groups/<int:group_id>")
@@ -238,7 +299,14 @@ async def group_profile(group_id: int):
                 .limit(10)
                 .all()
             )
-            submissions = _build_submissions(recent, s, partition)
+            recent_player_ids = {r.player_id for r in recent if r.player_id}
+            player_names = {}
+            if recent_player_ids:
+                player_names = {
+                    p.player_id: p.player_name
+                    for p in s.query(Player).filter(Player.player_id.in_(recent_player_ids)).all()
+                }
+            submissions = _build_submissions(recent, s, partition, player_names)
 
             payload = {
                 "id": group_id,
@@ -260,40 +328,7 @@ async def group_profile(group_id: int):
     payload = await asyncio.to_thread(_load)
     if payload is None:
         return problem(404, "Group not found", f"No group with id {group_id}")
-    return jsonify(payload)
+    return with_cache_headers(jsonify(payload), max_age=30)
 
-
-@profiles_bp.get("/groups/<int:group_id>/members")
-async def group_members(group_id: int):
-    page, limit = parse_page(request)
-
-    def _load():
-        with db_session() as s:
-            group = s.query(Group).filter(Group.group_id == group_id).first()
-            if not group:
-                return None
-            partition = period_to_partition("all")
-            rows = (
-                s.query(Player.player_id, Player.player_name)
-                .join(Player.groups)
-                .filter(Group.group_id == group_id)
-                .all()
-            )
-            members = []
-            for pid, name in rows:
-                members.append({
-                    "id": pid,
-                    "name": name,
-                    "total_loot": money(player_month_total(pid, partition)),
-                    "hidden": False,
-                })
-            members.sort(key=lambda m: m["total_loot"]["value"], reverse=True)
-            total = len(members)
-            start = (page - 1) * limit
-            window = members[start:start + limit]
-            return {"members": window, "meta": {"page": page, "limit": limit, "total": total}}
-
-    payload = await asyncio.to_thread(_load)
-    if payload is None:
-        return problem(404, "Group not found", f"No group with id {group_id}")
-    return jsonify(payload)
+# NOTE: GET /groups/{id}/members lives in web_api/routes/group_admin.py — it is
+# session + group-admin gated and reflects hidden (ignored) players (Task 10).

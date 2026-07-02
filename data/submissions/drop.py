@@ -323,7 +323,9 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         log_checkpoint("create_drop_object")
         try:
             debug_print("Updating player in redis...")
-            redis_updates.add_to_player(player, drop, world_type=world_type)
+            redis_updates.add_to_player(
+                player, drop, world_type=world_type, item_name=item_name, npc_name=npc_name,
+            )
             debug_print("Player redis update completed")
         except Exception as e:
             debug_print(f"Error updating player in redis: {e}")

@@ -48,6 +48,17 @@ from .seasonal_combat_achievement import SeasonalCombatAchievementEntry
 from .seasonal_pet import SeasonalPlayerPet
 from .seasonal_quest_completion import SeasonalQuestCompletionEntry
 from .drop_split import DropSplit
+from .web import GroupAdmin, Announcement, AuditLog, DiscordOutbox, DocsPage
+from .subscriptions import SubscriptionTier, GroupSubscription
+from .events import (
+    Event,
+    EventTask,
+    EventTeam,
+    EventTeamMember,
+    EventBingoCell,
+    EventBingoCompletion,
+    EVENT_TASK_TYPES,
+)
 
 
 def get_current_partition() -> int:
@@ -122,4 +133,18 @@ __all__ = [
     "SeasonalPlayerPet",
     "SeasonalQuestCompletionEntry",
     "DropSplit",
+    "GroupAdmin",
+    "Announcement",
+    "AuditLog",
+    "DiscordOutbox",
+    "DocsPage",
+    "SubscriptionTier",
+    "GroupSubscription",
+    "Event",
+    "EventTask",
+    "EventTeam",
+    "EventTeamMember",
+    "EventBingoCell",
+    "EventBingoCompletion",
+    "EVENT_TASK_TYPES",
 ]

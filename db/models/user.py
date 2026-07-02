@@ -67,6 +67,15 @@ class User(Base):
     group_ping = Column(Boolean, default=False)
     never_ping = Column(Boolean, default=False)
     hidden = Column(Boolean, default=False)
+    # Web platform preference columns (FRONTEND_PLAN.md §9, backend Task 03/08).
+    dm_on_rank_change = Column(Boolean, default=False)
+    dm_on_points = Column(Boolean, default=False)
+    update_logs_opt_in = Column(Boolean, default=False)
+    # Patreon/premium group selection (users.patreon_group / premium_group, §9/§11).
+    patreon_group = Column(Integer, nullable=True)
+    premium_group = Column(Integer, nullable=True)
+    # Site staff flag: unlocks superadmin surfaces (§9, backend Task 12).
+    is_superadmin = Column(Boolean, default=False)
     
     # Relationships
     players = relationship("Player", back_populates="user")

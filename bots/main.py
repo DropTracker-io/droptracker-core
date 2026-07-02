@@ -457,7 +457,12 @@ async def lootboard_updates():
         print(f"Critical error in loot leaderboard update loop: {e}")
     
 
-async def create_tasks():    
+async def create_tasks():
+    # Cheap and independent (in-memory bot.guilds only, no external calls) —
+    # run this first so the Web API's channel picker has data within seconds of
+    # startup instead of waiting behind the slow lootboard/WOM-sync passes below.
+    await cache_guild_channels()
+    cache_guild_channels.start()
     print("Starting lootboards")
     await lootboard_updates()
     lootboard_updates.start()
@@ -469,6 +474,64 @@ async def create_tasks():
     print("Starting heartbeat monitoring...")
     heartbeat_check.start()
     notification_force.start()
+    drain_discord_outbox.start()
+
+
+@Task.create(IntervalTrigger(seconds=10))
+async def drain_discord_outbox():
+    """Drain the Web API's Discord outbox (announcement syndication + admin
+    message sender). Additive; failures are isolated per row."""
+    try:
+        from services.discord_outbox import drain_once
+        from db.models import Session as _Session
+        await drain_once(bot, _Session)
+    except Exception as e:
+        print(f"Couldn't drain discord outbox: {e}")
+
+@Task.create(IntervalTrigger(minutes=5))
+async def cache_guild_channels():
+    """Cache each linked group's guild's text channels to Redis
+    (`guild:{id}:channels`) so the Web API's Discord channel picker (group
+    config UI) can list them without the Web API ever holding a bot token /
+    Discord connection itself — it only reads this cache.
+
+    Uses REST (`bot.fetch_guild` + `guild.fetch_channels()`), not the gateway's
+    passive `bot.guilds` cache: this bot doesn't run the `GUILDS` intent, so
+    that cache never populates. Scoped to guilds with a linked ``Group`` row
+    (not "every guild the bot is in") since that's the only thing the picker
+    ever needs. 10-minute Redis TTL as a staleness guard if the bot goes down;
+    this task refreshes it every 5 minutes while running.
+    """
+    try:
+        session = Session()
+        guild_ids = {
+            str(g[0])
+            for g in session.query(Group.guild_id).filter(Group.guild_id != None).distinct().all()  # noqa: E711
+        }
+    except Exception as e:
+        print(f"Couldn't load guild ids for channel cache: {e}")
+        return
+
+    cached = 0
+    for guild_id in guild_ids:
+        try:
+            guild = await bot.fetch_guild(guild_id)
+            if not guild:
+                continue
+            raw_channels = await guild.fetch_channels()
+            channels = sorted(
+                (
+                    {"id": str(c.id), "name": c.name, "position": c.position or 0}
+                    for c in raw_channels
+                    if isinstance(c, GuildText)
+                ),
+                key=lambda c: c["position"],
+            )
+            redis_client.setex(f"guild:{guild_id}:channels", 600, json.dumps(channels))
+            cached += 1
+        except Exception as e:
+            print(f"Couldn't cache channels for guild {guild_id}: {e}")
+    print(f"Cached channel lists for {cached}/{len(guild_ids)} linked guilds.")
 
 @Task.create(IntervalTrigger(seconds=30))
 async def notification_force():

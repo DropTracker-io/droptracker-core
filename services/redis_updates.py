@@ -164,13 +164,25 @@ class RedisLootTracker:
         return result
         """
     
-    def add_to_player(self, player: Player, drop, world_type: str = "main") -> bool:
+    def add_to_player(
+        self,
+        player: Player,
+        drop,
+        world_type: str = "main",
+        item_name: str | None = None,
+        npc_name: str | None = None,
+    ) -> bool:
         """
         Add a single drop to a player's Redis cache (incremental update).
         Thread-safe and atomic. Also updates leaderboards.
 
         Pass ``world_type="seasonal"`` to write into the seasonal key namespace
         so that seasonal and main-world data are stored completely separately.
+
+        ``item_name``/``npc_name`` are optional display strings the caller has
+        already resolved (e.g. ``drop_processor``) — passed through only for the
+        realtime drop-feed publish so it can show text without this hot path
+        doing its own DB lookup.
         """
         with self._lock:
             if player.player_id in self._processing_players:
@@ -189,6 +201,17 @@ class RedisLootTracker:
 
                     # Update leaderboards incrementally using ZINCRBY instead of full recalculation
                     self._increment_leaderboards(player.player_id, total_value, partition, player_group_ids, world_type=world_type)
+
+                    # Additive: publish a realtime leaderboard_delta (Task 07 C).
+                    # Never affects intake — publish failures are swallowed.
+                    try:
+                        from services.realtime import publish_drop
+                        publish_drop(
+                            player, drop, total_value, partition, player_group_ids,
+                            world_type=world_type, item_name=item_name, npc_name=npc_name,
+                        )
+                    except Exception:
+                        pass
 
                 return result
             except Exception as e:
@@ -221,6 +244,48 @@ class RedisLootTracker:
                 group_key = f"{prefix}leaderboard:{partition}:group:{group_id}"
                 pipeline.zincrby(group_key, value_delta, player_id)
 
+        pipeline.execute()
+
+        # --- Additive: weekly / daily / all-time partitions (Task 07 Part A) ---
+        # The monthly board above is unchanged. These extra sorted sets are
+        # populated going forward so the Web API's period=day|week|all filters
+        # have real data. Failures here never affect the monthly board or the
+        # drop itself.
+        try:
+            self._increment_extra_partitions(player_id, value_delta, group_ids, prefix)
+        except Exception as e:
+            print(f"[redis_updates] extra-partition update skipped: {e}")
+
+    # Retention for the additive weekly/daily boards (bounds Redis memory).
+    _WEEKLY_TTL = 400 * 24 * 3600   # ~13 months
+    _DAILY_TTL = 90 * 24 * 3600     # 90 days (matches player daily key retention)
+
+    def _increment_extra_partitions(self, player_id: int, value_delta: int,
+                                    group_ids: Optional[List[int]], prefix: str):
+        """Maintain weekly / daily / all-time global + per-group player boards.
+
+        Strictly additive to the monthly board. Weekly and daily sets get a TTL
+        so they don't grow unbounded; all-time and monthly persist.
+        """
+        from utils.partitions import week_token, day_token, ALL
+
+        now = datetime.now()
+        wk, day = week_token(now), day_token(now)
+        # (token, ttl) — None ttl => persist.
+        tokens = [(wk, self._WEEKLY_TTL), (day, self._DAILY_TTL), (ALL, None)]
+
+        pipeline = redis_client.client.pipeline(transaction=True)
+        for token, ttl in tokens:
+            gkey = f"{prefix}leaderboard:{token}"
+            pipeline.zincrby(gkey, value_delta, player_id)
+            if ttl:
+                pipeline.expire(gkey, ttl)
+            if group_ids:
+                for group_id in group_ids:
+                    grpkey = f"{prefix}leaderboard:{token}:group:{group_id}"
+                    pipeline.zincrby(grpkey, value_delta, player_id)
+                    if ttl:
+                        pipeline.expire(grpkey, ttl)
         pipeline.execute()
     
     def _add_drop_incremental(self, player_id: int, drop, world_type: str = "main") -> bool:
