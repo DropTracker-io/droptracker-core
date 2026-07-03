@@ -1,6 +1,8 @@
 # Environmental variables
 .env
 
+nohup.out
+
 # static files like css, js, images, etc.
 /static/assets/data/*
 /static/assets/img/*
