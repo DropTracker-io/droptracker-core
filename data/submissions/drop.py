@@ -328,7 +328,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             )
             debug_print("Player redis update completed")
         except Exception as e:
-            debug_print(f"Error updating player in redis: {e}")
+            print(f"[RedisSync] Failed to update player {player_id} in redis for drop {getattr(drop, 'drop_id', '?')}: {e}")
         log_checkpoint("redis_add_to_player")
 
         debug_print(f"Getting player groups for {player_name}...")
