@@ -35,6 +35,7 @@ from db import (
 from web_api.common import abort_problem, db_session, private_no_store, with_cache_headers
 from web_api.deps import (
     assert_group_admin,
+    assert_group_entitlement,
     current_user_id,
     json_body,
     load_user,
@@ -243,7 +244,14 @@ def _assert_event_admin(s, user_id, group_id):
     if not group_id:
         abort_problem(422, "Missing group", "Events must belong to a group.")
     user = load_user(s, user_id)
-    assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+    assert_group_entitlement(
+        s,
+        user_id,
+        group_id,
+        "events",
+        manageable_guild_ids(user_id),
+        user=user,
+    )
 
 
 @events_bp.post("/events")

@@ -35,6 +35,7 @@ class SubscriptionTier(Base):
     currency = Column(String(8), nullable=False, default="USD")
     interval = Column(String(8), nullable=False, default="month")  # month|year
     features = Column(Text, nullable=True)  # JSON array of strings
+    entitlements = Column(Text, nullable=True)  # JSON object of booleans (Task 15)
     recommended = Column(Boolean, nullable=False, default=False)
     provider_price_id = Column(String(120), nullable=True)
     active = Column(Boolean, nullable=False, default=True)

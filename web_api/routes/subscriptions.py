@@ -22,6 +22,11 @@ from quart import Blueprint, jsonify, request
 from db import GroupSubscription, SubscriptionTier
 from web_api import billing
 from web_api.common import abort_problem, db_session, private_no_store, with_cache_headers
+from web_api.entitlements import resolve_group_entitlements
+from web_api.entitlements_registry import (
+    parse_stored_entitlements,
+    resolve_tier_entitlements,
+)
 from web_api.deps import (
     assert_group_admin,
     current_user_id,
@@ -38,6 +43,7 @@ def _serialize_tier(t: SubscriptionTier) -> dict:
         features = json.loads(t.features) if t.features else []
     except Exception:
         features = []
+    stored = parse_stored_entitlements(t.entitlements)
     return {
         "key": t.key,
         "name": t.name,
@@ -46,13 +52,14 @@ def _serialize_tier(t: SubscriptionTier) -> dict:
         "currency": t.currency or "USD",
         "interval": t.interval or "month",
         "features": features if isinstance(features, list) else [],
+        "entitlements": resolve_tier_entitlements(stored),
         "recommended": bool(t.recommended),
     }
 
 
-def _serialize_sub(group_id: int, sub: GroupSubscription | None) -> dict:
+def _serialize_sub(group_id: int, sub: GroupSubscription | None, entitlements: dict | None = None) -> dict:
     if sub is None or sub.status == "none":
-        return {
+        base = {
             "group_id": group_id,
             "tier_key": None,
             "status": "none",
@@ -60,7 +67,10 @@ def _serialize_sub(group_id: int, sub: GroupSubscription | None) -> dict:
             "current_period_end": None,
             "cancel_at_period_end": False,
         }
-    return {
+        if entitlements is not None:
+            base["entitlements"] = entitlements
+        return base
+    payload = {
         "group_id": group_id,
         "tier_key": sub.tier_key,
         "status": sub.status,
@@ -70,6 +80,9 @@ def _serialize_sub(group_id: int, sub: GroupSubscription | None) -> dict:
         else None,
         "cancel_at_period_end": bool(sub.cancel_at_period_end),
     }
+    if entitlements is not None:
+        payload["entitlements"] = entitlements
+    return payload
 
 
 @subscriptions_bp.get("/subscriptions/tiers")
@@ -97,7 +110,8 @@ def _require_admin_and_sub(user_id, group_id):
             .filter(GroupSubscription.group_id == group_id)
             .first()
         )
-        return _serialize_sub(group_id, sub)
+        entitlements = resolve_group_entitlements(s, group_id, user=user)
+        return _serialize_sub(group_id, sub, entitlements=entitlements)
 
 
 @subscriptions_bp.get("/groups/<int:group_id>/subscription")

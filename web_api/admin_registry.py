@@ -99,7 +99,7 @@ ENTITY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "pk_type": "str",
         "columns": [
             "key", "name", "description", "price_cents", "currency", "interval",
-            "features", "recommended", "provider_price_id", "active",
+            "features", "entitlements", "recommended", "provider_price_id", "active",
             "created_at", "updated_at",
         ],
         "editable": [

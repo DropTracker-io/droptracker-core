@@ -203,6 +203,44 @@ def assert_superadmin(user: Optional[User]) -> None:
         abort_problem(403, "Forbidden", "Site staff access is required.")
 
 
+def assert_group_entitlement(
+    s,
+    user_id: int,
+    group_id: int,
+    entitlement_key: str,
+    *,
+    manage_guild_ids: Optional[Set[str]] = None,
+    user: Optional[User] = None,
+) -> None:
+    """Abort 403 unless the group's subscription includes ``entitlement_key``.
+
+    Superadmins bypass entitlement checks (same as ``canAdminGroup`` on the
+    front-end). Requires admin rights on the group first.
+    """
+    from web_api.entitlements import resolve_group_entitlements
+    from web_api.entitlements_registry import get_entitlement_field
+
+    if get_entitlement_field(entitlement_key) is None:
+        abort_problem(500, "Invalid entitlement", f"Unknown entitlement '{entitlement_key}'.")
+
+    assert_group_admin(s, user_id, group_id, manage_guild_ids, user)
+
+    if user is None:
+        user = load_user(s, user_id)
+    if is_superadmin(user):
+        return
+
+    entitlements = resolve_group_entitlements(s, group_id, user=user)
+    if not entitlements.get(entitlement_key):
+        label = get_entitlement_field(entitlement_key)["label"]
+        abort_problem(
+            403,
+            "Subscription required",
+            f"Your group's subscription does not include {label}. "
+            "Upgrade on the Subscription tab.",
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Request body
 # --------------------------------------------------------------------------- #

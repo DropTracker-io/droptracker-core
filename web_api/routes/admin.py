@@ -51,6 +51,11 @@ from web_api import admin_registry as registry
 from web_api import billing
 from web_api.common import abort_problem, db_session, parse_page, private_no_store
 from web_api.deps import assert_superadmin, current_user_id, json_body, load_user
+from web_api.entitlements_registry import (
+    EntitlementValidationError,
+    entitlements_to_storage,
+    validate_entitlements_input,
+)
 from web_api.routes.subscriptions import _serialize_sub
 
 admin_bp = Blueprint("v1_admin", __name__)
@@ -284,7 +289,16 @@ def _tier_from_body(body: dict, existing: SubscriptionTier | None = None):
     features_json = json.dumps(features) if isinstance(features, list) else (
         existing.features if existing else "[]"
     )
-    return key, features_json
+    entitlements_json = None
+    if "entitlements" in body:
+        try:
+            validated = validate_entitlements_input(body.get("entitlements") or {})
+            entitlements_json = entitlements_to_storage(validated)
+        except EntitlementValidationError as e:
+            abort_problem(422, "Invalid entitlements", e.detail)
+    elif existing is not None:
+        entitlements_json = existing.entitlements
+    return key, features_json, entitlements_json
 
 
 @admin_bp.post("/admin/subscriptions/tiers")
@@ -294,7 +308,7 @@ async def create_tier():
 
     def _apply():
         with db_session() as s:
-            key, features_json = _tier_from_body(body)
+            key, features_json, entitlements_json = _tier_from_body(body)
             if s.query(SubscriptionTier).filter(SubscriptionTier.key == key).first():
                 abort_problem(409, "Tier exists", f"Tier '{key}' already exists.")
             tier = SubscriptionTier(
@@ -305,6 +319,7 @@ async def create_tier():
                 currency=body.get("currency") or "USD",
                 interval=body.get("interval") or "month",
                 features=features_json,
+                entitlements=entitlements_json,
                 recommended=bool(body.get("recommended", False)),
                 active=bool(body.get("active", True)),
             )
@@ -343,6 +358,12 @@ async def update_tier(key: str):
                 tier.interval = body["interval"]
             if "features" in body and isinstance(body["features"], list):
                 tier.features = json.dumps(body["features"])
+            if "entitlements" in body:
+                try:
+                    validated = validate_entitlements_input(body.get("entitlements") or {})
+                    tier.entitlements = entitlements_to_storage(validated)
+                except EntitlementValidationError as e:
+                    abort_problem(422, "Invalid entitlements", e.detail)
             if "recommended" in body:
                 tier.recommended = bool(body["recommended"])
             if "active" in body:

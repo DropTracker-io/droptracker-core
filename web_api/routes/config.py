@@ -36,11 +36,13 @@ from web_api.config_registry import (
 )
 from web_api.deps import (
     assert_group_admin,
+    assert_group_entitlement,
     current_user_id,
     json_body,
     load_user,
     manageable_guild_ids,
 )
+from web_api.entitlements_registry import HALL_OF_FAME_CONFIG_KEYS
 
 config_bp = Blueprint("v1_config", __name__)
 
@@ -95,6 +97,21 @@ async def patch_group_config(group_id: int):
 
     if not body:
         return jsonify({"ok": True})
+
+    if any(key in HALL_OF_FAME_CONFIG_KEYS for key in body):
+        def _check_hof():
+            with db_session() as s:
+                user = load_user(s, user_id)
+                assert_group_entitlement(
+                    s,
+                    user_id,
+                    group_id,
+                    "hall_of_fame",
+                    manageable_guild_ids(user_id),
+                    user=user,
+                )
+
+        await asyncio.to_thread(_check_hof)
 
     # Pre-validate + coerce all provided keys before touching the DB.
     coerced = {}

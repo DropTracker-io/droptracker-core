@@ -57,7 +57,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "personal_best_embed_boss_list", "type": "bosslist", "default": ""},
     {"key": "number_of_pbs_to_display", "type": "int", "default": 5, "min": 1, "max": 25},
     {"key": "channel_id_to_send_pb_embeds", "type": "channel", "default": None},
-    {"key": "hof_individual_boss_messages", "type": "boolean", "default": True},
+    {"key": "hof_individual_boss_messages", "type": "boolean", "default": False},
 
     # --- Combat achievements ---
     {
