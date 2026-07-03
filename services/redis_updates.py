@@ -898,9 +898,23 @@ def get_player_list_loot_sum(player_ids: List[int]):
         return 0
 
 # Convenience functions for backward compatibility
-def add_to_player(player: Player, drop: Drop, world_type: str = "main") -> bool:
+def add_to_player(
+    player: Player,
+    drop: Drop,
+    world_type: str = "main",
+    item_name: str | None = None,
+    npc_name: str | None = None,
+) -> bool:
     """Add a drop to a player's Redis cache"""
-    return loot_tracker.add_to_player(player, drop, world_type=world_type)
+    return loot_tracker.add_to_player(
+        player, drop, world_type=world_type, item_name=item_name, npc_name=npc_name,
+    )
+
+
+def add_split_credit(player_id: int, split_value: int, partition: int,
+                     group_id: int, world_type: str = "main") -> None:
+    """Adjust a player's score in a single group leaderboard by split_value."""
+    return loot_tracker.add_split_credit(player_id, split_value, partition, group_id, world_type)
 
 def force_update_player(player_id: int, session_to_use=None) -> bool:
     """Force update a player's Redis cache from database"""
