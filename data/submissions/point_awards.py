@@ -6,6 +6,7 @@ without affecting global credits used for premium features.
 """
 
 import json
+import os
 from datetime import datetime
 
 from db import PlayerPoints, GroupPointConfig
@@ -21,7 +22,9 @@ import time
 
 
 class PointDebugSettings:
-    enabled = True
+    # ~12 log lines per drop for premium groups; enable via POINT_DEBUG=true
+    # (or flip at runtime) only when investigating point/split behavior.
+    enabled = os.getenv("POINT_DEBUG", "").lower() in ("true", "1", "yes")
 
 
 def _point_debug(message: str):

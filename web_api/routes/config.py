@@ -3,6 +3,7 @@
   GET   /api/v1/groups/{id}/config             (session + group admin) -> flat typed object
   PATCH /api/v1/groups/{id}/config             (session + group admin) -> { ok: true }
   GET   /api/v1/groups/{id}/discord-channels   (session + group admin) -> { channels, cached }
+  GET   /api/v1/groups/{id}/pb-bosses          (session + group admin) -> { bosses, cached }
 
 Reads/writes ``group_configurations`` validated against the shared registry
 (``web_api/config_registry.py``). The plugin-facing ``load_config`` is untouched.
@@ -23,7 +24,7 @@ import json
 
 from quart import Blueprint, jsonify
 
-from db import AuditLog, Group, GroupConfiguration
+from db import AuditLog, Group, GroupConfiguration, NpcList, PersonalBestEntry
 from web_api.common import abort_problem, db_session, private_no_store, _rc
 from web_api.config_registry import (
     ConfigValidationError,
@@ -43,6 +44,21 @@ from web_api.deps import (
 
 config_bp = Blueprint("v1_config", __name__)
 
+# Keys whose values can exceed group_configurations.config_value (VARCHAR(255)).
+# The HoF service reads these via long_value when config_value is empty/short
+# (services/hall_of_fame.py _parse_group_boss_list), so the typed endpoints
+# must round-trip long_value or long lists silently truncate on save.
+LONG_VALUE_KEYS = {"personal_best_embed_boss_list"}
+
+
+def _effective_stored_value(row: GroupConfiguration) -> str | None:
+    """Mirror the HoF parser's precedence: config_value wins unless it's empty
+    or suspiciously short, in which case the overflow long_value is used."""
+    value = row.config_value or ""
+    if row.config_key in LONG_VALUE_KEYS and len(value) < 10:
+        return row.long_value or value
+    return row.config_value
+
 
 @config_bp.get("/groups/<int:group_id>/config")
 async def get_group_config(group_id: int):
@@ -58,7 +74,7 @@ async def get_group_config(group_id: int):
                 .filter(GroupConfiguration.group_id == group_id)
                 .all()
             )
-            stored = {r.config_key: r.config_value for r in rows}
+            stored = {r.config_key: _effective_stored_value(r) for r in rows}
 
             out = {}
             for key in all_config_keys():
@@ -105,8 +121,26 @@ async def patch_group_config(group_id: int):
                     )
                     .first()
                 )
-                before = row.config_value if row else None
-                if row:
+                before = _effective_stored_value(row) if row else None
+                # Overflow-capable keys: the full value always lives in
+                # long_value; config_value only holds it when it fits (empty
+                # otherwise, so the short-value fallback in the HoF parser
+                # kicks in instead of reading a truncated list).
+                if key in LONG_VALUE_KEYS:
+                    short_value = new_value if len(new_value) <= 255 else ""
+                    if row:
+                        row.config_value = short_value
+                        row.long_value = new_value
+                    else:
+                        s.add(
+                            GroupConfiguration(
+                                group_id=group_id,
+                                config_key=key,
+                                config_value=short_value,
+                                long_value=new_value,
+                            )
+                        )
+                elif row:
                     row.config_value = new_value
                 else:
                     s.add(
@@ -175,3 +209,55 @@ async def get_group_discord_channels(group_id: int):
             pass
 
     return private_no_store(jsonify({"channels": channels, "cached": cached}))
+
+
+_PB_BOSSES_CACHE_KEY = "web:pb-boss-names"
+_PB_BOSSES_CACHE_TTL = 600
+
+
+@config_bp.get("/groups/<int:group_id>/pb-bosses")
+async def get_group_pb_bosses(group_id: int):
+    """Boss names eligible for `personal_best_embed_boss_list` — the distinct
+    NPC names that have at least one personal best stored, i.e. exactly the
+    names the HoF service can match against. Global (not group-scoped), since
+    a group may want to track bosses its members haven't submitted PBs for yet.
+    Cached in Redis; falls back to a direct query when Redis is unavailable."""
+    user_id = current_user_id()
+
+    def _authorize():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+
+    await asyncio.to_thread(_authorize)
+
+    conn = _rc()
+    if conn is not None:
+        try:
+            raw = conn.get(_PB_BOSSES_CACHE_KEY)
+            if raw:
+                names = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+                return private_no_store(jsonify({"bosses": names, "cached": True}))
+        except Exception:
+            pass
+
+    def _load():
+        with db_session() as s:
+            rows = (
+                s.query(NpcList.npc_name)
+                .join(PersonalBestEntry, PersonalBestEntry.npc_id == NpcList.npc_id)
+                .distinct()
+                .order_by(NpcList.npc_name)
+                .all()
+            )
+            return [r[0] for r in rows]
+
+    names = await asyncio.to_thread(_load)
+
+    if conn is not None:
+        try:
+            conn.set(_PB_BOSSES_CACHE_KEY, json.dumps(names), ex=_PB_BOSSES_CACHE_TTL)
+        except Exception:
+            pass
+
+    return private_no_store(jsonify({"bosses": names, "cached": False}))

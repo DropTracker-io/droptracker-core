@@ -19,7 +19,9 @@ from typing import Any, Dict, List, Optional
 
 SEASONAL_PREFIX = "seasonal_"
 
-# type ∈ channel | boolean | int | string | text | csv | select
+# type ∈ channel | boolean | int | string | text | csv | bosslist | select
+# (bosslist stores a comma-separated boss-name list like csv; the frontend
+# renders it as a picker backed by GET /groups/{id}/pb-bosses.)
 GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # --- Channels ---
     {"key": "drop_channel_id", "type": "channel", "default": None},
@@ -52,9 +54,10 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
 
     # --- Personal best ---
     {"key": "notify_pbs", "type": "boolean", "default": True, "seasonal": True},
-    {"key": "personal_best_embed_boss_list", "type": "csv", "default": ""},
+    {"key": "personal_best_embed_boss_list", "type": "bosslist", "default": ""},
     {"key": "number_of_pbs_to_display", "type": "int", "default": 5, "min": 1, "max": 25},
     {"key": "channel_id_to_send_pb_embeds", "type": "channel", "default": None},
+    {"key": "hof_individual_boss_messages", "type": "boolean", "default": True},
 
     # --- Combat achievements ---
     {
@@ -130,7 +133,7 @@ def coerce_from_storage(field: Dict[str, Any], stored: Optional[str]) -> Any:
             return int(float(stored))
         except (ValueError, TypeError):
             return field.get("default")
-    # channel / string / text / csv / select -> string
+    # channel / string / text / csv / bosslist / select -> string
     return str(stored)
 
 
@@ -176,7 +179,7 @@ def coerce_to_storage(key: str, value: Any) -> str:
             )
         return sval
 
-    # channel / string / text / csv
+    # channel / string / text / csv / bosslist
     if value is None:
         return ""
     if not isinstance(value, (str, int)):

@@ -24,9 +24,15 @@ _QUEUE_MODE = os.getenv("WEBHOOK_QUEUE_MODE", "").lower() in ("true", "1", "yes"
 _WEBHOOK_TEMP_DIR = os.getenv("WEBHOOK_TEMP_DIR", "/tmp/webhook_uploads")
 
 
+# Per-submission ingestion diagnostics are very high volume (several lines per
+# drop); keep them off unless explicitly debugging with DROP_REQUEST_DEBUG=true.
+_DROP_REQUEST_DEBUG = os.getenv("DROP_REQUEST_DEBUG", "").lower() in ("true", "1", "yes")
+
+
 def _drop_request_debug(message: str):
     """Consistent logging for drop request ingestion diagnostics."""
-    print(f"[DropRequestDebug] {message}")
+    if _DROP_REQUEST_DEBUG:
+        print(f"[DropRequestDebug] {message}")
 
 
 def _normalize_world_type(raw_world_type):

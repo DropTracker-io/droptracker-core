@@ -111,6 +111,7 @@ async def top_groups():
 
 
 @groups_bp.get("/group_search")
+@rate_limit(limit=10, period=timedelta(seconds=60))
 async def group_search():
     group_name = request.args.get("name", None)
     if not group_name:
@@ -191,6 +192,7 @@ async def group_custom_board(group_id: int):
 @groups_bp.get("/groups/board_update/<int:group_id>")
 @groups_bp.post("/groups/board_update/<int:group_id>")
 @route_cors(allow_origin="https://www.droptracker.io")
+@rate_limit(limit=5, period=timedelta(seconds=60))
 async def group_board_update(group_id: int):
     try:
         force_raw = request.args.get("force", "false").lower()

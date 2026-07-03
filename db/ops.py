@@ -461,11 +461,7 @@ class DatabaseOperations:
                         }
                         await self.create_notification("name_change", player.player_id, notification_data)
             else:
-                try:
-                    overall = wom_player.latest_snapshot.data.skills.get("overall")
-                    total_level = overall.level
-                except Exception:
-                    total_level = 0
+                total_level = wom_player.get("total_level", 0) if isinstance(wom_player, dict) else 0
 
                 new_player = Player(
                     wom_id=expected_wom_id,

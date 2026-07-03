@@ -53,6 +53,7 @@ def setup_signal_handlers():
 @interactions.listen(Startup)
 async def on_startup(event: Startup):
     print("Hall of Fame bot started.")
+    total_groups = 0
     try:
         local_session = Session()
         groups_to_update = local_session.query(GroupConfiguration.group_id).filter(GroupConfiguration.config_key == "create_pb_embeds",
@@ -65,14 +66,17 @@ async def on_startup(event: Startup):
             ).first()
             if not existing_subscription or existing_subscription.group_upgrade_id < 2:
                 print(f"Group {group.group_id} does not have a subscription or is not a premium group, skipping")
-                total_groups -= 1    
-                continue        
+                total_groups -= 1
+                continue
     except Exception as e:
+        # Presence count is cosmetic — never let it stop the service from loading.
         print("Error getting groups to update:", e)
-        return
     bot.load_extension("services.hall_of_fame")
-    await bot.change_presence(status=interactions.Status.ONLINE,
-                              activity=interactions.Activity(name=f"{total_groups} Halls of Fame", type=interactions.ActivityType.WATCHING))
+    try:
+        await bot.change_presence(status=interactions.Status.ONLINE,
+                                  activity=interactions.Activity(name=f"{total_groups} Halls of Fame", type=interactions.ActivityType.WATCHING))
+    except Exception as e:
+        print("Error setting presence:", e)
 
 async def main():
     """Main function with systemd watchdog integration"""

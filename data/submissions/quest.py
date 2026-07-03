@@ -45,8 +45,8 @@ async def quest_processor(quest_data, external_session=None, world_type="main"):
       - image_url / image_path (optional)
       - video_key / video_url (optional; supported for consistency)
     """
-    print(f"=== QUEST PROCESSOR START (world_type={world_type}) ===")
-    print(f"[QUEST] Raw quest data: {quest_data}")
+    debug_print(f"=== QUEST PROCESSOR START (world_type={world_type}) ===")
+    debug_print(f"[QUEST] Raw quest data: {quest_data}")
 
     config_prefix = get_config_prefix(world_type)
     is_seasonal = world_type == SEASONAL_WORLD_TYPE
@@ -69,15 +69,7 @@ async def quest_processor(quest_data, external_session=None, world_type="main"):
     total_quest_points = quest_data.get("total_quest_points")
     qp_percentage = quest_data.get("qp_percentage")
     timestamp = quest_data.get("timestamp")
-    print(f"[QUEST] timestamp: {timestamp}")
-    print(f"[QUEST] completion_percentage: {completion_percentage}")
-    print(f"[QUEST] quest_points: {quest_points}")
-    print(f"[QUEST] total_quest_points: {total_quest_points}")
-    print(f"[QUEST] qp_percentage: {qp_percentage}")
-    print(f"[QUEST] quests_completed: {quests_completed}")
-    print(f"[QUEST] total_quests: {total_quests}")
-    print(f"[QUEST] quest_name: {quest_name}")
-    print(f"[QUEST] unique_id: {unique_id}")
+    debug_print(f"[QUEST] quest_name={quest_name} unique_id={unique_id} timestamp={timestamp}")
 
     notice = ""
 
@@ -188,7 +180,7 @@ async def quest_processor(quest_data, external_session=None, world_type="main"):
             existing_session=session if use_external_session else None,
         )
 
-    print(f"[QUEST] === QUEST PROCESSOR END ===")
+    debug_print(f"[QUEST] === QUEST PROCESSOR END ===")
     return SubmissionResponse(success=True, message=f"Quest recorded: {quest_name}", notice=notice or None)
 
 

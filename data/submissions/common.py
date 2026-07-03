@@ -178,6 +178,8 @@ def _to_int_or_none(value):
 
 
 def _extract_total_level_from_wom_player(wom_player) -> int:
+    if isinstance(wom_player, dict):
+        return int(wom_player.get("total_level") or 0)
     try:
         overall = wom_player.latest_snapshot.data.skills.get("overall")
         return int(overall.level)
@@ -489,6 +491,23 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
     expected_wom_id = None
     wom_log_slots = None
     wom_total_level = None
+
+    # Fast path: the account hash already maps to a local player whose stored
+    # name matches the submitted name and whose WOM identity is already known.
+    # Nothing about the identity can have changed (a name change would make the
+    # names differ; a fresh install/new account would miss on hash), so there is
+    # no reason to consult WOM at all. This is the hot path for ~95%+ of
+    # submissions and keeps our WOM API usage proportional to *new* identities
+    # rather than total submission volume.
+    if (
+        player_by_hash is not None
+        and player_by_hash.wom_id
+        and not _is_temp_account_hash(player_by_hash.account_hash)
+        and normalize_player_display_equivalence(player_by_hash.player_name or "")
+        == normalize_player_display_equivalence(player_name)
+    ):
+        player_list[player_name] = player_by_hash.player_id
+        return player_by_hash, True, True
 
     # 2) Authoritative WOM identity lookup for this RSN.
     wom_player = None
@@ -978,11 +997,7 @@ async def create_player(player_name, account_hash, existing_session=None):
                     existing_session=db_session if use_existing_session else None,
                 )
     else:
-        try:
-            overall = wom_player.latest_snapshot.data.skills.get("overall")
-            total_level = overall.level
-        except Exception:
-            total_level = 0
+        total_level = wom_total_level
 
         new_player = Player(
             wom_id=expected_wom_id,

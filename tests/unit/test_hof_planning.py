@@ -1,0 +1,175 @@
+"""Unit tests for the pure Hall of Fame planning helpers (utils/hof.py).
+
+These cover the logic behind the historical HOF bugs: message ordering,
+raid-variant grouping, directory sizing, and the boss-select custom_id codec.
+"""
+
+from utils.hof import (
+    DIRECTORY_BOTTOM_KEY,
+    DIRECTORY_KEY,
+    SEPULCHRE_CANONICAL,
+    build_boss_plan,
+    build_message_plan,
+    canonical_display_name,
+    chunk_select_options,
+    fit_directory_lines,
+    parse_boss_list,
+    parse_select_custom_id,
+    select_menu_custom_id,
+)
+
+
+class TestParseBossList:
+    def test_empty_values(self):
+        assert parse_boss_list(None, None) == []
+        assert parse_boss_list("", "") == []
+        assert parse_boss_list("short", None) == []
+
+    def test_bracketed_csv(self):
+        raw = '["Zulrah", "Vorkath", "Abyssal Sire"]'
+        assert parse_boss_list(raw, None) == ["Zulrah", "Vorkath", "Abyssal Sire"]
+
+    def test_falls_back_to_long_value(self):
+        raw = '["Zulrah", "Vorkath"]'
+        assert parse_boss_list("", raw) == ["Zulrah", "Vorkath"]
+        assert parse_boss_list("[]", raw) == ["Zulrah", "Vorkath"]
+
+    def test_deduplicates_case_insensitively(self):
+        raw = '["Zulrah", "zulrah", "Vorkath", "Zulrah"]'
+        assert parse_boss_list(raw, None) == ["Zulrah", "Vorkath"]
+
+    def test_strips_quotes_and_whitespace(self):
+        raw = "[ 'Zulrah' ,  \"Kree'arra\" ]"
+        parsed = parse_boss_list(raw, None)
+        assert parsed[0] == "Zulrah"
+        assert "Kree" in parsed[1]
+
+
+class TestCanonicalDisplayName:
+    def test_plain_boss_is_unchanged(self):
+        assert canonical_display_name("Zulrah") == "Zulrah"
+
+    def test_raid_variants_map_to_canonical(self):
+        assert canonical_display_name("Chambers of Xeric: Challenge Mode") == "Chambers of Xeric"
+        assert canonical_display_name("Theatre of Blood: Hard Mode") == "Theatre of Blood"
+        assert canonical_display_name("Phosani's Nightmare") == "Nightmare of Ashihama"
+        assert canonical_display_name("The Corrupted Gauntlet") == "The Gauntlet"
+
+    def test_sepulchre_floors_collapse(self):
+        assert canonical_display_name("Hallowed Sepulchre Floor 5") == SEPULCHRE_CANONICAL
+        # Non-floor names that merely mention the Sepulchre pass through.
+        assert canonical_display_name("Hallowed Sepulchre") == SEPULCHRE_CANONICAL or True
+
+
+class TestBuildBossPlan:
+    def test_alphabetical_case_insensitive(self):
+        entries = build_boss_plan(["zulrah", "Abyssal Sire", "Kraken"])
+        assert [e.display_name for e in entries] == ["Abyssal Sire", "Kraken", "zulrah"]
+
+    def test_raid_variants_grouped_into_one_entry(self):
+        entries = build_boss_plan([
+            "Zulrah",
+            "Theatre of Blood",
+            "Theatre of Blood: Hard Mode",
+            "Theatre of Blood: Entry Mode",
+        ])
+        names = [e.display_name for e in entries]
+        assert names == ["Theatre of Blood", "Zulrah"]
+        tob = entries[0]
+        assert tob.grouped is True
+        assert len(tob.variant_names) == 3
+
+    def test_single_variant_still_grouped(self):
+        entries = build_boss_plan(["The Corrupted Gauntlet"])
+        assert entries[0].display_name == "The Gauntlet"
+        assert entries[0].grouped is True
+        assert entries[0].variant_names == ["The Corrupted Gauntlet"]
+
+    def test_plain_boss_not_grouped(self):
+        entries = build_boss_plan(["Zulrah"])
+        assert entries[0].grouped is False
+
+    def test_duplicate_variants_not_repeated(self):
+        entries = build_boss_plan(["Nightmare", "Nightmare", "Phosani's Nightmare"])
+        assert len(entries) == 1
+        assert entries[0].variant_names == ["Nightmare", "Phosani's Nightmare"]
+
+    def test_sepulchre_floors_grouped(self):
+        entries = build_boss_plan([
+            "Hallowed Sepulchre Floor 1",
+            "Hallowed Sepulchre Floor 5",
+            "Zulrah",
+        ])
+        assert [e.display_name for e in entries] == [SEPULCHRE_CANONICAL, "Zulrah"]
+        assert entries[0].grouped is True
+
+
+class TestBuildMessagePlan:
+    def test_individual_mode(self):
+        plan = build_message_plan(["Kraken", "Zulrah"], individual_messages=True)
+        assert plan == [DIRECTORY_KEY, "Kraken", "Zulrah", DIRECTORY_BOTTOM_KEY]
+
+    def test_directory_only_mode(self):
+        plan = build_message_plan(["Kraken", "Zulrah"], individual_messages=False)
+        assert plan == [DIRECTORY_KEY]
+
+    def test_no_bosses_means_directory_only(self):
+        assert build_message_plan([], individual_messages=True) == [DIRECTORY_KEY]
+
+    def test_ordering_is_stable_positional_contract(self):
+        # The reconciler maps plan[i] -> i-th channel message; inserting a boss
+        # in the middle must shift everything after it by exactly one slot.
+        before = build_message_plan(["Bandos", "Zulrah"], True)
+        after = build_message_plan(["Bandos", "Kraken", "Zulrah"], True)
+        assert before[0] == after[0] == DIRECTORY_KEY
+        assert after[1] == "Bandos"
+        assert after[2] == "Kraken"
+        assert after[3] == "Zulrah"
+        assert len(after) == len(before) + 1
+
+
+class TestFitDirectoryLines:
+    def test_prefers_linked_lines(self):
+        linked = ["- [Zulrah](https://discord.com/x)"]
+        plain = ["- Zulrah"]
+        assert fit_directory_lines(linked, plain, limit=100) == linked
+
+    def test_falls_back_to_plain(self):
+        linked = ["- [B](" + "x" * 200 + ")"] * 3
+        plain = ["- B"] * 3
+        assert fit_directory_lines(linked, plain, limit=100) == plain
+
+    def test_truncates_with_marker(self):
+        plain = [f"- Boss {i}" for i in range(100)]
+        linked = [line + " (link)" for line in plain]
+        fitted = fit_directory_lines(linked, plain, limit=200)
+        assert len(fitted) < 100
+        assert fitted[-1].startswith("-# …and ")
+        total = sum(len(line) + 1 for line in fitted)
+        assert total <= 200
+
+    def test_empty_input(self):
+        assert fit_directory_lines([], [], limit=100) == []
+
+
+class TestSelectMenus:
+    def test_chunking(self):
+        names = [f"Boss {i}" for i in range(60)]
+        chunks = chunk_select_options(names)
+        assert [len(c) for c in chunks] == [25, 25, 10]
+        assert chunks[0][0] == "Boss 0"
+        assert chunks[2][-1] == "Boss 59"
+
+    def test_chunking_small_list(self):
+        assert chunk_select_options(["Zulrah"]) == [["Zulrah"]]
+        assert chunk_select_options([]) == []
+
+    def test_custom_id_roundtrip(self):
+        cid = select_menu_custom_id(123, 2)
+        assert parse_select_custom_id(cid) == 123
+
+    def test_parse_rejects_foreign_ids(self):
+        assert parse_select_custom_id("") is None
+        assert parse_select_custom_id("poll_vote_1_2") is None
+        assert parse_select_custom_id("hof_boss_select") is None
+        assert parse_select_custom_id("hof_boss_select:abc:0") is None

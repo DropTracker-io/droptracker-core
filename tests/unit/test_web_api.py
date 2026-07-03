@@ -8,6 +8,48 @@ and session tokens without a live DB/Redis.
 import pytest
 
 
+# ── Config long_value precedence (Hall of Fame boss list) ─────────────────────
+
+class TestEffectiveStoredValue:
+    """Mirrors the HoF parser (services/hall_of_fame.py _parse_group_boss_list):
+    config_value wins unless empty/<10 chars, then long_value."""
+
+    def _row(self, key, config_value, long_value=None):
+        class Row:
+            pass
+
+        r = Row()
+        r.config_key = key
+        r.config_value = config_value
+        r.long_value = long_value
+        return r
+
+    def test_long_list_lives_in_long_value(self):
+        from web_api.routes.config import _effective_stored_value
+
+        long = ",".join(f"Boss {i}" for i in range(40))  # > 255 chars
+        row = self._row("personal_best_embed_boss_list", "", long)
+        assert _effective_stored_value(row) == long
+
+    def test_short_config_value_falls_back_to_long_value(self):
+        from web_api.routes.config import _effective_stored_value
+
+        row = self._row("personal_best_embed_boss_list", "Zulrah", "Zulrah, Vorkath")
+        assert _effective_stored_value(row) == "Zulrah, Vorkath"
+
+    def test_fitting_config_value_wins(self):
+        from web_api.routes.config import _effective_stored_value
+
+        row = self._row("personal_best_embed_boss_list", "Zulrah, Vorkath", "stale old value")
+        assert _effective_stored_value(row) == "Zulrah, Vorkath"
+
+    def test_other_keys_never_touch_long_value(self):
+        from web_api.routes.config import _effective_stored_value
+
+        row = self._row("notify_pbs", "1", "junk")
+        assert _effective_stored_value(row) == "1"
+
+
 # ── Response conventions (Task 01) ────────────────────────────────────────────
 
 class TestConventions:
@@ -187,6 +229,7 @@ class TestApp:
         [
             ("get", "/api/v1/groups/1/config"),
             ("patch", "/api/v1/groups/1/config"),
+            ("get", "/api/v1/groups/1/pb-bosses"),
             ("post", "/api/v1/submissions/manual"),
             ("get", "/api/v1/uploads/presign"),
             ("get", "/api/v1/groups/1/members"),
