@@ -24,13 +24,16 @@ from web_api.common import ProblemException, problem
 from web_api.routes.admin import admin_bp
 from web_api.routes.announcements import announcements_bp
 from web_api.routes.auth import auth_bp
+from web_api.routes.badges import badges_bp
 from web_api.routes.config import config_bp
 from web_api.routes.docs import docs_bp
+from web_api.routes.event_admin import event_admin_bp
 from web_api.routes.events import events_bp
 from web_api.routes.group_admin import group_admin_bp
 from web_api.routes.leaderboards import leaderboards_bp
 from web_api.routes.lootboard import lootboard_bp
 from web_api.routes.me import me_bp
+from web_api.routes.paypal_ipn import paypal_ipn_bp
 from web_api.routes.profiles import profiles_bp
 from web_api.routes.realtime import realtime_bp
 from web_api.routes.search import search_bp
@@ -118,12 +121,15 @@ def create_app() -> Quart:
     app.register_blueprint(admin_bp, url_prefix=API_PREFIX)
     app.register_blueprint(announcements_bp, url_prefix=API_PREFIX)
     app.register_blueprint(auth_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(badges_bp, url_prefix=API_PREFIX)
     app.register_blueprint(config_bp, url_prefix=API_PREFIX)
     app.register_blueprint(docs_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(event_admin_bp, url_prefix=API_PREFIX)
     app.register_blueprint(events_bp, url_prefix=API_PREFIX)
     app.register_blueprint(group_admin_bp, url_prefix=API_PREFIX)
     app.register_blueprint(lootboard_bp, url_prefix=API_PREFIX)
     app.register_blueprint(me_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(paypal_ipn_bp, url_prefix=API_PREFIX)
     app.register_blueprint(leaderboards_bp, url_prefix=API_PREFIX)
     app.register_blueprint(profiles_bp, url_prefix=API_PREFIX)
     app.register_blueprint(search_bp, url_prefix=API_PREFIX)

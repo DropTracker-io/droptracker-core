@@ -57,6 +57,7 @@ def _rc():
 async def group_members(group_id: int):
     user_id = current_user_id()
     page, limit = parse_page(request)
+    q = (request.args.get("q") or "").strip().lower()
 
     def _load():
         with db_session() as s:
@@ -86,6 +87,7 @@ async def group_members(group_id: int):
                     "hidden": pid in hidden_ids,
                 }
                 for pid, name in rows
+                if not q or q in (name or "").lower()
             ]
             members.sort(key=lambda m: m["total_loot"]["value"], reverse=True)
             total = len(members)
