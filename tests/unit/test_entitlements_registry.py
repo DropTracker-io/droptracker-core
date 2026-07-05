@@ -13,16 +13,35 @@ _TS_REGISTRY = "/store/droptracker/web/packages/api-types/src/entitlements.ts"
 
 class TestEntitlementsRegistry:
     def test_resolve_empty_uses_defaults(self):
-        assert reg.resolve_tier_entitlements({}) == {"events": False, "hall_of_fame": False}
+        assert reg.resolve_tier_entitlements({}) == {
+            "events": False,
+            "events_max_active": 1,
+            "hall_of_fame": False,
+        }
 
     def test_resolve_explicit_defaults(self):
         resolved = reg.resolve_tier_entitlements({"events": True})
         assert resolved["events"] is True
         assert resolved["hall_of_fame"] is False
+        assert resolved["events_max_active"] == 1
 
     def test_validate_rejects_unknown(self):
         with pytest.raises(reg.EntitlementValidationError):
             reg.validate_entitlements_input({"bogus": True})
+
+    def test_int_kind_validation(self):
+        assert reg.validate_entitlements_input({"events_max_active": 3}) == {"events_max_active": 3}
+        with pytest.raises(reg.EntitlementValidationError):
+            reg.validate_entitlements_input({"events_max_active": True})
+        with pytest.raises(reg.EntitlementValidationError):
+            reg.validate_entitlements_input({"events_max_active": -1})
+        with pytest.raises(reg.EntitlementValidationError):
+            reg.validate_entitlements_input({"events": 5})
+
+    def test_superadmin_grant_unbounded_ints(self):
+        granted = reg.all_entitlements_granted()
+        assert granted["events"] is True
+        assert granted["events_max_active"] >= 1_000_000
 
     def test_hof_config_keys(self):
         assert "personal_best_embed_boss_list" in reg.HALL_OF_FAME_CONFIG_KEYS

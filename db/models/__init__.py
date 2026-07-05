@@ -49,6 +49,7 @@ from .seasonal_pet import SeasonalPlayerPet
 from .seasonal_quest_completion import SeasonalQuestCompletionEntry
 from .drop_split import DropSplit
 from .web import GroupAdmin, Announcement, AuditLog, DiscordOutbox, DocsPage
+from .badge import Badge, PlayerBadge
 from .subscriptions import SubscriptionTier, GroupSubscription
 from .events import (
     Event,
@@ -57,7 +58,15 @@ from .events import (
     EventTeamMember,
     EventBingoCell,
     EventBingoCompletion,
+    EventCompletion,
+    EventProgress,
+    EventChannel,
+    EventTaskLibraryItem,
     EVENT_TASK_TYPES,
+    EVENT_FORMATION_MODES,
+    EVENT_COMPLETION_STATUSES,
+    EVENT_CHANNEL_KINDS,
+    EVENT_BOARD_SIZES,
 )
 
 
@@ -138,6 +147,8 @@ __all__ = [
     "AuditLog",
     "DiscordOutbox",
     "DocsPage",
+    "Badge",
+    "PlayerBadge",
     "SubscriptionTier",
     "GroupSubscription",
     "Event",
@@ -146,5 +157,13 @@ __all__ = [
     "EventTeamMember",
     "EventBingoCell",
     "EventBingoCompletion",
+    "EventCompletion",
+    "EventProgress",
+    "EventChannel",
+    "EventTaskLibraryItem",
     "EVENT_TASK_TYPES",
+    "EVENT_FORMATION_MODES",
+    "EVENT_COMPLETION_STATUSES",
+    "EVENT_CHANNEL_KINDS",
+    "EVENT_BOARD_SIZES",
 ]
