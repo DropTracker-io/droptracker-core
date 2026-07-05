@@ -367,6 +367,27 @@ async def experience_processor(experience_data, external_session=None):
         stage = "commit_experience"
         session.commit()
 
+        # Event engine hook (Task 17): gated, fire-and-forget LPUSH, one
+        # envelope per reported skill (guid suffixed with the skill so the
+        # completions ledger stays idempotent per skill). Runs before the
+        # bulk-sync early-return so xp baselines still advance on initial
+        # syncs (PRD D10: baseline-only, no retroactive credit).
+        try:
+            from services.event_engine import queue_submission
+            for _s in real_skill_updates:
+                queue_submission(
+                    "experience", player_id,
+                    f"{unique_id}:{_s['skill_key']}" if unique_id else None,
+                    {
+                        "skill": _s["skill_key"],
+                        "xp": _safe_int(_s.get("xp_total")),
+                        "level": _safe_int(_s.get("new_level")),
+                    },
+                    world_type="main", player_name=player_name,
+                )
+        except Exception:
+            pass
+
         # If this looks like an initial "0 -> real level" sync, we should NOT notify.
         # Still update the stored XP/levels above so the backend stays accurate.
         stage = "bulk_sync_detection"

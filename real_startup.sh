@@ -128,6 +128,14 @@ main() {
         echo "Started webhook queue consumer in screen 'DT-consumer'"
     fi
 
+    # Start event completion engine consumer (backend Task 17)
+    if screen_exists "DT-events"; then
+        echo "Screen matching 'DT-events' is already running. Skipping..."
+    else
+        screen -dmS "DT-events" bash -c "cd $APP_DIR && source $VENV_PATH && python3 -m workers.event_consumer; exec bash"
+        echo "Started event completion consumer in screen 'DT-events'"
+    fi
+
     echo "=== Startup Complete ==="
     
     # List all running screens

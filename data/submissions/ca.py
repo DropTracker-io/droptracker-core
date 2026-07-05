@@ -138,6 +138,25 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
             ca_entry.video_url = video_url
     session.commit()
     debug_print("Committed a new CA entry")
+
+    # Event engine hook (Task 17): gated, fire-and-forget LPUSH; new CA
+    # entries only. Never fails the submission.
+    if is_new_ca:
+        try:
+            from services.event_engine import queue_submission
+            queue_submission(
+                "ca", player_id, unique_id,
+                {
+                    "task_name": task_name,
+                    "tier": tier,
+                    "image_url": ca_entry.image_url,
+                    "source_id": getattr(ca_entry, "id", None),
+                },
+                world_type=world_type, player_name=player_name,
+            )
+        except Exception:
+            pass
+
     ca_tier = ""
     match str(tier).strip().lower():
         case "easy":

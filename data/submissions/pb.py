@@ -159,6 +159,32 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
         session.flush()
     else:
         session.commit()
+
+    # Event engine hook (Task 17): gated, fire-and-forget LPUSH. The kill
+    # time (not just new PBs) is pushed so pb_target tasks can match any
+    # qualifying kill.
+    try:
+        from services.event_engine import queue_submission
+        _kill_ms = current_ms if current_ms and current_ms > 0 else time_ms
+        try:
+            _kill_formatted = convert_from_ms(_kill_ms) if _kill_ms else None
+        except Exception:
+            _kill_formatted = None
+        queue_submission(
+            "pb", player_id, unique_id,
+            {
+                "npc_name": npc_name,
+                "time_ms": _kill_ms,
+                "team_size": team_size,
+                "kill_time_formatted": _kill_formatted,
+                "image_url": pb_entry.image_url,
+                "source_id": getattr(pb_entry, "id", None),
+            },
+            world_type=world_type, player_name=player_name,
+        )
+    except Exception:
+        pass
+
     if is_personal_best:
         player_groups = get_player_groups_with_global(session, player)
         group_ids = [g.group_id for g in player_groups]

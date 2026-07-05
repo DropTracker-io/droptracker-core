@@ -12,9 +12,10 @@ scopes (global/group/npc) are anonymous; ``player:{id}`` requires a session.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 
-from quart import Blueprint, Response, request
+from quart import Blueprint, Response, jsonify, request
 
 from web_api.deps import optional_user_id
 
@@ -23,6 +24,7 @@ realtime_bp = Blueprint("v1_realtime", __name__)
 _HEARTBEAT_SECONDS = 20
 _MAX_CHANNELS = 24
 _PUBLIC_EXACT_SCOPES = ("global", "feed")  # "feed" = site-wide live drop ticker
+_FEED_HISTORY_KEY = "feed:recent"
 
 
 def _authorize_channels(raw: str) -> list[str]:
@@ -41,7 +43,8 @@ def _authorize_channels(raw: str) -> list[str]:
         ch = ch.strip()
         if not ch:
             continue
-        if ch not in _PUBLIC_EXACT_SCOPES and not ch.startswith(("group:", "player:", "npc:")):
+        # "event:{id}" is public like "group:*" (live event pages, Task 17)
+        if ch not in _PUBLIC_EXACT_SCOPES and not ch.startswith(("group:", "player:", "npc:", "event:")):
             continue
         if ch.startswith("player:") and not have_session:
             continue  # private feed requires a session
@@ -58,6 +61,33 @@ def _redis_url() -> dict:
         "db": 0,
         "password": os.getenv("DB_PASS"),
     }
+
+
+@realtime_bp.get("/feed/recent")
+async def feed_recent():
+    """Recent site-wide drop-feed history (§UI ticker), newest first, so the
+    ticker can hydrate on page load instead of waiting for the next drop."""
+    import redis.asyncio as aioredis
+
+    client = aioredis.Redis(**_redis_url())
+    try:
+        raw = await client.lrange(_FEED_HISTORY_KEY, 0, -1)
+    except Exception:
+        raw = []
+    finally:
+        try:
+            await client.close()
+        except Exception:
+            pass
+
+    events = []
+    for item in raw:
+        try:
+            data = json.loads(item)
+            events.append({"v": 1, "type": "drop", "scope": "feed", "data": data})
+        except Exception:
+            continue
+    return jsonify(events)
 
 
 @realtime_bp.get("/stream")

@@ -52,7 +52,20 @@ def publish_to_scopes(event_type: str, scopes: Iterable[str], data: dict) -> Non
         publish_event(event_type, scope, data)
 
 
+def publish_event_update(event_id: int, data: dict) -> None:
+    """Publish an event-engine update (Task 17) to ``rt:event:{id}``.
+
+    ``data.kind`` ∈ progress|completion|cell|pending, plus task_id/team_id and
+    optional cell_idx/points/team_score/player_name — display-ready for the
+    live event page. Best-effort; never raises.
+    """
+    publish_event("event_update", f"event:{int(event_id)}", data)
+
+
 IMG_BASE = "https://www.droptracker.io/img"
+
+FEED_HISTORY_KEY = "feed:recent"
+FEED_HISTORY_MAX = 30
 
 
 def publish_drop(player, drop, total_value: int, partition: int,
@@ -113,6 +126,7 @@ def publish_drop(player, drop, total_value: int, partition: int,
         if total_value >= 1_000_000:
             item_id = getattr(drop, "item_id", None)
             feed_data = {
+                "ts": int(time.time()),
                 "player_id": player_id,
                 "player_name": getattr(player, "player_name", None),
                 "item_id": item_id,
@@ -123,6 +137,16 @@ def publish_drop(player, drop, total_value: int, partition: int,
             }
             if item_id:
                 feed_data["icon_url"] = f"{IMG_BASE}/itemdb/{item_id}.png"
+            if npc_id:
+                feed_data["npc_icon_url"] = f"{IMG_BASE}/npcdb/{npc_id}.png"
             publish_event("drop", "feed", feed_data)
+
+            # Persist to a capped history list so the ticker can hydrate with
+            # past drops on page load instead of starting empty.
+            try:
+                conn.lpush(FEED_HISTORY_KEY, json.dumps(feed_data))
+                conn.ltrim(FEED_HISTORY_KEY, 0, FEED_HISTORY_MAX - 1)
+            except Exception:
+                pass
     except Exception:
         pass

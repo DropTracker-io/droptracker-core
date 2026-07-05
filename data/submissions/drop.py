@@ -38,7 +38,7 @@ last_board_updates = {}
 
 async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
                                    players_included: list, drop_value: int,
-                                   world_type: str = "main") -> None:
+                                   world_type: str = "main") -> int:
     """
     For groups with split_gp_tracking enabled, distribute group leaderboard GP
     credit equally among all split participants (including the receiver).
@@ -51,6 +51,8 @@ async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
 
     The global leaderboard and individual player:*:total_loot keys are never
     modified here.
+
+    Returns the number of non-receiver participants credited.
     """
     from db.models.drop_split import DropSplit
     from db.models import Player, user_group_association
@@ -58,10 +60,15 @@ async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
     group_id = group.group_id
     partition = drop.partition
 
-    # Resolve included player names to Player rows that are in this group
+    # Resolve included player names to Player rows that are in this group.
+    # OSRS treats spaces and underscores as equivalent in player names, and the
+    # plugin normalizes underscores to spaces before submitting.
     valid_participants = []
     for name in players_included:
-        p = session.query(Player).filter(Player.player_name == name).first()
+        p = session.query(Player).filter(Player.player_name.ilike(name)).first()
+        if p is None and (" " in name or "_" in name):
+            alt_name = name.replace(" ", "_") if " " in name else name.replace("_", " ")
+            p = session.query(Player).filter(Player.player_name.ilike(alt_name)).first()
         if p is None:
             continue
         # Verify the player is a member of this group
@@ -77,7 +84,7 @@ async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
             valid_participants.append(p)
 
     if not valid_participants:
-        return
+        return 0
 
     # Total participants = receiver + valid split members
     total_count = 1 + len(valid_participants)
@@ -85,7 +92,7 @@ async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
 
     # Guard: nothing to do if split equals full value (1-way "split")
     if split_value >= drop_value:
-        return
+        return 0
 
     # 1. Adjust receiver's group leaderboard down from full_value to split_value
     receiver_adjustment = split_value - drop_value  # negative
@@ -115,6 +122,14 @@ async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
         redis_updates.add_split_credit(p.player_id, split_value, partition, group_id, world_type)
 
     session.flush()
+    return len(valid_participants)
+
+
+def _strip_empty_sentinel(cleaned):
+    """The plugin sends the literal string "none" when no players are nearby."""
+    if cleaned and len(cleaned) == 1 and cleaned[0].lower() == "none":
+        return None
+    return cleaned or None
 
 
 def _normalize_incoming_players(players_included):
@@ -123,7 +138,7 @@ def _normalize_incoming_players(players_included):
         return None
     if isinstance(players_included, list):
         cleaned = [str(name).strip() for name in players_included if name and str(name).strip()]
-        return cleaned or None
+        return _strip_empty_sentinel(cleaned)
     if isinstance(players_included, str):
         raw_text = players_included.strip()
         if not raw_text:
@@ -133,14 +148,14 @@ def _normalize_incoming_players(players_included):
                 parsed = json.loads(raw_text)
                 if isinstance(parsed, list):
                     cleaned = [str(name).strip() for name in parsed if name and str(name).strip()]
-                    return cleaned or None
+                    return _strip_empty_sentinel(cleaned)
             except Exception:
                 pass
         cleaned = [part.strip() for part in raw_text.replace("\n", ",").split(",") if part.strip()]
-        return cleaned or None
+        return _strip_empty_sentinel(cleaned)
     if isinstance(players_included, dict):
         cleaned = [str(name).strip() for name in players_included.values() if name and str(name).strip()]
-        return cleaned or None
+        return _strip_empty_sentinel(cleaned)
     return None
 
 
@@ -187,6 +202,10 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         image_url = drop_data.get("image_url", None)
         used_api = drop_data.get("used_api", False)
         raw_players_included = drop_data.get("players_included", drop_data.get("nearby_players"))
+        if raw_players_included is None:
+            # The RuneLite plugin sends the participant list as an embed field
+            # named "members" (comma-separated, "none" when empty).
+            raw_players_included = drop_data.get("members")
         players_included = _normalize_incoming_players(raw_players_included)
         debug_print(
             "Drop split payload players_included "
@@ -331,6 +350,29 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             print(f"[RedisSync] Failed to update player {player_id} in redis for drop {getattr(drop, 'drop_id', '?')}: {e}")
         log_checkpoint("redis_add_to_player")
 
+        # Event engine hook (Task 17): one gated, fire-and-forget LPUSH.
+        # No DB queries; a Redis hiccup can never fail the submission.
+        try:
+            from services.event_engine import queue_submission
+            queue_submission(
+                "drop", player_id, guid,
+                {
+                    "item_id": item_id,
+                    "item_name": item_name,
+                    "npc_id": npc_id,
+                    "npc_name": npc_name,
+                    "value": int(raw_drop_value),
+                    "quantity": int(quantity),
+                    "total_value": int(drop_value),
+                    "kill_count": kill_count,
+                    "image_url": drop.image_url,
+                    "source_id": getattr(drop, "drop_id", None),
+                },
+                world_type=world_type, player_name=player_name,
+            )
+        except Exception:
+            pass
+
         debug_print(f"Getting player groups for {player_name}...")
         player_groups = get_player_groups_with_global(session, player)
         log_checkpoint("get_player_groups")
@@ -443,7 +485,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             )
             if split_tracking_enabled and players_included and not is_seasonal:
                 try:
-                    await _award_split_gp_credits(
+                    credited = await _award_split_gp_credits(
                         session=session,
                         drop=drop,
                         group=group,
@@ -452,6 +494,9 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                         drop_value=drop_value,
                         world_type=world_type,
                     )
+                    if credited:
+                        print(f"[SplitTracking] Split {drop_value} gp across {credited + 1} participants "
+                              f"for group {group_id} (drop_id={drop.drop_id}, receiver={player_id})")
                 except Exception as e:
                     print(f"[SplitTracking] Failed to apply split credits for group {group_id}: {e}")
 

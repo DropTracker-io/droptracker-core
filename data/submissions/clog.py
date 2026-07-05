@@ -161,6 +161,25 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
     session.commit()
 
     if is_new_clog:
+        # Event engine hook (Task 17): gated, fire-and-forget LPUSH; new
+        # collection log slots only. Never fails the submission.
+        try:
+            from services.event_engine import queue_submission
+            queue_submission(
+                "clog", player_id, unique_id,
+                {
+                    "item_name": item_name,
+                    "item_id": item_id,
+                    "kc": killcount,
+                    "npc_name": npc,
+                    "image_url": clog_entry.image_url,
+                    "source_id": getattr(clog_entry, "log_id", None),
+                },
+                world_type=world_type, player_name=player_name,
+            )
+        except Exception:
+            pass
+
         print("New collection log -- Creating notification")
         if not is_seasonal:
             award_points_to_player(
