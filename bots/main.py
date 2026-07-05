@@ -49,7 +49,7 @@ from utils.msg_logger import HighThroughputLogger
 from utils.wiseoldman import fetch_group_members
 from web.front import create_frontend
 from commands import UserCommands, ClanCommands
-from db.models import Group, GroupConfiguration, GroupPatreon, GroupPersonalBestMessage, Guild, PersonalBestEntry, PlayerPet, Session, User, WebhookPendingDeletion, session, NpcList, ItemList, Webhook, Player
+from db.models import Event, Group, GroupConfiguration, GroupPatreon, GroupPersonalBestMessage, Guild, PersonalBestEntry, PlayerPet, Session, User, WebhookPendingDeletion, session, NpcList, ItemList, Webhook, Player
 
 from db.ops import associate_player_ids, update_group_members
 from db.ops import DatabaseOperations
@@ -463,6 +463,11 @@ async def create_tasks():
     # startup instead of waiting behind the slow lootboard/WOM-sync passes below.
     await cache_guild_channels()
     cache_guild_channels.start()
+    # Guild list for the event Discord config (Task 19) — same cheap REST
+    # pattern; run once at startup then every 5 minutes.
+    await cache_bot_guilds()
+    cache_bot_guilds.start()
+    drain_channel_cache_requests.start()
     print("Starting lootboards")
     await lootboard_updates()
     lootboard_updates.start()
@@ -475,6 +480,22 @@ async def create_tasks():
     heartbeat_check.start()
     notification_force.start()
     drain_discord_outbox.start()
+    badge_cycle.start()
+
+
+@Task.create(IntervalTrigger(minutes=60))
+async def badge_cycle():
+    """Evaluate automatic badges (services/badges.py). The engine keeps a
+    Redis day marker, so all but the first run after daily rollover are a
+    single Redis GET; on downtime it catches up the missed days itself."""
+    try:
+        from services.badges import run_badge_cycle
+        stats = await asyncio.to_thread(run_badge_cycle)
+        if stats.get("days"):
+            print(f"Badge cycle processed {stats['days']}: "
+                  f"daily={stats['daily']} streaks={stats['streaks']} records={stats['records']}")
+    except Exception as e:
+        print(f"Badge cycle failed: {e}")
 
 
 @Task.create(IntervalTrigger(seconds=10))
@@ -488,19 +509,45 @@ async def drain_discord_outbox():
     except Exception as e:
         print(f"Couldn't drain discord outbox: {e}")
 
+async def cache_channels_for_guild(guild_id) -> bool:
+    """Fetch one guild's text channels via REST and cache them to Redis
+    (`guild:{id}:channels`). Works for *any* guild the bot is a member of —
+    not just group home guilds — so events can target dedicated event servers
+    (Task 19). Returns True when the cache was written."""
+    try:
+        guild = await bot.fetch_guild(guild_id)
+        if not guild:
+            return False
+        raw_channels = await guild.fetch_channels()
+        channels = sorted(
+            (
+                {"id": str(c.id), "name": c.name, "position": c.position or 0}
+                for c in raw_channels
+                if isinstance(c, GuildText)
+            ),
+            key=lambda c: c["position"],
+        )
+        redis_client.setex(f"guild:{guild_id}:channels", 600, json.dumps(channels))
+        return True
+    except Exception as e:
+        print(f"Couldn't cache channels for guild {guild_id}: {e}")
+        return False
+
+
 @Task.create(IntervalTrigger(minutes=5))
 async def cache_guild_channels():
-    """Cache each linked group's guild's text channels to Redis
-    (`guild:{id}:channels`) so the Web API's Discord channel picker (group
-    config UI) can list them without the Web API ever holding a bot token /
-    Discord connection itself — it only reads this cache.
+    """Cache guild text-channel lists to Redis (`guild:{id}:channels`) so the
+    Web API's Discord channel pickers (group config UI + event Discord config)
+    can list them without the Web API ever holding a bot token / Discord
+    connection itself — it only reads this cache.
 
     Uses REST (`bot.fetch_guild` + `guild.fetch_channels()`), not the gateway's
     passive `bot.guilds` cache: this bot doesn't run the `GUILDS` intent, so
-    that cache never populates. Scoped to guilds with a linked ``Group`` row
-    (not "every guild the bot is in") since that's the only thing the picker
-    ever needs. 10-minute Redis TTL as a staleness guard if the bot goes down;
-    this task refreshes it every 5 minutes while running.
+    that cache never populates. Covers guilds with a linked ``Group`` row plus
+    any guild targeted by a web event (``web_events.discord_guild_id`` — which
+    may be a dedicated event server that is nobody's home guild). 10-minute
+    Redis TTL as a staleness guard if the bot goes down; this task refreshes
+    it every 5 minutes while running.
     """
     try:
         session = Session()
@@ -508,30 +555,80 @@ async def cache_guild_channels():
             str(g[0])
             for g in session.query(Group.guild_id).filter(Group.guild_id != None).distinct().all()  # noqa: E711
         }
+        guild_ids |= {
+            str(g[0])
+            for g in session.query(Event.discord_guild_id).filter(Event.discord_guild_id != None).distinct().all()  # noqa: E711
+        }
     except Exception as e:
         print(f"Couldn't load guild ids for channel cache: {e}")
         return
 
     cached = 0
     for guild_id in guild_ids:
-        try:
-            guild = await bot.fetch_guild(guild_id)
-            if not guild:
-                continue
-            raw_channels = await guild.fetch_channels()
-            channels = sorted(
-                (
-                    {"id": str(c.id), "name": c.name, "position": c.position or 0}
-                    for c in raw_channels
-                    if isinstance(c, GuildText)
-                ),
-                key=lambda c: c["position"],
-            )
-            redis_client.setex(f"guild:{guild_id}:channels", 600, json.dumps(channels))
+        if await cache_channels_for_guild(guild_id):
             cached += 1
-        except Exception as e:
-            print(f"Couldn't cache channels for guild {guild_id}: {e}")
-    print(f"Cached channel lists for {cached}/{len(guild_ids)} linked guilds.")
+    print(f"Cached channel lists for {cached}/{len(guild_ids)} guilds.")
+
+
+@Task.create(IntervalTrigger(minutes=5))
+async def cache_bot_guilds():
+    """Cache every guild the bot is a member of to Redis (`bot:guilds`) as a
+    JSON list of {id, name, icon} for the Web API's event Discord config
+    (Task 19: an event can target any guild the bot is in).
+
+    Enumerated via Discord REST `GET /users/@me/guilds` (paginated, bot token
+    from .env) — never `bot.guilds`: without the GUILDS intent the gateway
+    cache stays empty forever. 15-minute TTL as a staleness guard; refreshed
+    every 5 minutes while the bot runs.
+    """
+    guilds = []
+    headers = {"Authorization": f"Bot {bot_token}"}
+    after = None
+    try:
+        async with aiohttp.ClientSession() as http_session:
+            while True:
+                params = {"limit": "200"}
+                if after:
+                    params["after"] = after
+                async with http_session.get(
+                    "https://discord.com/api/v10/users/@me/guilds",
+                    headers=headers, params=params,
+                ) as resp:
+                    if resp.status != 200:
+                        print(f"bot:guilds refresh failed: HTTP {resp.status}")
+                        return
+                    page = await resp.json()
+                if not isinstance(page, list) or not page:
+                    break
+                guilds.extend(
+                    {"id": str(g.get("id")), "name": g.get("name"), "icon": g.get("icon")}
+                    for g in page if g.get("id")
+                )
+                if len(page) < 200:
+                    break
+                after = str(page[-1].get("id"))
+        redis_client.setex("bot:guilds", 900, json.dumps(guilds))
+        print(f"Cached bot:guilds ({len(guilds)} guilds).")
+    except Exception as e:
+        print(f"Couldn't refresh bot:guilds: {e}")
+
+
+@Task.create(IntervalTrigger(seconds=15))
+async def drain_channel_cache_requests():
+    """Serve on-demand channel-cache requests from the Web API: when the event
+    Discord config UI asks for a guild whose channels aren't cached yet, the
+    Web API SADDs the guild id to `bot:channels:refresh` and we warm the cache
+    here within seconds (instead of waiting for the 5-minute sweep)."""
+    try:
+        for _ in range(10):
+            raw = redis_client.client.spop("bot:channels:refresh")
+            if not raw:
+                break
+            guild_id = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+            if guild_id.isdigit():
+                await cache_channels_for_guild(guild_id)
+    except Exception as e:
+        print(f"Couldn't drain channel cache requests: {e}")
 
 @Task.create(IntervalTrigger(seconds=30))
 async def notification_force():

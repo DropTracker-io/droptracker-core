@@ -43,6 +43,7 @@ from db import (
     EventTeamMember,
     EVENT_FORMATION_MODES,
     EVENT_TASK_TYPES,
+    Group,
     Player,
     user_group_association,
 )
@@ -355,6 +356,14 @@ async def create_event():
     def _apply():
         with db_session() as s:
             _assert_event_admin(s, user_id, group_id)
+            # Group events default their Discord destination to the group's
+            # linked guild (Task 19); admins can re-point it at any guild the
+            # bot is in via PUT /events/{id}/discord.
+            discord_guild_id = None
+            if group_id:
+                group = s.query(Group).filter(Group.group_id == group_id).first()
+                if group and group.guild_id:
+                    discord_guild_id = str(group.guild_id)
             ev = Event(
                 group_id=group_id,
                 name=name,
@@ -366,6 +375,7 @@ async def create_event():
                 formation_mode=formation_mode,
                 requires_confirmation=bool(body.get("requires_confirmation")),
                 join_code=join_code or None,
+                discord_guild_id=discord_guild_id,
             )
             s.add(ev)
             s.commit()

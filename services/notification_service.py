@@ -31,6 +31,12 @@ from utils.download import download_player_image
 from db.app_logger import AppLogger
 from utils import osrs_api
 from services.xf_services import get_user_id, create_alert
+from services.event_notifications import (
+    EVENT_NOTIFICATION_TYPES,
+    event_url,
+    load_event_channels,
+    resolve_event_channel,
+)
 from utils.wiseoldman import fetch_group_members
 from services.redis_updates import get_player_list_loot_sum, loot_tracker, get_player_current_month_total
 from db.models.video_upload import VideoUpload
@@ -705,6 +711,8 @@ class NotificationService:
                 await self.send_update_log_data_with_session(notification, data, db_session)
             elif notification_type == 'points_earned':
                 await self.send_points_notification_with_session(notification, data, db_session)
+            elif notification_type in EVENT_NOTIFICATION_TYPES:
+                await self.send_event_notification_with_session(notification, data, db_session)
             else:
                 notification.status = 'failed'
                 notification.error_message = f"Unknown notification type: {notification_type}"
@@ -1218,6 +1226,93 @@ class NotificationService:
             app_logger.log(log_type="error", data=f"Error sending update log data notification: {e}", app_name="notification_service", description="send_update_log_data")
             raise
     
+    # ------------------------------------------------------------------ #
+    # Events (Task 19) — event_started / event_ended / event_completion /
+    # event_cell / event_line / event_blackout / event_lead_change /
+    # event_pending, produced by services/event_engine.py (+ Tasks 20/21).
+    # ------------------------------------------------------------------ #
+    async def send_event_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
+        """Send one event notification to its per-event Discord destination.
+
+        Channel resolution reads ``web_event_channels`` by (event_id, kind);
+        completions/leaderboard/admin fall back to announcements; with nothing
+        configured the row is marked processed and skipped silently (spec) —
+        no error spam for events that simply don't use Discord.
+        """
+        from db.models import Event, EventTeam
+
+        try:
+            notification_type = notification.notification_type
+            event_id = data.get('event_id')
+            event = db_session.query(Event).filter(Event.id == event_id).first() if event_id else None
+            if not event:
+                notification.status = 'failed'
+                notification.error_message = f"Unknown event {event_id}"
+                db_session.commit()
+                return
+
+            channels = load_event_channels(db_session, event.id)
+            channel_id = resolve_event_channel(channels, notification_type)
+            if not channel_id:
+                # Nothing configured for this kind (or at all) — processed, skipped.
+                notification.status = 'sent'
+                notification.error_message = 'skipped: no event channel configured'
+                notification.processed_at = datetime.now()
+                db_session.commit()
+                return
+
+            # --- enrichment the embed needs but the queue payload may lack ---
+            data = dict(data)
+            data.setdefault('event_name', event.name)
+            team_id = data.get('team_id')
+            if team_id and not data.get('team_name'):
+                team = db_session.query(EventTeam).filter(EventTeam.id == team_id).first()
+                if team:
+                    data['team_name'] = team.name
+
+            standings = None
+            if notification_type in ('event_lead_change', 'event_ended'):
+                limit = 3 if notification_type == 'event_lead_change' else 5
+                rows = (db_session.query(EventTeam)
+                        .filter(EventTeam.event_id == event.id)
+                        .order_by(EventTeam.score.desc(), EventTeam.id.asc())
+                        .limit(limit).all())
+                standings = [{"name": t.name, "score": int(t.score or 0)} for t in rows]
+
+            if notification_type == 'event_pending' and not data.get('review_url'):
+                # Deep-link to the Review tab (the group event manager page);
+                # global events review from the public event page.
+                if event.group_id:
+                    data['review_url'] = f"https://www.droptracker.io/groups/{event.group_id}/events/{event.id}"
+                else:
+                    data['review_url'] = event_url(event.id)
+
+            channel = await self.bot.fetch_channel(channel_id=channel_id)
+            if channel is None:
+                notification.status = 'failed'
+                notification.error_message = f"Channel {channel_id} not found for event {event.id}"
+                db_session.commit()
+                return
+
+            from utils.embeds import build_event_embed
+            embed = build_event_embed(notification_type, data, standings=standings)
+            await channel.send(embed=embed)
+
+            notification.status = 'sent'
+            notification.processed_at = datetime.now()
+            db_session.commit()
+        except interactions.errors.Forbidden:
+            raise  # process_notification_with_session handles missing perms
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = str(e)
+            db_session.commit()
+            app_logger.log(log_type="error",
+                           data=f"Error sending {notification.notification_type} notification: {e}",
+                           app_name="notification_service",
+                           description="send_event_notification")
+            raise
+
     async def send_points_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
         """Send a points earned notification to Discord with session"""
         try:

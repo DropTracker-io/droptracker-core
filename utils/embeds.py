@@ -15,6 +15,36 @@ load_dotenv()
 
 global_footer = os.getenv("DISCORD_MESSAGE_FOOTER")
 
+DROPTRACKER_ICON = "https://www.droptracker.io/img/droptracker-small.gif"
+
+
+def build_event_embed(notification_type: str, data: dict, standings=None) -> Embed:
+    """Discord embed for an event notification (Task 19).
+
+    Content comes from the pure spec builder in
+    ``services.event_notifications.event_embed_spec`` (unit-tested there);
+    this converts it into an ``interactions.Embed`` in the same visual
+    language as the drop embeds (author line, thumbnail, global footer,
+    link to https://www.droptracker.io/events/{id}).
+    """
+    from services.event_notifications import event_embed_spec
+
+    spec = event_embed_spec(notification_type, data, standings=standings)
+    embed = Embed(
+        title=spec.get("title"),
+        url=spec.get("url"),
+        description=spec.get("description") or None,
+        color=spec.get("color", 0x00FF00),
+    )
+    if spec.get("author_name"):
+        embed.set_author(name=spec["author_name"], icon_url=DROPTRACKER_ICON)
+    for f in spec.get("fields", []):
+        embed.add_field(name=f["name"], value=f["value"], inline=bool(f.get("inline")))
+    if spec.get("thumbnail"):
+        embed.set_thumbnail(url=spec["thumbnail"])
+    embed.set_footer(global_footer)
+    return embed
+
 async def get_global_drop_embed(item_name, item_id, player_id, quantity, value, npc_id):
     player = session.query(Player).filter(Player.player_id == player_id).first()
     groups = [group for group in player.groups if group.group_id != 2]
