@@ -21,11 +21,35 @@ SEPULCHRE_CANONICAL = "Hallowed Sepulchre"
 SEPULCHRE_FLOOR_RE = re.compile(r"^Hallowed Sepulchre Floor \d+$")
 
 # Raid/boss variants that are combined into a single Hall of Fame message.
+# NpcList carries both colon and colon-less spellings for raid modes, and
+# group configs use whichever the NPC row happened to have — include both so
+# grouping does not depend on punctuation.
 RAID_GROUPS: Dict[str, List[str]] = {
-    "Chambers of Xeric": ["Chambers of Xeric", "Chambers of Xeric: Challenge Mode"],
-    "Theatre of Blood": ["Theatre of Blood", "Theatre of Blood: Entry Mode", "Theatre of Blood: Hard Mode"],
-    "Tombs of Amascut": ["Tombs of Amascut", "Tombs of Amascut: Entry Mode", "Tombs of Amascut: Expert Mode"],
-    "Nightmare of Ashihama": ["Nightmare", "Phosani's Nightmare", "Nightmare of Ashihama"],
+    "Chambers of Xeric": [
+        "Chambers of Xeric",
+        "Chambers of Xeric: Challenge Mode",
+        "Chambers of Xeric Challenge Mode",
+    ],
+    "Theatre of Blood": [
+        "Theatre of Blood",
+        "Theatre of Blood: Entry Mode",
+        "Theatre of Blood Entry Mode",
+        "Theatre of Blood: Hard Mode",
+        "Theatre of Blood Hard Mode",
+    ],
+    "Tombs of Amascut": [
+        "Tombs of Amascut",
+        "Tombs of Amascut: Entry Mode",
+        "Tombs of Amascut Entry Mode",
+        "Tombs of Amascut: Expert Mode",
+        "Tombs of Amascut Expert Mode",
+    ],
+    "Nightmare of Ashihama": [
+        "Nightmare",
+        "The Nightmare",
+        "Phosani's Nightmare",
+        "Nightmare of Ashihama",
+    ],
     "The Gauntlet": ["The Gauntlet", "The Corrupted Gauntlet"],
 }
 RAID_VARIANT_TO_CANONICAL: Dict[str, str] = {

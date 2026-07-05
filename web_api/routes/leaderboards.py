@@ -25,7 +25,6 @@ from web_api.common import (
     money,
     npc_leaderboard_key,
     parse_page,
-    period_to_partition,
     player_list_loot_sum,
     resolve_period,
     with_cache_headers,
@@ -35,11 +34,119 @@ from web_api.common import (
 leaderboards_bp = Blueprint("v1_leaderboards", __name__)
 
 GROUP_TOTALS_TTL = 30.0
+BADGES_TTL = 30.0
+# Chips sent per row; the frontend shows the first few and a "+N" overflow.
+_MAX_ROW_BADGES = 6
+IMG_BASE = "https://www.droptracker.io/img"
+
+
+def _badge_priority(semantic: str, key: str) -> int:
+    # Held records first, then streaks, then repeatable permanents (daily).
+    if semantic == "held":
+        return 0
+    if key.startswith("loot_streak"):
+        return 1
+    return 2
+
+
+def _compact_badges_for(ids: list[int]) -> dict[int, list[dict]]:
+    """One indexed query for a page of player ids -> compact badge chips.
+
+    Global badges only (group_key=0). Each chip carries the award's context so
+    the UI can render specifics ("Daily Loot Champion (Jul 3, 2026)", "Boss
+    Record (Zulrah, Solo)"). Held awards get one chip per record they hold;
+    repeatable permanents (e.g. many daily-champion days) collapse into one
+    chip with a count and the most recent context. Cached in-process ~30s per
+    id-set; this endpoint is hot, so any failure here is swallowed by the
+    caller and the field is simply omitted.
+    """
+    import json as _json
+
+    cache_key = "lb:badges:" + ",".join(map(str, sorted(ids)))
+    cached = cache_get(cache_key, BADGES_TTL)
+    if cached is not None:
+        return cached
+
+    from db import Badge, PlayerBadge
+
+    with db_session() as s:
+        rows = (
+            s.query(
+                PlayerBadge.player_id,
+                PlayerBadge.context,
+                Badge.key,
+                Badge.name,
+                Badge.tone,
+                Badge.icon_emoji,
+                Badge.icon_url,
+                Badge.semantic,
+            )
+            .join(Badge, Badge.badge_id == PlayerBadge.badge_id)
+            .filter(
+                PlayerBadge.player_id.in_(ids),
+                PlayerBadge.status == "active",
+                PlayerBadge.group_key == 0,
+                Badge.active == True,  # noqa: E712
+            )
+            .order_by(PlayerBadge.awarded_at.desc())
+            .all()
+        )
+
+    out: dict[int, list[dict]] = {}
+    for pid, ctx_raw, key, name, tone, emoji, icon_url, semantic in rows:
+        context = None
+        if ctx_raw:
+            try:
+                context = _json.loads(ctx_raw)
+            except (TypeError, ValueError):
+                context = None
+        # NPC-scoped awards use the NPC's icon when the badge has no custom one.
+        if not icon_url and isinstance(context, dict) and context.get("npc_id"):
+            icon_url = f"{IMG_BASE}/npcdb/{context['npc_id']}.png"
+
+        chips = out.setdefault(int(pid), [])
+        if semantic != "held":
+            # Collapse repeats of the same permanent badge into one chip,
+            # keeping the most recent context. Backfilled awards can share an
+            # awarded_at second, so compare the context day rather than
+            # trusting row order.
+            for c in chips:
+                if c["key"] == key:
+                    c["count"] = c.get("count", 1) + 1
+                    prev_day = str((c.get("context") or {}).get("day") or "")
+                    new_day = str((context or {}).get("day") or "")
+                    if new_day > prev_day:
+                        c["context"] = context
+                    break
+            else:
+                chips.append({
+                    "key": key, "label": name, "tone": tone, "emoji": emoji,
+                    "icon_url": icon_url, "count": 1, "context": context,
+                    "_prio": _badge_priority(semantic, key),
+                })
+        else:
+            chips.append({
+                "key": key, "label": name, "tone": tone, "emoji": emoji,
+                "icon_url": icon_url, "count": 1, "context": context,
+                "_prio": _badge_priority(semantic, key),
+            })
+
+    for pid, chips in out.items():
+        chips.sort(key=lambda c: (c["_prio"], c["key"]))
+        out[pid] = [
+            {k: v for k, v in c.items() if k != "_prio"}
+            for c in chips[:_MAX_ROW_BADGES]
+        ]
+    cache_set(cache_key, out)
+    return out
 
 
 @leaderboards_bp.get("/leaderboards/players")
 async def leaderboards_players():
-    period = request.args.get("period", "all")
+    # Default to the current month — the tracking system works month-to-month and
+    # the all-time board is a secondary view. The "month" sentinel is resolved to
+    # the current-month partition by resolve_period's fallback.
+    period = request.args.get("period", "month")
     scope = request.args.get("scope", "global")
     page, limit = parse_page(request)
     token = resolve_period(period)
@@ -90,14 +197,26 @@ async def leaderboards_players():
                 rows = s.query(Player.player_id, Player.player_name).filter(Player.player_id.in_(ids)).all()
                 name_map = {pid: name for pid, name in rows}
 
+        # Best-effort compact badges; omit the field entirely on any failure.
+        badge_map: dict[int, list[dict]] = {}
+        if ids:
+            try:
+                badge_map = await asyncio.to_thread(_compact_badges_for, ids)
+            except Exception:
+                badge_map = {}
+
         start_rank = (page - 1) * limit
         for i, (pid, loot) in enumerate(scored):
-            entries.append({
+            row = {
                 "rank": start_rank + i + 1,
                 "id": pid,
                 "name": name_map.get(pid, f"Player {pid}"),
                 "loot": money(loot),
-            })
+            }
+            chips = badge_map.get(pid)
+            if chips:
+                row["badges"] = chips
+            entries.append(row)
 
     resp = jsonify({
         "period": token,
@@ -130,13 +249,21 @@ def _read_group_totals_precomputed(token):
     return out or None
 
 
-def _compute_group_totals(partition: int):
-    """Sorted [(group_id, name, total)] desc across all non-system groups.
+def _compute_group_totals(token):
+    """Sorted [(group_id, name, total, members)] desc across all non-system groups.
 
-    Cached per-partition (in-process). O(all groups) — replaced by a precomputed
-    Redis sorted set in Task 07 Part B.
+    ``token`` is a resolved partition token (``YYYYMM`` | ``YYYYWww`` |
+    ``YYYYMMDD`` | ``all``). Each group's total is the sum of its members'
+    per-token loot, read from the maintained player boards
+    (``player:{id}:{token}:total_loot`` → ``leaderboard:{token}`` fallback). This
+    is what makes the group all-time/weekly/daily boards correct: they derive
+    from the same per-player period totals used for the player leaderboards,
+    rather than always summing the current month.
+
+    Cached per-token (in-process). O(all groups) — a precomputed per-token group
+    sorted set (Task 07 Part B) can replace this later.
     """
-    cache_key = f"group_totals:{partition}"
+    cache_key = f"group_totals:{token}"
     cached = cache_get(cache_key, GROUP_TOTALS_TTL)
     if cached is not None:
         return cached
@@ -151,7 +278,7 @@ def _compute_group_totals(partition: int):
                 pid for (pid,) in s.query(Player.player_id).join(Player.groups)
                 .filter(Group.group_id == g.group_id).all()
             ]
-            total = player_list_loot_sum(player_ids, partition)
+            total = player_list_loot_sum(player_ids, token)
             result.append((g.group_id, g.group_name, total, len(player_ids)))
 
     result.sort(key=lambda x: x[2], reverse=True)
@@ -161,10 +288,10 @@ def _compute_group_totals(partition: int):
 
 @leaderboards_bp.get("/leaderboards/groups")
 async def leaderboards_groups():
-    period = request.args.get("period", "all")
+    # Default to the current month (see `leaderboards_players`).
+    period = request.args.get("period", "month")
     page, limit = parse_page(request)
     token = resolve_period(period)
-    partition = period_to_partition(period)
 
     def _load():
         # Prefer the precomputed group-total set (O(page), no full recompute).
@@ -195,8 +322,9 @@ async def leaderboards_groups():
             return entries, total_count
 
         # Fallback: compute across members (cached). Used for periods the
-        # precompute doesn't cover.
-        totals = _compute_group_totals(partition)
+        # precompute doesn't cover (all-time / weekly / daily), aggregating each
+        # group's members over the resolved token.
+        totals = _compute_group_totals(token)
         start = (page - 1) * limit
         window = totals[start:start + limit]
         entries = [

@@ -107,7 +107,7 @@ async def patch_group_config(group_id: int):
                     user_id,
                     group_id,
                     "hall_of_fame",
-                    manageable_guild_ids(user_id),
+                    manage_guild_ids=manageable_guild_ids(user_id),
                     user=user,
                 )
 

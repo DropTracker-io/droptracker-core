@@ -15,8 +15,12 @@ DB_PASS = os.getenv("DB_PASS")
 # Create base class for declarative models
 Base = declarative_base()
 
-DATA_POOL_SIZE = int(os.getenv("DATA_DB_POOL_SIZE", "50"))
-DATA_POOL_OVERFLOW = int(os.getenv("DATA_DB_MAX_OVERFLOW", "20"))
+# Pools are PER PROCESS and QueuePool never releases idle connections below
+# pool_size, so every process that imports this module permanently holds up to
+# pool_size connections after any burst. Size for the fleet (~15 processes),
+# not for one process: 50/20 defaults exhausted max_connections in production.
+DATA_POOL_SIZE = int(os.getenv("DATA_DB_POOL_SIZE", "5"))
+DATA_POOL_OVERFLOW = int(os.getenv("DATA_DB_MAX_OVERFLOW", "25"))
 DATA_POOL_TIMEOUT = int(os.getenv("DATA_DB_POOL_TIMEOUT", "20"))
 
 # Create engine with improved connection handling.

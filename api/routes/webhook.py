@@ -498,9 +498,15 @@ async def process_webhook_data(webhook_data):
             if submission_type in ("drop", "npc", "other"):
                 raw_nearby_players = processed_data.get("nearby_players")
                 raw_players_included = processed_data.get("players_included")
-                normalized_players = _parse_nearby_players(
-                    raw_nearby_players if raw_nearby_players is not None else raw_players_included
-                )
+                # The RuneLite plugin sends the participant list as an embed
+                # field named "members" (comma-separated, "none" when empty).
+                raw_members = processed_data.get("members")
+                raw_participants = raw_nearby_players
+                if raw_participants is None:
+                    raw_participants = raw_players_included
+                if raw_participants is None:
+                    raw_participants = raw_members
+                normalized_players = _parse_nearby_players(raw_participants)
                 processed_data["players_included"] = normalized_players
                 processed_data["nearby_players"] = normalized_players
                 _drop_request_debug(
@@ -511,6 +517,7 @@ async def process_webhook_data(webhook_data):
                     f"source={processed_data.get('source') or processed_data.get('npc_name')} "
                     f"raw_players_included={raw_players_included} "
                     f"raw_nearby_players={raw_nearby_players} "
+                    f"raw_members={raw_members} "
                     f"normalized_players_included={normalized_players}"
                 )
             processed_items.append(processed_data)
@@ -553,6 +560,9 @@ async def process_webhook_data(webhook_data):
 # "nearby_players": list|string|null, // Optional. List of nearby player names for
 #                             //   point splits. Accepts a JSON array, a
 #                             //   comma-separated string, or a list.
+#                             //   Aliases: "players_included", "members" (the
+#                             //   RuneLite plugin's embed field name; sends the
+#                             //   literal string "none" when empty).
 #
 # === COLLECTION LOG SUBMISSION FIELDS ===
 # submission_type: "collection_log"
@@ -603,12 +613,20 @@ def _parse_nearby_players(raw):
       - list of strings         -> returned as-is (after stripping blanks)
       - JSON-encoded array str  -> parsed then returned
       - comma-separated string  -> split and stripped
+
+    The plugin sends the literal string "none" when no players are nearby;
+    a lone "none" entry is treated as empty.
     """
+    def finalize(cleaned):
+        if cleaned and len(cleaned) == 1 and cleaned[0].lower() == "none":
+            return None
+        return cleaned or None
+
     if raw is None:
         return None
     if isinstance(raw, list):
         cleaned = [str(n).strip() for n in raw if n and str(n).strip()]
-        return cleaned or None
+        return finalize(cleaned)
     if isinstance(raw, str):
         raw = raw.strip()
         if not raw:
@@ -618,11 +636,11 @@ def _parse_nearby_players(raw):
                 parsed = _json.loads(raw)
                 if isinstance(parsed, list):
                     cleaned = [str(n).strip() for n in parsed if n and str(n).strip()]
-                    return cleaned or None
+                    return finalize(cleaned)
             except (_json.JSONDecodeError, TypeError):
                 pass
         cleaned = [p.strip() for p in raw.split(",") if p.strip()]
-        return cleaned or None
+        return finalize(cleaned)
     return None
 
 
@@ -802,7 +820,7 @@ async def _process_manual_submission(req_start):
                         return jsonify({"success": False, "error": "Drop submission requires 'value'"}), 400
                     
                     nearby_players = _parse_nearby_players(
-                        data.get("nearby_players") or data.get("players_included")
+                        data.get("nearby_players") or data.get("players_included") or data.get("members")
                     )
                     
                     processed_data.update({

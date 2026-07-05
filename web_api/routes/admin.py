@@ -13,6 +13,11 @@ Every endpoint independently enforces superadmin (403 otherwise):
   GET  /api/v1/admin/audit?action=&actor_user_id=&group_id=&q=&page=&limit=
   GET  /api/v1/admin/users/{id}/overview
   POST /api/v1/admin/users/{id}/superadmin       { grant: bool }
+  GET    /api/v1/admin/badges
+  POST   /api/v1/admin/badges                    { key, name, ... } (upsert)
+  DELETE /api/v1/admin/badges/{key}              (soft delete)
+  POST   /api/v1/admin/players/{id}/badges       { badge_key, note? }
+  DELETE /api/v1/admin/players/{id}/badges/{award_id}
 
 Service control is whitelisted to three units and shells out via systemctl /
 journalctl with **no** user input interpolated into the command. No SQL executor
@@ -61,11 +66,12 @@ from web_api.routes.subscriptions import _serialize_sub
 admin_bp = Blueprint("v1_admin", __name__)
 
 # Whitelisted units the superadmin may control (contract SERVICE_UNITS).
-SERVICE_UNITS = {"droptracker-core", "droptracker-api", "droptracker-webhooks"}
+SERVICE_UNITS = {"droptracker-core", "droptracker-api", "droptracker-webhooks", "droptracker-webapi"}
 SERVICE_NAMES = {
     "droptracker-core": "Discord bot (core)",
     "droptracker-api": "RuneLite intake API",
     "droptracker-webhooks": "Webhook reader bot",
+    "droptracker-webapi": "Web API (this backend)",
 }
 _MAX_LOG_LINES = 200
 
@@ -156,9 +162,10 @@ async def admin_service_action(unit: str):
     if action not in ("start", "stop", "restart"):
         abort_problem(422, "Invalid action", "action must be start|stop|restart.")
 
-    # Guard: stopping the intake API halts submission processing.
-    if action == "stop" and unit == "droptracker-api" and not body.get("confirm"):
-        abort_problem(409, "Confirmation required", "Stopping intake requires confirm:true.")
+    # Guard: stopping the intake API halts submission processing, and stopping
+    # the web API kills the backend serving this dashboard (no UI to restart it).
+    if action == "stop" and unit in ("droptracker-api", "droptracker-webapi") and not body.get("confirm"):
+        abort_problem(409, "Confirmation required", "Stopping this service requires confirm:true.")
 
     def _do():
         # Try direct systemctl, then sudo -n (non-interactive) as fallback.
@@ -976,4 +983,224 @@ async def admin_set_user_superadmin(user_id: int):
         before=json.dumps(before),
         after=json.dumps(grant),
     )
+    return jsonify({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
+# Badges (catalog CRUD + manual award/revoke)
+# --------------------------------------------------------------------------- #
+
+def _serialize_badge_admin(b, active_awards: int = 0) -> dict:
+    return {
+        "key": b.key,
+        "name": b.name,
+        "description": b.description,
+        "icon_url": b.icon_url,
+        "icon_emoji": b.icon_emoji,
+        "tone": b.tone,
+        "semantic": b.semantic,
+        "active": bool(b.active),
+        "automatic": b.criteria is not None,
+        "criteria": b.criteria,  # read-only in the UI (code-owned behavior)
+        "active_awards": int(active_awards),
+    }
+
+
+@admin_bp.get("/admin/badges")
+async def admin_list_badges():
+    await _require_superadmin()
+
+    def _load():
+        from sqlalchemy import func as safunc
+
+        from db import Badge, PlayerBadge
+
+        with db_session() as s:
+            counts = dict(
+                s.query(PlayerBadge.badge_id, safunc.count(PlayerBadge.id))
+                .filter(PlayerBadge.status == "active")
+                .group_by(PlayerBadge.badge_id)
+                .all()
+            )
+            rows = s.query(Badge).order_by(Badge.badge_id.asc()).all()
+            return [_serialize_badge_admin(b, counts.get(b.badge_id, 0)) for b in rows]
+
+    payload = await asyncio.to_thread(_load)
+    return private_no_store(jsonify(payload))
+
+
+@admin_bp.post("/admin/badges")
+async def admin_save_badge():
+    """Upsert a badge definition by key. ``semantic`` is fixed once any award
+    exists; ``criteria`` is never editable from the UI (evaluators are
+    code-owned) — new badges created here are manual-only (criteria NULL)."""
+    actor = await _require_superadmin()
+    body = await json_body()
+
+    from db.models.badge import BADGE_SEMANTICS, BADGE_TONES
+
+    key = (body.get("key") or "").strip().lower()
+    if not key or len(key) > 64 or not key.replace("_", "").isalnum():
+        abort_problem(422, "Invalid key", "Badge key must be a short snake_case identifier.")
+    name = (body.get("name") or "").strip()
+    if not name:
+        abort_problem(422, "Invalid name", "Badge name is required.")
+    description = (body.get("description") or "").strip()
+    if not description:
+        abort_problem(422, "Invalid description", "Badge description is required.")
+    tone = body.get("tone") or "gold"
+    if tone not in BADGE_TONES:
+        abort_problem(422, "Invalid tone", f"Tone must be one of: {', '.join(BADGE_TONES)}.")
+    semantic = body.get("semantic") or "permanent"
+    if semantic not in BADGE_SEMANTICS:
+        abort_problem(422, "Invalid semantic", "Semantic must be 'permanent' or 'held'.")
+    icon_url = (body.get("icon_url") or "").strip() or None
+    icon_emoji = (body.get("icon_emoji") or "").strip() or None
+    active = bool(body.get("active", True))
+
+    def _apply():
+        from db import Badge, PlayerBadge
+
+        with db_session() as s:
+            b = s.query(Badge).filter(Badge.key == key).first()
+            before = _serialize_badge_admin(b) if b else None
+            if b is None:
+                b = Badge(
+                    key=key, name=name, description=description, tone=tone,
+                    semantic=semantic, icon_url=icon_url, icon_emoji=icon_emoji,
+                    active=active, criteria=None,
+                )
+                s.add(b)
+            else:
+                if semantic != b.semantic:
+                    has_awards = (
+                        s.query(PlayerBadge.id)
+                        .filter(PlayerBadge.badge_id == b.badge_id)
+                        .first()
+                        is not None
+                    )
+                    if has_awards:
+                        abort_problem(
+                            409, "Semantic locked",
+                            "Cannot change semantics of a badge that has awards.",
+                        )
+                    b.semantic = semantic
+                b.name = name
+                b.description = description
+                b.tone = tone
+                b.icon_url = icon_url
+                b.icon_emoji = icon_emoji
+                b.active = active
+            s.commit()
+            return before, _serialize_badge_admin(b)
+
+    before, after = await asyncio.to_thread(_apply)
+    _audit(
+        actor, "badge.definition.save", f"badge:{key}",
+        before=json.dumps(before) if before else None,
+        after=json.dumps(after),
+    )
+    return jsonify(after)
+
+
+@admin_bp.delete("/admin/badges/<key>")
+async def admin_delete_badge(key: str):
+    """Soft delete: hides the badge (and its awards) everywhere; history kept."""
+    actor = await _require_superadmin()
+
+    def _apply():
+        from db import Badge
+
+        with db_session() as s:
+            b = s.query(Badge).filter(Badge.key == key).first()
+            if b is None:
+                abort_problem(404, "Badge not found", f"No badge with key '{key}'.")
+            before = _serialize_badge_admin(b)
+            b.active = False
+            s.commit()
+            return before
+
+    before = await asyncio.to_thread(_apply)
+    _audit(actor, "badge.definition.delete", f"badge:{key}", before=json.dumps(before))
+    return jsonify({"ok": True})
+
+
+@admin_bp.post("/admin/players/<int:player_id>/badges")
+async def admin_award_badge(player_id: int):
+    actor = await _require_superadmin()
+    body = await json_body()
+    badge_key = (body.get("badge_key") or "").strip()
+    if not badge_key:
+        abort_problem(422, "Invalid badge_key", "'badge_key' is required.")
+    note = (body.get("note") or "").strip() or None
+
+    def _apply():
+        from db import Badge, Player
+
+        from services.badges import award_badge
+
+        with db_session() as s:
+            player = s.query(Player).filter(Player.player_id == player_id).first()
+            if player is None:
+                abort_problem(404, "Player not found", f"No player with id {player_id}.")
+            b = s.query(Badge).filter(Badge.key == badge_key, Badge.active == True).first()  # noqa: E712
+            if b is None:
+                abort_problem(404, "Badge not found", f"No active badge with key '{badge_key}'.")
+            context = {"note": note} if note else None
+            award = award_badge(
+                s, b, player_id, slot_key=f"p:{player_id}", context=context,
+                awarded_by=actor,
+            )
+            if award is None:
+                abort_problem(
+                    409, "Already awarded",
+                    f"Player {player_id} already holds an active '{badge_key}' badge.",
+                )
+            s.commit()
+            return {
+                "award_id": int(award.id),
+                "badge_key": badge_key,
+                "player_id": player_id,
+                "player_name": player.player_name,
+                "note": note,
+            }
+
+    after = await asyncio.to_thread(_apply)
+    _audit(actor, "badge.award", f"player:{player_id}", after=json.dumps(after))
+    return jsonify(after)
+
+
+@admin_bp.delete("/admin/players/<int:player_id>/badges/<int:award_id>")
+async def admin_revoke_badge(player_id: int, award_id: int):
+    actor = await _require_superadmin()
+
+    def _apply():
+        from db import Badge, PlayerBadge
+
+        from services.badges import revoke_badge
+
+        with db_session() as s:
+            award = (
+                s.query(PlayerBadge)
+                .filter(PlayerBadge.id == award_id, PlayerBadge.player_id == player_id)
+                .first()
+            )
+            if award is None:
+                abort_problem(404, "Award not found",
+                              f"No award {award_id} for player {player_id}.")
+            if award.status != "active":
+                abort_problem(409, "Not active", "Only active awards can be revoked.")
+            b = s.query(Badge).filter(Badge.badge_id == award.badge_id).first()
+            before = {
+                "award_id": award_id,
+                "badge_key": b.key if b else None,
+                "player_id": player_id,
+                "status": award.status,
+            }
+            revoke_badge(s, award)
+            s.commit()
+            return before
+
+    before = await asyncio.to_thread(_apply)
+    _audit(actor, "badge.revoke", f"player:{player_id}", before=json.dumps(before))
     return jsonify({"ok": True})

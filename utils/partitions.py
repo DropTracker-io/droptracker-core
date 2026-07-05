@@ -63,7 +63,10 @@ def resolve_period(period: Optional[str]) -> str:
     """Normalize a requested ``period`` query param to a canonical token.
 
     Recognized forms (``YYYYMM`` | ``YYYYWww`` | ``YYYYMMDD`` | ``all``) pass
-    through; anything else falls back to the current month.
+    through. The relative sentinels ``day`` / ``week`` / ``month`` resolve to
+    the current server-side token — clients should prefer these over computing
+    tokens themselves so the week/day arithmetic can never drift from the write
+    path. Anything else falls back to the current month.
     """
     if period:
         p = period.strip()
@@ -71,4 +74,11 @@ def resolve_period(period: Optional[str]) -> str:
             return p
         if _WEEK_RE.match(p):
             return p.upper()
+        low = p.lower()
+        if low == "day":
+            return day_token()
+        if low == "week":
+            return week_token()
+        if low == "month":
+            return month_token()
     return month_token()

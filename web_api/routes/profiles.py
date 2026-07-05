@@ -235,6 +235,12 @@ async def player_profile(player_id: int):
             top_npc = _player_top_npc(s, player)
             if top_npc:
                 payload["top_npc"] = top_npc
+            # Best-effort: badge failures must never break profiles.
+            try:
+                from web_api.routes.badges import player_awards
+                payload["badges"] = player_awards(s, player_id)
+            except Exception:
+                pass
             return payload
 
     payload = await asyncio.to_thread(_load)

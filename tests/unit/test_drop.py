@@ -96,6 +96,25 @@ class TestNormalizeIncomingPlayers:
         result = self.normalize("Zezima")
         assert result == ["Zezima"]
 
+    # ── "none" empty sentinel (plugin sends this when no players nearby) ─────
+
+    def test_none_sentinel_string_returns_none(self):
+        assert self.normalize("none") is None
+
+    def test_none_sentinel_case_insensitive(self):
+        assert self.normalize("None") is None
+
+    def test_none_sentinel_in_list_returns_none(self):
+        assert self.normalize(["none"]) is None
+
+    def test_none_sentinel_with_whitespace(self):
+        assert self.normalize("  none  ") is None
+
+    def test_none_alongside_real_names_is_preserved(self):
+        # Only a lone "none" is the sentinel; mixed lists pass through
+        result = self.normalize("none, Alice")
+        assert result == ["none", "Alice"]
+
     # ── Dict inputs ──────────────────────────────────────────────────────────
 
     def test_dict_values_extracted(self):

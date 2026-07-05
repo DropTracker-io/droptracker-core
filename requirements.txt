@@ -98,3 +98,6 @@ git-filter-repo==2.45.0
 py-spy==0.4.0
 typeguard==4.4.1
 typing_extensions==4.12.2
+
+# Payments
+stripe==15.3.0

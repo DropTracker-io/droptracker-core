@@ -55,7 +55,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # --- Personal best ---
     {"key": "notify_pbs", "type": "boolean", "default": True, "seasonal": True},
     {"key": "personal_best_embed_boss_list", "type": "bosslist", "default": ""},
-    {"key": "number_of_pbs_to_display", "type": "int", "default": 5, "min": 1, "max": 25},
+    {"key": "number_of_pbs_to_display", "type": "int", "default": 5, "min": 1, "max": 10},
     {"key": "channel_id_to_send_pb_embeds", "type": "channel", "default": None},
     {"key": "hof_individual_boss_messages", "type": "boolean", "default": False},
 
@@ -130,9 +130,16 @@ def coerce_from_storage(field: Dict[str, Any], stored: Optional[str]) -> Any:
         return _is_truthy(stored)
     if ftype == "int":
         try:
-            return int(float(stored))
+            value = int(float(stored))
         except (ValueError, TypeError):
             return field.get("default")
+        # Out-of-range stored values are legacy sentinels (e.g. the template
+        # group's number_of_pbs_to_display='0' means "unset"). The editor
+        # can't re-save them anyway (PATCH enforces min/max), so surface the
+        # effective default instead of an invalid number.
+        if ("min" in field and value < field["min"]) or ("max" in field and value > field["max"]):
+            return field.get("default")
+        return value
     # channel / string / text / csv / bosslist / select -> string
     return str(stored)
 

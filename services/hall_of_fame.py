@@ -113,7 +113,10 @@ _DISCORD_EPOCH_MS = 1420070400000
 _MAX_COMPONENT_COUNT = 38
 _MAX_TEXT_CHARS = 3950
 
-_HASH_KEY_TEMPLATE = "hof:msghash:v1:{group_id}:{message_id}"
+# v2: v1 hashes were poisoned by silent edit failures (the interactions HTTP
+# client returns None after exhausting 429 retries and Message.edit no-ops).
+# Bumping the version forces one clean re-verification wave of every message.
+_HASH_KEY_TEMPLATE = "hof:msghash:v2:{group_id}:{message_id}"
 _HASH_TTL_SECONDS = 14 * 24 * 3600
 
 
@@ -292,10 +295,16 @@ class HallOfFame(Extension):
             elif row.config_key == "hof_individual_boss_messages":
                 cfg.individual_messages = str(row.config_value).strip().lower() not in ("0", "false", "no", "off")
             elif row.config_key == "number_of_pbs_to_display":
+                # Legacy sentinel: nearly every group carries '0' (cloned from
+                # the template group), which has always meant "unset — use the
+                # default". Clamping it to 1 collapses every individual boss
+                # message to a single PB per bracket.
                 try:
-                    cfg.pb_entries = max(1, min(10, int(row.config_value)))
+                    value = int(row.config_value)
                 except (TypeError, ValueError):
-                    pass
+                    value = 0
+                if value > 0:
+                    cfg.pb_entries = min(10, value)
         return cfg
 
     def _resolve_entries(
@@ -424,6 +433,19 @@ class HallOfFame(Extension):
             stats.pruned += 1
         valid.sort(key=lambda r: int(r.message_id))
 
+        # Two rows pointing at the same Discord message would make positional
+        # mapping edit the same message under two plan keys, churning forever.
+        seen_ids: set[str] = set()
+        deduped: List[GroupPersonalBestMessage] = []
+        for row in valid:
+            if str(row.message_id) in seen_ids:
+                session.delete(row)
+                stats.pruned += 1
+                continue
+            seen_ids.add(str(row.message_id))
+            deduped.append(row)
+        valid = deduped
+
         slots: List[GroupPersonalBestMessage] = []
         for row in valid:
             if str(row.channel_id) != str(channel.id):
@@ -502,11 +524,22 @@ class HallOfFame(Extension):
             if self._get_stored_hash(group.group_id, row.message_id) == new_hash:
                 stats.skipped += 1
                 return
-            message = await self._get_channel_message(channel, row.message_id, scan)
+            try:
+                message = await self._get_channel_message(channel, row.message_id, scan)
+            except Exception as e:
+                # Transient fetch failure: leave this slot for the next cycle
+                # rather than mistaking it for a deleted message (a delete +
+                # resend here would create a real duplicate in the channel).
+                stats.failures += 1
+                log.warning("HOF: group %d slot %d fetch failed, skipping this cycle: %s",
+                            group.group_id, index, e)
+                return
             if message is not None:
                 try:
                     await self._discord_write(
-                        str(channel.id), lambda: message.edit(components=components),
+                        str(channel.id),
+                        lambda: message.edit(components=components),
+                        expect_result=True,
                     )
                     row.date_updated = datetime.datetime.now()
                     session.commit()
@@ -529,7 +562,9 @@ class HallOfFame(Extension):
         components: List[BaseComponent], stats: CycleStats,
     ) -> GroupPersonalBestMessage:
         message = await self._discord_write(
-            str(channel.id), lambda: channel.send(components=components),
+            str(channel.id),
+            lambda: channel.send(components=components),
+            expect_result=True,
         )
         row = GroupPersonalBestMessage(
             group_id=group.group_id,
@@ -547,7 +582,14 @@ class HallOfFame(Extension):
         self, group: Group, channel, scan: Optional[ChannelScan],
         row: GroupPersonalBestMessage, stats: CycleStats,
     ):
-        message = await self._get_channel_message(channel, row.message_id, scan)
+        try:
+            message = await self._get_channel_message(channel, row.message_id, scan)
+        except Exception as e:
+            # Keep the row so the deletion is retried next cycle.
+            stats.failures += 1
+            log.warning("HOF: group %d surplus message %s fetch failed, retrying next cycle: %s",
+                        group.group_id, row.message_id, e)
+            return
         if message is not None:
             try:
                 await self._discord_write(str(channel.id), message.delete)
@@ -560,30 +602,53 @@ class HallOfFame(Extension):
     async def _get_channel_message(
         self, channel, message_id, scan: Optional[ChannelScan],
     ) -> Optional["interactions.Message"]:
+        """Return the Message, or None only when it provably no longer exists.
+
+        Transient errors propagate: callers must not confuse "couldn't fetch
+        right now" with "deleted", or they will resend and duplicate.
+        """
         if scan is not None and str(message_id) in scan.by_id:
             return scan.by_id[str(message_id)]
         try:
             return await channel.fetch_message(int(message_id))
         except NotFound:
             return None
-        except Exception as e:
-            log.warning("HOF: fetch_message %s failed: %s", message_id, e)
-            return None
 
-    async def _discord_write(self, channel_id: str, factory):
+    async def _discord_write(self, channel_id: str, factory, expect_result: bool = False):
         """Run one Discord write (send/edit/delete) with pacing and retries.
 
         ``factory`` is a zero-arg callable returning a fresh coroutine, so the
         call can be retried.  Forbidden and NotFound propagate to the caller;
-        everything else is retried with backoff.
+        BadRequest fails fast (retrying a 400 can never succeed); everything
+        else is retried with backoff.
+
+        ``expect_result`` MUST be True for sends and edits.  interactions'
+        HTTPClient gives up silently after 3 consecutive 429s — its request
+        loop simply ends and returns ``None`` instead of raising — which makes
+        ``Message.edit()`` a no-op that "succeeds".  Treating that None as
+        success is what poisoned the hash cache and froze stale boss messages
+        in place (the duplicate-boss symptom of issue #31).  When a None comes
+        back we wait out the bucket and retry, and if it never succeeds we
+        raise so the caller does not record the write as done.
         """
         last_exc: Optional[Exception] = None
         for attempt in range(1, 5):
             await self._global_limiter.acquire()
             await self._get_channel_limiter(channel_id).acquire()
             try:
-                return await factory()
-            except (Forbidden, NotFound):
+                result = await factory()
+                if expect_result and result is None:
+                    # Silent rate-limit exhaustion inside the HTTP client.
+                    delay = 5.0 * attempt + random.uniform(0.5, 1.5)
+                    log.warning(
+                        "HOF: write on channel %s returned None (library gave up on 429s), "
+                        "sleeping %.1fs before retry (attempt %d)",
+                        channel_id, delay, attempt,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                return result
+            except (Forbidden, NotFound, BadRequest):
                 raise
             except RateLimited as e:
                 retry_after = float(getattr(e, "retry_after", None) or 2.0)
@@ -597,13 +662,17 @@ class HallOfFame(Extension):
                 log.warning("HOF: HTTP %s on channel %s, retrying in %.1fs (attempt %d)",
                             getattr(e, "status", "?"), channel_id, delay, attempt)
                 await asyncio.sleep(delay)
-        raise last_exc if last_exc else RuntimeError("HOF: discord write failed")
+        if last_exc:
+            raise last_exc
+        raise RuntimeError(f"HOF: discord write on channel {channel_id} kept returning None (rate limited)")
 
     def _get_channel_limiter(self, channel_id: str) -> RateLimiter:
         limiter = self._channel_limiters.get(channel_id)
         if limiter is None:
-            # Discord allows ~5 edits/5s per channel; stay comfortably under.
-            limiter = RateLimiter(max_calls=1, period_seconds=1.2)
+            # Discord's PATCH message bucket is 5 per rolling window per
+            # channel; production logs show sustained 1.2s pacing still trips
+            # it during mass-edit waves, so pace conservatively.
+            limiter = RateLimiter(max_calls=1, period_seconds=1.5)
             self._channel_limiters[channel_id] = limiter
         return limiter
 
@@ -731,6 +800,13 @@ class HallOfFame(Extension):
             "Corrupted": 1,
         }
         mode_npcs = [(self._get_variant_mode_name(canonical_name, npc.npc_name), npc) for npc in npcs]
+        # Alias NPC rows (e.g. "Nightmare" and "The Nightmare") map to the same
+        # mode — keep only the first so a mode section never renders twice.
+        seen_modes: set[str] = set()
+        mode_npcs = [
+            (mode, npc) for mode, npc in mode_npcs
+            if not (mode in seen_modes or seen_modes.add(mode))
+        ]
         mode_npcs.sort(key=lambda item: (mode_order.get(item[0], 50), item[0].casefold()))
 
         grouped_components: List[BaseComponent] = []

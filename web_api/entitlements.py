@@ -1,6 +1,7 @@
 """Resolve a group's effective entitlements from its subscription tier."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Optional
 
 from db import GroupSubscription, SubscriptionTier
@@ -15,6 +16,19 @@ from web_api.deps import is_superadmin
 _ACTIVE_STATUSES = frozenset({"active", "trialing"})
 # Implicit free-plan tier keys, tried in order when a group has no active paid sub.
 _FALLBACK_TIER_KEYS = ("free", "basic")
+# PayPal/manual subs have no provider webhook flipping status when a period
+# lapses (Stripe does), so an "active" row past its period end must stop
+# granting benefits. The grace window absorbs late IPN deliveries/retries.
+_PERIOD_END_GRACE = timedelta(hours=72)
+
+
+def subscription_is_live(sub: GroupSubscription | None) -> bool:
+    """Active status AND (no period end, or within period + grace)."""
+    if sub is None or sub.status not in _ACTIVE_STATUSES:
+        return False
+    if sub.current_period_end is None:
+        return True
+    return datetime.now() <= sub.current_period_end + _PERIOD_END_GRACE
 
 
 def _load_fallback_tier(s) -> SubscriptionTier | None:
@@ -48,13 +62,13 @@ def resolve_group_entitlements(
         .first()
     )
     tier: SubscriptionTier | None = None
-    if sub and sub.tier_key and sub.status in _ACTIVE_STATUSES:
+    if sub is not None and sub.tier_key and subscription_is_live(sub):
         tier = (
             s.query(SubscriptionTier)
             .filter(SubscriptionTier.key == sub.tier_key)
             .first()
         )
-    elif sub is None or sub.status not in _ACTIVE_STATUSES:
+    elif not subscription_is_live(sub):
         tier = _load_fallback_tier(s)
 
     if tier is None:

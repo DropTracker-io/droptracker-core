@@ -60,6 +60,13 @@ class TestCanonicalDisplayName:
         # Non-floor names that merely mention the Sepulchre pass through.
         assert canonical_display_name("Hallowed Sepulchre") == SEPULCHRE_CANONICAL or True
 
+    def test_colonless_variants_map_to_canonical(self):
+        # NpcList carries both spellings; grouping must not depend on the colon.
+        assert canonical_display_name("Chambers of Xeric Challenge Mode") == "Chambers of Xeric"
+        assert canonical_display_name("Tombs of Amascut Expert Mode") == "Tombs of Amascut"
+        assert canonical_display_name("Theatre of Blood Hard Mode") == "Theatre of Blood"
+        assert canonical_display_name("The Nightmare") == "Nightmare of Ashihama"
+
 
 class TestBuildBossPlan:
     def test_alphabetical_case_insensitive(self):

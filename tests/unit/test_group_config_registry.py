@@ -42,6 +42,14 @@ class TestRegistry:
         assert reg.coerce_from_storage(ifield, "2500000") == 2500000
         assert reg.coerce_from_storage(ifield, None) == 100000  # default
 
+    def test_coerce_from_storage_out_of_range_int_is_default(self):
+        # Legacy sentinel: template group seeds number_of_pbs_to_display='0'
+        # ("unset"); below min must surface the default, not the raw 0.
+        pbs = reg.get_config_field("number_of_pbs_to_display")
+        assert reg.coerce_from_storage(pbs, "0") == 5
+        assert reg.coerce_from_storage(pbs, "99") == 5  # above max
+        assert reg.coerce_from_storage(pbs, "7") == 7  # in range passes through
+
     def test_coerce_to_storage_validation(self):
         assert reg.coerce_to_storage("notify_pbs", True) == "1"
         assert reg.coerce_to_storage("notify_pbs", False) == "0"

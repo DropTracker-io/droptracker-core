@@ -199,8 +199,12 @@ class RedisLootTracker:
                     # Get player's group IDs for group leaderboards
                     player_group_ids = [group.group_id for group in player.groups] if player.groups else []
 
-                    # Update leaderboards incrementally using ZINCRBY instead of full recalculation
-                    self._increment_leaderboards(player.player_id, total_value, partition, player_group_ids, world_type=world_type)
+                    # Update leaderboards incrementally using ZINCRBY instead of full recalculation.
+                    # The drop's own timestamp decides which weekly/daily boards it lands on,
+                    # so late-processed drops around a day/week boundary stay on the right board.
+                    drop_dt = self._coerce_drop_datetime(drop.date_added)
+                    self._increment_leaderboards(player.player_id, total_value, partition, player_group_ids,
+                                                 world_type=world_type, drop_dt=drop_dt)
 
                     # Additive: publish a realtime leaderboard_delta (Task 07 C).
                     # Never affects intake — publish failures are swallowed.
@@ -220,7 +224,7 @@ class RedisLootTracker:
     
     def _increment_leaderboards(self, player_id: int, value_delta: int,
                                 partition: Optional[int] = None, group_ids: Optional[List[int]] = None,
-                                world_type: str = "main"):
+                                world_type: str = "main", drop_dt: Optional[datetime] = None):
         """
         Incrementally update leaderboards by adding value_delta to player's score.
         More efficient than full recalculation for individual drop additions.
@@ -252,7 +256,7 @@ class RedisLootTracker:
         # have real data. Failures here never affect the monthly board or the
         # drop itself.
         try:
-            self._increment_extra_partitions(player_id, value_delta, group_ids, prefix)
+            self._increment_extra_partitions(player_id, value_delta, group_ids, prefix, drop_dt)
         except Exception as e:
             print(f"[redis_updates] extra-partition update skipped: {e}")
 
@@ -261,15 +265,18 @@ class RedisLootTracker:
     _DAILY_TTL = 90 * 24 * 3600     # 90 days (matches player daily key retention)
 
     def _increment_extra_partitions(self, player_id: int, value_delta: int,
-                                    group_ids: Optional[List[int]], prefix: str):
+                                    group_ids: Optional[List[int]], prefix: str,
+                                    drop_dt: Optional[datetime] = None):
         """Maintain weekly / daily / all-time global + per-group player boards.
 
         Strictly additive to the monthly board. Weekly and daily sets get a TTL
-        so they don't grow unbounded; all-time and monthly persist.
+        so they don't grow unbounded; all-time and monthly persist. ``drop_dt``
+        (the drop's own timestamp) picks the week/day tokens; wall clock is only
+        the fallback.
         """
         from utils.partitions import week_token, day_token, ALL
 
-        now = datetime.now()
+        now = drop_dt or datetime.now()
         wk, day = week_token(now), day_token(now)
         # (token, ttl) — None ttl => persist.
         tokens = [(wk, self._WEEKLY_TTL), (day, self._DAILY_TTL), (ALL, None)]
@@ -447,16 +454,32 @@ class RedisLootTracker:
             self._remove_from_leaderboards(player_id, player_group_ids)
             
             # Rebuild Redis data for each monthly partition and update leaderboards
+            all_time_total = 0
             for partition, drops in partition_drops.items():
                 total_loot = self._rebuild_partition_data(player_id, partition, drops)
+                all_time_total += total_loot
                 # Update leaderboards for this partition
                 self.update_leaderboards(player_id, total_loot, partition, player_group_ids)
                 print(f"Updated leaderboards for player {player_id} in partition {partition}")
-            
+
+            # Re-establish the all-time global board + total from the accumulated
+            # per-partition totals. `_remove_from_leaderboards` cleared the stale
+            # all-time score above, so this ZADD (absolute) is authoritative and
+            # keeps `leaderboard:all` correct after drops are hidden/edited —
+            # something the incremental ZINCRBY path alone cannot do.
+            self._rebuild_all_time_total(player_id, all_time_total)
+
             # Rebuild Redis data for each daily partition
             for daily_partition, drops in daily_drops.items():
                 self._rebuild_daily_data(player_id, daily_partition, drops)
                 print(f"Updated daily data for player {player_id} on {daily_partition}")
+
+            # Re-write this player's daily + weekly leaderboard scores from the
+            # same per-day grouping. Without this, the incremental
+            # ZINCRBY-maintained boards keep stale scores forever after drops
+            # are hidden/edited — the monthly and all-time boards were repaired
+            # above, but day/week were not.
+            self._rebuild_period_leaderboards(player_id, daily_drops, player_group_ids)
 
             # Re-apply split GP credits earned as a participant in other players' drops.
             # These are not in the player's own Drop rows, so they must be reconstructed
@@ -528,20 +551,39 @@ class RedisLootTracker:
             redis_client.client.delete(*keys)
     
     def _remove_from_leaderboards(self, player_id: int, group_ids: List[int]):
-        """Remove player from all leaderboards"""
+        """Remove player from the current-month + all-time global leaderboards.
+
+        The all-time board (``leaderboard:all``) must be cleared here too, so that
+        a subsequent rebuild (``force_update_player``) re-adds an accurate score
+        instead of layering on top of a stale one. Historical monthly boards and
+        per-group all-time boards are intentionally left untouched (force_update
+        re-adds each monthly partition; per-group all-time is maintained purely
+        incrementally and is not read by any user-facing surface).
+        """
+        from utils.partitions import week_token, day_token
+
         current_partition = self._get_partition()
-        
+
         pipeline = redis_client.client.pipeline(transaction=True)
-        
-        # Remove from global leaderboard
+
+        # Remove from global leaderboard (current month + all-time + current
+        # week/day). The week/day boards are re-added with absolute scores by
+        # `_rebuild_period_leaderboards`, so clearing here is what makes a
+        # fully-hidden player actually disappear from them.
         global_key = f"leaderboard:{current_partition}"
         pipeline.zrem(global_key, player_id)
-        
+        pipeline.zrem("leaderboard:all", player_id)
+        period_tokens = (week_token(), day_token())
+        for token in period_tokens:
+            pipeline.zrem(f"leaderboard:{token}", player_id)
+
         # Remove from group leaderboards
         for group_id in group_ids:
             group_key = f"leaderboard:{current_partition}:group:{group_id}"
             pipeline.zrem(group_key, player_id)
-        
+            for token in period_tokens:
+                pipeline.zrem(f"leaderboard:{token}:group:{group_id}", player_id)
+
         pipeline.execute()
     
     def _rebuild_partition_data(self, player_id: int, partition: int, drops: List[Drop]) -> int:
@@ -580,9 +622,13 @@ class RedisLootTracker:
         # Use pipeline for atomic updates
         pipeline = redis_client.client.pipeline(transaction=True)
         
-        # Set total loot
+        # Set this partition's monthly total loot. The all-time total loot is
+        # NOT set here: this method is called once per monthly partition, so
+        # setting `all_time_total_loot` to a single partition's total would
+        # leave it equal to whichever partition was rebuilt last. The correct
+        # all-time sum is written once by `_rebuild_all_time_total` after the
+        # per-partition loop in `_force_update_player_internal`.
         pipeline.set(keys['total_loot'], total_loot)
-        pipeline.set(keys['all_time_total_loot'], total_loot)
 
         recent_items_raw.sort(key=lambda x: x['date_added'])
         recent_items = [json.dumps(item) for item in recent_items_raw]
@@ -602,9 +648,80 @@ class RedisLootTracker:
         
         # Execute all operations
         pipeline.execute()
-        
+
         return total_loot
-    
+
+    def _rebuild_period_leaderboards(self, player_id: int, daily_drops: Dict[str, List[Drop]],
+                                     group_ids: List[int]) -> None:
+        """Set the player's authoritative daily + weekly board scores after a
+        full rebuild.
+
+        ``daily_drops`` is the ``{YYYYMMDD: [drops]}`` grouping already built by
+        ``_force_update_player_internal`` (visible drops only). Scores are
+        written with absolute ZADD — overwriting whatever the incremental
+        ZINCRBY path accumulated — for every day within the daily retention
+        window and every ISO week within the weekly retention window.
+        ``_remove_from_leaderboards`` clears the current day/week entries first,
+        so a player whose current drops were all hidden drops off those boards.
+        """
+        from utils.partitions import week_token
+
+        now = datetime.now()
+        daily_cutoff = now - timedelta(seconds=self._DAILY_TTL)
+        weekly_cutoff = now - timedelta(seconds=self._WEEKLY_TTL)
+
+        weekly_totals: Dict[str, int] = {}
+        pipeline = redis_client.client.pipeline(transaction=True)
+
+        for daily_partition, drops in daily_drops.items():
+            try:
+                day_dt = datetime.strptime(daily_partition, '%Y%m%d')
+            except ValueError:
+                continue
+            day_total = sum(d.value * d.quantity for d in drops)
+
+            if day_dt >= weekly_cutoff:
+                wk = week_token(day_dt)
+                weekly_totals[wk] = weekly_totals.get(wk, 0) + day_total
+
+            if day_dt < daily_cutoff:
+                continue
+            day_key = f"leaderboard:{daily_partition}"
+            pipeline.zadd(day_key, {player_id: day_total})
+            pipeline.expire(day_key, self._DAILY_TTL)
+            for group_id in group_ids:
+                gkey = f"leaderboard:{daily_partition}:group:{group_id}"
+                pipeline.zadd(gkey, {player_id: day_total})
+                pipeline.expire(gkey, self._DAILY_TTL)
+
+        for wk, week_total in weekly_totals.items():
+            week_key = f"leaderboard:{wk}"
+            pipeline.zadd(week_key, {player_id: week_total})
+            pipeline.expire(week_key, self._WEEKLY_TTL)
+            for group_id in group_ids:
+                gkey = f"leaderboard:{wk}:group:{group_id}"
+                pipeline.zadd(gkey, {player_id: week_total})
+                pipeline.expire(gkey, self._WEEKLY_TTL)
+
+        pipeline.execute()
+
+    def _rebuild_all_time_total(self, player_id: int, all_time_total: int) -> None:
+        """Set the player's authoritative all-time score/total after a full rebuild.
+
+        `all_time_total` is the sum of every monthly partition's total loot (all
+        non-hidden drops). Writing an absolute value here — rather than relying on
+        the incremental ZINCRBY in `_increment_extra_partitions` — is what keeps
+        `leaderboard:all` correct when drops are hidden, edited, or the board is
+        rebuilt from scratch.
+        """
+        pipeline = redis_client.client.pipeline(transaction=True)
+        pipeline.set(f"player:{player_id}:all:total_loot", all_time_total)
+        if all_time_total > 0:
+            pipeline.zadd("leaderboard:all", {player_id: all_time_total})
+        else:
+            pipeline.zrem("leaderboard:all", player_id)
+        pipeline.execute()
+
     def _rebuild_daily_data(self, player_id: int, daily_partition: str, drops: List[Drop]) -> int:
         """Rebuild Redis data for a specific daily partition. Returns total loot value."""
         # Generate daily keys

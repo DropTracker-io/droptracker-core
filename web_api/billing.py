@@ -17,7 +17,9 @@ from typing import Optional
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-SITE_URL = os.getenv("WEB_SITE_URL", os.getenv("NEXTAUTH_URL", "http://localhost:3000"))
+SITE_URL = os.getenv(
+    "WEB_SITE_URL", os.getenv("NEXTAUTH_URL", "http://localhost:3000")
+).rstrip("/")
 
 
 def _stripe():
