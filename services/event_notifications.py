@@ -30,6 +30,8 @@ KIND_FOR_TYPE = {
     "event_blackout": "completions",
     "event_lead_change": "leaderboard",
     "event_pending": "admin",
+    # Task 21: the scheduler sweep could not activate a scheduled draft.
+    "event_activation_failed": "admin",
 }
 
 EVENT_NOTIFICATION_TYPES = tuple(KIND_FOR_TYPE)
@@ -47,6 +49,7 @@ _COLORS = {
     "event_blackout": 0x2C2F33,
     "event_lead_change": 0xFFD700,
     "event_pending": 0xE67E22,
+    "event_activation_failed": 0xED4245,
 }
 
 
@@ -199,6 +202,19 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             field("Review", f"[Open the review queue]({review_url})", inline=False)
         if data.get("proof_url"):
             spec["thumbnail"] = data["proof_url"]
+
+    elif notification_type == "event_activation_failed":
+        spec["title"] = f"⚠️ {event_name} could not start"
+        reason = data.get("reason") or "It failed the activation checks."
+        spec["description"] = (
+            f"The scheduled start passed, but the event could not be "
+            f"activated: {reason}"
+        )
+        starts = _fmt_ts(data.get("starts_at"))
+        if starts:
+            field("Scheduled start", starts)
+        if url:
+            field("Fix it", f"[Open the event manager]({url})", inline=False)
 
     else:
         # Unknown event type — generic card so nothing crashes.

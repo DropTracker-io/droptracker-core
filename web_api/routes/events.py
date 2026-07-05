@@ -10,8 +10,10 @@ Player-facing (session required; Task 16, PRD D4/D10):
 
 Admin writes (session + group admin of events.group_id, or superadmin for
 global events where group_id is NULL):
-  POST   /api/v1/events                    { EventInput }     -> { id }
+  POST   /api/v1/events                    { EventInput }     -> { id }  (status: draft)
   PATCH  /api/v1/events/{id}                { partial }        -> EventDetail
+  POST   /api/v1/events/{id}/activate                          -> EventDetail  (Task 21)
+  POST   /api/v1/events/{id}/end                               -> EventDetail  (Task 21)
   POST   /api/v1/events/{id}/tasks          { EventTaskInput } -> { id }
   DELETE /api/v1/events/{id}/tasks/{taskId}                    -> { ok }
   POST   /api/v1/events/{id}/teams          { EventTeamInput } -> { id }
@@ -79,8 +81,11 @@ def _dt(unix) -> datetime | None:
 
 
 def _effective_status(ev: Event) -> str:
-    if ev.status == "draft":
-        return "draft"
+    """Explicit status, with one derivation: an active event past its
+    scheduled end reads as 'past' even before the scheduler sweep (Task 21)
+    flips the row."""
+    if ev.status in ("draft", "past"):
+        return ev.status
     if ev.ends_at and ev.ends_at < datetime.now():
         return "past"
     return "active"
@@ -280,21 +285,26 @@ async def list_events():
             events = q.order_by(Event.id.desc()).all()
 
             # Determine which groups the viewer can admin (to see drafts).
+            # Superadmins see every draft, including global ones (Task 21).
             admin_groups = set()
+            viewer_is_superadmin = False
             if viewer_id is not None:
                 user = load_user(s, viewer_id)
+                viewer_is_superadmin = is_superadmin(user)
                 manage_ids = manageable_guild_ids(viewer_id)
-                for ev in events:
-                    if ev.group_id and ev.group_id not in admin_groups:
-                        role = resolve_group_role(s, viewer_id, ev.group_id, manage_ids, user=user)
-                        if role in ("owner", "admin"):
-                            admin_groups.add(ev.group_id)
+                if not viewer_is_superadmin:
+                    for ev in events:
+                        if ev.group_id and ev.group_id not in admin_groups:
+                            role = resolve_group_role(s, viewer_id, ev.group_id, manage_ids, user=user)
+                            if role in ("owner", "admin"):
+                                admin_groups.add(ev.group_id)
 
             out = []
             for ev in events:
                 eff = _effective_status(ev)
                 is_draft = eff == "draft"
-                if is_draft and ev.group_id not in admin_groups:
+                if is_draft and not viewer_is_superadmin and (
+                        not ev.group_id or ev.group_id not in admin_groups):
                     continue  # drafts hidden from non-admins
                 if status and eff != status:
                     continue
@@ -355,8 +365,9 @@ async def create_event():
     body = await json_body()
     group_id = body.get("group_id")
     name = (body.get("name") or "").strip()
-    if not isinstance(group_id, int):
-        abort_problem(422, "Invalid group_id", "'group_id' must be an integer.")
+    # group_id null => global event; _assert_event_admin requires superadmin.
+    if group_id is not None and not isinstance(group_id, int):
+        abort_problem(422, "Invalid group_id", "'group_id' must be an integer or null.")
     if not (1 <= len(name) <= 120):
         abort_problem(422, "Invalid name", "Event name must be 1–120 characters.")
     formation_mode = body.get("formation_mode") or "admin_assign"
@@ -384,11 +395,15 @@ async def create_event():
                 group = s.query(Group).filter(Group.group_id == group_id).first()
                 if group and group.guild_id:
                     discord_guild_id = str(group.guild_id)
+            # Explicit lifecycle (Task 21): events are born as drafts and go
+            # live only through POST /events/{id}/activate (or the scheduler
+            # sweep once starts_at passes). Drafts are unlimited; the tier
+            # concurrency limit binds at activation.
             ev = Event(
                 group_id=group_id,
                 name=name,
                 description=(body.get("description") or None),
-                status="active",
+                status="draft",
                 starts_at=_dt(body.get("starts_at")),
                 ends_at=_dt(body.get("ends_at")),
                 has_bingo=False,
@@ -462,6 +477,51 @@ async def update_event(event_id: int):
             return _detail(s, ev, viewer_id=user_id)
 
     payload = await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify(payload))
+
+
+# --------------------------------------------------------------------------- #
+# Explicit lifecycle (Task 21): draft -> active -> past, one-way.
+# The scheduler sweep in workers/event_consumer.py reuses the exact same
+# services.event_lifecycle functions — one code path.
+# --------------------------------------------------------------------------- #
+def _run_lifecycle_transition(event_id: int, user_id: int, action: str) -> dict:
+    # Lazy service import (pytest conftest stubs `services`).
+    from services import event_lifecycle
+
+    with db_session() as s:
+        ev = _load_event_or_404(s, event_id)
+        _assert_event_admin(s, user_id, ev.group_id)
+        user = load_user(s, user_id)
+        try:
+            if action == "activate":
+                event_lifecycle.activate_event(s, ev, actor_user_id=user_id, user=user)
+            else:
+                event_lifecycle.end_event(s, ev, actor_user_id=user_id)
+        except event_lifecycle.LifecycleError as exc:
+            abort_problem(exc.status, exc.title, exc.detail)
+        s.commit()
+        return _detail(s, ev, viewer_id=user_id)
+
+
+@events_bp.post("/events/<int:event_id>/activate")
+async def activate_event(event_id: int):
+    """Explicit activation (event admin). Validates readiness (≥1 team, a
+    complete bingo board when has_bingo, a future end date) and the tier's
+    ``events_max_active`` concurrency limit (409 at the limit; global events
+    and superadmins bypass). Effects live in services.event_lifecycle."""
+    user_id = current_user_id()
+    payload = await asyncio.to_thread(_run_lifecycle_transition, event_id, user_id, "activate")
+    _bump(event_id)
+    return private_no_store(jsonify(payload))
+
+
+@events_bp.post("/events/<int:event_id>/end")
+async def end_event(event_id: int):
+    """Explicit end (event admin): active -> past, final standings announced."""
+    user_id = current_user_id()
+    payload = await asyncio.to_thread(_run_lifecycle_transition, event_id, user_id, "end")
     _bump(event_id)
     return private_no_store(jsonify(payload))
 

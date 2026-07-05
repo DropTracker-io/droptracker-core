@@ -14,6 +14,11 @@ bump on the ``rt:event-admin`` pubsub channel (event/task/roster mutations).
 The worker also maintains the ``events:active`` gate set so the producer hooks
 stay zero-overhead when no events run. Replays are safe: the completions
 ledger is idempotent on (task, team, submission_guid).
+
+Task 21 adds a ~60s lifecycle sweep (``services.event_lifecycle`` — the exact
+functions the activate/end routes use): scheduled drafts whose ``starts_at``
+passed are activated (validation failures notify the event's admin channel
+once, then skip), and active events whose ``ends_at`` passed are ended.
 """
 import asyncio
 import json
@@ -38,6 +43,7 @@ log = logging.getLogger("event_consumer")
 
 BRPOP_TIMEOUT = 5
 STATE_REFRESH_SECONDS = 30
+LIFECYCLE_SWEEP_SECONDS = 60
 _REDIS_PW = os.getenv("DB_PASS")
 
 
@@ -58,6 +64,20 @@ def _refresh_state(r):
         reset_db_connections()
     event_engine.set_active_events(r, list(state.events.keys()))
     return state
+
+
+def _run_lifecycle_sweep(r) -> dict:
+    """One scheduler tick (Task 21): activate due drafts / end due actives
+    through the same service functions the web_api routes use."""
+    from api.core import get_db_session, reset_db_connections
+    from services import event_lifecycle
+
+    db_session = get_db_session()
+    try:
+        return event_lifecycle.run_lifecycle_sweep(db_session, r)
+    finally:
+        db_session.close()
+        reset_db_connections()
 
 
 def _process_entry(r, state, entry_bytes) -> list:
@@ -101,6 +121,7 @@ async def run_consumer() -> None:
 
     state = None
     last_refresh = 0.0
+    last_sweep = 0.0
 
     while True:
         try:
@@ -116,6 +137,16 @@ async def run_consumer() -> None:
                             bumped = True
                 except Exception:
                     pass
+
+            # Lifecycle sweep (Task 21): scheduled activations / ends.
+            if (time.time() - last_sweep) >= LIFECYCLE_SWEEP_SECONDS:
+                summary = await asyncio.to_thread(_run_lifecycle_sweep, r)
+                last_sweep = time.time()
+                if summary.get("activated") or summary.get("ended") or summary.get("failed"):
+                    log.info("Lifecycle sweep: activated=%s ended=%s failed=%s",
+                             summary.get("activated"), summary.get("ended"),
+                             summary.get("failed"))
+                    bumped = True  # transitions changed the active set
 
             if state is None or bumped or (time.time() - last_refresh) >= STATE_REFRESH_SECONDS:
                 state = await asyncio.to_thread(_refresh_state, r)

@@ -22,6 +22,7 @@ _spec.loader.exec_module(en)
 ALL_TYPES = (
     "event_started", "event_ended", "event_completion", "event_cell",
     "event_line", "event_blackout", "event_lead_change", "event_pending",
+    "event_activation_failed",
 )
 
 
@@ -38,6 +39,7 @@ class TestKindMapping:
             "event_blackout": "completions",
             "event_lead_change": "leaderboard",
             "event_pending": "admin",
+            "event_activation_failed": "admin",
         }
 
     def test_all_families_covered(self):
@@ -63,11 +65,13 @@ class TestResolveEventChannel:
         assert en.resolve_event_channel(self.FULL, "event_blackout") == "200"
         assert en.resolve_event_channel(self.FULL, "event_lead_change") == "300"
         assert en.resolve_event_channel(self.FULL, "event_pending") == "400"
+        assert en.resolve_event_channel(self.FULL, "event_activation_failed") == "400"
 
     def test_fallback_to_announcements(self):
         only_ann = {"announcements": "100"}
         for t in ("event_completion", "event_cell", "event_line",
-                  "event_blackout", "event_lead_change", "event_pending"):
+                  "event_blackout", "event_lead_change", "event_pending",
+                  "event_activation_failed"):
             assert en.resolve_event_channel(only_ann, t) == "100"
 
     def test_announcements_has_no_fallback(self):
@@ -105,6 +109,17 @@ class TestEmbedSpecs:
             assert spec["url"] == "https://www.droptracker.io/events/42", t
             assert spec["author_name"] == "Summer Bingo", t
             assert isinstance(spec["fields"], list), t
+
+    def test_activation_failed_card(self):
+        spec = _spec("event_activation_failed", {
+            "reason": "The event needs at least one team.",
+            "starts_at": 1751700000,
+        })
+        assert "could not start" in spec["title"]
+        assert "The event needs at least one team." in spec["description"]
+        names = [f["name"] for f in spec["fields"]]
+        assert "Scheduled start" in names
+        assert "Fix it" in names
 
     def test_started_card(self):
         spec = _spec("event_started", {
