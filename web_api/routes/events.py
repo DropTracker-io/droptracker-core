@@ -38,6 +38,7 @@ from db import (
     Event,
     EventBingoCell,
     EventBingoCompletion,
+    EventProgress,
     EventTask,
     EventTeam,
     EventTeamMember,
@@ -190,6 +191,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
         )
         cell_ids = [c.id for c in cells]
         completions_by_cell: dict[int, list[str]] = {}
+        detail_by_cell: dict[int, list[dict]] = {}
         if cell_ids:
             comps = (
                 s.query(EventBingoCompletion)
@@ -204,6 +206,15 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
                     .filter(Player.player_id.in_(pids)).all()
                 ):
                     player_names[pid] = name
+            # (task, team) -> completed_at from the progress rollup, so the
+            # board popover can say *when* a cell was completed.
+            completed_at = {
+                (p.task_id, p.team_id): _ts(p.completed_at)
+                for p in s.query(EventProgress)
+                .filter(EventProgress.event_id == ev.id, EventProgress.completed.is_(True))
+                .all()
+            }
+            task_by_cell = {c.id: c.task_id for c in cells}
             for comp in comps:
                 label = None
                 if comp.team_id:
@@ -212,6 +223,14 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
                     label = player_names.get(comp.player_id)
                 if label:
                     completions_by_cell.setdefault(comp.cell_id, []).append(label)
+                detail_by_cell.setdefault(comp.cell_id, []).append({
+                    "team_id": comp.team_id,
+                    "team_name": team_names.get(comp.team_id),
+                    "player_id": comp.player_id,
+                    "player_name": player_names.get(comp.player_id),
+                    "completed_at": completed_at.get(
+                        (task_by_cell.get(comp.cell_id), comp.team_id)),
+                })
         size = int(round(math.sqrt(len(cells)))) if cells else 0
         bingo = {
             "size": size,
@@ -221,6 +240,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
                     "label": c.label,
                     "task_id": c.task_id,
                     "completed_by": completions_by_cell.get(c.id, []),
+                    "completions": detail_by_cell.get(c.id, []),
                 }
                 for c in cells
             ],
@@ -427,6 +447,17 @@ async def update_event(event_id: int):
             if "requires_confirmation" in body:
                 # Event-level force: all completions queue for review (PRD D3).
                 ev.requires_confirmation = bool(body.get("requires_confirmation"))
+            # Bingo bonus config (Task 20, PRD D7): 0 disables a bonus. The
+            # board itself is replaced via PUT /events/{id}/bingo.
+            for key in ("bonus_line_points", "bonus_blackout_points"):
+                if key in body:
+                    val = body.get(key)
+                    if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+                        abort_problem(
+                            422, "Invalid bonus points",
+                            f"'{key}' must be a non-negative integer.",
+                        )
+                    setattr(ev, key, val)
             s.commit()
             return _detail(s, ev, viewer_id=user_id)
 

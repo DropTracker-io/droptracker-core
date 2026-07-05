@@ -36,8 +36,12 @@ v1 evaluation semantics (task doc table):
 - ``ehp_target``/``ehb_target``/``custom`` — not auto-evaluated (Task 18
   manual/confirmation only).
 
-Bingo line/blackout bonuses are Task 20: cells are completed here, bonuses are
-left to :func:`evaluate_bingo_bonuses` (stub).
+Bingo (Task 20): cells are completed by the apply layer; after each newly
+completed cell :func:`evaluate_bingo_bonuses` awards line/blackout bonuses.
+The awarded set is derived idempotently from ``source_type='bonus'`` ledger
+rows whose deterministic ``note`` names the line (``line:r3`` / ``line:c1`` /
+``line:d0`` / ``blackout``) — no separate state. :func:`revoke_ledger_row`
+unwinds cell completions and stale bonus rows when a completion is revoked.
 """
 from __future__ import annotations
 
@@ -114,6 +118,31 @@ def publish_event_admin_bump(event_id: Optional[int] = None) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 # 2. Pure matcher (no I/O)
 # ══════════════════════════════════════════════════════════════════════════════
+
+BLACKOUT_NOTE = "blackout"
+
+
+def line_defs(size: int) -> dict:
+    """{line_key: frozenset(cell idxs)} for every row/column/diagonal of a
+    ``size`` × ``size`` board. Keys: ``r{i}`` (row i), ``c{i}`` (column i),
+    ``d0`` (main diagonal), ``d1`` (anti-diagonal). Pure; no I/O."""
+    n = int(size)
+    lines = {}
+    for r in range(n):
+        lines[f"r{r}"] = frozenset(r * n + c for c in range(n))
+    for c in range(n):
+        lines[f"c{c}"] = frozenset(r * n + c for r in range(n))
+    lines["d0"] = frozenset(i * n + i for i in range(n))
+    lines["d1"] = frozenset(i * n + (n - 1 - i) for i in range(n))
+    return lines
+
+
+def completed_lines(size: int, completed_idxs) -> list:
+    """Sorted line keys (see :func:`line_defs`) fully covered by
+    ``completed_idxs``. Pure; no I/O."""
+    done = set(completed_idxs)
+    return sorted(key for key, cells in line_defs(size).items() if cells <= done)
+
 
 def _norm(value) -> str:
     """Normalize a name for case-insensitive comparison."""
@@ -296,6 +325,9 @@ def _event_to_dict(event) -> dict:
         "group_id": event.group_id,
         "requires_confirmation": bool(event.requires_confirmation),
         "has_bingo": bool(event.has_bingo),
+        "board_size": int(event.board_size or 5),
+        "bonus_line_points": int(event.bonus_line_points or 0),
+        "bonus_blackout_points": int(event.bonus_blackout_points or 0),
         "window_start": max(starts) if starts else None,
         "window_end": min(ends) if ends else None,
     }
@@ -335,7 +367,8 @@ def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
     for cell in session.query(EventBingoCell).filter(
             EventBingoCell.event_id.in_(event_ids), EventBingoCell.task_id.isnot(None)).all():
         state.cells_by_task.setdefault(cell.task_id, []).append(
-            {"id": cell.id, "idx": cell.idx, "event_id": cell.event_id})
+            {"id": cell.id, "idx": cell.idx, "event_id": cell.event_id,
+             "label": cell.label})
 
     teams = session.query(EventTeam).filter(EventTeam.event_id.in_(event_ids)).all()
     state.team_names = {t.id: t.name for t in teams}
@@ -440,32 +473,237 @@ def _enqueue_notification(session, notification_type: str, event: dict,
     payload = dict(data)
     payload["event_id"] = event["id"]
     payload.setdefault("event_name", event.get("name"))
-    session.add(NotificationQueue(
-        notification_type=notification_type,
-        player_id=player_id,
-        data=json.dumps(payload, default=str),
-        group_id=event.get("group_id"),
-        status="pending",
-    ))
+    try:
+        # notification_queue has a unique (type, player, group, data) index;
+        # a re-completion after a revoke can build a byte-identical payload —
+        # treat that as an already-queued notification, not an error.
+        with session.begin_nested():
+            session.add(NotificationQueue(
+                notification_type=notification_type,
+                player_id=player_id,
+                data=json.dumps(payload, default=str),
+                group_id=event.get("group_id"),
+                status="pending",
+            ))
+            session.flush()
+    except IntegrityError:
+        pass
 
 
-def evaluate_bingo_bonuses(session, event: dict, team_id: int) -> None:
-    """Task 20 stub — line/blackout bonus evaluation.
+APPLIED_BONUS_STATUSES = ("auto", "confirmed", "manual")
 
-    Called after each newly completed bingo cell. v1 completes cells only;
-    row/column/diagonal/blackout bonuses (``bonus_line_points`` /
-    ``bonus_blackout_points``) are defined and implemented by Task 20.
+
+def _team_completed_idxs(session, cells, team_id: int) -> set:
+    """Board idxs the team has completed, given the event's cell rows."""
+    from db.models import EventBingoCompletion
+
+    if not cells:
+        return set()
+    done_cell_ids = {
+        row.cell_id
+        for row in session.query(EventBingoCompletion).filter(
+            EventBingoCompletion.cell_id.in_([c.id for c in cells]),
+            EventBingoCompletion.team_id == team_id).all()
+    }
+    return {c.idx for c in cells if c.id in done_cell_ids}
+
+
+def _board_size_for(event: dict, cells) -> int:
+    """Effective board size; 0 when the cell count isn't a matching square."""
+    size = int(event.get("board_size") or 0)
+    if size * size != len(cells):
+        size = int(round(len(cells) ** 0.5)) if cells else 0
+        if size * size != len(cells):
+            return 0
+    return size
+
+
+def evaluate_bingo_bonuses(session, event: dict, team_id: int,
+                           trigger_task_id: Optional[int] = None,
+                           player_id: Optional[int] = None,
+                           player_name: Optional[str] = None) -> list:
+    """Award line/blackout bonuses newly earned by ``team_id`` (Task 20).
+
+    Called after each newly completed bingo cell (and after free-cell grants).
+    Idempotent with no separate state: the already-awarded set is derived from
+    applied ``source_type='bonus'`` ledger rows whose deterministic ``note``
+    names the line (``line:r3`` / ``line:c1`` / ``line:d0`` / ``blackout``).
+    Each bonus row stores the points it granted in ``quantity`` so an unwind
+    subtracts exactly what was added even if the event config changed later.
+    Publishes ``kind: line|blackout`` SSE frames and enqueues ``event_line`` /
+    ``event_blackout`` notifications. Returns [{note, points}, ...].
     """
-    return None
+    if not event.get("has_bingo") or team_id is None:
+        return []
+    line_pts = int(event.get("bonus_line_points") or 0)
+    blackout_pts = int(event.get("bonus_blackout_points") or 0)
+    if line_pts <= 0 and blackout_pts <= 0:
+        return []
+
+    from db.models import EventBingoCell, EventCompletion, EventTeam
+
+    cells = session.query(EventBingoCell).filter(
+        EventBingoCell.event_id == event["id"]).all()
+    size = _board_size_for(event, cells)
+    if not size:
+        return []
+    done_idxs = _team_completed_idxs(session, cells, team_id)
+
+    earned = set()
+    if line_pts > 0:
+        earned.update(f"line:{key}" for key in completed_lines(size, done_idxs))
+    if blackout_pts > 0 and len(done_idxs) == len(cells):
+        earned.add(BLACKOUT_NOTE)
+    if not earned:
+        return []
+
+    awarded = {
+        row.note
+        for row in session.query(EventCompletion).filter(
+            EventCompletion.event_id == event["id"],
+            EventCompletion.team_id == team_id,
+            EventCompletion.source_type == "bonus",
+            EventCompletion.status.in_(APPLIED_BONUS_STATUSES)).all()
+        if row.note
+    }
+    new_notes = sorted(earned - awarded)
+    if not new_notes:
+        return []
+
+    # Ledger rows need a task_id (NOT NULL): the triggering task, else any
+    # task bound to a board cell, else any task on the event. An all-free
+    # board on a task-less event has nowhere to hang a ledger row — skip.
+    ledger_task_id = trigger_task_id
+    if ledger_task_id is None:
+        ledger_task_id = next((c.task_id for c in cells if c.task_id is not None), None)
+    if ledger_task_id is None:
+        from db.models import EventTask
+        row = session.query(EventTask.id).filter(
+            EventTask.event_id == event["id"]).first()
+        ledger_task_id = row[0] if row else None
+    if ledger_task_id is None:
+        return []
+
+    team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+    team_name = team.name if team is not None else None
+    results = []
+    for note in new_notes:
+        points = blackout_pts if note == BLACKOUT_NOTE else line_pts
+        session.add(EventCompletion(
+            event_id=event["id"], task_id=ledger_task_id, team_id=team_id,
+            player_id=player_id, status="auto", quantity=points,
+            source_type="bonus", note=note))
+        if team is not None:
+            team.score = int(team.score or 0) + points
+        kind = "blackout" if note == BLACKOUT_NOTE else "line"
+        frame = {"kind": kind, "event_id": event["id"], "team_id": team_id,
+                 "bonus_points": points, "note": note}
+        if team is not None:
+            frame["team_score"] = int(team.score or 0)
+        if player_name:
+            frame["player_name"] = player_name
+        _publish(event["id"], frame)
+        _enqueue_notification(
+            session,
+            "event_blackout" if note == BLACKOUT_NOTE else "event_line",
+            event, player_id, {
+                "team_id": team_id,
+                "team_name": team_name,
+                "bonus_points": points,
+                "line": note,
+                "team_score": int(team.score or 0) if team is not None else None,
+            })
+        results.append({"note": note, "points": points})
+    session.flush()
+    return results
+
+
+def grant_free_cells(session, event) -> int:
+    """Complete every free cell (``task_id`` NULL) for every team of ``event``.
+
+    Free cells count as completed for all teams "from activation": Task 21's
+    explicit activation action calls this; until then the board PUT calls it
+    when the board is (re)saved while the event is already live (today's
+    implicit lifecycle — create_event activates immediately). Idempotent per
+    (cell, team); evaluates bonuses for each touched team. ``event`` may be
+    the ORM row or an engine event dict. Returns the number of completions
+    inserted. Caller owns the commit.
+    """
+    from db.models import EventBingoCell, EventBingoCompletion, EventTeam
+
+    ev = event if isinstance(event, dict) else _event_to_dict(event)
+    if not ev.get("has_bingo"):
+        return 0
+    free_cells = session.query(EventBingoCell).filter(
+        EventBingoCell.event_id == ev["id"],
+        EventBingoCell.task_id.is_(None)).all()
+    if not free_cells:
+        return 0
+    teams = session.query(EventTeam).filter(EventTeam.event_id == ev["id"]).all()
+    if not teams:
+        return 0
+    existing = {
+        (row.cell_id, row.team_id)
+        for row in session.query(EventBingoCompletion).filter(
+            EventBingoCompletion.cell_id.in_([c.id for c in free_cells])).all()
+    }
+    inserted = 0
+    touched_teams = set()
+    for team in teams:
+        for cell in free_cells:
+            if (cell.id, team.id) in existing:
+                continue
+            session.add(EventBingoCompletion(
+                cell_id=cell.id, team_id=team.id, player_id=None))
+            inserted += 1
+            touched_teams.add(team.id)
+            _publish(ev["id"], {
+                "kind": "cell", "event_id": ev["id"], "task_id": None,
+                "team_id": team.id, "cell_idx": cell.idx,
+                "cell_label": cell.label, "free": True,
+            })
+    if inserted:
+        session.flush()
+        for team_id in sorted(touched_teams):
+            evaluate_bingo_bonuses(session, ev, team_id)
+    return inserted
+
+
+def reconcile_bingo_bonuses(session, event) -> dict:
+    """Re-derive every team's bonus set from the current board state.
+
+    Used after a *live* board replace (implicit lifecycle lets a never-
+    scheduled active event edit its board): unwinds bonuses for lines the new
+    board no longer holds and awards ones it already satisfies (e.g. all-free
+    lines). Idempotent. ``event`` is the ORM row or an engine event dict.
+    Returns {team_id: {"revoked": [...], "awarded": [...]}} for teams that
+    changed.
+    """
+    from db.models import EventTeam
+
+    ev = event if isinstance(event, dict) else _event_to_dict(event)
+    summary: dict = {}
+    if not ev.get("has_bingo"):
+        return summary
+    for team in session.query(EventTeam).filter(EventTeam.event_id == ev["id"]).all():
+        revoked = _unwind_bonuses(session, ev, team.id)
+        awarded = [a["note"] for a in evaluate_bingo_bonuses(session, ev, team.id)]
+        if revoked or awarded:
+            summary[team.id] = {"revoked": revoked, "awarded": awarded}
+    if summary:
+        session.flush()
+    return summary
 
 
 def _complete_bingo_cells(session, event: dict, task: dict, team_id: int,
-                          player_id: int, cells: list) -> list:
-    """Insert web_event_bingo_completions once per (cell, team). Returns the
-    cell dicts that were newly completed."""
+                          player_id: int, cells: list,
+                          player_name: Optional[str] = None) -> list:
+    """Insert web_event_bingo_completions once per (cell, team), enqueue
+    ``event_cell`` notifications and evaluate line/blackout bonuses. Returns
+    the cell dicts that were newly completed."""
     if not cells or not event.get("has_bingo"):
         return []
-    from db.models import EventBingoCompletion
+    from db.models import EventBingoCompletion, EventTeam
 
     newly = []
     cell_ids = [c["id"] for c in cells]
@@ -482,7 +720,23 @@ def _complete_bingo_cells(session, event: dict, task: dict, team_id: int,
             cell_id=cell["id"], team_id=team_id, player_id=player_id))
         newly.append(cell)
     if newly:
-        evaluate_bingo_bonuses(session, event, team_id)  # Task 20 stub
+        team_name = None
+        if team_id is not None:
+            team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+            team_name = team.name if team is not None else None
+        for cell in newly:
+            _enqueue_notification(session, "event_cell", event, player_id, {
+                "cell_label": cell.get("label"),
+                "cell_idx": cell["idx"],
+                "team_id": team_id,
+                "team_name": team_name,
+                "task_id": task["id"],
+                "task_label": task.get("label"),
+                "player_name": player_name,
+            })
+        evaluate_bingo_bonuses(session, event, team_id,
+                               trigger_task_id=task["id"],
+                               player_id=player_id, player_name=player_name)
     return newly
 
 
@@ -569,7 +823,8 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         result["team_score"] = team_score
 
     new_cells = _complete_bingo_cells(
-        session, event, task, team_id, player_id, cells or [])
+        session, event, task, team_id, player_id, cells or [],
+        player_name=player_name)
     session.flush()
 
     frame = dict(result)
@@ -579,8 +834,9 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
     _publish(event["id"], frame)
     for cell in new_cells:
         _publish(event["id"], {
-            "kind": "cell", "task_id": task["id"], "team_id": team_id,
-            "cell_idx": cell["idx"],
+            "kind": "cell", "event_id": event["id"], "task_id": task["id"],
+            "team_id": team_id, "cell_idx": cell["idx"],
+            "cell_label": cell.get("label"),
         })
 
     notification = {
@@ -735,13 +991,53 @@ def apply_completion(session, completion) -> Optional[dict]:
     if event is None or task is None:
         return None
     cells = [
-        {"id": c.id, "idx": c.idx, "event_id": c.event_id}
+        {"id": c.id, "idx": c.idx, "event_id": c.event_id, "label": c.label}
         for c in session.query(EventBingoCell).filter(
             EventBingoCell.task_id == task.id).all()
     ]
     return apply_ledger_row(
         session, getattr(redis_client, "client", None),
         _event_to_dict(event), _task_to_dict(task), completion, cells=cells)
+
+
+def _unwind_bonuses(session, event: dict, team_id: int) -> list:
+    """Revoke applied bonus ledger rows whose line/blackout no longer holds
+    (Task 20 revoke cascade). The still-valid set is derived from the team's
+    current cell completions; each stale row is flipped to ``revoked`` and the
+    points it stored in ``quantity`` are subtracted from the team score.
+    Returns the notes revoked (e.g. ``["line:r0", "blackout"]``)."""
+    from db.models import EventBingoCell, EventCompletion, EventTeam
+
+    bonus_rows = (session.query(EventCompletion)
+                  .filter(EventCompletion.event_id == event["id"],
+                          EventCompletion.team_id == team_id,
+                          EventCompletion.source_type == "bonus",
+                          EventCompletion.status.in_(APPLIED_BONUS_STATUSES))
+                  .all())
+    if not bonus_rows:
+        return []
+    cells = session.query(EventBingoCell).filter(
+        EventBingoCell.event_id == event["id"]).all()
+    size = _board_size_for(event, cells)
+    still_valid = set()
+    if size:
+        done_idxs = _team_completed_idxs(session, cells, team_id)
+        still_valid = {f"line:{key}" for key in completed_lines(size, done_idxs)}
+        if cells and len(done_idxs) == len(cells):
+            still_valid.add(BLACKOUT_NOTE)
+
+    revoked, delta = [], 0
+    for row in bonus_rows:
+        if row.note in still_valid:
+            continue
+        row.status = "revoked"
+        delta += max(int(row.quantity or 0), 0)
+        revoked.append(row.note)
+    if delta:
+        team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+        if team is not None:
+            team.score = int(team.score or 0) - delta
+    return revoked
 
 
 def revoke_ledger_row(session, completion) -> Optional[dict]:
@@ -751,7 +1047,8 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
     owns the commit. This re-folds the progress rollup from surviving ledger
     rows (``auto``/``confirmed``/``manual``), adjusts the team score by the
     delta of ``completed × points``, removes the team's bingo-cell completions
-    for the task's cells when the task is no longer complete, and publishes an
+    for the task's cells when the task is no longer complete, revokes bonus
+    ledger rows for lines the team no longer holds (Task 20), and publishes an
     SSE correction (``kind: "revoke"``). Returns a summary dict for the
     caller's audit row (None when the event/task rows are gone).
     """
@@ -766,15 +1063,29 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
     task = _task_to_dict(task_row)
     team_id = completion.team_id
 
+    if (completion.source_type or "") == "bonus":
+        # A directly-revoked bonus row has no progress/cell state of its own —
+        # just take back exactly the points it granted (stored in quantity).
+        team_score = None
+        if team_id is not None:
+            team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+            if team is not None:
+                team.score = int(team.score or 0) - max(int(completion.quantity or 0), 0)
+                team_score = team.score
+        session.flush()
+        frame = {"kind": "revoke", "event_id": event["id"], "task_id": task["id"],
+                 "team_id": team_id, "bonus": completion.note}
+        if team_score is not None:
+            frame["team_score"] = team_score
+        _publish(event["id"], frame)
+        return {"progress": None, "completed": None, "team_score": team_score,
+                "revoked_bonuses": [completion.note]}
+
     survivors = (session.query(EventCompletion)
                  .filter(EventCompletion.task_id == task["id"],
                          EventCompletion.team_id == team_id,
                          EventCompletion.status.in_(("auto", "confirmed", "manual")))
                  .all())
-    # TODO(Task 20): line/blackout bonus ledger rows (source_type='bonus')
-    # carry no reference to the cells/completions that produced them yet.
-    # Once bonuses exist, a revoke that un-completes a cell must cascade to
-    # the affected bonus rows here (revoke them + subtract their points).
     new_progress = sum(
         max(int(r.quantity or 1), 1) for r in survivors
         if (r.source_type or "") != "bonus"
@@ -817,6 +1128,16 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
                      EventBingoCompletion.team_id == team_id)
              .delete(synchronize_session=False))
 
+    # Un-completed cells may break lines/blackout: revoke the team's stale
+    # bonus rows and take back their points (Task 20).
+    revoked_bonuses = []
+    if event.get("has_bingo") and team_id is not None:
+        revoked_bonuses = _unwind_bonuses(session, event, team_id)
+        if revoked_bonuses:
+            team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+            if team is not None:
+                team_score = int(team.score or 0)
+
     session.flush()
     frame = {
         "kind": "revoke", "event_id": event["id"], "task_id": task["id"],
@@ -825,6 +1146,8 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
     }
     if team_score is not None:
         frame["team_score"] = team_score
+    if revoked_bonuses:
+        frame["revoked_bonuses"] = revoked_bonuses
     _publish(event["id"], frame)
     return {"progress": new_progress, "completed": now_completed,
-            "team_score": team_score}
+            "team_score": team_score, "revoked_bonuses": revoked_bonuses}

@@ -55,9 +55,10 @@ def publish_to_scopes(event_type: str, scopes: Iterable[str], data: dict) -> Non
 def publish_event_update(event_id: int, data: dict) -> None:
     """Publish an event-engine update (Task 17) to ``rt:event:{id}``.
 
-    ``data.kind`` ∈ progress|completion|cell|pending, plus task_id/team_id and
-    optional cell_idx/points/team_score/player_name — display-ready for the
-    live event page. Best-effort; never raises.
+    ``data.kind`` ∈ progress|completion|cell|line|blackout|pending|revoke,
+    plus task_id/team_id and optional cell_idx/cell_label/points/bonus_points/
+    team_score/player_name — display-ready for the live event page.
+    Best-effort; never raises.
     """
     publish_event("event_update", f"event:{int(event_id)}", data)
 
