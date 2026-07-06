@@ -32,6 +32,7 @@ EVENT_TASK_TYPES = (
     "ehb_target",
     "pb_target",
     "skill_target",
+    "loot_value",
     # Manual-confirmation-only tasks (no automated evaluation).
     "custom",
 )

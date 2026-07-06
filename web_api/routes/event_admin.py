@@ -414,20 +414,23 @@ async def update_task(event_id: int, task_id: int):
                 if not (1 <= len(label) <= 255):
                     abort_problem(422, "Invalid label", "Task label must be 1–255 characters.")
                 task.label = label
-            if "target" in body:
-                target = body.get("target")
+            if "target" in body or "target_value" in body:
+                # Re-validate the merged goal per task type so an edit can't
+                # leave a task the engine will never match.
+                from web_api.routes.event_task_validation import validate_task_payload
+
+                target = body.get("target", task.target)
                 if target is not None and not isinstance(target, str):
                     abort_problem(422, "Invalid target", "'target' must be a string or null.")
-                task.target = (target or "").strip()[:120] or None
-            if "target_value" in body:
-                tv = body.get("target_value")
-                if tv is not None and (not isinstance(tv, int) or isinstance(tv, bool) or tv < 0):
-                    abort_problem(
-                        422,
-                        "Invalid target_value",
-                        "'target_value' must be a non-negative integer or null.",
-                    )
-                task.target_value = tv
+                normalized = validate_task_payload(s, {
+                    "type": task.type,
+                    "target": target,
+                    "target_value": body.get("target_value", task.target_value),
+                    "config": task.config,
+                })
+                task.target = normalized["target"]
+                task.target_value = normalized["target_value"]
+                task.config = normalized["config"]
             if "points" in body:
                 points = body.get("points")
                 if not isinstance(points, int) or isinstance(points, bool) or points < 0:
@@ -581,6 +584,8 @@ async def put_bingo_board(event_id: int):
     size, cells_in = _validate_board_body(body)
 
     def _apply():
+        from web_api.routes.event_task_validation import validate_task_payload
+
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev.group_id)
@@ -671,21 +676,16 @@ async def put_bingo_board(event_id: int):
                     points = nt.get("points", 0)
                     if not isinstance(points, int) or isinstance(points, bool) or points < 0:
                         abort_problem(422, "Invalid points", "new_task.points must be a non-negative integer.")
-                    tv = nt.get("target_value")
-                    if tv is not None and (not isinstance(tv, int) or isinstance(tv, bool) or tv < 0):
-                        abort_problem(
-                            422, "Invalid target_value",
-                            "new_task.target_value must be a non-negative integer or null.",
-                        )
+                    normalized = validate_task_payload(s, nt)
                     task = EventTask(
                         event_id=event_id,
                         type=nt["type"],
                         label=nt["label"].strip()[:255],
-                        target=((nt.get("target") or "").strip()[:120] or None),
-                        target_value=tv,
+                        target=normalized["target"],
+                        target_value=normalized["target_value"],
                         points=points,
                         requires_confirmation=bool(nt.get("requires_confirmation")),
-                        config=_merged_auto_config(nt.get("config")),
+                        config=_merged_auto_config(normalized["config"]),
                     )
                     s.add(task)
                     s.flush()

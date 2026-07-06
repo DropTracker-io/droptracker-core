@@ -16,6 +16,8 @@ global events where group_id is NULL):
   POST   /api/v1/events/{id}/end                               -> EventDetail  (Task 21)
   POST   /api/v1/events/{id}/tasks          { EventTaskInput } -> { id }
   DELETE /api/v1/events/{id}/tasks/{taskId}                    -> { ok }
+  GET    /api/v1/events/meta/items?q=       -> [{ id, name }]  (task-form autocomplete)
+  GET    /api/v1/events/meta/npcs?q=        -> [{ id, name }]
   POST   /api/v1/events/{id}/teams          { EventTeamInput } -> { id }
   POST   /api/v1/events/{id}/teams/{teamId}/members   { player_id } -> { ok }
   DELETE /api/v1/events/{id}/teams/{teamId}/members/{playerId}      -> { ok }
@@ -538,20 +540,21 @@ async def add_task(event_id: int):
         abort_problem(422, "Invalid label", "Task label is required.")
 
     def _apply():
+        from web_api.routes.event_task_validation import validate_task_payload
+
         with db_session() as s:
             ev = s.query(Event).filter(Event.id == event_id).first()
             if not ev:
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             _assert_event_admin(s, user_id, ev.group_id)
+            normalized = validate_task_payload(s, body)
             task = EventTask(
                 event_id=event_id,
                 type=ttype,
                 label=label,
-                target=(body.get("target") or None),
-                target_value=body.get("target_value"),
                 points=int(body.get("points") or 0),
                 requires_confirmation=bool(body.get("requires_confirmation")),
-                config=(body.get("config") or None),
+                **normalized,
             )
             s.add(task)
             s.commit()
@@ -560,6 +563,58 @@ async def add_task(event_id: int):
     task_id = await asyncio.to_thread(_apply)
     _bump(event_id)
     return jsonify({"id": task_id})
+
+
+@events_bp.get("/events/meta/items")
+async def search_items():
+    """Item-name autocomplete for the task form (session required)."""
+    current_user_id()
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return jsonify([])
+
+    def _search():
+        from db import ItemList
+
+        with db_session() as s:
+            # Stack/noted variants share a name — collapse to one row per name.
+            rows = (
+                s.query(func.min(ItemList.item_id), ItemList.item_name)
+                .filter(ItemList.item_name.ilike(f"%{q}%"), ItemList.noted.is_(False))
+                .group_by(ItemList.item_name)
+                .order_by(func.length(ItemList.item_name), ItemList.item_name)
+                .limit(15)
+                .all()
+            )
+            return [{"id": i, "name": n} for i, n in rows]
+
+    return jsonify(await asyncio.to_thread(_search))
+
+
+@events_bp.get("/events/meta/npcs")
+async def search_npcs():
+    """NPC-name autocomplete for the task form (session required)."""
+    current_user_id()
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return jsonify([])
+
+    def _search():
+        from db import NpcList
+
+        with db_session() as s:
+            # Multi-form bosses repeat a name (one row per form) — dedupe.
+            rows = (
+                s.query(func.min(NpcList.npc_id), NpcList.npc_name)
+                .filter(NpcList.npc_name.ilike(f"%{q}%"))
+                .group_by(NpcList.npc_name)
+                .order_by(func.length(NpcList.npc_name), NpcList.npc_name)
+                .limit(15)
+                .all()
+            )
+            return [{"id": i, "name": n} for i, n in rows]
+
+    return jsonify(await asyncio.to_thread(_search))
 
 
 @events_bp.delete("/events/<int:event_id>/tasks/<int:task_id>")

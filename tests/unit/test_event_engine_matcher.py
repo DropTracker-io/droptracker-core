@@ -165,6 +165,35 @@ class TestExperienceTargets:
         assert engine.match_task(t, _env("drop", {"skill": "Agility", "level": 99})) is None
 
 
+# ── loot_value ────────────────────────────────────────────────────────────────
+
+class TestLootValue:
+    def test_any_source_folds_total_value(self):
+        t = _task(type="loot_value", target_value=10_000_000)
+        m = engine.match_task(t, _env("drop", {"item_name": "Coins", "npc_name": "Zulrah",
+                                               "total_value": 250_000}))
+        assert m == {"mode": "count", "quantity": 250_000}
+
+    def test_target_npc_scopes_credit(self):
+        t = _task(type="loot_value", target="Zulrah", target_value=10_000_000)
+        env = {"item_name": "x", "npc_name": "Vorkath", "total_value": 100}
+        assert engine.match_task(t, _env("drop", env)) is None
+        env["npc_name"] = "zulrah"
+        assert engine.match_task(t, _env("drop", env)) == {"mode": "count", "quantity": 100}
+
+    def test_config_source_npcs_scope(self):
+        t = _task(type="loot_value", target_value=1_000,
+                  config={"source_npcs": ["Zulrah", "Vorkath"]})
+        assert engine.match_task(t, _env("drop", {"npc_name": "Vorkath", "total_value": 5})) \
+            == {"mode": "count", "quantity": 5}
+        assert engine.match_task(t, _env("drop", {"npc_name": "Kraken", "total_value": 5})) is None
+
+    def test_zero_value_and_wrong_kind_no_match(self):
+        t = _task(type="loot_value", target_value=1_000)
+        assert engine.match_task(t, _env("drop", {"npc_name": "Zulrah", "total_value": 0})) is None
+        assert engine.match_task(t, _env("clog", {"npc_name": "Zulrah", "total_value": 50})) is None
+
+
 # ── non-evaluated types ───────────────────────────────────────────────────────
 
 class TestManualOnlyTypes:

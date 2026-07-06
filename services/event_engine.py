@@ -61,7 +61,8 @@ ADMIN_BUMP_CHANNEL = "rt:event-admin"      # pubsub bump on event/task/roster mu
 _STATE_KEY_TTL = 60 * 60 * 24 * 60         # 60 days for xp-baseline / kc-dedupe keys
 
 # Task types the engine can evaluate automatically (v1).
-AUTO_TASK_TYPES = ("item_collection", "kc_target", "pb_target", "xp_target", "skill_target")
+AUTO_TASK_TYPES = ("item_collection", "kc_target", "pb_target", "xp_target", "skill_target",
+                   "loot_value")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -279,6 +280,25 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
         if _norm(data.get("skill")) != _norm(task.get("target")) or not task.get("target"):
             return None
         return {"mode": "xp", "quantity": 0}
+
+    if task_type == "loot_value":
+        # Accumulate GP from drops, optionally scoped to specific NPCs via
+        # ``target`` (single) and/or ``config.source_npcs`` (list).
+        if kind != "drop":
+            return None
+        try:
+            value = int(data.get("total_value") or 0)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0:
+            return None
+        config = task.get("config") or {}
+        sources = {_norm(n) for n in (config.get("source_npcs") or []) if _norm(n)}
+        if task.get("target"):
+            sources.add(_norm(task["target"]))
+        if sources and _norm(data.get("npc_name")) not in sources:
+            return None
+        return {"mode": "count", "quantity": value}
 
     if task_type == "skill_target":
         if kind != "experience":
