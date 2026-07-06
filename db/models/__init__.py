@@ -13,6 +13,8 @@ from .combat_achievement import CombatAchievementEntry
 from .personal_best import PersonalBestEntry
 from .player_pet import PlayerPet
 from .quest_completion import QuestCompletionEntry
+from .player_death import PlayerDeath
+from .diary_completion import DiaryCompletionEntry
 from .group_configuration import GroupConfiguration
 from .group_notification import GroupNotification
 from .notified_submission import NotifiedSubmission
@@ -99,6 +101,8 @@ __all__ = [
     "PersonalBestEntry",
     "PlayerPet",
     "QuestCompletionEntry",
+    "PlayerDeath",
+    "DiaryCompletionEntry",
     "GroupConfiguration",
     "GroupNotification",
     "NotifiedSubmission",

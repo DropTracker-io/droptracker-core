@@ -222,6 +222,50 @@ class NotificationService:
         embed.set_footer(global_footer)
         return embed
 
+    def _build_default_death_embed(self, data: dict, player_name: str, player_id: int, video_url: str = "") -> interactions.Embed:
+        """
+        Build a default death embed when no DB-backed template exists.
+        """
+        source = str(data.get("source") or "").strip()
+        location = str(data.get("location") or "").strip()
+        region_id = self._coerce_int(data.get("region_id"))
+
+        player_link = f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)"
+        embed = interactions.Embed(
+            title="Player Death",
+            description=f"{player_link} has died.",
+            color="#B23B3B",
+        )
+        if source:
+            embed.add_field(name="Killed By", value=source, inline=True)
+        if location:
+            embed.add_field(name="Location", value=location, inline=True)
+        elif region_id is not None:
+            embed.add_field(name="Region", value=f"`{region_id}`", inline=True)
+        if video_url:
+            embed.add_field(name="Video", value=f"[Watch clip]({video_url})", inline=False)
+        embed.set_footer(global_footer)
+        return embed
+
+    def _build_default_diary_embed(self, data: dict, player_name: str, player_id: int, video_url: str = "") -> interactions.Embed:
+        """
+        Build a default achievement diary embed when no DB-backed template exists.
+        """
+        diary_name = str(data.get("diary_name") or "Unknown area")
+        diary_tier = str(data.get("diary_tier") or "").strip()
+        diary_label = f"{diary_tier} {diary_name}".strip()
+
+        player_link = f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)"
+        embed = interactions.Embed(
+            title="Achievement Diary Completed",
+            description=f"{player_link} completed the **{diary_label}** diary.",
+            color="#5A8DEE",
+        )
+        if video_url:
+            embed.add_field(name="Video", value=f"[Watch clip]({video_url})", inline=False)
+        embed.set_footer(global_footer)
+        return embed
+
     def _maybe_get_video_url(self, db_session, data: dict) -> str:
         """
         Best-effort resolution of a public video URL for notifications.
@@ -695,6 +739,10 @@ class NotificationService:
                 await self.send_level_up_notification_with_session(notification, data, db_session)
             elif notification_type == 'quest':
                 await self.send_quest_notification_with_session(notification, data, db_session)
+            elif notification_type == 'death':
+                await self.send_death_notification_with_session(notification, data, db_session)
+            elif notification_type == 'diary':
+                await self.send_diary_notification_with_session(notification, data, db_session)
             elif notification_type == 'new_npc':
                 await self.send_new_npc_notification_with_session(notification, data, db_session)
             elif notification_type == 'new_item':
@@ -1024,6 +1072,226 @@ class NotificationService:
                 )
 
             content = f"{formatted_name} completed a quest!"
+
+            # Prefer attaching MP4 if available; otherwise attach screenshot if present.
+            video_attachment, video_local_path = (None, None)
+            if video_url:
+                video_attachment, video_local_path = await self._download_video_attachment(video_url, notification.id)
+
+            try:
+                if video_attachment:
+                    await channel.send(content, embed=embed, files=video_attachment)
+                elif image_url:
+                    try:
+                        local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
+                        if os.path.exists(local_path):
+                            attachment = interactions.File(local_path)
+                            await channel.send(content, embed=embed, files=attachment)
+                        else:
+                            await channel.send(content, embed=embed)
+                    except Exception:
+                        await channel.send(content, embed=embed)
+                else:
+                    await channel.send(content, embed=embed)
+            finally:
+                if video_local_path:
+                    try:
+                        os.remove(video_local_path)
+                    except Exception:
+                        pass
+
+            await self._cleanup_processed_local_video_after_send(db_session, data)
+            notification.status = 'sent'
+            notification.processed_at = datetime.now()
+            db_session.commit()
+
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = str(e)
+            db_session.commit()
+            raise
+
+    async def send_death_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
+        """Send a player death notification to Discord with session"""
+        notification.status = 'processing'
+        db_session.commit()
+        try:
+            group_id = notification.group_id
+            player_id = notification.player_id
+
+            # Channel config. Fallback to loot channel.
+            channel_id_config = db_session.query(GroupConfiguration).filter(
+                GroupConfiguration.group_id == group_id,
+                GroupConfiguration.config_key == 'channel_id_to_post_deaths'
+            ).first()
+            if not channel_id_config or not channel_id_config.config_value:
+                channel_id_config = db_session.query(GroupConfiguration).filter(
+                    GroupConfiguration.group_id == group_id,
+                    GroupConfiguration.config_key == 'channel_id_to_post_loot'
+                ).first()
+            if not channel_id_config or not channel_id_config.config_value:
+                notification.status = 'failed'
+                notification.error_message = f"No channel configured for group {group_id}"
+                db_session.commit()
+                return
+
+            channel = await self.bot.fetch_channel(channel_id=channel_id_config.config_value)
+            if channel is None:
+                notification.status = 'failed'
+                notification.error_message = f"Channel not found for group {group_id}"
+                db_session.commit()
+                return
+
+            # Embed template (optional; default embed is used when none exists)
+            upgrade_active = has_custom_embeds(group_id)
+            if upgrade_active:
+                embed_template = await self.db_ops.get_group_embed('death', group_id)
+            else:
+                embed_template = await self.db_ops.get_group_embed('death', 1)
+
+            player_name = data.get("player_name") or ""
+            source = data.get("source") or ""
+            location = data.get("location") or ""
+            image_url = data.get("image_url") or ""
+
+            video_url = self._maybe_get_video_url(db_session, data)
+
+            formatted_name = get_formatted_name(player_name, group_id, db_session)
+            if embed_template:
+                replacements = {
+                    "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
+                    "{source}": str(source),
+                    "{killer}": str(source),
+                    "{location}": str(location),
+                    "{region_id}": str(data.get("region_id") or ""),
+                    "{timestamp}": str(data.get("timestamp") or ""),
+                    "{video_url}": video_url or "",
+                    "{video_link}": f"[Video]({video_url})" if video_url else "",
+                    # Prefer video for display; keep screenshot in data["image_url"] for attachments
+                    "{image_url}": video_url or image_url or "",
+                }
+
+                embed = replace_placeholders(embed_template, replacements)
+                if group_id == 2:
+                    embed = await self.remove_group_field(embed)
+            else:
+                embed = self._build_default_death_embed(
+                    data=data,
+                    player_name=player_name,
+                    player_id=player_id,
+                    video_url=video_url,
+                )
+
+            content = f"{formatted_name} has died!"
+
+            # Prefer attaching MP4 if available; otherwise attach screenshot if present.
+            video_attachment, video_local_path = (None, None)
+            if video_url:
+                video_attachment, video_local_path = await self._download_video_attachment(video_url, notification.id)
+
+            try:
+                if video_attachment:
+                    await channel.send(content, embed=embed, files=video_attachment)
+                elif image_url:
+                    try:
+                        local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
+                        if os.path.exists(local_path):
+                            attachment = interactions.File(local_path)
+                            await channel.send(content, embed=embed, files=attachment)
+                        else:
+                            await channel.send(content, embed=embed)
+                    except Exception:
+                        await channel.send(content, embed=embed)
+                else:
+                    await channel.send(content, embed=embed)
+            finally:
+                if video_local_path:
+                    try:
+                        os.remove(video_local_path)
+                    except Exception:
+                        pass
+
+            await self._cleanup_processed_local_video_after_send(db_session, data)
+            notification.status = 'sent'
+            notification.processed_at = datetime.now()
+            db_session.commit()
+
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = str(e)
+            db_session.commit()
+            raise
+
+    async def send_diary_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
+        """Send an achievement diary completion notification to Discord with session"""
+        notification.status = 'processing'
+        db_session.commit()
+        try:
+            group_id = notification.group_id
+            player_id = notification.player_id
+
+            # Channel config. Fallback to loot channel.
+            channel_id_config = db_session.query(GroupConfiguration).filter(
+                GroupConfiguration.group_id == group_id,
+                GroupConfiguration.config_key == 'channel_id_to_post_diaries'
+            ).first()
+            if not channel_id_config or not channel_id_config.config_value:
+                channel_id_config = db_session.query(GroupConfiguration).filter(
+                    GroupConfiguration.group_id == group_id,
+                    GroupConfiguration.config_key == 'channel_id_to_post_loot'
+                ).first()
+            if not channel_id_config or not channel_id_config.config_value:
+                notification.status = 'failed'
+                notification.error_message = f"No channel configured for group {group_id}"
+                db_session.commit()
+                return
+
+            channel = await self.bot.fetch_channel(channel_id=channel_id_config.config_value)
+            if channel is None:
+                notification.status = 'failed'
+                notification.error_message = f"Channel not found for group {group_id}"
+                db_session.commit()
+                return
+
+            # Embed template (optional; default embed is used when none exists)
+            upgrade_active = has_custom_embeds(group_id)
+            if upgrade_active:
+                embed_template = await self.db_ops.get_group_embed('diary', group_id)
+            else:
+                embed_template = await self.db_ops.get_group_embed('diary', 1)
+
+            player_name = data.get("player_name") or ""
+            diary_name = data.get("diary_name") or ""
+            diary_tier = data.get("diary_tier") or ""
+            image_url = data.get("image_url") or ""
+
+            video_url = self._maybe_get_video_url(db_session, data)
+
+            formatted_name = get_formatted_name(player_name, group_id, db_session)
+            if embed_template:
+                replacements = {
+                    "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
+                    "{diary_name}": str(diary_name),
+                    "{diary_tier}": str(diary_tier),
+                    "{timestamp}": str(data.get("timestamp") or ""),
+                    "{video_url}": video_url or "",
+                    "{video_link}": f"[Video]({video_url})" if video_url else "",
+                    # Prefer video for display; keep screenshot in data["image_url"] for attachments
+                    "{image_url}": video_url or image_url or "",
+                }
+
+                embed = replace_placeholders(embed_template, replacements)
+                if group_id == 2:
+                    embed = await self.remove_group_field(embed)
+            else:
+                embed = self._build_default_diary_embed(
+                    data=data,
+                    player_name=player_name,
+                    player_id=player_id,
+                    video_url=video_url,
+                )
+
+            content = f"{formatted_name} completed an achievement diary!"
 
             # Prefer attaching MP4 if available; otherwise attach screenshot if present.
             video_attachment, video_local_path = (None, None)

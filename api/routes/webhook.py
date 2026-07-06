@@ -53,6 +53,10 @@ def _normalize_submission_type(raw_submission_type):
             return "experience"
         case "quest_completion":
             return "quest"
+        case "player_death":
+            return "death"
+        case "achievement_diary" | "diary_completion":
+            return "diary"
         case _:
             return normalized
 
@@ -72,6 +76,10 @@ async def _dispatch_seasonal_submission(submission_type, processed_data, db_sess
             return await submissions.pet_processor(processed_data, external_session=db_session, world_type="seasonal")
         case "quest" | "quest_completion":
             return await submissions.quest_processor(processed_data, external_session=db_session, world_type="seasonal")
+        case "death" | "player_death":
+            return await submissions.death_processor(processed_data, external_session=db_session, world_type="seasonal")
+        case "diary" | "achievement_diary" | "diary_completion":
+            return await submissions.diary_processor(processed_data, external_session=db_session, world_type="seasonal")
         case _:
             # experience and adventure_log not yet tracked for seasonal worlds
             return None
@@ -422,6 +430,16 @@ async def _process_webhook_request(req_start):
                                     g.submission_type = submission_type
                                     response = await submissions.quest_processor(processed_data, external_session=db_session)
                                     log_phase("quest_processed")
+                                case "death" | "player_death":
+                                    submission_type = "death"
+                                    g.submission_type = submission_type
+                                    response = await submissions.death_processor(processed_data, external_session=db_session)
+                                    log_phase("death_processed")
+                                case "diary" | "achievement_diary" | "diary_completion":
+                                    submission_type = "diary"
+                                    g.submission_type = submission_type
+                                    response = await submissions.diary_processor(processed_data, external_session=db_session)
+                                    log_phase("diary_processed")
                                 case "pet":
                                     g.submission_type = "pet"
                                     response = await submissions.pet_processor(processed_data, external_session=db_session)

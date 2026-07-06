@@ -24,6 +24,8 @@ from db import (
     FeatureActivation,
     NotifiedSubmission,
     QuestCompletionEntry,
+    PlayerDeath,
+    DiaryCompletionEntry,
     PlayerPet,
     session,
     NpcList,
@@ -621,7 +623,7 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
     return player, authed, user_exists
 
 
-unique_id_cache = {"clog": [], "drop": [], "pb": [], "ca": [], "pet": [], "quest": []}
+unique_id_cache = {"clog": [], "drop": [], "pb": [], "ca": [], "pet": [], "quest": [], "death": [], "diary": []}
 
 
 async def ensure_can_create(session, unique_id, submission_type) -> bool:
@@ -673,6 +675,18 @@ async def ensure_can_create(session, unique_id, submission_type) -> bool:
                 return session.query(QuestCompletionEntry).filter(
                     QuestCompletionEntry.unique_id == unique_id,
                     QuestCompletionEntry.date_added > cutoff,
+                ).first()
+            case "death" | "seasonal_death":
+                # Deaths share one table across world types (world_type column).
+                return session.query(PlayerDeath).filter(
+                    PlayerDeath.unique_id == unique_id,
+                    PlayerDeath.date_added > cutoff,
+                ).first()
+            case "diary" | "seasonal_diary":
+                # Diary completions share one table across world types (world_type column).
+                return session.query(DiaryCompletionEntry).filter(
+                    DiaryCompletionEntry.unique_id == unique_id,
+                    DiaryCompletionEntry.date_added > cutoff,
                 ).first()
             case "seasonal_drop":
                 return session.query(SeasonalDrop).filter(

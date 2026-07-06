@@ -32,6 +32,8 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "ca_channel_id", "type": "channel", "default": None},
     {"key": "pet_channel_id", "type": "channel", "default": None},
     {"key": "quest_channel_id", "type": "channel", "default": None},
+    {"key": "channel_id_to_post_deaths", "type": "channel", "default": None},
+    {"key": "channel_id_to_post_diaries", "type": "channel", "default": None},
     {"key": "announcements_channel_id", "type": "channel", "default": None},
 
     # --- Drop notifications ---
@@ -44,6 +46,8 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "notify_pets", "type": "boolean", "default": True, "seasonal": True},
     {"key": "notify_quests", "type": "boolean", "default": False, "seasonal": True},
     {"key": "notify_special_quests", "type": "boolean", "default": True, "seasonal": True},
+    {"key": "notify_deaths", "type": "boolean", "default": False, "seasonal": True},
+    {"key": "notify_diaries", "type": "boolean", "default": False, "seasonal": True},
 
     # --- Level notifications ---
     {"key": "notify_levels", "type": "boolean", "default": False, "seasonal": True},

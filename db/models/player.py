@@ -51,6 +51,8 @@ class Player(Base):
         clogs: List of CollectionLogEntry objects for this player
         pets: List of PlayerPet objects for this player
         quests: List of QuestCompletionEntry objects for this player
+        deaths: List of PlayerDeath objects for this player
+        diaries: List of DiaryCompletionEntry objects for this player
         groups: List of Group objects this player is a member of
         notifications: List of NotificationQueue objects for this player
         notified_submissions: List of NotifiedSubmission objects for this player
@@ -79,6 +81,8 @@ class Player(Base):
     clogs = relationship("CollectionLogEntry", back_populates="player")
     pets = relationship("PlayerPet", back_populates="player")
     quests = relationship("QuestCompletionEntry", back_populates="player")
+    deaths = relationship("PlayerDeath", back_populates="player")
+    diaries = relationship("DiaryCompletionEntry", back_populates="player")
     player_points = relationship("PlayerPoints", back_populates="player")
     groups = relationship("Group", secondary=user_group_association, back_populates="players")
     notifications = relationship("NotificationQueue", back_populates="player")

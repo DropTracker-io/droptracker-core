@@ -27,6 +27,8 @@ from .pet import pet_processor  # noqa: F401
 from .adventure_log import adventure_log_processor  # noqa: F401
 from .experience import experience_processor  # noqa: F401
 from .quest import quest_processor  # noqa: F401
+from .death import death_processor  # noqa: F401
+from .diary import diary_processor  # noqa: F401
 
 # Utilities used externally
 from .common import (
@@ -44,6 +46,8 @@ __all__ = [
     "adventure_log_processor",
     "experience_processor",
     "quest_processor",
+    "death_processor",
+    "diary_processor",
     "SubmissionResponse",
     "RawDropData",
     "try_create_player",

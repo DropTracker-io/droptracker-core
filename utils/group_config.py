@@ -41,6 +41,8 @@ NOTIFY_CAS = "notify_cas"
 MIN_CA_TIER_TO_NOTIFY = "min_ca_tier_to_notify"
 NOTIFY_PETS = "notify_pets"
 NOTIFY_QUESTS = "notify_quests"
+NOTIFY_DEATHS = "notify_deaths"
+NOTIFY_DIARIES = "notify_diaries"
 
 # ── Cache internals ───────────────────────────────────────────────────────────
 _TTL: float = 30.0  # seconds

@@ -340,6 +340,8 @@ async def load_config():
                                 "send_clogs": get_config_value(current_group_configs, "notify_clogs"),
                                 "send_cas": get_config_value(current_group_configs, "notify_cas"),
                                 "send_pets": get_config_value(current_group_configs, "send_pets"),
+                                "send_deaths": get_config_value(current_group_configs, "notify_deaths"),
+                                "send_diaries": get_config_value(current_group_configs, "notify_diaries"),
                                 "send_xp": get_config_value(current_group_configs, "notify_levels"),
                                 "minimum_level": get_config_value(current_group_configs, "level_minimum_for_notifications"),
                                 "send_stacked_items": get_config_value(current_group_configs, "send_stacks_of_items"),
@@ -347,5 +349,55 @@ async def load_config():
         return jsonify(group_configs), 200
     finally:
         db_session.close()
+
+
+# Hardcoded fallbacks when no GroupConfiguration override exists (group_id=2).
+PLUGIN_LATEST_VERSION_FALLBACK = "5.4.0"
+PLUGIN_MINIMUM_VERSION_FALLBACK = "5.0.0"
+
+
+@players_bp.get("/plugin_version")
+async def plugin_version():
+    """Plugin version check for the RuneLite plugin (no auth required).
+
+    Values are sourced from GroupConfiguration rows on the global group
+    (group_id=2) with config keys 'plugin_latest_version' /
+    'plugin_minimum_version' / 'plugin_version_message', falling back to
+    hardcoded defaults when unset.
+    """
+    latest_version = PLUGIN_LATEST_VERSION_FALLBACK
+    minimum_version = PLUGIN_MINIMUM_VERSION_FALLBACK
+    message = None
+    db_session = get_db_session()
+    try:
+        rows = (
+            db_session.query(GroupConfiguration)
+            .filter(
+                GroupConfiguration.group_id == 2,
+                GroupConfiguration.config_key.in_(
+                    ["plugin_latest_version", "plugin_minimum_version", "plugin_version_message"]
+                ),
+            )
+            .all()
+        )
+        for row in rows:
+            value = (row.config_value or "").strip()
+            if not value:
+                continue
+            if row.config_key == "plugin_latest_version":
+                latest_version = value
+            elif row.config_key == "plugin_minimum_version":
+                minimum_version = value
+            elif row.config_key == "plugin_version_message":
+                message = value
+    except Exception as e:
+        print(f"Exception in plugin_version: {e}")
+    finally:
+        db_session.close()
+
+    payload = {"latest_version": latest_version, "minimum_version": minimum_version}
+    if message:
+        payload["message"] = message
+    return jsonify(payload), 200
 
 

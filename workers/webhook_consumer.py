@@ -119,6 +119,10 @@ async def _process_entry(entry_bytes: bytes) -> None:
                         await submissions.experience_processor(processed_data, external_session=db_session)
                     case "quest":
                         await submissions.quest_processor(processed_data, external_session=db_session)
+                    case "death":
+                        await submissions.death_processor(processed_data, external_session=db_session)
+                    case "diary":
+                        await submissions.diary_processor(processed_data, external_session=db_session)
                     case "pet":
                         await submissions.pet_processor(processed_data, external_session=db_session)
                     case "adventure_log":
