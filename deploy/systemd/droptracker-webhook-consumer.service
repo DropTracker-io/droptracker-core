@@ -1,0 +1,28 @@
+[Unit]
+Description=DropTracker Webhook Queue Consumer
+Documentation=file:///store/droptracker/disc/docs/REFACTOR_PLAN.md
+After=network.target redis-server.service mariadb.service
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+User=user
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -u -m workers.webhook_consumer
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+Type=simple
+NoNewPrivileges=true
+# NOTE: the intake API stashes screenshot files in WEBHOOK_TEMP_DIR for this
+# consumer to pick up. Both units run with PrivateTmp=true, so WEBHOOK_TEMP_DIR
+# must point at a shared path (set in .env to /store/droptracker/disc/data/webhook_uploads),
+# never the default /tmp.
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/store/droptracker
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+[Unit]
+Description=DropTracker Events v2 Consumer
+Documentation=file:///store/droptracker/disc/docs/ARCHITECTURE.md
+After=network.target redis-server.service mariadb.service
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+User=user
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -u -m workers.event_consumer
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+Type=simple
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/store/droptracker
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

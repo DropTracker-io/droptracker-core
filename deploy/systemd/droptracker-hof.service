@@ -1,0 +1,48 @@
+[Unit]
+# A human-readable description of the service
+Description=DropTracker Hall of Fame Bot
+
+# Start this service only after the network is available
+After=network.target
+
+[Service]
+# The user that will run the application
+User=user
+
+# The working directory for the script
+WorkingDirectory=/store/droptracker/disc
+
+# The command to start the application.
+# Using python -m to run from the bots module context
+ExecStart=/store/droptracker/disc/venv/bin/python -m bots.hall_of_fame
+
+# Automatically restart the service if it fails
+Restart=on-failure
+# Wait 5 seconds before restarting
+RestartSec=5
+
+# Graceful shutdown timeout
+TimeoutStopSec=30
+
+# Systemd watchdog configuration
+Type=notify
+NotifyAccess=all
+WatchdogSec=30
+
+# Environment variables
+Environment=WATCHDOG_USEC=30000000
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/store/droptracker
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+# Defines which system state should enable this service
+WantedBy=multi-user.target

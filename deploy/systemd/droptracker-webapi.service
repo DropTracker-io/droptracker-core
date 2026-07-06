@@ -1,0 +1,24 @@
+[Unit]
+Description=DropTracker Web API v1
+After=network.target
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+User=debian
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -u /store/droptracker/disc/venv/bin/hypercorn --workers 2 --worker-class asyncio --keep-alive 5 --graceful-timeout 10 --bind 127.0.0.1:31325 "web_api:create_app()"
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+Type=simple
+# No NoNewPrivileges here: /admin/services in web_api controls other units via
+# `sudo -n systemctl`, which NoNewPrivileges would block.
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/store/droptracker
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

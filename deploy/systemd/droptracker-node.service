@@ -1,0 +1,25 @@
+[Unit]
+Description=DropTracker Web (Next.js BFF)
+After=network.target droptracker-api.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=debian
+WorkingDirectory=/store/droptracker/web/apps/web
+# App configuration (USE_MOCK_API, WEB_API_INTERNAL_URL, NEXTAUTH_URL, Discord
+# OAuth, SESSION_COOKIE_SECRET, ...) is loaded by Next.js from
+# apps/web/.env.local, which is symlinked to /store/droptracker/web/.env.
+# Only process-level knobs are set here so they don't override the env file.
+Environment=NODE_ENV=production
+Environment=PORT=31380
+Environment=HOSTNAME=0.0.0.0
+Environment=HOME=/home/debian
+Environment=PATH=/store/droptracker/web/apps/web/node_modules/.bin:/home/debian/.nvm/versions/node/v20.20.1/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/store/droptracker/web/apps/web/node_modules/.bin/next start
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

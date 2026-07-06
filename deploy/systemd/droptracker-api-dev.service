@@ -1,0 +1,31 @@
+[Unit]
+Description=DropTracker API Dev Instance
+After=network.target
+
+[Service]
+User=user
+WorkingDirectory=/store/droptracker/disc
+# Dev binds to different port; same codebase
+Environment=API_PORT=31324
+Environment=WEBHOOK_REQUEST_TIMEOUT_SECONDS=35
+Environment=DATA_DB_POOL_SIZE=20
+Environment=DATA_DB_MAX_OVERFLOW=5
+Environment=DATA_DB_POOL_TIMEOUT=5
+Environment=XENFORO_DB_POOL_SIZE=1
+Environment=XENFORO_DB_MAX_OVERFLOW=0
+Environment=XENFORO_DB_POOL_TIMEOUT=5
+ExecStart=/store/droptracker/disc/venv/bin/hypercorn --workers 4 --worker-class asyncio --keep-alive 2 --graceful-timeout 20 --max-requests 500 --max-requests-jitter 100 --bind 127.0.0.1:31324 "api:create_app()"
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+Type=simple
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/store/droptracker
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target
