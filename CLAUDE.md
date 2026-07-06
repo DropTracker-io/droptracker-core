@@ -25,25 +25,31 @@ DropTracker is an Old School RuneScape (OSRS) loot and achievement tracking plat
 | Video storage | Backblaze B2 (prod) or local filesystem |
 | Auth / crypto | Fernet (cryptography), PyJWT |
 | Forum | XenForo (separate DB, integrated via API) |
-| Process management | GNU screen (prod), systemd watchdog |
+| Process management | systemd units + watchdog (unit files in `deploy/systemd/`) |
 | Config | python-dotenv (`.env`) |
 
 ---
 
 ## Running Processes
 
-The system is **multiple separate processes** run concurrently (via `real_startup.sh` with GNU screen):
+Production runs as **systemd units** (`/etc/systemd/system/droptracker-*.service`). The old `real_startup.sh` GNU-screen launcher is legacy — do not use it.
 
-| Screen Name | Entry Point | Purpose | Port |
+| Systemd Unit | Entry Point | Purpose | Port |
 |---|---|---|---|
-| `DT-api` | `api/app.py` | Primary REST API (submission intake, leaderboards) | 31323 |
-| `DTcore` | `bots/main.py` | Primary Discord bot (slash commands, notifications, lootboard updates) | — |
-| `DT-webhooks` | `bots/webhook_bot.py` | Discord bot that reads webhook-channel messages (legacy fallback) | — |
-| `DT-lootboards` | `lootboard/_board_generator.py` | Generates lootboard images every 2 min | — |
-| `DT-hof` | `bots/hall_of_fame.py` | Hall of Fame image bot | — |
-| `DT-heartbeat` | `bots/heartbeat.py` | Uptime/monitoring bot | — |
+| `droptracker-api` | `api/app.py` (`api:create_app()`) | Submission intake + public read API | 31323 |
+| `droptracker-webapi` | `web_api/app.py` | Website backend `/api/v1` (auth, profiles, config, events, admin, SSE) | 31325 |
+| `droptracker-node` | Next.js server (separate `droptracker-web` repo, deployed at `/store/droptracker/web`) | Website frontend / BFF | 31380 |
+| `droptracker-core` | `bots/main.py` | Primary Discord bot (slash commands, notifications, lootboard updates) | — |
+| `droptracker-webhooks` | `bots/webhook_bot.py` | Discord bot that reads webhook-channel messages (legacy fallback) | — |
+| `droptracker-lootboards` | `lootboard/_board_generator.py` | Generates lootboard images every 2 min | — |
+| `droptracker-hof` | `bots/hall_of_fame.py` | Hall of Fame image bot | — |
+| `droptracker-player-updates` | `data/player_total_updater.py` | Background WOM sync + Redis leaderboard maintenance | — |
+| `droptracker-video-worker` | `services/video_worker.py` | MJPEG→MP4 conversion via FFmpeg + Backblaze B2 | — |
+| `droptracker-heartbeat` | `bots/heartbeat.py` | Uptime heartbeat bot | — |
+| `droptracker-events` | `workers/event_consumer.py` | Events v2: drains `events:submissions`, applies task/bingo/team progress | — |
+| `droptracker-webhook-consumer` | `workers/webhook_consumer.py` | Drains `webhook:queue` (idles unless `WEBHOOK_QUEUE_MODE=true`) | — |
 
-Dev API runs on port **31324** via `droptracker-api-dev` systemd unit (disabled by default, same `.env` as prod).
+Canonical unit files live in `deploy/systemd/` (install with `cp` + `daemon-reload`, see its README). Dev API runs on port **31324** via `droptracker-api-dev` systemd unit (disabled by default, same `.env` as prod).
 
 ---
 
@@ -66,6 +72,24 @@ droptracker/
 │   │   └── helpers.py      # assemble_submission_data()
 │   └── services/
 │       └── metrics.py      # Per-request metrics tracker
+│
+├── web_api/                # Quart website API (port 31325, systemd droptracker-webapi)
+│   ├── app.py              # Entry point
+│   ├── __init__.py         # create_app() – registers 20 blueprints under /api/v1
+│   ├── session.py          # JWT mint/verify (HS256, JWT_TOKEN_KEY), Redis deny-list
+│   ├── deps.py             # current_user_id(), resolve_group_role() (superadmin/owner/admin/member)
+│   ├── config_registry.py  # Group config schema: field defs, coercion, limits
+│   ├── entitlements*.py    # Premium feature gates by subscription tier
+│   ├── billing.py          # PayPal checkout/subscription logic
+│   └── routes/             # auth, me, profiles, search, leaderboards, config,
+│                           # group_admin, events, event_admin, event_discord,
+│                           # badges, announcements, docs (CMS), submissions,
+│                           # subscriptions, paypal_ipn, lootboard, realtime (SSE),
+│                           # admin (superadmin), health
+│
+├── workers/                # Redis queue consumers (systemd: droptracker-events, droptracker-webhook-consumer)
+│   ├── event_consumer.py   # Events v2: BRPOP events:submissions → engine apply
+│   └── webhook_consumer.py # Fast-accept intake: drains webhook:queue (WEBHOOK_QUEUE_MODE)
 │
 ├── bots/
 │   ├── main.py             # Primary Discord bot
@@ -113,9 +137,15 @@ droptracker/
 ├── services/
 │   ├── notification_service.py  # Polls notification_queue, sends Discord embeds
 │   ├── redis_updates.py         # RedisLootTracker – incremental leaderboard updates
+│   ├── realtime.py              # Publishes rt:* pub/sub channels + feed:recent (web SSE)
 │   ├── points.py                # Premium point system (award/debit ledger)
+│   ├── badges.py                # Badge award engine (daily champion, streaks, boss records)
+│   ├── event_engine.py          # Events v2: producer / matcher / apply layers
+│   ├── event_lifecycle.py       # Events v2 state machine (draft → active → past) + sweep
+│   ├── event_notifications.py   # Events v2 per-event Discord channel routing
 │   ├── message_handler.py       # Discord MessageCreate/Component event handler
 │   ├── hall_of_fame.py          # HOF image generation
+│   ├── video_worker.py          # MJPEG→MP4 conversion worker (systemd unit)
 │   └── ...
 │
 ├── lootboard/              # Lootboard image generation
@@ -136,14 +166,18 @@ droptracker/
 │   ├── b2_storage.py       # Backblaze B2 presigned URLs
 │   └── ...
 │
-├── alembic/                # DB migrations (env.py configured)
-├── docs/                   # Architecture + planning docs
-├── games/                  # Board game / Gielinor Race mini-game
+├── osrs_api/               # External clients: WOM, GE pricing, semantic drop verification
+├── monitor/                # Service control CLI + systemd watchdog integration
+├── games/events/           # Events v2 domain logic (typed events, bingo, teams, task library)
+├── alembic/                # DB migration env (versions/ NOT committed — see CONTRIBUTING.md)
+├── docs/                   # Architecture + planning docs (archive/ holds legacy-events backup)
 ├── scripts/                # One-off maintenance scripts
+├── tests/                  # pytest suite (unit/ runs in CI; integration/ needs DB+Redis)
 ├── .env.example            # All environment variable keys
-├── requirements.txt
-└── real_startup.sh         # Production startup (GNU screen)
+└── requirements.txt
 ```
+
+**Legacy (do not build on):** `real_startup.sh`, `run_server.sh`, `restart.sh`, root-level `eventBot.py` / `worker.py` / `commands.py` / `test.py` / `bingo_test.py`, `board_cli.py` (broken import), `web/` + `templates/` (old Jinja2 site, replaced by Next.js), `games/gielinor_race/`, `oldvenv/`. Legacy events system decommissioned 2026-07-05; archived in `docs/archive/legacy-events/`.
 
 ---
 
@@ -201,7 +235,9 @@ A full walkthrough is in `docs/SUBMISSION_PIPELINE.md`. Short version:
 
 **Notification flow is async.** Processors write to `notification_queue`, they do not send Discord messages directly. `NotificationService` drains the queue independently.
 
-**Known latency issue (see `docs/REFACTOR_PLAN.md`).** The webhook handler currently blocks until all processing (DB + WOM + OSRS API) finishes. Under load this causes 10–40s response times. The planned fix (async Redis queue with background consumer) is not yet implemented.
+**Intake latency (see `docs/REFACTOR_PLAN.md`).** By default the webhook handler blocks until all processing (DB + WOM + OSRS API) finishes — 10–40s under load. Phase 1 of the fix is implemented behind a flag: with `WEBHOOK_QUEUE_MODE=true`, the handler fast-accepts (validate + stash image + RPUSH `webhook:queue`, ~50ms) and `workers/webhook_consumer.py` drains the queue in the background. Not yet the default.
+
+**Events v2 pipeline.** Processors call `services/event_engine.queue_submission()` (LPUSH `events:submissions`, gated on `events:active`); `workers/event_consumer.py` matches submissions against active event tasks (pure `match_task()`), applies progress/bingo/team points, and routes Discord notifications via `services/event_notifications.py`. Lifecycle transitions (draft → active → past) live in `services/event_lifecycle.py`; the web admin surface is `web_api/routes/events.py` + `event_admin.py` + `event_discord.py`.
 
 ---
 
@@ -212,15 +248,28 @@ Two MySQL databases:
 - **`data`** — Application DB (all tables below)
 - **`xenforo`** — Forum DB (read/write for XenForo integration)
 
-Key models: `Drop`, `Player`, `User`, `Group`, `Guild`, `GroupConfiguration`, `NotificationQueue`, `NotifiedSubmission`, `ItemList`, `NpcList`, `PersonalBestEntry`, `CollectionLogEntry`, `CombatAchievementEntry`, `PlayerPet`, `QuestCompletionEntry`, `VideoUpload`, `GroupEmbed`, `Webhook`, `PlayerPoints`, `PointCredit`, `PointDebit`
+Core models: `Drop`, `Player`, `User`, `Group`, `Guild`, `GroupConfiguration`, `NotificationQueue`, `NotifiedSubmission`, `ItemList`, `NpcList`, `PersonalBestEntry`, `CollectionLogEntry`, `CombatAchievementEntry`, `PlayerPet`, `QuestCompletionEntry`, `VideoUpload`, `GroupEmbed`, `Webhook`, `PlayerPoints`, `PointCredit`, `PointDebit`
+
+Newer model families (~80 tables total):
+- **Events v2** (`db/models/events.py`): `Event`, `EventTask`, `EventTeam`, `EventTeamMember`, `EventBingoCell`, `EventBingoCompletion`, `EventCompletion`, `EventProgress`, `EventTaskLibraryItem`, `EventChannel`
+- **Badges** (`db/models/badge.py`): `Badge`, `PlayerBadge` (dedupe via unique `(badge_id, group_key, active_key)`)
+- **Subscriptions** (`db/models/subscriptions.py`): `SubscriptionTier`, `GroupSubscription`
+- **Web/admin**: `GroupAdmin`, `AuditLog`, `Announcement`, `DocsPage`, `UserConfiguration`
+- **Split tracking**: `DropSplit`
+- **Seasonal mirrors**: `Seasonal{Drop,PersonalBestEntry,CollectionLogEntry,CombatAchievementEntry,PlayerPet,QuestCompletionEntry}`
+- **Analytics**: `PlayerItemHourlyTotals`, `PlayerNpcHourlyTotals`, `PlayerDailyAggregates`, `HistoricalMetrics`
 
 See `db/models/` for ORM definitions and `docs/ARCHITECTURE.md` for full schema reference.
 
-**Redis key patterns:**
-- `leaderboard:{YYYYMM}` — Global sorted set (player_id → total loot GP)
-- `leaderboard:group:{group_id}:{YYYYMM}` — Per-group sorted set
-- `leaderboard:npc:{npc_id}:{YYYYMM}` — Per-NPC sorted set
+**Redis key patterns** (see `services/redis_updates.py`, `services/realtime.py`, `web_api/common.py`):
+- `leaderboard:{YYYYMM}` — Monthly global sorted set (player_id → total loot GP)
+- `leaderboard:{YYYYMM}:group:{gid}` — Per-group monthly
+- `leaderboard:{YYYYMMDD}` / `leaderboard:{ISO-week}` / `leaderboard:all` — Daily / weekly / all-time boards
 - `player:{player_id}:{YYYYMM}:total_loot` — String: total GP this month
+- `rt:global`, `rt:feed`, `rt:group:{gid}`, `rt:player:{pid}`, `rt:npc:{npc_id}`, `rt:event:{eid}` — Pub/sub for web SSE (`GET /api/v1/stream`)
+- `feed:recent` — Capped list backing the live drop ticker (`GET /api/v1/feed/recent`)
+- `events:submissions` / `events:active` — Events v2 queue + active-event gate
+- `webhook:queue` — Fast-accept intake queue (`WEBHOOK_QUEUE_MODE=true`)
 
 ---
 
@@ -253,20 +302,23 @@ cp .env.example .env
 # Fill in: DB_USER, DB_PASS, BOT_TOKEN (or DEV_TOKEN), WOM_API_KEY,
 #          XF_KEY, ENCRYPTION_KEY, WEBHOOK_TOKEN, etc.
 
-# 3. Run migrations
+# 3. Database
 cp alembic.ini.template alembic.ini
 # Edit alembic.ini sqlalchemy.url with DB credentials
-alembic upgrade head
+# NOTE: alembic/versions/ is gitignored — a fresh clone cannot
+# `alembic upgrade head` from zero. Get a schema dump from a maintainer,
+# then use Alembic for incremental changes.
 
 # 4. Start individual processes (dev)
-python api/app.py           # REST API on port 31323
-python bots/main.py         # Discord bot
-python bots/webhook_bot.py  # Webhook channel bot (optional)
-python lootboard/_board_generator.py  # Lootboard generator
-
-# 5. Production (all processes via screen)
-bash real_startup.sh
+python -m api.app                     # intake API :31323
+python -m web_api.app                 # website API :31325
+python -m bots.main                   # core Discord bot
+python -m bots.webhook_bot            # webhook channel bot (optional)
+python -m lootboard._board_generator  # lootboard generator
+python -m workers.event_consumer      # events v2 consumer (if testing events)
 ```
+
+Production is managed via systemd (`systemctl status 'droptracker-*'`) — do not use `real_startup.sh`.
 
 `STATE=dev` in `.env` uses `DEV_TOKEN` instead of `BOT_TOKEN`. Dev API port is 31324 (systemd unit: `droptracker-api-dev`).
 
@@ -289,3 +341,9 @@ bash real_startup.sh
 | Points/premium features | `services/points.py`, `data/submissions/point_awards.py` |
 | Video upload flow | `api/routes/video.py`, `services/video_worker.py`, `utils/b2_storage.py` |
 | XenForo integration | `db/xf/`, `services/xf_services.py` |
+| Events v2 (tasks, bingo, teams) | `services/event_engine.py`, `workers/event_consumer.py`, `web_api/routes/events.py`, `db/models/events.py` |
+| Badges | `services/badges.py`, `db/models/badge.py`, `web_api/routes/badges.py` |
+| Website API endpoint (`/api/v1/...`) | `web_api/routes/<area>.py`; auth/roles in `web_api/deps.py` |
+| Website auth/session | `web_api/session.py` (JWT), `web_api/routes/auth.py` (Discord OAuth) |
+| Live drop feed / SSE | `services/realtime.py` (publish), `web_api/routes/realtime.py` (stream) |
+| Subscriptions / PayPal | `web_api/billing.py`, `web_api/routes/subscriptions.py`, `web_api/routes/paypal_ipn.py` |

@@ -29,6 +29,23 @@ DropTracker is a multi-process Python system. Each concern runs as its own proce
                     └─────────────────────────────────────┘
 ```
 
+> **Addendum (2026-07-06):** this document covers the core intake/notification
+> pipeline, which is unchanged. Subsystems added since it was written are
+> documented in [CLAUDE.md](../CLAUDE.md) and the [README](../README.md):
+>
+> - **Website API** — `web_api/` (Quart, port 31325, systemd
+>   `droptracker-webapi`): JWT auth, profiles, group config, admin surfaces,
+>   SSE realtime. Backs the Next.js frontend (separate repo, port 31380).
+> - **Events v2** — `db/models/events.py`, `services/event_engine.py` /
+>   `event_lifecycle.py` / `event_notifications.py`, consumer in
+>   `workers/event_consumer.py`.
+> - **Badges** — `services/badges.py`, `db/models/badge.py`.
+> - **Subscriptions/PayPal** — `db/models/subscriptions.py`, `web_api/billing.py`.
+> - **Async intake (Phase 1)** — `WEBHOOK_QUEUE_MODE` +
+>   `workers/webhook_consumer.py` (see [REFACTOR_PLAN.md](REFACTOR_PLAN.md)).
+> - Production process management moved from GNU screen to **systemd units**
+>   (`droptracker-*.service`).
+
 ---
 
 ## Component Descriptions

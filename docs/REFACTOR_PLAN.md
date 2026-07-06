@@ -1,5 +1,16 @@
 # DropTracker API: Latency Refactor Plan
 
+> **Status (2026-07-06):** Phase 1 is implemented but not yet the default.
+> The fast acceptor lives in `api/routes/webhook.py` behind the
+> `WEBHOOK_QUEUE_MODE` env flag, and the background consumer is
+> `workers/webhook_consumer.py` (systemd unit `droptracker-webhook-consumer`,
+> always running — it idles while the flag is off). `WEBHOOK_TEMP_DIR` must be
+> a path shared between the API and the consumer (both run with
+> `PrivateTmp=true`, so the `/tmp` default won't work — prod uses
+> `data/webhook_uploads/`). The plan below is kept as the original design
+> rationale; flipping the flag on in prod (and Phase 2 worker scaling) is
+> still outstanding.
+
 ## Current Problem
 
 The webhook endpoint blocks the request until full processing (DB, WOM, OSRS API) completes. Under ~400 req/min:
