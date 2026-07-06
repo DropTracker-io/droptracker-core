@@ -32,7 +32,7 @@ DropTracker is an Old School RuneScape (OSRS) loot and achievement tracking plat
 
 ## Running Processes
 
-Production runs as **systemd units** (`/etc/systemd/system/droptracker-*.service`). The old `real_startup.sh` GNU-screen launcher is legacy — do not use it.
+Production runs as **systemd units** (`/etc/systemd/system/droptracker-*.service`; canonical copies in `deploy/systemd/`).
 
 | Systemd Unit | Entry Point | Purpose | Port |
 |---|---|---|---|
@@ -168,7 +168,7 @@ droptracker/
 │
 ├── osrs_api/               # External clients: WOM, GE pricing, semantic drop verification
 ├── monitor/                # Service control CLI + systemd watchdog integration
-├── games/events/           # Events v2 domain logic (typed events, bingo, teams, task library)
+├── games/events/task_store/ # Seed data for events v2 task library (scripts/seed_event_task_library.py)
 ├── alembic/                # DB migration env (versions/ NOT committed — see CONTRIBUTING.md)
 ├── docs/                   # Architecture + planning docs (archive/ holds legacy-events backup)
 ├── scripts/                # One-off maintenance scripts
@@ -177,7 +177,7 @@ droptracker/
 └── requirements.txt
 ```
 
-**Legacy (do not build on):** `real_startup.sh`, `run_server.sh`, `restart.sh`, root-level `eventBot.py` / `worker.py` / `commands.py` / `test.py` / `bingo_test.py`, `board_cli.py` (broken import), `web/` + `templates/` (old Jinja2 site, replaced by Next.js), `games/gielinor_race/`, `oldvenv/`. Legacy events system decommissioned 2026-07-05; archived in `docs/archive/legacy-events/`.
+**Legacy:** dead entry points (screen launchers, events v1 `eventBot.py`/`worker.py`, root duplicates of `webhook_bot.py`/`commands.py`, `games/gielinor_race/`, `api/backup/`) were **deleted in the 2026-07-06 audit** — recover from git history or `docs/archive/legacy-events/` if ever needed. Still present but not for new work: `web/` + `templates/` (old Jinja2 site, registered as blueprints in the core bot for backward compat; superseded by Next.js + `web_api/`), and the `board_cli.py`/`timeframe_board_cli.py` subprocess helpers.
 
 ---
 
@@ -318,7 +318,7 @@ python -m lootboard._board_generator  # lootboard generator
 python -m workers.event_consumer      # events v2 consumer (if testing events)
 ```
 
-Production is managed via systemd (`systemctl status 'droptracker-*'`) — do not use `real_startup.sh`.
+Production is managed via systemd: `systemctl status 'droptracker-*'`.
 
 `STATE=dev` in `.env` uses `DEV_TOKEN` instead of `BOT_TOKEN`. Dev API port is 31324 (systemd unit: `droptracker-api-dev`).
 

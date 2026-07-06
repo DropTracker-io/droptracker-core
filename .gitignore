@@ -87,3 +87,6 @@ static/assets/osrs_wiki.py
 #Backups from test changes
 *copy.py
 utils/osrs_api/semantic.py
+
+# local quarantine of pre-cleanup files (safe to delete)
+.trash-*/

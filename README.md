@@ -77,7 +77,7 @@ Production runs as **systemd units**; canonical copies of the unit files live in
 | [services/](services/) | Business logic: notification queue drain, Redis leaderboards, realtime pub/sub, points, badges, events engine/lifecycle/notifications, XenForo integration, video worker |
 | [workers/](workers/) | Redis queue consumers (events, webhook fast-accept mode) |
 | [lootboard/](lootboard/) | Pillow-based lootboard image generation + PNG themes |
-| [games/events/](games/events/) | Events v2 domain logic (typed events, bingo boards, teams, task library) |
+| [games/events/task_store/](games/events/task_store/) | Seed data for the events v2 task library (loaded by [scripts/seed_event_task_library.py](scripts/seed_event_task_library.py)) |
 | [osrs_api/](osrs_api/) | External API clients: Wise Old Man, GE pricing, semantic drop verification |
 | [utils/](utils/) | Shared helpers: Redis client, embeds, formatting, Fernet encryption, B2 storage |
 | [monitor/](monitor/) | Service control/monitoring CLI + systemd watchdog integration |
@@ -134,14 +134,10 @@ CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs unit tests on pus
 
 ## Legacy code (what to ignore)
 
-The codebase has grown over several years; not everything at the repo root is live. **Do not build on these:**
+A 2026-07-06 audit removed the dead entry points that used to clutter the repo root (legacy screen launchers, the decommissioned events v1 system, duplicate bot wrappers — see [docs/archive/legacy-events/](docs/archive/legacy-events/) and git history if you need them). What remains intentionally but is **not** the place to build new things:
 
-- `real_startup.sh`, `run_server.sh`, `restart.sh` — pre-systemd launchers (reference files that no longer exist)
-- `eventBot.py`, `worker.py`, `bingo_test.py`, `commands.py`, `test.py` — superseded (legacy events system was decommissioned 2026-07-05; archived in [docs/archive/legacy-events/](docs/archive/legacy-events/))
-- `board_cli.py` — broken import; use `timeframe_board_cli.py` (still invoked by `web_api`) if you need CLI board generation
-- `web/` + `templates/` + most of `static/` — the old Jinja2 site, replaced by the Next.js frontend; kept for reference
-- `games/gielinor_race/` — archived mini-game, design reference only
-- `oldvenv/` — dead virtualenv
+- `web/` + `templates/` + most of `static/` — the old Jinja2 site, still registered as blueprints inside the core bot for backward compatibility; the Next.js frontend + `web_api/` replaced it
+- `board_cli.py` / `timeframe_board_cli.py` — CLI board generators invoked as subprocesses by `api/` and `web_api/`; not a public interface
 
 ## Contributing
 

@@ -307,6 +307,6 @@ See `docs/REFACTOR_PLAN.md` for the primary known issue:
 - **Webhook handler blocks on processing.** The `POST /webhook` route currently awaits the full pipeline (DB writes, WOM API calls, OSRS API calls) before returning a response. Under load this produces 10–40s response times and connection pool exhaustion. Planned fix: accept quickly into a Redis queue, process in a separate consumer process.
 
 Other notable debt:
-- `bots/main.py` has a legacy embedded Quart server that predates `api/app.py`; both are started by `real_startup.sh` but the API is the canonical path
+- `bots/main.py` has a legacy embedded Quart server (port 8080, serving the old `web/` blueprints) that predates `api/app.py`; the standalone API is the canonical path
 - `services/message_handler.py` has the webhook-channel processing logic commented out (replaced by the API path), but the code still exists as documentation
 - Some group configuration reads are scattered across processor files rather than in a single config accessor

@@ -62,7 +62,6 @@ from data.submissions import ca_processor, drop_processor, pb_processor, clog_pr
 from utils.format import get_sorted_doc_files, format_time_since_update, format_number, get_command_id, get_extension_from_content_type, convert_to_ms, get_true_boss_name, replace_placeholders
 from datetime import datetime, timedelta
 import logging
-from games.gielinor_race.routes import gielinor_race_bp
 
 bot_ready = Value('b', False)  # 'b' is for boolean
 logger = LoggerClient(token=os.getenv('LOGGER_TOKEN'))
