@@ -24,14 +24,19 @@ SEASONAL_PREFIX = "seasonal_"
 # renders it as a picker backed by GET /groups/{id}/pb-bosses.)
 GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # --- Channels ---
-    {"key": "drop_channel_id", "type": "channel", "default": None},
+    # NOTE: notification routing reads the channel_id_to_post_* keys (see
+    # services/notification_service.py). The registry previously used
+    # *_channel_id names that nothing consumed; migration web20a copied any
+    # values groups saved under those dead keys into the canonical ones.
+    {"key": "channel_id_to_post_loot", "type": "channel", "default": None},
     {"key": "lootboard_channel_id", "type": "channel", "default": None},
     {"key": "lootboard_message_id", "type": "string", "default": None},
-    {"key": "level_channel_id", "type": "channel", "default": None},
-    {"key": "pb_channel_id", "type": "channel", "default": None},
-    {"key": "ca_channel_id", "type": "channel", "default": None},
-    {"key": "pet_channel_id", "type": "channel", "default": None},
-    {"key": "quest_channel_id", "type": "channel", "default": None},
+    {"key": "channel_id_to_post_levels", "type": "channel", "default": None},
+    {"key": "channel_id_to_post_pb", "type": "channel", "default": None},
+    {"key": "channel_id_to_post_ca", "type": "channel", "default": None},
+    {"key": "channel_id_to_post_pets", "type": "channel", "default": None},
+    {"key": "channel_id_to_post_quests", "type": "channel", "default": None},
+    {"key": "channel_id_to_post_clog", "type": "channel", "default": None},
     {"key": "channel_id_to_post_deaths", "type": "channel", "default": None},
     {"key": "channel_id_to_post_diaries", "type": "channel", "default": None},
     {"key": "announcements_channel_id", "type": "channel", "default": None},

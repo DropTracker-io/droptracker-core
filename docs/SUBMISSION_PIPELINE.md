@@ -167,7 +167,7 @@ Runs as a background asyncio task inside `bots/main.py`. Polls every 3 seconds.
 
 1. `SELECT * FROM notification_queue WHERE status = 'pending' ORDER BY created_at LIMIT 50`
 2. For each notification:
-   a. Look up group's `drop_channel_id` from `group_configurations`
+   a. Look up group's `channel_id_to_post_loot` from `group_configurations`
    b. Fetch `GroupEmbed` template for this group + notification type
    c. Replace placeholders in template:
       - `{player_name}` → RSN
@@ -262,4 +262,4 @@ All submission processors check `world_type` before writing:
 - `world_type == "main"` → write to standard tables (`drops`, `personal_best`, etc.)
 - `world_type == "seasonal"` → write to `seasonal_*` mirror tables
 
-Group configurations use `seasonal_` prefixed keys for seasonal-specific settings (e.g., `seasonal_minimum_value_to_notify`, `seasonal_drop_channel_id`). Both standard and seasonal submissions can be active simultaneously for the same group.
+Group configurations use `seasonal_` prefixed keys for seasonal-specific settings (e.g., `seasonal_minimum_value_to_notify`, `seasonal_notify_pbs`). Both standard and seasonal submissions can be active simultaneously for the same group.

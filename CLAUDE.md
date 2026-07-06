@@ -279,7 +279,7 @@ Stored in `group_configurations` table (key-value per group):
 
 | Key | Purpose |
 |---|---|
-| `drop_channel_id` | Discord channel to post drop notifications |
+| `channel_id_to_post_loot` | Discord channel to post drop notifications (per-type overrides: `channel_id_to_post_{levels,pb,ca,pets,quests,clog,deaths,diaries}`) |
 | `minimum_value_to_notify` | GP threshold for drop announcements (default: 2.5M) |
 | `only_send_messages_with_images` | Require screenshots before notifying |
 | `send_stacks_of_items` | Announce stackable items (e.g. runes) |

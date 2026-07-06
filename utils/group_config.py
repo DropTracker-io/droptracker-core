@@ -26,7 +26,8 @@ from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
 # ── Config key constants ──────────────────────────────────────────────────────
-DROP_CHANNEL_ID = "drop_channel_id"
+# Canonical key the notification service reads for drop-channel routing.
+DROP_CHANNEL_ID = "channel_id_to_post_loot"
 MINIMUM_VALUE_TO_NOTIFY = "minimum_value_to_notify"
 ONLY_SEND_MESSAGES_WITH_IMAGES = "only_send_messages_with_images"
 SEND_STACKS_OF_ITEMS = "send_stacks_of_items"

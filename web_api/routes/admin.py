@@ -777,7 +777,7 @@ async def admin_audit_log():
 # Group staff overview (superadmin view of any group)
 # --------------------------------------------------------------------------- #
 _CONFIG_SUMMARY_KEYS = [
-    "drop_channel_id",
+    "channel_id_to_post_loot",
     "lootboard_channel_id",
     "minimum_value_to_notify",
     "only_send_messages_with_images",
@@ -849,8 +849,8 @@ async def admin_group_overview(group_id: int):
                 activity.append({"date": day.isoformat(), "submissions": int(count)})
 
             warnings = []
-            if not cfg_map.get("drop_channel_id"):
-                warnings.append("No drop_channel_id configured — drop notifications won't post.")
+            if not cfg_map.get("channel_id_to_post_loot"):
+                warnings.append("No drops channel (channel_id_to_post_loot) configured — drop notifications won't post.")
             if not group.guild_id:
                 warnings.append("No Discord guild linked to this group.")
             if subscription["status"] not in ("active", "trialing"):

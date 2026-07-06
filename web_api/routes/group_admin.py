@@ -237,12 +237,12 @@ async def diagnostics(group_id: int):
                 s.query(GroupConfiguration)
                 .filter(
                     GroupConfiguration.group_id == group_id,
-                    GroupConfiguration.config_key == "drop_channel_id",
+                    GroupConfiguration.config_key == "channel_id_to_post_loot",
                 )
                 .first()
             )
             if not drop_channel or not drop_channel.config_value:
-                warnings.append("No drop_channel_id configured — drop notifications won't post.")
+                warnings.append("No drops channel (channel_id_to_post_loot) configured — drop notifications won't post.")
             if not group.guild_id:
                 warnings.append("No Discord guild linked to this group.")
 
