@@ -17,6 +17,7 @@ class TestEntitlementsRegistry:
             "events": False,
             "events_max_active": 1,
             "hall_of_fame": False,
+            "custom_embeds": False,
         }
 
     def test_resolve_explicit_defaults(self):

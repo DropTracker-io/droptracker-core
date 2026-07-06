@@ -27,6 +27,7 @@ from web_api.routes.auth import auth_bp
 from web_api.routes.badges import badges_bp
 from web_api.routes.config import config_bp
 from web_api.routes.docs import docs_bp
+from web_api.routes.embeds import embeds_bp
 from web_api.routes.event_admin import event_admin_bp
 from web_api.routes.event_discord import event_discord_bp
 from web_api.routes.events import events_bp
@@ -125,6 +126,7 @@ def create_app() -> Quart:
     app.register_blueprint(badges_bp, url_prefix=API_PREFIX)
     app.register_blueprint(config_bp, url_prefix=API_PREFIX)
     app.register_blueprint(docs_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(embeds_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_admin_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_discord_bp, url_prefix=API_PREFIX)
     app.register_blueprint(events_bp, url_prefix=API_PREFIX)

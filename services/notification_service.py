@@ -22,7 +22,7 @@ from db.models import (
     GroupConfiguration,
 )
 from db.ops import DatabaseOperations, associate_player_ids, get_formatted_name
-from db.xf.upgrades import check_active_upgrade
+from db.entitlements import has_custom_embeds
 from utils.redis import redis_client
 from utils.embeds import update_boss_pb_embed
 from utils.messages import confirm_new_npc, confirm_new_item, name_change_message, new_player_message
@@ -779,7 +779,7 @@ class NotificationService:
                 return
 
             # Get embed template
-            upgrade_active = check_active_upgrade(group_id)
+            upgrade_active = has_custom_embeds(group_id)
             if upgrade_active:
                 embed_template = await self.db_ops.get_group_embed('level_up', group_id)
             else:
@@ -877,7 +877,7 @@ class NotificationService:
                 session.commit()
                 return
 
-            upgrade_active = check_active_upgrade(group_id)
+            upgrade_active = has_custom_embeds(group_id)
             if upgrade_active:
                 embed_template = await self.db_ops.get_group_embed('level_up', group_id)
             else:
@@ -982,7 +982,7 @@ class NotificationService:
                 return
 
             # Embed template
-            upgrade_active = check_active_upgrade(group_id)
+            upgrade_active = has_custom_embeds(group_id)
             if upgrade_active:
                 embed_template = await self.db_ops.get_group_embed('quest', group_id)
             else:
@@ -1093,7 +1093,7 @@ class NotificationService:
                 session.commit()
                 return
 
-            upgrade_active = check_active_upgrade(group_id)
+            upgrade_active = has_custom_embeds(group_id)
             if upgrade_active:
                 embed_template = await self.db_ops.get_group_embed('quest', group_id)
             else:
@@ -1861,7 +1861,7 @@ class NotificationService:
                 video_url = self._maybe_get_video_url(db_session, data)
             
             # Get embed template
-            upgrade_active = check_active_upgrade(group_id)
+            upgrade_active = has_custom_embeds(group_id)
             if upgrade_active:
                 embed_template = await self.db_ops.get_group_embed('drop', group_id)
             else:
@@ -2112,7 +2112,7 @@ class NotificationService:
                 image_url = ""
             
             # Get embed template
-            upgrade_active = check_active_upgrade(group_id)
+            upgrade_active = has_custom_embeds(group_id)
             if upgrade_active:
                 embed_template = await self.db_ops.get_group_embed('drop', group_id)
             else:
@@ -2535,7 +2535,7 @@ class NotificationService:
             old_time_formatted = convert_from_ms(old_time_ms) if old_time_ms else None
             
             # Get embed template
-            upgrade_active = check_active_upgrade(group_id)
+            upgrade_active = has_custom_embeds(group_id)
             if upgrade_active:
                 embed_template = await self.db_ops.get_group_embed('pb', group_id)
             else:
@@ -2724,7 +2724,7 @@ class NotificationService:
             old_time_formatted = convert_from_ms(old_time_ms) if old_time_ms else None
             
             # Get embed template
-            upgrade_active = check_active_upgrade(group_id)
+            upgrade_active = has_custom_embeds(group_id)
             if upgrade_active:
                 embed_template = await self.db_ops.get_group_embed('pb', group_id)
             else:
@@ -2848,7 +2848,7 @@ class NotificationService:
         is_new_pet = data.get('is_new_pet')
         group_id = data.get('group_id')
         player_name = data.get('player_name')
-        update_active = check_active_upgrade(group_id)
+        update_active = has_custom_embeds(group_id)
         if update_active:
             embed_template = await self.db_ops.get_group_embed('pet', group_id)
         else:
@@ -2973,7 +2973,7 @@ class NotificationService:
         is_new_pet = data.get('is_new_pet')
         group_id = data.get('group_id')
         player_name = data.get('player_name')
-        update_active = check_active_upgrade(group_id)
+        update_active = has_custom_embeds(group_id)
         if update_active:
             embed_template = await self.db_ops.get_group_embed('pet', group_id)
         else:
@@ -3114,7 +3114,7 @@ class NotificationService:
             }
             
             # Get embed template
-            upgrade_active = check_active_upgrade(group_id)
+            upgrade_active = has_custom_embeds(group_id)
             if upgrade_active:
                 embed_template = await self.db_ops.get_group_embed('ca', group_id)
             else:
@@ -3279,7 +3279,7 @@ class NotificationService:
             }
             
             # Get embed template
-            upgrade_active = check_active_upgrade(group_id)
+            upgrade_active = has_custom_embeds(group_id)
             if upgrade_active:
                 embed_template = await self.db_ops.get_group_embed('ca', group_id)
             else:
@@ -3419,7 +3419,7 @@ class NotificationService:
             player_month_total = format_number(month_total_int)
             
             # Get embed template
-            upgrade_active = check_active_upgrade(group_id)
+            upgrade_active = has_custom_embeds(group_id)
             if upgrade_active:
                 embed_template = await self.db_ops.get_group_embed('clog', group_id)
             else:
@@ -3561,7 +3561,7 @@ class NotificationService:
             player_month_total = format_number(month_total_int)
             
             # Get embed template
-            upgrade_active = check_active_upgrade(group_id)
+            upgrade_active = has_custom_embeds(group_id)
             if upgrade_active:
                 embed_template = await self.db_ops.get_group_embed('clog', group_id)
             else:

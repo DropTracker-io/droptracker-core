@@ -4,6 +4,7 @@ from typing import List
 import aiohttp
 from interactions.client.errors import Forbidden, InteractionMissingAccess
 from db.clan_sync import insert_xf_group
+from db.entitlements import has_custom_embeds
 from h11 import LocalProtocolError
 import interactions
 import json
@@ -382,7 +383,10 @@ async def lootboard_updates():
                         continue
                     
                     try:
-                        embed_template = await db.get_group_embed('lb', group_id)
+                        # Custom lootboard embeds are a subscription perk; everyone
+                        # else gets the template group's default embed.
+                        lb_embed_group = group_id if has_custom_embeds(group_id) else 1
+                        embed_template = await db.get_group_embed('lb', lb_embed_group)
                     except Exception as e:
                         print("Unable to obtain embed_template for group", group_obj.group_name, "e:", e)
                         continue

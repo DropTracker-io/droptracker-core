@@ -139,12 +139,12 @@ async def _rebuild_notification_embed(drop, player, item, npc, group_id, db):
     current DB / Redis state.  Returns a fresh Embed or *None* on failure.
     """
     from db.ops import DatabaseOperations, get_formatted_name
-    from db.xf.upgrades import check_active_upgrade
+    from db.entitlements import has_custom_embeds
     from utils.format import replace_placeholders, format_number
 
     db_ops = DatabaseOperations()
 
-    upgrade_active = check_active_upgrade(group_id)
+    upgrade_active = has_custom_embeds(group_id)
     template_group = group_id if upgrade_active else 1
     embed_template = await db_ops.get_group_embed("drop", template_group)
     if not embed_template:

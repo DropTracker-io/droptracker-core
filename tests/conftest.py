@@ -115,6 +115,21 @@ for _stub_name in _STUBS:
     if _stub_name not in sys.modules:
         sys.modules[_stub_name] = MagicMock()
 
+# ── Real modules that live under stubbed packages ─────────────────────────────
+# db/entitlements.py is pure logic (stdlib-only module imports; DB access is
+# lazy inside functions), but `import db.entitlements` would execute the real
+# db/__init__.py. Load it by file path under its dotted name so unit tests can
+# exercise the entitlement registry (web_api.entitlements_registry re-exports it).
+import importlib.util as _importlib_util
+from pathlib import Path as _Path
+
+_ENTITLEMENTS_PATH = _Path(__file__).resolve().parent.parent / "db" / "entitlements.py"
+if "db.entitlements" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("db.entitlements", _ENTITLEMENTS_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["db.entitlements"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # ── SQLAlchemy column expression stub ─────────────────────────────────────────
 # Real SQLAlchemy column attributes implement comparison operators to return
 # BinaryExpression objects.  When tests do `Model.date_added > cutoff`,
