@@ -1,8 +1,9 @@
 """Task 02 + Task 03 — current user identity and account settings.
 
-  GET   /api/v1/me            -> Me (identity, players, groups+role, is_superadmin)
-  GET   /api/v1/me/settings   -> AccountSettings
-  PATCH /api/v1/me            -> AccountSettings (apply a subset, return full)
+  GET   /api/v1/me                     -> Me (identity, players, groups+role, is_superadmin)
+  GET   /api/v1/me/settings            -> AccountSettings
+  PATCH /api/v1/me                     -> AccountSettings (apply a subset, return full)
+  PATCH /api/v1/me/players/{player_id} -> AccountSettings (toggle one account's visibility)
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import asyncio
 
 from quart import Blueprint, jsonify
 
-from db import GroupAdmin, Player, User
+from db import GroupAdmin, Player, User, UserConfiguration
 from web_api.common import (
     abort_problem,
     db_session,
@@ -33,32 +34,50 @@ me_bp = Blueprint("v1_me", __name__)
 
 
 # Settings field -> User column mapping (Task 03 / AccountSettingsSchema).
+# Only settings the backend actually enforces are exposed: `hidden` filters the
+# user's accounts from public surfaces (leaderboards/search/profiles/feed), the
+# ping trio gates Discord @-mentions in db.ops.get_formatted_name().
 _BOOL_SETTINGS = [
-    "public",
     "hidden",
     "global_ping",
     "group_ping",
     "never_ping",
-    "dm_on_rank_change",
-    "dm_on_points",
-    "update_logs_opt_in",
 ]
-_GROUP_SETTINGS = ["patreon_group", "premium_group"]
+# Settings stored in user_configurations, shared with the Discord bot.
+# `dm_account_changes` gates the RSN-change DM in data/submissions/common.py.
+_CONFIG_SETTINGS = ["dm_account_changes"]
 
 
-def _settings_dict(user: User) -> dict:
+def _config_bool(s, user_id: int, key: str) -> bool:
+    row = (
+        s.query(UserConfiguration)
+        .filter(UserConfiguration.user_id == user_id, UserConfiguration.config_key == key)
+        .first()
+    )
+    return bool(row and str(row.config_value).lower() in ("true", "1"))
+
+
+def _set_config_bool(s, user_id: int, key: str, value: bool) -> None:
+    row = (
+        s.query(UserConfiguration)
+        .filter(UserConfiguration.user_id == user_id, UserConfiguration.config_key == key)
+        .first()
+    )
+    if row:
+        row.config_value = "true" if value else "false"
+    else:
+        s.add(UserConfiguration(user_id=user_id, config_key=key, config_value="true" if value else "false"))
+
+
+def _settings_dict(s, user: User) -> dict:
     out = {k: bool(getattr(user, k, False)) for k in _BOOL_SETTINGS}
-    for k in _GROUP_SETTINGS:
-        val = getattr(user, k, None)
-        out[k] = int(val) if val is not None else None
+    for k in _CONFIG_SETTINGS:
+        out[k] = _config_bool(s, user.user_id, k)
+    out["players"] = [
+        {"id": p.player_id, "name": p.player_name, "hidden": bool(p.hidden)}
+        for p in s.query(Player).filter(Player.user_id == user.user_id).order_by(Player.player_name.asc()).all()
+    ]
     return out
-
-
-def _user_group_ids(user: User) -> set:
-    try:
-        return {g.group_id for g in user.groups}
-    except Exception:
-        return set()
 
 
 @me_bp.get("/me")
@@ -140,7 +159,7 @@ async def get_settings():
     def _load():
         with db_session() as s:
             user = load_user(s, user_id)
-            return _settings_dict(user) if user else None
+            return _settings_dict(s, user) if user else None
 
     settings = await asyncio.to_thread(_load)
     if settings is None:
@@ -156,13 +175,9 @@ async def patch_me():
     # Validate keys/types up-front (reject unknown keys silently ignored? -> 422).
     updates = {}
     for key, value in body.items():
-        if key in _BOOL_SETTINGS:
+        if key in _BOOL_SETTINGS or key in _CONFIG_SETTINGS:
             if not isinstance(value, bool):
                 abort_problem(422, "Invalid value", f"'{key}' must be a boolean.")
-            updates[key] = value
-        elif key in _GROUP_SETTINGS:
-            if value is not None and not isinstance(value, int):
-                abort_problem(422, "Invalid value", f"'{key}' must be an integer group id or null.")
             updates[key] = value
         else:
             abort_problem(422, "Unknown setting", f"'{key}' is not a settable field.")
@@ -172,17 +187,45 @@ async def patch_me():
             user = load_user(s, user_id)
             if not user:
                 return None
-            member_ids = _user_group_ids(user)
             for key, value in updates.items():
-                if key in _GROUP_SETTINGS and value is not None and value not in member_ids:
-                    abort_problem(
-                        422,
-                        "Invalid group",
-                        f"You are not a member of group {value}.",
-                    )
-                setattr(user, key, value)
+                if key in _CONFIG_SETTINGS:
+                    _set_config_bool(s, user.user_id, key, value)
+                else:
+                    setattr(user, key, value)
             s.commit()
-            return _settings_dict(user)
+            return _settings_dict(s, user)
+
+    settings = await asyncio.to_thread(_apply)
+    if settings is None:
+        abort_problem(401, "Not authenticated", "User not found for this session.")
+    return private_no_store(jsonify(settings))
+
+
+@me_bp.patch("/me/players/<int:player_id>")
+async def patch_my_player(player_id: int):
+    """Toggle one linked account's public visibility (players.hidden) —
+    the web equivalent of the bot's `/hideme <account>`."""
+    user_id = current_user_id()
+    body = await json_body()
+    hidden = body.get("hidden")
+    if not isinstance(hidden, bool):
+        abort_problem(422, "Invalid value", "'hidden' must be a boolean.")
+
+    def _apply():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            if not user:
+                return None
+            player = (
+                s.query(Player)
+                .filter(Player.player_id == player_id, Player.user_id == user.user_id)
+                .first()
+            )
+            if not player:
+                abort_problem(404, "Player not found", "That account is not linked to you.")
+            player.hidden = hidden
+            s.commit()
+            return _settings_dict(s, user)
 
     settings = await asyncio.to_thread(_apply)
     if settings is None:

@@ -213,6 +213,10 @@ class TestApp:
         r = await client.patch("/api/v1/me", json={"never_ping": True})
         assert r.status_code == 401
 
+    async def test_patch_my_player_requires_session(self, client):
+        r = await client.patch("/api/v1/me/players/1", json={"hidden": True})
+        assert r.status_code == 401
+
     async def test_auth_rejects_bad_snowflake(self, client):
         r = await client.post(
             "/api/v1/auth/discord", json={"discord_profile": {"id": "abc"}}

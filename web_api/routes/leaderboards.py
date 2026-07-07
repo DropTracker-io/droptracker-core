@@ -21,6 +21,7 @@ from web_api.common import (
     db_session,
     decode_member,
     group_totals_key,
+    hidden_player_ids,
     leaderboard_key,
     money,
     npc_leaderboard_key,
@@ -182,14 +183,20 @@ async def leaderboards_players():
 
         raw, total = await asyncio.to_thread(_read)
 
+        # Privacy: drop hidden players from the page (user "Hidden" setting or
+        # per-account hide). Ranks keep their Redis positions, so a filtered
+        # row leaves a gap rather than reshuffling everyone below it.
+        hidden = await asyncio.to_thread(hidden_player_ids)
+
+        start_rank = (page - 1) * limit
         ids = []
         scored = []
-        for member_raw, score in raw:
+        for pos, (member_raw, score) in enumerate(raw):
             pid = decode_member(member_raw)
-            if pid is None:
+            if pid is None or pid in hidden:
                 continue
             ids.append(pid)
-            scored.append((pid, int(float(score))))
+            scored.append((start_rank + pos + 1, pid, int(float(score))))
 
         name_map = {}
         if ids:
@@ -205,10 +212,9 @@ async def leaderboards_players():
             except Exception:
                 badge_map = {}
 
-        start_rank = (page - 1) * limit
-        for i, (pid, loot) in enumerate(scored):
+        for rank, pid, loot in scored:
             row = {
-                "rank": start_rank + i + 1,
+                "rank": rank,
                 "id": pid,
                 "name": name_map.get(pid, f"Player {pid}"),
                 "loot": money(loot),

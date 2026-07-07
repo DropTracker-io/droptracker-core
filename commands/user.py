@@ -95,13 +95,14 @@ class UserCommands(Extension):
     async def dm_settings_cmd(self, ctx: SlashContext, dm_type: str, toggle: str):
         """
         Configure direct message notification settings.
-        
-        Allows users to enable or disable different types of direct message
-        notifications from the bot, including update logs and points earned.
-        
+
+        Only settings the backend actually acts on are offered. Legacy
+        "updates"/"points" toggles were removed 2026-07-07 — nothing ever sent
+        those DMs (user_configurations rows they wrote were never read).
+
         Args:
             ctx (SlashContext): The slash command context
-            dm_type (str): Type of DM setting ("updates", "points", "both")
+            dm_type (str): Type of DM setting ("account_changes")
             toggle (str): Whether to "enable" or "disable" the setting
         """
         self._refresh_session()
@@ -130,24 +131,20 @@ class UserCommands(Extension):
             user = session.query(User).filter(User.discord_id == str(ctx.user.id)).first()
 
         # Determine which config keys to update
-        config_keys = []
-        if dm_type == "updates":
-            config_keys = ["dm_on_update_logs"]
-        elif dm_type == "points":
-            config_keys = ["dm_on_points_earned"]
-        elif dm_type == "both":
-            config_keys = ["dm_on_update_logs", "dm_on_points_earned"]
+        if dm_type == "account_changes":
+            config_keys = ["dm_account_changes"]
+            desc_ext = "- Account name changes"
+        else:
+            embed = Embed(
+                title="Unknown setting",
+                description="Pick a setting from the list. (You can also manage this at https://www.droptracker.io/settings)"
+            )
+            await ctx.send(embed=embed, ephemeral=True)
+            return
 
         value = "true" if toggle == "enable" else "false"
         set_dm_config(user, config_keys, value)
         session.commit()
-        
-        if dm_type == "both":
-            desc_ext = "- Update logs\\n- Points earned"
-        elif dm_type == "updates":
-            desc_ext = "- Update logs"
-        elif dm_type == "points":
-            desc_ext = "- Points earned"
 
         if toggle == "enable":
             embed = Embed(
@@ -166,9 +163,7 @@ class UserCommands(Extension):
         """Provide autocomplete options for DM settings type."""
         await ctx.send(
             choices=[
-                {"name": "Update Logs", "value": "updates"},
-                {"name": "Points earned", "value": "points"},
-                {"name": "Both", "value": "both"}
+                {"name": "Account name changes", "value": "account_changes"},
             ]
         )
 

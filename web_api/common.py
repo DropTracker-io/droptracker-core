@@ -222,6 +222,41 @@ def cache_set(key: str, value: Any):
 
 
 # --------------------------------------------------------------------------- #
+# Privacy: players excluded from all public surfaces (leaderboards, search,
+# profiles, live feed). A player is hidden when its own `players.hidden` flag
+# is set (bot `/hideme <account>`, web per-account toggle) or when the owning
+# user opted out entirely (`users.hidden`; bot `/hideme all`, web "Hidden").
+# --------------------------------------------------------------------------- #
+_HIDDEN_TTL = 60.0
+
+
+def hidden_player_ids() -> set:
+    """Set of player ids to omit from public reads. Cached in-process ~60s."""
+    cached = cache_get("privacy:hidden_pids", _HIDDEN_TTL)
+    if cached is not None:
+        return cached
+    from sqlalchemy import or_
+
+    from db import Player, User
+
+    out: set = set()
+    try:
+        with db_session() as s:
+            rows = (
+                s.query(Player.player_id)
+                .outerjoin(User, User.user_id == Player.user_id)
+                .filter(or_(Player.hidden.is_(True), User.hidden.is_(True)))
+                .all()
+            )
+            out = {int(pid) for (pid,) in rows}
+    except Exception:
+        # Fail open: never let the privacy filter take down public reads.
+        out = set()
+    cache_set("privacy:hidden_pids", out)
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # RFC-7807 problem responses (FRONTEND_PLAN.md §6.5 error envelope).
 # --------------------------------------------------------------------------- #
 def problem(status: int, title: str, detail: Optional[str] = None):

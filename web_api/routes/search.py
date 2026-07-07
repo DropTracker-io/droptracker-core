@@ -10,7 +10,7 @@ import asyncio
 
 from quart import Blueprint, jsonify, request
 
-from db import Player, Group
+from db import Player, Group, User
 from web_api.common import (
     db_session,
     money,
@@ -25,9 +25,14 @@ LIMIT_EACH = 10
 
 
 def _search_players(s, q, partition):
+    # Privacy: skip hidden accounts and accounts of hidden users. IS NOT TRUE
+    # keeps rows with NULL flags / no owning user.
     rows = (
         s.query(Player.player_id, Player.player_name)
+        .outerjoin(User, User.user_id == Player.user_id)
         .filter(Player.player_name.ilike(f"%{q}%"))
+        .filter(Player.hidden.isnot(True))
+        .filter(User.hidden.isnot(True))
         .order_by(Player.player_name.asc())
         .limit(LIMIT_EACH)
         .all()

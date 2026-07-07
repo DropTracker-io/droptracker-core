@@ -17,9 +17,30 @@ import os
 
 from quart import Blueprint, Response, jsonify, request
 
+from web_api.common import hidden_player_ids
 from web_api.deps import optional_user_id
 
 realtime_bp = Blueprint("v1_realtime", __name__)
+
+
+async def _is_hidden_event(frame: str) -> bool:
+    """True when an rt:* frame belongs to a hidden player (privacy filter for
+    the live feed/leaderboard deltas). Best-effort: unparseable or player-less
+    frames pass through."""
+    try:
+        envelope = json.loads(frame)
+        # Only these carry a player id in `data` ("id"/"player_id" mean other
+        # entities on announcement/event_update frames).
+        if envelope.get("type") not in ("drop", "leaderboard_delta"):
+            return False
+        data = envelope.get("data") or {}
+        pid = data.get("player_id", data.get("id"))
+        if not isinstance(pid, int):
+            return False
+        hidden = await asyncio.to_thread(hidden_player_ids)
+        return pid in hidden
+    except Exception:
+        return False
 
 _HEARTBEAT_SECONDS = 20
 _MAX_CHANNELS = 24
@@ -80,10 +101,13 @@ async def feed_recent():
         except Exception:
             pass
 
+    hidden = await asyncio.to_thread(hidden_player_ids)
     events = []
     for item in raw:
         try:
             data = json.loads(item)
+            if data.get("player_id") in hidden:
+                continue
             events.append({"v": 1, "type": "drop", "scope": "feed", "data": data})
         except Exception:
             continue
@@ -115,6 +139,8 @@ async def stream():
                     data = message.get("data")
                     if isinstance(data, (bytes, bytearray)):
                         data = data.decode("utf-8", "ignore")
+                    if await _is_hidden_event(data):
+                        continue
                     yield f"data: {data}\n\n".encode("utf-8")
 
                 now = asyncio.get_event_loop().time()

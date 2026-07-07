@@ -679,10 +679,10 @@ def get_formatted_name(player_name:str, group_id: int, existing_session = None):
     url_name = formatted_name
     if player.user:
         user: User = db_session.query(User).filter(User.user_id == player.user.user_id).first()
-        if user:
+        if user and not user.never_ping:
             if group_id == 2 and user.global_ping:
                 formatted_name = f"<@{user.discord_id}> ({url_name})"
-            elif user.group_ping:
+            elif group_id != 2 and user.group_ping:
                 formatted_name = f"<@{user.discord_id}> ({url_name})"
     return formatted_name
     
