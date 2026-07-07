@@ -40,7 +40,7 @@ from .premium_features import (
     PointCredit, 
     PointDebit, 
     RecurringPointGrant)
-from .tickets import Ticket
+from .tickets import Ticket, TicketMessage
 from .group_points import PlayerPoints, GroupPointConfig, GroupPointMods, GroupPointTimedEvent, GroupPointBlacklist
 from .video_upload import VideoUpload
 from .seasonal_drop import SeasonalDrop
@@ -133,6 +133,7 @@ __all__ = [
     "get_current_partition",
     "LootboardStyle",
     "Ticket",
+    "TicketMessage",
     "PlayerPoints",
     "GroupPointConfig",
     "GroupPointMods",

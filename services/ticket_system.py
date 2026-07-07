@@ -3,14 +3,134 @@ import time
 from datetime import datetime
 import interactions
 from sqlalchemy import text
-from interactions import Button, ButtonStyle, ComponentContext, Embed, Extension, OverwriteType, Permissions, slash_command, slash_option, OptionType, SlashContext, listen
-from interactions.api.events import MessageCreate, Component
+from interactions import Button, ButtonStyle, ComponentContext, Embed, Extension, IntervalTrigger, OverwriteType, Permissions, Task, slash_command, slash_option, OptionType, SlashContext, listen
+from interactions.api.events import MessageCreate, MessageUpdate, Component, Startup
 
 from commands import try_create_user
 from db.models import Drop, Group, Player, Ticket, User, Session, user_group_association
+from services.ticket_transcripts import (
+    backfill_open_tickets,
+    close_and_archive,
+    upsert_message,
+)
 from utils.redis import redis_client
 
 class Tickets(Extension):
+    def __init__(self, bot):
+        # channel_id (str) -> ticket_id for open tickets; kept warm by the
+        # 15s task so the MessageCreate hot path never queries the DB for
+        # non-ticket channels.
+        self.ticket_channel_cache: dict[str, int] = {}
+        self._started = False
+        # webhook_bot loads this extension INSIDE its own Startup handler, so
+        # a @listen(Startup) here would register after the event already
+        # fired and never run. Instead defer via a task that waits for ready
+        # (returns immediately when the bot is already up).
+        asyncio.create_task(self._deferred_start())
+
+    async def _deferred_start(self):
+        try:
+            await self.bot.wait_until_ready()
+        except Exception as e:
+            print(f"[tickets] wait_until_ready failed: {e}")
+        if self._started:
+            return
+        self._started = True
+        self._refresh_ticket_cache()
+        self.process_ticket_maintenance.start()
+        print(f"[tickets] extension started; tracking {len(self.ticket_channel_cache)} open ticket channels")
+        # Sync history for all open tickets (idempotent) — heals any gap from
+        # downtime and seeds transcripts for tickets that predate archiving.
+        asyncio.create_task(backfill_open_tickets(self.bot))
+
+    @listen(Startup)
+    async def _tickets_startup(self, event: Startup):
+        # Only fires if the extension is ever loaded before Startup; the
+        # deferred-start guard makes double-fire harmless.
+        await self._deferred_start()
+
+    def _refresh_ticket_cache(self):
+        local_session = Session()
+        try:
+            rows = (
+                local_session.query(Ticket.channel_id, Ticket.ticket_id)
+                .filter(Ticket.status.in_(["open", "close_requested"]))
+                .all()
+            )
+            self.ticket_channel_cache = {str(c): t for c, t in rows}
+        except Exception as e:
+            print(f"Error refreshing ticket cache: {e}")
+        finally:
+            local_session.close()
+
+    @Task.create(IntervalTrigger(seconds=15))
+    async def process_ticket_maintenance(self):
+        """Refresh the channel cache and act on web-requested closes.
+
+        The admin dashboard (web_api PATCH /admin/tickets/{id}) flips a
+        ticket to status='close_requested'; this loop archives the channel,
+        marks it closed, and deletes the channel.
+        """
+        self._refresh_ticket_cache()
+        local_session = Session()
+        try:
+            pending = (
+                local_session.query(Ticket)
+                .filter(Ticket.status == "close_requested")
+                .all()
+            )
+            for t in pending:
+                local_session.expunge(t)
+        except Exception as e:
+            print(f"Error reading close_requested tickets: {e}")
+            pending = []
+        finally:
+            local_session.close()
+        for ticket in pending:
+            closer_name = "site staff"
+            if ticket.closed_by is not None:
+                s = Session()
+                try:
+                    closer = s.query(User).filter(User.user_id == ticket.closed_by).first()
+                    if closer is not None and closer.username:
+                        closer_name = closer.username
+                finally:
+                    s.close()
+            await close_and_archive(
+                self.bot,
+                ticket.ticket_id,
+                closed_by_user_id=ticket.closed_by,
+                closed_by_name=closer_name,
+                reason="closed from the web dashboard",
+            )
+
+    @listen(MessageCreate)
+    async def _mirror_ticket_message(self, event: MessageCreate):
+        await self._mirror(event.message)
+
+    @listen(MessageUpdate)
+    async def _mirror_ticket_edit(self, event: MessageUpdate):
+        if event.after is not None:
+            await self._mirror(event.after)
+
+    async def _mirror(self, message):
+        if message is None or getattr(message, "channel", None) is None:
+            return
+        ticket_id = self.ticket_channel_cache.get(str(message.channel.id))
+        if ticket_id is None:
+            return
+        local_session = Session()
+        try:
+            ticket = local_session.query(Ticket).filter(Ticket.ticket_id == ticket_id).first()
+            if ticket is None:
+                return
+            local_session.expunge(ticket)
+        finally:
+            local_session.close()
+        try:
+            await upsert_message(ticket, message)
+        except Exception as e:
+            print(f"Error mirroring ticket message: {e}")
     @slash_command(name="close",
                    description="Close a ticket")
     async def close_ticket(self, ctx: SlashContext):
@@ -34,18 +154,26 @@ class Tickets(Extension):
                 embed = Embed(description=":warning: This is not a ticket channel owned by the DropTracker ticket system.")
                 await ctx.send(embeds=[embed])
                 return
-            ticket.status = "closed"
-            ticket.last_reply_uid = author.id
-            local_session.commit()
-            await ctx.send(f"Ticket #{ticket.ticket_id} closed...")
-            await asyncio.sleep(5)
-            await ctx.channel.delete()
+            ticket_id = ticket.ticket_id
+            closer = local_session.query(User).filter_by(discord_id=str(author.id)).first()
+            closer_user_id = closer.user_id if closer else None
         except Exception as e:
             local_session.rollback()
             print(f"Error closing ticket: {e}")
             raise
         finally:
             local_session.close()
+        await ctx.send(f"Ticket #{ticket_id} is being archived and closed...")
+        ok = await close_and_archive(
+            self.bot,
+            ticket_id,
+            closed_by_user_id=closer_user_id,
+            closed_by_name=author.display_name or author.username,
+        )
+        if not ok:
+            await ctx.channel.send(
+                ":warning: Archiving the conversation failed, so the ticket was **not** closed. Please try again."
+            )
 
     @listen(Component)
     async def on_component(self, event: Component):
@@ -87,18 +215,26 @@ class Tickets(Extension):
                         embed = Embed(description=":warning: This is not a ticket channel owned by the DropTracker ticket system.")
                         await event.ctx.send(embeds=[embed])
                         return
-                    await event.ctx.send(f"Closing ticket #{ticket.ticket_id}...")
-                    await asyncio.sleep(5)
-                    ticket.status = "closed"
-                    ticket.last_reply_uid = author.id
-                    local_session.commit()
-                    await event.ctx.channel.delete()
+                    ticket_id = ticket.ticket_id
+                    closer = local_session.query(User).filter_by(discord_id=str(author.id)).first()
+                    closer_user_id = closer.user_id if closer else None
                 except Exception as e:
                     local_session.rollback()
                     print(f"Error in close ticket component: {e}")
                     raise
                 finally:
                     local_session.close()
+                await event.ctx.send(f"Ticket #{ticket_id} is being archived and closed...")
+                ok = await close_and_archive(
+                    self.bot,
+                    ticket_id,
+                    closed_by_user_id=closer_user_id,
+                    closed_by_name=author.display_name or author.username,
+                )
+                if not ok:
+                    await event.ctx.channel.send(
+                        ":warning: Archiving the conversation failed, so the ticket was **not** closed. Please try again."
+                    )
                 
         except Exception as e:
             print(f"Error in ticket component handler: {e}")
@@ -165,6 +301,9 @@ class Tickets(Extension):
             )
             local_session.add(ticket)
             local_session.commit()
+            # Mirror messages in this channel immediately (don't wait for the
+            # 15s cache refresh).
+            self.ticket_channel_cache[str(ticket_channel.id)] = ticket.ticket_id
             
             # Respond to the interaction immediately to prevent timeout
             await ctx.send(

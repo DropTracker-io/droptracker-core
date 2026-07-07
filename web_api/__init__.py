@@ -41,6 +41,7 @@ from web_api.routes.realtime import realtime_bp
 from web_api.routes.search import search_bp
 from web_api.routes.submissions import submissions_bp
 from web_api.routes.subscriptions import subscriptions_bp
+from web_api.routes.tickets import tickets_bp
 
 API_PREFIX = "/api/v1"
 
@@ -140,6 +141,7 @@ def create_app() -> Quart:
     app.register_blueprint(realtime_bp, url_prefix=API_PREFIX)
     app.register_blueprint(submissions_bp, url_prefix=API_PREFIX)
     app.register_blueprint(subscriptions_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(tickets_bp, url_prefix=API_PREFIX)
 
     return app
 
