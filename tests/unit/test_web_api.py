@@ -268,3 +268,24 @@ class TestApp:
         for path in ["/api/v1/subscriptions/tiers", "/api/v1/events", "/api/v1/announcements"]:
             r = await client.get(path)
             assert r.status_code != 401, f"{path} unexpectedly gated"
+
+
+class TestProfileStatHelpers:
+    """Pure helpers behind the group/player profile stat blocks."""
+
+    def test_previous_partition_mid_year(self):
+        from web_api.routes.profiles import _previous_partition
+
+        assert _previous_partition(202607) == 202606
+
+    def test_previous_partition_january_wraps(self):
+        from web_api.routes.profiles import _previous_partition
+
+        assert _previous_partition(202601) == 202512
+
+    def test_convert_from_ms_formats(self):
+        from web_api.routes.profiles import _convert_from_ms
+
+        assert _convert_from_ms(58800) == "0:58.8"
+        assert _convert_from_ms(872000) == "14:32.0"
+        assert _convert_from_ms(3_723_400) == "1:02:03.4"

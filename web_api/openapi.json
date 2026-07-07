@@ -313,6 +313,58 @@
           "name": { "type": "string" }
         }
       },
+      "TopBoss": {
+        "type": "object",
+        "required": ["npc_id", "name", "loot", "drops"],
+        "properties": {
+          "npc_id": { "type": "integer" },
+          "name": { "type": "string" },
+          "loot": { "$ref": "#/components/schemas/Money" },
+          "drops": { "type": "integer" }
+        }
+      },
+      "GroupTopPlayer": {
+        "type": "object",
+        "required": ["rank", "id", "name", "loot"],
+        "properties": {
+          "rank": { "type": "integer" },
+          "id": { "type": "integer" },
+          "name": { "type": "string" },
+          "loot": { "$ref": "#/components/schemas/Money" }
+        }
+      },
+      "GroupRecord": {
+        "type": "object",
+        "required": ["npc_id", "boss", "time_ms", "time_display", "team_size", "holder", "date_ts"],
+        "properties": {
+          "npc_id": { "type": "integer" },
+          "boss": { "type": "string" },
+          "time_ms": { "type": "integer" },
+          "time_display": { "type": "string" },
+          "team_size": { "type": "string" },
+          "holder": {
+            "type": "object",
+            "required": ["id", "name"],
+            "properties": {
+              "id": { "type": "integer" },
+              "name": { "type": "string" }
+            }
+          },
+          "date_ts": { "type": "integer", "description": "Unix seconds the record was set." }
+        }
+      },
+      "PersonalBestSummary": {
+        "type": "object",
+        "required": ["npc_id", "boss", "time_ms", "time_display", "team_size", "date_ts"],
+        "properties": {
+          "npc_id": { "type": "integer" },
+          "boss": { "type": "string" },
+          "time_ms": { "type": "integer" },
+          "time_display": { "type": "string" },
+          "team_size": { "type": "string" },
+          "date_ts": { "type": "integer" }
+        }
+      },
       "PlayerProfile": {
         "allOf": [
           { "$ref": "#/components/schemas/PlayerSummary" },
@@ -321,6 +373,19 @@
             "properties": {
               "points": { "type": "integer" },
               "top_npc": { "type": "string" },
+              "previous_month_loot": { "$ref": "#/components/schemas/Money" },
+              "ranked_players": {
+                "type": "integer",
+                "description": "Total players on the global board, for percentile context."
+              },
+              "top_bosses": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/TopBoss" }
+              },
+              "personal_bests": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/PersonalBestSummary" }
+              },
               "groups": {
                 "type": "array",
                 "items": { "$ref": "#/components/schemas/GroupMembership" }
@@ -345,6 +410,18 @@
           "monthly_loot": { "$ref": "#/components/schemas/Money" },
           "discord_url": { "type": "string" },
           "top_player": { "$ref": "#/components/schemas/PlayerSummary" },
+          "top_players": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/GroupTopPlayer" }
+          },
+          "top_bosses": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/TopBoss" }
+          },
+          "records": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/GroupRecord" }
+          },
           "recent_submissions": {
             "type": "array",
             "items": { "$ref": "#/components/schemas/Submission" }
