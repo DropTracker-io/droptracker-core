@@ -48,6 +48,13 @@ ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
         "help": "Customize the Discord embeds the bot posts for drops, collection logs, personal bests, combat achievements, pets and the lootboard.",
         "default": False,
     },
+    {
+        "key": "video_submissions",
+        "label": "Video submissions",
+        "category": "features",
+        "help": "Members can capture and upload short video clips of drops, personal bests and other achievements instead of screenshots.",
+        "default": False,
+    },
 ]
 
 _BY_KEY = {f["key"]: f for f in ENTITLEMENT_FIELDS}

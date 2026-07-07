@@ -72,19 +72,24 @@ def backend_for_video_record(video_record) -> str:
     return normalize_backend(getattr(video_record, "storage_backend", None))
 
 
+# The production B2 application key is restricted to object names starting
+# with "dt_" (key namePrefix). Keys outside that namespace fail every
+# read/write with 403 "not entitled", so all pipeline keys must live under it.
 def build_raw_key(player_id: int, video_uuid: str, fps: int) -> str:
-    return f"raw/{player_id}/{video_uuid}_fps{fps}.mjpeg"
+    return f"dt_raw/{player_id}/{video_uuid}_fps{fps}.mjpeg"
 
 
 def derive_final_key(raw_key: str) -> str:
     import re
 
     key = raw_key
-    if key.startswith("raw/"):
-        key = key[4:]
+    for prefix in ("dt_raw/", "raw/"):
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+            break
     key = re.sub(r"_fps\d+\.mjpeg$", ".mp4", key)
     key = re.sub(r"\.mjpeg$", ".mp4", key)
-    return f"videos/{key}"
+    return f"dt_videos/{key}"
 
 
 def _safe_join(base_dir: str, relative_path: str) -> str:
@@ -100,12 +105,14 @@ def resolve_internal_path(object_key: str, backend: str | None = None) -> str:
     if backend_name != "local":
         return ""
 
-    if object_key.startswith("raw/"):
-        rel = object_key[len("raw/"):]
-        return _safe_join(VIDEO_LOCAL_RAW_DIR, rel)
-    if object_key.startswith("videos/"):
-        rel = object_key[len("videos/"):]
-        return _safe_join(VIDEO_LOCAL_FINAL_DIR, rel)
+    for prefix in ("dt_raw/", "raw/"):
+        if object_key.startswith(prefix):
+            rel = object_key[len(prefix):]
+            return _safe_join(VIDEO_LOCAL_RAW_DIR, rel)
+    for prefix in ("dt_videos/", "videos/"):
+        if object_key.startswith(prefix):
+            rel = object_key[len(prefix):]
+            return _safe_join(VIDEO_LOCAL_FINAL_DIR, rel)
 
     # Fallback for unknown prefixes
     return _safe_join(VIDEO_LOCAL_ROOT, object_key)

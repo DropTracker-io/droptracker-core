@@ -153,7 +153,9 @@ async def uploads_presign():
     content_type = (request.args.get("content_type") or "image/png").lower()
     kind = (request.args.get("kind") or "image").lower()
     ext = _CONTENT_TYPE_EXT.get(content_type, "png" if kind == "image" else "bin")
-    key = f"uploads/{uuid.uuid4().hex}.{ext}"
+    # The B2 application key is namePrefix-restricted to "dt_" — keys outside
+    # that namespace fail with 403 "not entitled".
+    key = f"dt_uploads/{uuid.uuid4().hex}.{ext}"
 
     def _presign():
         from utils.b2_storage import generate_presigned_upload_url

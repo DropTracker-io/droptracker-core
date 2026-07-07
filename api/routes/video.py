@@ -19,6 +19,7 @@ from sqlalchemy.sql import text
 
 from api.core import logger, get_db_session, metrics, reset_db_connections
 from db import Player
+from db.entitlements import group_has_entitlement
 from db.models import Group, user_group_association
 from db.models.video_upload import VideoUpload
 from utils.b2_storage import (
@@ -47,19 +48,41 @@ VIDEO_LOCAL_MAX_UPLOAD_BYTES = max(
 
 use_b2 = True ## TODO -- decide if b2 is long-term or not  
 
+def _group_grants_video_uploads(group_id: int, db_session) -> bool:
+    """
+    Whether a group unlocks video uploads.
+
+    Primary: the ``video_submissions`` entitlement resolved from the group's
+    active subscription tier (``group_subscriptions`` → ``subscription_tiers``).
+    Fallback: the legacy XenForo group upgrade table, which predates the
+    subscription migration (upgrade ids > 2 were the tier-3 products).
+    """
+    if group_has_entitlement(group_id, "video_submissions"):
+        return True
+    try:
+        premium_status = db_session.execute(
+            text(
+                "SELECT 1 FROM xenforo.xf_dt_group_upgrade_active "
+                "WHERE group_id = :group_id AND is_cancelled = 0 AND group_upgrade_id > 2 LIMIT 1"
+            ),
+            {"group_id": group_id},
+        ).first()
+        if premium_status:
+            return True
+    except Exception as e:
+        print(f"[Video] Error checking legacy premium status: {e}")
+    return False
+
+
 def _get_daily_limit_for_group(group_id: int, db_session) -> int:
     """
-    Determine the daily video upload limit for a player.
-    
-    Checks if the player (or any of their groups) has an active premium
-    feature activation for video uploads. Falls back to the free tier limit.
+    Determine the daily video upload limit for a group.
+
+    Groups that unlock video uploads get the premium daily limit; anything
+    else falls back to the free tier limit.
     """
-    try:
-        premium_status = db_session.execute(text("SELECT * FROM xenforo.xf_dt_group_upgrade_active WHERE group_id = :group_id AND is_cancelled = 0 AND group_upgrade_id > 2"), {"group_id": group_id}).first()
-        if premium_status:
-            return VIDEO_DAILY_LIMIT_PREMIUM
-    except Exception as e:
-        print(f"[Video] Error checking premium status: {e}")
+    if _group_grants_video_uploads(group_id, db_session):
+        return VIDEO_DAILY_LIMIT_PREMIUM
     return VIDEO_DAILY_LIMIT_FREE
 
 
@@ -127,23 +150,13 @@ def _get_player_groups(db_session, player_id: int) -> list[Group]:
 
 def _has_premium_for_uploads(player, db_session) -> Group:
     """
-    Check if the player is part of a group with an active premium group upgrade
-    that grants access to video uploads.
-
-    Note: In production, `xenforo.xf_dt_group_upgrade_active.group_upgrade_id` is not
-    necessarily "3" for tier 3. We treat any upgrade id > 2 as premium access, to
-    match `_get_daily_limit_for_group()`.
+    Return the first of the player's groups that unlocks video uploads
+    (``video_submissions`` entitlement, with legacy XenForo upgrade fallback),
+    or None when no group qualifies.
     """
     player_groups = _get_player_groups(db_session, player.player_id)
     for group in player_groups:
-        premium_status = db_session.execute(
-            text(
-                "SELECT * FROM xenforo.xf_dt_group_upgrade_active "
-                "WHERE group_id = :group_id AND is_cancelled = 0 AND group_upgrade_id > 2"
-            ),
-            {"group_id": group.group_id},
-        ).first()
-        if premium_status:
+        if _group_grants_video_uploads(group.group_id, db_session):
             return group
     return None ## No premium group found
 
@@ -168,9 +181,17 @@ async def _resolve_upload_context(db_session, acc_hash: str):
         lambda: _has_premium_for_uploads(player, db_session)
     )
     if not premium_group:
+        # The plugin surfaces an in-game upsell only when the 402 body has a
+        # "message" containing "missing upgrade" — keep that substring intact.
         return None, None, None, None, (
             jsonify(
-                {"error": "Player is not a member of a group who has subscribed for access to video uploads."}
+                {
+                    "error": "Player is not a member of a group who has subscribed for access to video uploads.",
+                    "message": (
+                        "missing upgrade: video capture requires membership in a group "
+                        "with an active tier 3 subscription."
+                    ),
+                }
             ),
             402,
         )

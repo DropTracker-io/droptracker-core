@@ -27,8 +27,8 @@ class VideoUpload(Base):
     Attributes:
         id (int): Primary key, auto-incrementing identifier
         player_id (int): Foreign key to the player who uploaded the video
-        video_key (str): Unique object key in B2 storage (e.g. "raw/12345/uuid_fps20.mjpeg")
-        final_key (str): Object key of the processed MP4 (e.g. "videos/12345/uuid.mp4")
+        video_key (str): Unique object key in B2 storage (e.g. "dt_raw/12345/uuid_fps20.mjpeg")
+        final_key (str): Object key of the processed MP4 (e.g. "dt_videos/12345/uuid.mp4")
         video_url (str): Public CDN URL of the final processed video
         fps (int): Frame rate of the video (extracted from filename)
         status (str): Current status in the pipeline:
