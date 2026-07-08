@@ -260,11 +260,61 @@ def resolve_group_entitlements(s, group_id: int) -> Dict[str, Any]:
     return resolve_tier_entitlements(stored)
 
 
-def resolve_user_entitlements(s, user_id: int) -> Dict[str, Any]:
-    """Resolved supporter entitlement map for ``user_id`` from user_subscriptions.
+# Badge-linked complimentary grant: users holding an active badge with this
+# key (on any of their players) receive the benefits of the tier below WITHOUT
+# a subscription row — they can still subscribe normally, and revoking the
+# badge removes the benefits at the next resolution (caches expire in ≤60s).
+_COMP_BADGE_KEY = os.getenv("SUPPORTER_COMP_BADGE_KEY", "bug_tester_helper").strip()
+_COMP_TIER_KEY = os.getenv("SUPPORTER_COMP_TIER_KEY", "supporter").strip()
 
-    No fallback tier: users without a live supporter subscription get the
-    restrictive user-scope defaults (everything off).
+
+def _complimentary_badge_entitlements(s, user_id: int) -> Optional[Dict[str, Any]]:
+    """Supporter-tier entitlement map when the user holds the comp badge."""
+    if not _COMP_BADGE_KEY or not _COMP_TIER_KEY:
+        return None
+    try:
+        from db.models import Player
+        from db.models.badge import Badge, PlayerBadge
+        from db.models.subscriptions import SubscriptionTier
+
+        held = (
+            s.query(PlayerBadge.id)
+            .join(Badge, Badge.badge_id == PlayerBadge.badge_id)
+            .join(Player, Player.player_id == PlayerBadge.player_id)
+            .filter(
+                Player.user_id == user_id,
+                Badge.key == _COMP_BADGE_KEY,
+                Badge.active == True,  # noqa: E712
+                PlayerBadge.status == "active",
+            )
+            .first()
+        )
+        if held is None:
+            return None
+        tier = (
+            s.query(SubscriptionTier)
+            .filter(SubscriptionTier.key == _COMP_TIER_KEY)
+            .first()
+        )
+        if tier is None:
+            return None
+        stored = parse_stored_entitlements(tier.entitlements, "user")
+        return resolve_tier_entitlements(stored, "user")
+    except Exception:
+        # Fail closed: a lookup error must not unlock (or crash resolution of)
+        # premium behavior.
+        return None
+
+
+def resolve_user_entitlements(s, user_id: int) -> Dict[str, Any]:
+    """Resolved supporter entitlement map for ``user_id``.
+
+    Sources, merged permissively (a capability granted by either is granted):
+      1. A live user_subscriptions row → its tier's entitlements.
+      2. The complimentary badge grant (active Bug Tester badge).
+
+    No fallback tier: users with neither get the restrictive user-scope
+    defaults (everything off).
     """
     from db.models.subscriptions import SubscriptionTier, UserSubscription
 
@@ -281,10 +331,20 @@ def resolve_user_entitlements(s, user_id: int) -> Dict[str, Any]:
             .first()
         )
     if tier is None:
-        return default_entitlements("user")
+        base = default_entitlements("user")
+    else:
+        stored = parse_stored_entitlements(tier.entitlements, "user")
+        base = resolve_tier_entitlements(stored, "user")
 
-    stored = parse_stored_entitlements(tier.entitlements, "user")
-    return resolve_tier_entitlements(stored, "user")
+    grant = _complimentary_badge_entitlements(s, user_id)
+    if grant:
+        for key, value in grant.items():
+            current = base.get(key)
+            if isinstance(value, bool):
+                base[key] = bool(current) or value
+            else:
+                base[key] = max(int(current or 0), int(value))
+    return base
 
 
 # --------------------------------------------------------------------------- #

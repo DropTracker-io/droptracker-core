@@ -1262,9 +1262,13 @@ async def admin_award_badge(player_id: int):
                 "player_id": player_id,
                 "player_name": player.player_name,
                 "note": note,
+                "_user_id": player.user_id,
             }
 
     after = await asyncio.to_thread(_apply)
+    # Badges can carry entitlement grants (e.g. Bug Tester → supporter perks) —
+    # bust the owner's cached entitlements so the change is immediate here.
+    _invalidate_badge_user_entitlements(after.pop("_user_id", None))
     _audit(actor, "badge.award", f"player:{player_id}", after=json.dumps(after))
     return jsonify(after)
 
@@ -1298,8 +1302,23 @@ async def admin_revoke_badge(player_id: int, award_id: int):
             }
             revoke_badge(s, award)
             s.commit()
-            return before
+            owner = s.query(Player).filter(Player.player_id == player_id).first()
+            return before, (owner.user_id if owner else None)
 
-    before = await asyncio.to_thread(_apply)
+    before, owner_user_id = await asyncio.to_thread(_apply)
+    # Badge removal may withdraw an entitlement grant (Bug Tester → supporter
+    # perks) — bust the owner's cached entitlements so it applies immediately.
+    _invalidate_badge_user_entitlements(owner_user_id)
     _audit(actor, "badge.revoke", f"player:{player_id}", before=json.dumps(before))
     return jsonify({"ok": True})
+
+
+def _invalidate_badge_user_entitlements(user_id) -> None:
+    if not user_id:
+        return
+    try:
+        from db.entitlements import invalidate_user_entitlement_cache
+
+        invalidate_user_entitlement_cache(int(user_id))
+    except Exception:
+        pass
