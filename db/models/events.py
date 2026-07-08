@@ -162,6 +162,10 @@ class EventCompletion(Base):
     source_id = Column(BigInteger, nullable=True)
     submission_guid = Column(String(64), nullable=True)
     proof_url = Column(String(255), nullable=True)
+    # Canonical item name this row credited (item_collection matches). Drives
+    # distinct-item progress for all_of/assembly tasks — a 1,338-coins drop is
+    # still just "Coins". NULL on non-item rows and manual wildcard awards.
+    matched_target = Column(String(120), nullable=True)
     acted_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     note = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)

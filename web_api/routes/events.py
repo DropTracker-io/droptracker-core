@@ -473,6 +473,7 @@ async def get_event_team(event_id: int, team_id: int):
                     "player_name": player_names.get(c.player_id),
                     "quantity": int(c.quantity or 1),
                     "source_type": c.source_type,
+                    "matched_target": c.matched_target,
                     "created_at": _ts(c.created_at),
                 }
                 for c in applied[:50]

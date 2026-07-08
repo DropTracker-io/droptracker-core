@@ -40,17 +40,17 @@ class TestItemCollection:
     def test_exact_target_match_drop(self):
         t = _task(target="Abyssal whip", target_value=1)
         m = engine.match_task(t, _env("drop", {"item_name": "Abyssal whip", "quantity": 1}))
-        assert m == {"mode": "count", "quantity": 1}
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "Abyssal whip"}
 
     def test_case_and_whitespace_insensitive(self):
         t = _task(target="Abyssal Whip")
         m = engine.match_task(t, _env("drop", {"item_name": "  abyssal   WHIP ", "quantity": 2}))
-        assert m == {"mode": "count", "quantity": 2}
+        assert m == {"mode": "count", "quantity": 2, "matched_target": "abyssal   WHIP"}
 
     def test_clog_matches_with_quantity_one(self):
         t = _task(target="Dragon pickaxe")
         m = engine.match_task(t, _env("clog", {"item_name": "dragon pickaxe", "kc": 100}))
-        assert m == {"mode": "count", "quantity": 1}
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "dragon pickaxe"}
 
     def test_non_matching_item(self):
         t = _task(target="Abyssal whip")
@@ -63,7 +63,7 @@ class TestItemCollection:
     def test_any_of_config_list_of_strings(self):
         t = _task(config={"kind": "any_of", "any_of": ["Bandos chestplate", "Bandos tassets"]})
         m = engine.match_task(t, _env("drop", {"item_name": "bandos tassets", "quantity": 1}))
-        assert m == {"mode": "count", "quantity": 1}
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "bandos tassets"}
 
     def test_all_of_config_items_best_effort(self):
         t = _task(config={"kind": "all_of", "items": [
@@ -71,7 +71,7 @@ class TestItemCollection:
             {"item_name": "Ahrim's hood", "quantity": 1},
         ]}, target_value=2)
         m = engine.match_task(t, _env("drop", {"item_name": "AHRIM'S HOOD", "quantity": 1}))
-        assert m == {"mode": "count", "quantity": 1}
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "AHRIM'S HOOD"}
 
     def test_point_collection_credits_item_points(self):
         t = _task(config={"kind": "point_collection", "items": [
@@ -79,17 +79,17 @@ class TestItemCollection:
             {"item_name": "Dharok's greataxe", "points": 4.5},
         ]}, target_value=10)
         m = engine.match_task(t, _env("drop", {"item_name": "dharok's greataxe", "quantity": 2}))
-        assert m == {"mode": "count", "quantity": 9}  # round(4.5 * 2)
+        assert m == {"mode": "count", "quantity": 9, "matched_target": "dharok's greataxe"}  # round(4.5 * 2)
 
     def test_assembly_config_matches_listed_items(self):
         t = _task(config={"kind": "assembly", "items": [{"item_name": "Godsword shard 1"}]})
         m = engine.match_task(t, _env("drop", {"item_name": "Godsword shard 1"}))
-        assert m == {"mode": "count", "quantity": 1}
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "Godsword shard 1"}
 
     def test_drop_quantity_folded(self):
         t = _task(target="Cannonball")
         m = engine.match_task(t, _env("drop", {"item_name": "Cannonball", "quantity": 250}))
-        assert m == {"mode": "count", "quantity": 250}
+        assert m == {"mode": "count", "quantity": 250, "matched_target": "Cannonball"}
 
 
 # ── kc_target ─────────────────────────────────────────────────────────────────
@@ -233,3 +233,50 @@ class TestHelpers:
     def test_item_match_quantity_none_for_missing_name(self):
         assert engine.item_match_quantity(_task(target="Abyssal whip"), None) is None
         assert engine.item_match_quantity(_task(target="Abyssal whip"), "") is None
+
+
+# ── all_of / assembly distinct-item progress ─────────────────────────────────
+
+class _Row:
+    """Minimal EventCompletion stand-in for the pure rollup."""
+    def __init__(self, matched_target=None, quantity=1, source_type="drop"):
+        self.matched_target = matched_target
+        self.quantity = quantity
+        self.source_type = source_type
+
+
+class TestDistinctItemProgress:
+    def test_quantity_does_not_inflate_progress(self):
+        # The original bug: one 1,338-coins drop completed a 3-item collect-all.
+        rows = [_Row("Coins", quantity=1338)]
+        assert engine._distinct_progress_from_rows(rows, threshold=3) == 1
+
+    def test_distinct_items_counted_once_each(self):
+        rows = [
+            _Row("Bones", quantity=5),
+            _Row("Coins", quantity=1338),
+            _Row("bones", quantity=2),   # same item, different casing
+        ]
+        assert engine._distinct_progress_from_rows(rows, threshold=3) == 2
+
+    def test_completes_with_all_items(self):
+        rows = [_Row("Bones"), _Row("Coins"), _Row("Bronze axe")]
+        assert engine._distinct_progress_from_rows(rows, threshold=3) == 3
+
+    def test_manual_wildcard_rows_fill_by_quantity(self):
+        # "Mark complete" awards have no matched item; their quantity fills.
+        rows = [_Row("Bones"), _Row(None, quantity=2, source_type="manual")]
+        assert engine._distinct_progress_from_rows(rows, threshold=3) == 3
+
+    def test_wildcards_capped_at_threshold(self):
+        rows = [_Row(None, quantity=50, source_type="manual"), _Row("Bones")]
+        assert engine._distinct_progress_from_rows(rows, threshold=3) == 3
+
+    def test_bonus_rows_ignored(self):
+        rows = [_Row(None, quantity=10, source_type="bonus")]
+        assert engine._distinct_progress_from_rows(rows, threshold=3) == 0
+
+    def test_list_kind_helper(self):
+        assert engine._list_kind(_task(config={"kind": "all_of"})) == "all_of"
+        assert engine._list_kind(_task(config={})) is None
+        assert engine._list_kind(_task(config=None)) is None

@@ -230,6 +230,50 @@ def completion_threshold(task: dict) -> int:
         return 1
 
 
+def _list_kind(task: dict) -> Optional[str]:
+    """Item-list config kind (any_of/all_of/point_collection/assembly), if any."""
+    config = task.get("config") or {}
+    return config.get("kind") if isinstance(config, dict) else None
+
+
+def _distinct_item_progress(session, task: dict, team_id, include=None) -> int:
+    """all_of/assembly rollup: one unit per DISTINCT listed item collected
+    (quantity is irrelevant — a 1,338-coins drop is still just "Coins"), plus
+    manual wildcard rows (no matched item) counting their quantity each,
+    capped at the threshold so wildcard awards can't overshoot.
+
+    ``include`` folds a row not yet visible to the applied-status query (the
+    confirm flow applies before the caller flips ``pending`` → ``confirmed``).
+    """
+    from db.models import EventCompletion
+
+    rows = list(
+        session.query(EventCompletion)
+        .filter(EventCompletion.task_id == task["id"],
+                EventCompletion.team_id == team_id,
+                EventCompletion.status.in_(("auto", "confirmed", "manual")))
+        .all()
+    )
+    if include is not None and all(r.id != include.id for r in rows):
+        rows.append(include)
+    return _distinct_progress_from_rows(rows, completion_threshold(task))
+
+
+def _distinct_progress_from_rows(rows, threshold: int) -> int:
+    """Pure core of :func:`_distinct_item_progress` (unit-testable)."""
+    distinct: set = set()
+    wildcard = 0
+    for r in rows:
+        if (getattr(r, "source_type", None) or "") == "bonus":
+            continue
+        target = getattr(r, "matched_target", None)
+        if target:
+            distinct.add(_norm(target))
+        else:
+            wildcard += max(int(getattr(r, "quantity", 1) or 1), 1)
+    return min(len(distinct) + wildcard, threshold)
+
+
 def match_task(task: dict, envelope: dict) -> Optional[dict]:
     """Match one envelope against one task dict (pure; no I/O).
 
@@ -251,7 +295,10 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
         credit = item_match_quantity(task, data.get("item_name"), qty)
         if credit is None:
             return None
-        return {"mode": "count", "quantity": credit}
+        # The matched name rides along to the ledger row so all_of/assembly
+        # progress can count DISTINCT items rather than folding quantities.
+        return {"mode": "count", "quantity": credit,
+                "matched_target": str(data.get("item_name") or "").strip()[:120] or None}
 
     if task_type == "kc_target":
         if kind != "drop":
@@ -794,7 +841,12 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
             progress=0, completed=False)
         session.add(progress)
     already_completed = bool(progress.completed)
-    progress.progress = int(progress.progress or 0) + quantity
+    if _list_kind(task) in ("all_of", "assembly"):
+        # Distinct-item semantics: recompute from the applied ledger instead
+        # of folding quantity (which let one big stack complete the set).
+        progress.progress = _distinct_item_progress(session, task, team_id, include=completion)
+    else:
+        progress.progress = int(progress.progress or 0) + quantity
 
     result = {
         "kind": "progress",
@@ -884,7 +936,8 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
 
 def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
                  player_id: int, quantity: int, envelope: dict,
-                 cells: Optional[list] = None) -> Optional[dict]:
+                 cells: Optional[list] = None,
+                 matched_target: Optional[str] = None) -> Optional[dict]:
     """Insert the ledger row for a match (idempotent on
     (task, team, submission_guid)); apply effects unless it needs
     confirmation. Returns a result dict, or None on duplicate replay."""
@@ -906,6 +959,7 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
         source_id=data.get("source_id"),
         submission_guid=str(guid)[:64] if guid else None,
         proof_url=str(proof)[:255] if proof else None,
+        matched_target=matched_target,
     )
     try:
         with session.begin_nested():
@@ -990,7 +1044,8 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict) ->
                 quantity = xp_delta
             outcome = record_match(
                 session, redis_conn, event, task, team_id, player_id,
-                quantity, envelope, cells=state.cells_by_task.get(task["id"]))
+                quantity, envelope, cells=state.cells_by_task.get(task["id"]),
+                matched_target=match.get("matched_target"))
             if outcome is not None:
                 results.append(outcome)
     return results
@@ -1101,15 +1156,20 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
         return {"progress": None, "completed": None, "team_score": team_score,
                 "revoked_bonuses": [completion.note]}
 
-    survivors = (session.query(EventCompletion)
-                 .filter(EventCompletion.task_id == task["id"],
-                         EventCompletion.team_id == team_id,
-                         EventCompletion.status.in_(("auto", "confirmed", "manual")))
-                 .all())
-    new_progress = sum(
-        max(int(r.quantity or 1), 1) for r in survivors
-        if (r.source_type or "") != "bonus"
-    )
+    if _list_kind(task) in ("all_of", "assembly"):
+        # Distinct-item semantics (the revoked row is already excluded — its
+        # status flipped before this recompute).
+        new_progress = _distinct_item_progress(session, task, team_id)
+    else:
+        survivors = (session.query(EventCompletion)
+                     .filter(EventCompletion.task_id == task["id"],
+                             EventCompletion.team_id == team_id,
+                             EventCompletion.status.in_(("auto", "confirmed", "manual")))
+                     .all())
+        new_progress = sum(
+            max(int(r.quantity or 1), 1) for r in survivors
+            if (r.source_type or "") != "bonus"
+        )
 
     progress = (session.query(EventProgress)
                 .filter(EventProgress.task_id == task["id"],
