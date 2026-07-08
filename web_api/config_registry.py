@@ -84,7 +84,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "repost_lootboard", "type": "boolean", "default": False},
     {"key": "seasonal_boards", "type": "boolean", "default": False},
 
-    # --- Points ---
+    # --- Split tracking (GP only; point splitting lives in the points routes) ---
     {"key": "split_gp_tracking", "type": "boolean", "default": False},
 
     # --- Misc / integration ---
