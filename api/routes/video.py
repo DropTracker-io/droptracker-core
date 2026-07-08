@@ -19,7 +19,7 @@ from sqlalchemy.sql import text
 
 from api.core import logger, get_db_session, metrics, reset_db_connections
 from db import Player
-from db.entitlements import group_has_entitlement
+from db.entitlements import group_has_entitlement, user_has_entitlement
 from db.models import Group, user_group_association
 from db.models.video_upload import VideoUpload
 from utils.b2_storage import (
@@ -40,6 +40,8 @@ video_bp = Blueprint("video", __name__)
 # Daily video limits from environment (with sensible defaults)
 VIDEO_DAILY_LIMIT_FREE = int(os.getenv("VIDEO_DAILY_LIMIT_FREE", "50"))
 VIDEO_DAILY_LIMIT_PREMIUM = int(os.getenv("VIDEO_DAILY_LIMIT_PREMIUM", "100"))
+# Per-player daily cap for personal supporters (user-level video_submissions).
+VIDEO_DAILY_LIMIT_SUPPORTER = int(os.getenv("VIDEO_DAILY_LIMIT_SUPPORTER", "50"))
 # Hard cap for local test upload payloads to protect API memory/disk.
 VIDEO_LOCAL_MAX_UPLOAD_BYTES = max(
     1 * 1024 * 1024,
@@ -161,12 +163,27 @@ def _has_premium_for_uploads(player, db_session) -> Group:
     return None ## No premium group found
 
 
+def _user_grants_video_uploads(player) -> bool:
+    """Personal supporter path: the player's linked user carries the
+    user-level ``video_submissions`` entitlement, independent of any group."""
+    if not player.user_id:
+        return False
+    try:
+        return user_has_entitlement(player.user_id, "video_submissions")
+    except Exception:
+        return False
+
+
 async def _resolve_upload_context(db_session, acc_hash: str):
     """
-    Resolve player, premium group, and current quota usage.
+    Resolve player, granting scope, and current quota usage.
+
+    Video uploads unlock via EITHER a group subscription (shared group quota)
+    or the player's own supporter subscription (per-player quota).
 
     Returns:
         (player, premium_group, daily_limit, today_count, error_response)
+        premium_group is None on the personal-supporter path.
     """
     if not acc_hash:
         return None, None, None, None, (jsonify({"error": "Missing acc_hash parameter"}), 400)
@@ -180,28 +197,37 @@ async def _resolve_upload_context(db_session, acc_hash: str):
     premium_group = await asyncio.to_thread(
         lambda: _has_premium_for_uploads(player, db_session)
     )
-    if not premium_group:
+
+    if premium_group:
+        daily_limit = await asyncio.to_thread(
+            lambda: _get_daily_limit_for_group(premium_group.group_id, db_session)
+        )
+        today_count = await asyncio.to_thread(
+            lambda: _get_daily_upload_count_for_group(premium_group.group_id, db_session)
+        )
+        quota_owner = "Your group has"
+    elif await asyncio.to_thread(lambda: _user_grants_video_uploads(player)):
+        daily_limit = VIDEO_DAILY_LIMIT_SUPPORTER
+        today_count = await asyncio.to_thread(
+            lambda: _get_daily_upload_count(player.player_id, db_session)
+        )
+        quota_owner = "You have"
+    else:
         # The plugin surfaces an in-game upsell only when the 402 body has a
         # "message" containing "missing upgrade" — keep that substring intact.
         return None, None, None, None, (
             jsonify(
                 {
-                    "error": "Player is not a member of a group who has subscribed for access to video uploads.",
+                    "error": "Video uploads require a group subscription with video submissions, or a personal supporter subscription.",
                     "message": (
-                        "missing upgrade: video capture requires membership in a group "
-                        "with an active tier 3 subscription."
+                        "missing upgrade: video capture requires a group plan with video "
+                        "submissions, or your own supporter subscription "
+                        "(droptracker.io/premium)."
                     ),
                 }
             ),
             402,
         )
-
-    daily_limit = await asyncio.to_thread(
-        lambda: _get_daily_limit_for_group(premium_group.group_id, db_session)
-    )
-    today_count = await asyncio.to_thread(
-        lambda: _get_daily_upload_count_for_group(premium_group.group_id, db_session)
-    )
 
     if today_count >= daily_limit:
         return None, None, None, None, (
@@ -209,7 +235,7 @@ async def _resolve_upload_context(db_session, acc_hash: str):
                 {
                     "error": "Daily video limit reached",
                     "message": (
-                        f"Your group has used {today_count}/{daily_limit} video uploads today. "
+                        f"{quota_owner} used {today_count}/{daily_limit} video uploads today. "
                         "Using a screenshot."
                     ),
                     "screenshot_only": True,

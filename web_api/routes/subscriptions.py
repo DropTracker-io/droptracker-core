@@ -308,6 +308,7 @@ def _serialize_user_sub(user_id: int, sub: UserSubscription | None, entitlements
         "tier_key": sub.tier_key,
         "status": sub.status,
         "provider": sub.provider,
+        "amount_cents": int(sub.amount_cents) if sub.amount_cents else None,
         "current_period_end": int(sub.current_period_end.timestamp())
         if sub.current_period_end
         else None,
@@ -339,6 +340,10 @@ async def get_my_subscription():
     return private_no_store(jsonify(payload))
 
 
+# Sanity ceiling for pay-what-you-want amounts ($1,000/month).
+_PWYW_MAX_CENTS = 100_000
+
+
 @subscriptions_bp.post("/users/me/subscription/checkout")
 async def user_checkout():
     user_id = current_user_id()
@@ -346,6 +351,11 @@ async def user_checkout():
     tier_key = body.get("tier_key")
     if not tier_key:
         abort_problem(422, "Missing tier_key", "'tier_key' is required.")
+    amount_cents = body.get("amount_cents")
+    if amount_cents is not None and (
+        isinstance(amount_cents, bool) or not isinstance(amount_cents, int)
+    ):
+        abort_problem(422, "Invalid amount", "'amount_cents' must be an integer.")
 
     def _prepare():
         with db_session() as s:
@@ -363,10 +373,23 @@ async def user_checkout():
             )
             if not tier:
                 abort_problem(404, "Unknown tier", f"No active user tier '{tier_key}'.")
+            minimum = int(tier.price_cents or 0)
+            chosen = amount_cents if amount_cents is not None else minimum
+            if chosen < minimum:
+                abort_problem(
+                    422,
+                    "Amount below minimum",
+                    f"The minimum for this tier is {minimum} cents per {tier.interval}.",
+                )
+            if chosen > _PWYW_MAX_CENTS:
+                abort_problem(422, "Amount too large", f"The maximum is {_PWYW_MAX_CENTS} cents.")
             return {
                 "key": tier.key,
                 "interval": tier.interval,
                 "provider_price_id": tier.provider_price_id,
+                "currency": tier.currency,
+                "price_cents": minimum,
+                "amount_cents": chosen,
             }
 
     tier_snapshot = await asyncio.to_thread(_prepare)
@@ -375,9 +398,13 @@ async def user_checkout():
         key = tier_snapshot["key"]
         interval = tier_snapshot["interval"]
         provider_price_id = tier_snapshot["provider_price_id"]
+        currency = tier_snapshot["currency"]
+        price_cents = tier_snapshot["price_cents"]
 
     try:
-        result = await asyncio.to_thread(billing.start_user_checkout, user_id, _T(), None)
+        result = await asyncio.to_thread(
+            billing.start_user_checkout, user_id, _T(), None, tier_snapshot["amount_cents"]
+        )
     except Exception as e:
         abort_problem(502, "Checkout failed", str(e))
 
@@ -394,6 +421,7 @@ async def user_checkout():
                 sub.provider = apply["provider"]
                 sub.current_period_end = apply["current_period_end"]
                 sub.cancel_at_period_end = apply["cancel_at_period_end"]
+                sub.amount_cents = apply.get("amount_cents")
                 s.commit()
 
         await asyncio.to_thread(_persist)
@@ -506,6 +534,26 @@ async def billing_webhook():
     etype = event.get("type")
     obj = (event.get("data") or {}).get("object") or {}
 
+    def _extract_amount_cents() -> int | None:
+        """Best-effort recurring amount from Stripe payloads (PWYW capture)."""
+        try:
+            if etype == "checkout.session.completed":
+                total = obj.get("amount_total")
+                return int(total) if total else None
+            if str(etype).startswith("customer.subscription."):
+                items = ((obj.get("items") or {}).get("data")) or []
+                if items:
+                    price = items[0].get("price") or {}
+                    amt = price.get("unit_amount")
+                    if amt:
+                        return int(amt)
+                plan = obj.get("plan") or {}
+                amt = plan.get("amount")
+                return int(amt) if amt else None
+        except Exception:
+            pass
+        return None
+
     def _apply_fields(sub, meta: dict):
         if etype == "checkout.session.completed":
             sub.provider = "stripe"
@@ -544,6 +592,9 @@ async def billing_webhook():
                         s.add(sub)
                 if sub is not None:
                     _apply_fields(sub, meta)
+                    amt = _extract_amount_cents()
+                    if amt:
+                        sub.amount_cents = amt
                     s.commit()
                     _invalidate_user_entitlements(user_id)
                 return
@@ -581,6 +632,9 @@ async def billing_webhook():
                     if usub is None:
                         return
                     _apply_fields(usub, meta)
+                    amt = _extract_amount_cents()
+                    if amt:
+                        usub.amount_cents = amt
                     s.commit()
                     _invalidate_user_entitlements(usub.user_id)
                     return

@@ -80,12 +80,15 @@ def start_checkout(group_id: int, tier, subscription) -> dict:
         raise RuntimeError(f"Stripe checkout failed: {e}")
 
 
-def start_user_checkout(user_id: int, tier, subscription) -> dict:
+def start_user_checkout(user_id: int, tier, subscription, amount_cents: int | None = None) -> dict:
     """Begin (or switch to) a user-scoped supporter tier.
 
-    Same contract as ``start_checkout``: Stripe returns a hosted URL, manual
-    returns an ``apply`` dict for immediate in-DB activation.
+    Pay-what-you-want: ``amount_cents`` is the user's chosen recurring amount
+    (validated ≥ ``tier.price_cents`` by the route); ``None`` falls back to
+    the tier minimum. Same contract as ``start_checkout``: Stripe returns a
+    hosted URL, manual returns an ``apply`` dict for immediate activation.
     """
+    amount = int(amount_cents or tier.price_cents or 0)
     stripe = _stripe()
     if stripe is None:
         period = timedelta(days=365 if tier.interval == "year" else 30)
@@ -97,14 +100,34 @@ def start_user_checkout(user_id: int, tier, subscription) -> dict:
                 "provider": "manual",
                 "current_period_end": datetime.now() + period,
                 "cancel_at_period_end": False,
+                "amount_cents": amount,
             },
         }
 
     try:
         meta = {"scope": "user", "user_id": str(user_id), "tier_key": tier.key}
+        # Custom amounts need an ad-hoc recurring price. Reuse the tier's
+        # Stripe product when one exists so the dashboard stays tidy;
+        # otherwise let Stripe create a product inline.
+        price_data = {
+            "currency": (tier.currency or "USD").lower(),
+            "unit_amount": amount,
+            "recurring": {"interval": tier.interval or "month"},
+        }
+        product_id = None
+        if tier.provider_price_id:
+            try:
+                product_id = stripe.Price.retrieve(tier.provider_price_id).product
+            except Exception:
+                product_id = None
+        if product_id:
+            price_data["product"] = product_id
+        else:
+            price_data["product_data"] = {"name": f"DropTracker {tier.key} (supporter)"}
+
         session = stripe.checkout.Session.create(
             mode="subscription",
-            line_items=[{"price": tier.provider_price_id, "quantity": 1}],
+            line_items=[{"price_data": price_data, "quantity": 1}],
             success_url=f"{SITE_URL}/premium?checkout=success",
             cancel_url=f"{SITE_URL}/premium?checkout=cancel",
             metadata=meta,

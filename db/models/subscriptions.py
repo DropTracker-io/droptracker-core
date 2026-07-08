@@ -88,6 +88,9 @@ class UserSubscription(Base):
     status = Column(String(16), nullable=False, default="none")
     # none|active|trialing|past_due|canceled|expired
     provider = Column(String(16), nullable=True)  # stripe|paypal|manual
+    # Pay-what-you-want: the user's chosen monthly amount in minor units.
+    # The tier's price_cents is the MINIMUM; NULL = unknown (legacy rows).
+    amount_cents = Column(Integer, nullable=True)
     provider_customer_id = Column(String(120), nullable=True)
     provider_subscription_id = Column(String(120), nullable=True)
     current_period_end = Column(DateTime, nullable=True)

@@ -74,6 +74,13 @@ USER_ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
         "help": "A distinct supporter display style on your public profile and site listings.",
         "default": False,
     },
+    {
+        "key": "video_submissions",
+        "label": "Personal video submissions",
+        "category": "supporter",
+        "help": "Capture and upload short video clips of your own submissions, independent of whether any of your groups has video submissions enabled.",
+        "default": False,
+    },
 ]
 
 _BY_KEY = {f["key"]: f for f in ENTITLEMENT_FIELDS}
