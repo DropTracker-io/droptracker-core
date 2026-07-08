@@ -63,6 +63,10 @@ _DM_CONFIG_SETTINGS = [
 # Minimum drop value (GP) for dm_drop DMs; stored as an int string.
 _DM_MIN_VALUE_KEY = "dm_min_value"
 _DM_MIN_VALUE_MAX = 2_147_483_647
+# Set true by the bot when a DM bounces (Discord privacy settings); the site
+# shows a fix-it banner. Users may PATCH it false to dismiss; the bot clears
+# it automatically on the next successful DM.
+_DM_DELIVERY_ISSUE_KEY = "dm_delivery_issue"
 
 
 def _config_bool(s, user_id: int, key: str) -> bool:
@@ -118,6 +122,7 @@ def _settings_dict(s, user: User) -> dict:
         out[_DM_MIN_VALUE_KEY] = int(raw_min) if raw_min else 0
     except (TypeError, ValueError):
         out[_DM_MIN_VALUE_KEY] = 0
+    out[_DM_DELIVERY_ISSUE_KEY] = _config_bool(s, user.user_id, _DM_DELIVERY_ISSUE_KEY)
     out["supporter_entitlements"] = resolve_user_entitlements(s, user.user_id, user=user)
     out["players"] = [
         {"id": p.player_id, "name": p.player_name, "hidden": bool(p.hidden)}
@@ -237,6 +242,11 @@ async def patch_me():
             if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > _DM_MIN_VALUE_MAX:
                 abort_problem(422, "Invalid value", f"'{key}' must be a non-negative integer.")
             updates[key] = value
+        elif key == _DM_DELIVERY_ISSUE_KEY:
+            # Dismiss-only: the bot is the sole writer of `true`.
+            if value is not False:
+                abort_problem(422, "Invalid value", f"'{key}' can only be set to false (dismiss).")
+            updates[key] = value
         else:
             abort_problem(422, "Unknown setting", f"'{key}' is not a settable field.")
 
@@ -248,7 +258,7 @@ async def patch_me():
             for key, value in updates.items():
                 if key == _DM_MIN_VALUE_KEY:
                     _set_config_value(s, user.user_id, key, str(value))
-                elif key in _CONFIG_SETTINGS or key in _DM_CONFIG_SETTINGS:
+                elif key in _CONFIG_SETTINGS or key in _DM_CONFIG_SETTINGS or key == _DM_DELIVERY_ISSUE_KEY:
                     _set_config_bool(s, user.user_id, key, value)
                 else:
                     setattr(user, key, value)

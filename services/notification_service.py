@@ -2731,12 +2731,35 @@ class NotificationService:
                 return _skip("skipped: Discord user not found")
             await discord_user.send(embed=embed)
         except interactions.errors.Forbidden:
-            # User has DMs closed — don't fail (would ping group admins upstream).
+            # User has DMs closed — don't fail (would ping group admins
+            # upstream). Record it so the website can prompt them to open
+            # DMs from server members (cleared on the next successful DM).
+            self._set_dm_delivery_issue(db_session, user.user_id, True)
             return _skip("skipped: user's DMs are closed")
 
+        self._set_dm_delivery_issue(db_session, user.user_id, False)
         notification.status = 'sent'
         notification.processed_at = datetime.now()
         db_session.commit()
+
+    def _set_dm_delivery_issue(self, db_session, user_id: int, failed: bool) -> None:
+        """Maintain the `dm_delivery_issue` user config flag (site banner)."""
+        try:
+            row = db_session.query(UserConfiguration).filter(
+                UserConfiguration.user_id == user_id,
+                UserConfiguration.config_key == 'dm_delivery_issue'
+            ).first()
+            if failed:
+                if row is None:
+                    db_session.add(UserConfiguration(
+                        user_id=user_id, config_key='dm_delivery_issue', config_value='true'
+                    ))
+                else:
+                    row.config_value = 'true'
+            elif row is not None and str(row.config_value).lower() in ('true', '1'):
+                row.config_value = 'false'
+        except Exception:
+            pass
 
     def _build_submission_dm_embed(self, ntype: str, data: dict, db_session):
         """Small personal embed per submission type; None for unknown types."""

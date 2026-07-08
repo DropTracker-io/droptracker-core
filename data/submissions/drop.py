@@ -521,7 +521,6 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             group_points_awarded = int(group_points_result.get("receiver_points_awarded", 0))
             group_has_awarded_points = int(group_points_result.get("total_points_awarded", 0)) > 0
             awarded_members = group_points_result.get("awarded_members", []) or []
-            player_dm_sent = False
             if int(raw_drop_value) >= min_value_to_notify or (
                 send_stacks == True and int(drop_value) > min_value_to_notify
             ):
@@ -573,18 +572,6 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                     sent_group_notifications.append(group.group_name)
                     debug_print(f"Added {group.group_name} to notification list")
 
-                if player and player_dm_sent == False:
-                    if player.user:
-                        if is_user_dm_enabled(session, player.user_id, "dm_drops"):
-                            debug_print(f"Creating DM notification for user {player.user_id}")
-                            await create_notification(
-                                "dm_drop",
-                                player_id,
-                                notification_data,
-                                group_id,
-                                existing_session=session if use_external_session else None,
-                            )
-                            player_dm_sent = True
                 print(f"Creating group notification for {player_name} in group {group_id}")
                 await create_notification(
                     "drop",
@@ -607,6 +594,55 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                 debug_print(
                     f"Notification criteria NOT met for group {group_id} - skipping"
                 )
+        # --- Personal submission DM (supporter perk) -----------------------
+        # Queued ONCE per drop, OUTSIDE the group loop: the user's own
+        # dm_min_value is the only value filter. Group notification criteria
+        # (minimum_value_to_notify, screenshot requirements) must not gate a
+        # personal DM — that coupling silently dropped DMs for low-value
+        # drops. Entitlement + opt-in are checked in is_user_dm_enabled and
+        # re-checked at send time.
+        try:
+            if player and player.user and is_user_dm_enabled(session, player.user_id, "dm_drops"):
+                from db.models import UserConfiguration
+
+                min_dm_raw = (
+                    session.query(UserConfiguration.config_value)
+                    .filter(
+                        UserConfiguration.user_id == player.user_id,
+                        UserConfiguration.config_key == "dm_min_value",
+                    )
+                    .scalar()
+                )
+                try:
+                    min_dm_value = int(min_dm_raw) if min_dm_raw else 0
+                except (TypeError, ValueError):
+                    min_dm_value = 0
+                if int(drop_value) >= min_dm_value:
+                    debug_print(f"Creating personal DM notification for user {player.user_id}")
+                    await create_notification(
+                        "dm_drop",
+                        player_id,
+                        {
+                            "drop_id": drop.drop_id,
+                            "guid": guid,
+                            "item_name": item_name,
+                            "npc_name": npc_name,
+                            "value": value,
+                            "quantity": quantity,
+                            "total_value": drop_value,
+                            "kill_count": kill_count,
+                            "player_name": player_name,
+                            "player_id": player_id,
+                            "image_url": drop.image_url,
+                            "video_key": video_key,
+                            "attachment_type": attachment_type,
+                            "world_type": world_type,
+                        },
+                        existing_session=session if use_external_session else None,
+                    )
+        except Exception as e:
+            print(f"Couldn't queue personal DM notification: {e}")
+
         if not use_external_session:
             debug_print(f"Committing session (we own it)")
             session.commit()
