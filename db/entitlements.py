@@ -57,7 +57,29 @@ ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
     },
 ]
 
+# User-scoped ("supporter") entitlements — granted by a user_subscriptions row
+# to a tier with scope="user". Personal perks, independent of group tiers.
+USER_ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
+    {
+        "key": "dm_submissions",
+        "label": "Submission DMs",
+        "category": "supporter",
+        "help": "Receive Discord DMs for your own drops, personal bests, collection log slots and other achievements, filtered by your own settings.",
+        "default": False,
+    },
+    {
+        "key": "supporter_flair",
+        "label": "Supporter flair",
+        "category": "supporter",
+        "help": "A distinct supporter display style on your public profile and site listings.",
+        "default": False,
+    },
+]
+
 _BY_KEY = {f["key"]: f for f in ENTITLEMENT_FIELDS}
+_USER_BY_KEY = {f["key"]: f for f in USER_ENTITLEMENT_FIELDS}
+
+TIER_SCOPES = ("group", "user")
 
 HALL_OF_FAME_CONFIG_KEYS = frozenset({
     "personal_best_embed_boss_list",
@@ -65,12 +87,20 @@ HALL_OF_FAME_CONFIG_KEYS = frozenset({
 })
 
 
-def all_entitlement_keys() -> List[str]:
-    return [f["key"] for f in ENTITLEMENT_FIELDS]
+def _registry(scope: str) -> tuple:
+    if scope == "user":
+        return USER_ENTITLEMENT_FIELDS, _USER_BY_KEY
+    return ENTITLEMENT_FIELDS, _BY_KEY
 
 
-def get_entitlement_field(key: str) -> Optional[Dict[str, Any]]:
-    return _BY_KEY.get(key)
+def all_entitlement_keys(scope: str = "group") -> List[str]:
+    fields, _ = _registry(scope)
+    return [f["key"] for f in fields]
+
+
+def get_entitlement_field(key: str, scope: str = "group") -> Optional[Dict[str, Any]]:
+    _, by_key = _registry(scope)
+    return by_key.get(key)
 
 
 class EntitlementValidationError(ValueError):
@@ -80,9 +110,10 @@ class EntitlementValidationError(ValueError):
         self.detail = detail
 
 
-def _validate_value(key: str, value: Any) -> Any:
+def _validate_value(key: str, value: Any, scope: str = "group") -> Any:
     """Coerce/validate one entitlement value against its field kind."""
-    kind = _BY_KEY[key].get("kind", "bool")
+    _, by_key = _registry(scope)
+    kind = by_key[key].get("kind", "bool")
     if kind == "int":
         # bool is an int subclass in Python — reject it explicitly.
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -93,7 +124,7 @@ def _validate_value(key: str, value: Any) -> Any:
     return value
 
 
-def parse_stored_entitlements(raw: Optional[str]) -> Dict[str, Any]:
+def parse_stored_entitlements(raw: Optional[str], scope: str = "group") -> Dict[str, Any]:
     """Parse the JSON column; returns {} when unset/invalid."""
     if not raw:
         return {}
@@ -103,15 +134,16 @@ def parse_stored_entitlements(raw: Optional[str]) -> Dict[str, Any]:
         return {}
     if not isinstance(data, dict):
         return {}
+    _, by_key = _registry(scope)
     out: Dict[str, Any] = {}
     for key, value in data.items():
-        if key not in _BY_KEY:
+        if key not in by_key:
             continue
-        out[key] = _validate_value(key, value)
+        out[key] = _validate_value(key, value, scope)
     return out
 
 
-def validate_entitlements_input(body: dict) -> Dict[str, Any]:
+def validate_entitlements_input(body: dict, scope: str = "group") -> Dict[str, Any]:
     """Validate a partial entitlement map from tier CRUD. Unknown keys rejected."""
     if body is None:
         return {}
@@ -119,9 +151,9 @@ def validate_entitlements_input(body: dict) -> Dict[str, Any]:
         raise EntitlementValidationError("", "Entitlements must be an object.")
     out: Dict[str, Any] = {}
     for key, value in body.items():
-        if get_entitlement_field(key) is None:
+        if get_entitlement_field(key, scope) is None:
             raise EntitlementValidationError(key, f"Unknown entitlement '{key}'.")
-        out[key] = _validate_value(key, value)
+        out[key] = _validate_value(key, value, scope)
     return out
 
 
@@ -129,12 +161,13 @@ def entitlements_to_storage(data: Dict[str, bool]) -> str:
     return json.dumps(data)
 
 
-def default_entitlements() -> Dict[str, Any]:
+def default_entitlements(scope: str = "group") -> Dict[str, Any]:
     """Restrictive baseline when no tier applies (unsubscribed / unknown tier)."""
-    return {f["key"]: f["default"] for f in ENTITLEMENT_FIELDS}
+    fields, _ = _registry(scope)
+    return {f["key"]: f["default"] for f in fields}
 
 
-def resolve_tier_entitlements(stored: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def resolve_tier_entitlements(stored: Optional[Dict[str, Any]], scope: str = "group") -> Dict[str, Any]:
     """Resolve a tier's stored map to a full entitlement dict.
 
     An empty stored map uses registry defaults (usually ``false``). Superadmins
@@ -142,13 +175,15 @@ def resolve_tier_entitlements(stored: Optional[Dict[str, Any]]) -> Dict[str, Any
     their registry default.
     """
     stored = stored or {}
-    return {f["key"]: stored.get(f["key"], f["default"]) for f in ENTITLEMENT_FIELDS}
+    fields, _ = _registry(scope)
+    return {f["key"]: stored.get(f["key"], f["default"]) for f in fields}
 
 
-def all_entitlements_granted() -> Dict[str, Any]:
+def all_entitlements_granted(scope: str = "group") -> Dict[str, Any]:
     """Superadmin bypass: every capability on; numeric limits effectively unbounded."""
+    fields, _ = _registry(scope)
     out: Dict[str, Any] = {}
-    for f in ENTITLEMENT_FIELDS:
+    for f in fields:
         out[f["key"]] = 1_000_000 if f.get("kind") == "int" else True
     return out
 
@@ -218,6 +253,33 @@ def resolve_group_entitlements(s, group_id: int) -> Dict[str, Any]:
     return resolve_tier_entitlements(stored)
 
 
+def resolve_user_entitlements(s, user_id: int) -> Dict[str, Any]:
+    """Resolved supporter entitlement map for ``user_id`` from user_subscriptions.
+
+    No fallback tier: users without a live supporter subscription get the
+    restrictive user-scope defaults (everything off).
+    """
+    from db.models.subscriptions import SubscriptionTier, UserSubscription
+
+    sub = (
+        s.query(UserSubscription)
+        .filter(UserSubscription.user_id == user_id)
+        .first()
+    )
+    tier = None
+    if sub is not None and sub.tier_key and subscription_is_live(sub):
+        tier = (
+            s.query(SubscriptionTier)
+            .filter(SubscriptionTier.key == sub.tier_key)
+            .first()
+        )
+    if tier is None:
+        return default_entitlements("user")
+
+    stored = parse_stored_entitlements(tier.entitlements, "user")
+    return resolve_tier_entitlements(stored, "user")
+
+
 # --------------------------------------------------------------------------- #
 # Bot-facing cached checks (notification hot path)
 # --------------------------------------------------------------------------- #
@@ -259,6 +321,41 @@ def group_has_entitlement(group_id: Optional[int], key: str) -> bool:
         return False
     try:
         return bool(group_entitlements(group_id).get(key))
+    except Exception:
+        # Fail closed: a resolution error must not unlock premium behavior.
+        return False
+
+
+_user_entitlement_cache: Dict[int, tuple] = {}  # user_id -> (expires_at, entitlement map)
+
+
+def invalidate_user_entitlement_cache(user_id: Optional[int] = None) -> None:
+    if user_id is None:
+        _user_entitlement_cache.clear()
+    else:
+        _user_entitlement_cache.pop(user_id, None)
+
+
+def user_entitlements(user_id: int) -> Dict[str, Any]:
+    """Cached supporter entitlement map for a user (bot processes)."""
+    now = time.monotonic()
+    cached = _user_entitlement_cache.get(user_id)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    from db.models import Session
+
+    with Session() as session:
+        entitlements = resolve_user_entitlements(session, user_id)
+    _user_entitlement_cache[user_id] = (now + _ENTITLEMENT_CACHE_TTL, entitlements)
+    return entitlements
+
+
+def user_has_entitlement(user_id: Optional[int], key: str) -> bool:
+    if not user_id:
+        return False
+    try:
+        return bool(user_entitlements(user_id).get(key))
     except Exception:
         # Fail closed: a resolution error must not unlock premium behavior.
         return False

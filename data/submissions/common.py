@@ -828,12 +828,22 @@ def get_group_drop_notify_settings(session, group_id):
 
 
 def is_user_dm_enabled(session, user_id, key):
+    """Whether a dm_* submission notification should be queued for this user.
+
+    Requires both the user's per-type opt-in config AND the `dm_submissions`
+    supporter entitlement (user-level premium). The send-side handler in
+    services/notification_service.py re-checks the entitlement (fail closed).
+    """
     cfg = (
         session.query(UserConfiguration)
         .filter(UserConfiguration.user_id == user_id, UserConfiguration.config_key == key)
         .first()
     )
-    return is_truthy_config(cfg.config_value) if cfg else False
+    if not (cfg and is_truthy_config(cfg.config_value)):
+        return False
+    from db.entitlements import user_has_entitlement
+
+    return user_has_entitlement(user_id, "dm_submissions")
 
 
 async def ensure_item_by_name(session, item_name):

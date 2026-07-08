@@ -46,6 +46,23 @@ _BOOL_SETTINGS = [
 # Settings stored in user_configurations, shared with the Discord bot.
 # `dm_account_changes` gates the RSN-change DM in data/submissions/common.py.
 _CONFIG_SETTINGS = ["dm_account_changes"]
+# Supporter submission-DM opt-ins (user_configurations), read by
+# data/submissions/* at queue time. Saving them is allowed for everyone;
+# they only take effect with the `dm_submissions` supporter entitlement.
+_DM_CONFIG_SETTINGS = [
+    "dm_drops",
+    "dm_pbs",
+    "dm_cas",
+    "dm_clogs",
+    "dm_pets",
+    "dm_quests",
+    "dm_deaths",
+    "dm_diaries",
+    "dm_levels",
+]
+# Minimum drop value (GP) for dm_drop DMs; stored as an int string.
+_DM_MIN_VALUE_KEY = "dm_min_value"
+_DM_MIN_VALUE_MAX = 2_147_483_647
 
 
 def _config_bool(s, user_id: int, key: str) -> bool:
@@ -69,10 +86,39 @@ def _set_config_bool(s, user_id: int, key: str, value: bool) -> None:
         s.add(UserConfiguration(user_id=user_id, config_key=key, config_value="true" if value else "false"))
 
 
+def _config_value(s, user_id: int, key: str):
+    row = (
+        s.query(UserConfiguration)
+        .filter(UserConfiguration.user_id == user_id, UserConfiguration.config_key == key)
+        .first()
+    )
+    return row.config_value if row else None
+
+
+def _set_config_value(s, user_id: int, key: str, value: str) -> None:
+    row = (
+        s.query(UserConfiguration)
+        .filter(UserConfiguration.user_id == user_id, UserConfiguration.config_key == key)
+        .first()
+    )
+    if row:
+        row.config_value = value
+    else:
+        s.add(UserConfiguration(user_id=user_id, config_key=key, config_value=value))
+
+
 def _settings_dict(s, user: User) -> dict:
+    from web_api.entitlements import resolve_user_entitlements
+
     out = {k: bool(getattr(user, k, False)) for k in _BOOL_SETTINGS}
-    for k in _CONFIG_SETTINGS:
+    for k in _CONFIG_SETTINGS + _DM_CONFIG_SETTINGS:
         out[k] = _config_bool(s, user.user_id, k)
+    raw_min = _config_value(s, user.user_id, _DM_MIN_VALUE_KEY)
+    try:
+        out[_DM_MIN_VALUE_KEY] = int(raw_min) if raw_min else 0
+    except (TypeError, ValueError):
+        out[_DM_MIN_VALUE_KEY] = 0
+    out["supporter_entitlements"] = resolve_user_entitlements(s, user.user_id, user=user)
     out["players"] = [
         {"id": p.player_id, "name": p.player_name, "hidden": bool(p.hidden)}
         for p in s.query(Player).filter(Player.user_id == user.user_id).order_by(Player.player_name.asc()).all()
@@ -122,10 +168,18 @@ async def get_me():
                 for gid, role in group_roles.items()
             ]
 
+            from db.entitlements import resolve_user_entitlements as _resolve_supporter
+
+            try:
+                is_supporter = bool(_resolve_supporter(s, user.user_id).get("supporter_flair"))
+            except Exception:
+                is_supporter = False
+
             return {
                 "user_id": user.user_id,
                 "discord_id": str(user.discord_id or ""),
                 "is_superadmin": bool(getattr(user, "is_superadmin", False)),
+                "is_supporter": is_supporter,
                 "players": players,
                 "groups": groups,
             }
@@ -175,9 +229,13 @@ async def patch_me():
     # Validate keys/types up-front (reject unknown keys silently ignored? -> 422).
     updates = {}
     for key, value in body.items():
-        if key in _BOOL_SETTINGS or key in _CONFIG_SETTINGS:
+        if key in _BOOL_SETTINGS or key in _CONFIG_SETTINGS or key in _DM_CONFIG_SETTINGS:
             if not isinstance(value, bool):
                 abort_problem(422, "Invalid value", f"'{key}' must be a boolean.")
+            updates[key] = value
+        elif key == _DM_MIN_VALUE_KEY:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > _DM_MIN_VALUE_MAX:
+                abort_problem(422, "Invalid value", f"'{key}' must be a non-negative integer.")
             updates[key] = value
         else:
             abort_problem(422, "Unknown setting", f"'{key}' is not a settable field.")
@@ -188,7 +246,9 @@ async def patch_me():
             if not user:
                 return None
             for key, value in updates.items():
-                if key in _CONFIG_SETTINGS:
+                if key == _DM_MIN_VALUE_KEY:
+                    _set_config_value(s, user.user_id, key, str(value))
+                elif key in _CONFIG_SETTINGS or key in _DM_CONFIG_SETTINGS:
                     _set_config_bool(s, user.user_id, key, value)
                 else:
                     setattr(user, key, value)

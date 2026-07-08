@@ -51,6 +51,14 @@ app_logger = AppLogger()
 global_footer = os.getenv('DISCORD_MESSAGE_FOOTER')
 db = DatabaseOperations()
 
+# Direct-message queue types. Submission DMs (everything except dm_name_change)
+# are a supporter perk gated on the `dm_submissions` user entitlement; queueing
+# is opt-in via user_configurations `dm_*` keys (see data/submissions/*).
+SUBMISSION_DM_TYPES = frozenset({
+    'dm_drop', 'dm_pb', 'dm_ca', 'dm_clog', 'dm_pet',
+    'dm_quest', 'dm_death', 'dm_diary', 'dm_level_up', 'dm_name_change',
+})
+
 
 # Removed global tracking dictionaries - now using database-based tracking via NotifiedSubmission table
 
@@ -759,6 +767,8 @@ class NotificationService:
                 await self.send_update_log_data_with_session(notification, data, db_session)
             elif notification_type == 'points_earned':
                 await self.send_points_notification_with_session(notification, data, db_session)
+            elif notification_type in SUBMISSION_DM_TYPES:
+                await self.send_submission_dm_with_session(notification, data, db_session)
             elif notification_type in EVENT_NOTIFICATION_TYPES:
                 await self.send_event_notification_with_session(notification, data, db_session)
             else:
@@ -2628,29 +2638,10 @@ class NotificationService:
             old_name = data.get('old_name')
             
             await name_change_message(self.bot, player_name, player_id, old_name)
-            
-            # Also send DM to user if they have Discord ID
-            player = db_session.query(Player).filter(Player.player_id == player_id).first()
-            if player and player.user:
-                user_discord_id = player.user.discord_id
-                if user_discord_id:
-                    try:
-                        user = await self.bot.fetch_user(user_id=user_discord_id)
-                        if user:
-                            embed = interactions.Embed(
-                                title=f"Name change detected:",
-                                description=f"Your account, {old_name}, has changed names to {player_name}.",
-                                color="#00f0f0"
-                            )
-                            embed.add_field(
-                                name=f"Is this a mistake?",
-                                value=f"Reach out in [our discord](https://www.droptracker.io/discord)"
-                            )
-                            embed.set_footer(global_footer)
-                            await user.send(f"Hey, <@{user_discord_id}>", embed=embed)
-                    except Exception as e:
-                        app_logger.log(log_type="error", data=f"Couldn't DM user about name change: {e}", app_name="notification_service", description="send_name_change_notification")
-            
+
+            # The user-facing DM is handled by the separate dm_name_change
+            # queue row, gated on the `dm_account_changes` opt-in setting.
+
             notification.status = 'sent'
             notification.processed_at = datetime.now()
             db_session.commit()
@@ -2669,29 +2660,10 @@ class NotificationService:
             old_name = data.get('old_name')
             
             await name_change_message(self.bot, player_name, player_id, old_name)
-            
-            # Also send DM to user if they have Discord ID
-            player = session.query(Player).filter(Player.player_id == player_id).first()
-            if player and player.user:
-                user_discord_id = player.user.discord_id
-                if user_discord_id:
-                    try:
-                        user = await self.bot.fetch_user(user_id=user_discord_id)
-                        if user:
-                            embed = interactions.Embed(
-                                title=f"Name change detected:",
-                                description=f"Your account, {old_name}, has changed names to {player_name}.",
-                                color="#00f0f0"
-                            )
-                            embed.add_field(
-                                name=f"Is this a mistake?",
-                                value=f"Reach out in [our discord](https://www.droptracker.io/discord)"
-                            )
-                            embed.set_footer(global_footer)
-                            await user.send(f"Hey, <@{user_discord_id}>", embed=embed)
-                    except Exception as e:
-                        app_logger.log(log_type="error", data=f"Couldn't DM user about name change: {e}", app_name="notification_service", description="send_name_change_notification")
-            
+
+            # The user-facing DM is handled by the separate dm_name_change
+            # queue row, gated on the `dm_account_changes` opt-in setting.
+
             notification.status = 'sent'
             notification.processed_at = datetime.now()
             session.commit()
@@ -2701,7 +2673,197 @@ class NotificationService:
             notification.error_message = str(e)
             session.commit()
             raise
-    
+
+    def _user_dm_config(self, db_session, user_id: int, key: str):
+        row = db_session.query(UserConfiguration).filter(
+            UserConfiguration.user_id == user_id,
+            UserConfiguration.config_key == key
+        ).first()
+        return row.config_value if row else None
+
+    async def send_submission_dm_with_session(self, notification: NotificationQueue, data: dict, db_session):
+        """DM the owning user about their own submission (dm_* queue types).
+
+        Ineligible rows are marked sent with a reason instead of failed — the
+        DM is a best-effort perk, and a skip must not retry or alert admins.
+        Submission DMs require the `dm_submissions` supporter entitlement;
+        dm_name_change is a free feature gated only by its opt-in config.
+        """
+        def _skip(reason: str):
+            notification.status = 'sent'
+            notification.error_message = reason
+            notification.processed_at = datetime.now()
+            db_session.commit()
+
+        ntype = notification.notification_type
+        player = db_session.query(Player).filter(Player.player_id == notification.player_id).first()
+        user = player.user if player else None
+        if not user or not user.discord_id:
+            return _skip("skipped: no linked Discord user")
+        if user.never_ping:
+            return _skip("skipped: user has never_ping")
+
+        if ntype != 'dm_name_change':
+            from db.entitlements import user_has_entitlement
+            if not user_has_entitlement(user.user_id, 'dm_submissions'):
+                return _skip("skipped: no dm_submissions entitlement")
+
+        if ntype == 'dm_drop':
+            min_raw = self._user_dm_config(db_session, user.user_id, 'dm_min_value')
+            try:
+                min_value = int(min_raw) if min_raw else 0
+            except (TypeError, ValueError):
+                min_value = 0
+            try:
+                total_value = int(data.get('total_value') or 0)
+            except (TypeError, ValueError):
+                total_value = 0
+            if total_value < min_value:
+                return _skip(f"skipped: below dm_min_value ({total_value} < {min_value})")
+
+        embed = self._build_submission_dm_embed(ntype, data, db_session)
+        if embed is None:
+            return _skip(f"skipped: no DM format for {ntype}")
+
+        try:
+            discord_user = await self.bot.fetch_user(user_id=user.discord_id)
+            if not discord_user:
+                return _skip("skipped: Discord user not found")
+            await discord_user.send(embed=embed)
+        except interactions.errors.Forbidden:
+            # User has DMs closed — don't fail (would ping group admins upstream).
+            return _skip("skipped: user's DMs are closed")
+
+        notification.status = 'sent'
+        notification.processed_at = datetime.now()
+        db_session.commit()
+
+    def _build_submission_dm_embed(self, ntype: str, data: dict, db_session):
+        """Small personal embed per submission type; None for unknown types."""
+        player_name = data.get('player_name', 'your account')
+        embed = None
+        thumb = None
+
+        if ntype == 'dm_drop':
+            item_name = data.get('item_name', 'Unknown item')
+            quantity = data.get('quantity') or 1
+            npc_name = data.get('npc_name', 'Unknown source')
+            total_value = data.get('total_value') or 0
+            qty_text = f" x{quantity}" if str(quantity) not in ("1", "None") else ""
+            embed = interactions.Embed(
+                title="You received a drop!",
+                description=f"**{item_name}**{qty_text} from **{npc_name}** ({format_number(total_value)} gp)",
+                color="#FFD700",
+            )
+            if data.get('kill_count'):
+                embed.add_field(name="Kill count", value=str(data['kill_count']), inline=True)
+            item = db_session.query(ItemList).filter(ItemList.item_name == item_name).first()
+            if item:
+                thumb = f"https://www.droptracker.io/img/itemdb/{item.item_id}.png"
+        elif ntype == 'dm_pb':
+            boss_name = data.get('boss_name', 'Unknown boss')
+            time_ms = data.get('kill_time_ms') or data.get('time_ms')
+            time_text = convert_from_ms(time_ms) if time_ms else "?"
+            embed = interactions.Embed(
+                title="New personal best!",
+                description=f"**{boss_name}** in **{time_text}**",
+                color="#00f0f0",
+            )
+            if data.get('team_size'):
+                embed.add_field(name="Team size", value=str(data['team_size']), inline=True)
+            old_ms = data.get('old_time_ms')
+            if old_ms:
+                embed.add_field(name="Previous best", value=convert_from_ms(old_ms), inline=True)
+        elif ntype == 'dm_ca':
+            embed = interactions.Embed(
+                title="Combat achievement completed!",
+                description=f"**{data.get('task_name', 'Unknown task')}** ({data.get('tier', '?')} tier)",
+                color="#E67E22",
+            )
+            if data.get('points_total'):
+                embed.add_field(name="Total points", value=str(data['points_total']), inline=True)
+            if data.get('completed_tier'):
+                embed.add_field(name="Tier completed", value=str(data['completed_tier']), inline=True)
+        elif ntype == 'dm_clog':
+            item_name = data.get('item_name', 'Unknown item')
+            embed = interactions.Embed(
+                title="New collection log slot!",
+                description=f"**{item_name}** from **{data.get('npc_name', 'Unknown source')}**",
+                color="#9B59B6",
+            )
+            if data.get('kc_received'):
+                embed.add_field(name="Kill count", value=str(data['kc_received']), inline=True)
+            if data.get('item_id'):
+                thumb = f"https://www.droptracker.io/img/itemdb/{data['item_id']}.png"
+        elif ntype == 'dm_pet':
+            source = data.get('npc_name') or data.get('source') or 'Unknown source'
+            embed = interactions.Embed(
+                title="You got a pet!",
+                description=f"**{data.get('pet_name', 'A pet')}** from **{source}**",
+                color="#2ECC71",
+            )
+            if data.get('killcount'):
+                embed.add_field(name="Kill count", value=str(data['killcount']), inline=True)
+            if data.get('duplicate'):
+                embed.add_field(name="Duplicate", value="Yes", inline=True)
+        elif ntype == 'dm_quest':
+            embed = interactions.Embed(
+                title="Quest completed!",
+                description=f"**{data.get('quest_name', 'Unknown quest')}**",
+                color="#3498DB",
+            )
+            if data.get('quests_completed') and data.get('total_quests'):
+                embed.add_field(
+                    name="Progress",
+                    value=f"{data['quests_completed']}/{data['total_quests']} quests",
+                    inline=True,
+                )
+            if data.get('total_quest_points'):
+                embed.add_field(name="Quest points", value=str(data['total_quest_points']), inline=True)
+        elif ntype == 'dm_death':
+            source = data.get('source') or 'Unknown cause'
+            location = data.get('location')
+            loc_text = f" at **{location}**" if location else ""
+            embed = interactions.Embed(
+                title="You died...",
+                description=f"**{player_name}** died to **{source}**{loc_text}",
+                color="#E74C3C",
+            )
+        elif ntype == 'dm_diary':
+            embed = interactions.Embed(
+                title="Achievement diary completed!",
+                description=f"**{data.get('diary_name', 'Unknown diary')}** ({data.get('diary_tier', '?')})",
+                color="#1ABC9C",
+            )
+        elif ntype == 'dm_level_up':
+            skills_text = data.get('skills_text') or data.get('skill_name') or 'a skill'
+            embed = interactions.Embed(
+                title="Level up!",
+                description=f"**{player_name}** advanced: {skills_text}",
+                color="#F1C40F",
+            )
+            if data.get('total_level'):
+                embed.add_field(name="Total level", value=str(data['total_level']), inline=True)
+            if data.get('combat_level'):
+                embed.add_field(name="Combat level", value=str(data['combat_level']), inline=True)
+        elif ntype == 'dm_name_change':
+            embed = interactions.Embed(
+                title="Name change detected:",
+                description=f"Your account, {data.get('old_name')}, has changed names to {player_name}.",
+                color="#00f0f0",
+            )
+            embed.add_field(
+                name="Is this a mistake?",
+                value="Reach out in [our discord](https://www.droptracker.io/discord)",
+            )
+
+        if embed is None:
+            return None
+        if thumb:
+            embed.set_thumbnail(url=thumb)
+        embed.set_footer(global_footer)
+        return embed
+
     async def send_new_player_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
         """Send notification about new player with session"""
         try:

@@ -20,8 +20,9 @@ Contract (verified against XF's ``\\XF\\Payment\\PayPal`` provider):
                      ``cmd=_notify-validate`` prepended; PayPal answers
                      ``VERIFIED`` or ``INVALID``.
 
-Rows are populated by ``scripts/backfill_group_subscriptions.py``. IPNs that
-match no row (e.g. XenForo *user* upgrades, which shared the callback URL) are
+Rows are populated by ``scripts/backfill_group_subscriptions.py`` (groups) and
+``scripts/backfill_user_subscriptions.py`` (legacy XF *user* upgrades, matched
+against ``user_subscriptions``). IPNs that match no row in either table are
 logged loudly and acknowledged. PayPal retries non-2xx deliveries for ~4 days,
 so transient failures answer 503.
 
@@ -41,7 +42,7 @@ import aiohttp
 from dateutil.relativedelta import relativedelta
 from quart import Blueprint, jsonify, request
 
-from db import GroupSubscription, SubscriptionTier
+from db import GroupSubscription, SubscriptionTier, UserSubscription
 from web_api.common import db_session
 from utils.redis import redis_client
 
@@ -68,28 +69,48 @@ async def _verify_with_paypal(raw: bytes, sandbox: bool) -> str:
             return (await resp.text()).strip()
 
 
-def _extend_subscription(sub_id: int, fields: dict) -> dict | None:
+def _extend_subscription(kind: str, sub_id: int, fields: dict) -> dict | None:
     """Apply an IPN outcome to a subscription row. Runs in a worker thread."""
+    model = UserSubscription if kind == "user" else GroupSubscription
     with db_session() as s:
-        sub = s.query(GroupSubscription).filter(GroupSubscription.id == sub_id).first()
+        sub = s.query(model).filter(model.id == sub_id).first()
         if not sub:
             return None
         for k, v in fields.items():
             setattr(sub, k, v)
         s.commit()
-        return {"group_id": sub.group_id, "tier_key": sub.tier_key, "status": sub.status,
-                "current_period_end": str(sub.current_period_end)}
+        owner = {"user_id": sub.user_id} if kind == "user" else {"group_id": sub.group_id}
+        result = {**owner, "tier_key": sub.tier_key, "status": sub.status,
+                  "current_period_end": str(sub.current_period_end)}
+    if kind == "user":
+        try:
+            from db.entitlements import invalidate_user_entitlement_cache
+
+            invalidate_user_entitlement_cache(result.get("user_id"))
+        except Exception:
+            pass
+    return result
 
 
 def _find_subscription(subscr_id: str | None, custom: str | None):
-    """Match an IPN to a paypal-provider row. Returns a detached snapshot dict."""
+    """Match an IPN to a paypal-provider row (group first, then user).
+
+    Returns a detached snapshot dict with ``kind`` = group|user.
+    """
     with db_session() as s:
+        sub, kind = None, "group"
         q = s.query(GroupSubscription).filter(GroupSubscription.provider == "paypal")
-        sub = None
         if subscr_id:
             sub = q.filter(GroupSubscription.provider_subscription_id == subscr_id).first()
         if sub is None and custom:
             sub = q.filter(GroupSubscription.provider_customer_id == custom).first()
+        if sub is None:
+            kind = "user"
+            uq = s.query(UserSubscription).filter(UserSubscription.provider == "paypal")
+            if subscr_id:
+                sub = uq.filter(UserSubscription.provider_subscription_id == subscr_id).first()
+            if sub is None and custom:
+                sub = uq.filter(UserSubscription.provider_customer_id == custom).first()
         if sub is None:
             return None
         tier = (
@@ -97,9 +118,11 @@ def _find_subscription(subscr_id: str | None, custom: str | None):
             if sub.tier_key
             else None
         )
+        owner_id = sub.user_id if kind == "user" else sub.group_id
         return {
+            "kind": kind,
             "id": sub.id,
-            "group_id": sub.group_id,
+            "owner_id": owner_id,
             "tier_key": sub.tier_key,
             "current_period_end": sub.current_period_end,
             "price_cents": int(tier.price_cents) if tier else None,
@@ -171,6 +194,7 @@ async def paypal_ipn():
     now = datetime.now()
     updates: dict | None = None
     action = "none"
+    owner = f"{snapshot['kind']} {snapshot['owner_id']}"
 
     if payment_status in ("Refunded", "Reversed", "Canceled_Reversal") and fields.get("parent_txn_id"):
         if payment_status == "Canceled_Reversal":
@@ -186,8 +210,8 @@ async def paypal_ipn():
             gross_cents < snapshot["price_cents"] or currency != snapshot["currency"]
         ):
             logger.warning(
-                "paypal_ipn: amount mismatch for group %s (%s %s < expected %s %s); not extending",
-                snapshot["group_id"], gross_cents, currency,
+                "paypal_ipn: amount mismatch for %s (%s %s < expected %s %s); not extending",
+                owner, gross_cents, currency,
                 snapshot["price_cents"], snapshot["currency"],
             )
             return jsonify({"ignored": "amount mismatch"}), 200
@@ -210,17 +234,17 @@ async def paypal_ipn():
         action = "end of term"
     elif txn_type == "subscr_failed":
         logger.warning(
-            "paypal_ipn: payment failed for group %s (PayPal will retry); no change",
-            snapshot["group_id"],
+            "paypal_ipn: payment failed for %s (PayPal will retry); no change",
+            owner,
         )
         return jsonify({"received": True}), 200
     else:
         logger.info(
-            "paypal_ipn: no-op event txn_type=%s status=%s for group %s",
-            txn_type, payment_status, snapshot["group_id"],
+            "paypal_ipn: no-op event txn_type=%s status=%s for %s",
+            txn_type, payment_status, owner,
         )
         return jsonify({"received": True}), 200
 
-    result = await asyncio.to_thread(_extend_subscription, snapshot["id"], updates)
-    logger.info("paypal_ipn: group %s — %s → %s", snapshot["group_id"], action, result)
+    result = await asyncio.to_thread(_extend_subscription, snapshot["kind"], snapshot["id"], updates)
+    logger.info("paypal_ipn: %s — %s → %s", owner, action, result)
     return jsonify({"received": True}), 200

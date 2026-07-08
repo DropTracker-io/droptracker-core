@@ -51,6 +51,7 @@ from db import (
     Player,
     SubscriptionTier,
     User,
+    UserSubscription,
 )
 from web_api import admin_registry as registry
 from web_api import billing
@@ -61,7 +62,7 @@ from web_api.entitlements_registry import (
     entitlements_to_storage,
     validate_entitlements_input,
 )
-from web_api.routes.subscriptions import _serialize_sub
+from web_api.routes.subscriptions import _serialize_sub, _serialize_user_sub
 
 admin_bp = Blueprint("v1_admin", __name__)
 
@@ -292,6 +293,11 @@ def _tier_from_body(body: dict, existing: SubscriptionTier | None = None):
     key = body.get("key") or (existing.key if existing else None)
     if not key:
         abort_problem(422, "Missing key", "Tier 'key' is required.")
+    # Scope is set at creation and immutable after — entitlement keys differ
+    # per scope, and flipping it would strand subscriber rows.
+    scope = (existing.scope if existing else body.get("scope")) or "group"
+    if scope not in ("group", "user"):
+        abort_problem(422, "Invalid scope", "Tier 'scope' must be 'group' or 'user'.")
     features = body.get("features")
     features_json = json.dumps(features) if isinstance(features, list) else (
         existing.features if existing else "[]"
@@ -299,13 +305,13 @@ def _tier_from_body(body: dict, existing: SubscriptionTier | None = None):
     entitlements_json = None
     if "entitlements" in body:
         try:
-            validated = validate_entitlements_input(body.get("entitlements") or {})
+            validated = validate_entitlements_input(body.get("entitlements") or {}, scope)
             entitlements_json = entitlements_to_storage(validated)
         except EntitlementValidationError as e:
             abort_problem(422, "Invalid entitlements", e.detail)
     elif existing is not None:
         entitlements_json = existing.entitlements
-    return key, features_json, entitlements_json
+    return key, scope, features_json, entitlements_json
 
 
 @admin_bp.post("/admin/subscriptions/tiers")
@@ -315,13 +321,14 @@ async def create_tier():
 
     def _apply():
         with db_session() as s:
-            key, features_json, entitlements_json = _tier_from_body(body)
+            key, scope, features_json, entitlements_json = _tier_from_body(body)
             if s.query(SubscriptionTier).filter(SubscriptionTier.key == key).first():
                 abort_problem(409, "Tier exists", f"Tier '{key}' already exists.")
             tier = SubscriptionTier(
                 key=key,
                 name=body.get("name") or key,
                 description=body.get("description"),
+                scope=scope,
                 price_cents=int(body.get("price_cents") or 0),
                 currency=body.get("currency") or "USD",
                 interval=body.get("interval") or "month",
@@ -367,7 +374,8 @@ async def update_tier(key: str):
                 tier.features = json.dumps(body["features"])
             if "entitlements" in body:
                 try:
-                    validated = validate_entitlements_input(body.get("entitlements") or {})
+                    tier_scope = getattr(tier, "scope", None) or "group"
+                    validated = validate_entitlements_input(body.get("entitlements") or {}, tier_scope)
                     tier.entitlements = entitlements_to_storage(validated)
                 except EntitlementValidationError as e:
                     abort_problem(422, "Invalid entitlements", e.detail)
@@ -397,6 +405,13 @@ async def delete_tier(key: str):
                 .filter(
                     GroupSubscription.tier_key == key,
                     GroupSubscription.status.in_(["active", "trialing", "past_due"]),
+                )
+                .first()
+            ) or (
+                s.query(UserSubscription)
+                .filter(
+                    UserSubscription.tier_key == key,
+                    UserSubscription.status.in_(["active", "trialing", "past_due"]),
                 )
                 .first()
             )
@@ -547,6 +562,90 @@ async def admin_revoke_subscription(group_id: int):
     before, after = await asyncio.to_thread(_apply)
     _audit(
         actor, "subscription.revoke", f"group:{group_id}",
+        before=json.dumps(before), after=json.dumps(after),
+    )
+    return jsonify(after)
+
+
+@admin_bp.post("/admin/users/<int:user_id>/subscription/grant")
+async def admin_grant_user_subscription(user_id: int):
+    actor = await _require_superadmin()
+    body = await json_body()
+    grant = registry.build_comped_grant(body.get("tier_key"), body.get("days"))
+
+    def _apply():
+        with db_session() as s:
+            target = s.query(User).filter(User.user_id == user_id).first()
+            if not target:
+                abort_problem(404, "User not found", f"No user with id {user_id}.")
+            tier = (
+                s.query(SubscriptionTier)
+                .filter(
+                    SubscriptionTier.key == grant["tier_key"],
+                    SubscriptionTier.scope == "user",
+                )
+                .first()
+            )
+            if not tier:
+                abort_problem(404, "Unknown tier", f"No user-scoped tier '{grant['tier_key']}'.")
+            sub = (
+                s.query(UserSubscription)
+                .filter(UserSubscription.user_id == user_id)
+                .first()
+            )
+            before = _serialize_user_sub(user_id, sub) if sub else None
+            if not sub:
+                sub = UserSubscription(user_id=user_id)
+                s.add(sub)
+            sub.provider = grant["provider"]
+            sub.status = grant["status"]
+            sub.tier_key = grant["tier_key"]
+            sub.current_period_end = grant["current_period_end"]
+            sub.cancel_at_period_end = grant["cancel_at_period_end"]
+            s.commit()
+            return before, _serialize_user_sub(user_id, sub)
+
+    before, after = await asyncio.to_thread(_apply)
+    try:
+        from db.entitlements import invalidate_user_entitlement_cache
+
+        invalidate_user_entitlement_cache(user_id)
+    except Exception:
+        pass
+    _audit(
+        actor, "subscription.grant", f"user:{user_id}",
+        before=json.dumps(before) if before else None, after=json.dumps(after),
+    )
+    return jsonify(after)
+
+
+@admin_bp.post("/admin/users/<int:user_id>/subscription/revoke")
+async def admin_revoke_user_subscription(user_id: int):
+    actor = await _require_superadmin()
+
+    def _apply():
+        with db_session() as s:
+            sub = (
+                s.query(UserSubscription)
+                .filter(UserSubscription.user_id == user_id)
+                .first()
+            )
+            if not sub or sub.status == "none":
+                abort_problem(404, "No subscription", "This user has no supporter subscription.")
+            before = _serialize_user_sub(user_id, sub)
+            sub.status = "canceled"
+            s.commit()
+            return before, _serialize_user_sub(user_id, sub)
+
+    before, after = await asyncio.to_thread(_apply)
+    try:
+        from db.entitlements import invalidate_user_entitlement_cache
+
+        invalidate_user_entitlement_cache(user_id)
+    except Exception:
+        pass
+    _audit(
+        actor, "subscription.revoke", f"user:{user_id}",
         before=json.dumps(before), after=json.dumps(after),
     )
     return jsonify(after)

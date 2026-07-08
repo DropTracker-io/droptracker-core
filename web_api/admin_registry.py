@@ -36,6 +36,7 @@ from db import (
     Player,
     SubscriptionTier,
     User,
+    UserSubscription,
 )
 from web_api.common import abort_problem
 
@@ -98,7 +99,7 @@ ENTITY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "pk": "key",
         "pk_type": "str",
         "columns": [
-            "key", "name", "description", "price_cents", "currency", "interval",
+            "key", "name", "description", "scope", "price_cents", "currency", "interval",
             "features", "entitlements", "recommended", "provider_price_id", "active",
             "created_at", "updated_at",
         ],
@@ -106,7 +107,7 @@ ENTITY_REGISTRY: Dict[str, Dict[str, Any]] = {
             "name", "description", "price_cents", "currency", "interval",
             "recommended", "active",
         ],
-        "search_text": ["key", "name"],
+        "search_text": ["key", "name", "scope"],
         "search_int": [],
     },
     "group_subscriptions": {
@@ -121,6 +122,19 @@ ENTITY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "editable": ["tier_key", "status", "cancel_at_period_end"],
         "search_text": ["status", "tier_key"],
         "search_int": ["id", "group_id"],
+    },
+    "user_subscriptions": {
+        "model": UserSubscription,
+        "pk": "id",
+        "columns": [
+            "id", "user_id", "tier_key", "status", "provider",
+            "provider_customer_id", "provider_subscription_id",
+            "current_period_end", "cancel_at_period_end", "created_at",
+            "updated_at",
+        ],
+        "editable": ["tier_key", "status", "cancel_at_period_end"],
+        "search_text": ["status", "tier_key"],
+        "search_int": ["id", "user_id"],
     },
     "audit_log": {
         "model": AuditLog,

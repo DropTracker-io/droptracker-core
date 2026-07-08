@@ -56,26 +56,28 @@ def _player_points(s, player_id: int):
         return None
 
 
-def _player_top_npc(s, player: Player):
-    """The player's highest-loot NPC name over the tracked NPC set
-    (best-effort; omitted on error). Mirrors the intake `/player_search`."""
+def _player_top_npc(s, player: Player, partition: int):
+    """The player's highest-loot NPC name this month over the tracked NPC set
+    (best-effort; omitted on error). Reads the hourly analytics rollup — the
+    old per-NPC Redis leaderboards this used to read are no longer written."""
     try:
-        from data.TOP_NPCS import TOP_NPCS
-        from db import NpcList
+        from sqlalchemy import bindparam
 
-        best_name = None
-        best_loot = -1
-        npcs = s.query(NpcList).filter(NpcList.npc_id.in_(TOP_NPCS)).all()
-        for npc in npcs:
-            try:
-                _rank, score = player.get_score_at_npc(npc.npc_id)
-            except Exception:
-                continue
-            loot = int(float(score)) if score is not None else 0
-            if loot > best_loot:
-                best_loot = loot
-                best_name = npc.npc_name
-        return best_name if best_loot > 0 else None
+        from data.TOP_NPCS import TOP_NPCS
+
+        sql = text(
+            "SELECT n.npc_name FROM player_npc_hourly_totals t "
+            "JOIN npc_list n ON n.npc_id = t.npc_id "
+            "WHERE t.player_id = :pid AND t.`partition` = :partition "
+            "  AND t.npc_id IN :npc_ids "
+            "GROUP BY t.npc_id, n.npc_name "
+            "ORDER BY SUM(t.total_value) DESC LIMIT 1"
+        ).bindparams(bindparam("npc_ids", expanding=True))
+        row = s.execute(
+            sql,
+            {"pid": player.player_id, "partition": int(partition), "npc_ids": list(TOP_NPCS)},
+        ).first()
+        return row[0] if row else None
     except Exception:
         return None
 
@@ -416,6 +418,15 @@ async def player_profile(player_id: int):
                 "groups": groups,
                 "recent_submissions": submissions,
             }
+            # Supporter flair: user-level premium display perk.
+            try:
+                if player.user_id:
+                    from db.entitlements import resolve_user_entitlements
+
+                    if resolve_user_entitlements(s, player.user_id).get("supporter_flair"):
+                        payload["is_supporter"] = True
+            except Exception:
+                pass
             if rank is not None:
                 payload["global_rank"] = rank
             # Month-over-month movement + percentile context for the hero tiles.
@@ -454,7 +465,7 @@ async def player_profile(player_id: int):
             points = _player_points(s, player_id)
             if points is not None:
                 payload["points"] = points
-            top_npc = _player_top_npc(s, player)
+            top_npc = _player_top_npc(s, player, partition)
             if top_npc:
                 payload["top_npc"] = top_npc
             # Best-effort: badge failures must never break profiles.
@@ -469,6 +480,105 @@ async def player_profile(player_id: int):
     if payload is None:
         return problem(404, "Player not found", f"No player with id {player_id}")
     return with_cache_headers(jsonify(payload), max_age=30)
+
+
+def _earliest_loot_partition(s, player_id: int):
+    """First YYYYMM with tracked drops for this player (for the month picker)."""
+    # ix_drops_player_id is effectively (player_id, drop_id), so ordering by
+    # PK under a player_id filter is index-ordered and the LIMIT 1 is O(1) —
+    # unlike MIN(`partition`), which would scan every row the player has.
+    row = s.execute(
+        text("SELECT `partition` FROM drops WHERE player_id = :pid ORDER BY drop_id ASC LIMIT 1"),
+        {"pid": player_id},
+    ).first()
+    return int(row[0]) if row and row[0] else None
+
+
+@profiles_bp.get("/players/<int:player_id>/loot")
+async def player_loot(player_id: int):
+    """RuneLite-style loot tracker: one month of the player's drops grouped by
+    NPC, with item stacks. Reads `drops` directly (player_id+partition are
+    indexed; a player-month is a few thousand rows at most)."""
+    raw = request.args.get("partition", "")
+    current = period_to_partition("all")
+    try:
+        partition = int(raw) if raw else current
+    except ValueError:
+        return problem(400, "Bad partition", "partition must be YYYYMM")
+    year, month = divmod(partition, 100)
+    if not (2020 <= year <= 2100 and 1 <= month <= 12) or partition > current:
+        return problem(400, "Bad partition", "partition must be a valid YYYYMM month, not in the future")
+
+    def _load():
+        with db_session() as s:
+            player = s.query(Player).filter(Player.player_id == player_id).first()
+            if not player:
+                return None
+            if bool(player.hidden) or bool(player.user and player.user.hidden):
+                return None
+
+            cache_key = f"pstats:loot:{player_id}:{partition}"
+            cached = cache_get(cache_key, _STATS_TTL)
+            if cached is not None:
+                return cached
+
+            item_rows = s.execute(text(
+                "SELECT d.npc_id, n.npc_name, d.item_id, i.item_name, "
+                "       SUM(d.quantity) AS qty, SUM(d.value * d.quantity) AS loot "
+                "FROM drops d "
+                "JOIN npc_list n ON n.npc_id = d.npc_id "
+                "JOIN items i ON i.item_id = d.item_id "
+                "WHERE d.player_id = :pid AND d.`partition` = :partition "
+                "GROUP BY d.npc_id, n.npc_name, d.item_id, i.item_name"
+            ), {"pid": player_id, "partition": partition}).fetchall()
+
+            # "Kills" the way the old XenForo widget counted them: distinct
+            # drop timestamps per NPC (multi-item kills share one timestamp).
+            kill_rows = s.execute(text(
+                "SELECT d.npc_id, COUNT(DISTINCT d.date_added) "
+                "FROM drops d "
+                "WHERE d.player_id = :pid AND d.`partition` = :partition "
+                "  AND d.npc_id IS NOT NULL "
+                "GROUP BY d.npc_id"
+            ), {"pid": player_id, "partition": partition}).fetchall()
+            kills = {int(npc_id): int(cnt) for npc_id, cnt in kill_rows}
+
+            npcs = {}
+            for npc_id, npc_name, item_id, item_name, qty, loot in item_rows:
+                npc = npcs.setdefault(int(npc_id), {
+                    "npc_id": int(npc_id),
+                    "name": npc_name,
+                    "kills": kills.get(int(npc_id), 0),
+                    "total_value": 0,
+                    "items": [],
+                })
+                loot = int(loot or 0)
+                npc["total_value"] += loot
+                npc["items"].append({
+                    "item_id": int(item_id),
+                    "name": item_name,
+                    "quantity": int(qty or 0),
+                    "loot": money(loot),
+                })
+
+            npc_list = sorted(npcs.values(), key=lambda x: x["total_value"], reverse=True)
+            for npc in npc_list:
+                npc["items"].sort(key=lambda x: x["loot"]["value"], reverse=True)
+                npc["loot"] = money(npc.pop("total_value"))
+
+            payload = {
+                "player_id": player_id,
+                "partition": partition,
+                "earliest_partition": _earliest_loot_partition(s, player_id) or partition,
+                "npcs": npc_list,
+            }
+            cache_set(cache_key, payload)
+            return payload
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        return problem(404, "Player not found", f"No player with id {player_id}")
+    return with_cache_headers(jsonify(payload), max_age=60)
 
 
 @profiles_bp.get("/groups/<int:group_id>")

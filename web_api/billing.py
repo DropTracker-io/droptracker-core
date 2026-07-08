@@ -63,13 +63,52 @@ def start_checkout(group_id: int, tier, subscription) -> dict:
 
     # Stripe hosted checkout.
     try:
+        meta = {"group_id": str(group_id), "tier_key": tier.key}
         session = stripe.checkout.Session.create(
             mode="subscription",
             line_items=[{"price": tier.provider_price_id, "quantity": 1}],
             success_url=f"{SITE_URL}/groups/{group_id}/subscription?checkout=success",
             cancel_url=f"{SITE_URL}/groups/{group_id}/subscription?checkout=cancel",
             client_reference_id=str(group_id),
-            metadata={"group_id": str(group_id), "tier_key": tier.key},
+            metadata=meta,
+            # Propagate onto the Subscription object so recurring
+            # customer.subscription.* webhooks can be matched back to us.
+            subscription_data={"metadata": meta},
+        )
+        return {"url": session.url, "apply": None}
+    except Exception as e:
+        raise RuntimeError(f"Stripe checkout failed: {e}")
+
+
+def start_user_checkout(user_id: int, tier, subscription) -> dict:
+    """Begin (or switch to) a user-scoped supporter tier.
+
+    Same contract as ``start_checkout``: Stripe returns a hosted URL, manual
+    returns an ``apply`` dict for immediate in-DB activation.
+    """
+    stripe = _stripe()
+    if stripe is None:
+        period = timedelta(days=365 if tier.interval == "year" else 30)
+        return {
+            "url": None,
+            "apply": {
+                "tier_key": tier.key,
+                "status": "active",
+                "provider": "manual",
+                "current_period_end": datetime.now() + period,
+                "cancel_at_period_end": False,
+            },
+        }
+
+    try:
+        meta = {"scope": "user", "user_id": str(user_id), "tier_key": tier.key}
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            line_items=[{"price": tier.provider_price_id, "quantity": 1}],
+            success_url=f"{SITE_URL}/premium?checkout=success",
+            cancel_url=f"{SITE_URL}/premium?checkout=cancel",
+            metadata=meta,
+            subscription_data={"metadata": meta},
         )
         return {"url": session.url, "apply": None}
     except Exception as e:
@@ -103,13 +142,22 @@ def resume(subscription) -> dict:
 
 def billing_portal(group_id: int, subscription) -> Optional[str]:
     """Return a provider billing-portal URL, or None if unavailable (manual)."""
+    return _portal(subscription, f"{SITE_URL}/groups/{group_id}/subscription")
+
+
+def user_billing_portal(subscription) -> Optional[str]:
+    """Billing portal for a user-scoped supporter subscription."""
+    return _portal(subscription, f"{SITE_URL}/premium")
+
+
+def _portal(subscription, return_url: str) -> Optional[str]:
     stripe = _stripe()
     if stripe is None or not subscription.provider_customer_id:
         return None
     try:
         portal = stripe.billing_portal.Session.create(
             customer=subscription.provider_customer_id,
-            return_url=f"{SITE_URL}/groups/{group_id}/subscription",
+            return_url=return_url,
         )
         return portal.url
     except Exception:

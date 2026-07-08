@@ -8,6 +8,7 @@ from __future__ import annotations
 from db.entitlements import (  # noqa: F401  (re-exported for existing importers)
     all_entitlements_granted,
     resolve_group_entitlements as _resolve_group_entitlements,
+    resolve_user_entitlements as _resolve_user_entitlements,
     subscription_is_live,
 )
 from web_api.deps import is_superadmin
@@ -26,3 +27,18 @@ def resolve_group_entitlements(
     if is_superadmin(user):
         return all_entitlements_granted()
     return _resolve_group_entitlements(s, group_id)
+
+
+def resolve_user_entitlements(
+    s,
+    user_id: int,
+    *,
+    user=None,
+) -> dict[str, bool]:
+    """Return the resolved supporter entitlement map for ``user_id``.
+
+    Superadmins receive all supporter entitlements.
+    """
+    if is_superadmin(user):
+        return all_entitlements_granted("user")
+    return _resolve_user_entitlements(s, user_id)

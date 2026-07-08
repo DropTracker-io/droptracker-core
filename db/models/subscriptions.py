@@ -31,6 +31,10 @@ class SubscriptionTier(Base):
     key = Column(String(40), primary_key=True)
     name = Column(String(80), nullable=False)
     description = Column(Text, nullable=True)
+    # Who this tier applies to: "group" tiers grant group entitlements via
+    # group_subscriptions; "user" tiers grant per-user supporter entitlements
+    # via user_subscriptions. Both live here so tier CRUD/billing are shared.
+    scope = Column(String(8), nullable=False, default="group")  # group|user
     price_cents = Column(Integer, nullable=False, default=0)
     currency = Column(String(8), nullable=False, default="USD")
     interval = Column(String(8), nullable=False, default="month")  # month|year
@@ -56,6 +60,34 @@ class GroupSubscription(Base):
     status = Column(String(16), nullable=False, default="none")
     # none|active|trialing|past_due|canceled|expired
     provider = Column(String(16), nullable=True)  # patreon|stripe|manual
+    provider_customer_id = Column(String(120), nullable=True)
+    provider_subscription_id = Column(String(120), nullable=True)
+    current_period_end = Column(DateTime, nullable=True)
+    cancel_at_period_end = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class UserSubscription(Base):
+    """Per-user supporter subscription — same lifecycle as GroupSubscription.
+
+    A user holds at most one subscription to a user-scoped tier. Grants
+    personal perks (submission DMs, supporter flair) independent of any
+    group's subscription.
+    """
+
+    __tablename__ = "user_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uix_user_subscription"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.user_id"), nullable=False)
+    tier_key = Column(String(40), ForeignKey("subscription_tiers.key"), nullable=True)
+    status = Column(String(16), nullable=False, default="none")
+    # none|active|trialing|past_due|canceled|expired
+    provider = Column(String(16), nullable=True)  # stripe|paypal|manual
     provider_customer_id = Column(String(120), nullable=True)
     provider_subscription_id = Column(String(120), nullable=True)
     current_period_end = Column(DateTime, nullable=True)

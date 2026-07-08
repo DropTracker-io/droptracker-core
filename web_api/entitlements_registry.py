@@ -10,6 +10,8 @@ from __future__ import annotations
 from db.entitlements import (  # noqa: F401
     ENTITLEMENT_FIELDS,
     HALL_OF_FAME_CONFIG_KEYS,
+    TIER_SCOPES,
+    USER_ENTITLEMENT_FIELDS,
     EntitlementValidationError,
     all_entitlement_keys,
     all_entitlements_granted,
@@ -24,6 +26,8 @@ from db.entitlements import (  # noqa: F401
 __all__ = [
     "ENTITLEMENT_FIELDS",
     "HALL_OF_FAME_CONFIG_KEYS",
+    "TIER_SCOPES",
+    "USER_ENTITLEMENT_FIELDS",
     "EntitlementValidationError",
     "all_entitlement_keys",
     "all_entitlements_granted",
