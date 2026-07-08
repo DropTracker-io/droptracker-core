@@ -41,7 +41,7 @@ from .premium_features import (
     PointDebit, 
     RecurringPointGrant)
 from .tickets import Ticket, TicketMessage
-from .group_points import PlayerPoints, GroupPointConfig, GroupPointMods, GroupPointTimedEvent, GroupPointBlacklist
+from .group_points import PlayerPoints, GroupPointConfig, GroupPointMods, GroupPointTimedEvent, GroupPointBlacklist, GroupPointSeason
 from .video_upload import VideoUpload
 from .seasonal_drop import SeasonalDrop
 from .seasonal_personal_best import SeasonalPersonalBestEntry
@@ -139,6 +139,7 @@ __all__ = [
     "GroupPointMods",
     "GroupPointTimedEvent",
     "GroupPointBlacklist",
+    "GroupPointSeason",
     "VideoUpload",
     "SeasonalDrop",
     "SeasonalPersonalBestEntry",

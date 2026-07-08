@@ -423,7 +423,8 @@ async def check_and_award_points(
             # - If mod does NOT specify an id (NULL/0), it matches any incoming id.
             item_match = (mod_item_id == 0) or (incoming_item_id != 0 and mod_item_id == incoming_item_id)
             npc_match = (mod_npc_id == 0) or (incoming_npc_id != 0 and mod_npc_id == incoming_npc_id)
-            if item_match and npc_match and mod.event_type == reason:
+            mod_event_type = str(getattr(mod, "event_type", "") or "any").lower()
+            if item_match and npc_match and mod_event_type in (str(reason).lower(), "any"):
                 try:
                     award = int(mod.award)
                     has_mod_override = True

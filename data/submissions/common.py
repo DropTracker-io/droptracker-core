@@ -454,22 +454,14 @@ async def screenshot_required(session, group_id) -> bool:
     value = gc.get(session, group_id, gc.ONLY_SEND_MESSAGES_WITH_IMAGES)
     return gc.is_truthy(value)
 
-_group_point_system_cache = {}
-_GROUP_POINT_CACHE_TTL = 60
-
 def check_group_point_system_active(group_id, external_session=None):
-    now = time.time()
-    cached = _group_point_system_cache.get(group_id)
-    if cached is not None:
-        value, ts = cached
-        if now - ts < _GROUP_POINT_CACHE_TTL:
-            return value
+    """Whether the group's custom point system is enabled (subscription entitlement).
 
-    session, use_external_session = select_session_and_flag(external_session)
-    premium_status = session.execute(text("SELECT 1 FROM xenforo.xf_dt_group_upgrade_active WHERE group_id = :group_id AND is_cancelled = 0 AND group_upgrade_id >= 2 LIMIT 1"), {"group_id": group_id}).first()
-    result = premium_status is not None
-    _group_point_system_cache[group_id] = (result, now)
-    return result
+    Resolution + 60s caching live in db.entitlements; the external_session
+    parameter is kept for call-site compatibility but no longer used.
+    """
+    from db.entitlements import group_has_entitlement
+    return group_has_entitlement(group_id, "custom_points")
     
 
 async def ensure_player_and_auth(session, player_name, account_hash, auth_key):

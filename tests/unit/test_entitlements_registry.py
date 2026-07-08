@@ -19,6 +19,7 @@ class TestEntitlementsRegistry:
             "hall_of_fame": False,
             "custom_embeds": False,
             "video_submissions": False,
+            "custom_points": False,
         }
 
     def test_resolve_explicit_defaults(self):

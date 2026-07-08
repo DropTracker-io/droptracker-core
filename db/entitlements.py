@@ -55,6 +55,13 @@ ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
         "help": "Members can capture and upload short video clips of drops, personal bests and other achievements instead of screenshots.",
         "default": False,
     },
+    {
+        "key": "custom_points",
+        "label": "Custom points system",
+        "category": "features",
+        "help": "Configure a custom point system: award rules per submission type, per-item/NPC overrides, timed boosts, and points leaderboards.",
+        "default": False,
+    },
 ]
 
 # User-scoped ("supporter") entitlements — granted by a user_subscriptions row

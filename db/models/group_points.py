@@ -83,6 +83,22 @@ class GroupPointTimedEvent(Base):
     # Relationships
     group = relationship("Group", back_populates="group_point_timed_events")
 
+class GroupPointSeason(Base):
+    """Admin-defined leaderboard window (e.g. a recruitment drive or quarterly comp)."""
+    __tablename__ = 'group_point_seasons'
+    __table_args__ = {
+        'extend_existing': True,
+    }
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_id = Column(Integer, ForeignKey('groups.group_id'), nullable=False)
+    name = Column[str](String(100), nullable=False)
+    start_at = Column(DateTime, nullable=False)
+    end_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, onupdate=func.now(), default=func.now())
+
+
 class GroupPointBlacklist(Base):
     __tablename__ = 'group_point_blacklist'
     __table_args__ = {
