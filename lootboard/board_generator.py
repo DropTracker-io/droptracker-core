@@ -107,6 +107,10 @@ async def update_boards():
                     print(f"Error getting groups: {e}")
                     return
             
+        # Every group id that still exists, for the stale-entry prune below
+        # (independent of the guild_id filter — an unlinked group still exists).
+        db_group_ids = {g.group_id for g in original_groups}
+
         # Create a clean list of groups outside the session
         groups = []
         for g in original_groups:
@@ -155,6 +159,23 @@ async def update_boards():
                 print(f"Error in group processing for {group.group_id}: {e}")
                 continue
         
+        # Prune deleted groups from the precomputed group leaderboard. The
+        # per-group zadds during generation never remove members, so a group
+        # deleted from the DB would otherwise stay on the website's group
+        # leaderboard forever (web_api reads gleaderboard:{partition} first).
+        try:
+            from utils.redis import RedisClient
+            partition = datetime.now().year * 100 + datetime.now().month
+            key = f"gleaderboard:{partition}"
+            redis_client = RedisClient()
+            members = redis_client.client.zrange(key, 0, -1)
+            stale = [m for m in members if int(m) not in db_group_ids]
+            if stale:
+                redis_client.client.zrem(key, *stale)
+                print(f"Pruned deleted groups from {key}: {[int(m) for m in stale]}")
+        except Exception as e:
+            print(f"Error pruning deleted groups from gleaderboard: {e}")
+
     except Exception as e:
         print(f"Error updating boards: {e}")
     finally:

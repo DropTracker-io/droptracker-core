@@ -42,6 +42,7 @@ from db import (
     Event,
     EventBingoCell,
     EventBingoCompletion,
+    EventCompletion,
     EventProgress,
     EventTask,
     EventTeam,
@@ -139,6 +140,9 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             "target_value": t.target_value,
             "points": int(t.points or 0),
             "requires_confirmation": bool(t.requires_confirmation),
+            # Raw JSON config (item lists, source NPCs) so participants can
+            # see exactly which items/NPCs count toward a task.
+            "config": t.config or None,
         }
         for t in s.query(EventTask).filter(EventTask.event_id == ev.id).all()
     ]
@@ -253,6 +257,19 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             ],
         }
 
+    # Per-team per-task rollups: lets the public page render 35/50-style
+    # progress bars instead of only final team scores.
+    base["progress"] = [
+        {
+            "task_id": p.task_id,
+            "team_id": p.team_id,
+            "progress": int(p.progress or 0),
+            "completed": bool(p.completed),
+            "completed_at": _ts(p.completed_at),
+        }
+        for p in s.query(EventProgress).filter(EventProgress.event_id == ev.id).all()
+    ]
+
     base["tasks"] = tasks
     base["teams"] = teams
     base["bingo"] = bingo
@@ -340,6 +357,148 @@ async def get_event(event_id: int):
         # shared-cacheable.
         return private_no_store(jsonify(payload))
     return with_cache_headers(jsonify(payload), max_age=30)
+
+
+# Ledger statuses that actually counted toward progress/score (pending and
+# rejected/revoked rows are excluded from public team activity).
+_APPLIED_STATUSES = ("auto", "confirmed", "manual")
+
+
+@events_bp.get("/events/<int:event_id>/teams/<int:team_id>")
+async def get_event_team(event_id: int, team_id: int):
+    """Public team detail: standings context, roster with per-member
+    contribution counts, per-task progress, and the recent applied-ledger
+    activity feed (no admin notes or proof URLs)."""
+    viewer_id = optional_user_id()
+
+    def _load():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if _effective_status(ev) == "draft" and not _is_event_admin(s, viewer_id, ev):
+                return None
+            all_teams = (
+                s.query(EventTeam)
+                .filter(EventTeam.event_id == event_id)
+                .order_by(EventTeam.score.desc(), EventTeam.id.asc())
+                .all()
+            )
+            team = next((tm for tm in all_teams if tm.id == team_id), None)
+            if team is None:
+                return None
+            rank = all_teams.index(team) + 1
+
+            member_rows = (
+                s.query(EventTeamMember, Player.player_name)
+                .join(Player, Player.player_id == EventTeamMember.player_id)
+                .filter(EventTeamMember.team_id == team_id)
+                .order_by(EventTeamMember.joined_at.asc())
+                .all()
+            )
+
+            applied = (
+                s.query(EventCompletion)
+                .filter(
+                    EventCompletion.event_id == event_id,
+                    EventCompletion.team_id == team_id,
+                    EventCompletion.status.in_(_APPLIED_STATUSES),
+                )
+                .order_by(EventCompletion.id.desc())
+                .all()
+            )
+            # Per-member contribution rollup from the applied ledger.
+            contrib: dict[int, dict[str, int]] = {}
+            for c in applied:
+                if c.player_id is None:
+                    continue
+                row = contrib.setdefault(c.player_id, {"completions": 0, "quantity": 0})
+                row["completions"] += 1
+                row["quantity"] += int(c.quantity or 1)
+
+            members = [
+                {
+                    "player_id": m.player_id,
+                    "player_name": player_name,
+                    "joined_at": _ts(m.joined_at),
+                    "completions": contrib.get(m.player_id, {}).get("completions", 0),
+                    "quantity": contrib.get(m.player_id, {}).get("quantity", 0),
+                }
+                for m, player_name in member_rows
+            ]
+
+            task_rows = s.query(EventTask).filter(EventTask.event_id == event_id).all()
+            prog_by_task = {
+                p.task_id: p
+                for p in s.query(EventProgress).filter(
+                    EventProgress.event_id == event_id,
+                    EventProgress.team_id == team_id,
+                ).all()
+            }
+            tasks = []
+            for t in task_rows:
+                p = prog_by_task.get(t.id)
+                tasks.append({
+                    "id": t.id,
+                    "type": t.type,
+                    "label": t.label,
+                    "target": t.target or None,
+                    "target_value": t.target_value,
+                    "points": int(t.points or 0),
+                    "requires_confirmation": bool(t.requires_confirmation),
+                    "config": t.config or None,
+                    "progress": int(p.progress or 0) if p else 0,
+                    "completed": bool(p.completed) if p else False,
+                    "completed_at": _ts(p.completed_at) if p else None,
+                })
+
+            task_labels = {t.id: t.label for t in task_rows}
+            player_names = {m.player_id: name for (m, name) in member_rows}
+            missing_pids = {
+                c.player_id for c in applied[:50]
+                if c.player_id and c.player_id not in player_names
+            }
+            if missing_pids:  # contributors who since left the roster
+                for pid, name in (
+                    s.query(Player.player_id, Player.player_name)
+                    .filter(Player.player_id.in_(missing_pids)).all()
+                ):
+                    player_names[pid] = name
+            activity = [
+                {
+                    "id": c.id,
+                    "task_id": c.task_id,
+                    "task_label": task_labels.get(c.task_id),
+                    "player_id": c.player_id,
+                    "player_name": player_names.get(c.player_id),
+                    "quantity": int(c.quantity or 1),
+                    "source_type": c.source_type,
+                    "created_at": _ts(c.created_at),
+                }
+                for c in applied[:50]
+            ]
+
+            return {
+                "event": _summary(ev),
+                "team": {
+                    "id": team.id,
+                    "name": team.name,
+                    "score": int(team.score or 0),
+                    "rank": rank,
+                    "team_count": len(all_teams),
+                    "member_count": len(members),
+                },
+                "members": members,
+                "tasks": tasks,
+                "activity": activity,
+            }
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(404, "Team not found", f"No team {team_id} in event {event_id}.")
+    if viewer_id is not None:
+        return private_no_store(jsonify(payload))
+    return with_cache_headers(jsonify(payload), max_age=15)
 
 
 # --------------------------------------------------------------------------- #

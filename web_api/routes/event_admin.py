@@ -292,9 +292,11 @@ async def award_completion(event_id: int):
     quantity = body.get("quantity", 1)
     if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity < 1:
         abort_problem(422, "Invalid quantity", "'quantity' must be a positive integer.")
+    complete = bool(body.get("complete"))
     note = _clean_note(body)
 
     def _apply():
+        nonlocal quantity
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev.group_id)
@@ -312,6 +314,21 @@ async def award_completion(event_id: int):
             )
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+            if complete:
+                # "Mark complete": fill whatever progress is left so this one
+                # ledger row crosses the task's threshold (an award of the
+                # default quantity 1 on a 50-KC task otherwise just records
+                # 1/50 and completes nothing).
+                eng = _engine()
+                threshold = eng.completion_threshold(eng._task_to_dict(task))
+                current = (
+                    s.query(EventProgress)
+                    .filter(EventProgress.task_id == task_id,
+                            EventProgress.team_id == team_id)
+                    .first()
+                )
+                done = int(current.progress or 0) if current else 0
+                quantity = max(threshold - done, 1)
             comp = EventCompletion(
                 event_id=event_id,
                 task_id=task_id,

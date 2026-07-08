@@ -276,6 +276,29 @@ async def update():
             session.rollback()
             return {"status": "failed", "error": str(e)}
 
+async def npc_totals_loop():
+    """Keep the player_npc_hourly_totals rollup current (powers the profile
+    'top bosses' blocks). Tails the drops table by drop_id every 60s."""
+    from services import npc_totals
+
+    while not shutdown_event.is_set():
+        try:
+            await send_watchdog_heartbeat()
+            loop = asyncio.get_event_loop()
+            scanned = await loop.run_in_executor(None, npc_totals.process_new_drops)
+            if scanned:
+                print(f"npc_totals: folded {scanned} new drops into hourly rollup")
+        except Exception as e:
+            print(f"Error in npc totals loop: {e}")
+            app_logger.log(
+                log_type="error",
+                data=f"Error in npc totals loop: {e}",
+                app_name="player_updates",
+                description="npc_totals_loop",
+            )
+        await sleep_with_watchdog_heartbeats(60)
+
+
 async def github_update_loop():
     """Enhanced github_update_loop with watchdog notifications"""
     if os.getenv("STATUS") == "dev" or os.getenv("STATE") == "dev":
@@ -313,6 +336,7 @@ async def github_update_loop():
 async def setup_background_tasks():
     app.update_task = asyncio.create_task(update_players())
     app.github_task = asyncio.create_task(github_update_loop())
+    app.npc_totals_task = asyncio.create_task(npc_totals_loop())
     app_logger.log(log_type="access", data=f"Started background tasks", app_name="player_updates", description="setup_background_tasks")
 
 async def get_all_groups(session_to_use = None):
@@ -341,6 +365,13 @@ async def cleanup_background_tasks():
         app.github_task.cancel()
         try:
             await app.github_task
+        except asyncio.CancelledError:
+            pass
+
+    if hasattr(app, 'npc_totals_task'):
+        app.npc_totals_task.cancel()
+        try:
+            await app.npc_totals_task
         except asyncio.CancelledError:
             pass
     

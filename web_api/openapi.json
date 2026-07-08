@@ -80,6 +80,35 @@
         }
       }
     },
+    "/players/{playerId}/loot": {
+      "get": {
+        "tags": ["players"],
+        "operationId": "getPlayerLoot",
+        "summary": "Player loot tracker (drops grouped by NPC for one month)",
+        "parameters": [
+          { "$ref": "#/components/parameters/PlayerId" },
+          {
+            "name": "partition",
+            "in": "query",
+            "required": false,
+            "description": "YYYYMM month to show; defaults to the current month.",
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Loot tracker payload.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PlayerLootTracker" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/players/search": {
       "get": {
         "tags": ["players"],
@@ -321,6 +350,49 @@
           "name": { "type": "string" },
           "loot": { "$ref": "#/components/schemas/Money" },
           "drops": { "type": "integer" }
+        }
+      },
+      "LootTrackerItem": {
+        "type": "object",
+        "required": ["item_id", "name", "quantity", "loot"],
+        "properties": {
+          "item_id": { "type": "integer" },
+          "name": { "type": "string" },
+          "quantity": { "type": "integer", "format": "int64" },
+          "loot": { "$ref": "#/components/schemas/Money" }
+        }
+      },
+      "LootTrackerNpc": {
+        "type": "object",
+        "required": ["npc_id", "name", "kills", "loot", "items"],
+        "properties": {
+          "npc_id": { "type": "integer" },
+          "name": { "type": "string" },
+          "kills": {
+            "type": "integer",
+            "description": "Distinct drop events (multi-item kills counted once)."
+          },
+          "loot": { "$ref": "#/components/schemas/Money" },
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/LootTrackerItem" }
+          }
+        }
+      },
+      "PlayerLootTracker": {
+        "type": "object",
+        "required": ["player_id", "partition", "earliest_partition", "npcs"],
+        "properties": {
+          "player_id": { "type": "integer" },
+          "partition": { "type": "integer", "description": "YYYYMM month shown." },
+          "earliest_partition": {
+            "type": "integer",
+            "description": "First YYYYMM with tracked drops (month-picker lower bound)."
+          },
+          "npcs": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/LootTrackerNpc" }
+          }
         }
       },
       "GroupTopPlayer": {
