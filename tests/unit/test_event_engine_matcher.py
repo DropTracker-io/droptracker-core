@@ -280,3 +280,69 @@ class TestDistinctItemProgress:
         assert engine._list_kind(_task(config={"kind": "all_of"})) == "all_of"
         assert engine._list_kind(_task(config={})) is None
         assert engine._list_kind(_task(config=None)) is None
+
+
+# ── kc dedupe: kill_count keying + cooldown fallback ─────────────────────────
+
+class _FakeRedis:
+    def __init__(self):
+        self.sets = {}
+        self.kv = {}
+
+    def sadd(self, key, member):
+        s = self.sets.setdefault(key, set())
+        if member in s:
+            return 0
+        s.add(member)
+        return 1
+
+    def expire(self, key, ttl):
+        return True
+
+    def get(self, key):
+        return self.kv.get(key)
+
+    def set(self, key, value, ex=None):
+        self.kv[key] = str(value)
+
+
+class TestKcDedupe:
+    def test_same_kill_count_counts_once(self):
+        r = _FakeRedis()
+        env = _env("drop", {"npc_name": "Zulrah", "kill_count": 12})
+        assert engine._kc_dedupe(r, 2, 9, 5, env) is True
+        assert engine._kc_dedupe(r, 2, 9, 5, env) is False  # second stack, same kill
+
+    def test_new_kill_count_counts_again(self):
+        r = _FakeRedis()
+        assert engine._kc_dedupe(r, 2, 9, 5, _env("drop", {"npc_name": "Zulrah", "kill_count": 12})) is True
+        assert engine._kc_dedupe(r, 2, 9, 5, _env("drop", {"npc_name": "Zulrah", "kill_count": 13})) is True
+
+    def test_zero_kill_count_uses_cooldown_not_collapse(self):
+        # The plugin sends 0 when KC is unavailable — two kills far apart must
+        # BOTH count (0 must not dedupe them into one).
+        r = _FakeRedis()
+        assert engine._kc_dedupe(r, 2, 9, 5, _env("drop", {"npc_name": "Zulrah", "kill_count": 0}, ts=1000)) is True
+        assert engine._kc_dedupe(r, 2, 9, 5, _env("drop", {"npc_name": "Zulrah", "kill_count": 0}, ts=1100)) is True
+
+    def test_missing_kill_count_stacks_within_cooldown_count_once(self):
+        # The original bug: one kill dropping 3 stacks (each its own guid,
+        # 1-2s apart) counted as 3 kills.
+        r = _FakeRedis()
+        assert engine._kc_dedupe(r, 2, 9, 5, _env("drop", {"npc_name": "Zulrah"}, guid="a", ts=1000)) is True
+        assert engine._kc_dedupe(r, 2, 9, 5, _env("drop", {"npc_name": "Zulrah"}, guid="b", ts=1001)) is False
+        assert engine._kc_dedupe(r, 2, 9, 5, _env("drop", {"npc_name": "Zulrah"}, guid="c", ts=1002)) is False
+        # ...and the next real kill (past the cooldown) counts.
+        assert engine._kc_dedupe(r, 2, 9, 5, _env("drop", {"npc_name": "Zulrah"}, guid="d", ts=1065)) is True
+
+    def test_string_kill_count_coerced(self):
+        # Embed field values arrive as strings.
+        r = _FakeRedis()
+        env = _env("drop", {"npc_name": "Zulrah", "kill_count": "12"})
+        assert engine._kc_dedupe(r, 2, 9, 5, env) is True
+        assert engine._kc_dedupe(r, 2, 9, 5, env) is False
+
+    def test_players_deduped_independently(self):
+        r = _FakeRedis()
+        assert engine._kc_dedupe(r, 2, 9, 5, _env("drop", {"npc_name": "Zulrah"}, ts=1000, player_id=5)) is True
+        assert engine._kc_dedupe(r, 2, 9, 6, _env("drop", {"npc_name": "Zulrah"}, ts=1001, player_id=6)) is True

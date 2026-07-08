@@ -497,23 +497,39 @@ def _fold_xp_baseline(redis_conn, event_id: int, player_id: int, skill, xp) -> i
         return 0
 
 
+# Without a usable kill count, stacks from one kill are only distinguishable
+# from a new kill by time: one kill's stacks arrive within a couple of
+# seconds, while re-killing any multi-stack NPC takes far longer.
+KC_FALLBACK_COOLDOWN_SECONDS = 10
+
+
 def _kc_dedupe(redis_conn, event_id: int, task_id: int, player_id: int, envelope: dict) -> bool:
     """True if this drop represents a not-yet-counted kill for a kc task.
 
-    Keyed per (npc, kill_count) so multi-item drops from one kill count once;
-    falls back to the submission guid when kill_count is absent.
+    Keyed per (npc, kill_count) so multi-item drops from one kill count once.
+    When kill_count is unusable (absent, or 0 = the plugin's "unavailable"
+    marker), fall back to a per-(task, player) cooldown — the old guid
+    fallback counted every stack of a multi-item kill as its own kill.
     """
     data = envelope.get("data") or {}
-    kill_count = data.get("kill_count")
-    if kill_count is not None:
-        member = f"{_norm(data.get('npc_name'))}:{kill_count}"
-    else:
-        member = f"guid:{envelope.get('guid')}"
+    try:
+        kill_count = int(data.get("kill_count"))
+    except (TypeError, ValueError):
+        kill_count = None
     key = f"events:{event_id}:kcdedupe:{task_id}:{player_id}"
     try:
-        added = redis_conn.sadd(key, member)
-        redis_conn.expire(key, _STATE_KEY_TTL)
-        return bool(added)
+        if kill_count is not None and kill_count > 0:
+            member = f"{_norm(data.get('npc_name'))}:{kill_count}"
+            added = redis_conn.sadd(key, member)
+            redis_conn.expire(key, _STATE_KEY_TTL)
+            return bool(added)
+        ts = int(envelope.get("ts") or time.time())
+        last_key = f"events:{event_id}:kclast:{task_id}:{player_id}"
+        last = redis_conn.get(last_key)
+        if last is not None and ts - int(last) < KC_FALLBACK_COOLDOWN_SECONDS:
+            return False
+        redis_conn.set(last_key, ts, ex=_STATE_KEY_TTL)
+        return True
     except Exception:
         # If Redis dedupe is unavailable, fall through — the ledger's unique
         # (task, team, guid) index still blocks exact replays.

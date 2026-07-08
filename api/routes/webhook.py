@@ -849,7 +849,7 @@ async def _process_manual_submission(req_start):
                         "npc_name": npc_name,
                         "value": int(value),
                         "quantity": int(quantity),
-                        "kill_count": data.get("kill_count"),
+                        "kill_count": data.get("kill_count", data.get("killcount")),
                         "players_included": nearby_players,
                     })
                     response = await submissions.drop_processor(processed_data, external_session=db_session)

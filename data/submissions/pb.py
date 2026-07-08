@@ -25,6 +25,19 @@ from .common import (
 )
 
 
+def _time_to_ms(value) -> int:
+    """Milliseconds from a plugin time value: formatted ("1:23.40"), raw ms
+    int (form API path), or garbage ("N/A" on untimed kills, None) → 0.
+    convert_to_ms alone returns None on unparseable input and raises on
+    non-strings, and its results were compared unguarded."""
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return max(int(value), 0)
+    ms = convert_to_ms(str(value))
+    return max(int(ms), 0) if ms else 0
+
+
 async def pb_processor(pb_data, external_session=None, world_type="main"):
     debug_print(f"=== PB PROCESSOR START (world_type={world_type}) ===")
     debug_print(f"Raw PB data: {pb_data}")
@@ -37,15 +50,14 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     player_name = pb_data["player_name"]
     account_hash = pb_data["acc_hash"]
     boss_name = pb_data.get("npc_name", pb_data.get("boss_name", None))
-    current_ms = pb_data.get("current_time_ms", pb_data.get("kill_time", 0))
-    pb_ms = pb_data.get("personal_best_ms", pb_data.get("best_time", 0))
-    pb_ms = convert_to_ms(pb_ms)
-    current_ms = convert_to_ms(current_ms)
+    current_ms = _time_to_ms(pb_data.get("current_time_ms", pb_data.get("kill_time", 0)))
+    pb_ms = _time_to_ms(pb_data.get("personal_best_ms", pb_data.get("best_time", 0)))
     if pb_ms == 0 and current_ms == 0:
         return
     team_size = pb_data.get("team_size", 1)
+    # The embed path delivers "true"/"false" strings; the form path booleans.
     is_personal_best = pb_data.get("is_new_pb", pb_data.get("is_pb", False))
-    is_personal_best = True if is_personal_best == "true" else False
+    is_personal_best = str(is_personal_best).strip().lower() in ("true", "1", "yes")
     time_ms = (
         current_ms if current_ms < pb_ms and current_ms != 0 else (pb_ms if pb_ms != 0 else current_ms)
     )
@@ -161,28 +173,36 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     else:
         session.commit()
 
-    # Event engine hook (Task 17): gated, fire-and-forget LPUSH. The kill
-    # time (not just new PBs) is pushed so pb_target tasks can match any
-    # qualifying kill.
+    # Event engine hook (Task 17): gated, fire-and-forget LPUSH. EVERY kill
+    # time (not just new PBs) is pushed so pb_target tasks match any
+    # qualifying kill — but only a time this kill actually demonstrated: the
+    # measured kill time, or the reported best when this kill just set it.
+    # Never the standing PB on an untimed kill (it may predate the event).
     try:
         from services.event_engine import queue_submission
-        _kill_ms = current_ms if current_ms and current_ms > 0 else time_ms
-        try:
-            _kill_formatted = convert_from_ms(_kill_ms) if _kill_ms else None
-        except Exception:
-            _kill_formatted = None
-        queue_submission(
-            "pb", player_id, unique_id,
-            {
-                "npc_name": npc_name,
-                "time_ms": _kill_ms,
-                "team_size": team_size,
-                "kill_time_formatted": _kill_formatted,
-                "image_url": pb_entry.image_url,
-                "source_id": getattr(pb_entry, "id", None),
-            },
-            world_type=world_type, player_name=player_name,
-        )
+        if current_ms and current_ms > 0:
+            _kill_ms = current_ms
+        elif is_personal_best and pb_ms and pb_ms > 0:
+            _kill_ms = pb_ms
+        else:
+            _kill_ms = None
+        if _kill_ms:
+            try:
+                _kill_formatted = convert_from_ms(_kill_ms)
+            except Exception:
+                _kill_formatted = None
+            queue_submission(
+                "pb", player_id, unique_id,
+                {
+                    "npc_name": npc_name,
+                    "time_ms": _kill_ms,
+                    "team_size": team_size,
+                    "kill_time_formatted": _kill_formatted,
+                    "image_url": pb_entry.image_url,
+                    "source_id": getattr(pb_entry, "id", None),
+                },
+                world_type=world_type, player_name=player_name,
+            )
     except Exception:
         pass
 

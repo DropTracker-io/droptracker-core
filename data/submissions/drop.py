@@ -194,7 +194,16 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         auth_key = drop_data.get("auth_key", None)
         player_name = drop_data.get("player_name", drop_data.get("player", None))
         account_hash = drop_data["acc_hash"]
-        kill_count = drop_data.get("kill_count", None)
+        # The RuneLite plugin sends this embed field as "killcount" (no
+        # underscore) and uses 0 when the KC isn't available — treat both as
+        # absent rather than letting 0 read as a real kill count.
+        kill_count = drop_data.get("kill_count", drop_data.get("killcount", None))
+        try:
+            kill_count = int(kill_count)
+        except (TypeError, ValueError):
+            kill_count = None
+        if kill_count is not None and kill_count <= 0:
+            kill_count = None
         player_name = str(player_name).strip()
         account_hash = str(account_hash)
         guid = drop_data.get("guid", None)
