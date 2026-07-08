@@ -47,6 +47,11 @@ EMBED_TYPES = ("drop", "clog", "pb", "ca", "pet", "level_up", "quest", "lb")
 
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
+# Thumbnail/image values may contain {placeholder} tokens (e.g. {image_url},
+# {video_url}, or .../icon/{item_id}.png) — utils/format.replace_placeholders
+# substitutes them at send time, so they are exempt from the scheme check.
+_PLACEHOLDER_TOKEN = re.compile(r"\{[a-z_]+\}")
+
 # Column limits (db/models/embed.py) — Discord's own limits are looser except
 # for title (256) and field counts, so the columns are the binding constraint.
 _MAX_TITLE = 255
@@ -96,8 +101,14 @@ def _optional_url(body: dict, key: str) -> str | None:
     value = value.strip()
     if len(value) > _MAX_URL:
         abort_problem(422, "Invalid embed", f"'{key}' must be at most {_MAX_URL} characters.")
+    if _PLACEHOLDER_TOKEN.search(value):
+        return value
     if not value.lower().startswith(("http://", "https://")):
-        abort_problem(422, "Invalid embed", f"'{key}' must be an http(s) URL.")
+        abort_problem(
+            422,
+            "Invalid embed",
+            f"'{key}' must be an http(s) URL or contain a placeholder like {{image_url}}.",
+        )
     return value
 
 
