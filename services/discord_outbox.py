@@ -8,10 +8,40 @@ on an interval to send them and (for announcements) write back the resulting
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Optional
 
 from db.models import DiscordOutbox, Announcement
+
+_ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
+_USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
+
+
+def _allowed_mentions_for(content: str):
+    """AllowedMentions covering exactly the mentions present in ``content``.
+
+    Explicit rather than Discord's parse-everything default: only the pings
+    the author selected (role/user tokens, @everyone/@here) may fire, and
+    nothing an embed or later content tweak sneaks in.
+    """
+    try:
+        from interactions import AllowedMentions
+    except Exception:
+        return None
+    role_ids = _ROLE_MENTION_RE.findall(content)
+    user_ids = [u for u in _USER_MENTION_RE.findall(content) if u not in role_ids]
+    everyone = "@everyone" in content or "@here" in content
+    if not role_ids and not user_ids and not everyone:
+        return None
+    kwargs = {}
+    if role_ids:
+        kwargs["roles"] = role_ids
+    if user_ids:
+        kwargs["users"] = user_ids
+    if everyone:
+        kwargs["parse"] = ["everyone"]
+    return AllowedMentions(**kwargs)
 
 
 def enqueue(
@@ -68,6 +98,9 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
                 kwargs = {}
                 if row.content:
                     kwargs["content"] = row.content[:2000]
+                    allowed = _allowed_mentions_for(kwargs["content"])
+                    if allowed is not None:
+                        kwargs["allowed_mentions"] = allowed
                 if row.embed_json:
                     try:
                         from interactions import Embed

@@ -143,11 +143,47 @@ def _validate_input(body: dict):
     return title, body_md
 
 
+_MAX_PING_IDS = 10
+
+
+def _validate_ping_ids(values, what: str) -> list[str]:
+    """Snowflake-id list from the ping pickers (strings; JS numbers lose
+    precision past 2^53). Empty/absent → []."""
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        abort_problem(422, f"Invalid {what}", f"'{what}' must be a list of Discord id strings.")
+    out: list[str] = []
+    for v in values:
+        v = str(v).strip()
+        if not v.isdigit() or len(v) > 32:
+            abort_problem(422, f"Invalid {what}", f"'{v}' is not a Discord snowflake id.")
+        if v not in out:
+            out.append(v)
+    if len(out) > _MAX_PING_IDS:
+        abort_problem(422, f"Too many {what}", f"At most {_MAX_PING_IDS} {what} per announcement.")
+    return out
+
+
+def _ping_content(role_ids: list[str], user_ids: list[str], everyone: bool) -> str | None:
+    """Mentions must live in the message CONTENT — Discord never pings from
+    embed text. Returns the content line, or None when nothing is pinged."""
+    parts: list[str] = []
+    if everyone:
+        parts.append("@everyone")
+    parts.extend(f"<@&{rid}>" for rid in role_ids)
+    parts.extend(f"<@{uid}>" for uid in user_ids)
+    return " ".join(parts) if parts else None
+
+
 def _create_announcement(user_id, scope_type, group_id, body):
     title, body_md = _validate_input(body)
     pinned = bool(body.get("pinned", False))
     cover = body.get("cover_image_url")
     post_to_discord = bool(body.get("post_to_discord", True))
+    ping_role_ids = _validate_ping_ids(body.get("ping_role_ids"), "ping_role_ids")
+    ping_user_ids = _validate_ping_ids(body.get("ping_user_ids"), "ping_user_ids")
+    ping_everyone = bool(body.get("ping_everyone", False))
 
     with db_session() as s:
         ann = Announcement(
@@ -177,6 +213,7 @@ def _create_announcement(user_id, scope_type, group_id, body):
                     enqueue(
                         s,
                         channel_id=str(channel_id),
+                        content=_ping_content(ping_role_ids, ping_user_ids, ping_everyone),
                         embed={
                             "title": title,
                             "description": body_md[:4000],
@@ -205,6 +242,52 @@ def _create_announcement(user_id, scope_type, group_id, body):
         pass
 
     return ann_id
+
+
+@announcements_bp.get("/groups/<int:group_id>/discord/roles")
+async def list_group_discord_roles(group_id: int):
+    """Roles of the group's linked guild, for the announcement ping picker.
+
+    Reads the bot-maintained Redis cache (`guild:{id}:roles`, same pipeline as
+    the channel picker); a cold cache returns `stale: true` and asks the bot
+    to warm it (~15s), so a retry succeeds shortly.
+    """
+    user_id = current_user_id()
+
+    def _load():
+        import json as _json
+
+        from utils.redis import redis_client
+
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+            group = s.query(Group).filter(Group.group_id == group_id).first()
+            guild_id = str(group.guild_id) if (group and group.guild_id) else None
+        if not guild_id:
+            return {"roles": [], "stale": False}
+
+        conn = getattr(redis_client, "client", None)
+        roles = None
+        if conn is not None:
+            try:
+                raw = conn.get(f"guild:{guild_id}:roles")
+                if raw:
+                    roles = _json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+            except Exception:
+                roles = None
+        if not isinstance(roles, list):
+            # Cold cache: the bot warms channels+roles from the same request set.
+            try:
+                if conn is not None:
+                    conn.sadd("bot:channels:refresh", guild_id)
+                    conn.expire("bot:channels:refresh", 300)
+            except Exception:
+                pass
+            return {"roles": [], "stale": True}
+        return {"roles": roles, "stale": False}
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
 
 
 @announcements_bp.post("/groups/<int:group_id>/announcements")

@@ -516,7 +516,8 @@ async def cache_channels_for_guild(guild_id) -> bool:
     """Fetch one guild's text channels via REST and cache them to Redis
     (`guild:{id}:channels`). Works for *any* guild the bot is a member of —
     not just group home guilds — so events can target dedicated event servers
-    (Task 19). Returns True when the cache was written."""
+    (Task 19). Also caches the guild's roles (`guild:{id}:roles`) for the
+    announcement ping picker. Returns True when the cache was written."""
     try:
         guild = await bot.fetch_guild(guild_id)
         if not guild:
@@ -531,6 +532,21 @@ async def cache_channels_for_guild(guild_id) -> bool:
             key=lambda c: c["position"],
         )
         redis_client.setex(f"guild:{guild_id}:channels", 600, json.dumps(channels))
+        try:
+            raw_roles = await guild.fetch_roles()
+            roles = sorted(
+                (
+                    {"id": str(r.id), "name": r.name, "position": r.position or 0}
+                    for r in raw_roles
+                    # Skip @everyone (its id == guild id; picked via a
+                    # dedicated toggle) and bot-managed integration roles.
+                    if str(r.id) != str(guild_id) and not getattr(r, "managed", False)
+                ),
+                key=lambda r: -r["position"],
+            )
+            redis_client.setex(f"guild:{guild_id}:roles", 600, json.dumps(roles))
+        except Exception as e:
+            print(f"Couldn't cache roles for guild {guild_id}: {e}")
         return True
     except Exception as e:
         print(f"Couldn't cache channels for guild {guild_id}: {e}")
