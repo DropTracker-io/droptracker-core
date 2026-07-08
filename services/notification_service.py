@@ -4215,13 +4215,19 @@ async def get_authorized_users(group_id):
     db_session = get_db_session()
     try:
         group_config = db_session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id).all()
-        # Transform group_config into a dictionary for easy access
-        config = {conf.config_key: conf.config_value for conf in group_config}
-        if "authed_users" in config:
+        # Long lists spill from config_value into long_value — read both.
+        config = {
+            conf.config_key: (conf.config_value or getattr(conf, "long_value", None))
+            for conf in group_config
+        }
+        if config.get("authed_users"):
             authed_users = config["authed_users"]
             if isinstance(authed_users, int):
                 authed_users = f"{authed_users}"  # Get the list of authorized user IDs
-            authed_users = json.loads(authed_users)
+            try:
+                authed_users = json.loads(authed_users)
+            except (TypeError, ValueError):
+                authed_users = []
             for authed_id in authed_users:
                 user = db_session.query(User).filter(User.discord_id == authed_id).first()
                 if user:

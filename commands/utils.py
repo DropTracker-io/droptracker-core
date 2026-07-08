@@ -174,20 +174,27 @@ def is_user_authorized(user_id, group: Group):
     # Check if the user is an admin or an authorized user for this group
     from db.models import GroupConfiguration
     group_config = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group.group_id).all()
-    # Transform group_config into a dictionary for easy access
-    config = {conf.config_key: conf.config_value for conf in group_config}
+    # Transform group_config into a dictionary for easy access.
+    # Long lists spill from config_value (255 chars) into long_value — the web
+    # "Authorized users" editor writes whichever fits, so read both.
+    config = {
+        conf.config_key: (conf.config_value or getattr(conf, "long_value", None))
+        for conf in group_config
+    }
     authed_user = False
     user_data: User = session.query(User).filter(User.user_id == user_id).first()
     if user_data:
         discord_id = user_data.discord_id
     else:
         return False
-    if "authed_users" in config:
+    if config.get("authed_users"):
         authed_users = config["authed_users"]
         if isinstance(authed_users, int):
             authed_users = f"{authed_users}"  # Get the list of authorized user IDs
-        print("Authed users:", authed_users)
-        authed_users = json.loads(authed_users)
+        try:
+            authed_users = json.loads(authed_users)
+        except (TypeError, ValueError):
+            return False
         # Loop over authed_users and check if the current user is authorized
         for authed_id in authed_users:
             if str(authed_id) == str(discord_id):  # Compare the authed_id with the current user's ID

@@ -7,6 +7,11 @@ Members / hidden players / WOM sync / diagnostics (session + group admin):
   POST  /api/v1/groups/{id}/wom-sync
   GET   /api/v1/groups/{id}/diagnostics
 
+Authorized users (post-creation admin management, XF parity):
+  GET    /api/v1/groups/{id}/authorized-users
+  POST   /api/v1/groups/{id}/authorized-users   { identifier }
+  DELETE /api/v1/groups/{id}/authorized-users   { user_id | discord_id }
+
 Creation wizard (session):
   GET   /api/v1/groups/wom-lookup/{womId}
   GET   /api/v1/groups/guild-status/{guildId}
@@ -15,11 +20,12 @@ Creation wizard (session):
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from datetime import datetime, timedelta
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 
 from quart import Blueprint, jsonify, request
 
@@ -48,6 +54,251 @@ group_admin_bp = Blueprint("v1_group_admin", __name__)
 
 def _rc():
     return getattr(redis_client, "client", None)
+
+
+# --------------------------------------------------------------------------- #
+# Authorized users — who may administer the group besides the creator.
+#
+# Two stores are kept in sync (XF-era parity):
+#   * ``group_admins`` rows            → drive website roles (deps.resolve_group_role)
+#   * ``authed_users`` group config    → JSON list of Discord IDs; drives the
+#     Discord bot's slash-command authorization (commands/utils.py).
+# --------------------------------------------------------------------------- #
+_AUTHED_USERS_KEY = "authed_users"
+
+
+def _load_authed_ids(s, group_id: int):
+    """Return (config_row_or_None, list[str] of Discord IDs)."""
+    row = (
+        s.query(GroupConfiguration)
+        .filter(
+            GroupConfiguration.group_id == group_id,
+            GroupConfiguration.config_key == _AUTHED_USERS_KEY,
+        )
+        .first()
+    )
+    raw = None
+    if row is not None:
+        raw = row.config_value or getattr(row, "long_value", None)
+    if not raw:
+        return row, []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return row, []
+    if not isinstance(data, list):
+        return row, []
+    return row, [str(v) for v in data if v]
+
+
+def _store_authed_ids(s, group_id: int, row, ids: list[str]) -> None:
+    """Persist the Discord-ID list; short lists stay in config_value so the
+    bot's existing readers keep working, oversized lists spill to long_value."""
+    payload = json.dumps(ids)
+    if row is None:
+        row = GroupConfiguration(group_id=group_id, config_key=_AUTHED_USERS_KEY)
+        s.add(row)
+    if len(payload) <= 255:
+        row.config_value = payload
+        row.long_value = None
+    else:
+        row.config_value = ""
+        row.long_value = payload
+
+
+def _authorized_entries(s, group_id: int) -> list[dict]:
+    """Merged view of both stores, one entry per person."""
+    grants = s.query(GroupAdmin).filter(GroupAdmin.group_id == group_id).all()
+    _, authed_ids = _load_authed_ids(s, group_id)
+
+    entries: dict[str, dict] = {}  # keyed by discord_id or "user:{id}"
+
+    grant_users = {
+        u.user_id: u
+        for u in s.query(User).filter(User.user_id.in_([g.user_id for g in grants])).all()
+    } if grants else {}
+    for g in grants:
+        u = grant_users.get(g.user_id)
+        discord_id = str(u.discord_id) if (u and u.discord_id) else None
+        key = discord_id or f"user:{g.user_id}"
+        entries[key] = {
+            "user_id": g.user_id,
+            "discord_id": discord_id,
+            "username": (u.username if u else None) or None,
+            "role": g.role if g.role in ("owner", "admin") else "admin",
+            "sources": ["web"],
+        }
+
+    if authed_ids:
+        id_users = {
+            str(u.discord_id): u
+            for u in s.query(User).filter(User.discord_id.in_(authed_ids)).all()
+        }
+        for did in authed_ids:
+            if did in entries:
+                entries[did]["sources"].append("discord")
+                continue
+            u = id_users.get(did)
+            entries[did] = {
+                "user_id": u.user_id if u else None,
+                "discord_id": did,
+                "username": (u.username if u else None) or None,
+                "role": "admin",
+                "sources": ["discord"],
+            }
+
+    out = list(entries.values())
+    out.sort(key=lambda e: (e["role"] != "owner", (e["username"] or "￿").lower()))
+    return out
+
+
+@group_admin_bp.get("/groups/<int:group_id>/authorized-users")
+async def list_authorized_users(group_id: int):
+    user_id = current_user_id()
+
+    def _load():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+            return {"users": _authorized_entries(s, group_id)}
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@group_admin_bp.post("/groups/<int:group_id>/authorized-users")
+async def add_authorized_user(group_id: int):
+    user_id = current_user_id()
+    body = await json_body()
+    identifier = str(body.get("identifier") or "").strip()
+    if not identifier:
+        abort_problem(422, "Missing identifier", "Provide a Discord ID or DropTracker username.")
+
+    def _apply():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+
+            target_user = None
+            discord_id = None
+            if identifier.isdigit() and 15 <= len(identifier) <= 20:
+                discord_id = identifier
+                target_user = s.query(User).filter(User.discord_id == identifier).first()
+            else:
+                target_user = (
+                    s.query(User)
+                    .filter(func.lower(User.username) == identifier.lower())
+                    .first()
+                )
+                if target_user is None:
+                    abort_problem(
+                        404,
+                        "User not found",
+                        f"No DropTracker user named '{identifier}'. "
+                        "You can also add someone by their Discord ID.",
+                    )
+                discord_id = str(target_user.discord_id) if target_user.discord_id else None
+
+            changed = False
+            if discord_id:
+                row, ids = _load_authed_ids(s, group_id)
+                if discord_id not in ids:
+                    ids.append(discord_id)
+                    _store_authed_ids(s, group_id, row, ids)
+                    changed = True
+            if target_user is not None:
+                existing = (
+                    s.query(GroupAdmin)
+                    .filter(
+                        GroupAdmin.group_id == group_id,
+                        GroupAdmin.user_id == target_user.user_id,
+                    )
+                    .first()
+                )
+                if existing is None:
+                    s.add(GroupAdmin(
+                        group_id=group_id,
+                        user_id=target_user.user_id,
+                        role="admin",
+                        granted_by=user_id,
+                    ))
+                    changed = True
+
+            if not changed:
+                abort_problem(409, "Already authorized", "That user is already authorized.")
+            s.commit()
+            return {"users": _authorized_entries(s, group_id)}
+
+    return jsonify(await asyncio.to_thread(_apply))
+
+
+@group_admin_bp.delete("/groups/<int:group_id>/authorized-users")
+async def remove_authorized_user(group_id: int):
+    user_id = current_user_id()
+    body = await json_body()
+    target_user_id = body.get("user_id")
+    target_discord_id = str(body.get("discord_id") or "").strip() or None
+    if target_user_id is None and not target_discord_id:
+        abort_problem(422, "Missing target", "Provide 'user_id' or 'discord_id'.")
+
+    def _apply():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            caller_role = assert_group_admin(
+                s, user_id, group_id, manageable_guild_ids(user_id), user=user
+            )
+
+            # Resolve the target across both stores.
+            target = None
+            if target_user_id is not None:
+                target = s.query(User).filter(User.user_id == int(target_user_id)).first()
+            elif target_discord_id:
+                target = s.query(User).filter(User.discord_id == target_discord_id).first()
+            discord_id = target_discord_id or (
+                str(target.discord_id) if (target and target.discord_id) else None
+            )
+
+            removed = False
+            grant = None
+            if target is not None:
+                grant = (
+                    s.query(GroupAdmin)
+                    .filter(
+                        GroupAdmin.group_id == group_id,
+                        GroupAdmin.user_id == target.user_id,
+                    )
+                    .first()
+                )
+            if grant is not None:
+                if grant.role == "owner":
+                    if caller_role != "owner":
+                        abort_problem(403, "Owners only", "Only an owner can remove an owner.")
+                    owner_grants = (
+                        s.query(GroupAdmin)
+                        .filter(GroupAdmin.group_id == group_id, GroupAdmin.role == "owner")
+                        .count()
+                    )
+                    if grant.user_id == user_id and owner_grants <= 1:
+                        abort_problem(
+                            409,
+                            "Last owner",
+                            "You are this group's only owner — transfer ownership first.",
+                        )
+                s.delete(grant)
+                removed = True
+
+            if discord_id:
+                row, ids = _load_authed_ids(s, group_id)
+                if discord_id in ids:
+                    ids.remove(discord_id)
+                    _store_authed_ids(s, group_id, row, ids)
+                    removed = True
+
+            if not removed:
+                abort_problem(404, "Not authorized", "That user is not on the authorized list.")
+            s.commit()
+            return {"users": _authorized_entries(s, group_id)}
+
+    return jsonify(await asyncio.to_thread(_apply))
 
 
 # --------------------------------------------------------------------------- #
