@@ -264,6 +264,8 @@ async def put_group_embed(group_id: int, embed_type: str):
                 row.fields.append(
                     EmbedField(field_name=f["name"], field_value=f["value"], inline=f["inline"])
                 )
+            # Assign PKs to the new field rows; _serialize_embed sorts on field_id.
+            s.flush()
 
             s.add(
                 AuditLog(
