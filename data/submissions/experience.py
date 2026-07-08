@@ -555,18 +555,40 @@ async def experience_processor(experience_data, external_session=None):
                 )
                 #print(f"[EXP] Created total_level_milestone notification for group {group_id}")
 
-            # Check for DM notifications
-            stage = "create_dm_notifications"
+        # Personal submission DM (supporter perk): queued once per level-up,
+        # OUTSIDE the group loop — group notify/min-level/screenshot criteria
+        # must not gate or duplicate a personal DM (same fix as drops,
+        # c258115). Entitlement + opt-in are re-checked at send time.
+        stage = "create_dm_notification"
+        try:
             if player and player.user and is_user_dm_enabled(session, player.user_id, "dm_levels"):
+                dm_skills_text = ", ".join(
+                    [
+                        f"{s.get('skill_name')} {s.get('new_level')} (+{s.get('levels_gained')})"
+                        if _safe_int(s.get("levels_gained"), default=0) > 0
+                        else f"{s.get('skill_name')} {s.get('new_level')}"
+                        for s in skills
+                        if s.get("skill_name")
+                    ]
+                )
                 await create_notification(
                     "dm_level_up",
                     player_id,
-                    notification_data,
-                    group_id,
+                    {
+                        "player_name": player_name,
+                        "player_id": player_id,
+                        "guid": unique_id,
+                        "skill_name": skill_name or "",
+                        "skills_text": dm_skills_text,
+                        "total_level": total_level,
+                        "combat_level": combat_level,
+                        "image_url": image_url if image_url else "",
+                    },
                     existing_session=session if use_external_session else None,
                 )
-                #print(f"[EXP] Created DM level_up notification for user {player.user_id}")
-    
+        except Exception as e:
+            print(f"Couldn't queue personal level-up DM notification: {e}")
+
         stage = "done"
         #print(f"[EXP] === EXPERIENCE PROCESSOR END ===")
         try:

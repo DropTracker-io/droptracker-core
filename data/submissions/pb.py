@@ -12,6 +12,7 @@ from .common import (
     get_player_groups_with_global,
     create_notification,
     get_player_boss_kills,
+    is_user_dm_enabled,
     award_points_to_player,
     screenshot_required,
     select_session_and_flag,
@@ -264,18 +265,34 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                     group_id,
                     existing_session=session if use_external_session else None,
                 )
-                
-                if player and player.user:
-                    from .common import is_user_dm_enabled
 
-                    if is_user_dm_enabled(session, player.user_id, "dm_pbs"):
-                        await create_notification(
-                            "dm_pb",
-                            player_id,
-                            notification_data,
-                            group_id,
-                            existing_session=session if use_external_session else None,
-                        )
+        # Personal submission DM (supporter perk): queued once per PB,
+        # OUTSIDE the group loop — group notify/screenshot criteria must not
+        # gate or duplicate a personal DM (same fix as drops, c258115).
+        # Entitlement + opt-in are re-checked at send time.
+        try:
+            if player and player.user and is_user_dm_enabled(session, player.user_id, "dm_pbs"):
+                await create_notification(
+                    "dm_pb",
+                    player_id,
+                    {
+                        "player_name": player_name,
+                        "player_id": player_id,
+                        "pb_id": pb_entry.id,
+                        "guid": unique_id,
+                        "boss_name": boss_name,
+                        "time_ms": time_ms,
+                        "kill_time_ms": current_ms,
+                        "old_time_ms": old_time,
+                        "team_size": team_size,
+                        "image_url": pb_entry.image_url,
+                        "video_key": video_key,
+                        "world_type": world_type,
+                    },
+                    existing_session=session if use_external_session else None,
+                )
+        except Exception as e:
+            print(f"Couldn't queue personal PB DM notification: {e}")
     debug_print(f"=== PB PROCESSOR END ===")
     return SubmissionResponse(success=True,
                             message="PB entry created/modified successfully.",

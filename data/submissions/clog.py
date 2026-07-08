@@ -94,7 +94,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
         print("user failed auth check")
         return
 
-    from db import CollectionLogEntry, User, UserConfiguration
+    from db import CollectionLogEntry
 
     clog_model = SeasonalCollectionLogEntry if is_seasonal else CollectionLogEntry
     clog_entry = (
@@ -254,24 +254,31 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                     group_id,
                     existing_session=session if use_external_session else None,
                 )
-        if player and player.user:
-            user = session.query(User).filter(User.user_id == player.user_id).first()
-            if user and is_user_dm_enabled(session, user.user_id, "dm_clogs"):
+        # Personal submission DM (supporter perk): queued once per new clog
+        # slot, OUTSIDE the group loop with no group_id — group notify
+        # criteria must not gate or duplicate a personal DM (same fix as
+        # drops, c258115). Entitlement + opt-in are re-checked at send time.
+        try:
+            if player and player.user and is_user_dm_enabled(session, player.user_id, "dm_clogs"):
                 await create_notification(
                     "dm_clog",
                     player_id,
                     {
                         "player_name": player_name,
                         "player_id": player_id,
+                        "guid": unique_id,
                         "item_name": item_name,
                         "npc_name": npc,
                         "image_url": clog_entry.image_url,
+                        "video_key": video_key,
                         "kc_received": killcount,
                         "item_id": item_id,
+                        "world_type": world_type,
                     },
-                    group_id,
                     existing_session=session if use_external_session else None,
                 )
+        except Exception as e:
+            print(f"Couldn't queue personal clog DM notification: {e}")
     debug_print("Returning clog entry")
     debug_print(f"=== CLOG PROCESSOR END ===")
     return SubmissionResponse(success=True,

@@ -6,6 +6,7 @@ from .common import (
     SubmissionResponse,
     ensure_player_by_name_then_auth,
     ensure_can_create,
+    is_user_dm_enabled,
     screenshot_required,
     select_session_and_flag,
     create_notification,
@@ -270,19 +271,6 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
                                 "group_points_members_awarded": group_points_result.get("awarded_members", []) or [],
                                 "world_type": world_type,
                             }
-                            if player and player.user:
-                                user = session.query(type(player.user)).filter(type(player.user).user_id == player.user_id).first()
-                                if user:
-                                    from .common import is_user_dm_enabled
-
-                                    if is_user_dm_enabled(session, user.user_id, "dm_cas"):
-                                        await create_notification(
-                                            "dm_ca",
-                                            player_id,
-                                            notification_data,
-                                            group_id,
-                                            existing_session=session if use_external_session else None,
-                                        )
                             await create_notification(
                                 "ca",
                                 player_id,
@@ -290,6 +278,32 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
                                 group_id,
                                 existing_session=session if use_external_session else None,
                             )
+        # Personal submission DM (supporter perk): queued once per new CA,
+        # OUTSIDE the group loop — group notify/tier/screenshot criteria must
+        # not gate or duplicate a personal DM (same fix as drops, c258115).
+        # Entitlement + opt-in are re-checked at send time.
+        try:
+            if player and player.user and is_user_dm_enabled(session, player.user_id, "dm_cas"):
+                await create_notification(
+                    "dm_ca",
+                    player_id,
+                    {
+                        "player_name": player_name,
+                        "player_id": player_id,
+                        "guid": unique_id,
+                        "task_name": task_name,
+                        "tier": tier,
+                        "points_awarded": points_awarded,
+                        "points_total": points_total,
+                        "completed_tier": completed_tier,
+                        "image_url": ca_entry.image_url,
+                        "video_key": video_key,
+                        "world_type": world_type,
+                    },
+                    existing_session=session if use_external_session else None,
+                )
+        except Exception as e:
+            print(f"Couldn't queue personal CA DM notification: {e}")
     debug_print(f"=== CA PROCESSOR END ===")
     return SubmissionResponse(success=True,
                               message="Combat Achievement proccessed successfully.",

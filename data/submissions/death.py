@@ -146,16 +146,6 @@ async def death_processor(death_data, external_session=None, world_type="main"):
         }
         print(f"Notification data: {notification_data}")
 
-        # DM notifications (inferred key: dm_deaths)
-        if player and player.user and is_user_dm_enabled(session, player.user_id, "dm_deaths"):
-            await create_notification(
-                "dm_death",
-                player_id,
-                notification_data,
-                group_id,
-                existing_session=session if use_external_session else None,
-            )
-
         await create_notification(
             "death",
             player_id,
@@ -163,6 +153,31 @@ async def death_processor(death_data, external_session=None, world_type="main"):
             group_id,
             existing_session=session if use_external_session else None,
         )
+
+    # Personal submission DM (supporter perk): queued once per death,
+    # OUTSIDE the group loop — group notify/screenshot criteria must not
+    # gate or duplicate a personal DM (same fix as drops, c258115).
+    # Entitlement + opt-in are re-checked at send time.
+    try:
+        if player and player.user and is_user_dm_enabled(session, player.user_id, "dm_deaths"):
+            await create_notification(
+                "dm_death",
+                player_id,
+                {
+                    "player_name": player_name,
+                    "player_id": player_id,
+                    "death_id": death_entry.id,
+                    "guid": unique_id,
+                    "source": source,
+                    "location": location,
+                    "image_url": image_url or "",
+                    "video_key": video_key,
+                    "world_type": world_type,
+                },
+                existing_session=session if use_external_session else None,
+            )
+    except Exception as e:
+        print(f"Couldn't queue personal death DM notification: {e}")
 
     debug_print(f"[DEATH] === DEATH PROCESSOR END ===")
     return SubmissionResponse(success=True, message="Death recorded.", notice=notice or None)

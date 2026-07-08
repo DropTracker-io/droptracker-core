@@ -98,7 +98,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
         )
         debug_print(f"NPC resolved - ID: {npc_id}, Name: {npc_name}")
 
-    from db import PlayerPet, User
+    from db import PlayerPet
 
     pet_model = SeasonalPlayerPet if is_seasonal else PlayerPet
     existing_pet = None
@@ -240,17 +240,6 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                     "group_points_members_awarded": awarded_members,
                     "world_type": world_type,
                 }
-                if player and player.user:
-                    user = session.query(User).filter(User.user_id == player.user_id).first()
-                    if user and is_user_dm_enabled(session, user.user_id, "dm_pets"):
-                        debug_print(f"Creating DM notification for user {user.user_id}")
-                        await create_notification(
-                            "dm_pet",
-                            player_id,
-                            notification_data,
-                            group_id,
-                            existing_session=session if use_external_session else None,
-                        )
                 await create_notification(
                     "pet",
                     player_id,
@@ -259,6 +248,34 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                     existing_session=session if use_external_session else None,
                 )
                 debug_print(f"Created pet notification for group {group_id}")
+
+        # Personal submission DM (supporter perk): queued once per pet,
+        # OUTSIDE the group loop — group notify/screenshot criteria must not
+        # gate or duplicate a personal DM (same fix as drops, c258115).
+        # Entitlement + opt-in are re-checked at send time.
+        try:
+            if player and player.user and is_user_dm_enabled(session, player.user_id, "dm_pets"):
+                await create_notification(
+                    "dm_pet",
+                    player_id,
+                    {
+                        "player_name": player_name,
+                        "player_id": player_id,
+                        "guid": unique_id,
+                        "pet_name": pet_name,
+                        "source": source,
+                        "npc_name": npc_name,
+                        "killcount": killcount,
+                        "milestone": milestone,
+                        "duplicate": duplicate,
+                        "image_url": dl_path,
+                        "video_key": video_key,
+                        "world_type": world_type,
+                    },
+                    existing_session=session if use_external_session else None,
+                )
+        except Exception as e:
+            print(f"Couldn't queue personal pet DM notification: {e}")
 
     debug_print(f"=== PET PROCESSOR END ===")
     return SubmissionResponse(success=True,
