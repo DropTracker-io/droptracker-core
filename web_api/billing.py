@@ -11,6 +11,7 @@ The source of truth for subscription state is always the provider webhook
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta
 from typing import Optional
@@ -188,14 +189,27 @@ def _portal(subscription, return_url: str) -> Optional[str]:
 
 
 def verify_webhook(payload: bytes, signature: str):
-    """Verify + parse a Stripe webhook. Returns the event dict or None."""
+    """Verify + parse a Stripe webhook. Returns the event as a plain dict or None.
+
+    ``construct_event`` is used only for signature verification. It returns a
+    ``stripe.Event`` whose ``StripeObject`` base stopped subclassing dict in
+    newer stripe-python (15.x has no ``.get``/``.to_dict_recursive``), which
+    made the webhook route's dict-style access crash with 500s and silently
+    drop every subscription event. Parse the verified raw payload instead so
+    the route always sees plain dicts.
+    """
     stripe = _stripe()
     if stripe is None or not STRIPE_WEBHOOK_SECRET:
         return None
     try:
-        return stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
+        stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
     except Exception:
         return None
+    try:
+        event = json.loads(payload)
+    except Exception:
+        return None
+    return event if isinstance(event, dict) else None
 
 
 def ensure_provider_price(tier) -> Optional[str]:

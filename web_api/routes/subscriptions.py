@@ -568,6 +568,12 @@ async def billing_webhook():
             sub.status = obj.get("status", sub.status)
             sub.cancel_at_period_end = bool(obj.get("cancel_at_period_end"))
             cpe = obj.get("current_period_end")
+            if not cpe:
+                # Stripe API 2025-03+ moved current_period_end off the
+                # Subscription object onto its items.
+                items = ((obj.get("items") or {}).get("data")) or []
+                if items:
+                    cpe = items[0].get("current_period_end")
             if cpe:
                 sub.current_period_end = datetime.fromtimestamp(int(cpe))
         elif etype == "customer.subscription.deleted":
