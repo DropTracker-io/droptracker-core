@@ -47,6 +47,13 @@ EVENT_CHANNEL_KINDS = ("announcements", "completions", "leaderboard", "admin")
 
 EVENT_BOARD_SIZES = (3, 4, 5, 6, 7)  # square boards; default 5
 
+# Which intake paths may drive automatic task progress (web_events.submission_policy):
+# - "all"             — every processed submission counts (API + webhook fallback).
+# - "confirm_non_api" — non-API submissions count but always land as pending
+#                       ledger rows needing admin confirmation.
+# - "api_only"        — submissions without the plugin API flag are ignored.
+EVENT_SUBMISSION_POLICIES = ("all", "confirm_non_api", "api_only")
+
 
 class Event(Base):
     # Namespaced under `web_*` to avoid colliding with the pre-existing legacy
@@ -70,6 +77,7 @@ class Event(Base):
     # --- schema v2 (Task 15) ---
     formation_mode = Column(String(16), nullable=False, default="admin_assign")  # EVENT_FORMATION_MODES
     requires_confirmation = Column(Boolean, nullable=False, default=False)  # event-level force (PRD D3)
+    submission_policy = Column(String(16), nullable=False, default="all")  # EVENT_SUBMISSION_POLICIES
     join_code = Column(String(32), nullable=True)  # optional self-join code; never in public reads
     discord_guild_id = Column(String(32), nullable=True)  # snowflake; any guild the bot is in (PRD D8)
     board_size = Column(Integer, nullable=False, default=5)  # EVENT_BOARD_SIZES

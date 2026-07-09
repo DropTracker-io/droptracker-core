@@ -48,6 +48,7 @@ from db import (
     EventTeam,
     EventTeamMember,
     EVENT_FORMATION_MODES,
+    EVENT_SUBMISSION_POLICIES,
     EVENT_TASK_TYPES,
     Group,
     Player,
@@ -106,6 +107,7 @@ def _summary(ev: Event) -> dict:
         "has_bingo": bool(ev.has_bingo),
         "formation_mode": ev.formation_mode or "admin_assign",
         "requires_confirmation": bool(ev.requires_confirmation),
+        "submission_policy": ev.submission_policy or "all",
         "board_size": int(ev.board_size or 5),
         "bonus_line_points": int(ev.bonus_line_points or 0),
         "bonus_blackout_points": int(ev.bonus_blackout_points or 0),
@@ -545,6 +547,13 @@ async def create_event():
     join_code = (join_code or "").strip()
     if len(join_code) > 32:
         abort_problem(422, "Invalid join code", "join_code must be at most 32 characters.")
+    submission_policy = body.get("submission_policy") or "all"
+    if submission_policy not in EVENT_SUBMISSION_POLICIES:
+        abort_problem(
+            422,
+            "Invalid submission policy",
+            f"submission_policy must be one of {list(EVENT_SUBMISSION_POLICIES)}.",
+        )
 
     def _apply():
         with db_session() as s:
@@ -571,6 +580,7 @@ async def create_event():
                 has_bingo=False,
                 formation_mode=formation_mode,
                 requires_confirmation=bool(body.get("requires_confirmation")),
+                submission_policy=submission_policy,
                 join_code=join_code or None,
                 discord_guild_id=discord_guild_id,
             )
@@ -624,6 +634,15 @@ async def update_event(event_id: int):
             if "requires_confirmation" in body:
                 # Event-level force: all completions queue for review (PRD D3).
                 ev.requires_confirmation = bool(body.get("requires_confirmation"))
+            if "submission_policy" in body:
+                policy = body.get("submission_policy") or "all"
+                if policy not in EVENT_SUBMISSION_POLICIES:
+                    abort_problem(
+                        422,
+                        "Invalid submission policy",
+                        f"submission_policy must be one of {list(EVENT_SUBMISSION_POLICIES)}.",
+                    )
+                ev.submission_policy = policy
             # Bingo bonus config (Task 20, PRD D7): 0 disables a bonus. The
             # board itself is replaced via PUT /events/{id}/bingo.
             for key in ("bonus_line_points", "bonus_blackout_points"):

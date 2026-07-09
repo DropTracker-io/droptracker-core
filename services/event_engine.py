@@ -17,7 +17,12 @@ Envelope (v1)::
 
     { "v": 1, "kind": "drop|pb|clog|ca|experience",
       "guid": "...", "player_id": 123, "player_name": "...",
-      "ts": 1751600000, "data": { ...type-specific... } }
+      "ts": 1751600000, "used_api": true, "data": { ...type-specific... } }
+
+``used_api`` mirrors the submission's intake path (plugin API vs the
+webhook-bot fallback); events gate on it via ``submission_policy``
+(``all`` / ``confirm_non_api`` / ``api_only``). Absent (pre-upgrade queue
+entries) is treated as non-API.
 
 v1 evaluation semantics (task doc table):
 
@@ -71,7 +76,7 @@ AUTO_TASK_TYPES = ("item_collection", "kc_target", "pb_target", "xp_target", "sk
 
 def queue_submission(kind: str, player_id, guid, data: dict,
                      world_type: str = "main", player_name: str = None,
-                     ts: int = None) -> None:
+                     ts: int = None, used_api: bool = False) -> None:
     """Fire-and-forget push of a processed submission onto the events queue.
 
     Gated on the ``events:active`` Redis set (maintained by the worker) so it
@@ -93,6 +98,7 @@ def queue_submission(kind: str, player_id, guid, data: dict,
             "guid": str(guid) if guid else None,
             "player_id": int(player_id),
             "ts": int(ts or time.time()),
+            "used_api": bool(used_api),
             "data": data or {},
         }
         if player_name:
@@ -365,6 +371,28 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
     return None
 
 
+def accepts_submission_source(event: dict, envelope: dict) -> bool:
+    """Whether the event's submission_policy admits this envelope's intake
+    path (pure; no I/O). Only ``api_only`` rejects; a missing ``used_api``
+    flag (pre-upgrade queue entries, webhook-bot fallback) reads as non-API."""
+    if event.get("submission_policy") == "api_only":
+        return bool(envelope.get("used_api"))
+    return True
+
+
+def completion_status(event: dict, task: dict, envelope: dict) -> str:
+    """Initial ledger-row status for a match (pure; no I/O): ``pending`` when
+    the task or event forces confirmation (PRD D3), or when the event's
+    ``confirm_non_api`` policy holds a submission that didn't arrive via the
+    plugin API; ``auto`` otherwise."""
+    if task.get("requires_confirmation") or event.get("requires_confirmation"):
+        return "pending"
+    if (event.get("submission_policy") == "confirm_non_api"
+            and not envelope.get("used_api")):
+        return "pending"
+    return "auto"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Matcher state (loaded by the worker every 30s / on admin bump)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -391,6 +419,7 @@ def _event_to_dict(event) -> dict:
         "name": event.name,
         "group_id": event.group_id,
         "requires_confirmation": bool(event.requires_confirmation),
+        "submission_policy": getattr(event, "submission_policy", None) or "all",
         "has_bingo": bool(event.has_bingo),
         "board_size": int(event.board_size or 5),
         "bonus_line_points": int(event.bonus_line_points or 0),
@@ -960,8 +989,7 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
     from db.models import EventCompletion
 
     data = envelope.get("data") or {}
-    status = "pending" if (task.get("requires_confirmation")
-                           or event.get("requires_confirmation")) else "auto"
+    status = completion_status(event, task, envelope)
     guid = envelope.get("guid")
     proof = data.get("image_url") or None
     completion = EventCompletion(
@@ -1038,6 +1066,8 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict) ->
         if event["window_start"] is not None and submitted_at < event["window_start"]:
             continue
         if event["window_end"] is not None and submitted_at > event["window_end"]:
+            continue
+        if not accepts_submission_source(event, envelope):
             continue
 
         xp_delta = None  # baseline folded at most once per (event, envelope)

@@ -346,3 +346,62 @@ class TestKcDedupe:
         r = _FakeRedis()
         assert engine._kc_dedupe(r, 2, 9, 5, _env("drop", {"npc_name": "Zulrah"}, ts=1000, player_id=5)) is True
         assert engine._kc_dedupe(r, 2, 9, 6, _env("drop", {"npc_name": "Zulrah"}, ts=1001, player_id=6)) is True
+
+
+# ── submission_policy (api_only / confirm_non_api / all) ─────────────────────
+
+def _event(**kw):
+    base = {
+        "id": 10, "name": "ev", "group_id": 1,
+        "requires_confirmation": False, "submission_policy": "all",
+        "has_bingo": False, "board_size": 5,
+        "bonus_line_points": 0, "bonus_blackout_points": 0,
+        "window_start": None, "window_end": None,
+    }
+    base.update(kw)
+    return base
+
+
+class TestSubmissionPolicy:
+    def test_all_accepts_both_sources(self):
+        ev = _event(submission_policy="all")
+        assert engine.accepts_submission_source(ev, {"used_api": True}) is True
+        assert engine.accepts_submission_source(ev, {"used_api": False}) is True
+        assert engine.accepts_submission_source(ev, {}) is True  # legacy envelope
+
+    def test_api_only_rejects_non_api(self):
+        ev = _event(submission_policy="api_only")
+        assert engine.accepts_submission_source(ev, {"used_api": True}) is True
+        assert engine.accepts_submission_source(ev, {"used_api": False}) is False
+        assert engine.accepts_submission_source(ev, {}) is False  # legacy envelope
+
+    def test_confirm_non_api_accepts_but_holds(self):
+        ev = _event(submission_policy="confirm_non_api")
+        task = _task()
+        assert engine.accepts_submission_source(ev, {"used_api": False}) is True
+        assert engine.completion_status(ev, task, {"used_api": True}) == "auto"
+        assert engine.completion_status(ev, task, {"used_api": False}) == "pending"
+        assert engine.completion_status(ev, task, {}) == "pending"  # legacy envelope
+
+    def test_requires_confirmation_still_forces_pending(self):
+        env = {"used_api": True}
+        assert engine.completion_status(
+            _event(requires_confirmation=True), _task(), env) == "pending"
+        assert engine.completion_status(
+            _event(), _task(requires_confirmation=True), env) == "pending"
+
+    def test_all_policy_auto_for_non_api(self):
+        assert engine.completion_status(_event(), _task(), {"used_api": False}) == "auto"
+
+    def test_handle_envelope_skips_api_only_event_for_non_api(self):
+        # End-to-end through handle_envelope: the api_only event is skipped
+        # before any task matching / DB work (session=None would blow up
+        # if a match were recorded).
+        state = engine.MatcherState(
+            events={10: _event(submission_policy="api_only")},
+            tasks_by_event={10: [_task(target="Twisted bow")]},
+            participants={5: [(10, 77, None)]},
+        )
+        env = _env("drop", {"item_name": "Twisted bow", "quantity": 1})
+        env["used_api"] = False
+        assert engine.handle_envelope(None, _FakeRedis(), state, env) == []

@@ -237,7 +237,7 @@ A full walkthrough is in `docs/SUBMISSION_PIPELINE.md`. Short version:
 
 **Intake latency (see `docs/REFACTOR_PLAN.md`).** By default the webhook handler blocks until all processing (DB + WOM + OSRS API) finishes — 10–40s under load. Phase 1 of the fix is implemented behind a flag: with `WEBHOOK_QUEUE_MODE=true`, the handler fast-accepts (validate + stash image + RPUSH `webhook:queue`, ~50ms) and `workers/webhook_consumer.py` drains the queue in the background. Not yet the default.
 
-**Events v2 pipeline.** Processors call `services/event_engine.queue_submission()` (LPUSH `events:submissions`, gated on `events:active`); `workers/event_consumer.py` matches submissions against active event tasks (pure `match_task()`), applies progress/bingo/team points, and routes Discord notifications via `services/event_notifications.py`. Lifecycle transitions (draft → active → past) live in `services/event_lifecycle.py`; the web admin surface is `web_api/routes/events.py` + `event_admin.py` + `event_discord.py`.
+**Events v2 pipeline.** Processors call `services/event_engine.queue_submission()` (LPUSH `events:submissions`, gated on `events:active`); `workers/event_consumer.py` matches submissions against active event tasks (pure `match_task()`), applies progress/bingo/team points, and routes Discord notifications via `services/event_notifications.py`. Each event's `submission_policy` gates credit by intake path (envelope `used_api` flag): `all` (default), `confirm_non_api` (non-plugin submissions always land as pending completions), or `api_only` (non-plugin submissions ignored). Lifecycle transitions (draft → active → past) live in `services/event_lifecycle.py`; the web admin surface is `web_api/routes/events.py` + `event_admin.py` + `event_discord.py`.
 
 ---
 

@@ -154,6 +154,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
                     "source_id": getattr(ca_entry, "id", None),
                 },
                 world_type=world_type, player_name=player_name,
+                used_api=used_api,
             )
         except Exception:
             pass

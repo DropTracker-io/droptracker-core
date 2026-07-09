@@ -14,6 +14,117 @@
     { "name": "me" }
   ],
   "paths": {
+    "/events": {
+      "get": {
+        "tags": ["events"],
+        "operationId": "listEvents",
+        "summary": "List events (drafts visible to event admins only)",
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["draft", "active", "past"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Events visible to the requester.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/EventSummary" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["events"],
+        "operationId": "createEvent",
+        "summary": "Create a draft event (group admin; superadmin for global)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EventInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Id of the created draft event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["id"],
+                  "properties": { "id": { "type": "integer" } }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/events/{eventId}": {
+      "get": {
+        "tags": ["events"],
+        "operationId": "getEvent",
+        "summary": "Event detail (tasks, teams, progress, bingo board)",
+        "parameters": [{ "$ref": "#/components/parameters/EventId" }],
+        "responses": {
+          "200": {
+            "description": "Event detail payload. join_code appears only for event admins.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EventDetail" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "patch": {
+        "tags": ["events"],
+        "operationId": "updateEvent",
+        "summary": "Update event settings (event admin)",
+        "parameters": [{ "$ref": "#/components/parameters/EventId" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EventPatch" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The refreshed event detail.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EventDetail" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/leaderboards/players": {
       "get": {
         "tags": ["leaderboards"],
@@ -243,6 +354,12 @@
         "in": "path",
         "required": true,
         "schema": { "type": "integer" }
+      },
+      "EventId": {
+        "name": "eventId",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "integer" }
       }
     },
     "responses": {
@@ -256,6 +373,163 @@
       }
     },
     "schemas": {
+      "EventSummary": {
+        "type": "object",
+        "required": ["id", "group_id", "name", "status", "starts_at", "ends_at", "has_bingo", "formation_mode", "requires_confirmation", "submission_policy", "board_size", "bonus_line_points", "bonus_blackout_points"],
+        "properties": {
+          "id": { "type": "integer" },
+          "group_id": { "type": "integer", "nullable": true, "description": "null => global event." },
+          "name": { "type": "string" },
+          "description": { "type": "string", "nullable": true },
+          "status": { "type": "string", "enum": ["draft", "active", "past"] },
+          "starts_at": { "type": "integer", "nullable": true, "description": "Unix seconds." },
+          "ends_at": { "type": "integer", "nullable": true, "description": "Unix seconds." },
+          "has_bingo": { "type": "boolean", "default": false },
+          "formation_mode": { "type": "string", "enum": ["self_join", "auto_assign", "admin_assign"], "default": "admin_assign" },
+          "requires_confirmation": { "type": "boolean", "default": false, "description": "Event-level force: all completions queue for admin review." },
+          "submission_policy": { "type": "string", "enum": ["all", "confirm_non_api", "api_only"], "default": "all", "description": "Which submissions the completion engine accepts: 'all' \u2014 everything counts; 'confirm_non_api' \u2014 non-plugin submissions land as pending completions needing admin confirmation; 'api_only' \u2014 submissions without the plugin API flag are ignored." },
+          "board_size": { "type": "integer", "default": 5 },
+          "bonus_line_points": { "type": "integer", "default": 0 },
+          "bonus_blackout_points": { "type": "integer", "default": 0 },
+          "activated_at": { "type": "integer", "nullable": true },
+          "ended_at": { "type": "integer", "nullable": true }
+        }
+      },
+      "EventTask": {
+        "type": "object",
+        "required": ["id", "type", "label", "points", "requires_confirmation"],
+        "properties": {
+          "id": { "type": "integer" },
+          "type": { "type": "string", "enum": ["item_collection", "kc_target", "xp_target", "ehp_target", "ehb_target", "pb_target", "skill_target", "loot_value", "custom"] },
+          "label": { "type": "string" },
+          "target": { "type": "string", "nullable": true },
+          "target_value": { "type": "integer", "nullable": true },
+          "points": { "type": "integer", "default": 0 },
+          "requires_confirmation": { "type": "boolean", "default": false },
+          "config": { "type": "string", "nullable": true, "description": "JSON string: any_of/assembly/point_collection item lists etc." }
+        }
+      },
+      "EventMember": {
+        "type": "object",
+        "required": ["player_id", "player_name", "joined_at"],
+        "properties": {
+          "player_id": { "type": "integer" },
+          "player_name": { "type": "string" },
+          "joined_at": { "type": "integer", "nullable": true, "description": "Unix seconds; the credit cutoff." }
+        }
+      },
+      "EventTeam": {
+        "type": "object",
+        "required": ["id", "name", "score", "member_count"],
+        "properties": {
+          "id": { "type": "integer" },
+          "name": { "type": "string" },
+          "score": { "type": "integer", "default": 0 },
+          "member_count": { "type": "integer", "default": 0 },
+          "members": { "type": "array", "items": { "$ref": "#/components/schemas/EventMember" } }
+        }
+      },
+      "EventProgress": {
+        "type": "object",
+        "required": ["task_id", "team_id", "progress", "completed"],
+        "properties": {
+          "task_id": { "type": "integer" },
+          "team_id": { "type": "integer" },
+          "progress": { "type": "integer", "default": 0 },
+          "completed": { "type": "boolean", "default": false },
+          "completed_at": { "type": "integer", "nullable": true }
+        }
+      },
+      "BingoCellCompletion": {
+        "type": "object",
+        "properties": {
+          "team_id": { "type": "integer", "nullable": true },
+          "team_name": { "type": "string", "nullable": true },
+          "player_id": { "type": "integer", "nullable": true },
+          "player_name": { "type": "string", "nullable": true },
+          "completed_at": { "type": "integer", "nullable": true }
+        }
+      },
+      "BingoCell": {
+        "type": "object",
+        "required": ["index", "label"],
+        "properties": {
+          "index": { "type": "integer" },
+          "label": { "type": "string" },
+          "task_id": { "type": "integer", "nullable": true },
+          "completed_by": { "type": "array", "items": { "type": "string" } },
+          "completions": { "type": "array", "items": { "$ref": "#/components/schemas/BingoCellCompletion" } }
+        }
+      },
+      "BingoBoard": {
+        "type": "object",
+        "required": ["size", "cells"],
+        "properties": {
+          "size": { "type": "integer", "description": "Board is size \u00d7 size." },
+          "cells": { "type": "array", "items": { "$ref": "#/components/schemas/BingoCell" } }
+        }
+      },
+      "EventViewer": {
+        "type": "object",
+        "properties": {
+          "player_ids_on_event": { "type": "array", "items": { "type": "integer" } },
+          "team_id": { "type": "integer", "nullable": true }
+        }
+      },
+      "EventDetail": {
+        "allOf": [
+          { "$ref": "#/components/schemas/EventSummary" },
+          {
+            "type": "object",
+            "required": ["join_requires_code"],
+            "properties": {
+              "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/EventTask" } },
+              "teams": { "type": "array", "items": { "$ref": "#/components/schemas/EventTeam" } },
+              "progress": { "type": "array", "items": { "$ref": "#/components/schemas/EventProgress" } },
+              "bingo": { "$ref": "#/components/schemas/BingoBoard" },
+              "viewer": { "$ref": "#/components/schemas/EventViewer" },
+              "join_requires_code": { "type": "boolean", "default": false },
+              "join_code": { "type": "string", "nullable": true, "description": "Admin-only: present only when the requester administers the event." },
+              "discord_guild_id": { "type": "string", "nullable": true }
+            }
+          }
+        ]
+      },
+      "EventInput": {
+        "type": "object",
+        "required": ["group_id", "name"],
+        "properties": {
+          "group_id": { "type": "integer", "nullable": true, "description": "null => global event (superadmin only)." },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "starts_at": { "type": "integer", "nullable": true },
+          "ends_at": { "type": "integer", "nullable": true },
+          "formation_mode": { "type": "string", "enum": ["self_join", "auto_assign", "admin_assign"] },
+          "requires_confirmation": { "type": "boolean" },
+          "submission_policy": { "type": "string", "enum": ["all", "confirm_non_api", "api_only"], "description": "422 on any other value." },
+          "join_code": { "type": "string", "nullable": true },
+          "board_size": { "type": "integer" },
+          "bonus_line_points": { "type": "integer" },
+          "bonus_blackout_points": { "type": "integer" }
+        }
+      },
+      "EventPatch": {
+        "type": "object",
+        "description": "Any subset of EventInput fields except group_id.",
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "starts_at": { "type": "integer", "nullable": true },
+          "ends_at": { "type": "integer", "nullable": true },
+          "formation_mode": { "type": "string", "enum": ["self_join", "auto_assign", "admin_assign"] },
+          "requires_confirmation": { "type": "boolean" },
+          "submission_policy": { "type": "string", "enum": ["all", "confirm_non_api", "api_only"], "description": "422 on any other value." },
+          "join_code": { "type": "string", "nullable": true },
+          "board_size": { "type": "integer" },
+          "bonus_line_points": { "type": "integer" },
+          "bonus_blackout_points": { "type": "integer" }
+        }
+      },
       "Problem": {
         "type": "object",
         "description": "RFC-7807 error envelope.",
