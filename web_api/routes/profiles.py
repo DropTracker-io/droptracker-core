@@ -40,6 +40,7 @@ from web_api.common import (
     _rc,
 )
 from web_api.routes.leaderboards import _compute_group_totals
+from web_api.flair import group_flair, group_flairs
 
 profiles_bp = Blueprint("v1_profiles", __name__)
 
@@ -395,6 +396,12 @@ async def player_profile(player_id: int):
                 g = s.query(Group).filter(Group.group_id == gid).first()
                 if g:
                     groups.append({"id": gid, "name": g.group_name})
+            # Flair for the player's subscribed groups (one query for all).
+            group_flair_map = group_flairs(s, [g["id"] for g in groups])
+            for g in groups:
+                flair = group_flair_map.get(g["id"])
+                if flair:
+                    g["flair"] = flair
 
             recent = (
                 s.query(NotifiedSubmission)
@@ -686,6 +693,9 @@ async def group_profile(group_id: int):
                 payload["top_bosses"] = top_bosses
             if records:
                 payload["records"] = records
+            flair = group_flair(s, group_id)
+            if flair:
+                payload["flair"] = flair
             return payload
 
     payload = await asyncio.to_thread(_load)

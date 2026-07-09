@@ -18,6 +18,7 @@ from web_api.common import (
     player_month_total,
     with_cache_headers,
 )
+from web_api.flair import group_flairs
 
 search_bp = Blueprint("v1_search", __name__)
 
@@ -57,6 +58,11 @@ def _search_groups(s, q):
         g = s.query(Group).filter(Group.group_id == gid).first()
         member_count = g.get_player_count(session_to_use=s) if g else 0
         out.append({"id": gid, "name": name, "member_count": int(member_count or 0)})
+    flair_map = group_flairs(s, [row["id"] for row in out])
+    for row in out:
+        flair = flair_map.get(row["id"])
+        if flair:
+            row["flair"] = flair
     return out
 
 

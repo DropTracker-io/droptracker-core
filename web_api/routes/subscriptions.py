@@ -32,6 +32,7 @@ from web_api.entitlements_registry import (
     parse_stored_entitlements,
     resolve_tier_entitlements,
 )
+from web_api.tier_flair import normalize_flair
 from web_api.deps import (
     assert_group_admin,
     current_user_id,
@@ -60,6 +61,7 @@ def _serialize_tier(t: SubscriptionTier) -> dict:
         "interval": t.interval or "month",
         "features": features if isinstance(features, list) else [],
         "entitlements": resolve_tier_entitlements(stored, scope),
+        "flair": normalize_flair(getattr(t, "flair", None)),
         "recommended": bool(t.recommended),
     }
 

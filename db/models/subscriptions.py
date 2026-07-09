@@ -40,6 +40,9 @@ class SubscriptionTier(Base):
     interval = Column(String(8), nullable=False, default="month")  # month|year
     features = Column(Text, nullable=True)  # JSON array of strings
     entitlements = Column(Text, nullable=True)  # JSON object of booleans (Task 15)
+    # Cosmetic display style granted to subscribed groups on the website
+    # (none|bronze|gold|amethyst|dragon). See web_api/tier_flair.py.
+    flair = Column(String(16), nullable=False, default="none", server_default="none")
     recommended = Column(Boolean, nullable=False, default=False)
     provider_price_id = Column(String(120), nullable=True)
     active = Column(Boolean, nullable=False, default=True)

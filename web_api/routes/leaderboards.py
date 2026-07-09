@@ -15,6 +15,7 @@ import asyncio
 from quart import Blueprint, jsonify, request
 
 from db import Player, Group
+from web_api.flair import group_flairs
 from web_api.common import (
     cache_get,
     cache_set,
@@ -308,6 +309,7 @@ async def leaderboards_groups():
             window = precomputed[start:start + limit]
             gids = [gid for gid, _ in window]
             names = {}
+            flairs = {}
             if gids:
                 with db_session() as s:
                     rows = (
@@ -316,15 +318,19 @@ async def leaderboards_groups():
                         .all()
                     )
                     names = {gid: name for gid, name in rows}
-            entries = [
-                {
+                    flairs = group_flairs(s, gids)
+            entries = []
+            for i, (gid, total) in enumerate(window):
+                row = {
                     "rank": start + i + 1,
                     "id": gid,
                     "name": names.get(gid, f"Group {gid}"),
                     "loot": money(total),
                 }
-                for i, (gid, total) in enumerate(window)
-            ]
+                flair = flairs.get(gid)
+                if flair:
+                    row["flair"] = flair
+                entries.append(row)
             return entries, total_count
 
         # Fallback: compute across members (cached). Used for periods the
@@ -333,15 +339,23 @@ async def leaderboards_groups():
         totals = _compute_group_totals(token)
         start = (page - 1) * limit
         window = totals[start:start + limit]
-        entries = [
-            {
+        gids = [gid for (gid, _name, _total, _members) in window]
+        flairs = {}
+        if gids:
+            with db_session() as s:
+                flairs = group_flairs(s, gids)
+        entries = []
+        for i, (gid, name, total, _members) in enumerate(window):
+            row = {
                 "rank": start + i + 1,
                 "id": gid,
                 "name": name,
                 "loot": money(total),
             }
-            for i, (gid, name, total, _members) in enumerate(window)
-        ]
+            flair = flairs.get(gid)
+            if flair:
+                row["flair"] = flair
+            entries.append(row)
         return entries, len(totals)
 
     entries, total_count = await asyncio.to_thread(_load)

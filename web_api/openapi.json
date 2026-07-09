@@ -559,6 +559,19 @@
           "total": { "type": "integer" }
         }
       },
+      "GroupFlair": {
+        "type": "object",
+        "description": "Cosmetic subscription-tier display style for a group's name. Present only for groups with an active/trialing subscription to a tier whose flair is not 'none'.",
+        "required": ["tier_key", "tier_name", "style"],
+        "properties": {
+          "tier_key": { "type": "string" },
+          "tier_name": { "type": "string" },
+          "style": {
+            "type": "string",
+            "enum": ["none", "bronze", "gold", "amethyst", "dragon"]
+          }
+        }
+      },
       "LeaderboardEntry": {
         "type": "object",
         "required": ["rank", "id", "name", "loot"],
@@ -567,7 +580,8 @@
           "id": { "type": "integer" },
           "name": { "type": "string" },
           "loot": { "$ref": "#/components/schemas/Money" },
-          "delta": { "type": "integer", "description": "Recent change in GP (for live deltas)." }
+          "delta": { "type": "integer", "description": "Recent change in GP (for live deltas)." },
+          "flair": { "$ref": "#/components/schemas/GroupFlair" }
         }
       },
       "LeaderboardPage": {
@@ -613,7 +627,8 @@
         "required": ["id", "name"],
         "properties": {
           "id": { "type": "integer" },
-          "name": { "type": "string" }
+          "name": { "type": "string" },
+          "flair": { "$ref": "#/components/schemas/GroupFlair" }
         }
       },
       "TopBoss": {
@@ -771,7 +786,8 @@
           "recent_submissions": {
             "type": "array",
             "items": { "$ref": "#/components/schemas/Submission" }
-          }
+          },
+          "flair": { "$ref": "#/components/schemas/GroupFlair" }
         }
       },
       "Announcement": {
@@ -823,7 +839,8 @@
                 "role": {
                   "type": "string",
                   "enum": ["owner", "admin", "member"]
-                }
+                },
+                "flair": { "$ref": "#/components/schemas/GroupFlair" }
               }
             }
           }

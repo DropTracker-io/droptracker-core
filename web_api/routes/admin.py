@@ -62,6 +62,7 @@ from web_api.entitlements_registry import (
     entitlements_to_storage,
     validate_entitlements_input,
 )
+from web_api.tier_flair import FlairValidationError, validate_flair
 from web_api.routes.subscriptions import _serialize_sub, _serialize_user_sub
 
 admin_bp = Blueprint("v1_admin", __name__)
@@ -311,7 +312,13 @@ def _tier_from_body(body: dict, existing: SubscriptionTier | None = None):
             abort_problem(422, "Invalid entitlements", e.detail)
     elif existing is not None:
         entitlements_json = existing.entitlements
-    return key, scope, features_json, entitlements_json
+    try:
+        flair = validate_flair(
+            body.get("flair") if "flair" in body else (existing.flair if existing else None)
+        )
+    except FlairValidationError as e:
+        abort_problem(422, "Invalid flair", e.detail)
+    return key, scope, features_json, entitlements_json, flair
 
 
 @admin_bp.post("/admin/subscriptions/tiers")
@@ -321,7 +328,7 @@ async def create_tier():
 
     def _apply():
         with db_session() as s:
-            key, scope, features_json, entitlements_json = _tier_from_body(body)
+            key, scope, features_json, entitlements_json, flair = _tier_from_body(body)
             if s.query(SubscriptionTier).filter(SubscriptionTier.key == key).first():
                 abort_problem(409, "Tier exists", f"Tier '{key}' already exists.")
             tier = SubscriptionTier(
@@ -334,6 +341,7 @@ async def create_tier():
                 interval=body.get("interval") or "month",
                 features=features_json,
                 entitlements=entitlements_json,
+                flair=flair,
                 recommended=bool(body.get("recommended", False)),
                 active=bool(body.get("active", True)),
             )
@@ -379,6 +387,11 @@ async def update_tier(key: str):
                     tier.entitlements = entitlements_to_storage(validated)
                 except EntitlementValidationError as e:
                     abort_problem(422, "Invalid entitlements", e.detail)
+            if "flair" in body:
+                try:
+                    tier.flair = validate_flair(body.get("flair"))
+                except FlairValidationError as e:
+                    abort_problem(422, "Invalid flair", e.detail)
             if "recommended" in body:
                 tier.recommended = bool(body["recommended"])
             if "active" in body:
