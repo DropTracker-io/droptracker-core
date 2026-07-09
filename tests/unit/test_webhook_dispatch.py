@@ -17,6 +17,8 @@ class TestNormalizeSubmissionType:
         assert _normalize_submission_type("experience_update") == "experience"
         assert _normalize_submission_type("experience_milestone") == "experience"
         assert _normalize_submission_type("level_up") == "experience"
+        # legacy type string still sent by older plugin builds
+        assert _normalize_submission_type("xp_milestone") == "experience"
 
     def test_quest_aliases(self):
         assert _normalize_submission_type("quest_completion") == "quest"

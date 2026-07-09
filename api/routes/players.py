@@ -311,6 +311,27 @@ async def load_config():
             player.player_name = player_name
             db_session.commit()
         player_gids = db_session.execute(text("SELECT group_id FROM user_group_association WHERE player_id = :player_id"), {"player_id": player.player_id}).all()
+
+        # Events v2: advertise whether an active event with XP-based tasks
+        # (xp_target / skill_target) is tracking this player, so the plugin
+        # submits periodic experience snapshots instead of only level-ups.
+        xp_events_active = False
+        try:
+            xp_event_row = db_session.execute(
+                text(
+                    "SELECT 1 FROM web_event_team_members m "
+                    "JOIN web_event_teams t ON t.id = m.team_id "
+                    "JOIN web_events e ON e.id = t.event_id "
+                    "JOIN web_event_tasks k ON k.event_id = e.id "
+                    "WHERE m.player_id = :player_id AND e.status = 'active' "
+                    "AND k.type IN ('xp_target', 'skill_target') LIMIT 1"
+                ),
+                {"player_id": player.player_id},
+            ).first()
+            xp_events_active = xp_event_row is not None
+        except Exception as e:
+            print(f"Exception checking active xp events in load_config: {e}")
+
         group_configs = []
         def get_config_value(current_group_configs, key: str):
             for group_config in current_group_configs:
@@ -345,7 +366,8 @@ async def load_config():
                                 "send_xp": get_config_value(current_group_configs, "notify_levels"),
                                 "minimum_level": get_config_value(current_group_configs, "level_minimum_for_notifications"),
                                 "send_stacked_items": get_config_value(current_group_configs, "send_stacks_of_items"),
-                                "minimum_ca_tier": get_config_value(current_group_configs, "min_ca_tier_to_notify")})
+                                "minimum_ca_tier": get_config_value(current_group_configs, "min_ca_tier_to_notify"),
+                                "track_xp_events": xp_events_active})
         return jsonify(group_configs), 200
     finally:
         db_session.close()

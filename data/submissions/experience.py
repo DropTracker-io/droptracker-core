@@ -118,7 +118,9 @@ def _parse_skill_data(experience_data: dict) -> dict:
         - new_level: the new level achieved
         - levels_gained: number of levels gained (usually 1)
     """
-    skills_leveled = experience_data.get("skills_leveled", experience_data.get("skills_trained", ""))
+    # `or` (not a dict default): milestone submissions send skills_leveled=""
+    # with the affected skills in skills_trained.
+    skills_leveled = experience_data.get("skills_leveled") or experience_data.get("skills_trained") or ""
     skill_name = skills_leveled.lower() if skills_leveled else None
     
     if not skill_name:
@@ -173,7 +175,7 @@ def _parse_skills_data(experience_data: dict) -> list[dict]:
           "levels_gained": int,
         }
     """
-    skills_leveled = experience_data.get("skills_leveled", experience_data.get("skills_trained", "")) or ""
+    skills_leveled = experience_data.get("skills_leveled") or experience_data.get("skills_trained") or ""
     raw_parts = [p.strip() for p in str(skills_leveled).split(",") if p and str(p).strip()]
     seen: set[str] = set()
     out: list[dict] = []
@@ -215,6 +217,53 @@ def _parse_skills_data(experience_data: dict) -> list[dict]:
         )
 
     return out
+
+
+def _parse_snapshot_skills(experience_data) -> list[dict]:
+    """Parse an ``experience_update`` snapshot's ``skills_data`` field.
+
+    ``skills_data`` is a JSON object mapping lowercase skill name to
+    ``[xp_total, level]``. The plugin sends one on login/logout/world-hop and
+    periodically while an XP-tracking event is active, so xp_target /
+    skill_target tasks progress even when no level-up occurs (e.g. 99+ skills).
+
+    Returns a list of ``{"skill_key", "xp_total", "new_level"}`` dicts.
+    """
+    raw = experience_data.get("skills_data")
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return []
+    if not isinstance(raw, dict):
+        return []
+
+    out: list[dict] = []
+    for name, values in raw.items():
+        key = str(name).strip().lower()
+        if key not in SKILL_NAMES:
+            continue
+        xp, level = 0, 0
+        if isinstance(values, (list, tuple)):
+            xp = _safe_int(values[0] if len(values) > 0 else 0)
+            level = _safe_int(values[1] if len(values) > 1 else 0)
+        elif isinstance(values, dict):
+            xp = _safe_int(values.get("xp"))
+            level = _safe_int(values.get("level"))
+        else:
+            xp = _safe_int(values)
+        if xp < 0:
+            continue
+        out.append({"skill_key": key, "xp_total": xp, "new_level": level})
+    return out
+
+
+def _is_snapshot_submission(experience_data) -> bool:
+    """True for full-snapshot ``experience_update`` submissions."""
+    sub_type = str(experience_data.get("type") or "").strip().lower()
+    return sub_type == "experience_update" or bool(experience_data.get("skills_data"))
 
 
 async def experience_processor(experience_data, external_session=None):
@@ -270,6 +319,7 @@ async def experience_processor(experience_data, external_session=None):
     
         # Parse skill-specific data
         stage = "parse_skill_data"
+        is_snapshot = _is_snapshot_submission(experience_data)
         skills = _parse_skills_data(experience_data)
         # Pick a "primary" skill for backward compatibility with older templates
         primary = next((s for s in skills if s.get("skill_key") in SKILL_NAMES), None) or (skills[0] if skills else None)
@@ -289,7 +339,7 @@ async def experience_processor(experience_data, external_session=None):
             )
     
         stage = "validate_skill_name"
-        if not skills:
+        if not skills and not is_snapshot:
             #print(f"[EXP] No valid skills leveled up. skills_leveled={experience_data.get('skills_leveled')}")
             return SubmissionResponse(
                 success=False,
@@ -331,6 +381,68 @@ async def experience_processor(experience_data, external_session=None):
             .first()
         )
     
+        # Full-snapshot submissions (login/logout/world-hop/periodic event sync):
+        # update stored XP for every reported skill and feed the events engine,
+        # but never create level-up notifications.
+        if is_snapshot:
+            stage = "snapshot_parse"
+            snapshot_skills = _parse_snapshot_skills(experience_data)
+            if not snapshot_skills:
+                return SubmissionResponse(
+                    success=False,
+                    message="Experience snapshot contained no valid skills."
+                )
+
+            stage = "snapshot_upsert"
+            if not exp_entry:
+                exp_entry = PlayerExperience(
+                    player_id=player_id,
+                    last_updated=datetime.now()
+                )
+                session.add(exp_entry)
+            exp_entry.last_updated = datetime.now()
+            for s in snapshot_skills:
+                k = s["skill_key"]
+                new_xp = s["xp_total"]
+                prev_xp = getattr(exp_entry, k, 0) or 0
+                if new_xp > prev_xp:
+                    setattr(exp_entry, k, new_xp)
+
+            if total_level > 0 and (not player.total_level or total_level > player.total_level):
+                player.total_level = total_level
+
+            stage = "snapshot_commit"
+            session.commit()
+
+            # Event engine hook: snapshots are what advance xp_target baselines
+            # and deltas for skills that never level up (PRD D10: the first
+            # report after join is baseline-only, no retroactive credit).
+            try:
+                from services.event_engine import queue_submission
+                snapshot_world_type = str(experience_data.get("world_type") or "main")
+                for s in snapshot_skills:
+                    if s["xp_total"] <= 0:
+                        continue
+                    queue_submission(
+                        "experience", player_id,
+                        f"{unique_id}:{s['skill_key']}" if unique_id else None,
+                        {
+                            "skill": s["skill_key"],
+                            "xp": s["xp_total"],
+                            "level": s["new_level"],
+                        },
+                        world_type=snapshot_world_type, player_name=player_name,
+                        used_api=used_api,
+                    )
+            except Exception:
+                pass
+
+            stage = "snapshot_done"
+            return SubmissionResponse(
+                success=True,
+                message=f"Experience snapshot recorded ({len(snapshot_skills)} skills)."
+            )
+
         stage = "upsert_player_experience"
         # Update PlayerExperience for each real OSRS skill (exclude "combat")
         real_skill_updates = [s for s in skills if s.get("skill_key") in SKILL_NAMES]
@@ -384,6 +496,7 @@ async def experience_processor(experience_data, external_session=None):
                         "level": _safe_int(_s.get("new_level")),
                     },
                     world_type="main", player_name=player_name,
+                    used_api=used_api,
                 )
         except Exception:
             pass

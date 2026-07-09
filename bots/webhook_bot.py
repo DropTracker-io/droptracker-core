@@ -10,7 +10,7 @@ from interactions.api.events import MemberUpdate, MessageCreate, MessageReaction
 from interactions import Embed, Intents, Message, ChannelType, OptionType, SlashContext, listen, slash_command, Permissions, slash_option
 from interactions.models import Member
 from db.models import Group, ItemList, PersonalBestEntry, PlayerPet, Session, Player, User, UserConfiguration
-from data.submissions import adventure_log_processor, clog_processor, ca_processor, pb_processor, drop_processor, pet_processor
+from data.submissions import adventure_log_processor, clog_processor, ca_processor, pb_processor, drop_processor, pet_processor, experience_processor
 from api.services.metrics import MetricsTracker
 from services.points import award_points_to_player
 from utils.format import convert_to_ms, get_true_boss_name
@@ -65,7 +65,8 @@ def _normalize_submission_type(raw_submission_type):
             return "drop"
         case "kill_time" | "npc_kill":
             return "personal_best"
-        case "experience_update" | "experience_milestone" | "level_up":
+        case "experience_update" | "experience_milestone" | "level_up" | "xp_milestone":
+            # "xp_milestone" is the legacy type string older plugin builds send
             return "experience"
         case "quest_completion":
             return "quest"
@@ -287,6 +288,12 @@ async def process_submission_with_session(submission_type, embed_data):
         elif normalized_submission_type == "adventure_log":
             result = await adventure_log_processor(embed_data, external_session=session)
             success = True
+        elif normalized_submission_type == "experience":
+            # Level-ups and experience_update snapshots from non-API users;
+            # snapshots keep event xp_target baselines/deltas advancing
+            # (events gate non-API credit via their submission_policy).
+            result = await experience_processor(embed_data, external_session=session)
+            success = True
         else:
             result = None
         
@@ -371,8 +378,9 @@ async def on_message_create(event: MessageCreate):
                     elif embed.title and "received some drops" in embed.title or "drop" in field_values:
                         await process_submission_with_session("drop", embed_data)
                         continue
-                    elif "experience_update" in field_values or "experience_milestone" in field_values or "level_up" in field_values:
-                        # await experience_processor(embed_data)
+                    elif ("experience_update" in field_values or "experience_milestone" in field_values
+                          or "level_up" in field_values or "xp_milestone" in field_values):
+                        await process_submission_with_session(embed_data.get("type", "experience_update"), embed_data)
                         continue
                     elif "quest_completion" in field_values:
                         # await quest_processor(embed_data)

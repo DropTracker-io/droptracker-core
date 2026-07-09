@@ -49,7 +49,8 @@ def _normalize_submission_type(raw_submission_type):
             return "drop"
         case "kill_time" | "npc_kill":
             return "personal_best"
-        case "experience_update" | "experience_milestone" | "level_up":
+        case "experience_update" | "experience_milestone" | "level_up" | "xp_milestone":
+            # "xp_milestone" is the legacy type string older plugin builds send
             return "experience"
         case "quest_completion":
             return "quest"
@@ -274,7 +275,7 @@ async def _queue_webhook_request():
 
 
 @webhook_bp.post("/submit")
-@rate_limit(limit=10, period=timedelta(seconds=1))
+@rate_limit(limit=100, period=timedelta(seconds=1))
 async def submit_data():
     return await webhook_data()
 
@@ -421,7 +422,7 @@ async def _process_webhook_request(req_start):
                                     g.submission_type = submission_type
                                     response = await submissions.ca_processor(processed_data, external_session=db_session)
                                     log_phase("ca_processed")
-                                case "experience_update" | "experience_milestone" | "level_up":
+                                case "experience_update" | "experience_milestone" | "level_up" | "xp_milestone":
                                     g.submission_type = "experience"
                                     response = await submissions.experience_processor(processed_data, external_session=db_session)
                                     log_phase("experience_processed")
