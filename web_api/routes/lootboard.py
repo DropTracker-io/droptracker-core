@@ -47,6 +47,8 @@ CANVAS = {"width": 1074, "height": 795}
 MAX_ITEMS = 32
 MAX_RECENT = 12
 MAX_LEADERBOARD = 12
+# Per-item tooltip breakdown: top recipients by contributed value.
+MAX_CONTRIBUTORS = 6
 DEFAULT_MIN_VALUE = 2_500_000
 
 # Filesystem prefix shared by every ``LootboardStyle.local_url`` row. The
@@ -92,6 +94,21 @@ def _parse_item_value(raw) -> tuple[int, int]:
         return int(float(parts[0])), int(float(parts[1]))
     except Exception:
         return 0, 0
+
+
+def _parse_item_blob(raw) -> tuple[int, int, str | None]:
+    """Return (quantity, total_value, last_received) from a
+    ``qty,value,count,first,last`` blob. ``last`` is the raw
+    ``YYYY-MM-DD HH:MM:SS`` string (or None on old/malformed blobs) — it feeds
+    the per-player "how long ago" line in the item-stack tooltips."""
+    try:
+        s = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        parts = s.split(",")
+        qty, val = int(float(parts[0])), int(float(parts[1]))
+        last = parts[4].strip() if len(parts) >= 5 and parts[4].strip() else None
+        return qty, val, last
+    except Exception:
+        return 0, 0, None
 
 
 def _as_str(raw) -> str:
@@ -172,6 +189,9 @@ async def group_lootboard(group_id: int):
 
             conn = _rc()
             agg: dict[int, list[int]] = {}       # item_id -> [qty, value]
+            # item_id -> [(player_id, qty, value, last_received)] — feeds the
+            # per-player breakdown in the item-stack tooltips.
+            contributors: dict[int, list[tuple[int, int, int, str | None]]] = {}
             loot: dict[int, int] = {}            # player_id -> total_loot
             recent_raw: list[tuple[int, dict]] = []  # (player_id, drop dict)
             if conn is not None and player_ids:
@@ -190,13 +210,15 @@ async def group_lootboard(group_id: int):
                                 item_id = int(_as_str(item_raw))
                             except Exception:
                                 continue
-                            qty, val = _parse_item_value(blob)
+                            qty, val, last = _parse_item_blob(blob)
                             # Respect only_include_items_over_minimum (per-item unit value).
                             if only_over_min and qty > 0 and (val // qty) < min_value:
                                 continue
                             row = agg.setdefault(item_id, [0, 0])
                             row[0] += qty
                             row[1] += val
+                            if qty > 0 or val > 0:
+                                contributors.setdefault(item_id, []).append((pid, qty, val, last))
                     if loot_res is not None:
                         try:
                             loot[pid] = int(float(_as_str(loot_res)))
@@ -209,6 +231,14 @@ async def group_lootboard(group_id: int):
                             continue
 
             ranked = sorted(agg.items(), key=lambda kv: kv[1][1], reverse=True)[:MAX_ITEMS]
+
+            # Top recipients per ranked item (by contributed value). Capped so a
+            # stackable farmed by the whole clan doesn't bloat the payload; the
+            # tooltip shows the rest as "+N more players".
+            top_contribs: dict[int, list[tuple[int, int, int, str | None]]] = {}
+            for iid, _qv in ranked:
+                rows = sorted(contributors.get(iid, []), key=lambda r: r[2], reverse=True)
+                top_contribs[iid] = rows[:MAX_CONTRIBUTORS]
 
             # --- Recent drops: high-value, newest first (generator.draw_recent_drops). ---
             recents = [
@@ -241,6 +271,7 @@ async def group_lootboard(group_id: int):
                     .filter(ItemList.item_id.in_(item_ids)).all()
                 }
             pids = {pid for pid, _ in deduped} | {pid for pid, _ in top_players}
+            pids |= {row[0] for rows in top_contribs.values() for row in rows}
             player_names: dict[int, str] = {}
             if pids:
                 player_names = {
@@ -253,8 +284,9 @@ async def group_lootboard(group_id: int):
                 icon_id = _coin_image_id(qty) if iid == 995 else iid
                 return f"{IMG_BASE}/itemdb/{icon_id}.png"
 
-            items = [
-                {
+            items = []
+            for iid, qv in ranked:
+                item = {
                     "item_id": iid,
                     "name": item_names.get(iid, f"Item {iid}"),
                     "quantity": qv[0],
@@ -262,8 +294,20 @@ async def group_lootboard(group_id: int):
                     "icon_url": _icon_url(iid, qv[0]),
                     "is_coin": iid == 995,
                 }
-                for iid, qv in ranked
-            ]
+                rows = top_contribs.get(iid, [])
+                if rows:
+                    item["contributors"] = [
+                        {
+                            "player_id": pid,
+                            "player_name": player_names.get(pid, "Unknown"),
+                            "quantity": q,
+                            "value": money(v),
+                            "last_at": last,
+                        }
+                        for pid, q, v, last in rows
+                    ]
+                    item["contributor_count"] = len(contributors.get(iid, []))
+                items.append(item)
 
             recent_drops = []
             for pid, d in deduped:

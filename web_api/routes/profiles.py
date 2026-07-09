@@ -524,14 +524,18 @@ async def player_loot(player_id: int):
             if bool(player.hidden) or bool(player.user and player.user.hidden):
                 return None
 
-            cache_key = f"pstats:loot:{player_id}:{partition}"
+            # v2: items also carry drop count + first/last received timestamps
+            # (rich item tooltips). Key bumped so stale v1 payloads never serve.
+            cache_key = f"pstats:loot2:{player_id}:{partition}"
             cached = cache_get(cache_key, _STATS_TTL)
             if cached is not None:
                 return cached
 
             item_rows = s.execute(text(
                 "SELECT d.npc_id, n.npc_name, d.item_id, i.item_name, "
-                "       SUM(d.quantity) AS qty, SUM(d.value * d.quantity) AS loot "
+                "       SUM(d.quantity) AS qty, SUM(d.value * d.quantity) AS loot, "
+                "       COUNT(*) AS drop_count, "
+                "       MIN(d.date_added) AS first_at, MAX(d.date_added) AS last_at "
                 "FROM drops d "
                 "JOIN npc_list n ON n.npc_id = d.npc_id "
                 "JOIN items i ON i.item_id = d.item_id "
@@ -550,8 +554,15 @@ async def player_loot(player_id: int):
             ), {"pid": player_id, "partition": partition}).fetchall()
             kills = {int(npc_id): int(cnt) for npc_id, cnt in kill_rows}
 
+            def _ts(dt) -> int | None:
+                """DB datetime -> unix seconds (None-safe)."""
+                try:
+                    return int(dt.timestamp()) if dt is not None else None
+                except Exception:
+                    return None
+
             npcs = {}
-            for npc_id, npc_name, item_id, item_name, qty, loot in item_rows:
+            for npc_id, npc_name, item_id, item_name, qty, loot, drop_count, first_at, last_at in item_rows:
                 npc = npcs.setdefault(int(npc_id), {
                     "npc_id": int(npc_id),
                     "name": npc_name,
@@ -561,12 +572,21 @@ async def player_loot(player_id: int):
                 })
                 loot = int(loot or 0)
                 npc["total_value"] += loot
-                npc["items"].append({
+                item = {
                     "item_id": int(item_id),
                     "name": item_name,
                     "quantity": int(qty or 0),
                     "loot": money(loot),
-                })
+                    "drops": int(drop_count or 0),
+                }
+                # Optional detail for the web item tooltip; omitted when NULL so
+                # the payload stays backwards compatible.
+                first_ts, last_ts = _ts(first_at), _ts(last_at)
+                if first_ts is not None:
+                    item["first_ts"] = first_ts
+                if last_ts is not None:
+                    item["last_ts"] = last_ts
+                npc["items"].append(item)
 
             npc_list = sorted(npcs.values(), key=lambda x: x["total_value"], reverse=True)
             for npc in npc_list:

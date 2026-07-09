@@ -648,7 +648,21 @@
           "item_id": { "type": "integer" },
           "name": { "type": "string" },
           "quantity": { "type": "integer", "format": "int64" },
-          "loot": { "$ref": "#/components/schemas/Money" }
+          "loot": { "$ref": "#/components/schemas/Money" },
+          "drops": {
+            "type": "integer",
+            "description": "Distinct drop rows this item came from this month."
+          },
+          "first_ts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds of the first time this item was received this month."
+          },
+          "last_ts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds of the most recent time this item was received this month."
+          }
         }
       },
       "LootTrackerNpc": {
