@@ -1,51 +1,29 @@
 """Resolve per-group subscription flair for public listings.
 
 Flair is the cosmetic tier style shown wherever a group name appears on the
-website (see ``web_api/tier_flair.py``). Only groups with an active/trialing
-subscription to a tier whose flair is not "none" get a descriptor; everything
-else renders like a free group. Kept to a single query — the leaderboard is hot.
+website (see ``web_api/tier_flair.py``). Subscription-pool model: a group's
+effective tier comes from the sum of its live contribution legs
+(``db/entitlements.py effective_group_tiers``), so flair reflects exactly the
+tier the group's live payments cover — including the period-end grace that
+plain status checks miss. Groups whose pool covers no flaired tier are simply
+absent from the map.
 """
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, Optional
 
-from db import GroupSubscription, SubscriptionTier
+from db.entitlements import effective_group_tiers
 from web_api.tier_flair import normalize_flair
-
-# Subscription statuses that confer flair — parity with isSubscriptionActive()
-# in the frontend (apps/web/lib/entitlements.ts).
-_ACTIVE_STATUSES = ("active", "trialing")
 
 
 def group_flairs(session, group_ids: Iterable[int]) -> Dict[int, dict]:
-    """``{group_id: {"tier_key","tier_name","style"}}`` for the flaired subset.
-
-    One indexed query joining ``group_subscriptions`` -> ``subscription_tiers``.
-    Groups without an active, flaired subscription are simply absent from the map.
-    """
-    ids: List[int] = [int(g) for g in group_ids if g is not None]
-    if not ids:
-        return {}
-    rows = (
-        session.query(
-            GroupSubscription.group_id,
-            SubscriptionTier.key,
-            SubscriptionTier.name,
-            SubscriptionTier.flair,
-        )
-        .join(SubscriptionTier, SubscriptionTier.key == GroupSubscription.tier_key)
-        .filter(
-            GroupSubscription.group_id.in_(ids),
-            GroupSubscription.status.in_(_ACTIVE_STATUSES),
-        )
-        .all()
-    )
+    """``{group_id: {"tier_key","tier_name","style"}}`` for the flaired subset."""
     out: Dict[int, dict] = {}
-    for gid, key, name, flair in rows:
-        style = normalize_flair(flair)
+    for gid, (tier, _total) in effective_group_tiers(session, group_ids).items():
+        style = normalize_flair(getattr(tier, "flair", None))
         if style == "none":
             continue
-        out[int(gid)] = {"tier_key": key, "tier_name": name, "style": style}
+        out[gid] = {"tier_key": tier.key, "tier_name": tier.name, "style": style}
     return out
 
 

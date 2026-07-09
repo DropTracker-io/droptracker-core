@@ -237,29 +237,142 @@ def _load_fallback_tier(s):
     return None
 
 
+# --------------------------------------------------------------------------- #
+# Subscription pool: a group holds many contribution "legs" (multi-payer);
+# its effective tier is the most expensive tier covered by the sum of the
+# live legs' monthly amounts.
+# --------------------------------------------------------------------------- #
+def paid_group_tiers_desc(s):
+    """Active, paid, group-scope tiers sorted most-expensive first."""
+    from db.models.subscriptions import SubscriptionTier
+
+    return (
+        s.query(SubscriptionTier)
+        .filter(
+            SubscriptionTier.active == True,  # noqa: E712
+            SubscriptionTier.scope == "group",
+            SubscriptionTier.price_cents > 0,
+        )
+        .order_by(SubscriptionTier.price_cents.desc())
+        .all()
+    )
+
+
+def leg_monthly_cents(leg, tiers_by_key: Dict[str, Any]) -> int:
+    """One leg's monthly-normalized contribution. Legacy rows (NULL amount)
+    contribute their tier's full price; year-interval legs are divided out."""
+    tier = tiers_by_key.get(leg.tier_key) if leg.tier_key else None
+    amount = leg.amount_cents
+    if amount is None:
+        amount = int(tier.price_cents) if tier else 0
+    interval = ((tier.interval if tier else None) or "month")
+    return int(amount) // 12 if interval == "year" else int(amount)
+
+
+def pool_tier_for_total(tiers_desc, total_cents: int):
+    """Most expensive tier whose price the pool covers, or None."""
+    for tier in tiers_desc:
+        if int(tier.price_cents) <= total_cents:
+            return tier
+    return None
+
+
+def effective_group_subscription(s, group_id: int) -> Dict[str, Any]:
+    """Pool resolution for one group.
+
+    Returns ``{tier, total_monthly_cents, legs, live_legs, status,
+    current_period_end, cancel_at_period_end}``. ``tier`` is None when the
+    live pool covers no paid tier. Effective status: active if any live leg;
+    else past_due if any leg is past_due; else canceled/expired by presence;
+    none without legs. ``current_period_end`` is the soonest live-leg end (the
+    next moment the pool could shrink); ``cancel_at_period_end`` is True only
+    when every live leg is winding down.
+    """
+    from db.models.subscriptions import GroupSubscription
+
+    legs = (
+        s.query(GroupSubscription)
+        .filter(GroupSubscription.group_id == group_id)
+        .order_by(GroupSubscription.created_at.asc())
+        .all()
+    )
+    tiers_desc = paid_group_tiers_desc(s)
+    tiers_by_key = {t.key: t for t in tiers_desc}
+
+    live = [leg for leg in legs if subscription_is_live(leg)]
+    total = sum(leg_monthly_cents(leg, tiers_by_key) for leg in live)
+    tier = pool_tier_for_total(tiers_desc, total) if live else None
+
+    if live:
+        status = "active"
+    elif any(leg.status == "past_due" for leg in legs):
+        status = "past_due"
+    elif any(leg.status == "canceled" for leg in legs):
+        status = "canceled"
+    elif any(leg.status == "expired" for leg in legs):
+        status = "expired"
+    else:
+        status = "none"
+
+    live_ends = [leg.current_period_end for leg in live if leg.current_period_end]
+    return {
+        "tier": tier,
+        "total_monthly_cents": total,
+        "legs": legs,
+        "live_legs": live,
+        "status": status,
+        "current_period_end": min(live_ends) if live_ends else None,
+        "cancel_at_period_end": bool(live) and all(leg.cancel_at_period_end for leg in live),
+    }
+
+
+def effective_group_tiers(s, group_ids) -> Dict[int, Any]:
+    """Bulk pool resolution: ``{group_id: (tier, total_monthly_cents)}`` for
+    the subset of ``group_ids`` whose live pool covers a paid tier. Two
+    queries total — used on hot listing paths (flair)."""
+    from db.models.subscriptions import GroupSubscription
+
+    ids = [int(g) for g in group_ids if g is not None]
+    if not ids:
+        return {}
+    legs = (
+        s.query(GroupSubscription)
+        .filter(
+            GroupSubscription.group_id.in_(ids),
+            GroupSubscription.status.in_(tuple(_ACTIVE_STATUSES)),
+        )
+        .all()
+    )
+    tiers_desc = paid_group_tiers_desc(s)
+    tiers_by_key = {t.key: t for t in tiers_desc}
+
+    totals: Dict[int, int] = {}
+    for leg in legs:
+        if not subscription_is_live(leg):
+            continue
+        totals[int(leg.group_id)] = totals.get(int(leg.group_id), 0) + leg_monthly_cents(
+            leg, tiers_by_key
+        )
+
+    out: Dict[int, Any] = {}
+    for gid, total in totals.items():
+        tier = pool_tier_for_total(tiers_desc, total)
+        if tier is not None:
+            out[gid] = (tier, total)
+    return out
+
+
 def resolve_group_entitlements(s, group_id: int) -> Dict[str, Any]:
-    """Resolved entitlement map for ``group_id`` from its subscription tier.
+    """Resolved entitlement map for ``group_id`` from its subscription pool.
 
     No superadmin handling here — that's a web-request concern
     (``web_api/entitlements.py`` wraps this with the bypass).
     """
-    from db.models.subscriptions import GroupSubscription, SubscriptionTier
-
-    sub = (
-        s.query(GroupSubscription)
-        .filter(GroupSubscription.group_id == group_id)
-        .first()
-    )
-    tier = None
-    if sub is not None and sub.tier_key and subscription_is_live(sub):
-        tier = (
-            s.query(SubscriptionTier)
-            .filter(SubscriptionTier.key == sub.tier_key)
-            .first()
-        )
-    elif not subscription_is_live(sub):
+    resolved = effective_group_subscription(s, group_id)
+    tier = resolved["tier"]
+    if tier is None:
+        # Live payments below the cheapest paid tier (or none) → free plan.
         tier = _load_fallback_tier(s)
-
     if tier is None:
         return default_entitlements()
 

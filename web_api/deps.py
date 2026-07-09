@@ -194,6 +194,24 @@ def assert_group_admin(
     return role
 
 
+def assert_group_member(
+    s,
+    user_id: int,
+    group_id: int,
+    manage_guild_ids: Optional[Set[str]] = None,
+    user: Optional[User] = None,
+) -> str:
+    """Abort 403 unless the user holds ANY role on the group (member and up).
+
+    Subscription-pool contributions are open to every group member, not just
+    admins — any member may add their own payment leg toward the group's tier.
+    """
+    role = resolve_group_role(s, user_id, group_id, manage_guild_ids, user)
+    if role is None:
+        abort_problem(403, "Forbidden", "Group membership is required.")
+    return role
+
+
 def is_superadmin(user: Optional[User]) -> bool:
     return bool(user and getattr(user, "is_superadmin", False))
 

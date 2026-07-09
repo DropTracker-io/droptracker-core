@@ -52,7 +52,12 @@ from .seasonal_quest_completion import SeasonalQuestCompletionEntry
 from .drop_split import DropSplit
 from .web import GroupAdmin, Announcement, AuditLog, DiscordOutbox, DocsPage
 from .badge import Badge, PlayerBadge
-from .subscriptions import SubscriptionTier, GroupSubscription, UserSubscription
+from .subscriptions import (
+    SubscriptionTier,
+    GroupSubscription,
+    SubscriptionPayment,
+    UserSubscription,
+)
 from .events import (
     Event,
     EventTask,
@@ -158,6 +163,7 @@ __all__ = [
     "PlayerBadge",
     "SubscriptionTier",
     "GroupSubscription",
+    "SubscriptionPayment",
     "UserSubscription",
     "Event",
     "EventTask",

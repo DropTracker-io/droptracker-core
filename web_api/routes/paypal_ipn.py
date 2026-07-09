@@ -119,13 +119,19 @@ def _find_subscription(subscr_id: str | None, custom: str | None):
             else None
         )
         owner_id = sub.user_id if kind == "user" else sub.group_id
+        # The leg's own recurring amount (pool model); legacy rows fall back
+        # to their tier's price.
+        amount = getattr(sub, "amount_cents", None)
+        if amount is None and tier is not None:
+            amount = int(tier.price_cents)
         return {
             "kind": kind,
             "id": sub.id,
             "owner_id": owner_id,
+            "payer_user_id": sub.user_id if kind == "group" else None,
             "tier_key": sub.tier_key,
             "current_period_end": sub.current_period_end,
-            "price_cents": int(tier.price_cents) if tier else None,
+            "amount_cents": int(amount) if amount is not None else None,
             "currency": (tier.currency or "USD").upper() if tier else None,
             "interval": (tier.interval or "month") if tier else "month",
         }
@@ -196,6 +202,31 @@ async def paypal_ipn():
     action = "none"
     owner = f"{snapshot['kind']} {snapshot['owner_id']}"
 
+    def _ledger(amount_cents: int, kind: str):
+        """Best-effort payment-ledger row; idempotent via txn_id."""
+        if not txn_id:
+            return
+        try:
+            from web_api.payments import record_payment
+
+            record_payment(
+                scope=snapshot["kind"],
+                group_id=snapshot["owner_id"] if snapshot["kind"] == "group" else None,
+                user_id=snapshot["payer_user_id"]
+                if snapshot["kind"] == "group"
+                else snapshot["owner_id"],
+                subscription_id=snapshot["id"],
+                tier_key=snapshot["tier_key"],
+                provider="paypal",
+                amount_cents=amount_cents,
+                currency=(fields.get("mc_currency") or snapshot["currency"] or "USD"),
+                external_id=str(txn_id),
+                kind=kind,
+                paid_at=now,
+            )
+        except Exception:
+            logger.exception("paypal_ipn: ledger write failed for %s", owner)
+
     if payment_status in ("Refunded", "Reversed", "Canceled_Reversal") and fields.get("parent_txn_id"):
         if payment_status == "Canceled_Reversal":
             updates = {"status": "active"}
@@ -203,16 +234,18 @@ async def paypal_ipn():
         else:
             updates = {"status": "canceled"}
             action = f"{payment_status.lower()} — benefits revoked"
+            gross_cents = abs(round(float(fields.get("mc_gross", "0")) * 100))
+            if gross_cents:
+                _ledger(gross_cents, "refund" if payment_status == "Refunded" else "reversal")
     elif txn_type == "subscr_payment" and payment_status == "Completed":
         gross_cents = round(float(fields.get("mc_gross", "0")) * 100)
         currency = (fields.get("mc_currency") or "").upper()
-        if snapshot["price_cents"] is not None and (
-            gross_cents < snapshot["price_cents"] or currency != snapshot["currency"]
-        ):
+        expected = snapshot["amount_cents"]
+        if expected is not None and (gross_cents < expected or currency != snapshot["currency"]):
             logger.warning(
                 "paypal_ipn: amount mismatch for %s (%s %s < expected %s %s); not extending",
                 owner, gross_cents, currency,
-                snapshot["price_cents"], snapshot["currency"],
+                expected, snapshot["currency"],
             )
             return jsonify({"ignored": "amount mismatch"}), 200
         base = snapshot["current_period_end"]
@@ -224,6 +257,7 @@ async def paypal_ipn():
             "cancel_at_period_end": False,
         }
         action = "payment — period extended"
+        _ledger(gross_cents, "payment")
     elif txn_type == "subscr_cancel":
         updates = {"cancel_at_period_end": True}
         action = "cancelled — runs to period end"

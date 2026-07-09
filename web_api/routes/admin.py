@@ -31,7 +31,7 @@ import json
 import subprocess
 from datetime import datetime, timedelta
 
-from sqlalchemy import or_
+from sqlalchemy import or_, text as sa_text
 
 from quart import Blueprint, jsonify, request
 
@@ -49,9 +49,16 @@ from db import (
     NotificationQueue,
     NpcList,
     Player,
+    SubscriptionPayment,
     SubscriptionTier,
     User,
     UserSubscription,
+)
+from db.entitlements import (
+    effective_group_tiers,
+    leg_monthly_cents,
+    paid_group_tiers_desc,
+    subscription_is_live,
 )
 from web_api import admin_registry as registry
 from web_api import billing
@@ -63,7 +70,7 @@ from web_api.entitlements_registry import (
     validate_entitlements_input,
 )
 from web_api.tier_flair import FlairValidationError, validate_flair
-from web_api.routes.subscriptions import _serialize_sub, _serialize_user_sub
+from web_api.routes.subscriptions import _serialize_group_sub, _serialize_sub, _serialize_user_sub
 
 admin_bp = Blueprint("v1_admin", __name__)
 
@@ -479,6 +486,27 @@ async def admin_overview():
                     s.query(GroupSubscription).filter(GroupSubscription.status == "active")
                 ),
             })
+            # Headline MRR — the full breakdown lives on /admin/subscriptions.
+            try:
+                tiers_by_key = {t.key: t for t in s.query(SubscriptionTier).all()}
+                mrr = sum(
+                    leg_monthly_cents(leg, tiers_by_key)
+                    for leg in s.query(GroupSubscription).all()
+                    if subscription_is_live(leg)
+                )
+                for u in s.query(UserSubscription).all():
+                    if not subscription_is_live(u):
+                        continue
+                    tier = tiers_by_key.get(u.tier_key) if u.tier_key else None
+                    amount = u.amount_cents if u.amount_cents else (tier.price_cents if tier else 0)
+                    mrr += _monthly_cents(amount, tier.interval if tier else "month")
+                stats.append({
+                    "key": "mrr", "label": "Monthly recurring revenue",
+                    "value": f"${mrr / 100:,.2f}",
+                    "hint": "Live subscriptions, monthly-normalized",
+                })
+            except Exception:
+                pass
             stats.append({
                 "key": "pending_discord_outbox", "label": "Pending Discord outbox",
                 "value": _count(
@@ -509,6 +537,186 @@ async def admin_overview():
 
 
 # --------------------------------------------------------------------------- #
+# Monetization dashboard (/admin/subscriptions)
+# --------------------------------------------------------------------------- #
+def _ts(dt) -> int | None:
+    return int(dt.timestamp()) if dt else None
+
+
+def _monthly_cents(amount, interval: str | None) -> int:
+    amt = int(amount or 0)
+    return amt // 12 if (interval or "month") == "year" else amt
+
+
+@admin_bp.get("/admin/subscriptions/overview")
+async def admin_subscriptions_overview():
+    """Everything the superadmin monetization dashboard renders, one payload:
+    MRR/lifetime KPIs, 12-month income (from the payments ledger), every
+    subscription across both scopes, and recent payments."""
+    await _require_superadmin()
+
+    def _load():
+        with db_session() as s:
+            legs = s.query(GroupSubscription).all()
+            usubs = s.query(UserSubscription).all()
+            tiers = s.query(SubscriptionTier).all()
+            tiers_by_key = {t.key: t for t in tiers}
+
+            live_legs = [leg for leg in legs if subscription_is_live(leg)]
+            live_usubs = [u for u in usubs if subscription_is_live(u)]
+
+            group_mrr = sum(leg_monthly_cents(leg, tiers_by_key) for leg in live_legs)
+            user_mrr = 0
+            for u in live_usubs:
+                tier = tiers_by_key.get(u.tier_key) if u.tier_key else None
+                amount = u.amount_cents if u.amount_cents else (tier.price_cents if tier else 0)
+                user_mrr += _monthly_cents(amount, tier.interval if tier else "month")
+
+            # Effective tier per paying group (pool resolution).
+            effective = effective_group_tiers(s, {leg.group_id for leg in live_legs})
+            tier_counts: dict[str, int] = {}
+            for tier, _total in effective.values():
+                tier_counts[tier.key] = tier_counts.get(tier.key, 0) + 1
+            tier_distribution = [
+                {
+                    "tier_key": key,
+                    "tier_name": tiers_by_key[key].name if key in tiers_by_key else key,
+                    "groups": count,
+                }
+                for key, count in sorted(tier_counts.items(), key=lambda kv: -kv[1])
+            ]
+
+            past_due = sum(1 for leg in legs if leg.status == "past_due") + sum(
+                1 for u in usubs if u.status == "past_due"
+            )
+
+            # Ledger aggregates. Refunds/reversals subtract.
+            signed = "SUM(CASE WHEN kind = 'payment' THEN amount_cents ELSE -amount_cents END)"
+            lifetime = s.execute(
+                sa_text(f"SELECT COALESCE({signed}, 0) FROM subscription_payments")
+            ).scalar()
+            months = s.execute(
+                sa_text(
+                    "SELECT DATE_FORMAT(paid_at, '%Y-%m') AS month, "
+                    f"{signed} AS cents "
+                    "FROM subscription_payments "
+                    "WHERE paid_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH) "
+                    "GROUP BY month ORDER BY month ASC"
+                )
+            ).fetchall()
+
+            # Names for every row we're about to list.
+            group_ids = {leg.group_id for leg in legs}
+            payer_ids = {leg.user_id for leg in legs if leg.user_id} | {
+                u.user_id for u in usubs
+            }
+            group_names = dict(
+                s.query(Group.group_id, Group.group_name)
+                .filter(Group.group_id.in_(group_ids))
+                .all()
+            ) if group_ids else {}
+            user_names = dict(
+                s.query(User.user_id, User.username)
+                .filter(User.user_id.in_(payer_ids))
+                .all()
+            ) if payer_ids else {}
+
+            subscriptions = []
+            for leg in legs:
+                subscriptions.append({
+                    "scope": "group",
+                    "id": leg.id,
+                    "group_id": leg.group_id,
+                    "group_name": group_names.get(leg.group_id),
+                    "user_id": leg.user_id,
+                    "user_name": user_names.get(leg.user_id),
+                    "tier_key": leg.tier_key,
+                    "amount_cents": int(leg.amount_cents) if leg.amount_cents is not None else None,
+                    "provider": leg.provider,
+                    "status": leg.status,
+                    "live": leg in live_legs,
+                    "current_period_end": _ts(leg.current_period_end),
+                    "cancel_at_period_end": bool(leg.cancel_at_period_end),
+                })
+            for u in usubs:
+                subscriptions.append({
+                    "scope": "user",
+                    "id": u.id,
+                    "group_id": None,
+                    "group_name": None,
+                    "user_id": u.user_id,
+                    "user_name": user_names.get(u.user_id),
+                    "tier_key": u.tier_key,
+                    "amount_cents": int(u.amount_cents) if u.amount_cents else None,
+                    "provider": u.provider,
+                    "status": u.status,
+                    "live": u in live_usubs,
+                    "current_period_end": _ts(u.current_period_end),
+                    "cancel_at_period_end": bool(u.cancel_at_period_end),
+                })
+            # Live first, then by soonest renewal.
+            subscriptions.sort(key=lambda r: (not r["live"], r["current_period_end"] or 0))
+
+            recent_rows = (
+                s.query(SubscriptionPayment)
+                .order_by(SubscriptionPayment.paid_at.desc())
+                .limit(20)
+                .all()
+            )
+            pay_group_ids = {p.group_id for p in recent_rows if p.group_id}
+            pay_user_ids = {p.user_id for p in recent_rows if p.user_id}
+            pay_group_names = dict(
+                s.query(Group.group_id, Group.group_name)
+                .filter(Group.group_id.in_(pay_group_ids))
+                .all()
+            ) if pay_group_ids else {}
+            pay_user_names = dict(
+                s.query(User.user_id, User.username)
+                .filter(User.user_id.in_(pay_user_ids))
+                .all()
+            ) if pay_user_ids else {}
+            recent_payments = [
+                {
+                    "id": p.id,
+                    "scope": p.scope,
+                    "group_id": p.group_id,
+                    "group_name": pay_group_names.get(p.group_id),
+                    "user_id": p.user_id,
+                    "user_name": pay_user_names.get(p.user_id),
+                    "tier_key": p.tier_key,
+                    "provider": p.provider,
+                    "amount_cents": int(p.amount_cents),
+                    "currency": p.currency,
+                    "kind": p.kind,
+                    "paid_at": _ts(p.paid_at),
+                }
+                for p in recent_rows
+            ]
+
+            return {
+                "kpis": {
+                    "mrr_cents": group_mrr + user_mrr,
+                    "group_mrr_cents": group_mrr,
+                    "user_mrr_cents": user_mrr,
+                    "paying_groups": len(effective),
+                    "active_user_subscriptions": len(live_usubs),
+                    "past_due": past_due,
+                    "lifetime_cents": int(lifetime or 0),
+                },
+                "tier_distribution": tier_distribution,
+                "income_by_month": [
+                    {"month": m, "amount_cents": int(c or 0)} for m, c in months
+                ],
+                "subscriptions": subscriptions,
+                "recent_payments": recent_payments,
+            }
+
+    payload = await asyncio.to_thread(_load)
+    payload["generated_at"] = int(datetime.now().timestamp())
+    return private_no_store(jsonify(payload))
+
+
+# --------------------------------------------------------------------------- #
 # Comped subscriptions (reuse group_subscriptions — no new table)
 # --------------------------------------------------------------------------- #
 @admin_bp.post("/admin/groups/<int:group_id>/subscription/grant")
@@ -529,9 +737,14 @@ async def admin_grant_subscription(group_id: int):
             )
             if not tier:
                 abort_problem(404, "Unknown tier", f"No tier '{grant['tier_key']}'.")
+            # Pool model: comp = the group's single MANUAL leg. Never touch
+            # paid legs (stripe/paypal) — a comp sits alongside them.
             sub = (
                 s.query(GroupSubscription)
-                .filter(GroupSubscription.group_id == group_id)
+                .filter(
+                    GroupSubscription.group_id == group_id,
+                    GroupSubscription.provider == "manual",
+                )
                 .first()
             )
             before = _serialize_sub(group_id, sub) if sub else None
@@ -541,6 +754,7 @@ async def admin_grant_subscription(group_id: int):
             sub.provider = grant["provider"]
             sub.status = grant["status"]
             sub.tier_key = grant["tier_key"]
+            sub.amount_cents = tier.price_cents
             sub.current_period_end = grant["current_period_end"]
             sub.cancel_at_period_end = grant["cancel_at_period_end"]
             s.commit()
@@ -560,13 +774,18 @@ async def admin_revoke_subscription(group_id: int):
 
     def _apply():
         with db_session() as s:
+            # Pool model: revoke targets the comped MANUAL leg only; paid
+            # legs are managed by their payers/providers.
             sub = (
                 s.query(GroupSubscription)
-                .filter(GroupSubscription.group_id == group_id)
+                .filter(
+                    GroupSubscription.group_id == group_id,
+                    GroupSubscription.provider == "manual",
+                )
                 .first()
             )
             if not sub or sub.status == "none":
-                abort_problem(404, "No subscription", "This group has no subscription.")
+                abort_problem(404, "No subscription", "This group has no comped subscription.")
             before = _serialize_sub(group_id, sub)
             sub.status = "canceled"
             s.commit()
@@ -914,12 +1133,8 @@ async def admin_group_overview(group_id: int):
             except Exception:
                 member_count = 0
 
-            sub = (
-                s.query(GroupSubscription)
-                .filter(GroupSubscription.group_id == group_id)
-                .first()
-            )
-            subscription = _serialize_sub(group_id, sub)
+            # Effective pool view (computed tier + all contribution legs).
+            subscription = _serialize_group_sub(s, group_id)
 
             cfg_rows = (
                 s.query(GroupConfiguration.config_key, GroupConfiguration.config_value)
