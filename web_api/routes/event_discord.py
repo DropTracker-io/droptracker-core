@@ -237,10 +237,12 @@ async def list_discord_guild_channels(guild_id: str):
             # (a 403 here just drops the UI to manual channel-id entry).
             _assert_can_target_guild(s, user_id, guild_id)
         channels = _guild_channels(guild_id)
+        # Always ask the bot to re-fetch (drained within ~15s): on a cold
+        # cache that makes the retry succeed shortly; on a warm one it picks
+        # up channels/threads created since the last 5-minute sweep.
+        _request_channel_refresh(guild_id)
         if channels is None:
-            # Cold cache: hand the UI its manual-id fallback and ask the bot
-            # to warm this guild so a retry succeeds shortly.
-            _request_channel_refresh(guild_id)
+            # Cold cache: hand the UI its manual-id fallback meanwhile.
             return {"channels": [], "stale": True}
         return {"channels": channels, "stale": False}
 
@@ -300,12 +302,25 @@ async def put_event_discord(event_id: int):
         # Validate channel membership against the bot cache when it's warm.
         cached = _guild_channels(guild_id)
         if cached is not None:
-            known = {str(c.get("id")) for c in cached}
+            known = {str(c.get("id")): c for c in cached}
             for kind, channel_id in channels.items():
                 if channel_id not in known:
+                    # Could be a typo/foreign channel — or one created moments
+                    # ago that the bot's cache hasn't caught up with. Ask the
+                    # bot to re-fetch (drained within ~15s) so a retry works.
+                    _request_channel_refresh(guild_id)
                     abort_problem(
                         422, "Channel not in guild",
-                        f"Channel {channel_id} ({kind}) doesn't belong to guild {guild_id}.",
+                        f"Channel {channel_id} ({kind}) isn't in the bot's list "
+                        f"of this server's channels. If you just created it, "
+                        "wait a moment and save again; otherwise check the id.",
+                    )
+                # A forum itself isn't messageable — only its threads are.
+                if known[channel_id].get("type") == "forum":
+                    abort_problem(
+                        422, "Forum channel selected",
+                        f"Channel {channel_id} ({kind}) is a forum — pick one of "
+                        "its threads instead.",
                     )
         else:
             _request_channel_refresh(guild_id)

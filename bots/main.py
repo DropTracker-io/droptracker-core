@@ -21,6 +21,7 @@ from sqlalchemy import text
 from services.notification_service import NotificationService
 from services.bot_state import BotState
 from services.channel_names import ChannelNames
+from services.channel_cache import shape_channel_cache
 from utils.ge_value import get_true_item_value
 from utils.embeds import create_boss_pb_embed, update_boss_pb_embed
 from utils.logger import LoggerClient
@@ -39,7 +40,7 @@ from quart_jwt_extended import (
 )
 from osrsreboxed import monsters_api, items_api
 import hypercorn.asyncio
-from interactions import GuildText, Intents, Message, user_context_menu, ContextMenuContext, Member, listen, Status, Task, IntervalTrigger, \
+from interactions import Intents, Message, user_context_menu, ContextMenuContext, Member, listen, Status, Task, IntervalTrigger, \
     ActivityType, ChannelType, slash_command, Embed, slash_option, OptionType, check, is_owner, \
     slash_default_member_permission, Permissions, SlashContext, ButtonStyle, Button, SlashCommand, ComponentContext, \
     component_callback, Modal, ShortText, BaseContext, Extension, GuildChannel
@@ -513,24 +514,24 @@ async def drain_discord_outbox():
         print(f"Couldn't drain discord outbox: {e}")
 
 async def cache_channels_for_guild(guild_id) -> bool:
-    """Fetch one guild's text channels via REST and cache them to Redis
-    (`guild:{id}:channels`). Works for *any* guild the bot is a member of —
-    not just group home guilds — so events can target dedicated event servers
-    (Task 19). Also caches the guild's roles (`guild:{id}:roles`) for the
-    announcement ping picker. Returns True when the cache was written."""
+    """Fetch one guild's text + forum channels (and the forums' active
+    threads) via REST and cache them to Redis (`guild:{id}:channels`). Works
+    for *any* guild the bot is a member of — not just group home guilds — so
+    events can target dedicated event servers (Task 19). Threads let groups
+    route notifications into forum posts instead of separate channels
+    (suggestion #3). Also caches the guild's roles (`guild:{id}:roles`) for
+    the announcement ping picker. Returns True when the cache was written."""
     try:
         guild = await bot.fetch_guild(guild_id)
         if not guild:
             return False
         raw_channels = await guild.fetch_channels()
-        channels = sorted(
-            (
-                {"id": str(c.id), "name": c.name, "position": c.position or 0}
-                for c in raw_channels
-                if isinstance(c, GuildText)
-            ),
-            key=lambda c: c["position"],
-        )
+        try:
+            active_threads = (await guild.fetch_active_threads()).threads
+        except Exception as e:
+            print(f"Couldn't fetch active threads for guild {guild_id}: {e}")
+            active_threads = []
+        channels = shape_channel_cache(raw_channels, active_threads)
         redis_client.setex(f"guild:{guild_id}:channels", 600, json.dumps(channels))
         try:
             raw_roles = await guild.fetch_roles()
@@ -555,7 +556,8 @@ async def cache_channels_for_guild(guild_id) -> bool:
 
 @Task.create(IntervalTrigger(minutes=5))
 async def cache_guild_channels():
-    """Cache guild text-channel lists to Redis (`guild:{id}:channels`) so the
+    """Cache guild channel lists (text, forums, active threads) to Redis
+    (`guild:{id}:channels`) so the
     Web API's Discord channel pickers (group config UI + event Discord config)
     can list them without the Web API ever holding a bot token / Discord
     connection itself — it only reads this cache.
