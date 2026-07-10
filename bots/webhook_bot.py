@@ -407,6 +407,10 @@ async def on_startup(event: Startup):
         bot.load_extension("services.ticket_system")
     except Exception as e:
         print(f"Error loading extensions: {e}")
+    try:
+        bot.load_extension("services.suggestion_sync")
+    except Exception as e:
+        print(f"Error loading suggestion sync: {e}")
     # Then handle database operations with proper session management
     player_count = 0
     local_session = Session()

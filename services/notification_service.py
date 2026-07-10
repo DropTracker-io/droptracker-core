@@ -31,6 +31,7 @@ from utils.download import download_player_image
 from db.app_logger import AppLogger
 from utils import osrs_api
 from services.xf_services import get_user_id, create_alert
+from services.contribution_notifications import format_money
 from services.event_notifications import (
     EVENT_NOTIFICATION_TYPES,
     event_url,
@@ -50,6 +51,15 @@ from utils.video_storage import (
 app_logger = AppLogger()
 global_footer = os.getenv('DISCORD_MESSAGE_FOOTER')
 db = DatabaseOperations()
+
+# Monetary contribution announcements (queued by web_api/payments.py via
+# services/contribution_notifications.py). Channel defaults to the same
+# global supporters channel the legacy group_upgrade notifications used.
+CONTRIBUTION_CHANNEL_ID = int(os.getenv("DISCORD_CONTRIBUTION_CHANNEL_ID", "1373331322709479485"))
+SUPPORTER_EMOJI = "<:supporter:1263827303712948304>"
+DROPTRACKER_EMOJI = "<a:droptracker:1346787143778963497>"
+BRAND_THUMBNAIL = "https://www.droptracker.io/img/droptracker-small.gif"
+CONTRIBUTION_COLOR = "#00f0f0"
 
 # Direct-message queue types. Submission DMs (everything except dm_name_change)
 # are a supporter perk gated on the `dm_submissions` user entitlement; queueing
@@ -513,7 +523,7 @@ class NotificationService:
                 
                 # Get breakdown by notification type
                 type_breakdown = {}
-                for notification_type in ['drop', 'pb', 'ca', 'clog', 'pet', 'new_npc', 'new_item', 'name_change', 'new_player', 'user_upgrade', 'group_upgrade', 'update_log', 'points_earned']:
+                for notification_type in ['drop', 'pb', 'ca', 'clog', 'pet', 'new_npc', 'new_item', 'name_change', 'new_player', 'user_upgrade', 'group_upgrade', 'monetary_contribution', 'update_log', 'points_earned']:
                     count = db_session.query(NotificationQueue).filter(
                         NotificationQueue.status == 'pending',
                         NotificationQueue.notification_type == notification_type
@@ -763,6 +773,8 @@ class NotificationService:
                 await self.send_user_upgrade_notification_with_session(notification, data, db_session)
             elif notification_type == 'group_upgrade':
                 await self.send_group_upgrade_notification_with_session(notification, data, db_session)
+            elif notification_type == 'monetary_contribution':
+                await self.send_contribution_notification_with_session(notification, data, db_session)
             elif notification_type == 'update_log':
                 await self.send_update_log_data_with_session(notification, data, db_session)
             elif notification_type == 'points_earned':
@@ -2046,7 +2058,133 @@ class NotificationService:
             session.commit()
             app_logger.log(log_type="error", data=f"Error sending user upgrade notification: {e}", app_name="notification_service", description="send_user_upgrade_notification")
             raise
-                
+
+    async def send_contribution_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
+        """Announce a monetary contribution (first payment of a subscription).
+
+        Three surfaces, each best-effort:
+          1. the global supporters channel (public thank-you),
+          2. a thank-you DM to the contributor,
+          3. for group contributions, the group's own Discord.
+        """
+        from db.models import SubscriptionTier
+
+        try:
+            scope = (data.get('scope') or 'user').lower()
+            user = None
+            if data.get('user_id'):
+                user = db_session.query(User).filter(User.user_id == data['user_id']).first()
+            group = None
+            if scope == 'group' and data.get('group_id'):
+                group = db_session.query(Group).filter(Group.group_id == data['group_id']).first()
+            tier = None
+            if data.get('tier_key'):
+                tier = db_session.query(SubscriptionTier).filter(SubscriptionTier.key == data['tier_key']).first()
+
+            amount = format_money(data.get('amount_cents'), data.get('currency') or 'USD')
+            interval = tier.interval if tier and tier.interval else 'month'
+            per = f"{amount}/{'yr' if interval == 'year' else 'mo'}"
+            tier_name = tier.name if tier else 'Supporter'
+
+            display_name = None
+            if user:
+                if user.players:
+                    display_name = user.players[0].player_name
+                display_name = display_name or user.username
+            mention = f"<@{user.discord_id}>" if user and user.discord_id else None
+            supporter_text = display_name or mention or "An anonymous supporter"
+            group_link = (
+                f"[{group.group_name}](https://www.droptracker.io/groups/{group.group_name}.{group.group_id}/view)"
+                if group else None
+            )
+
+            sent_any = False
+            errors = []
+
+            # 1) Global supporters channel
+            if group_link:
+                headline = f"**{supporter_text}** just contributed **{per}** toward {group_link}'s premium subscription. Thank you for supporting DropTracker!"
+            else:
+                headline = f"**{supporter_text}** just became a DropTracker supporter with a **{per}** contribution. Thank you for keeping the project alive!"
+            global_embed = interactions.Embed(
+                title=f"{SUPPORTER_EMOJI} New supporter contribution!",
+                description=headline,
+                color=CONTRIBUTION_COLOR,
+            )
+            global_embed.add_field(name="Tier", value=tier_name, inline=True)
+            global_embed.add_field(name="Supporting", value=group_link or "DropTracker Premium", inline=True)
+            global_embed.set_thumbnail(BRAND_THUMBNAIL)
+            global_embed.set_footer(global_footer)
+            try:
+                channel = await self.bot.fetch_channel(CONTRIBUTION_CHANNEL_ID)
+                if channel:
+                    await channel.send(embed=global_embed)
+                    sent_any = True
+            except Exception as e:
+                errors.append(f"global channel: {e}")
+                app_logger.log(log_type="error", data=f"Error sending contribution announcement to global channel: {e}", app_name="notification_service", description="send_contribution_notification")
+
+            # 2) Thank-you DM to the contributor
+            if user and user.discord_id:
+                if group:
+                    dm_description = f"Your **{per}** contribution toward **{group.group_name}**'s premium subscription has been received."
+                    manage_url = f"https://www.droptracker.io/groups/{group.group_id}/subscription"
+                else:
+                    dm_description = f"Your **{per}** supporter subscription is now active."
+                    manage_url = "https://www.droptracker.io/premium"
+                dm_embed = interactions.Embed(
+                    title=f"{DROPTRACKER_EMOJI} Thank you for your support!",
+                    description=dm_description,
+                    color=CONTRIBUTION_COLOR,
+                )
+                dm_embed.add_field(
+                    name="Manage your subscription",
+                    value=f"[View or change it any time]({manage_url}) — and if you have questions, [reach out in our Discord](https://www.droptracker.io/discord).",
+                )
+                dm_embed.set_thumbnail(BRAND_THUMBNAIL)
+                dm_embed.set_footer(global_footer)
+                try:
+                    discord_user = await self.bot.fetch_user(user.discord_id)
+                    if discord_user:
+                        await discord_user.send(embed=dm_embed)
+                        sent_any = True
+                except Exception as e:
+                    errors.append(f"contributor DM: {e}")
+                    app_logger.log(log_type="error", data=f"Error DMing contributor {user.user_id}: {e}", app_name="notification_service", description="send_contribution_notification")
+
+            # 3) The group's own Discord (group contributions only)
+            if group and group.guild_id:
+                group_embed = interactions.Embed(
+                    title=f"{SUPPORTER_EMOJI} {group.group_name} received a contribution!",
+                    description=f"{mention or supporter_text} contributed **{per}** toward the group's premium subscription — keeping premium perks unlocked for everyone.",
+                    color=CONTRIBUTION_COLOR,
+                )
+                group_embed.set_thumbnail(BRAND_THUMBNAIL)
+                group_embed.set_footer(global_footer)
+                try:
+                    guild = await self.bot.fetch_guild(group.guild_id)
+                    guild_channel = guild.public_updates_channel if guild else None
+                    if guild_channel:
+                        await guild_channel.send(embed=group_embed)
+                        sent_any = True
+                except Exception as e:
+                    errors.append(f"group channel: {e}")
+                    app_logger.log(log_type="error", data=f"Error sending contribution notice to group {group.group_id}: {e}", app_name="notification_service", description="send_contribution_notification")
+
+            if sent_any:
+                notification.status = 'sent'
+                notification.processed_at = datetime.now()
+            else:
+                notification.status = 'failed'
+                notification.error_message = "; ".join(errors) or "No deliverable destination"
+            db_session.commit()
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = str(e)
+            db_session.commit()
+            app_logger.log(log_type="error", data=f"Error sending contribution notification: {e}", app_name="notification_service", description="send_contribution_notification")
+            raise
+
     async def send_drop_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
         """Send a drop notification to Discord with session"""
         from db.models import NotifiedSubmission

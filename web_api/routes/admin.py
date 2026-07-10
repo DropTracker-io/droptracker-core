@@ -487,15 +487,17 @@ async def admin_overview():
                 ),
             })
             # Headline MRR — the full breakdown lives on /admin/subscriptions.
+            # Comped grants (provider == "manual") keep their entitlements but
+            # are not income, so they are excluded from every revenue figure.
             try:
                 tiers_by_key = {t.key: t for t in s.query(SubscriptionTier).all()}
                 mrr = sum(
                     leg_monthly_cents(leg, tiers_by_key)
                     for leg in s.query(GroupSubscription).all()
-                    if subscription_is_live(leg)
+                    if subscription_is_live(leg) and leg.provider != "manual"
                 )
                 for u in s.query(UserSubscription).all():
-                    if not subscription_is_live(u):
+                    if not subscription_is_live(u) or u.provider == "manual":
                         continue
                     tier = tiers_by_key.get(u.tier_key) if u.tier_key else None
                     amount = u.amount_cents if u.amount_cents else (tier.price_cents if tier else 0)
@@ -503,7 +505,7 @@ async def admin_overview():
                 stats.append({
                     "key": "mrr", "label": "Monthly recurring revenue",
                     "value": f"${mrr / 100:,.2f}",
-                    "hint": "Live subscriptions, monthly-normalized",
+                    "hint": "Live paid subscriptions, monthly-normalized (comped excluded)",
                 })
             except Exception:
                 pass
@@ -565,15 +567,21 @@ async def admin_subscriptions_overview():
             live_legs = [leg for leg in legs if subscription_is_live(leg)]
             live_usubs = [u for u in usubs if subscription_is_live(u)]
 
-            group_mrr = sum(leg_monthly_cents(leg, tiers_by_key) for leg in live_legs)
+            # Comped grants (provider == "manual") keep their entitlements but
+            # are not income — exclude them from every revenue metric.
+            paid_legs = [leg for leg in live_legs if leg.provider != "manual"]
+            paid_usubs = [u for u in live_usubs if u.provider != "manual"]
+
+            group_mrr = sum(leg_monthly_cents(leg, tiers_by_key) for leg in paid_legs)
             user_mrr = 0
-            for u in live_usubs:
+            for u in paid_usubs:
                 tier = tiers_by_key.get(u.tier_key) if u.tier_key else None
                 amount = u.amount_cents if u.amount_cents else (tier.price_cents if tier else 0)
                 user_mrr += _monthly_cents(amount, tier.interval if tier else "month")
 
-            # Effective tier per paying group (pool resolution).
-            effective = effective_group_tiers(s, {leg.group_id for leg in live_legs})
+            # Effective tier per paying group (pool resolution). Groups whose
+            # only live leg is a comp are not "paying".
+            effective = effective_group_tiers(s, {leg.group_id for leg in paid_legs})
             tier_counts: dict[str, int] = {}
             for tier, _total in effective.values():
                 tier_counts[tier.key] = tier_counts.get(tier.key, 0) + 1
@@ -590,17 +598,22 @@ async def admin_subscriptions_overview():
                 1 for u in usubs if u.status == "past_due"
             )
 
-            # Ledger aggregates. Refunds/reversals subtract.
+            # Ledger aggregates. Refunds/reversals subtract; manual rows are
+            # excluded defensively (no live path writes them today).
             signed = "SUM(CASE WHEN kind = 'payment' THEN amount_cents ELSE -amount_cents END)"
             lifetime = s.execute(
-                sa_text(f"SELECT COALESCE({signed}, 0) FROM subscription_payments")
+                sa_text(
+                    f"SELECT COALESCE({signed}, 0) FROM subscription_payments "
+                    "WHERE provider != 'manual'"
+                )
             ).scalar()
             months = s.execute(
                 sa_text(
                     "SELECT DATE_FORMAT(paid_at, '%Y-%m') AS month, "
                     f"{signed} AS cents "
                     "FROM subscription_payments "
-                    "WHERE paid_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH) "
+                    "WHERE provider != 'manual' "
+                    "AND paid_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH) "
                     "GROUP BY month ORDER BY month ASC"
                 )
             ).fetchall()

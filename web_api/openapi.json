@@ -1584,6 +1584,11 @@
           "description": {
             "type": "string"
           },
+          "icon_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Group icon uploaded by a group admin (also used for social-card previews)."
+          },
           "member_count": {
             "type": "integer"
           },

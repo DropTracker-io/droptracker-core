@@ -223,6 +223,7 @@ async def paypal_ipn():
                 external_id=str(txn_id),
                 kind=kind,
                 paid_at=now,
+                notify=True,
             )
         except Exception:
             logger.exception("paypal_ipn: ledger write failed for %s", owner)

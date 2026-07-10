@@ -30,8 +30,15 @@ def record_payment(
     currency: str = "USD",
     kind: str = "payment",
     paid_at: Optional[datetime] = None,
+    notify: bool = False,
 ) -> bool:
-    """Insert a ledger row. Returns False (without raising) on duplicates."""
+    """Insert a ledger row. Returns False (without raising) on duplicates.
+
+    ``notify=True`` queues a Discord ``monetary_contribution`` notification for
+    fresh settled payments (renewals and refunds stay quiet — see
+    ``services/contribution_notifications.py``). Live webhook/IPN callers opt
+    in; backfill scripts must not.
+    """
     with db_session() as s:
         row = SubscriptionPayment(
             scope=scope,
@@ -49,7 +56,23 @@ def record_payment(
         s.add(row)
         try:
             s.commit()
-            return True
         except IntegrityError:
             s.rollback()
             return False
+
+    if notify and kind == "payment":
+        from services.contribution_notifications import queue_contribution_notification
+
+        queue_contribution_notification(
+            scope=scope,
+            provider=provider,
+            amount_cents=int(amount_cents),
+            external_id=external_id,
+            user_id=user_id,
+            group_id=group_id,
+            subscription_id=subscription_id,
+            tier_key=tier_key,
+            currency=currency,
+            paid_at=paid_at,
+        )
+    return True

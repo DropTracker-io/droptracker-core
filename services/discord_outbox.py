@@ -73,6 +73,67 @@ def enqueue(
     return row
 
 
+_FORUM_NAME_PREFIX = {"suggestion": "\N{ELECTRIC LIGHT BULB} ", "bug": "\N{BUG} "}
+
+
+async def _create_forum_post(bot, session, row):
+    """Send a ``kind='forum_post'`` outbox row: create a post (thread +
+    starter message) in the target forum channel. For suggestion rows the
+    thread name comes from the referenced ``suggestions`` row, whose
+    ``discord_thread_id``/``status`` are written back on success."""
+    from db.models import Suggestion
+
+    suggestion = None
+    if row.ref_type == "suggestion" and row.ref_id:
+        suggestion = session.query(Suggestion).filter(Suggestion.id == row.ref_id).first()
+
+    channel = await bot.fetch_channel(int(row.channel_id))
+    if channel is None:
+        raise RuntimeError(f"channel {row.channel_id} not found")
+    if not hasattr(channel, "create_post"):
+        raise RuntimeError(f"channel {row.channel_id} is not a forum channel")
+
+    name = (suggestion.title if suggestion else None) or "New submission"
+    if suggestion is not None:
+        name = _FORUM_NAME_PREFIX.get(suggestion.type, "") + name
+    content = (row.content or "")[:2000]
+
+    kwargs = {}
+    allowed = _allowed_mentions_for(content)
+    if allowed is not None:
+        kwargs["allowed_mentions"] = allowed
+    # Apply a matching tag when the forum defines one (e.g. "Suggestion").
+    if suggestion is not None:
+        try:
+            tag = channel.get_tag(suggestion.type, case_insensitive=True)
+            if tag is not None:
+                kwargs["applied_tags"] = [tag]
+        except Exception:
+            pass
+
+    post = await channel.create_post(name[:100], content, **kwargs)
+    thread_id = str(getattr(post, "id", "") or "")
+    row.discord_message_id = thread_id
+    if suggestion is not None and thread_id:
+        suggestion.discord_thread_id = thread_id
+        suggestion.status = "posted"
+
+
+def _mark_ref_failed(session, row) -> None:
+    """Propagate a send failure onto the referenced suggestion row so the
+    website can surface it instead of showing 'pending' forever."""
+    if row.kind != "forum_post" or row.ref_type != "suggestion" or not row.ref_id:
+        return
+    try:
+        from db.models import Suggestion
+
+        suggestion = session.query(Suggestion).filter(Suggestion.id == row.ref_id).first()
+        if suggestion is not None:
+            suggestion.status = "failed"
+    except Exception:
+        pass
+
+
 async def drain_once(bot, session_factory, limit: int = 20) -> int:
     """Send up to ``limit`` pending outbox rows via ``bot``. Returns the number
     processed. Safe to call repeatedly; failures mark the row 'failed'.
@@ -91,6 +152,13 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
         )
         for row in rows:
             try:
+                if row.kind == "forum_post":
+                    await _create_forum_post(bot, session, row)
+                    row.status = "sent"
+                    row.processed_at = datetime.now()
+                    sent += 1
+                    continue
+
                 channel = await bot.fetch_channel(int(row.channel_id))
                 if channel is None:
                     raise RuntimeError(f"channel {row.channel_id} not found")
@@ -125,11 +193,24 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
                         if ann:
                             ann.discord_message_id = row.discord_message_id
                             ann.discord_channel_id = str(row.channel_id)
+                    # Web forum replies: record the relayed message id so the
+                    # Discord mirror can map edits back to this row.
+                    elif row.ref_type == "suggestion_message" and row.ref_id:
+                        from db.models import SuggestionMessage
+
+                        sm = (
+                            session.query(SuggestionMessage)
+                            .filter(SuggestionMessage.id == row.ref_id)
+                            .first()
+                        )
+                        if sm:
+                            sm.discord_message_id = row.discord_message_id
                 sent += 1
             except Exception as e:  # noqa: BLE001
                 row.status = "failed"
                 row.error = str(e)[:500]
                 row.processed_at = datetime.now()
+                _mark_ref_failed(session, row)
         session.commit()
     except Exception as e:  # noqa: BLE001
         session.rollback()

@@ -100,7 +100,7 @@ class DiscordOutbox(Base):
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    kind = Column(String(24), nullable=False, default="message")   # message|announcement
+    kind = Column(String(24), nullable=False, default="message")   # message|announcement|forum_post
     channel_id = Column(String(32), nullable=False)
     content = Column(Text, nullable=True)
     embed_json = Column(Text, nullable=True)
@@ -158,3 +158,72 @@ class DocsPage(Base):
     author_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class Suggestion(Base):
+    """Suggestion / bug-report threads, mirrored 1:1 with Discord forum posts.
+
+    Threads start on either side. Web-origin rows are written by the Web API
+    (§10.2: it never talks to Discord) and syndicated by the core bot as a
+    forum post via a ``kind='forum_post'`` outbox row, which writes back the
+    thread id and flips ``status`` to 'posted'. Discord-origin rows are
+    created by the webhook bot's mirror (services/suggestion_sync.py) when a
+    post appears directly in a tracked forum. Replies live in
+    ``suggestion_messages``.
+    """
+
+    __tablename__ = "suggestions"
+    __table_args__ = (
+        Index("idx_suggestion_user_created", "user_id", "created_at"),
+        Index("idx_suggestion_activity", "last_activity_at"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Site account of the author; NULL for Discord-origin threads whose
+    # author has no linked DropTracker account.
+    user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    origin = Column(String(8), nullable=False, default="web")  # web|discord
+    # Author snapshot for Discord-origin threads (display without a join).
+    author_discord_id = Column(String(35), nullable=True)
+    author_name = Column(String(100), nullable=True)
+    type = Column(String(16), nullable=False, default="suggestion")  # suggestion|bug
+    # Doubles as the Discord thread name (Discord caps thread names at 100).
+    title = Column(String(100), nullable=False)
+    body_md = Column(Text, nullable=False)
+    status = Column(String(16), nullable=False, default="pending")  # pending|posted|failed
+    # False once the Discord thread is archived, locked, or deleted.
+    is_open = Column(Boolean, nullable=False, default=True)
+    message_count = Column(Integer, nullable=False, default=0)
+    discord_thread_id = Column(String(32), nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    last_activity_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+class SuggestionMessage(Base):
+    """One reply on a suggestion thread, from either side of the mirror.
+
+    ``discord_message_id`` keys the two-way sync: Discord-origin rows store
+    the mirrored message's id (idempotent upserts, edit/delete tracking), and
+    web-origin rows get it written back by the outbox drain after the bot
+    relays them, so the mirror never re-imports the bot's relay as a new
+    reply (it skips bot authors anyway).
+    """
+
+    __tablename__ = "suggestion_messages"
+    __table_args__ = (
+        Index("idx_suggestion_message_thread", "suggestion_id", "created_at"),
+        UniqueConstraint("discord_message_id", name="uix_suggestion_message_discord"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    suggestion_id = Column(Integer, ForeignKey("suggestions.id"), nullable=False)
+    author_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    author_discord_id = Column(String(35), nullable=True)
+    author_name = Column(String(100), nullable=False)
+    source = Column(String(8), nullable=False)  # web|discord
+    content = Column(Text, nullable=False)
+    discord_message_id = Column(String(32), nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    edited_at = Column(DateTime, nullable=True)

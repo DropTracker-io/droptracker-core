@@ -701,6 +701,8 @@ async def group_profile(group_id: int):
             }
             if group.description:
                 payload["description"] = group.description
+            if group.icon_url:
+                payload["icon_url"] = group.icon_url
             if group.invite_url:
                 payload["discord_url"] = group.invite_url
             if rank is not None:

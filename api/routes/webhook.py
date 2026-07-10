@@ -462,7 +462,10 @@ async def _process_webhook_request(req_start):
                     success = True
                 except Exception as processor_error:
                     logger.log_sync("error", f"Processor error inside {submission_type} processor: {processor_error}")
-                    return jsonify({"error": f"Error processing data: {str(processor_error)}"}), 200
+                    # 500 (not 200): the plugin treats any 2xx as delivered and
+                    # never retries; processor failures may be transient, so let
+                    # the client's retry/backoff logic engage.
+                    return jsonify({"error": f"Error processing data: {str(processor_error)}"}), 500
                 finally:
                     if db_session:
                         db_session.close()
