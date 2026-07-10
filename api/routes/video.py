@@ -719,6 +719,76 @@ async def video_upload_complete():
             reset_db_connections()
 
 
+@video_bp.post("/video/upload-failed")
+@rate_limit(limit=10, period=timedelta(seconds=1))
+async def video_upload_failed():
+    """
+    Record a client-side upload failure for a pending video ticket.
+
+    Called by the plugin when the PUT to the presigned URL fails after
+    retries. Marks the record failed with the client-reported reason so
+    storage-side failures are visible in video_uploads instead of aging
+    out indistinguishably as "presigned URL expired".
+
+    JSON Body:
+        key (str): The object key returned from /presigned_upload_url
+        acc_hash (str): Player's account hash for authentication
+        reason (str): Short client-side failure description
+
+    Returns:
+        JSON with status confirmation
+    """
+    db_session = None
+    try:
+        data = await request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        video_key = data.get("key", "")
+        acc_hash = data.get("acc_hash", "")
+        reason = str(data.get("reason") or "unknown")
+
+        if not video_key:
+            return jsonify({"error": "Missing 'key' field"}), 400
+        if not acc_hash:
+            return jsonify({"error": "Missing 'acc_hash' field"}), 400
+
+        db_session = get_db_session()
+        _, video_record, error_response = await _load_player_and_video_record(
+            db_session, video_key, acc_hash
+        )
+        if error_response:
+            return error_response
+
+        video_record.status = "failed"
+        video_record.error_message = f"Client upload failed: {reason}"[:1000]
+        await asyncio.to_thread(db_session.commit)
+
+        logger.log_sync(
+            "warning",
+            f"Client-reported video upload failure for {video_key}: {reason}",
+        )
+        return jsonify(
+            {
+                "message": "Upload failure recorded",
+                "key": video_key,
+                "status": "failed",
+            }
+        ), 200
+
+    except Exception as e:
+        logger.log_sync("error", f"Error recording video upload failure: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        if db_session:
+            try:
+                db_session.close()
+            except Exception:
+                pass
+            reset_db_connections()
+
+
 @video_bp.get("/video/status")
 @rate_limit(limit=20, period=timedelta(seconds=1))
 async def video_status():
