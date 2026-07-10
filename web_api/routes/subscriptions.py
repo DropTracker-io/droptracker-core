@@ -23,9 +23,16 @@ import json
 from datetime import datetime
 
 from quart import Blueprint, jsonify, request
+from sqlalchemy import func
 
-from db import GroupSubscription, SubscriptionTier, User, UserSubscription
-from db.entitlements import effective_group_subscription, paid_group_tiers_desc
+from db import Group, GroupSubscription, Player, SubscriptionTier, User, UserSubscription
+from db.models.associations import user_group_association
+from db.entitlements import (
+    effective_group_subscription,
+    effective_group_tiers,
+    paid_group_tiers_desc,
+    subscription_is_live,
+)
 from web_api import billing
 from web_api.common import abort_problem, db_session, private_no_store, with_cache_headers
 from web_api.entitlements import resolve_group_entitlements, resolve_user_entitlements
@@ -173,6 +180,150 @@ async def list_tiers():
 
     tiers = await asyncio.to_thread(_load)
     return with_cache_headers(jsonify(tiers), max_age=300)
+
+
+# --------------------------------------------------------------------------- #
+# Public "wall of supporters" — groups and individuals with a live PAID
+# subscription, shown on the homepage to thank the people funding the project.
+# No personal data beyond public names; hidden users/players are excluded, and
+# complimentary badge grants (no payment) are excluded by construction (they
+# have no subscription row).
+# --------------------------------------------------------------------------- #
+# Only these statuses can be live; pre-filtering avoids loading canceled rows.
+_SUPPORTER_QUERY_STATUSES = ("active", "trialing")
+
+
+def _load_group_supporters(s, limit: int) -> list[dict]:
+    """Groups whose live contribution pool covers a paid tier, most recent
+    supporter first. Flair is attached when the covered tier grants one."""
+    active_legs = (
+        s.query(GroupSubscription)
+        .filter(GroupSubscription.status.in_(_SUPPORTER_QUERY_STATUSES))
+        .all()
+    )
+    live_legs = [leg for leg in active_legs if subscription_is_live(leg)]
+    if not live_legs:
+        return []
+    candidate_ids = {int(leg.group_id) for leg in live_legs}
+    # {group_id: (tier, total_monthly_cents)} for the paid-tier subset.
+    effective = effective_group_tiers(s, list(candidate_ids))
+    if not effective:
+        return []
+
+    # Recency: newest live leg per qualifying group (when the pool last grew).
+    since: dict[int, datetime] = {}
+    for leg in live_legs:
+        gid = int(leg.group_id)
+        if gid not in effective or not leg.created_at:
+            continue
+        if gid not in since or leg.created_at > since[gid]:
+            since[gid] = leg.created_at
+
+    ids = list(effective.keys())
+    names = dict(
+        s.query(Group.group_id, Group.group_name).filter(Group.group_id.in_(ids)).all()
+    )
+    member_counts = dict(
+        s.query(
+            user_group_association.c.group_id,
+            func.count(user_group_association.c.player_id),
+        )
+        .filter(user_group_association.c.group_id.in_(ids))
+        .group_by(user_group_association.c.group_id)
+        .all()
+    )
+
+    rows: list[dict] = []
+    for gid, (tier, _total) in effective.items():
+        row = {
+            "id": gid,
+            "name": names.get(gid) or f"Group {gid}",
+            "tier_name": tier.name,
+            "member_count": int(member_counts.get(gid, 0)),
+            "since": int(since[gid].timestamp()) if gid in since else None,
+        }
+        style = normalize_flair(getattr(tier, "flair", None))
+        if style != "none":
+            row["flair"] = {"tier_key": tier.key, "tier_name": tier.name, "style": style}
+        rows.append(row)
+
+    rows.sort(key=lambda r: (r["since"] or 0), reverse=True)
+    return rows[:limit]
+
+
+def _load_user_supporters(s, limit: int) -> list[dict]:
+    """Individual supporters with a live paid user subscription, most recent
+    first. Each is represented by a visible linked player (privacy: hidden
+    users and hidden players are excluded); supporters with no visible player
+    to link to are omitted."""
+    subs = (
+        s.query(UserSubscription)
+        .filter(UserSubscription.status.in_(_SUPPORTER_QUERY_STATUSES))
+        .order_by(UserSubscription.created_at.desc())
+        .all()
+    )
+    live = [sub for sub in subs if subscription_is_live(sub)]
+    if not live:
+        return []
+    user_ids = [int(sub.user_id) for sub in live]
+
+    users = {u.user_id: u for u in s.query(User).filter(User.user_id.in_(user_ids)).all()}
+    # Representative visible player per user: highest total level wins, then
+    # lowest player_id for a stable tie-break. MySQL sorts NULL levels last.
+    rep: dict[int, tuple[int, str]] = {}
+    player_rows = (
+        s.query(Player.player_id, Player.player_name, Player.user_id)
+        .filter(
+            Player.user_id.in_(user_ids),
+            Player.hidden == False,  # noqa: E712
+            Player.player_name.isnot(None),
+        )
+        .order_by(Player.total_level.desc(), Player.player_id.asc())
+        .all()
+    )
+    for pid, pname, uid in player_rows:
+        rep.setdefault(int(uid), (int(pid), pname))
+
+    rows: list[dict] = []
+    for sub in live:  # preserves created_at-desc ordering
+        uid = int(sub.user_id)
+        user = users.get(uid)
+        if user is None or bool(user.hidden):
+            continue
+        rep_player = rep.get(uid)
+        if rep_player is None:
+            continue  # nothing public to link to
+        rows.append(
+            {
+                "user_id": uid,
+                "player_id": rep_player[0],
+                "name": rep_player[1],
+                "since": int(sub.created_at.timestamp()) if sub.created_at else None,
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+@subscriptions_bp.get("/supporters")
+async def list_supporters():
+    """Public homepage "supporters" section: paid subscriber groups + players."""
+    try:
+        limit = int(request.args.get("limit", 60))
+    except (TypeError, ValueError):
+        limit = 60
+    limit = max(1, min(limit, 200))
+
+    def _load():
+        with db_session() as s:
+            return {
+                "groups": _load_group_supporters(s, limit),
+                "players": _load_user_supporters(s, limit),
+            }
+
+    payload = await asyncio.to_thread(_load)
+    return with_cache_headers(jsonify(payload), max_age=300)
 
 
 def _require_admin_and_sub(user_id, group_id):
@@ -780,6 +931,7 @@ async def billing_webhook():
                 currency=obj.get("currency") or "USD",
                 external_id=str(obj.get("id")),
                 paid_at=paid_at,
+                notify=True,
                 **fields,
             )
         elif etype == "charge.refunded":
