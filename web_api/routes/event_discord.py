@@ -44,6 +44,7 @@ from web_api.deps import (
     json_body,
     load_user,
     manageable_guild_ids,
+    resolve_group_role,
 )
 from web_api.routes.events import _assert_event_admin, _bump, _load_event_or_404
 
@@ -120,6 +121,59 @@ def _assert_any_event_admin(s, user_id: int) -> None:
     abort_problem(403, "Forbidden", "Event admin access is required.")
 
 
+def _targetable_guild_ids(s, user_id: int):
+    """Guild ids this user is allowed to target for event posting, or ``None``
+    for "all guilds" (superadmin — they run global events targeting any guild).
+
+    A guild qualifies when the user either **manages it on Discord** (owner or
+    MANAGE_GUILD, via the OAuth ``guilds`` scope cached at login — this covers
+    a brand-new server they added the bot to, with no DropTracker group) **or
+    administers the DropTracker group linked to it** (covers a cold OAuth
+    cache and web-granted admins for their clan's home server). Both signals
+    are the same ones :func:`resolve_group_role` already trusts app-wide, so
+    this introduces no new trust — it only *restricts* the old behaviour of
+    exposing every guild the bot is in.
+    """
+    user = load_user(s, user_id)
+    if is_superadmin(user):
+        return None
+    allowed = {str(g) for g in manageable_guild_ids(user_id)}
+    # Add the home guilds of groups the user has an explicit web grant on
+    # (bounded to this user's grants — no full-table scan).
+    grant_group_ids = [
+        gid for (gid,) in s.query(GroupAdmin.group_id)
+        .filter(GroupAdmin.user_id == user_id).all()
+    ]
+    if grant_group_ids:
+        for guild_id, in (
+            s.query(Group.guild_id)
+            .filter(Group.group_id.in_(grant_group_ids))
+            .all()
+        ):
+            if guild_id:
+                allowed.add(str(guild_id))
+    return allowed
+
+
+def _assert_can_target_guild(s, user_id: int, guild_id: str) -> None:
+    """403 unless the user may post events to ``guild_id`` (see
+    :func:`_targetable_guild_ids`). The real security boundary — the dropdown
+    filter is only cosmetic; this is what stops a crafted request (or the
+    manual-id field) from aiming an event at a guild the user has no authority
+    over."""
+    allowed = _targetable_guild_ids(s, user_id)
+    if allowed is None or str(guild_id) in allowed:
+        return
+    abort_problem(
+        403,
+        "Not your server",
+        "You can only post events to a Discord server you manage (Server "
+        "Manage permission) or whose DropTracker group you administer. If you "
+        "recently added the bot to a new server, sign out and back in to "
+        "refresh your server list.",
+    )
+
+
 def _config_payload(s, ev: Event) -> dict:
     rows = s.query(EventChannel).filter(EventChannel.event_id == ev.id).all()
     channels = {r.kind: str(r.channel_id) for r in rows if r.channel_id}
@@ -152,13 +206,17 @@ async def list_discord_guilds():
     def _load():
         with db_session() as s:
             _assert_any_event_admin(s, user_id)
+            # Only surface guilds the user is actually allowed to target
+            # (None => superadmin, unfiltered).
+            allowed = _targetable_guild_ids(s, user_id)
         guilds = _bot_guilds()
         if guilds is None:
             return {"guilds": [], "stale": True}
         return {
             "guilds": [
                 {"id": str(g.get("id")), "name": g.get("name") or "", "icon": g.get("icon")}
-                for g in guilds if g.get("id")
+                for g in guilds
+                if g.get("id") and (allowed is None or str(g.get("id")) in allowed)
             ],
             "stale": False,
         }
@@ -175,6 +233,9 @@ async def list_discord_guild_channels(guild_id: str):
     def _load():
         with db_session() as s:
             _assert_any_event_admin(s, user_id)
+            # No enumerating channels of a guild the user can't target
+            # (a 403 here just drops the UI to manual channel-id entry).
+            _assert_can_target_guild(s, user_id, guild_id)
         channels = _guild_channels(guild_id)
         if channels is None:
             # Cold cache: hand the UI its manual-id fallback and ask the bot
@@ -255,6 +316,14 @@ async def put_event_discord(event_id: int):
             _assert_event_admin(s, user_id, ev.group_id)
 
             before = _config_payload(s, ev)
+            # The security boundary: only require guild authority when the
+            # target is being set to a NEW guild. Keeping an already-vetted
+            # (or superadmin-set) guild while editing channels stays open to
+            # co-admins; pointing the event at a different guild does not.
+            if guild_id is not None and str(guild_id) != (
+                str(ev.discord_guild_id) if ev.discord_guild_id else None
+            ):
+                _assert_can_target_guild(s, user_id, guild_id)
             ev.discord_guild_id = guild_id
 
             existing = {
