@@ -26,6 +26,7 @@ import httpx
 from quart import Blueprint, jsonify, request
 
 from db import Group, GroupConfiguration, IgnoredPlayer, ItemList, LootboardStyle, Player
+from utils.dynamic_handling import get_stacked_display_id
 from web_api.common import (
     abort_problem,
     db_session,
@@ -56,6 +57,12 @@ DEFAULT_MIN_VALUE = 2_500_000
 # ``static/assets/img/lootboard -> ../../lootboard`` (see lootboard route docs).
 _THEME_PREFIX = "/store/droptracker/disc/lootboard/"
 _DEFAULT_THEME_URL = f"{IMG_BASE}/lootboard/bank-new-clean-dark.png"
+
+# Item icon PNGs, served over the image server at ``{IMG_BASE}/itemdb/{id}.png``.
+# Used to confirm a resolved stacked-pile icon is actually cached before pointing
+# the browser at it (the web read path has no on-demand download, unlike the PNG
+# generator's load_rl_cache_img).
+_ITEMDB_DIR = "/store/droptracker/disc/static/assets/img/itemdb"
 
 # Coin (item 995) icon variant by quantity — mirrors utils.dynamic_handling.get_coin_image_id.
 _COIN_VARIANTS = {1: 995, 2: 996, 3: 997, 4: 998, 5: 999, 10: 1000, 50: 1001, 100: 1002, 1000: 1003, 10000: 1004}
@@ -280,9 +287,26 @@ async def group_lootboard(group_id: int):
                     .filter(Player.player_id.in_(pids)).all()
                 }
 
+            # Stackable items (Zulrah's scales, arrows, bolts, seeds, …) are
+            # stored as their single-unit id but render best as their largest-
+            # stack pile icon (suggestion #44). Coins stay magnitude-based
+            # (per-quantity). Stack resolution is quantity-independent — memoise it.
+            _stacked_icon_cache: dict[int, int] = {}
+
+            def _resolve_icon_id(iid: int, qty: int) -> int:
+                if iid == 995:
+                    return _coin_image_id(qty)
+                if iid not in _stacked_icon_cache:
+                    resolved = get_stacked_display_id(iid, s)
+                    # Keep the submitted id if the pile variant isn't cached yet,
+                    # so the browser never points at a missing icon.
+                    if resolved != iid and not os.path.exists(f"{_ITEMDB_DIR}/{resolved}.png"):
+                        resolved = iid
+                    _stacked_icon_cache[iid] = resolved
+                return _stacked_icon_cache[iid]
+
             def _icon_url(iid: int, qty: int) -> str:
-                icon_id = _coin_image_id(qty) if iid == 995 else iid
-                return f"{IMG_BASE}/itemdb/{icon_id}.png"
+                return f"{IMG_BASE}/itemdb/{_resolve_icon_id(iid, qty)}.png"
 
             items = []
             for iid, qv in ranked:

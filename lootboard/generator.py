@@ -22,7 +22,7 @@ from utils.wiseoldman import fetch_group_members
 from db.ops import DatabaseOperations, associate_player_ids
 
 from utils.format import format_number
-from utils.dynamic_handling import get_value_color, get_dynamic_color, get_coin_image_id
+from utils.dynamic_handling import get_value_color, get_dynamic_color, get_coin_image_id, get_stacked_display_id
 
 redis_client = RedisClient()
 db = DatabaseOperations()
@@ -1022,30 +1022,36 @@ def save_image(image, server_id, partition):
 
 
 async def load_image_from_id(item_id):
-    if item_id == "None" or item_id is None or not isinstance(item_id, int):
+    if item_id == "None" or item_id is None:
         return None
-    file_path = f"/store/droptracker/disc/static/assets/img/itemdb/{item_id}.png"
-    item = session.query(ItemList).filter(ItemList.item_id == item_id).first()
-    item_name = item.item_name
-    if item.stackable:
-        all_items = session.query(ItemList).filter(ItemList.item_name == item_name).all()
-        target_item_id = [max(item.stacked, item.item_id) for item in all_items]
-        item_id = target_item_id
-    if not os.path.exists(file_path):
-        try:
-            image_path = await load_rl_cache_img(item_id)
-            if image_path:
-                file_path = image_path
-        except Exception as e:
-            print(f"Error loading image for item ID {item_id}: {e}")
-    loop = asyncio.get_event_loop()
     try:
-        # Run the blocking Image.open operation in a thread pool
-        image = await loop.run_in_executor(None, Image.open, file_path)
-        return image
-    except Exception as e:
-        print(f"The following file path: {file_path} produced an error: {e}")
+        base_id = int(item_id)
+    except (TypeError, ValueError):
         return None
+    # Stackable items (Zulrah's scales, arrows, bolts, seeds, …) are stored as
+    # their single-unit id but look best as the largest-stack pile icon
+    # (suggestion #44). Coins are already resolved by quantity at the call site
+    # and pass through unchanged. Fall back to the base id's icon if the stack
+    # variant can't be loaded, so we never regress a rendered item to a blank slot.
+    display_id = get_stacked_display_id(base_id, session)
+    candidates = [display_id] if display_id == base_id else [display_id, base_id]
+    loop = asyncio.get_event_loop()
+    for candidate in candidates:
+        file_path = f"/store/droptracker/disc/static/assets/img/itemdb/{candidate}.png"
+        if not os.path.exists(file_path):
+            try:
+                image_path = await load_rl_cache_img(candidate)
+                if image_path:
+                    file_path = image_path
+            except Exception as e:
+                print(f"Error loading image for item ID {candidate}: {e}")
+        try:
+            # Run the blocking Image.open operation in a thread pool
+            image = await loop.run_in_executor(None, Image.open, file_path)
+            return image
+        except Exception as e:
+            print(f"The following file path: {file_path} produced an error: {e}")
+    return None
 
 
 async def load_rl_cache_img(item_id):
