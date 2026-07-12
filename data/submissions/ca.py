@@ -45,6 +45,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
     unique_id = ca_data.get("guid", None)
     video_key = ca_data.get("video_key")
     video_url = ca_data.get("video_url")
+    plugin_version = ca_data.get("p_v", None)
     notice = ""
     debug_print(
         f"Extracted CA data - Player: {player_name}, Task: {task_name}, Tier: {tier}"
@@ -201,9 +202,23 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
     if is_new_ca:
         debug_print("New CA entry, creating notification")
         player_groups = get_player_groups_with_global(session, player)
+        # Per-group manual policy (suggestion #45): suppress this group's
+        # notification for a manual submission it doesn't trust (non-drop
+        # types are notification-only — no leaderboard, no review queue).
+        manual_suppressed = set()
+        if ca_data.get("intake_source") == "manual" and not is_seasonal:
+            try:
+                from .manual_policy import manual_notification_suppressed_groups
+                manual_suppressed = manual_notification_suppressed_groups(
+                    session, player, [g.group_id for g in player_groups]
+                )
+            except Exception as e:
+                print(f"[ManualPolicy] ca suppression check failed: {e}")
         for group in player_groups:
             debug_print("Checking group: " + str(group))
             group_id = group.group_id
+            if group_id in manual_suppressed:
+                continue
             group_points_result = {
                 "receiver_points_awarded": 0,
                 "receiver_current_points": 0,
@@ -271,6 +286,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
                                 "group_points_member_count": len(group_points_result.get("awarded_members", []) or []),
                                 "group_points_members_awarded": group_points_result.get("awarded_members", []) or [],
                                 "world_type": world_type,
+                                "plugin_version": plugin_version,
                             }
                             await create_notification(
                                 "ca",
@@ -300,6 +316,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
                         "image_url": ca_entry.image_url,
                         "video_key": video_key,
                         "world_type": world_type,
+                        "plugin_version": plugin_version,
                     },
                     existing_session=session if use_external_session else None,
                 )

@@ -194,6 +194,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         auth_key = drop_data.get("auth_key", None)
         player_name = drop_data.get("player_name", drop_data.get("player", None))
         account_hash = drop_data["acc_hash"]
+        plugin_version = drop_data.get("p_v", None)
         # The RuneLite plugin sends this embed field as "killcount" (no
         # underscore) and uses 0 when the KC isn't available — treat both as
         # absent rather than letting 0 read as a real kill count.
@@ -210,6 +211,10 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         downloaded = drop_data.get("downloaded", False)
         image_url = drop_data.get("image_url", None)
         used_api = drop_data.get("used_api", False)
+        # Intake path: 'manual' = website manual submit (/manual-submit). NOT
+        # drop_data["source"] — that key is the NPC name (line below). Drives
+        # per-group manual-submission policies (suggestion #45).
+        intake_source = drop_data.get("intake_source") or None
         raw_players_included = drop_data.get("players_included", drop_data.get("nearby_players"))
         if raw_players_included is None:
             # The RuneLite plugin sends the participant list as an embed field
@@ -339,6 +344,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             unique_id=guid,
             existing_session=session if use_external_session else None,
             model_class=SeasonalDrop if is_seasonal else None,
+            source=intake_source,
         )
         
 
@@ -349,10 +355,53 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             debug_print("Failed to create drop")
             return SubmissionResponse(success=False, message=f"Failed to create drop")
         log_checkpoint("create_drop_object")
+
+        # Per-group manual-submission policy (suggestion #45): a group may
+        # withhold manual drops from ITS boards/notifications — permanently
+        # ('excluded': block / authorized_only) or pending an admin's review
+        # ('pending': confirm). Never affects global tracking or the player's
+        # other groups. Recorded durably so board rebuilds re-apply it
+        # (drop_group_moderation). Both statuses withhold at intake.
+        manual_moderation = {}
+        if intake_source == "manual" and not is_seasonal:
+            try:
+                from .manual_policy import manual_moderation_for_player, record_moderation
+                manual_moderation = manual_moderation_for_player(
+                    session, player, [g.group_id for g in (player.groups or [])]
+                )
+                if manual_moderation:
+                    record_moderation(session, drop.drop_id, manual_moderation)
+                    if use_external_session:
+                        session.flush()
+                    else:
+                        session.commit()
+                    print(f"[ManualPolicy] Drop {drop.drop_id} withheld from groups "
+                          f"{ {g: s for g, (s, _p) in manual_moderation.items()} } "
+                          f"by manual_submission_policy")
+                    # Ping each group's admin channel about drops now awaiting
+                    # review (confirm policy). Best-effort; never fails intake.
+                    try:
+                        from .manual_policy import notify_pending_review
+                        await notify_pending_review(
+                            session, drop, player, item_name, npc_name, drop_value,
+                            [g for g, (s, _p) in manual_moderation.items() if s == "pending"],
+                            use_external_session=use_external_session,
+                        )
+                    except Exception as ne:
+                        print(f"[ManualPolicy] Couldn't queue pending-review ping: {ne}")
+            except Exception as e:
+                # A policy failure must never fail the submission; the drop
+                # counts everywhere (legacy behavior) rather than nowhere.
+                manual_moderation = {}
+                print(f"[ManualPolicy] Policy check failed for drop {getattr(drop, 'drop_id', '?')}: {e}")
+        excluded_group_ids = set(manual_moderation)
+        log_checkpoint("manual_policy")
+
         try:
             debug_print("Updating player in redis...")
             redis_updates.add_to_player(
                 player, drop, world_type=world_type, item_name=item_name, npc_name=npc_name,
+                exclude_group_ids=excluded_group_ids,
             )
             debug_print("Player redis update completed")
         except Exception as e:
@@ -376,9 +425,14 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                     "kill_count": kill_count,
                     "image_url": drop.image_url,
                     "source_id": getattr(drop, "drop_id", None),
+                    "plugin_version": plugin_version,
                 },
                 world_type=world_type, player_name=player_name,
-                used_api=used_api,
+                # The envelope's used_api means "came from the plugin" to the
+                # events engine (submission_policy confirm_non_api/api_only).
+                # Manual website submissions are NOT plugin traffic, even
+                # though the intake route stamps used_api=True on the row.
+                used_api=used_api and intake_source != "manual",
             )
         except Exception:
             pass
@@ -431,6 +485,11 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         for group in player_groups:
             await asyncio.sleep(0)
             group_id = group.group_id
+            if group_id in excluded_group_ids:
+                # manual_submission_policy withheld this drop from this group:
+                # no notification, no group points, no split credits.
+                debug_print(f"Group {group_id} excluded by manual_submission_policy - skipping")
+                continue
             group_points_result = {
                 "receiver_points_awarded": 0,
                 "receiver_current_points": 0,
@@ -577,6 +636,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                     "group_points_member_count": len(awarded_members),
                     "group_points_members_awarded": awarded_members,
                     "world_type": world_type,
+                    "plugin_version": plugin_version,
                 }
                 if group_id > 2:
                     sent_group_notifications.append(group.group_name)
@@ -647,6 +707,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                             "video_key": video_key,
                             "attachment_type": attachment_type,
                             "world_type": world_type,
+                            "plugin_version": plugin_version,
                         },
                         existing_session=session if use_external_session else None,
                     )

@@ -59,6 +59,7 @@ async def death_processor(death_data, external_session=None, world_type="main"):
     image_url = death_data.get("image_url") or death_data.get("image_path") or ""
     video_key = death_data.get("video_key")
     video_url = death_data.get("video_url")
+    plugin_version = death_data.get("p_v", None)
 
     source = death_data.get("source") or death_data.get("killer") or death_data.get("npc_name") or ""
     region_id = _safe_int(death_data.get("region_id"))
@@ -143,6 +144,7 @@ async def death_processor(death_data, external_session=None, world_type="main"):
             "video_key": video_key,
             "video_url": video_url,
             "world_type": world_type,
+            "plugin_version": plugin_version,
         }
         print(f"Notification data: {notification_data}")
 
@@ -173,6 +175,7 @@ async def death_processor(death_data, external_session=None, world_type="main"):
                     "image_url": image_url or "",
                     "video_key": video_key,
                     "world_type": world_type,
+                    "plugin_version": plugin_version,
                 },
                 existing_session=session if use_external_session else None,
             )

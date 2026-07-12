@@ -62,6 +62,7 @@ async def diary_processor(diary_data, external_session=None, world_type="main"):
     diary_name = diary_data.get("diary_name") or diary_data.get("diary") or diary_data.get("area") or ""
     diary_tier = diary_data.get("diary_tier") or diary_data.get("tier") or ""
     timestamp = diary_data.get("timestamp")
+    plugin_version = diary_data.get("p_v", None)
     debug_print(f"[DIARY] diary_name={diary_name} diary_tier={diary_tier} unique_id={unique_id} timestamp={timestamp}")
 
     notice = ""
@@ -94,6 +95,7 @@ async def diary_processor(diary_data, external_session=None, world_type="main"):
         video_url=video_url,
         used_api=bool(diary_data.get("used_api", False)),
         unique_id=unique_id,
+        plugin_version=plugin_version,
     )
     session.add(diary_entry)
     if use_external_session:
@@ -142,6 +144,7 @@ async def diary_processor(diary_data, external_session=None, world_type="main"):
             "video_key": video_key,
             "video_url": video_url,
             "world_type": world_type,
+            "plugin_version": plugin_version,
         }
         print(f"Notification data: {notification_data}")
 

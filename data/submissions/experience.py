@@ -293,6 +293,7 @@ async def experience_processor(experience_data, external_session=None):
         account_hash = experience_data.get("acc_hash")
         auth_key = experience_data.get("auth_key", "")
         unique_id = experience_data.get("guid")
+        plugin_version = experience_data.get("p_v", None)
     
         # Parse totals
         stage = "parse_totals"
@@ -646,6 +647,7 @@ async def experience_processor(experience_data, external_session=None):
                 "total_xp": total_xp,
                 "combat_level": combat_level,
                 "image_url": image_url if image_url else "",
+                "plugin_version": plugin_version,
             }
 
             stage = "create_group_notifications"
@@ -696,6 +698,7 @@ async def experience_processor(experience_data, external_session=None):
                         "total_level": total_level,
                         "combat_level": combat_level,
                         "image_url": image_url if image_url else "",
+                        "plugin_version": plugin_version,
                     },
                     existing_session=session if use_external_session else None,
                 )

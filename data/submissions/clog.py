@@ -21,6 +21,57 @@ from .common import (
 )
 
 
+# Collection-log slots whose single display name maps to MANY distinct in-game
+# item IDs — each variant is its own slot. The client resolves item_id by name
+# (ClogHandler.findItemId) and our ensure_item_by_name() does the same, so every
+# variant collapses onto ONE item_id. Our (player_id, item_id) slot-dedup below
+# would then treat a genuinely new slot as an already-owned duplicate and
+# silently drop the notification (the webhook still returns 200, so the client
+# reports "processed"). For these names we skip slot-dedup so each new unlock
+# notifies; exact re-sends/retries are still caught by the unique_id (guid)
+# check in ensure_can_create().
+#
+# TO ADD A NEW ONE: just drop the exact collection-log item name into the right
+# group below. Matching is case-insensitive and whitespace-trimmed (see
+# is_multi_slot_clog_item), so don't worry about exact casing.
+MULTI_SLOT_CLOG_ITEM_NAMES = {
+    # Chompy Bird Hunting — 36 milestone hats (Ogre bowman ... Expert dragon archer)
+    "Chompy bird hat",
+    # Treasure Trails / clue pages & fragments
+    "Ancient page",
+    "Mysterious page",
+    "Medallion fragment",
+    # Graceful outfit — a separate slot per recolour region
+    "Graceful hood",
+    "Graceful top",
+    "Graceful legs",
+    "Graceful cape",
+    "Graceful gloves",
+    "Graceful boots",
+    # Castle Wars decorative armour — a separate slot per set/colour. The
+    # body/legs/skirt pieces share the in-game item name "Decorative armour".
+    "Decorative helm",
+    "Decorative full helm",
+    "Decorative body",
+    "Decorative legs",
+    "Decorative skirt",
+    "Decorative sword",
+    "Decorative shield",
+    "Decorative boots",
+    "Decorative armour",
+}
+
+# Pre-normalised for O(1) case-insensitive membership tests.
+_MULTI_SLOT_CLOG_LOOKUP = frozenset(n.strip().lower() for n in MULTI_SLOT_CLOG_ITEM_NAMES)
+
+
+def is_multi_slot_clog_item(item_name) -> bool:
+    """True if `item_name` is a collection-log slot that shares its display name
+    with other distinct slots (see MULTI_SLOT_CLOG_ITEM_NAMES) and so must never
+    be deduped by (player_id, item_id)."""
+    return bool(item_name) and item_name.strip().lower() in _MULTI_SLOT_CLOG_LOOKUP
+
+
 async def clog_processor(clog_data, external_session=None, world_type="main"):
     debug_print(f"=== CLOG PROCESSOR START (world_type={world_type}) ===")
     debug_print(f"Raw clog data: {clog_data}")
@@ -55,6 +106,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
     unique_id = clog_data.get("guid", None)
     video_key = clog_data.get("video_key")
     video_url = clog_data.get("video_url")
+    plugin_version = clog_data.get("p_v", None)
     notice = ""
     item = await ensure_item_by_name(session, item_name)
 
@@ -97,14 +149,20 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
     from db import CollectionLogEntry
 
     clog_model = SeasonalCollectionLogEntry if is_seasonal else CollectionLogEntry
-    clog_entry = (
-        session.query(clog_model)
-        .filter(
-            clog_model.player_id == player_id,
-            clog_model.item_id == item_id,
+    # Multi-slot items (see MULTI_SLOT_CLOG_ITEM_NAMES) legitimately produce
+    # several rows per (player_id, item_id) — one per slot — so never dedup
+    # them by item_id; each new-unlock event is a genuinely new slot.
+    if is_multi_slot_clog_item(item_name):
+        clog_entry = None
+    else:
+        clog_entry = (
+            session.query(clog_model)
+            .filter(
+                clog_model.player_id == player_id,
+                clog_model.item_id == item_id,
+            )
+            .first()
         )
-        .first()
-    )
 
     is_new_clog = False
     if npc_id is None:
@@ -120,7 +178,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
             image_url="",
             video_url=video_url,
             used_api=used_api,
-            unique_id=unique_id,
+            unique_id=unique_id
         )
         session.add(clog_entry)
         session.commit()
@@ -190,9 +248,24 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                 expires_in_days=60,
             )
         player_groups = get_player_groups_with_global(session, player)
+        # Per-group manual policy (suggestion #45): withhold this group's
+        # notification (and group points) for a manual submission the group
+        # doesn't trust. Non-drop types have no leaderboard, so this is
+        # notification-only (no review queue).
+        manual_suppressed = set()
+        if clog_data.get("intake_source") == "manual" and not is_seasonal:
+            try:
+                from .manual_policy import manual_notification_suppressed_groups
+                manual_suppressed = manual_notification_suppressed_groups(
+                    session, player, [g.group_id for g in player_groups]
+                )
+            except Exception as e:
+                print(f"[ManualPolicy] clog suppression check failed: {e}")
         for group in player_groups:
             print(f"CLOG: Checking group: {group}")
             group_id = group.group_id
+            if group_id in manual_suppressed:
+                continue
             group_points_result = {
                 "receiver_points_awarded": 0,
                 "receiver_current_points": 0,
@@ -247,6 +320,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                     "group_points_member_count": len(group_points_result.get("awarded_members", []) or []),
                     "group_points_members_awarded": group_points_result.get("awarded_members", []) or [],
                     "world_type": world_type,
+                    "plugin_version": plugin_version,
                 }
                 await create_notification(
                     "clog",
