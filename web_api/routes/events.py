@@ -31,11 +31,13 @@ live in ``web_api/routes/event_admin.py`` (same auth helpers, shared engine).
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 from datetime import datetime
 
 from quart import Blueprint, jsonify, request
 from sqlalchemy import func
+from sqlalchemy import or_ as sa_or
 
 from db import (
     AuditLog,
@@ -43,13 +45,19 @@ from db import (
     EventBingoCell,
     EventBingoCompletion,
     EventCompletion,
+    EventGroup,
     EventProgress,
     EventTask,
     EventTeam,
     EventTeamMember,
+    EVENT_DISCORD_POLICIES,
     EVENT_FORMATION_MODES,
+    EVENT_MODES,
+    EVENT_PING_KEYS,
     EVENT_SUBMISSION_POLICIES,
     EVENT_TASK_TYPES,
+    EVENT_TASK_VISIBILITIES,
+    EventTaskLibraryItem,
     Group,
     Player,
     user_group_association,
@@ -84,6 +92,56 @@ def _dt(unix) -> datetime | None:
         return None
 
 
+def _parse_ping_config(raw) -> str | None:
+    """Validate a ``{ping_key: [role ids]}`` object (EVENT_PING_KEYS) and
+    return it as the JSON string stored in ``web_events.ping_config`` (None
+    when nothing is configured). Role ids travel as strings — JS numbers lose
+    precision past 2^53 (same rule as the channel snowflakes)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        abort_problem(422, "Invalid pings", "'pings' must be an object of ping key -> role id list.")
+    out: dict[str, list[str]] = {}
+    for key, role_ids in raw.items():
+        if key not in EVENT_PING_KEYS:
+            abort_problem(
+                422, "Invalid ping key",
+                f"'{key}' is not one of {list(EVENT_PING_KEYS)}.",
+            )
+        if role_ids in (None, []):
+            continue  # unset this key
+        if not isinstance(role_ids, list) or len(role_ids) > 10:
+            abort_problem(
+                422, "Invalid ping roles",
+                f"'pings.{key}' must be a list of at most 10 role ids.",
+            )
+        clean = []
+        for rid in role_ids:
+            if isinstance(rid, int) and not isinstance(rid, bool):
+                rid = str(rid)
+            if not isinstance(rid, str) or not rid.strip().isdigit() or len(rid.strip()) > 32:
+                abort_problem(
+                    422, "Invalid ping roles",
+                    f"'pings.{key}' entries must be Discord role snowflake id strings.",
+                )
+            clean.append(rid.strip())
+        if clean:
+            out[key] = clean
+    return json.dumps(out) if out else None
+
+
+def _event_pings(ev: Event) -> dict:
+    """Parsed ``ping_config`` ({ping_key: [role ids]}), {} when unset/corrupt."""
+    raw = getattr(ev, "ping_config", None)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
 def _effective_status(ev: Event) -> str:
     """Explicit status, with one derivation: an active event past its
     scheduled end reads as 'past' even before the scheduler sweep (Task 21)
@@ -105,6 +163,7 @@ def _summary(ev: Event) -> dict:
         "starts_at": _ts(ev.starts_at),
         "ends_at": _ts(ev.ends_at),
         "has_bingo": bool(ev.has_bingo),
+        "mode": getattr(ev, "mode", None) or "standard",
         "formation_mode": ev.formation_mode or "admin_assign",
         "requires_confirmation": bool(ev.requires_confirmation),
         "submission_policy": ev.submission_policy or "all",
@@ -116,14 +175,37 @@ def _summary(ev: Event) -> dict:
     }
 
 
+def participating_group_ids(s, ev) -> set[int]:
+    """Groups whose members/admins the event concerns — the single pivot every
+    authorization/eligibility check routes through. Standard/global: the one
+    owning group (empty set for global). clan_vs_clan: the *accepted*
+    participants (host is seeded accepted at create time), so standard events
+    never read ``web_event_groups``."""
+    if getattr(ev, "mode", "standard") == "clan_vs_clan":
+        rows = (
+            s.query(EventGroup.group_id)
+            .filter(EventGroup.event_id == ev.id, EventGroup.status == "accepted")
+            .all()
+        )
+        return {gid for (gid,) in rows}
+    return {ev.group_id} if ev.group_id else set()
+
+
 def _is_event_admin(s, viewer_id, ev: Event) -> bool:
     """Whether ``viewer_id`` administers ``ev`` (group owner/admin, or
-    superadmin — the only admins of global events)."""
+    superadmin — the only admins of global events). clan_vs_clan: owner/admin
+    of any accepted participating clan."""
     if viewer_id is None:
         return False
     user = load_user(s, viewer_id)
     if is_superadmin(user):
         return True
+    if (getattr(ev, "mode", None) or "standard") == "clan_vs_clan":
+        mgids = manageable_guild_ids(viewer_id)
+        return any(
+            resolve_group_role(s, viewer_id, gid, mgids, user=user) in ("owner", "admin")
+            for gid in participating_group_ids(s, ev)
+        )
     if not ev.group_id:
         return False
     role = resolve_group_role(s, viewer_id, ev.group_id, manageable_guild_ids(viewer_id), user=user)
@@ -142,6 +224,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             "target_value": t.target_value,
             "points": int(t.points or 0),
             "requires_confirmation": bool(t.requires_confirmation),
+            "visibility": t.visibility or "public",
             # Raw JSON config (item lists, source NPCs) so participants can
             # see exactly which items/NPCs count toward a task.
             "config": t.config or None,
@@ -175,6 +258,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             "id": tm.id,
             "name": tm.name,
             "score": int(tm.score or 0),
+            "group_id": getattr(tm, "group_id", None),  # clan bound (clan_vs_clan)
             "member_count": len(members),
             "members": members,
         })
@@ -302,7 +386,17 @@ async def list_events():
         with db_session() as s:
             q = s.query(Event)
             if group_id is not None:
-                q = q.filter(Event.group_id == group_id)
+                # A group's list also includes clan-vs-clan events it has
+                # ACCEPTED as an opponent (its own web_event_groups rows).
+                # Standard events never have participant rows, so their
+                # listing is byte-for-byte unchanged.
+                participant_event_ids = (
+                    s.query(EventGroup.event_id)
+                    .filter(EventGroup.group_id == group_id,
+                            EventGroup.status == "accepted")
+                )
+                q = q.filter(sa_or(Event.group_id == group_id,
+                                   Event.id.in_(participant_event_ids)))
             events = q.order_by(Event.id.desc()).all()
 
             # Determine which groups the viewer can admin (to see drafts).
@@ -326,7 +420,13 @@ async def list_events():
                 is_draft = eff == "draft"
                 if is_draft and not viewer_is_superadmin and (
                         not ev.group_id or ev.group_id not in admin_groups):
-                    continue  # drafts hidden from non-admins
+                    # clan-vs-clan drafts are also visible to admins of any
+                    # accepted participant (mode check first: standard events
+                    # take the fast `continue` with no extra queries).
+                    if not ((getattr(ev, "mode", None) or "standard") == "clan_vs_clan"
+                            and viewer_id is not None
+                            and _is_event_admin(s, viewer_id, ev)):
+                        continue  # drafts hidden from non-admins
                 if status and eff != status:
                     continue
                 out.append(_summary(ev))
@@ -487,6 +587,7 @@ async def get_event_team(event_id: int, team_id: int):
                     "id": team.id,
                     "name": team.name,
                     "score": int(team.score or 0),
+                    "group_id": getattr(team, "group_id", None),
                     "rank": rank,
                     "team_count": len(all_teams),
                     "member_count": len(members),
@@ -507,7 +608,27 @@ async def get_event_team(event_id: int, team_id: int):
 # --------------------------------------------------------------------------- #
 # Admin writes
 # --------------------------------------------------------------------------- #
-def _assert_event_admin(s, user_id, group_id):
+def _assert_event_admin(s, user_id, ev_or_group_id):
+    """Event-admin gate. Accepts an ``Event`` (any mode) or a raw group id
+    (the create path, which has no event yet — always standard semantics).
+
+    Standard/global: group admin + 'events' entitlement (superadmin only for
+    global). clan_vs_clan: an owner/admin of ANY *accepted* participating clan
+    may co-manage — the entitlement was paid by the host at create/invite
+    time, and an accepting opponent never needs a tier.
+    """
+    ev = ev_or_group_id if hasattr(ev_or_group_id, "group_id") else None
+    if ev is not None and (getattr(ev, "mode", None) or "standard") == "clan_vs_clan":
+        user = load_user(s, user_id)
+        if is_superadmin(user):
+            return
+        mgids = manageable_guild_ids(user_id)
+        for gid in participating_group_ids(s, ev):
+            if resolve_group_role(s, user_id, gid, mgids, user=user) in ("owner", "admin"):
+                return
+        abort_problem(403, "Forbidden", "You must administer a participating clan.")
+    group_id = ev.group_id if ev is not None else ev_or_group_id
+    # ---- standard/global path, unchanged ----
     user = load_user(s, user_id)
     if not group_id:
         # Global events (group_id NULL) are administered by superadmins only.
@@ -554,9 +675,30 @@ async def create_event():
             "Invalid submission policy",
             f"submission_policy must be one of {list(EVENT_SUBMISSION_POLICIES)}.",
         )
+    mode = body.get("mode") or "standard"
+    if mode not in EVENT_MODES:
+        abort_problem(422, "Invalid mode", f"mode must be one of {list(EVENT_MODES)}.")
+    # When the Discord scheduled-event mirror goes live: the creation form's
+    # "create the Discord event now / when the event goes live" prompt.
+    discord_event_policy = body.get("discord_event_policy") or "on_activate"
+    if discord_event_policy not in EVENT_DISCORD_POLICIES:
+        abort_problem(
+            422, "Invalid Discord event policy",
+            f"discord_event_policy must be one of {list(EVENT_DISCORD_POLICIES)}.",
+        )
+    ping_config = _parse_ping_config(body.get("pings"))
+    if mode == "clan_vs_clan" and not group_id:
+        abort_problem(
+            422,
+            "Host group required",
+            "A clan-vs-clan event needs a host group_id (global clan-vs-clan "
+            "events are not a thing).",
+        )
 
     def _apply():
         with db_session() as s:
+            # Entitlement/admin on the HOST group — the host "pays" exactly
+            # as for a standard event; invited opponents never need a tier.
             _assert_event_admin(s, user_id, group_id)
             # Group events default their Discord destination to the group's
             # linked guild (Task 19); admins can re-point it at any guild the
@@ -583,9 +725,32 @@ async def create_event():
                 submission_policy=submission_policy,
                 join_code=join_code or None,
                 discord_guild_id=discord_guild_id,
+                mode=mode,
+                discord_event_policy=discord_event_policy,
+                ping_config=ping_config,
             )
             s.add(ev)
             s.commit()
+            if mode == "clan_vs_clan":
+                # Seed the host as an accepted participant; opponents are
+                # invited via POST /events/{id}/participants.
+                s.add(EventGroup(
+                    event_id=ev.id,
+                    group_id=group_id,
+                    role="host",
+                    status="accepted",
+                    invited_by_user_id=user_id,
+                    responded_at=func.now(),
+                ))
+                s.commit()
+            if ev.discord_guild_id:
+                # Desired-state rows for the Discord scheduled event mirror.
+                # Default policy ('on_activate') makes this a no-op for the
+                # newborn draft — the rows are seeded by activate_event()
+                # instead. 'immediate' seeds them now (and the bot reconciler
+                # still holds off until starts_at is set and in the future).
+                _sync_event_guilds(s, ev)
+                s.commit()
             return ev.id
 
     ev_id = await asyncio.to_thread(_apply)
@@ -602,7 +767,7 @@ async def update_event(event_id: int):
             ev = s.query(Event).filter(Event.id == event_id).first()
             if not ev:
                 abort_problem(404, "Event not found", f"No event {event_id}.")
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
             if "name" in body:
                 name = (body.get("name") or "").strip()
                 if not (1 <= len(name) <= 120):
@@ -631,6 +796,34 @@ async def update_event(event_id: int):
                 if len(code) > 32:
                     abort_problem(422, "Invalid join code", "join_code must be at most 32 characters.")
                 ev.join_code = code or None
+            if "mode" in body:
+                new_mode = body.get("mode") or "standard"
+                if new_mode not in EVENT_MODES:
+                    abort_problem(422, "Invalid mode", f"mode must be one of {list(EVENT_MODES)}.")
+                if new_mode != (getattr(ev, "mode", None) or "standard"):
+                    # Mode is a structural choice: only a team-less draft may
+                    # convert (participant rows and clan-bound teams would
+                    # otherwise be stranded).
+                    if ev.status != "draft":
+                        abort_problem(409, "Event already started",
+                                      "The event mode can only change while it is a draft.")
+                    if s.query(EventTeam.id).filter(EventTeam.event_id == ev.id).first():
+                        abort_problem(409, "Teams exist",
+                                      "Remove the event's teams before changing its mode.")
+                    if new_mode == "clan_vs_clan":
+                        if not ev.group_id:
+                            abort_problem(422, "Host group required",
+                                          "A global event cannot become clan-vs-clan.")
+                        s.add(EventGroup(
+                            event_id=ev.id, group_id=ev.group_id, role="host",
+                            status="accepted", invited_by_user_id=user_id,
+                            responded_at=func.now(),
+                        ))
+                    else:
+                        s.query(EventGroup).filter(
+                            EventGroup.event_id == ev.id
+                        ).delete(synchronize_session=False)
+                    ev.mode = new_mode
             if "requires_confirmation" in body:
                 # Event-level force: all completions queue for review (PRD D3).
                 ev.requires_confirmation = bool(body.get("requires_confirmation"))
@@ -654,6 +847,11 @@ async def update_event(event_id: int):
                             f"'{key}' must be a non-negative integer.",
                         )
                     setattr(ev, key, val)
+            if any(k in body for k in ("name", "description", "starts_at", "ends_at")):
+                # Flip synced guild rows back to pending so the bot edits the
+                # live Discord scheduled event (never re-creates: the row
+                # keeps its discord_scheduled_event_id).
+                _sync_event_guilds(s, ev)
             s.commit()
             return _detail(s, ev, viewer_id=user_id)
 
@@ -673,7 +871,7 @@ def _run_lifecycle_transition(event_id: int, user_id: int, action: str) -> dict:
 
     with db_session() as s:
         ev = _load_event_or_404(s, event_id)
-        _assert_event_admin(s, user_id, ev.group_id)
+        _assert_event_admin(s, user_id, ev)
         user = load_user(s, user_id)
         try:
             if action == "activate":
@@ -707,6 +905,70 @@ async def end_event(event_id: int):
     return private_no_store(jsonify(payload))
 
 
+def clean_task_visibility(body: dict, default: str | None = "public") -> str | None:
+    """Validated EVENT_TASK_VISIBILITIES value from a request body.
+
+    ``default`` is returned when the key is absent ("public" on create —
+    matching the sitewide default — and None on PATCH, where an absent key
+    means "leave the library copy alone")."""
+    if "visibility" not in body:
+        return default
+    visibility = body.get("visibility")
+    if visibility not in EVENT_TASK_VISIBILITIES:
+        abort_problem(
+            422, "Invalid visibility",
+            f"visibility must be one of {list(EVENT_TASK_VISIBILITIES)}.",
+        )
+    return visibility
+
+
+def save_task_to_library(s, ev: Event, task: EventTask, visibility: str) -> None:
+    """Upsert the task's reusable library copy (source='group').
+
+    Public rows show in every group's picker; private rows only in the owning
+    group's. Keyed per group by lower-cased name so re-saving a same-named
+    task updates the preset instead of duplicating it. The bingo designer's
+    ``bingo_auto`` config marker is task-instance bookkeeping and is stripped
+    from the preset."""
+    name = (task.label or "").strip()[:120]
+    if not name:
+        return
+    config = task.config
+    if config:
+        try:
+            parsed = json.loads(config)
+            if isinstance(parsed, dict) and parsed.pop("bingo_auto", None) is not None:
+                config = json.dumps(parsed) if parsed else None
+        except (TypeError, ValueError):
+            pass
+    group_match = (
+        EventTaskLibraryItem.group_id == ev.group_id
+        if ev.group_id is not None
+        else EventTaskLibraryItem.group_id.is_(None)
+    )
+    row = (
+        s.query(EventTaskLibraryItem)
+        .filter(
+            EventTaskLibraryItem.source == "group",
+            group_match,
+            func.lower(EventTaskLibraryItem.name) == name.lower(),
+        )
+        .first()
+    )
+    if row is None:
+        row = EventTaskLibraryItem(
+            name=name, source="group", group_id=ev.group_id, default_points=0,
+        )
+        s.add(row)
+    row.type = task.type
+    row.target = task.target[:120] if task.target else None
+    row.target_value = task.target_value
+    row.default_points = int(task.points or 0)
+    row.config = config or None
+    row.visibility = visibility
+    row.active = True
+
+
 @events_bp.post("/events/<int:event_id>/tasks")
 async def add_task(event_id: int):
     user_id = current_user_id()
@@ -717,6 +979,7 @@ async def add_task(event_id: int):
         abort_problem(422, "Invalid task type", f"type must be one of {list(EVENT_TASK_TYPES)}.")
     if not label:
         abort_problem(422, "Invalid label", "Task label is required.")
+    visibility = clean_task_visibility(body)
 
     def _apply():
         from web_api.routes.event_task_validation import validate_task_payload
@@ -725,7 +988,7 @@ async def add_task(event_id: int):
             ev = s.query(Event).filter(Event.id == event_id).first()
             if not ev:
                 abort_problem(404, "Event not found", f"No event {event_id}.")
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
             normalized = validate_task_payload(s, body)
             task = EventTask(
                 event_id=event_id,
@@ -733,9 +996,11 @@ async def add_task(event_id: int):
                 label=label,
                 points=int(body.get("points") or 0),
                 requires_confirmation=bool(body.get("requires_confirmation")),
+                visibility=visibility,
                 **normalized,
             )
             s.add(task)
+            save_task_to_library(s, ev, task, visibility)
             s.commit()
             return task.id
 
@@ -805,7 +1070,7 @@ async def delete_task(event_id: int, task_id: int):
             ev = s.query(Event).filter(Event.id == event_id).first()
             if not ev:
                 abort_problem(404, "Event not found", f"No event {event_id}.")
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
             task = (
                 s.query(EventTask)
                 .filter(EventTask.id == task_id, EventTask.event_id == event_id)
@@ -833,8 +1098,19 @@ async def add_team(event_id: int):
             ev = s.query(Event).filter(Event.id == event_id).first()
             if not ev:
                 abort_problem(404, "Event not found", f"No event {event_id}.")
-            _assert_event_admin(s, user_id, ev.group_id)
-            team = EventTeam(event_id=event_id, name=name, score=0)
+            _assert_event_admin(s, user_id, ev)
+            # clan_vs_clan: every team belongs to an accepted participant clan.
+            # Standard/global teams stay unbound (group_id NULL).
+            team_group_id = None
+            if (getattr(ev, "mode", None) or "standard") == "clan_vs_clan":
+                team_group_id = body.get("group_id")
+                if not isinstance(team_group_id, int):
+                    abort_problem(422, "Missing group_id",
+                                  "Clan-vs-clan teams must name the clan they represent.")
+                if team_group_id not in participating_group_ids(s, ev):
+                    abort_problem(422, "Not an accepted participant",
+                                  "That clan has not accepted this event.")
+            team = EventTeam(event_id=event_id, name=name, score=0, group_id=team_group_id)
             s.add(team)
             s.commit()
             return team.id
@@ -842,6 +1118,106 @@ async def add_team(event_id: int):
     team_id = await asyncio.to_thread(_apply)
     _bump(event_id)
     return jsonify({"id": team_id})
+
+
+@events_bp.patch("/events/<int:event_id>/teams/<int:team_id>")
+async def update_team(event_id: int, team_id: int):
+    """Rename a team (fix a typo). Admin-only; audit-logged. The clan a
+    clan_vs_clan team represents is fixed at create time — only the display
+    name is editable. Allowed in any lifecycle state (renaming is cosmetic)."""
+    user_id = current_user_id()
+    body = await json_body()
+    name = (body.get("name") or "").strip()
+    if not (1 <= len(name) <= 80):
+        abort_problem(422, "Invalid name", "Team name must be 1–80 characters.")
+
+    def _apply():
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            team = (
+                s.query(EventTeam)
+                .filter(EventTeam.id == team_id, EventTeam.event_id == event_id)
+                .first()
+            )
+            if not team:
+                abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+            before = team.name
+            if before == name:
+                return  # no-op
+            team.name = name
+            s.add(
+                AuditLog(
+                    actor_user_id=user_id,
+                    group_id=ev.group_id,
+                    action="event.team.update",
+                    target=f"web_events.{event_id}.team.{team_id}",
+                    before=before,
+                    after=name,
+                )
+            )
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return jsonify({"ok": True})
+
+
+@events_bp.delete("/events/<int:event_id>/teams/<int:team_id>")
+async def delete_team(event_id: int, team_id: int):
+    """Delete a mistakenly-created team and everything scoped to it — its
+    roster, progress rollups, completion-ledger rows and bingo completions —
+    so no orphaned rows reference the removed team. Blocked once the event is
+    over (its history is then read-only, like the rest of the roster).
+    Admin-only; audit-logged."""
+    user_id = current_user_id()
+
+    def _apply():
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            _assert_roster_open(ev)
+            team = (
+                s.query(EventTeam)
+                .filter(EventTeam.id == team_id, EventTeam.event_id == event_id)
+                .first()
+            )
+            if not team:
+                abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+            team_name = team.name
+
+            # No ORM cascade is configured on these FKs, so clear the children
+            # first — EventProgress.team_id is NOT NULL, so a dangling row would
+            # violate the constraint. Deleting the team's ledger/progress is
+            # correct: standings recompute from the remaining teams.
+            s.query(EventBingoCompletion).filter(
+                EventBingoCompletion.team_id == team_id
+            ).delete(synchronize_session=False)
+            s.query(EventCompletion).filter(
+                EventCompletion.team_id == team_id
+            ).delete(synchronize_session=False)
+            s.query(EventProgress).filter(
+                EventProgress.team_id == team_id
+            ).delete(synchronize_session=False)
+            s.query(EventTeamMember).filter(
+                EventTeamMember.team_id == team_id
+            ).delete(synchronize_session=False)
+            s.delete(team)
+            s.add(
+                AuditLog(
+                    actor_user_id=user_id,
+                    group_id=ev.group_id,
+                    action="event.team.delete",
+                    target=f"web_events.{event_id}.team.{team_id}",
+                    before=f"name:{team_name}",
+                    after=None,
+                )
+            )
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return jsonify({"ok": True})
 
 
 # --------------------------------------------------------------------------- #
@@ -857,6 +1233,17 @@ def _bump(event_id: int | None = None) -> None:
         publish_event_admin_bump(event_id)
     except Exception:
         pass
+
+
+def _sync_event_guilds(s, ev: Event) -> None:
+    """Write the desired ``web_event_guilds`` rows for ``ev`` — pure DB, the
+    caller owns the commit. The core bot mirrors the rows onto real Discord
+    scheduled events (services/event_scheduled_events.py); the Web API never
+    talks to Discord."""
+    # Lazy service import (pytest conftest stubs `services`).
+    from services.event_scheduled_events import sync_event_guilds
+
+    sync_event_guilds(s, ev)
 
 
 def _load_event_or_404(s, event_id: int) -> Event:
@@ -885,20 +1272,23 @@ def _load_owned_player(s, player_id, user_id: int) -> Player:
 
 
 def _assert_player_eligible(s, ev: Event, player_id: int) -> None:
-    """Group events: the player must be a member of the event's group.
-    Global events (group_id NULL): any player is eligible."""
-    if not ev.group_id:
+    """Group events: the player must be a member of a participating group —
+    for standard events that is exactly the event's one group. Global events
+    (no participating groups): any player is eligible."""
+    gids = participating_group_ids(s, ev)
+    if not gids:
         return
     in_group = (
         s.query(user_group_association.c.id)
         .filter(
             user_group_association.c.player_id == player_id,
-            user_group_association.c.group_id == ev.group_id,
+            user_group_association.c.group_id.in_(gids),
         )
         .first()
     )
     if not in_group:
-        abort_problem(403, "Not a group member", "That player is not a member of this event's group.")
+        abort_problem(403, "Not a group member",
+                      "That player is not a member of a participating clan.")
 
 
 def _event_membership(s, event_id: int, player_id: int) -> EventTeamMember | None:
@@ -950,6 +1340,20 @@ async def join_event(event_id: int):
             )
             if not teams:
                 abort_problem(404, "No teams", "This event has no teams to join yet.")
+
+            if (getattr(ev, "mode", None) or "standard") == "clan_vs_clan":
+                # A member can only land on their own clan's team(s): both the
+                # self_join choice and the auto_assign balancing below operate
+                # on this filtered list.
+                my_gids = {
+                    gid for (gid,) in
+                    s.query(user_group_association.c.group_id)
+                    .filter(user_group_association.c.player_id == player_id)
+                    .all()
+                }
+                teams = [t for t in teams if t.group_id and t.group_id in my_gids]
+                if not teams:
+                    abort_problem(404, "No teams", "Your clan has no team on this event yet.")
 
             if mode == "self_join":
                 if req_team_id is None and len(teams) == 1:
@@ -1019,7 +1423,7 @@ async def admin_add_member(event_id: int, team_id: int):
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
             _assert_roster_open(ev)
             team = (
                 s.query(EventTeam)
@@ -1034,6 +1438,21 @@ async def admin_add_member(event_id: int, team_id: int):
             if not player:
                 abort_problem(404, "Player not found", f"No player {player_id}.")
             _assert_player_eligible(s, ev, player_id)
+            team_gid = getattr(team, "group_id", None)
+            if team_gid:
+                # Clan-bound team: membership of THAT clan specifically, not
+                # just any participating clan.
+                in_clan = (
+                    s.query(user_group_association.c.id)
+                    .filter(
+                        user_group_association.c.player_id == player_id,
+                        user_group_association.c.group_id == team_gid,
+                    )
+                    .first()
+                )
+                if not in_clan:
+                    abort_problem(403, "Wrong clan",
+                                  "That player is not a member of the clan this team represents.")
 
             existing = _event_membership(s, event_id, player_id)
             before = f"team:{existing.team_id}" if existing else None
@@ -1069,7 +1488,7 @@ async def admin_remove_member(event_id: int, team_id: int, player_id: int):
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
             _assert_roster_open(ev)
             team = (
                 s.query(EventTeam)

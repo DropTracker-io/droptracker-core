@@ -57,6 +57,33 @@ def event_url(event_id) -> str:
     return f"{EVENT_BASE_URL}/{event_id}"
 
 
+def event_ping_role_ids(ping_config_json, key: str) -> list:
+    """Role ids configured for one ping key in ``web_events.ping_config``
+    (JSON ``{key: [role ids]}``). [] on unset/corrupt config — pings must
+    never break a send."""
+    import json
+
+    if not ping_config_json:
+        return []
+    try:
+        data = json.loads(ping_config_json)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    roles = data.get(key)
+    if not isinstance(roles, list):
+        return []
+    return [str(r) for r in roles if r]
+
+
+def ping_content(role_ids) -> Optional[str]:
+    """`<@&id>` mention prefix for a notification message, or None when no
+    roles are configured (embed-only send, exactly as before)."""
+    mentions = " ".join(f"<@&{rid}>" for rid in role_ids)
+    return mentions or None
+
+
 def resolve_event_channel(channels_by_kind: dict, notification_type: str) -> Optional[str]:
     """The channel id a queue type should post to, or None to skip silently.
 

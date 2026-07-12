@@ -39,6 +39,21 @@ EVENT_TASK_TYPES = (
 
 EVENT_FORMATION_MODES = ("self_join", "auto_assign", "admin_assign")
 
+# Task-library sharing (web_event_tasks.visibility / web_event_task_library.visibility):
+# every task an admin creates is saved to the reusable task library — "public"
+# rows show up in every group's picker, "private" rows only in the owning
+# group's own picker (saved for their future events).
+EVENT_TASK_VISIBILITIES = ("public", "private")
+
+# Event ownership shape (web_events.mode): "standard" (one owning group, or
+# global when group_id is NULL) vs "clan_vs_clan" (a host group plus invited
+# opponent groups, tracked in web_event_groups).
+EVENT_MODES = ("standard", "clan_vs_clan")
+
+# web_event_groups participant roles / invite lifecycle.
+EVENT_GROUP_ROLES = ("host", "opponent")
+EVENT_GROUP_STATUSES = ("invited", "accepted", "declined")
+
 # Ledger row lifecycle for web_event_completions.
 EVENT_COMPLETION_STATUSES = ("auto", "pending", "confirmed", "rejected", "manual", "revoked")
 
@@ -53,6 +68,21 @@ EVENT_BOARD_SIZES = (3, 4, 5, 6, 7)  # square boards; default 5
 #                       ledger rows needing admin confirmation.
 # - "api_only"        — submissions without the plugin API flag are ignored.
 EVENT_SUBMISSION_POLICIES = ("all", "confirm_non_api", "api_only")
+
+# When the mirrored Discord scheduled event is created (web_events.discord_event_policy):
+# - "on_activate" — nothing is created while the event is a draft; the mirror
+#                   goes live when the event activates (default: drafts stay
+#                   invisible on Discord).
+# - "immediate"   — the mirror is created as soon as the event has a guild and
+#                   a future start, even while still a draft.
+EVENT_DISCORD_POLICIES = ("on_activate", "immediate")
+
+# Ping keys accepted in web_events.ping_config (JSON: {key: [role ids]}).
+# - "event_created" — companion message when the Discord scheduled event is
+#                     created in the event's primary guild (the main ask:
+#                     scheduled events can't ping by themselves).
+# - "event_started"/"event_ended" — the lifecycle announcements.
+EVENT_PING_KEYS = ("event_created", "event_started", "event_ended")
 
 
 class Event(Base):
@@ -80,6 +110,18 @@ class Event(Base):
     submission_policy = Column(String(16), nullable=False, default="all")  # EVENT_SUBMISSION_POLICIES
     join_code = Column(String(32), nullable=True)  # optional self-join code; never in public reads
     discord_guild_id = Column(String(32), nullable=True)  # snowflake; any guild the bot is in (PRD D8)
+    # EVENT_MODES. clan_vs_clan keeps group_id = the HOST group, so group
+    # indexes, the default Discord guild, and entitlement gating work unchanged.
+    mode = Column(String(16), nullable=False, default="standard", server_default="standard")
+    # EVENT_DISCORD_POLICIES: when the Discord scheduled-event mirror goes
+    # live — on activation (default; drafts create nothing on Discord) or
+    # immediately at creation.
+    discord_event_policy = Column(
+        String(16), nullable=False, default="on_activate", server_default="on_activate"
+    )
+    # JSON {ping_key: [role snowflakes]} (EVENT_PING_KEYS) — which roles the
+    # bot mentions on the scheduled-event companion message / lifecycle posts.
+    ping_config = Column(Text, nullable=True)
     board_size = Column(Integer, nullable=False, default=5)  # EVENT_BOARD_SIZES
     bonus_line_points = Column(Integer, nullable=False, default=0)
     bonus_blackout_points = Column(Integer, nullable=False, default=0)
@@ -102,6 +144,9 @@ class EventTask(Base):
     points = Column(Integer, nullable=False, default=0)
     requires_confirmation = Column(Boolean, nullable=False, default=False)  # per-task flag (PRD D3)
     config = Column(Text, nullable=True)  # JSON: any_of/assembly/point_collection item lists etc.
+    # EVENT_TASK_VISIBILITIES — how the task's library copy is shared: public
+    # (any group may reuse it) or private (owning group only).
+    visibility = Column(String(16), nullable=False, default="public", server_default="public")
 
 
 class EventTeam(Base):
@@ -112,6 +157,38 @@ class EventTeam(Base):
     event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
     name = Column(String(80), nullable=False)
     score = Column(Integer, nullable=False, default=0)
+    # The clan this team represents (clan_vs_clan only; NULL on standard/global).
+    group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=True)
+
+
+class EventGroup(Base):
+    """A clan participating in a clan-vs-clan event (web_events.mode).
+
+    Standard/global events write NO rows here — ``Event.group_id`` remains
+    their sole owner. For clan-vs-clan the host group is seeded as an
+    ``accepted`` row at create time and opponents move invited -> accepted /
+    declined via the web UI."""
+
+    __tablename__ = "web_event_groups"
+    __table_args__ = (
+        Index("uq_web_event_group_part", "event_id", "group_id", unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=False)
+    role = Column(String(16), nullable=False, default="opponent")   # EVENT_GROUP_ROLES
+    status = Column(String(16), nullable=False, default="invited")  # EVENT_GROUP_STATUSES
+    invited_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    responded_at = Column(DateTime, nullable=True)
+    # Opt-in (accept-time checkbox): mirror the Discord scheduled event into
+    # this clan's own linked guild too. Off by default — accepting an invite
+    # must not create anything in the accepting clan's server unasked.
+    mirror_discord_event = Column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
 class EventTeamMember(Base):
@@ -215,14 +292,47 @@ class EventChannel(Base):
     channel_id = Column(String(32), nullable=False)
 
 
+class EventGuild(Base):
+    """Per-(event, guild) Discord scheduled-event sync state (dual-guild ready).
+
+    The Web API only writes *desired* state here and never talks to Discord
+    (``services/event_scheduled_events.py``); the core bot's
+    ``reconcile_event_scheduled_events`` task (bots/main.py) creates/edits/
+    deletes the real Discord scheduled event and writes back
+    ``discord_scheduled_event_id``. Idempotent: a row that already has an id
+    is edited, never re-created. One row per guild keeps this ready for
+    clan-vs-clan events advertising in multiple guilds."""
+
+    __tablename__ = "web_event_guilds"
+    __table_args__ = (
+        Index("uq_web_event_guild", "event_id", "guild_id", unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    guild_id = Column(String(32), nullable=False)  # snowflake
+    discord_scheduled_event_id = Column(String(32), nullable=True)  # written back by the bot
+    sync_status = Column(String(16), nullable=False, default="pending")  # pending|synced|delete_pending|failed
+    synced_at = Column(DateTime, nullable=True)
+    last_error = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
 class EventTaskLibraryItem(Base):
-    """Curated task presets, seeded from the legacy BoardGame task store
-    (``games/events/task_store/default.json``) by
-    ``scripts/seed_event_task_library.py``."""
+    """Reusable task presets backing the task pickers.
+
+    Two kinds of rows share the table: curated presets seeded from the legacy
+    BoardGame task store (``source='legacy_v1'``, ``group_id`` NULL, always
+    public) and group-saved tasks (``source='group'``) written whenever an
+    admin creates/edits an event task — shared with everyone when
+    ``visibility='public'``, or kept for the owning group's future events when
+    ``'private'``. Upserted per group by lower-cased name."""
 
     __tablename__ = "web_event_task_library"
     __table_args__ = (
-        Index("uq_web_evt_library_name_source", "name", "source", unique=True),
+        Index("uq_web_evt_library_name_source_group", "name", "source", "group_id", unique=True),
+        Index("idx_web_evt_library_group", "group_id"),
         {"extend_existing": True},
     )
 
@@ -235,5 +345,63 @@ class EventTaskLibraryItem(Base):
     default_points = Column(Integer, nullable=False, default=0)
     difficulty = Column(String(24), nullable=True)  # air|water|earth|fire (legacy tiers)
     config = Column(Text, nullable=True)  # JSON: item lists / semantics
-    source = Column(String(24), nullable=False, default="legacy_v1")
+    source = Column(String(24), nullable=False, default="legacy_v1")  # legacy_v1|group
+    # Owning group for group-saved rows; NULL = site-wide (curated seeds, or
+    # rows saved from global events by superadmins).
+    group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=True)
+    # EVENT_TASK_VISIBILITIES: public rows appear in every group's picker,
+    # private rows only in the owning group's.
+    visibility = Column(String(16), nullable=False, default="public", server_default="public")
     active = Column(Boolean, nullable=False, default=True)
+
+
+# Version stamp written into EventTemplate.payload; bump when the snapshot
+# shape changes and teach services/event_templates.py to upgrade old payloads.
+EVENT_TEMPLATE_SCHEMA_VERSION = 1
+
+
+class EventTemplate(Base):
+    """A saved event *structure* — the "save/rerun events" feature.
+
+    The whole-event analogue of ``EventTaskLibraryItem``: captured from an
+    event in any lifecycle state, shared ``public`` (every clan's picker) or
+    ``private`` (owning group only), and instantiated later as a fresh
+    standard draft. The snapshot (config + tasks + bingo layout + team names,
+    never runtime state) lives in ``payload`` as versioned JSON — templates
+    are re-instantiated wholesale, so normalized child tables would only add
+    migration drift. Queryable columns exist for the picker cards."""
+
+    __tablename__ = "web_event_templates"
+    __table_args__ = (
+        Index("idx_web_evt_tmpl_group", "group_id", "active"),
+        Index("idx_web_evt_tmpl_visibility", "visibility", "active"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(120), nullable=False)
+    description = Column(Text, nullable=True)
+    # Provenance only (SET NULL on event delete) — templates outlive events.
+    source_event_id = Column(
+        Integer, ForeignKey("web_events.id", ondelete="SET NULL"), nullable=True
+    )
+    # Owning group; NULL = site-wide (saved from a global event — always
+    # treated as public regardless of visibility).
+    group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    # EVENT_TASK_VISIBILITIES reused. Default private: publishing a whole
+    # event site-wide is an explicit choice, unlike single library tasks.
+    visibility = Column(String(16), nullable=False, default="private", server_default="private")
+    # Source event's EVENT_MODES value — informational; instantiation always
+    # produces a standard draft (clan bindings/invites are per-run).
+    mode = Column(String(16), nullable=False, default="standard", server_default="standard")
+    has_bingo = Column(Boolean, nullable=False, default=False)
+    board_size = Column(Integer, nullable=False, default=5)
+    task_count = Column(Integer, nullable=False, default=0)
+    team_count = Column(Integer, nullable=False, default=0)
+    schema_version = Column(Integer, nullable=False, default=EVENT_TEMPLATE_SCHEMA_VERSION)
+    times_used = Column(Integer, nullable=False, default=0)
+    payload = Column(Text, nullable=False)  # MEDIUMTEXT in MySQL (web36a)
+    active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

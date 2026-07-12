@@ -4,6 +4,12 @@
   PUT /api/v1/events/{id}/discord                      -> EventChannelConfig
   GET /api/v1/events/discord/guilds                    -> { guilds, stale }
   GET /api/v1/events/discord/guilds/{gid}/channels     -> { channels, stale }
+  GET /api/v1/events/discord/guilds/{gid}/roles        -> { roles, stale }
+
+EventChannelConfig also carries ``discord_event_policy`` (when the mirrored
+Discord scheduled event goes live: 'on_activate' default / 'immediate') and
+``pings`` ({ping_key: [role ids]}, EVENT_PING_KEYS) — both editable on the
+same PUT.
 
 Every event can target *any* guild the bot is a member of — including
 dedicated event servers — with one channel per notification kind
@@ -33,9 +39,11 @@ from db import (
     AuditLog,
     Event,
     EventChannel,
+    EventGuild,
     Group,
     GroupAdmin,
     EVENT_CHANNEL_KINDS,
+    EVENT_DISCORD_POLICIES,
 )
 from web_api.common import abort_problem, db_session, private_no_store, _rc
 from web_api.deps import (
@@ -46,7 +54,14 @@ from web_api.deps import (
     manageable_guild_ids,
     resolve_group_role,
 )
-from web_api.routes.events import _assert_event_admin, _bump, _load_event_or_404
+from web_api.routes.events import (
+    _assert_event_admin,
+    _bump,
+    _event_pings,
+    _load_event_or_404,
+    _parse_ping_config,
+    _sync_event_guilds,
+)
 
 event_discord_bp = Blueprint("v1_event_discord", __name__)
 
@@ -58,6 +73,10 @@ _CHANNEL_REFRESH_KEY = "bot:channels:refresh"
 
 def _channels_key(guild_id: str) -> str:
     return f"guild:{guild_id}:channels"
+
+
+def _roles_key(guild_id: str) -> str:
+    return f"guild:{guild_id}:roles"
 
 
 def _read_json_cache(key: str):
@@ -96,6 +115,14 @@ def _guild_channels(guild_id: str):
     """[{id, name, position}] from the bot cache, or None when cold."""
     channels = _read_json_cache(_channels_key(guild_id))
     return channels if isinstance(channels, list) else None
+
+
+def _guild_roles(guild_id: str):
+    """[{id, name, position}] from the bot cache (`guild:{id}:roles`, written
+    alongside the channel cache by ``cache_channels_for_guild``), or None when
+    cold."""
+    roles = _read_json_cache(_roles_key(guild_id))
+    return roles if isinstance(roles, list) else None
 
 
 def _assert_any_event_admin(s, user_id: int) -> None:
@@ -184,7 +211,32 @@ def _config_payload(s, ev: Event) -> dict:
             if str(g.get("id")) == guild_id:
                 guild_name = g.get("name")
                 break
-    return {"guild_id": guild_id, "guild_name": guild_name, "channels": channels}
+    # Discord scheduled-event mirror state (web_event_guilds, written back by
+    # the bot reconciler) so the UI can show e.g. "couldn't create the Discord
+    # event — grant the bot Manage Events" instead of failing silently.
+    scheduled_event = None
+    if guild_id:
+        row = (
+            s.query(EventGuild)
+            .filter(EventGuild.event_id == ev.id, EventGuild.guild_id == guild_id)
+            .first()
+        )
+        if row:
+            scheduled_event = {
+                "id": row.discord_scheduled_event_id,
+                "status": row.sync_status,
+                "last_error": row.last_error if row.sync_status == "failed" else None,
+            }
+    return {
+        "guild_id": guild_id,
+        "guild_name": guild_name,
+        "channels": channels,
+        "scheduled_event": scheduled_event,
+        # When the mirror goes live (on_activate: nothing while a draft) and
+        # which roles each ping key mentions — both edited on this same PUT.
+        "discord_event_policy": getattr(ev, "discord_event_policy", None) or "on_activate",
+        "pings": _event_pings(ev),
+    }
 
 
 def _clean_snowflake(value, what: str) -> str:
@@ -250,6 +302,29 @@ async def list_discord_guild_channels(guild_id: str):
     return private_no_store(jsonify(payload))
 
 
+@event_discord_bp.get("/events/discord/guilds/<guild_id>/roles")
+async def list_discord_guild_roles(guild_id: str):
+    """Roles of one guild, for the event ping-role pickers. Same cache
+    pipeline and auth as the channel browse: the bot maintains
+    `guild:{id}:roles` next to the channel cache, and a cold cache returns
+    `stale: true` while `bot:channels:refresh` warms both within ~15s."""
+    user_id = current_user_id()
+    guild_id = _clean_snowflake(guild_id, "guild_id")
+
+    def _load():
+        with db_session() as s:
+            _assert_any_event_admin(s, user_id)
+            _assert_can_target_guild(s, user_id, guild_id)
+        roles = _guild_roles(guild_id)
+        _request_channel_refresh(guild_id)
+        if roles is None:
+            return {"roles": [], "stale": True}
+        return {"roles": roles, "stale": False}
+
+    payload = await asyncio.to_thread(_load)
+    return private_no_store(jsonify(payload))
+
+
 # --------------------------------------------------------------------------- #
 # Per-event config
 # --------------------------------------------------------------------------- #
@@ -260,7 +335,7 @@ async def get_event_discord(event_id: int):
     def _load():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
             return _config_payload(s, ev)
 
     payload = await asyncio.to_thread(_load)
@@ -281,6 +356,17 @@ async def put_event_discord(event_id: int):
     raw_channels = body.get("channels") or {}
     if not isinstance(raw_channels, dict):
         abort_problem(422, "Invalid channels", "'channels' must be an object of kind -> channel id.")
+
+    # Both optional for backward compatibility: absent keys leave the stored
+    # value unchanged (an explicit `pings: {}` clears the ping config).
+    discord_event_policy = body.get("discord_event_policy")
+    if discord_event_policy is not None and discord_event_policy not in EVENT_DISCORD_POLICIES:
+        abort_problem(
+            422, "Invalid Discord event policy",
+            f"discord_event_policy must be one of {list(EVENT_DISCORD_POLICIES)}.",
+        )
+    pings_provided = "pings" in body
+    ping_config = _parse_ping_config(body.get("pings")) if pings_provided else None
 
     if guild_id is None:
         if raw_channels:
@@ -328,7 +414,7 @@ async def put_event_discord(event_id: int):
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
 
             before = _config_payload(s, ev)
             # The security boundary: only require guild authority when the
@@ -340,6 +426,10 @@ async def put_event_discord(event_id: int):
             ):
                 _assert_can_target_guild(s, user_id, guild_id)
             ev.discord_guild_id = guild_id
+            if discord_event_policy is not None:
+                ev.discord_event_policy = discord_event_policy
+            if pings_provided:
+                ev.ping_config = ping_config
 
             existing = {
                 row.kind: row
@@ -353,6 +443,10 @@ async def put_event_discord(event_id: int):
                     existing[kind].channel_id = channel_id
                 else:
                     s.add(EventChannel(event_id=event_id, kind=kind, channel_id=channel_id))
+            # Keep the Discord scheduled-event mirror in step: a re-pointed
+            # guild retires the old guild's row (delete_pending) and seeds the
+            # new one (pending); clearing the guild retires everything.
+            _sync_event_guilds(s, ev)
             s.flush()
 
             after = _config_payload(s, ev)
@@ -361,8 +455,16 @@ async def put_event_discord(event_id: int):
                 group_id=ev.group_id,
                 action="event.discord.update",
                 target=f"web_events.{event_id}",
-                before=json.dumps({"guild_id": before["guild_id"], "channels": before["channels"]}),
-                after=json.dumps({"guild_id": after["guild_id"], "channels": after["channels"]}),
+                before=json.dumps({
+                    "guild_id": before["guild_id"], "channels": before["channels"],
+                    "discord_event_policy": before["discord_event_policy"],
+                    "pings": before["pings"],
+                }),
+                after=json.dumps({
+                    "guild_id": after["guild_id"], "channels": after["channels"],
+                    "discord_event_policy": after["discord_event_policy"],
+                    "pings": after["pings"],
+                }),
             ))
             s.commit()
             return after

@@ -69,6 +69,8 @@ from web_api.routes.events import (
     _effective_status,
     _load_event_or_404,
     _ts,
+    clean_task_visibility,
+    save_task_to_library,
 )
 
 event_admin_bp = Blueprint("v1_event_admin", __name__)
@@ -173,7 +175,7 @@ async def list_completions(event_id: int):
     def _load():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
             q = (
                 s.query(EventCompletion, EventTask.label, EventTeam.name, Player.player_name)
                 .outerjoin(EventTask, EventTask.id == EventCompletion.task_id)
@@ -207,7 +209,7 @@ async def confirm_completion(event_id: int, completion_id: int):
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
             comp = _load_completion_or_404(s, event_id, completion_id)
             if comp.status != "pending":
                 abort_problem(
@@ -246,7 +248,7 @@ async def reject_completion(event_id: int, completion_id: int):
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
             comp = _load_completion_or_404(s, event_id, completion_id)
             if comp.status != "pending":
                 abort_problem(
@@ -299,7 +301,7 @@ async def award_completion(event_id: int):
         nonlocal quantity
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
             task = (
                 s.query(EventTask)
                 .filter(EventTask.id == task_id, EventTask.event_id == event_id)
@@ -372,7 +374,7 @@ async def revoke_completion(event_id: int):
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
             comp = _load_completion_or_404(s, event_id, completion_id)
             if comp.status not in APPLIED_STATUSES:
                 abort_problem(
@@ -418,7 +420,7 @@ async def update_task(event_id: int, task_id: int):
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
             task = (
                 s.query(EventTask)
                 .filter(EventTask.id == task_id, EventTask.event_id == event_id)
@@ -455,6 +457,13 @@ async def update_task(event_id: int, task_id: int):
                 task.points = points
             if "requires_confirmation" in body:
                 task.requires_confirmation = bool(body.get("requires_confirmation"))
+            # Absent key ⇒ leave the task's library copy untouched (the
+            # quick-toggles PATCH single fields); when present, re-save the
+            # preset with the chosen publicity.
+            visibility = clean_task_visibility(body, default=None)
+            if visibility is not None:
+                task.visibility = visibility
+                save_task_to_library(s, ev, task, visibility)
             s.commit()
             return {
                 "id": task.id,
@@ -464,6 +473,7 @@ async def update_task(event_id: int, task_id: int):
                 "target_value": task.target_value,
                 "points": int(task.points or 0),
                 "requires_confirmation": bool(task.requires_confirmation),
+                "visibility": task.visibility or "public",
             }
 
     payload = await asyncio.to_thread(_apply)
@@ -605,7 +615,7 @@ async def put_bingo_board(event_id: int):
 
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev.group_id)
+            _assert_event_admin(s, user_id, ev)
             _assert_board_editable(ev)
 
             # Resolve library presets up front.
@@ -693,6 +703,7 @@ async def put_bingo_board(event_id: int):
                     points = nt.get("points", 0)
                     if not isinstance(points, int) or isinstance(points, bool) or points < 0:
                         abort_problem(422, "Invalid points", "new_task.points must be a non-negative integer.")
+                    visibility = clean_task_visibility(nt)
                     normalized = validate_task_payload(s, nt)
                     task = EventTask(
                         event_id=event_id,
@@ -702,9 +713,11 @@ async def put_bingo_board(event_id: int):
                         target_value=normalized["target_value"],
                         points=points,
                         requires_confirmation=bool(nt.get("requires_confirmation")),
+                        visibility=visibility,
                         config=_merged_auto_config(normalized["config"]),
                     )
                     s.add(task)
+                    save_task_to_library(s, ev, task, visibility)
                     s.flush()
                     task_id = task.id
                     label = label or task.label
@@ -771,11 +784,31 @@ async def put_bingo_board(event_id: int):
 _LIBRARY_PAGE_SIZE = 50
 
 
+def _admin_group_ids(s, user_id: int, manage_ids) -> set[int]:
+    """Group ids the user administers: explicit web grants plus groups whose
+    linked Discord guild they can manage. Drives which private library rows
+    they may see."""
+    from db import Group
+
+    gids = {
+        gid
+        for (gid,) in s.query(GroupAdmin.group_id).filter(GroupAdmin.user_id == user_id).all()
+    }
+    if manage_ids:
+        gids |= {
+            gid
+            for (gid,) in s.query(Group.group_id)
+            .filter(Group.guild_id.in_([str(g) for g in manage_ids]))
+            .all()
+        }
+    return gids
+
+
 @event_admin_bp.get("/event-task-library")
 async def list_task_library():
-    """Curated task presets for the designer picker. Read access for any
-    signed-in group admin (or superadmin) — the library is site-wide, not
-    scoped to one event."""
+    """Task presets for the pickers: curated seeds and group-saved tasks.
+    Read access for any signed-in group admin (or superadmin). Public rows
+    are site-wide; private rows only show to admins of the owning group."""
     user_id = current_user_id()
     query = (request.args.get("query") or "").strip()
     type_filter = (request.args.get("type") or "").strip()
@@ -792,18 +825,25 @@ async def list_task_library():
     manage_ids = manageable_guild_ids(user_id)
 
     def _load():
+        from sqlalchemy import or_ as sa_or
+
         with db_session() as s:
             user = load_user(s, user_id)
-            if not is_superadmin(user):
+            superadmin = is_superadmin(user)
+            admin_gids: set[int] = set()
+            if not superadmin:
+                admin_gids = _admin_group_ids(s, user_id, manage_ids)
                 # "Any group admin": an explicit web grant or MANAGE_GUILD on
                 # any linked guild qualifies.
-                grant = (s.query(GroupAdmin.id)
-                         .filter(GroupAdmin.user_id == user_id)
-                         .first())
-                if not grant and not manage_ids:
+                if not admin_gids and not manage_ids:
                     abort_problem(403, "Forbidden", "Event admins only.")
             q = s.query(EventTaskLibraryItem).filter(
                 EventTaskLibraryItem.active.is_(True))
+            if not superadmin:
+                visible = [EventTaskLibraryItem.visibility == "public"]
+                if admin_gids:
+                    visible.append(EventTaskLibraryItem.group_id.in_(sorted(admin_gids)))
+                q = q.filter(sa_or(*visible))
             if query:
                 like = f"%{query}%"
                 q = q.filter(EventTaskLibraryItem.name.like(like)
@@ -825,6 +865,9 @@ async def list_task_library():
                     "default_points": int(r.default_points or 0),
                     "difficulty": r.difficulty,
                     "config": r.config,
+                    "source": r.source,
+                    "group_id": r.group_id,
+                    "visibility": r.visibility or "public",
                 }
                 for r in rows
             ]

@@ -93,6 +93,30 @@ class TestResolveEventChannel:
         assert en.resolve_event_channel({"announcements": 123}, "event_started") == "123"
 
 
+# ── role pings (web_events.ping_config) ─────────────────────────────────────
+
+class TestPingRoles:
+    def test_unset_config_pings_nobody(self):
+        assert en.event_ping_role_ids(None, "event_started") == []
+        assert en.event_ping_role_ids("", "event_started") == []
+
+    def test_corrupt_config_pings_nobody(self):
+        assert en.event_ping_role_ids("not json", "event_started") == []
+        assert en.event_ping_role_ids('["list"]', "event_started") == []
+        assert en.event_ping_role_ids('{"event_started": "123"}', "event_started") == []
+
+    def test_configured_key_returns_role_strings(self):
+        raw = '{"event_started": ["111", 222], "event_ended": ["333"]}'
+        assert en.event_ping_role_ids(raw, "event_started") == ["111", "222"]
+        assert en.event_ping_role_ids(raw, "event_ended") == ["333"]
+        # Types without a configured key stay silent.
+        assert en.event_ping_role_ids(raw, "event_completion") == []
+
+    def test_ping_content_mentions(self):
+        assert en.ping_content(["1", "2"]) == "<@&1> <@&2>"
+        assert en.ping_content([]) is None
+
+
 # ── embed content specs ──────────────────────────────────────────────────────
 
 def _spec(ntype, data=None, standings=None):

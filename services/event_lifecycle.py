@@ -80,7 +80,8 @@ def activation_blockers(session, event, now: Optional[datetime] = None) -> list:
     """Human-readable reasons ``event`` cannot activate right now (empty when
     it can): needs ≥1 team; ``ends_at`` (if set) must be in the future; a
     bingo event needs a complete ``board_size²`` board whose bound cells
-    reference this event's tasks."""
+    reference this event's tasks. clan_vs_clan additionally needs ≥2 accepted
+    clans, each with at least one team."""
     from db.models import EventBingoCell, EventTask, EventTeam
 
     now = now or datetime.now()
@@ -89,6 +90,33 @@ def activation_blockers(session, event, now: Optional[datetime] = None) -> list:
     team_count = session.query(EventTeam).filter(EventTeam.event_id == event.id).count()
     if team_count < 1:
         blockers.append("The event needs at least one team.")
+
+    if (getattr(event, "mode", None) or "standard") == "clan_vs_clan":
+        from db.models import EventGroup
+
+        accepted = [
+            gid for (gid,) in
+            session.query(EventGroup.group_id)
+            .filter(EventGroup.event_id == event.id, EventGroup.status == "accepted")
+            .all()
+        ]
+        if len(accepted) < 2:
+            blockers.append(
+                "A clan-vs-clan event needs at least two accepted clans "
+                "(the host plus an opponent that accepted its invitation)."
+            )
+        team_gids = {
+            gid for (gid,) in
+            session.query(EventTeam.group_id)
+            .filter(EventTeam.event_id == event.id)
+            .all()
+        }
+        clans_without_teams = [g for g in accepted if g not in team_gids]
+        if accepted and clans_without_teams:
+            blockers.append(
+                f"Every accepted clan needs at least one team — "
+                f"{len(clans_without_teams)} clan(s) have none yet."
+            )
 
     if event.ends_at is not None and event.ends_at <= now:
         blockers.append("The end date is in the past — move it into the future first.")
@@ -278,6 +306,15 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
         event.starts_at = now
     session.flush()
 
+    # The Discord scheduled-event mirror goes live now: with the default
+    # ``discord_event_policy='on_activate'`` a draft desired no guilds, so
+    # this re-sync is what seeds the ``web_event_guilds`` rows the bot
+    # reconciler turns into real Discord events. (No-op for ``immediate``
+    # events — their rows already exist and stay synced.)
+    from services.event_scheduled_events import sync_event_guilds
+
+    sync_event_guilds(session, event)
+
     # Free cells complete for every team "from activation" (Task 20/21).
     event_engine.grant_free_cells(session, event)
 
@@ -331,6 +368,15 @@ def end_event(session, event, *, actor_user_id=None,
     event.status = "past"
     event.ended_at = now
     session.flush()
+
+    # Retire the mirrored Discord scheduled event(s): the core bot's
+    # reconciler deletes them and drops the rows
+    # (services/event_scheduled_events.py).
+    from db.models import EventGuild
+
+    session.query(EventGuild).filter(EventGuild.event_id == event.id).update(
+        {EventGuild.sync_status: "delete_pending"}, synchronize_session=False,
+    )
 
     standings = final_standings(session, event.id, limit=5)
     ev_dict = event_engine._event_to_dict(event)
