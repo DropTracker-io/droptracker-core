@@ -16,7 +16,29 @@ import db.models  # Import to register models with Base
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
-print("Alembic connection string:", config.get_main_option("sqlalchemy.url"))
+
+
+def _mask_db_url(url: str) -> str:
+    """Redact the password in a SQLAlchemy URL before logging it.
+
+    alembic runs on every deploy and its output is captured to logs; printing
+    the raw sqlalchemy.url leaks the DB (root) password. Mask the credential
+    while keeping the host/db visible for diagnostics.
+    """
+    if not url:
+        return url
+    try:
+        from sqlalchemy.engine.url import make_url
+
+        return make_url(url).render_as_string(hide_password=True)
+    except Exception:
+        # Fall back to a coarse regex mask if the URL can't be parsed.
+        import re
+
+        return re.sub(r"(://[^:/@]+:)[^@]*(@)", r"\1***\2", url)
+
+
+print("Alembic connection string:", _mask_db_url(config.get_main_option("sqlalchemy.url")))
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
 if config.config_file_name is not None:

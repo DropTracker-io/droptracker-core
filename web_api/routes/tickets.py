@@ -27,6 +27,7 @@ from sqlalchemy import func, or_
 from db.models import AuditLog, Ticket, TicketMessage, User
 from web_api.common import abort_problem, db_session, parse_page, private_no_store
 from web_api.deps import assert_superadmin, current_user_id, json_body, load_user
+from web_api.mentions import resolve_user_mentions
 
 tickets_bp = Blueprint("v1_tickets", __name__)
 
@@ -194,6 +195,9 @@ async def ticket_detail(ticket_id: int):
             )
             payload = _ticket_summary(s, ticket, message_counts={ticket_id: len(messages)})
             payload["messages"] = [_message_row(m) for m in messages]
+            # discord_id -> username for any <@id> mentions in the transcript,
+            # so the web view can render real names instead of raw ids.
+            payload["mentions"] = resolve_user_mentions(s, (m.content for m in messages))
             return payload
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))

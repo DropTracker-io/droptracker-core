@@ -18,6 +18,16 @@ Every endpoint independently enforces superadmin (403 otherwise):
   DELETE /api/v1/admin/badges/{key}              (soft delete)
   POST   /api/v1/admin/players/{id}/badges       { badge_key, note? }
   DELETE /api/v1/admin/players/{id}/badges/{award_id}
+  GET    /api/v1/admin/pb-blocks                  (blocked-PB NPC list)
+  GET    /api/v1/admin/pb-blocks/search?q=        (bosses to block, with impact)
+  POST   /api/v1/admin/pb-blocks                  { npc_id|npc_ids, confirm } (block + purge)
+  DELETE /api/v1/admin/pb-blocks/{npc_id}         (unblock; rows NOT restored)
+  GET    /api/v1/admin/item-values                 (list overrides + live preview)
+  GET    /api/v1/admin/item-values/item-search?q=  (resolve item name → id)
+  GET    /api/v1/admin/item-values/export          ({ txt } for valued_items.txt)
+  POST   /api/v1/admin/item-values                 { item_id, item_name, components, ... }
+  PATCH  /api/v1/admin/item-values/{override_id}   (partial update)
+  DELETE /api/v1/admin/item-values/{override_id}
 
 Service control is whitelisted to three units and shells out via systemctl /
 journalctl with **no** user input interpolated into the command. No SQL executor
@@ -31,7 +41,7 @@ import json
 import subprocess
 from datetime import datetime, timedelta
 
-from sqlalchemy import or_
+from sqlalchemy import or_, text as sa_text
 
 from quart import Blueprint, jsonify, request
 
@@ -45,24 +55,34 @@ from db import (
     GroupConfiguration,
     GroupSubscription,
     ItemList,
+    ItemValueOverride,
     Log,
     NotificationQueue,
     NpcList,
     Player,
+    SubscriptionPayment,
     SubscriptionTier,
     User,
     UserSubscription,
+)
+from db.entitlements import (
+    effective_group_tiers,
+    leg_monthly_cents,
+    paid_group_tiers_desc,
+    subscription_is_live,
 )
 from web_api import admin_registry as registry
 from web_api import billing
 from web_api.common import abort_problem, db_session, parse_page, private_no_store
 from web_api.deps import assert_superadmin, current_user_id, json_body, load_user
+from utils import value_overrides
 from web_api.entitlements_registry import (
     EntitlementValidationError,
     entitlements_to_storage,
     validate_entitlements_input,
 )
-from web_api.routes.subscriptions import _serialize_sub, _serialize_user_sub
+from web_api.tier_flair import FlairValidationError, validate_flair
+from web_api.routes.subscriptions import _serialize_group_sub, _serialize_sub, _serialize_user_sub
 
 admin_bp = Blueprint("v1_admin", __name__)
 
@@ -311,7 +331,13 @@ def _tier_from_body(body: dict, existing: SubscriptionTier | None = None):
             abort_problem(422, "Invalid entitlements", e.detail)
     elif existing is not None:
         entitlements_json = existing.entitlements
-    return key, scope, features_json, entitlements_json
+    try:
+        flair = validate_flair(
+            body.get("flair") if "flair" in body else (existing.flair if existing else None)
+        )
+    except FlairValidationError as e:
+        abort_problem(422, "Invalid flair", e.detail)
+    return key, scope, features_json, entitlements_json, flair
 
 
 @admin_bp.post("/admin/subscriptions/tiers")
@@ -321,7 +347,7 @@ async def create_tier():
 
     def _apply():
         with db_session() as s:
-            key, scope, features_json, entitlements_json = _tier_from_body(body)
+            key, scope, features_json, entitlements_json, flair = _tier_from_body(body)
             if s.query(SubscriptionTier).filter(SubscriptionTier.key == key).first():
                 abort_problem(409, "Tier exists", f"Tier '{key}' already exists.")
             tier = SubscriptionTier(
@@ -334,6 +360,7 @@ async def create_tier():
                 interval=body.get("interval") or "month",
                 features=features_json,
                 entitlements=entitlements_json,
+                flair=flair,
                 recommended=bool(body.get("recommended", False)),
                 active=bool(body.get("active", True)),
             )
@@ -379,6 +406,11 @@ async def update_tier(key: str):
                     tier.entitlements = entitlements_to_storage(validated)
                 except EntitlementValidationError as e:
                     abort_problem(422, "Invalid entitlements", e.detail)
+            if "flair" in body:
+                try:
+                    tier.flair = validate_flair(body.get("flair"))
+                except FlairValidationError as e:
+                    abort_problem(422, "Invalid flair", e.detail)
             if "recommended" in body:
                 tier.recommended = bool(body["recommended"])
             if "active" in body:
@@ -429,6 +461,266 @@ async def delete_tier(key: str):
 
 
 # --------------------------------------------------------------------------- #
+# Item value overrides — runtime-editable "component of X, worth Y" rules.
+# Replaces the hard-coded special-cases in utils/ge_value.py. Every write evicts
+# the shared cache (value_overrides.invalidate) so live services pick up the
+# change without a restart.
+# --------------------------------------------------------------------------- #
+def _override_to_dict(row) -> dict:
+    try:
+        components = json.loads(row.components) if row.components else []
+    except (ValueError, TypeError):
+        components = []
+    return {
+        "id": row.id,
+        "item_id": row.item_id,
+        "item_name": row.item_name,
+        "divisor": row.divisor,
+        "flat_bonus": row.flat_bonus,
+        "fallback_value": row.fallback_value,
+        "components": components,
+        "description": row.description,
+        "active": bool(row.active),
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def _validate_components(raw) -> list:
+    if not isinstance(raw, list):
+        abort_problem(422, "Invalid components", "components must be a list.")
+    out = []
+    for i, c in enumerate(raw):
+        if not isinstance(c, dict):
+            abort_problem(422, "Invalid component", f"Component {i + 1} must be an object.")
+        name = str(c.get("item_name") or "").strip()
+        if not name:
+            abort_problem(422, "Invalid component", f"Component {i + 1} requires an item name.")
+        try:
+            qty = int(c.get("quantity"))
+        except (TypeError, ValueError):
+            abort_problem(422, "Invalid component", f"Component {i + 1} quantity must be an integer.")
+        if qty == 0:
+            abort_problem(422, "Invalid component", f"Component {i + 1} quantity must be non-zero.")
+        cid = None
+        if c.get("item_id") not in (None, ""):
+            try:
+                cid = int(c["item_id"])
+            except (TypeError, ValueError):
+                abort_problem(422, "Invalid component", f"Component {i + 1} item_id must be an integer.")
+        out.append({"item_id": cid, "item_name": name[:125], "quantity": qty})
+    return out
+
+
+def _validate_override_body(body: dict, *, require_item: bool) -> dict:
+    """Validate + normalize an override payload. On create (require_item) every
+    column gets a value; on PATCH only the provided keys are returned."""
+    out: dict = {}
+    if "item_id" in body and body["item_id"] not in (None, ""):
+        try:
+            out["item_id"] = int(body["item_id"])
+        except (TypeError, ValueError):
+            abort_problem(422, "Invalid item_id", "item_id must be an integer.")
+    elif require_item:
+        out["item_id"] = None
+    if require_item or "item_name" in body:
+        name = str(body.get("item_name") or "").strip()
+        if not name:
+            abort_problem(422, "Missing item_name", "item_name is required.")
+        out["item_name"] = name[:125]
+    if require_item or "divisor" in body:
+        try:
+            divisor = int(body.get("divisor", 1))
+        except (TypeError, ValueError):
+            abort_problem(422, "Invalid divisor", "divisor must be an integer.")
+        if divisor < 1:
+            abort_problem(422, "Invalid divisor", "divisor must be ≥ 1.")
+        out["divisor"] = divisor
+    if "flat_bonus" in body:
+        try:
+            out["flat_bonus"] = int(body["flat_bonus"])
+        except (TypeError, ValueError):
+            abort_problem(422, "Invalid flat_bonus", "flat_bonus must be an integer.")
+    elif require_item:
+        out["flat_bonus"] = 0
+    if "fallback_value" in body:
+        try:
+            fv = int(body["fallback_value"])
+        except (TypeError, ValueError):
+            abort_problem(422, "Invalid fallback_value", "fallback_value must be an integer.")
+        if fv < 0:
+            abort_problem(422, "Invalid fallback_value", "fallback_value must be ≥ 0.")
+        out["fallback_value"] = fv
+    elif require_item:
+        out["fallback_value"] = 0
+    if require_item or "components" in body:
+        out["components"] = _validate_components(body.get("components") or [])
+    if require_item or "description" in body:
+        desc = str(body.get("description") or "").strip()
+        out["description"] = desc[:255] or None
+    if "active" in body:
+        out["active"] = bool(body["active"])
+    elif require_item:
+        out["active"] = True
+    return out
+
+
+def _apply_override_fields(row, fields: dict) -> None:
+    for key in ("item_id", "item_name", "divisor", "flat_bonus", "fallback_value",
+                "description", "active"):
+        if key in fields:
+            setattr(row, key, fields[key])
+    if "components" in fields:
+        row.components = json.dumps(fields["components"])
+
+
+@admin_bp.get("/admin/item-values")
+async def list_item_values():
+    await _require_superadmin()
+
+    def _load():
+        with db_session() as s:
+            rows = s.query(ItemValueOverride).order_by(ItemValueOverride.item_name.asc()).all()
+            items = [_override_to_dict(r) for r in rows]
+            from web_api.item_value_enrich import enrich_overrides
+            enrich_overrides(s, items)
+            return items
+
+    items = await asyncio.to_thread(_load)
+    # Best-effort live preview of each rule's current value. Never fail the list
+    # if the GE API is unavailable.
+    try:
+        from utils.ge_value import build_component_price_map
+
+        price_map = await build_component_price_map(items)
+        for it in items:
+            computed = value_overrides.compute_override_from_prices(it, price_map)
+            if computed is None:
+                computed = it["fallback_value"] or None
+            it["computed_value"] = computed
+    except Exception:
+        for it in items:
+            it["computed_value"] = None
+    return private_no_store(jsonify(items))
+
+
+@admin_bp.get("/admin/item-values/item-search")
+async def item_value_item_search():
+    await _require_superadmin()
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return jsonify([])
+
+    def _search():
+        with db_session() as s:
+            rows = (
+                s.query(ItemList)
+                .filter(ItemList.item_name.ilike(f"%{q}%"))
+                .order_by(ItemList.item_name.asc())
+                .limit(20)
+                .all()
+            )
+            return [{"item_id": r.item_id, "item_name": r.item_name} for r in rows]
+
+    return jsonify(await asyncio.to_thread(_search))
+
+
+@admin_bp.get("/admin/item-values/export")
+async def item_value_export():
+    """Comma-separated active item ids for the GitHub Pages valued_items.txt."""
+    await _require_superadmin()
+
+    def _load():
+        with db_session() as s:
+            rows = (
+                s.query(ItemValueOverride.item_id)
+                .filter(ItemValueOverride.active.is_(True), ItemValueOverride.item_id.isnot(None))
+                .order_by(ItemValueOverride.item_id.asc())
+                .all()
+            )
+            return [str(r[0]) for r in rows]
+
+    ids = await asyncio.to_thread(_load)
+    return jsonify({"txt": ",".join(ids), "count": len(ids)})
+
+
+@admin_bp.post("/admin/item-values")
+async def create_item_value():
+    actor = await _require_superadmin()
+    body = await json_body()
+    fields = _validate_override_body(body, require_item=True)
+
+    def _apply():
+        with db_session() as s:
+            if fields.get("item_id") is not None and (
+                s.query(ItemValueOverride)
+                .filter(ItemValueOverride.item_id == fields["item_id"])
+                .first()
+            ):
+                abort_problem(409, "Override exists",
+                              f"An override for item {fields['item_id']} already exists.")
+            row = ItemValueOverride(author_user_id=actor)
+            _apply_override_fields(row, fields)
+            s.add(row)
+            s.commit()
+            return row.id
+
+    new_id = await asyncio.to_thread(_apply)
+    value_overrides.invalidate()
+    _audit(actor, "item_value.create",
+           f"item_value_overrides:{fields.get('item_id') or fields.get('item_name')}")
+    return jsonify({"id": new_id})
+
+
+@admin_bp.patch("/admin/item-values/<int:override_id>")
+async def update_item_value(override_id: int):
+    actor = await _require_superadmin()
+    body = await json_body()
+    fields = _validate_override_body(body, require_item=False)
+    if not fields:
+        abort_problem(422, "No changes", "Provide at least one field to update.")
+
+    def _apply():
+        with db_session() as s:
+            row = s.query(ItemValueOverride).filter(ItemValueOverride.id == override_id).first()
+            if not row:
+                abort_problem(404, "Override not found", f"No override #{override_id}.")
+            if fields.get("item_id") is not None and fields["item_id"] != row.item_id:
+                if (
+                    s.query(ItemValueOverride)
+                    .filter(ItemValueOverride.item_id == fields["item_id"],
+                            ItemValueOverride.id != override_id)
+                    .first()
+                ):
+                    abort_problem(409, "Override exists",
+                                  f"An override for item {fields['item_id']} already exists.")
+            _apply_override_fields(row, fields)
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    value_overrides.invalidate()
+    _audit(actor, "item_value.update", f"item_value_overrides:{override_id}")
+    return jsonify({"ok": True})
+
+
+@admin_bp.delete("/admin/item-values/<int:override_id>")
+async def delete_item_value(override_id: int):
+    actor = await _require_superadmin()
+
+    def _apply():
+        with db_session() as s:
+            row = s.query(ItemValueOverride).filter(ItemValueOverride.id == override_id).first()
+            if not row:
+                abort_problem(404, "Override not found", f"No override #{override_id}.")
+            s.delete(row)
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    value_overrides.invalidate()
+    _audit(actor, "item_value.delete", f"item_value_overrides:{override_id}")
+    return jsonify({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
 # Site overview KPIs (dashboard landing)
 # --------------------------------------------------------------------------- #
 @admin_bp.get("/admin/overview")
@@ -466,6 +758,29 @@ async def admin_overview():
                     s.query(GroupSubscription).filter(GroupSubscription.status == "active")
                 ),
             })
+            # Headline MRR — the full breakdown lives on /admin/subscriptions.
+            # Comped grants (provider == "manual") keep their entitlements but
+            # are not income, so they are excluded from every revenue figure.
+            try:
+                tiers_by_key = {t.key: t for t in s.query(SubscriptionTier).all()}
+                mrr = sum(
+                    leg_monthly_cents(leg, tiers_by_key)
+                    for leg in s.query(GroupSubscription).all()
+                    if subscription_is_live(leg) and leg.provider != "manual"
+                )
+                for u in s.query(UserSubscription).all():
+                    if not subscription_is_live(u) or u.provider == "manual":
+                        continue
+                    tier = tiers_by_key.get(u.tier_key) if u.tier_key else None
+                    amount = u.amount_cents if u.amount_cents else (tier.price_cents if tier else 0)
+                    mrr += _monthly_cents(amount, tier.interval if tier else "month")
+                stats.append({
+                    "key": "mrr", "label": "Monthly recurring revenue",
+                    "value": f"${mrr / 100:,.2f}",
+                    "hint": "Live paid subscriptions, monthly-normalized (comped excluded)",
+                })
+            except Exception:
+                pass
             stats.append({
                 "key": "pending_discord_outbox", "label": "Pending Discord outbox",
                 "value": _count(
@@ -496,6 +811,197 @@ async def admin_overview():
 
 
 # --------------------------------------------------------------------------- #
+# Monetization dashboard (/admin/subscriptions)
+# --------------------------------------------------------------------------- #
+def _ts(dt) -> int | None:
+    return int(dt.timestamp()) if dt else None
+
+
+def _monthly_cents(amount, interval: str | None) -> int:
+    amt = int(amount or 0)
+    return amt // 12 if (interval or "month") == "year" else amt
+
+
+@admin_bp.get("/admin/subscriptions/overview")
+async def admin_subscriptions_overview():
+    """Everything the superadmin monetization dashboard renders, one payload:
+    MRR/lifetime KPIs, 12-month income (from the payments ledger), every
+    subscription across both scopes, and recent payments."""
+    await _require_superadmin()
+
+    def _load():
+        with db_session() as s:
+            legs = s.query(GroupSubscription).all()
+            usubs = s.query(UserSubscription).all()
+            tiers = s.query(SubscriptionTier).all()
+            tiers_by_key = {t.key: t for t in tiers}
+
+            live_legs = [leg for leg in legs if subscription_is_live(leg)]
+            live_usubs = [u for u in usubs if subscription_is_live(u)]
+
+            # Comped grants (provider == "manual") keep their entitlements but
+            # are not income — exclude them from every revenue metric.
+            paid_legs = [leg for leg in live_legs if leg.provider != "manual"]
+            paid_usubs = [u for u in live_usubs if u.provider != "manual"]
+
+            group_mrr = sum(leg_monthly_cents(leg, tiers_by_key) for leg in paid_legs)
+            user_mrr = 0
+            for u in paid_usubs:
+                tier = tiers_by_key.get(u.tier_key) if u.tier_key else None
+                amount = u.amount_cents if u.amount_cents else (tier.price_cents if tier else 0)
+                user_mrr += _monthly_cents(amount, tier.interval if tier else "month")
+
+            # Effective tier per paying group (pool resolution). Groups whose
+            # only live leg is a comp are not "paying".
+            effective = effective_group_tiers(s, {leg.group_id for leg in paid_legs})
+            tier_counts: dict[str, int] = {}
+            for tier, _total in effective.values():
+                tier_counts[tier.key] = tier_counts.get(tier.key, 0) + 1
+            tier_distribution = [
+                {
+                    "tier_key": key,
+                    "tier_name": tiers_by_key[key].name if key in tiers_by_key else key,
+                    "groups": count,
+                }
+                for key, count in sorted(tier_counts.items(), key=lambda kv: -kv[1])
+            ]
+
+            past_due = sum(1 for leg in legs if leg.status == "past_due") + sum(
+                1 for u in usubs if u.status == "past_due"
+            )
+
+            # Ledger aggregates. Refunds/reversals subtract; manual rows are
+            # excluded defensively (no live path writes them today).
+            signed = "SUM(CASE WHEN kind = 'payment' THEN amount_cents ELSE -amount_cents END)"
+            lifetime = s.execute(
+                sa_text(
+                    f"SELECT COALESCE({signed}, 0) FROM subscription_payments "
+                    "WHERE provider != 'manual'"
+                )
+            ).scalar()
+            months = s.execute(
+                sa_text(
+                    "SELECT DATE_FORMAT(paid_at, '%Y-%m') AS month, "
+                    f"{signed} AS cents "
+                    "FROM subscription_payments "
+                    "WHERE provider != 'manual' "
+                    "AND paid_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH) "
+                    "GROUP BY month ORDER BY month ASC"
+                )
+            ).fetchall()
+
+            # Names for every row we're about to list.
+            group_ids = {leg.group_id for leg in legs}
+            payer_ids = {leg.user_id for leg in legs if leg.user_id} | {
+                u.user_id for u in usubs
+            }
+            group_names = dict(
+                s.query(Group.group_id, Group.group_name)
+                .filter(Group.group_id.in_(group_ids))
+                .all()
+            ) if group_ids else {}
+            user_names = dict(
+                s.query(User.user_id, User.username)
+                .filter(User.user_id.in_(payer_ids))
+                .all()
+            ) if payer_ids else {}
+
+            subscriptions = []
+            for leg in legs:
+                subscriptions.append({
+                    "scope": "group",
+                    "id": leg.id,
+                    "group_id": leg.group_id,
+                    "group_name": group_names.get(leg.group_id),
+                    "user_id": leg.user_id,
+                    "user_name": user_names.get(leg.user_id),
+                    "tier_key": leg.tier_key,
+                    "amount_cents": int(leg.amount_cents) if leg.amount_cents is not None else None,
+                    "provider": leg.provider,
+                    "status": leg.status,
+                    "live": leg in live_legs,
+                    "current_period_end": _ts(leg.current_period_end),
+                    "cancel_at_period_end": bool(leg.cancel_at_period_end),
+                })
+            for u in usubs:
+                subscriptions.append({
+                    "scope": "user",
+                    "id": u.id,
+                    "group_id": None,
+                    "group_name": None,
+                    "user_id": u.user_id,
+                    "user_name": user_names.get(u.user_id),
+                    "tier_key": u.tier_key,
+                    "amount_cents": int(u.amount_cents) if u.amount_cents else None,
+                    "provider": u.provider,
+                    "status": u.status,
+                    "live": u in live_usubs,
+                    "current_period_end": _ts(u.current_period_end),
+                    "cancel_at_period_end": bool(u.cancel_at_period_end),
+                })
+            # Live first, then by soonest renewal.
+            subscriptions.sort(key=lambda r: (not r["live"], r["current_period_end"] or 0))
+
+            recent_rows = (
+                s.query(SubscriptionPayment)
+                .order_by(SubscriptionPayment.paid_at.desc())
+                .limit(20)
+                .all()
+            )
+            pay_group_ids = {p.group_id for p in recent_rows if p.group_id}
+            pay_user_ids = {p.user_id for p in recent_rows if p.user_id}
+            pay_group_names = dict(
+                s.query(Group.group_id, Group.group_name)
+                .filter(Group.group_id.in_(pay_group_ids))
+                .all()
+            ) if pay_group_ids else {}
+            pay_user_names = dict(
+                s.query(User.user_id, User.username)
+                .filter(User.user_id.in_(pay_user_ids))
+                .all()
+            ) if pay_user_ids else {}
+            recent_payments = [
+                {
+                    "id": p.id,
+                    "scope": p.scope,
+                    "group_id": p.group_id,
+                    "group_name": pay_group_names.get(p.group_id),
+                    "user_id": p.user_id,
+                    "user_name": pay_user_names.get(p.user_id),
+                    "tier_key": p.tier_key,
+                    "provider": p.provider,
+                    "amount_cents": int(p.amount_cents),
+                    "currency": p.currency,
+                    "kind": p.kind,
+                    "paid_at": _ts(p.paid_at),
+                }
+                for p in recent_rows
+            ]
+
+            return {
+                "kpis": {
+                    "mrr_cents": group_mrr + user_mrr,
+                    "group_mrr_cents": group_mrr,
+                    "user_mrr_cents": user_mrr,
+                    "paying_groups": len(effective),
+                    "active_user_subscriptions": len(live_usubs),
+                    "past_due": past_due,
+                    "lifetime_cents": int(lifetime or 0),
+                },
+                "tier_distribution": tier_distribution,
+                "income_by_month": [
+                    {"month": m, "amount_cents": int(c or 0)} for m, c in months
+                ],
+                "subscriptions": subscriptions,
+                "recent_payments": recent_payments,
+            }
+
+    payload = await asyncio.to_thread(_load)
+    payload["generated_at"] = int(datetime.now().timestamp())
+    return private_no_store(jsonify(payload))
+
+
+# --------------------------------------------------------------------------- #
 # Comped subscriptions (reuse group_subscriptions — no new table)
 # --------------------------------------------------------------------------- #
 @admin_bp.post("/admin/groups/<int:group_id>/subscription/grant")
@@ -516,9 +1022,14 @@ async def admin_grant_subscription(group_id: int):
             )
             if not tier:
                 abort_problem(404, "Unknown tier", f"No tier '{grant['tier_key']}'.")
+            # Pool model: comp = the group's single MANUAL leg. Never touch
+            # paid legs (stripe/paypal) — a comp sits alongside them.
             sub = (
                 s.query(GroupSubscription)
-                .filter(GroupSubscription.group_id == group_id)
+                .filter(
+                    GroupSubscription.group_id == group_id,
+                    GroupSubscription.provider == "manual",
+                )
                 .first()
             )
             before = _serialize_sub(group_id, sub) if sub else None
@@ -528,6 +1039,7 @@ async def admin_grant_subscription(group_id: int):
             sub.provider = grant["provider"]
             sub.status = grant["status"]
             sub.tier_key = grant["tier_key"]
+            sub.amount_cents = tier.price_cents
             sub.current_period_end = grant["current_period_end"]
             sub.cancel_at_period_end = grant["cancel_at_period_end"]
             s.commit()
@@ -547,13 +1059,18 @@ async def admin_revoke_subscription(group_id: int):
 
     def _apply():
         with db_session() as s:
+            # Pool model: revoke targets the comped MANUAL leg only; paid
+            # legs are managed by their payers/providers.
             sub = (
                 s.query(GroupSubscription)
-                .filter(GroupSubscription.group_id == group_id)
+                .filter(
+                    GroupSubscription.group_id == group_id,
+                    GroupSubscription.provider == "manual",
+                )
                 .first()
             )
             if not sub or sub.status == "none":
-                abort_problem(404, "No subscription", "This group has no subscription.")
+                abort_problem(404, "No subscription", "This group has no comped subscription.")
             before = _serialize_sub(group_id, sub)
             sub.status = "canceled"
             s.commit()
@@ -901,12 +1418,8 @@ async def admin_group_overview(group_id: int):
             except Exception:
                 member_count = 0
 
-            sub = (
-                s.query(GroupSubscription)
-                .filter(GroupSubscription.group_id == group_id)
-                .first()
-            )
-            subscription = _serialize_sub(group_id, sub)
+            # Effective pool view (computed tier + all contribution legs).
+            subscription = _serialize_group_sub(s, group_id)
 
             cfg_rows = (
                 s.query(GroupConfiguration.config_key, GroupConfiguration.config_value)
@@ -1322,3 +1835,171 @@ def _invalidate_badge_user_entitlements(user_id) -> None:
         invalidate_user_entitlement_cache(int(user_id))
     except Exception:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Personal-best NPC blocklist
+#
+# Some NPCs have no real personal best; the plugin still reports "kill times"
+# for them, producing junk rows. Superadmins maintain a global blocklist of
+# npc_ids — blocked NPCs are dropped at PB intake, and adding one permanently
+# purges its existing rows. Storage + enforcement live in utils.pb_blocklist;
+# a boss is always blocked/unblocked together with its variant ids (same name).
+# --------------------------------------------------------------------------- #
+def _group_npcs_by_name(s, npc_ids):
+    """Group ids into ``[{name, npc_ids, pb_count}]`` by case-insensitive name."""
+    from utils import pb_blocklist
+
+    ids = sorted({int(i) for i in npc_ids})
+    if not ids:
+        return []
+    rows = s.query(NpcList.npc_id, NpcList.npc_name).filter(NpcList.npc_id.in_(ids)).all()
+    by_name: dict = {}
+    seen: set = set()
+    for nid, name in rows:
+        seen.add(int(nid))
+        by_name.setdefault((name or "").strip().lower(), {"name": name, "npc_ids": []})[
+            "npc_ids"
+        ].append(int(nid))
+    for nid in ids:  # ids with no npc_list row — surface so they can be removed
+        if nid not in seen:
+            by_name[f"#{nid}"] = {"name": f"Unknown NPC #{nid}", "npc_ids": [nid]}
+    out = []
+    for g in by_name.values():
+        g["npc_ids"] = sorted(g["npc_ids"])
+        g["pb_count"] = pb_blocklist.pb_entry_count(s, g["npc_ids"])
+        out.append(g)
+    out.sort(key=lambda x: (x["name"] or "").lower())
+    return out
+
+
+def _body_npc_ids(body) -> list:
+    raw = body.get("npc_ids")
+    if raw is None and body.get("npc_id") is not None:
+        raw = [body.get("npc_id")]
+    if not isinstance(raw, list) or not raw:
+        abort_problem(422, "Missing npc_id", "Provide 'npc_id' or a non-empty 'npc_ids' list.")
+    out = []
+    for v in raw:
+        try:
+            out.append(int(v))
+        except (TypeError, ValueError):
+            abort_problem(422, "Invalid npc_id", f"'{v}' is not a valid npc id.")
+    return out
+
+
+@admin_bp.get("/admin/pb-blocks")
+async def admin_pb_blocks_list():
+    """Currently-blocked bosses (grouped by name, with remaining PB counts)."""
+    await _require_superadmin()
+
+    def _load():
+        from utils import pb_blocklist
+
+        with db_session() as s:
+            blocked = sorted(pb_blocklist.get_blocked_ids(s))
+            return {"bosses": _group_npcs_by_name(s, blocked), "blocked_ids": blocked}
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@admin_bp.get("/admin/pb-blocks/search")
+async def admin_pb_blocks_search():
+    """Search npc_list for bosses to block; annotate impact + current state."""
+    await _require_superadmin()
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return private_no_store(jsonify({"results": []}))
+
+    def _search():
+        from utils import pb_blocklist
+
+        like = f"%{q}%"
+        with db_session() as s:
+            rows = (
+                s.query(NpcList.npc_id, NpcList.npc_name)
+                .filter(NpcList.npc_name.ilike(like))
+                .order_by(NpcList.npc_name)
+                .limit(200)
+                .all()
+            )
+            blocked = pb_blocklist.get_blocked_ids(s)
+            by_name: dict = {}
+            for nid, name in rows:
+                by_name.setdefault((name or "").strip().lower(), {"name": name, "npc_ids": []})[
+                    "npc_ids"
+                ].append(int(nid))
+            results = []
+            for g in by_name.values():
+                ids = sorted(g["npc_ids"])
+                results.append(
+                    {
+                        "name": g["name"],
+                        "npc_ids": ids,
+                        "pb_count": pb_blocklist.pb_entry_count(s, ids),
+                        "blocked": all(i in blocked for i in ids),
+                    }
+                )
+            results.sort(key=lambda x: (-x["pb_count"], (x["name"] or "").lower()))
+            return results[:25]
+
+    return private_no_store(jsonify({"results": await asyncio.to_thread(_search)}))
+
+
+@admin_bp.post("/admin/pb-blocks")
+async def admin_pb_blocks_add():
+    """Block a boss (all its variant ids) AND purge its existing PB rows.
+
+    Destructive: requires ``confirm=true``; without it, returns 409 echoing the
+    number of rows that would be deleted so the UI can hard-confirm first.
+    """
+    actor = await _require_superadmin()
+    body = await json_body()
+    seed_ids = _body_npc_ids(body)
+    confirm = bool(body.get("confirm"))
+
+    def _apply():
+        from utils import pb_blocklist
+
+        with db_session() as s:
+            ids = sorted(pb_blocklist.sibling_ids(s, seed_ids) or set(seed_ids))
+            if not ids:
+                abort_problem(404, "Unknown NPC", "No npc_list rows matched the given id(s).")
+            bosses = _group_npcs_by_name(s, ids)
+            pb_count = pb_blocklist.pb_entry_count(s, ids)
+            if not confirm:
+                abort_problem(
+                    409,
+                    "Confirmation required",
+                    f"Blocking will permanently delete {pb_count} personal-best row(s). "
+                    "Re-send with confirm=true.",
+                )
+            result = pb_blocklist.block_and_purge(s, ids)
+            result["bosses"] = bosses
+            return result
+
+    result = await asyncio.to_thread(_apply)
+    label = ", ".join(b["name"] for b in result.get("bosses", [])) or str(seed_ids)
+    _audit(actor, "pb_block.add", label, after=f"deleted_pb={result.get('deleted_pb', 0)}")
+    return jsonify({"ok": True, **result})
+
+
+@admin_bp.delete("/admin/pb-blocks/<int:npc_id>")
+async def admin_pb_blocks_remove(npc_id: int):
+    """Unblock a boss (all its variant ids). Purged rows are NOT restored."""
+    actor = await _require_superadmin()
+
+    def _apply():
+        from utils import pb_blocklist
+
+        with db_session() as s:
+            ids = sorted(pb_blocklist.sibling_ids(s, [npc_id]) or {npc_id})
+            bosses = _group_npcs_by_name(s, ids)
+            result = pb_blocklist.unblock(s, ids)
+            result["bosses"] = bosses
+            return result
+
+    result = await asyncio.to_thread(_apply)
+    label = ", ".join(b["name"] for b in result.get("bosses", [])) or str(npc_id)
+    _audit(actor, "pb_block.remove", label)
+    return jsonify({"ok": True, **result})

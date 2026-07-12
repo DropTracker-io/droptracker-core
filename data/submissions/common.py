@@ -865,6 +865,53 @@ async def ensure_player_by_name_then_auth(session, player_name, account_hash, au
 stored_notifications = {}
 recently_sent = []
 
+# Group-channel notification types -> the GroupConfiguration channel key(s)
+# the notification service resolves at send time. The first key is the
+# per-type channel; any later key is its fallback, mirroring the exact
+# resolution order in services/notification_service.py (send_X_with_session).
+# Types NOT listed here (dm_* DMs, new_npc/new_item/name_change/new_player
+# system notifications, events, upgrades, ...) are never gated on this.
+GROUP_CHANNEL_NOTIFICATION_KEYS = {
+    "drop": ("channel_id_to_post_loot",),
+    "level_up": ("channel_id_to_post_levels",),
+    "quest": ("channel_id_to_post_quests", "channel_id_to_post_loot"),
+    "death": ("channel_id_to_post_deaths", "channel_id_to_post_loot"),
+    "diary": ("channel_id_to_post_diaries", "channel_id_to_post_loot"),
+    "pb": ("channel_id_to_post_pb", "channel_id_to_post_loot"),
+    "ca": ("channel_id_to_post_ca", "channel_id_to_post_loot"),
+    "clog": ("channel_id_to_post_clog", "channel_id_to_post_loot"),
+    "pet": ("channel_id_to_post_pets",),
+}
+
+
+def group_has_notification_channel(db_session, group_id, notification_type) -> bool:
+    """Whether a group has a Discord channel this notification could be sent to.
+
+    Mirrors the send-time channel resolution in
+    services/notification_service.py so we stop enqueueing group-channel
+    notifications that can only ever fail with "No channel configured".
+    A value is considered configured when it is non-empty and not the
+    legacy "0" unset sentinel. Unknown notification types (DMs, system
+    notifications) always return True; lookup errors also return True so a
+    transient DB issue never drops a notification.
+    """
+    keys = GROUP_CHANNEL_NOTIFICATION_KEYS.get(notification_type)
+    if keys is None or not group_id:
+        return True
+    try:
+        rows = (
+            db_session.query(GroupConfiguration.config_key, GroupConfiguration.config_value)
+            .filter(
+                GroupConfiguration.group_id == group_id,
+                GroupConfiguration.config_key.in_(keys),
+            )
+            .all()
+        )
+        values = {row[0]: row[1] for row in rows}
+    except Exception:
+        return True
+    return any(str(values.get(key) or "").strip() not in ("", "0") for key in keys)
+
 
 async def create_notification(notification_type, player_id, data, group_id=None, existing_session=None):
     """Create a notification queue entry."""
@@ -889,6 +936,17 @@ async def create_notification(notification_type, player_id, data, group_id=None,
         db_session = existing_session
     else:
         db_session = session
+    # Don't enqueue group-channel notifications the send side can never
+    # deliver (group has no relevant channel configured) — they'd fail with
+    # "No channel configured for group X" on every send attempt.
+    if group_id and not group_has_notification_channel(db_session, group_id, notification_type):
+        app_logger.log(
+            log_type="debug",
+            data=f"Skipping {notification_type} notification for group {group_id}: no notification channel configured",
+            app_name="core",
+            description="create_notification",
+        )
+        return None
     hashed_data = hashlib.sha256(json.dumps(data).encode()).hexdigest()
     if debug_test:
         await log_to_file(f"hashed data: {hashed_data}")

@@ -12,6 +12,10 @@ Authorized users (post-creation admin management, XF parity):
   POST   /api/v1/groups/{id}/authorized-users   { identifier }
   DELETE /api/v1/groups/{id}/authorized-users   { user_id | discord_id }
 
+Group icon (session + group admin):
+  POST   /api/v1/groups/{id}/icon               multipart 'file' → { icon_url }
+  DELETE /api/v1/groups/{id}/icon
+
 Creation wizard (session):
   GET   /api/v1/groups/wom-lookup/{womId}
   GET   /api/v1/groups/guild-status/{guildId}
@@ -517,6 +521,115 @@ async def diagnostics(group_id: int):
             }
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+# --------------------------------------------------------------------------- #
+# Group icon — uploaded by group admins, stored in the /img static tree
+# (www.droptracker.io/img/ → disc/static/assets/img/). The resulting
+# `groups.icon_url` is consumed by the website (profile header + social-card
+# metadata) and by Discord embeds (utils/embeds.py author icons).
+# --------------------------------------------------------------------------- #
+_IMG_BASE = "https://www.droptracker.io/img"
+# routes/ → web_api/ → repo root
+_ICON_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "static", "assets", "img", "group-icons",
+)
+_ICON_MAX_BYTES = 2 * 1024 * 1024
+_ICON_MAX_DIM = 512  # static uploads larger than this are downscaled
+_ICON_FORMATS = {"PNG": "png", "JPEG": "jpg", "GIF": "gif", "WEBP": "webp"}
+
+
+def _delete_group_icon_files(group_id: int) -> None:
+    """Remove every stored icon for the group (filenames are content-hashed,
+    so replacing an icon would otherwise leave the old file behind)."""
+    try:
+        for name in os.listdir(_ICON_DIR):
+            if name.startswith(f"{group_id}-"):
+                os.unlink(os.path.join(_ICON_DIR, name))
+    except FileNotFoundError:
+        pass
+
+
+@group_admin_bp.post("/groups/<int:group_id>/icon")
+async def upload_group_icon(group_id: int):
+    user_id = current_user_id()
+    files = await request.files
+    upload = files.get("file")
+    if upload is None:
+        abort_problem(422, "Invalid body", "A multipart 'file' field is required.")
+    raw = upload.read()
+    if len(raw) > _ICON_MAX_BYTES:
+        abort_problem(422, "File too large", "Group icons are capped at 2 MB.")
+
+    import io
+
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        im = Image.open(io.BytesIO(raw))
+        im.load()
+    except (UnidentifiedImageError, OSError, ValueError):
+        abort_problem(422, "Unsupported image", "Upload a PNG, JPEG, GIF, or WEBP image.")
+    ext = _ICON_FORMATS.get(im.format or "")
+    if ext is None:
+        abort_problem(422, "Unsupported image", "Upload a PNG, JPEG, GIF, or WEBP image.")
+
+    if getattr(im, "is_animated", False):
+        # Keep animated GIF/WEBP bytes untouched — re-encoding drops frames.
+        data = raw
+    else:
+        # Re-encode static images to PNG: strips metadata, caps dimensions,
+        # and guarantees the stored file is a plain raster.
+        rgba = im.convert("RGBA")
+        if max(rgba.size) > _ICON_MAX_DIM:
+            rgba.thumbnail((_ICON_MAX_DIM, _ICON_MAX_DIM), Image.LANCZOS)
+        buf = io.BytesIO()
+        rgba.save(buf, format="PNG", optimize=True)
+        data = buf.getvalue()
+        ext = "png"
+
+    import hashlib
+
+    digest = hashlib.sha1(data).hexdigest()[:10]
+    filename = f"{group_id}-{digest}.{ext}"
+    icon_url = f"{_IMG_BASE}/group-icons/{filename}"
+
+    def _apply():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+            group = s.query(Group).filter(Group.group_id == group_id).first()
+            if not group:
+                abort_problem(404, "Group not found", f"No group with id {group_id}.")
+            os.makedirs(_ICON_DIR, exist_ok=True)
+            _delete_group_icon_files(group_id)
+            with open(os.path.join(_ICON_DIR, filename), "wb") as fh:
+                fh.write(data)
+            group.icon_url = icon_url
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    return private_no_store(jsonify({"icon_url": icon_url}))
+
+
+@group_admin_bp.delete("/groups/<int:group_id>/icon")
+async def delete_group_icon(group_id: int):
+    user_id = current_user_id()
+
+    def _apply():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+            group = s.query(Group).filter(Group.group_id == group_id).first()
+            if not group:
+                abort_problem(404, "Group not found", f"No group with id {group_id}.")
+            _delete_group_icon_files(group_id)
+            group.icon_url = None
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    return jsonify({"ok": True})
 
 
 # --------------------------------------------------------------------------- #

@@ -10,7 +10,6 @@ from utils.embeds import update_boss_pb_embed
 # Removed circular import - these will be imported lazily inside functions if needed
 from utils.msg_logger import HighThroughputLogger
 from data.submissions import clog_processor, ca_processor, pb_processor, drop_processor
-from utils.ge_value import get_true_item_value
 from utils.format import convert_to_ms, convert_from_ms, get_true_boss_name
 from utils.redis import redis_client
 from db.app_logger import AppLogger

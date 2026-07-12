@@ -1,0 +1,19 @@
+# Daily trigger for droptracker-db-backup.service at ~08:30 UTC
+# (randomized up to 30 min to avoid a thundering herd on shared infra).
+# Persistent=true replays a missed run at next boot.
+#
+# Install:  sudo cp deploy/systemd/droptracker-db-backup.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now droptracker-db-backup.timer
+
+[Unit]
+Description=Daily DropTracker database backup (~08:30 UTC)
+
+[Timer]
+OnCalendar=*-*-* 08:30:00 UTC
+RandomizedDelaySec=1800
+Persistent=true
+Unit=droptracker-db-backup.service
+
+[Install]
+WantedBy=timers.target

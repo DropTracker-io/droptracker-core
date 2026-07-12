@@ -14,6 +14,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from utils.sentry import init_sentry  # noqa: E402
+
+init_sentry("droptracker-webapi")
+
 from web_api import create_app  # noqa: E402
 
 

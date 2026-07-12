@@ -43,7 +43,7 @@ TEMPLATE_GROUP_ID = 1
 
 # Embed types the notification pipeline actually renders (see
 # services/notification_service.py + the lootboard loop in bots/main.py).
-EMBED_TYPES = ("drop", "clog", "pb", "ca", "pet", "level_up", "quest", "lb")
+EMBED_TYPES = ("drop", "clog", "pb", "ca", "pet", "level_up", "quest", "death", "diary", "lb")
 
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 

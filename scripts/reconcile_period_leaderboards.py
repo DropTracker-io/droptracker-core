@@ -208,6 +208,19 @@ def reconcile(week: str, commit: bool) -> None:
     try:
         per_day = _db_daily_totals(session, start, end)
         membership = _group_membership(session)
+        # Per-group manual-submission exclusions (drop_group_moderation):
+        # (token, group_id, player_id) -> GP to subtract from that GROUP board
+        # only — global boards keep the full totals. Without this, every
+        # reconcile run would leak policy-excluded manual drops back onto the
+        # groups' boards.
+        try:
+            from services.drop_moderation import group_player_exclusion_totals_by_token
+            deductions = group_player_exclusion_totals_by_token(
+                session, {"day": set(per_day.keys()), "week": {week}}
+            )
+        except Exception as e:
+            print(f"WARNING: couldn't load manual-policy exclusions: {e}", file=sys.stderr)
+            deductions = {}
     finally:
         session.close()
 
@@ -222,7 +235,9 @@ def reconcile(week: str, commit: bool) -> None:
         by_group: dict[int, dict[int, int]] = defaultdict(dict)
         for pid, t in totals.items():
             for gid in membership.get(pid, ()):
-                by_group[gid][pid] = t
+                adjusted = t - deductions.get((token, gid, pid), 0)
+                if adjusted > 0:
+                    by_group[gid][pid] = adjusted
         for gid, g_totals in sorted(by_group.items()):
             yield f"leaderboard:{token}:group:{gid}", g_totals, ttl
 

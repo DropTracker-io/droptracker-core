@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Any, Iterable, Optional
 
 from quart import jsonify
+from sqlalchemy import text
 
 from db import Session
 
@@ -254,6 +255,88 @@ def hidden_player_ids() -> set:
         out = set()
     cache_set("privacy:hidden_pids", out)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Slugs / "nice URLs" (web_api/routes/resolve.py + `canonical_slug` on the
+# group/player/npc/item detail payloads).
+#
+# Slugs are computed on the fly from the current name — there is no slug column,
+# nothing to backfill, and a rename is followed automatically. The SQL
+# expression here MUST stay equivalent to the front-end `slugify()` in
+# apps/web/lib/slug.ts, so a slug authored on one side resolves on the other.
+# --------------------------------------------------------------------------- #
+_SLUG_NONALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def slugify(name: Optional[str]) -> str:
+    """lowercase → non-alphanumeric runs to '-' → trim leading/trailing '-'."""
+    if not name:
+        return ""
+    return _SLUG_NONALNUM.sub("-", str(name).lower()).strip("-")
+
+
+def slug_sql_expr(column: str) -> str:
+    """SQL that computes ``slugify(column)`` (MariaDB / MySQL 8 REGEXP_REPLACE).
+
+    ``column`` is interpolated verbatim — pass a trusted column reference only,
+    never user input.
+    """
+    return f"TRIM(BOTH '-' FROM REGEXP_REPLACE(LOWER({column}), '[^a-z0-9]+', '-'))"
+
+
+_CANON_SLUG_TTL = 300.0
+
+
+def canonical_slug_for(s, kind: str, entity_id: int, name: Optional[str]) -> Optional[str]:
+    """The pretty-URL slug this entity should declare as canonical, or None.
+
+    * npc / item — duplicate names collapse to one primary entity, so the slug
+      always belongs to the name; return it (empty name → None).
+    * group / player — only when no *other* visible entity shares the slug. A
+      colliding name has no unique pretty URL and keeps its id URL as canonical.
+
+    Cached per (kind, id) for a few minutes so the peer-count scan is rare.
+    """
+    slug = slugify(name)
+    if not slug:
+        return None
+    if kind in ("npc", "item"):
+        return slug
+
+    cache_key = f"canonslug:{kind}:{entity_id}"
+    cached = cache_get(cache_key, _CANON_SLUG_TTL)
+    if cached is not None:
+        return cached or None  # "" is the cached form of None
+
+    try:
+        if kind == "group":
+            expr = slug_sql_expr("group_name")
+            row = s.execute(
+                text(
+                    f"SELECT COUNT(*) FROM groups "
+                    f"WHERE group_id > 2 AND group_id <> :id AND {expr} = :slug"
+                ),
+                {"id": entity_id, "slug": slug},
+            ).fetchone()
+        else:  # player — ignore hidden players / players of hidden users
+            expr = slug_sql_expr("p.player_name")
+            row = s.execute(
+                text(
+                    f"SELECT COUNT(*) FROM players p "
+                    f"LEFT JOIN users u ON u.user_id = p.user_id "
+                    f"WHERE p.player_id <> :id AND p.hidden IS NOT TRUE "
+                    f"AND u.hidden IS NOT TRUE AND {expr} = :slug"
+                ),
+                {"id": entity_id, "slug": slug},
+            ).fetchone()
+        unique = int(row[0] or 0) == 0
+    except Exception:
+        unique = False  # fail closed: fall back to the id url
+
+    result = slug if unique else None
+    cache_set(cache_key, result or "")
+    return result
 
 
 # --------------------------------------------------------------------------- #

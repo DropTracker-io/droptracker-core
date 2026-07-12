@@ -22,7 +22,7 @@ from utils.wiseoldman import fetch_group_members
 from db.ops import DatabaseOperations, associate_player_ids
 
 from utils.format import format_number
-from utils.dynamic_handling import get_value_color, get_dynamic_color, get_coin_image_id
+from utils.dynamic_handling import get_value_color, get_dynamic_color, get_coin_image_id, get_stacked_display_id
 
 redis_client = RedisClient()
 db = DatabaseOperations()
@@ -67,7 +67,18 @@ async def get_drops_for_group_optimized(player_ids: List[int], partition: str, g
     with get_db_session() as session:
         # Single query for all players
         query_start = time.time()
-        
+
+        # Per-group manual-submission exclusions (drop_group_moderation):
+        # drops a group's manual_submission_policy withheld must not appear on
+        # ITS board (they still count globally / for other groups).
+        excluded_drop_ids = set()
+        if group_id:
+            try:
+                from services.drop_moderation import excluded_drop_ids_for_group
+                excluded_drop_ids = excluded_drop_ids_for_group(session, int(group_id))
+            except Exception as e:
+                print(f"Couldn't load manual-policy exclusions for group {group_id}: {e}")
+
         # Fetch all drops in one query
         drops_query = select(
             Drop.drop_id,
@@ -86,6 +97,8 @@ async def get_drops_for_group_optimized(player_ids: List[int], partition: str, g
                 Drop.item_id.isnot(None)
             )
         )
+        if excluded_drop_ids:
+            drops_query = drops_query.where(Drop.drop_id.notin_(excluded_drop_ids))
         
         result = session.execute(drops_query)
         all_drops = result.fetchall()
@@ -173,9 +186,15 @@ async def get_drops_for_group_optimized(player_ids: List[int], partition: str, g
     
     return group_items_formatted, player_totals_dict, recent_drops, total_loot
 
-async def get_drops_for_group(player_ids, partition: str, only_include_items_over_minimum: bool = False, group_minimum_value: int = 500000):
-    """ Returns the drops stored in redis cache 
+async def get_drops_for_group(player_ids, partition: str, only_include_items_over_minimum: bool = False, group_minimum_value: int = 500000,
+                              group_id: int = None):
+    """ Returns the drops stored in redis cache
         for the specific list of player_ids
+
+        ``group_id``: when given, drops excluded from that group by
+        manual_submission_policy (drop_group_moderation) are backed out of the
+        aggregates — the per-player Redis caches are player-scoped/global, so
+        they still contain drops individual groups have excluded.
     """
     group_items = {}
     recent_drops = []
@@ -271,6 +290,42 @@ async def get_drops_for_group(player_ids, partition: str, only_include_items_ove
         player_totals[player_id] = player_total
         total_loot += player_total
         recent_drops.extend(player_recent_items)
+
+    # Back out this group's manual-policy exclusions: the Redis player caches
+    # are global (player-scoped), so drops other groups may count but THIS
+    # group excluded are still in them.
+    if group_id:
+        try:
+            from services.drop_moderation import group_excluded_drops
+            with get_db_session() as _mod_session:
+                excluded = group_excluded_drops(_mod_session, int(group_id), player_ids, partition)
+        except Exception as e:
+            print(f"Couldn't load manual-policy exclusions for group {group_id}: {e}")
+            excluded = []
+        if excluded:
+            excluded_ids = {e["drop_id"] for e in excluded}
+            for e in excluded:
+                # Items below the board minimum were never aggregated when the
+                # over-minimum filter is on — don't subtract them twice.
+                if only_include_items_over_minimum and e["per_item_value"] < int(group_minimum_value):
+                    continue
+                item_key = str(e["item_id"])
+                if item_key in group_items:
+                    try:
+                        qty, val = map(int, group_items[item_key].split(","))
+                        qty -= e["quantity"]
+                        val -= e["total_value"]
+                        if qty > 0 and val > 0:
+                            group_items[item_key] = f"{qty},{val}"
+                        else:
+                            del group_items[item_key]
+                    except (ValueError, KeyError):
+                        pass
+                pid = e["player_id"]
+                if pid in player_totals:
+                    player_totals[pid] = max(player_totals[pid] - e["total_value"], 0)
+                total_loot = max(total_loot - e["total_value"], 0)
+            recent_drops = [d for d in recent_drops if d.get("drop_id") not in excluded_ids]
 
     # Ensure recent drops are in chronological order (newest first)
     try:
@@ -511,7 +566,8 @@ async def generate_server_board_temporary(group_id: int = 0, wom_group_id: int =
         player_ids,
         partition,
         only_include_items_over_minimum=only_include_items_over_minimum_flag,
-        group_minimum_value=group_min_value_cfg
+        group_minimum_value=group_min_value_cfg,
+        group_id=int(group.group_id),
     )
     #print("Got recent drops:", len(recent_drops))
     redis_client.client.zadd(f'gleaderboard:{partition}', {group.group_id: total_loot})
@@ -1022,30 +1078,36 @@ def save_image(image, server_id, partition):
 
 
 async def load_image_from_id(item_id):
-    if item_id == "None" or item_id is None or not isinstance(item_id, int):
+    if item_id == "None" or item_id is None:
         return None
-    file_path = f"/store/droptracker/disc/static/assets/img/itemdb/{item_id}.png"
-    item = session.query(ItemList).filter(ItemList.item_id == item_id).first()
-    item_name = item.item_name
-    if item.stackable:
-        all_items = session.query(ItemList).filter(ItemList.item_name == item_name).all()
-        target_item_id = [max(item.stacked, item.item_id) for item in all_items]
-        item_id = target_item_id
-    if not os.path.exists(file_path):
-        try:
-            image_path = await load_rl_cache_img(item_id)
-            if image_path:
-                file_path = image_path
-        except Exception as e:
-            print(f"Error loading image for item ID {item_id}: {e}")
-    loop = asyncio.get_event_loop()
     try:
-        # Run the blocking Image.open operation in a thread pool
-        image = await loop.run_in_executor(None, Image.open, file_path)
-        return image
-    except Exception as e:
-        print(f"The following file path: {file_path} produced an error: {e}")
+        base_id = int(item_id)
+    except (TypeError, ValueError):
         return None
+    # Stackable items (Zulrah's scales, arrows, bolts, seeds, …) are stored as
+    # their single-unit id but look best as the largest-stack pile icon
+    # (suggestion #44). Coins are already resolved by quantity at the call site
+    # and pass through unchanged. Fall back to the base id's icon if the stack
+    # variant can't be loaded, so we never regress a rendered item to a blank slot.
+    display_id = get_stacked_display_id(base_id, session)
+    candidates = [display_id] if display_id == base_id else [display_id, base_id]
+    loop = asyncio.get_event_loop()
+    for candidate in candidates:
+        file_path = f"/store/droptracker/disc/static/assets/img/itemdb/{candidate}.png"
+        if not os.path.exists(file_path):
+            try:
+                image_path = await load_rl_cache_img(candidate)
+                if image_path:
+                    file_path = image_path
+            except Exception as e:
+                print(f"Error loading image for item ID {candidate}: {e}")
+        try:
+            # Run the blocking Image.open operation in a thread pool
+            image = await loop.run_in_executor(None, Image.open, file_path)
+            return image
+        except Exception as e:
+            print(f"The following file path: {file_path} produced an error: {e}")
+    return None
 
 
 async def load_rl_cache_img(item_id):

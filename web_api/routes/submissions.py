@@ -30,6 +30,17 @@ submissions_bp = Blueprint("v1_submissions", __name__)
 INTAKE_API_URL = os.getenv("INTAKE_API_URL", "http://127.0.0.1:31323")
 B2_CDN_BASE_URL = os.getenv("B2_CDN_BASE_URL", "https://videos.droptracker.io")
 
+# Shared secret the intake API requires on /manual-submit (the endpoint
+# substitutes the player's real account_hash, so it must never be publicly
+# callable). Read at request time (matches the intake-side gate; also lets
+# tests monkeypatch it).
+MANUAL_SUBMIT_KEY_HEADER = "X-DT-Manual-Key"
+
+
+def _manual_submit_headers() -> dict:
+    key = (os.getenv("MANUAL_SUBMIT_KEY") or "").strip()
+    return {MANUAL_SUBMIT_KEY_HEADER: key} if key else {}
+
 # Contract type -> intake `/manual-submit` submission_type.
 _TYPE_MAP = {
     "drop": "drop",
@@ -124,7 +135,11 @@ async def manual_submission():
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(f"{INTAKE_API_URL}/manual-submit", json=payload)
+            resp = await client.post(
+                f"{INTAKE_API_URL}/manual-submit",
+                json=payload,
+                headers=_manual_submit_headers(),
+            )
     except Exception as e:
         abort_problem(502, "Submission pipeline unavailable", str(e))
 
@@ -144,6 +159,54 @@ async def manual_submission():
     if not isinstance(new_id, int):
         new_id = int(time.time() * 1000) % 1_000_000_000
     return jsonify({"id": new_id})
+
+
+_POLICY_NOTICE = {
+    "block": "won't be counted (manual submissions are disabled)",
+    "authorized_only": "won't be counted (only authorized members' manual submissions count)",
+    "confirm": "will be held for a group admin to approve",
+}
+
+
+@submissions_bp.get("/submissions/manual/preflight")
+async def manual_submission_preflight():
+    """Per-group manual-policy notices for a player's groups, so the submit
+    page can warn before submitting (suggestion #45, Phase 3). Only groups
+    where THIS submitter's manual drop would be withheld are returned — groups
+    that count it normally (allow, or an authorized submitter) are omitted."""
+    user_id = current_user_id()
+    player_id = request.args.get("player_id", type=int)
+    if not player_id:
+        abort_problem(422, "Invalid player_id", "'player_id' query param is required.")
+
+    def _load():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            player = s.query(Player).filter(Player.player_id == player_id).first()
+            if not player:
+                abort_problem(404, "Player not found", f"No player with id {player_id}.")
+            if player.user_id != user_id and not is_superadmin(user):
+                abort_problem(403, "Forbidden", "You do not own this player.")
+            gid_name = {g.group_id: g.group_name for g in (player.groups or [])}
+            # Lazy import (matches routes/points.py): keeps the processor
+            # package out of web_api's startup path.
+            from data.submissions.manual_policy import manual_moderation_for_player
+
+            moderation = manual_moderation_for_player(s, player, list(gid_name))
+            notices = [
+                {
+                    "group_id": gid,
+                    "group_name": gid_name.get(gid, f"Group {gid}"),
+                    "policy": policy,
+                    "held": status,  # 'excluded' | 'pending'
+                    "message": _POLICY_NOTICE.get(policy, "will be reviewed by the group"),
+                }
+                for gid, (status, policy) in moderation.items()
+            ]
+            notices.sort(key=lambda n: n["group_name"].lower())
+            return {"notices": notices}
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
 
 
 @submissions_bp.get("/uploads/presign")

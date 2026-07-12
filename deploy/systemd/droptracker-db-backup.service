@@ -1,0 +1,30 @@
+# Nightly MariaDB + Redis backup with B2 offsite sync.
+# Triggered by droptracker-db-backup.timer — do not enable the service itself.
+# Runs as root so it can read /var/lib/redis/dump.rdb; the DB dump only needs
+# the credentials in /store/droptracker/disc/.env.
+#
+# Manual run:        sudo systemctl start droptracker-db-backup.service
+# Watch it:          journalctl -u droptracker-db-backup.service -f
+# Full docs:         deploy/BACKUPS.md
+
+[Unit]
+Description=DropTracker nightly database backup (MariaDB + Redis -> local + B2)
+Documentation=file:/store/droptracker/disc/deploy/BACKUPS.md
+Wants=network-online.target
+After=network-online.target mariadb.service mysql.service redis-server.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/scripts/db_backup.sh
+# A full dump + gzip + B2 upload can take a while on ~30 GB of schemas.
+TimeoutStartSec=8h
+# Stay out of prod's way: low CPU priority, best-effort-low IO priority.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Tune retention/behavior here if needed (defaults shown; see scripts/db_backup.sh):
+#Environment=LOCAL_RETENTION_DAYS=7
+#Environment=REMOTE_RETENTION_DAYS=30
+#Environment=MIN_FREE_GB=25

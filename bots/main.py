@@ -21,7 +21,7 @@ from sqlalchemy import text
 from services.notification_service import NotificationService
 from services.bot_state import BotState
 from services.channel_names import ChannelNames
-from utils.ge_value import get_true_item_value
+from services.channel_cache import shape_channel_cache
 from utils.embeds import create_boss_pb_embed, update_boss_pb_embed
 from utils.logger import LoggerClient
 from db.app_logger import AppLogger
@@ -39,10 +39,11 @@ from quart_jwt_extended import (
 )
 from osrsreboxed import monsters_api, items_api
 import hypercorn.asyncio
-from interactions import GuildText, Intents, Message, user_context_menu, ContextMenuContext, Member, listen, Status, Task, IntervalTrigger, \
+from interactions import Intents, Message, user_context_menu, ContextMenuContext, Member, listen, Status, Task, IntervalTrigger, \
     ActivityType, ChannelType, slash_command, Embed, slash_option, OptionType, check, is_owner, \
     slash_default_member_permission, Permissions, SlashContext, ButtonStyle, Button, SlashCommand, ComponentContext, \
-    component_callback, Modal, ShortText, BaseContext, Extension, GuildChannel
+    component_callback, Modal, ShortText, BaseContext, Extension, GuildChannel, ScheduledEventType, \
+    ScheduledEventStatus
 from interactions.api.events import GuildJoin, GuildLeft, MessageCreate, Component, Startup
 from lootboard.generator import generate_server_board, get_generated_board_path
 from utils.cloudflare_update import CloudflareIPUpdater
@@ -50,7 +51,7 @@ from utils.msg_logger import HighThroughputLogger
 from utils.wiseoldman import fetch_group_members
 from web.front import create_frontend
 from commands import UserCommands, ClanCommands
-from db.models import Event, Group, GroupConfiguration, GroupPatreon, GroupPersonalBestMessage, Guild, PersonalBestEntry, PlayerPet, Session, User, WebhookPendingDeletion, session, NpcList, ItemList, Webhook, Player
+from db.models import Event, EventGuild, Group, GroupConfiguration, GroupPatreon, GroupPersonalBestMessage, Guild, PersonalBestEntry, PlayerPet, Session, User, WebhookPendingDeletion, session, NpcList, ItemList, Webhook, Player
 
 from db.ops import associate_player_ids, update_group_members
 from db.ops import DatabaseOperations
@@ -86,6 +87,9 @@ current_time = time.time()
 redis_client = RedisClient()
 ## Category IDs that contain DropTracker webhooks that receive messages from the RuneLite client
 load_dotenv()
+
+from utils.sentry import init_sentry
+init_sentry("droptracker-core")
 
 next_sync_time = datetime.now() + timedelta(minutes=5)
 
@@ -194,6 +198,7 @@ async def on_startup(event: Startup):
     bot.load_extension("commands")
     bot.load_extension("services.bot_state")
     bot.load_extension("services.message_handler")
+    bot.load_extension("services.event_signup_discord")
     bot.load_extension("services.channel_names")
     bot.load_extension("services.components")
     bot.load_extension("services.entry_modifier")
@@ -461,29 +466,46 @@ async def lootboard_updates():
     
 
 async def create_tasks():
-    # Cheap and independent (in-memory bot.guilds only, no external calls) —
-    # run this first so the Web API's channel picker has data within seconds of
-    # startup instead of waiting behind the slow lootboard/WOM-sync passes below.
+    # Interval tasks first — they only *schedule* here (first fire is one
+    # interval away), so nothing below can delay them. These used to start
+    # after the slow awaited warm-ups (guild-cache sweep over every guild +
+    # lootboards + WOM sync — many minutes), which left e.g. web_event_guilds
+    # rows stuck 'pending' for the whole warm-up after every restart.
+    drain_channel_cache_requests.start()
+    print("Starting heartbeat monitoring...")
+    heartbeat_check.start()
+    notification_force.start()
+    drain_discord_outbox.start()
+    reconcile_event_scheduled_events.start()
+    badge_cycle.start()
+    # Lootboard POSTING is user-visible and must stay with the interval tasks
+    # above — NEVER gated behind the multi-minute, rate-limited guild-cache /
+    # WOM warm-ups below. It previously sat after `await cache_guild_channels()`
+    # + `await cache_bot_guilds()`; when that guild sweep (228 DB guilds, many
+    # 404, heavy 429 backoff) ballooned to ~25min per startup, restart churn
+    # meant `.start()` was never reached and every group's board went stale for
+    # hours. Schedule it now; it fires on its own 8-min interval.
+    print("Starting lootboards")
+    lootboard_updates.start()
+    # Kick an immediate first pass WITHOUT blocking the rest of startup (the old
+    # blocking `await lootboard_updates()` here is exactly what let the guild
+    # warm-ups below starve posting). Fire-and-forget; the task body has its own
+    # top-level try/except so it can never surface as an unhandled task error.
+    asyncio.create_task(lootboard_updates())
+    # Cheap and independent — run this first among the warm-ups so the Web
+    # API's channel picker has data within seconds of startup instead of
+    # waiting behind the slow WOM-sync pass below.
     await cache_guild_channels()
     cache_guild_channels.start()
     # Guild list for the event Discord config (Task 19) — same cheap REST
     # pattern; run once at startup then every 5 minutes.
     await cache_bot_guilds()
     cache_bot_guilds.start()
-    drain_channel_cache_requests.start()
-    print("Starting lootboards")
-    await lootboard_updates()
-    lootboard_updates.start()
     print("Syncing group member association tables...")
     await start_group_sync()
     start_group_sync.start()
     update_group_members_task_channel_loop.start()
     await logger.log("access", "Startup tasks completed.", "create_tasks")
-    print("Starting heartbeat monitoring...")
-    heartbeat_check.start()
-    notification_force.start()
-    drain_discord_outbox.start()
-    badge_cycle.start()
 
 
 @Task.create(IntervalTrigger(minutes=60))
@@ -512,32 +534,201 @@ async def drain_discord_outbox():
     except Exception as e:
         print(f"Couldn't drain discord outbox: {e}")
 
+
+@Task.create(IntervalTrigger(seconds=30))
+async def reconcile_event_scheduled_events():
+    """Mirror web_event_guilds desired state onto real Discord scheduled
+    events (services/event_scheduled_events.py). The Web API only writes
+    desired rows; this task is the only place that talks to Discord: it
+    creates rows marked `pending` (once the event has a valid future start),
+    edits rows that already carry a `discord_scheduled_event_id` — never
+    re-creates one, so repeated edits can't spawn duplicates — and deletes
+    `delete_pending` rows. A future start only gates *creation*: existing
+    scheduled events keep receiving name/description (and still-future end)
+    edits after the event has started. Failures are isolated per row;
+    `failed` rows are not re-polled (no retry storm on a permanent Forbidden
+    — the next event edit flips them back to `pending`)."""
+    from services.event_scheduled_events import (
+        DESCRIPTION_MAX,
+        NAME_MAX,
+        event_created_ping,
+        future_end,
+        sched_fields,
+        schedulable,
+    )
+    from services.event_notifications import load_event_channels
+
+    db_session = Session()
+    try:
+        rows = (
+            db_session.query(EventGuild)
+            .filter(EventGuild.sync_status.in_(("pending", "delete_pending")))
+            .limit(50)
+            .all()
+        )
+        for row in rows:
+            try:
+                if row.sync_status == "delete_pending":
+                    if row.discord_scheduled_event_id:
+                        guild = await bot.fetch_guild(row.guild_id)
+                        # No guild (bot kicked) -> nothing left to clean up on
+                        # Discord's side; just drop the row. force=True skips
+                        # the library cache — a stale copy of an already-
+                        # deleted event would 404 the delete below.
+                        se = (
+                            await guild.fetch_scheduled_event(
+                                row.discord_scheduled_event_id, force=True
+                            )
+                            if guild else None
+                        )
+                        if se:
+                            await se.delete(reason="DropTracker event ended")
+                    db_session.delete(row)
+                    db_session.commit()
+                    continue
+
+                ev = db_session.query(Event).filter(Event.id == row.event_id).first()
+                if not ev:
+                    continue
+                # A future start is only required to CREATE a scheduled event
+                # (Discord rejects past starts). Rows that already carry one
+                # must keep syncing edits after the start passes — the old
+                # gate here skipped every pend-flipped row once starts_at was
+                # no longer in the future, so mid-event name/time edits
+                # applied on the website but never reached Discord.
+                creatable = schedulable(ev)
+                if not row.discord_scheduled_event_id and not creatable:
+                    continue  # stays pending until it has a valid future start
+                guild = await bot.fetch_guild(row.guild_id)
+                if not guild:
+                    raise RuntimeError("bot is not a member of this guild")
+                if row.discord_scheduled_event_id:
+                    # force=True: bypass the library cache so a Discord-side
+                    # deletion is actually seen (a stale cached object would
+                    # 404 the edit and fail the row instead).
+                    se = await guild.fetch_scheduled_event(
+                        row.discord_scheduled_event_id, force=True
+                    )
+                    if se and se.status not in (
+                        ScheduledEventStatus.SCHEDULED, ScheduledEventStatus.ACTIVE
+                    ):
+                        se = None  # completed/cancelled on Discord — nothing editable
+                    if not se:
+                        # Gone on Discord's side — forget the id. With a
+                        # future start the next tick re-creates it; without
+                        # one it can't come back (Discord rejects past
+                        # starts), so surface that instead of silently
+                        # re-skipping the row forever.
+                        row.discord_scheduled_event_id = None
+                        if not creatable:
+                            row.sync_status = "failed"
+                            row.last_error = (
+                                "The Discord scheduled event no longer exists and "
+                                "the start time has passed — it cannot be re-created"
+                            )
+                        db_session.commit()
+                        continue
+                    if creatable and se.status == ScheduledEventStatus.SCHEDULED:
+                        start, end, _location = sched_fields(ev)
+                        await se.edit(
+                            name=ev.name[:NAME_MAX],
+                            start_time=start,
+                            end_time=end,
+                            description=(ev.description or "")[:DESCRIPTION_MAX] or None,
+                        )
+                    else:
+                        # Already-started (ACTIVE) or past-start events:
+                        # Discord rejects start_time changes there, but name/
+                        # description — and an end moved to a still-future
+                        # time — must keep syncing.
+                        edit_kwargs = {
+                            "name": ev.name[:NAME_MAX],
+                            "description": (ev.description or "")[:DESCRIPTION_MAX] or None,
+                        }
+                        new_end = future_end(ev)
+                        if new_end is not None:
+                            edit_kwargs["end_time"] = new_end
+                        await se.edit(**edit_kwargs)
+                else:
+                    start, end, location = sched_fields(ev)
+                    se = await guild.create_scheduled_event(
+                        name=ev.name[:NAME_MAX],
+                        event_type=ScheduledEventType.EXTERNAL,
+                        start_time=start,
+                        end_time=end,
+                        external_location=location,
+                        description=(ev.description or "")[:DESCRIPTION_MAX] or None,
+                        reason="DropTracker event",
+                    )
+                    row.discord_scheduled_event_id = str(se.id)
+                    # Companion ping: scheduled events can't mention roles
+                    # themselves, so announce the fresh event in the
+                    # configured announcements channel with the configured
+                    # role pings (ping_config['event_created']; primary
+                    # guild only). Never lets a ping failure fail the sync.
+                    try:
+                        ping_channel_id, ping_content = event_created_ping(
+                            ev, row.guild_id, row.discord_scheduled_event_id,
+                            load_event_channels(db_session, ev.id),
+                        )
+                        if ping_channel_id and ping_content:
+                            ping_channel = await bot.fetch_channel(channel_id=ping_channel_id)
+                            if ping_channel:
+                                await ping_channel.send(
+                                    content=ping_content,
+                                    allowed_mentions=interactions.AllowedMentions(parse=["roles"]),
+                                )
+                    except Exception as ping_err:
+                        print(f"[sched-event] ping failed for event {ev.id}: {ping_err}")
+                row.sync_status = "synced"
+                row.synced_at = datetime.now()
+                row.last_error = None
+                db_session.commit()
+            except Exception as e:
+                db_session.rollback()
+                try:
+                    row.sync_status = "failed"
+                    row.last_error = str(e)[:255]
+                    db_session.commit()
+                except Exception:
+                    db_session.rollback()
+                print(f"[sched-event] guild={row.guild_id} event={row.event_id}: {e}")
+    except Exception as e:
+        print(f"Couldn't reconcile scheduled events: {e}")
+    finally:
+        db_session.close()
+
 async def cache_channels_for_guild(guild_id) -> bool:
-    """Fetch one guild's text channels via REST and cache them to Redis
-    (`guild:{id}:channels`). Works for *any* guild the bot is a member of —
-    not just group home guilds — so events can target dedicated event servers
-    (Task 19). Also caches the guild's roles (`guild:{id}:roles`) for the
-    announcement ping picker. Returns True when the cache was written."""
+    """Fetch one guild's text + forum channels (and the forums' active
+    threads) via REST and cache them to Redis (`guild:{id}:channels`). Works
+    for *any* guild the bot is a member of — not just group home guilds — so
+    events can target dedicated event servers (Task 19). Threads let groups
+    route notifications into forum posts instead of separate channels
+    (suggestion #3). Also caches the guild's roles (`guild:{id}:roles`) for
+    the announcement ping picker. Returns True when the cache was written."""
     try:
         guild = await bot.fetch_guild(guild_id)
         if not guild:
             return False
         raw_channels = await guild.fetch_channels()
-        channels = sorted(
-            (
-                {"id": str(c.id), "name": c.name, "position": c.position or 0}
-                for c in raw_channels
-                if isinstance(c, GuildText)
-            ),
-            key=lambda c: c["position"],
-        )
-        redis_client.setex(f"guild:{guild_id}:channels", 600, json.dumps(channels))
         try:
-            raw_roles = await guild.fetch_roles()
+            active_threads = (await guild.fetch_active_threads()).threads
+        except Exception as e:
+            print(f"Couldn't fetch active threads for guild {guild_id}: {e}")
+            active_threads = []
+        channels = shape_channel_cache(raw_channels, active_threads)
+        redis_client.setex(f"guild:{guild_id}:channels", 600, json.dumps(channels))
+        # Cache the guild's roles for the announcement ping picker.
+        # NOTE: `guild.fetch_roles()` is a discord.py method; it does not exist in
+        # interactions.py (this project's library). We don't need it: the
+        # `bot.fetch_guild()` call above already populated the role cache from the
+        # REST guild payload (GET /guilds/{id} embeds `roles`), so the `guild.roles`
+        # property is available here without the GUILDS gateway intent.
+        try:
             roles = sorted(
                 (
                     {"id": str(r.id), "name": r.name, "position": r.position or 0}
-                    for r in raw_roles
+                    for r in guild.roles
                     # Skip @everyone (its id == guild id; picked via a
                     # dedicated toggle) and bot-managed integration roles.
                     if str(r.id) != str(guild_id) and not getattr(r, "managed", False)
@@ -555,7 +746,8 @@ async def cache_channels_for_guild(guild_id) -> bool:
 
 @Task.create(IntervalTrigger(minutes=5))
 async def cache_guild_channels():
-    """Cache guild text-channel lists to Redis (`guild:{id}:channels`) so the
+    """Cache guild channel lists (text, forums, active threads) to Redis
+    (`guild:{id}:channels`) so the
     Web API's Discord channel pickers (group config UI + event Discord config)
     can list them without the Web API ever holding a bot token / Discord
     connection itself — it only reads this cache.
@@ -589,43 +781,85 @@ async def cache_guild_channels():
     print(f"Cached channel lists for {cached}/{len(guild_ids)} guilds.")
 
 
+_DISCORD_API_BASE = "https://discord.com/api/v10"
+
+
+async def _fetch_bot_guilds_rest():
+    """Enumerate every guild the bot is in via Discord REST
+    (`GET /users/@me/guilds`, paginated), honouring 429 / Retry-After.
+
+    We deliberately do NOT use `bot.http.get_guilds()`: in interactions.py 5.16
+    that call routes through a shared per-bucket rate limiter whose
+    `lock_for_duration` raises ``RuntimeError('Attempted to lock a bucket that
+    is already locked.')`` when this low-limit endpoint is paginated. That was
+    firing on every sweep, so `bot:guilds` never populated and the events
+    Discord config UI showed "the bot's server list isn't cached yet". Nor can
+    we read `bot.guilds`: without the GUILDS intent the gateway cache stays
+    empty. So we page the REST endpoint ourselves and back off on 429 — the
+    concern that motivated the previous library call (the older hand-rolled
+    request gave up on the first 429) is handled here by honouring Retry-After.
+    """
+    token = getattr(getattr(bot, "http", None), "token", None) or bot_token
+    headers = {
+        "Authorization": f"Bot {token}",
+        "User-Agent": "DropTracker (https://www.droptracker.io, 1.0)",
+    }
+    guilds = []
+    after = None
+    async with aiohttp.ClientSession(headers=headers) as session:
+        while True:
+            params = {"limit": 200}
+            if after:
+                params["after"] = after
+            page = None
+            # Bounded per-page retry so one 429 / transient 5xx backs off and
+            # retries rather than aborting (and discarding) the whole sweep.
+            for attempt in range(6):
+                async with session.get(
+                    f"{_DISCORD_API_BASE}/users/@me/guilds", params=params
+                ) as resp:
+                    if resp.status == 429:
+                        try:
+                            retry_after = float((await resp.json()).get("retry_after", 1.0))
+                        except Exception:
+                            retry_after = float(resp.headers.get("Retry-After", 1.0) or 1.0)
+                        await asyncio.sleep(min(retry_after, 60) + 0.5)
+                        continue
+                    if resp.status in (500, 502, 503, 504):
+                        await asyncio.sleep(1 + attempt * 2)
+                        continue
+                    resp.raise_for_status()
+                    page = await resp.json()
+                    break
+            else:
+                raise RuntimeError("exhausted retries fetching /users/@me/guilds")
+
+            if not isinstance(page, list) or not page:
+                break
+            guilds.extend(
+                {"id": str(g.get("id")), "name": g.get("name"), "icon": g.get("icon")}
+                for g in page if g.get("id")
+            )
+            if len(page) < 200:
+                break
+            after = str(page[-1].get("id"))
+            # Gentle spacing so a large-guild bot doesn't hammer this low-limit
+            # endpoint (still trivial next to the 5-minute sweep interval).
+            await asyncio.sleep(0.5)
+    return guilds
+
+
 @Task.create(IntervalTrigger(minutes=5))
 async def cache_bot_guilds():
     """Cache every guild the bot is a member of to Redis (`bot:guilds`) as a
     JSON list of {id, name, icon} for the Web API's event Discord config
-    (Task 19: an event can target any guild the bot is in).
-
-    Enumerated via Discord REST `GET /users/@me/guilds` (paginated, bot token
-    from .env) — never `bot.guilds`: without the GUILDS intent the gateway
-    cache stays empty forever. 15-minute TTL as a staleness guard; refreshed
-    every 5 minutes while the bot runs.
+    (Task 19: an event can target any guild the bot is in). 15-minute TTL as a
+    staleness guard; refreshed every 5 minutes while the bot runs. Only the
+    fully-enumerated list is written — a mid-pagination failure leaves the
+    previous cache in place rather than publishing a partial list.
     """
-    guilds = []
-    headers = {"Authorization": f"Bot {bot_token}"}
-    after = None
     try:
-        async with aiohttp.ClientSession() as http_session:
-            while True:
-                params = {"limit": "200"}
-                if after:
-                    params["after"] = after
-                async with http_session.get(
-                    "https://discord.com/api/v10/users/@me/guilds",
-                    headers=headers, params=params,
-                ) as resp:
-                    if resp.status != 200:
-                        print(f"bot:guilds refresh failed: HTTP {resp.status}")
-                        return
-                    page = await resp.json()
-                if not isinstance(page, list) or not page:
-                    break
-                guilds.extend(
-                    {"id": str(g.get("id")), "name": g.get("name"), "icon": g.get("icon")}
-                    for g in page if g.get("id")
-                )
-                if len(page) < 200:
-                    break
-                after = str(page[-1].get("id"))
+        guilds = await _fetch_bot_guilds_rest()
         redis_client.setex("bot:guilds", 900, json.dumps(guilds))
         print(f"Cached bot:guilds ({len(guilds)} guilds).")
     except Exception as e:

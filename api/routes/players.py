@@ -14,6 +14,7 @@ from sqlalchemy import or_, text
 from api.core import get_db_session, redis_client, redis_tracker
 from api.routes.helpers import assemble_submission_data
 from utils.format import format_number
+from utils import value_overrides
 from services.redis_updates import get_player_current_month_total
 from data.TOP_NPCS import TOP_NPCS
 from db import Player, NotifiedSubmission, NpcList, Group, GroupConfiguration, get_current_partition
@@ -273,14 +274,27 @@ async def get_player():
 
 @players_bp.get("/value_mods")
 async def item_value_modifications():
-    brimstone_pieces = ["22968", "22970", "22972", "22974"]
-    bludgeon_pieces = ["13274", "13275", "13276", "18633", "18634", "18635"]
-    vestiges = ["28279", "28281", "28283", "28285"]
-    halberd_pieces = ["29790", "29792", "29794"]
-    araxyte_fang = ["29799"]
-    mokhaiotl_cloth = ["31109"]
-    target_ids = brimstone_pieces + bludgeon_pieces + vestiges + halberd_pieces + araxyte_fang + mokhaiotl_cloth
-    return target_ids
+    """Item ids the plugin should ask the server to re-value after submission.
+
+    Derived from the item_value_overrides table so it never drifts from the
+    valuation rules themselves. Falls back to the legacy hard-coded list only
+    during the deploy window before the table is seeded
+    (see scripts/seed_item_value_overrides.py)."""
+    # Pre-table id set — kept solely as a fallback until the overrides are seeded.
+    legacy = [
+        "22968", "22970", "22972", "22974",
+        "13274", "13275", "13276", "18633", "18634", "18635",
+        "28279", "28281", "28283", "28285",
+        "29790", "29792", "29794", "29799", "31109",
+    ]
+    try:
+        overrides = await asyncio.to_thread(value_overrides.all_active)
+        ids = sorted({int(o["item_id"]) for o in overrides if o.get("item_id") is not None})
+        if ids:
+            return [str(i) for i in ids]
+    except Exception:
+        pass
+    return legacy
 
 @players_bp.get("/load_config")
 async def load_config():
@@ -311,6 +325,27 @@ async def load_config():
             player.player_name = player_name
             db_session.commit()
         player_gids = db_session.execute(text("SELECT group_id FROM user_group_association WHERE player_id = :player_id"), {"player_id": player.player_id}).all()
+
+        # Events v2: advertise whether an active event with XP-based tasks
+        # (xp_target / skill_target) is tracking this player, so the plugin
+        # submits periodic experience snapshots instead of only level-ups.
+        xp_events_active = False
+        try:
+            xp_event_row = db_session.execute(
+                text(
+                    "SELECT 1 FROM web_event_team_members m "
+                    "JOIN web_event_teams t ON t.id = m.team_id "
+                    "JOIN web_events e ON e.id = t.event_id "
+                    "JOIN web_event_tasks k ON k.event_id = e.id "
+                    "WHERE m.player_id = :player_id AND e.status = 'active' "
+                    "AND k.type IN ('xp_target', 'skill_target') LIMIT 1"
+                ),
+                {"player_id": player.player_id},
+            ).first()
+            xp_events_active = xp_event_row is not None
+        except Exception as e:
+            print(f"Exception checking active xp events in load_config: {e}")
+
         group_configs = []
         def get_config_value(current_group_configs, key: str):
             for group_config in current_group_configs:
@@ -345,7 +380,8 @@ async def load_config():
                                 "send_xp": get_config_value(current_group_configs, "notify_levels"),
                                 "minimum_level": get_config_value(current_group_configs, "level_minimum_for_notifications"),
                                 "send_stacked_items": get_config_value(current_group_configs, "send_stacks_of_items"),
-                                "minimum_ca_tier": get_config_value(current_group_configs, "min_ca_tier_to_notify")})
+                                "minimum_ca_tier": get_config_value(current_group_configs, "min_ca_tier_to_notify"),
+                                "track_xp_events": xp_events_active})
         return jsonify(group_configs), 200
     finally:
         db_session.close()

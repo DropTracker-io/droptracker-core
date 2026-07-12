@@ -25,6 +25,7 @@ from db import (
 from web_api.common import (
     cache_get,
     cache_set,
+    canonical_slug_for,
     db_session,
     decode_member,
     hidden_player_ids,
@@ -40,6 +41,7 @@ from web_api.common import (
     _rc,
 )
 from web_api.routes.leaderboards import _compute_group_totals
+from web_api.flair import group_flair, group_flairs
 
 profiles_bp = Blueprint("v1_profiles", __name__)
 
@@ -135,6 +137,8 @@ def _build_submissions(rows, s, partition, player_names: dict | None = None):
                 "value": money((drop.value or 0) * (drop.quantity or 1)),
                 "quantity": int(drop.quantity or 1),
                 "image_url": f"{IMG_BASE}/itemdb/{drop.item_id}.png",
+                "item_id": int(drop.item_id) if drop.item_id else None,
+                "npc_id": int(drop.npc_id) if drop.npc_id else None,
                 "npc_name": npc.npc_name if npc else None,
                 "player_id": player_id,
                 "player_name": player_name,
@@ -156,6 +160,8 @@ def _build_submissions(rows, s, partition, player_names: dict | None = None):
                 "type": "clog",
                 "label": label,
                 "image_url": f"{IMG_BASE}/itemdb/{clog.item_id}.png",
+                "item_id": int(clog.item_id) if clog.item_id else None,
+                "npc_id": int(clog.npc_id) if clog.npc_id else None,
                 "npc_name": npc.npc_name if npc else None,
                 "player_id": player_id,
                 "player_name": player_name,
@@ -182,6 +188,7 @@ def _build_submissions(rows, s, partition, player_names: dict | None = None):
                 "type": "pb",
                 "label": label,
                 "image_url": f"{IMG_BASE}/npcdb/{pb.npc_id}.png",
+                "npc_id": int(pb.npc_id) if pb.npc_id else None,
                 "npc_name": npc_name,
                 "player_id": player_id,
                 "player_name": player_name,
@@ -395,6 +402,12 @@ async def player_profile(player_id: int):
                 g = s.query(Group).filter(Group.group_id == gid).first()
                 if g:
                     groups.append({"id": gid, "name": g.group_name})
+            # Flair for the player's subscribed groups (one query for all).
+            group_flair_map = group_flairs(s, [g["id"] for g in groups])
+            for g in groups:
+                flair = group_flair_map.get(g["id"])
+                if flair:
+                    g["flair"] = flair
 
             recent = (
                 s.query(NotifiedSubmission)
@@ -417,6 +430,9 @@ async def player_profile(player_id: int):
                 "total_loot": money(loot),
                 "groups": groups,
                 "recent_submissions": submissions,
+                # Pretty-URL slug this profile declares as canonical (null when
+                # the name collides with another visible player → id url stays).
+                "canonical_slug": canonical_slug_for(s, "player", player_id, player.player_name),
             }
             # Supporter flair: user-level premium display perk.
             try:
@@ -517,14 +533,18 @@ async def player_loot(player_id: int):
             if bool(player.hidden) or bool(player.user and player.user.hidden):
                 return None
 
-            cache_key = f"pstats:loot:{player_id}:{partition}"
+            # v2: items also carry drop count + first/last received timestamps
+            # (rich item tooltips). Key bumped so stale v1 payloads never serve.
+            cache_key = f"pstats:loot2:{player_id}:{partition}"
             cached = cache_get(cache_key, _STATS_TTL)
             if cached is not None:
                 return cached
 
             item_rows = s.execute(text(
                 "SELECT d.npc_id, n.npc_name, d.item_id, i.item_name, "
-                "       SUM(d.quantity) AS qty, SUM(d.value * d.quantity) AS loot "
+                "       SUM(d.quantity) AS qty, SUM(d.value * d.quantity) AS loot, "
+                "       COUNT(*) AS drop_count, "
+                "       MIN(d.date_added) AS first_at, MAX(d.date_added) AS last_at "
                 "FROM drops d "
                 "JOIN npc_list n ON n.npc_id = d.npc_id "
                 "JOIN items i ON i.item_id = d.item_id "
@@ -543,8 +563,15 @@ async def player_loot(player_id: int):
             ), {"pid": player_id, "partition": partition}).fetchall()
             kills = {int(npc_id): int(cnt) for npc_id, cnt in kill_rows}
 
+            def _ts(dt) -> int | None:
+                """DB datetime -> unix seconds (None-safe)."""
+                try:
+                    return int(dt.timestamp()) if dt is not None else None
+                except Exception:
+                    return None
+
             npcs = {}
-            for npc_id, npc_name, item_id, item_name, qty, loot in item_rows:
+            for npc_id, npc_name, item_id, item_name, qty, loot, drop_count, first_at, last_at in item_rows:
                 npc = npcs.setdefault(int(npc_id), {
                     "npc_id": int(npc_id),
                     "name": npc_name,
@@ -554,12 +581,21 @@ async def player_loot(player_id: int):
                 })
                 loot = int(loot or 0)
                 npc["total_value"] += loot
-                npc["items"].append({
+                item = {
                     "item_id": int(item_id),
                     "name": item_name,
                     "quantity": int(qty or 0),
                     "loot": money(loot),
-                })
+                    "drops": int(drop_count or 0),
+                }
+                # Optional detail for the web item tooltip; omitted when NULL so
+                # the payload stays backwards compatible.
+                first_ts, last_ts = _ts(first_at), _ts(last_at)
+                if first_ts is not None:
+                    item["first_ts"] = first_ts
+                if last_ts is not None:
+                    item["last_ts"] = last_ts
+                npc["items"].append(item)
 
             npc_list = sorted(npcs.values(), key=lambda x: x["total_value"], reverse=True)
             for npc in npc_list:
@@ -671,9 +707,14 @@ async def group_profile(group_id: int):
                 "member_count": member_count,
                 "monthly_loot": money(monthly),
                 "recent_submissions": submissions,
+                # Pretty-URL slug this group declares as canonical (null when the
+                # name collides with another group → id url stays canonical).
+                "canonical_slug": canonical_slug_for(s, "group", group_id, group.group_name),
             }
             if group.description:
                 payload["description"] = group.description
+            if group.icon_url:
+                payload["icon_url"] = group.icon_url
             if group.invite_url:
                 payload["discord_url"] = group.invite_url
             if rank is not None:
@@ -686,6 +727,9 @@ async def group_profile(group_id: int):
                 payload["top_bosses"] = top_bosses
             if records:
                 payload["records"] = records
+            flair = group_flair(s, group_id)
+            if flair:
+                payload["flair"] = flair
             return payload
 
     payload = await asyncio.to_thread(_load)

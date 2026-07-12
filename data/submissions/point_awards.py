@@ -20,6 +20,9 @@ from db.models import (
 )
 import time
 
+# player_points.reason column width (String(125) in db/models/group_points.py)
+_PLAYER_POINTS_REASON_MAX_LEN = PlayerPoints.reason.type.length
+
 
 class PointDebugSettings:
     # ~12 log lines per drop for premium groups; enable via POINT_DEBUG=true
@@ -250,6 +253,75 @@ async def get_group_point_stack_config(group_id, external_session=None):
     return default_val == 1
 
 async def check_and_award_points(
+    reason,
+    group_id,
+    player_id,
+    value,
+    players_included=None,
+    item_id=None,
+    npc_id=None,
+    quantity=None,
+    entry_id=None,
+    submission_guid=None,
+    submission_timestamp=None,
+    *,
+    external_session=None,
+):
+    """Run the point-award pass isolated from the caller's transaction.
+
+    Submission processors pass the session that still holds the uncommitted
+    submission row (Drop, PB, clog, ...). Every write in the point pass
+    therefore runs inside a SAVEPOINT: on any failure we roll back to the
+    savepoint and return an empty result, so a bad point insert can never
+    poison the session and take the submission down with it.
+    """
+    try:
+        receiver_player_id = int(player_id)
+    except Exception:
+        receiver_player_id = player_id
+    empty_result = {
+        "group_id": int(group_id),
+        "receiver_player_id": receiver_player_id,
+        "receiver_points_awarded": 0,
+        "receiver_current_points": 0,
+        "total_points_awarded": 0,
+        "awarded_members": [],
+    }
+
+    try:
+        if external_session is None:
+            return await _check_and_award_points(
+                reason, group_id, player_id, value,
+                players_included=players_included, item_id=item_id, npc_id=npc_id,
+                quantity=quantity, entry_id=entry_id, submission_guid=submission_guid,
+                submission_timestamp=submission_timestamp, external_session=None,
+            )
+
+        savepoint = external_session.begin_nested()
+        try:
+            result = await _check_and_award_points(
+                reason, group_id, player_id, value,
+                players_included=players_included, item_id=item_id, npc_id=npc_id,
+                quantity=quantity, entry_id=entry_id, submission_guid=submission_guid,
+                submission_timestamp=submission_timestamp, external_session=external_session,
+            )
+            savepoint.commit()
+            return result
+        except Exception:
+            try:
+                savepoint.rollback()
+            except Exception:
+                pass
+            raise
+    except Exception as e:
+        print(
+            f"Point award pass failed for group {group_id} "
+            f"(guid={submission_guid}, entry_id={entry_id}): {e}"
+        )
+        return empty_result
+
+
+async def _check_and_award_points(
     reason,
     group_id,
     player_id,
@@ -1005,23 +1077,37 @@ async def award_player_points(
         print(
             f"Awarding {points_to_award} points to {player_id} for {reason} (entry_id={entry_id}) "
         )
+        from data.submissions.common import select_session_and_flag
+        session, use_ext = select_session_and_flag(external_session)
         try:
-            from data.submissions.common import select_session_and_flag
-            session, use_ext = select_session_and_flag(external_session)
             entry = PlayerPoints(
                 player_id=player_id,
                 group_id=group_id,
                 amount=int(points_to_award),
-                reason=str(reason),
+                # MySQL strict mode rejects values longer than the column
+                # (raid drops build reasons listing every participant).
+                reason=str(reason)[:_PLAYER_POINTS_REASON_MAX_LEN],
                 entry_id=int(entry_id) if entry_id not in (None, "", 0, "0") else None,
             )
-            session.add(entry)
-            _persist(session, use_ext)
+            if use_ext:
+                # SAVEPOINT: a failed insert must roll back only this point
+                # award, never the caller's transaction (which holds the
+                # not-yet-committed submission row).
+                with session.begin_nested():
+                    session.add(entry)
+                    session.flush()
+            else:
+                session.add(entry)
+                session.commit()
             return points_to_award
         except Exception as e:
             print(f"Could not award points to player: {e}")
+            if not use_ext:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
             return 0
-        return 0
 
 async def get_point_config(group_id: int, external_session=None):
     from data.submissions.common import select_session_and_flag

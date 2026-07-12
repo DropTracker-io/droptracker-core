@@ -171,6 +171,7 @@ class RedisLootTracker:
         world_type: str = "main",
         item_name: str | None = None,
         npc_name: str | None = None,
+        exclude_group_ids: set | None = None,
     ) -> bool:
         """
         Add a single drop to a player's Redis cache (incremental update).
@@ -183,6 +184,10 @@ class RedisLootTracker:
         already resolved (e.g. ``drop_processor``) — passed through only for the
         realtime drop-feed publish so it can show text without this hot path
         doing its own DB lookup.
+
+        ``exclude_group_ids``: groups whose boards this drop must NOT count
+        toward (manual_submission_policy, suggestion #45) — filtered out of
+        both the leaderboard increments and the realtime group publishes.
         """
         with self._lock:
             if player.player_id in self._processing_players:
@@ -198,13 +203,16 @@ class RedisLootTracker:
 
                     # Get player's group IDs for group leaderboards
                     player_group_ids = [group.group_id for group in player.groups] if player.groups else []
+                    if exclude_group_ids:
+                        player_group_ids = [g for g in player_group_ids if g not in exclude_group_ids]
 
                     # Update leaderboards incrementally using ZINCRBY instead of full recalculation.
                     # The drop's own timestamp decides which weekly/daily boards it lands on,
                     # so late-processed drops around a day/week boundary stay on the right board.
                     drop_dt = self._coerce_drop_datetime(drop.date_added)
                     self._increment_leaderboards(player.player_id, total_value, partition, player_group_ids,
-                                                 world_type=world_type, drop_dt=drop_dt)
+                                                 world_type=world_type, drop_dt=drop_dt,
+                                                 npc_id=getattr(drop, "npc_id", None))
 
                     # Additive: publish a realtime leaderboard_delta (Task 07 C).
                     # Never affects intake — publish failures are swallowed.
@@ -224,7 +232,8 @@ class RedisLootTracker:
     
     def _increment_leaderboards(self, player_id: int, value_delta: int,
                                 partition: Optional[int] = None, group_ids: Optional[List[int]] = None,
-                                world_type: str = "main", drop_dt: Optional[datetime] = None):
+                                world_type: str = "main", drop_dt: Optional[datetime] = None,
+                                npc_id: Optional[int] = None):
         """
         Incrementally update leaderboards by adding value_delta to player's score.
         More efficient than full recalculation for individual drop additions.
@@ -259,6 +268,57 @@ class RedisLootTracker:
             self._increment_extra_partitions(player_id, value_delta, group_ids, prefix, drop_dt)
         except Exception as e:
             print(f"[redis_updates] extra-partition update skipped: {e}")
+
+        # --- Additive: per-NPC loot boards ---
+        # Powers the Hall of Fame "Most Loot" section and the website's NPC
+        # leaderboards, which read these keys but previously had no writer.
+        # Best-effort: never affects the boards above or the drop itself.
+        try:
+            self._increment_npc_leaderboards(player_id, value_delta, npc_id, partition,
+                                             group_ids, prefix)
+        except Exception as e:
+            print(f"[redis_updates] npc-leaderboard update skipped: {e}")
+
+    # Monthly per-NPC boards get a TTL (many NPCs × groups × months would grow
+    # unbounded otherwise); the all-time boards persist like leaderboard:all.
+    _NPC_MONTH_TTL = 400 * 24 * 3600   # ~13 months
+
+    def _increment_npc_leaderboards(self, player_id: int, value_delta: int,
+                                    npc_id: Optional[int], partition: int,
+                                    group_ids: Optional[List[int]], prefix: str):
+        """Maintain per-NPC loot sorted sets (player_id -> total GP from this NPC).
+
+        Keys (mirroring web_api.common.npc_leaderboard_key and the reads in
+        services/hall_of_fame.py):
+          {prefix}leaderboard:npc:{npc_id}[:{partition}]                 (global)
+          {prefix}leaderboard:group:{gid}:npc:{npc_id}[:{partition}]     (per group)
+        """
+        try:
+            npc_id = int(npc_id) if npc_id is not None else 0
+        except (TypeError, ValueError):
+            npc_id = 0
+        if npc_id <= 0 or not value_delta:
+            return
+
+        pipeline = redis_client.client.pipeline(transaction=True)
+
+        # Global (used by the website and by the global/template group's HOF).
+        month_key = f"{prefix}leaderboard:npc:{npc_id}:{partition}"
+        all_key = f"{prefix}leaderboard:npc:{npc_id}"
+        pipeline.zincrby(month_key, value_delta, player_id)
+        pipeline.expire(month_key, self._NPC_MONTH_TTL)
+        pipeline.zincrby(all_key, value_delta, player_id)
+
+        # Per-group.
+        if group_ids:
+            for group_id in group_ids:
+                g_month = f"{prefix}leaderboard:group:{group_id}:npc:{npc_id}:{partition}"
+                g_all = f"{prefix}leaderboard:group:{group_id}:npc:{npc_id}"
+                pipeline.zincrby(g_month, value_delta, player_id)
+                pipeline.expire(g_month, self._NPC_MONTH_TTL)
+                pipeline.zincrby(g_all, value_delta, player_id)
+
+        pipeline.execute()
 
     # Retention for the additive weekly/daily boards (bounds Redis memory).
     _WEEKLY_TTL = 400 * 24 * 3600   # ~13 months
@@ -452,14 +512,28 @@ class RedisLootTracker:
             # Clear existing Redis data
             self._clear_player_redis_data(player_id)
             self._remove_from_leaderboards(player_id, player_group_ids)
-            
+
+            # Per-group manual-submission exclusions (drop_group_moderation):
+            # subtract from the affected GROUP boards only — the intake path
+            # never counted these drops there, so the rebuild must not either.
+            from services.drop_moderation import player_exclusion_totals
+            try:
+                excl_monthly, excl_daily = player_exclusion_totals(session_to_use, player_id)
+            except Exception as e:
+                print(f"Couldn't load manual-policy exclusions for player {player_id}: {e}")
+                excl_monthly, excl_daily = {}, {}
+
             # Rebuild Redis data for each monthly partition and update leaderboards
             all_time_total = 0
             for partition, drops in partition_drops.items():
                 total_loot = self._rebuild_partition_data(player_id, partition, drops)
                 all_time_total += total_loot
                 # Update leaderboards for this partition
-                self.update_leaderboards(player_id, total_loot, partition, player_group_ids)
+                deductions = {
+                    gid: amt for (gid, part), amt in excl_monthly.items() if part == partition
+                }
+                self.update_leaderboards(player_id, total_loot, partition, player_group_ids,
+                                         group_deductions=deductions or None)
                 print(f"Updated leaderboards for player {player_id} in partition {partition}")
 
             # Re-establish the all-time global board + total from the accumulated
@@ -479,7 +553,8 @@ class RedisLootTracker:
             # ZINCRBY-maintained boards keep stale scores forever after drops
             # are hidden/edited — the monthly and all-time boards were repaired
             # above, but day/week were not.
-            self._rebuild_period_leaderboards(player_id, daily_drops, player_group_ids)
+            self._rebuild_period_leaderboards(player_id, daily_drops, player_group_ids,
+                                              group_day_deductions=excl_daily or None)
 
             # Re-apply split GP credits earned as a participant in other players' drops.
             # These are not in the player's own Drop rows, so they must be reconstructed
@@ -652,7 +727,8 @@ class RedisLootTracker:
         return total_loot
 
     def _rebuild_period_leaderboards(self, player_id: int, daily_drops: Dict[str, List[Drop]],
-                                     group_ids: List[int]) -> None:
+                                     group_ids: List[int],
+                                     group_day_deductions: Optional[Dict[tuple, int]] = None) -> None:
         """Set the player's authoritative daily + weekly board scores after a
         full rebuild.
 
@@ -663,14 +739,21 @@ class RedisLootTracker:
         window and every ISO week within the weekly retention window.
         ``_remove_from_leaderboards`` clears the current day/week entries first,
         so a player whose current drops were all hidden drops off those boards.
+
+        ``group_day_deductions``: ``(group_id, 'YYYYMMDD') -> GP`` to subtract
+        from that group's day (and containing week) board — the per-group
+        manual_submission_policy exclusions (drop_group_moderation). Global
+        boards always get the full totals.
         """
         from utils.partitions import week_token
 
         now = datetime.now()
         daily_cutoff = now - timedelta(seconds=self._DAILY_TTL)
         weekly_cutoff = now - timedelta(seconds=self._WEEKLY_TTL)
+        deductions = group_day_deductions or {}
 
         weekly_totals: Dict[str, int] = {}
+        weekly_group_deductions: Dict[tuple, int] = {}
         pipeline = redis_client.client.pipeline(transaction=True)
 
         for daily_partition, drops in daily_drops.items():
@@ -683,6 +766,11 @@ class RedisLootTracker:
             if day_dt >= weekly_cutoff:
                 wk = week_token(day_dt)
                 weekly_totals[wk] = weekly_totals.get(wk, 0) + day_total
+                for group_id in group_ids:
+                    ded = deductions.get((group_id, daily_partition), 0)
+                    if ded:
+                        key = (group_id, wk)
+                        weekly_group_deductions[key] = weekly_group_deductions.get(key, 0) + ded
 
             if day_dt < daily_cutoff:
                 continue
@@ -691,7 +779,8 @@ class RedisLootTracker:
             pipeline.expire(day_key, self._DAILY_TTL)
             for group_id in group_ids:
                 gkey = f"leaderboard:{daily_partition}:group:{group_id}"
-                pipeline.zadd(gkey, {player_id: day_total})
+                group_day_total = max(day_total - deductions.get((group_id, daily_partition), 0), 0)
+                pipeline.zadd(gkey, {player_id: group_day_total})
                 pipeline.expire(gkey, self._DAILY_TTL)
 
         for wk, week_total in weekly_totals.items():
@@ -700,7 +789,8 @@ class RedisLootTracker:
             pipeline.expire(week_key, self._WEEKLY_TTL)
             for group_id in group_ids:
                 gkey = f"leaderboard:{wk}:group:{group_id}"
-                pipeline.zadd(gkey, {player_id: week_total})
+                group_week_total = max(week_total - weekly_group_deductions.get((group_id, wk), 0), 0)
+                pipeline.zadd(gkey, {player_id: group_week_total})
                 pipeline.expire(gkey, self._WEEKLY_TTL)
 
         pipeline.execute()
@@ -950,8 +1040,14 @@ class RedisLootTracker:
         return (int(rank) + 1, total_players)  # Redis ranks are 0-based
     
     def update_leaderboards(self, player_id: int, total_value: int,
-                           partition: Optional[int] = None, group_ids: Optional[List[int]] = None):
-        """Update leaderboards for a player"""
+                           partition: Optional[int] = None, group_ids: Optional[List[int]] = None,
+                           group_deductions: Optional[Dict[int, int]] = None):
+        """Update leaderboards for a player.
+
+        ``group_deductions``: per-group GP to subtract from ``total_value`` on
+        THAT group's board (manual_submission_policy exclusions,
+        drop_group_moderation) — the global board always gets the full total.
+        """
         if partition is None:
             partition = self._get_partition()
 
@@ -965,8 +1061,9 @@ class RedisLootTracker:
         if group_ids:
             for group_id in group_ids:
                 group_key = f"leaderboard:{partition}:group:{group_id}"
-                pipeline.zadd(group_key, {player_id: total_value})
-                print(f"Updated group leaderboard {group_id} for player {player_id} with value {total_value:,}")
+                group_value = max(total_value - (group_deductions or {}).get(group_id, 0), 0)
+                pipeline.zadd(group_key, {player_id: group_value})
+                print(f"Updated group leaderboard {group_id} for player {player_id} with value {group_value:,}")
 
         pipeline.execute()
 
@@ -1021,10 +1118,12 @@ def add_to_player(
     world_type: str = "main",
     item_name: str | None = None,
     npc_name: str | None = None,
+    exclude_group_ids: set | None = None,
 ) -> bool:
     """Add a drop to a player's Redis cache"""
     return loot_tracker.add_to_player(
         player, drop, world_type=world_type, item_name=item_name, npc_name=npc_name,
+        exclude_group_ids=exclude_group_ids,
     )
 
 

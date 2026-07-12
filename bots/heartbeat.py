@@ -18,6 +18,9 @@ import sqlalchemy
 from monitor.sdnotifier import SystemdWatchdog
 from dotenv import load_dotenv
 load_dotenv()
+
+from utils.sentry import init_sentry
+init_sentry("droptracker-heartbeat")
 # Set up more detailed logging
 # logging.basicConfig(level=logging.DEBUG)
 import os

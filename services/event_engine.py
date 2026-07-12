@@ -17,14 +17,22 @@ Envelope (v1)::
 
     { "v": 1, "kind": "drop|pb|clog|ca|experience",
       "guid": "...", "player_id": 123, "player_name": "...",
-      "ts": 1751600000, "data": { ...type-specific... } }
+      "ts": 1751600000, "used_api": true, "data": { ...type-specific... } }
+
+``used_api`` mirrors the submission's intake path (plugin API vs the
+webhook-bot fallback); events gate on it via ``submission_policy``
+(``all`` / ``confirm_non_api`` / ``api_only``). Absent (pre-upgrade queue
+entries) is treated as non-API.
 
 v1 evaluation semantics (task doc table):
 
 - ``item_collection`` — drop/clog item name match (case-insensitive; config
   kinds ``any_of``/``all_of``/``point_collection``/``assembly`` best-effort:
   every listed item name matches; ``point_collection`` credits the item's
-  point weight). Progress unit = quantity.
+  point weight; ``groups`` combines all-of/any-of sub-requirements — every
+  group must be satisfied, e.g. all godsword shards + any one hilt).
+  Progress unit = quantity; ``any_of`` completes at ``target_value``
+  qualifying drops (default 1).
 - ``kc_target`` — drop from the target NPC; each qualifying kill counts once
   (deduped by ``(npc, kill_count)`` per player via Redis).
 - ``pb_target`` — pb for the target boss with time ≤ target_value seconds;
@@ -71,7 +79,7 @@ AUTO_TASK_TYPES = ("item_collection", "kc_target", "pb_target", "xp_target", "sk
 
 def queue_submission(kind: str, player_id, guid, data: dict,
                      world_type: str = "main", player_name: str = None,
-                     ts: int = None) -> None:
+                     ts: int = None, used_api: bool = False) -> None:
     """Fire-and-forget push of a processed submission onto the events queue.
 
     Gated on the ``events:active`` Redis set (maintained by the worker) so it
@@ -93,6 +101,7 @@ def queue_submission(kind: str, player_id, guid, data: dict,
             "guid": str(guid) if guid else None,
             "player_id": int(player_id),
             "ts": int(ts or time.time()),
+            "used_api": bool(used_api),
             "data": data or {},
         }
         if player_name:
@@ -167,8 +176,8 @@ def parse_task_config(raw) -> dict:
 
 def _config_item_entries(config: dict) -> dict:
     """Map normalized item name -> item entry (dict or None) from a task
-    config. Supports ``items: [{item_name|name, quantity?, points?}]`` and a
-    bare ``any_of: [str, ...]`` list."""
+    config. Supports ``items: [{item_name|name, quantity?, points?}]``, a
+    bare ``any_of: [str, ...]`` list, and ``groups`` sub-requirement lists."""
     entries: dict = {}
     for it in (config.get("items") or []):
         if isinstance(it, str):
@@ -188,6 +197,13 @@ def _config_item_entries(config: dict) -> dict:
             name = _norm(it.get("item_name") or it.get("name"))
             if name:
                 entries.setdefault(name, it)
+    for group in (config.get("groups") or []):
+        if isinstance(group, dict):
+            for it in (group.get("items") or []):
+                name = _norm(it if isinstance(it, str)
+                             else (it or {}).get("item_name") or (it or {}).get("name"))
+                if name:
+                    entries.setdefault(name, None)
     return entries
 
 
@@ -231,7 +247,7 @@ def completion_threshold(task: dict) -> int:
 
 
 def _list_kind(task: dict) -> Optional[str]:
-    """Item-list config kind (any_of/all_of/point_collection/assembly), if any."""
+    """Item-list config kind (any_of/all_of/point_collection/assembly/groups), if any."""
     config = task.get("config") or {}
     return config.get("kind") if isinstance(config, dict) else None
 
@@ -272,6 +288,76 @@ def _distinct_progress_from_rows(rows, threshold: int) -> int:
         else:
             wildcard += max(int(getattr(r, "quantity", 1) or 1), 1)
     return min(len(distinct) + wildcard, threshold)
+
+
+def _grouped_item_progress(session, task: dict, team_id, include=None) -> int:
+    """``kind: "groups"`` rollup — each group is its own all-of (distinct
+    listed items) or any-of (quantities fold, capped at ``need``) requirement,
+    and overall progress is the sum of per-group progress. The task threshold
+    is the sum of group needs, so it completes exactly when every group is
+    satisfied. Manual wildcard rows count their quantity toward the total,
+    like :func:`_distinct_item_progress`.
+    """
+    from db.models import EventCompletion
+
+    rows = list(
+        session.query(EventCompletion)
+        .filter(EventCompletion.task_id == task["id"],
+                EventCompletion.team_id == team_id,
+                EventCompletion.status.in_(("auto", "confirmed", "manual")))
+        .all()
+    )
+    if include is not None and all(r.id != include.id for r in rows):
+        rows.append(include)
+    return _grouped_progress_from_rows(rows, task.get("config") or {},
+                                       completion_threshold(task))
+
+
+def _grouped_progress_from_rows(rows, config: dict, threshold: int) -> int:
+    """Pure core of :func:`_grouped_item_progress` (unit-testable)."""
+    groups: list[tuple[str, set, int]] = []
+    for group in (config.get("groups") or []):
+        if not isinstance(group, dict):
+            continue
+        names = {
+            _norm(it if isinstance(it, str)
+                  else (it or {}).get("item_name") or (it or {}).get("name"))
+            for it in (group.get("items") or [])
+        }
+        names.discard("")
+        if not names:
+            continue
+        mode = group.get("mode") if group.get("mode") in ("all_of", "any_of") else "all_of"
+        try:
+            need = max(int(group.get("need") or 0), 1) if mode == "any_of" else len(names)
+        except (TypeError, ValueError):
+            need = 1
+        groups.append((mode, names, need))
+
+    distinct: list[set] = [set() for _ in groups]
+    folded = [0] * len(groups)
+    wildcard = 0
+    for r in rows:
+        if (getattr(r, "source_type", None) or "") == "bonus":
+            continue
+        name = _norm(getattr(r, "matched_target", None))
+        qty = max(int(getattr(r, "quantity", 1) or 1), 1)
+        if not name:
+            wildcard += qty
+            continue
+        for gi, (mode, names, _need) in enumerate(groups):
+            if name in names:
+                if mode == "all_of":
+                    distinct[gi].add(name)
+                else:
+                    folded[gi] += qty
+                break
+
+    progress = wildcard
+    for gi, (mode, _names, need) in enumerate(groups):
+        got = len(distinct[gi]) if mode == "all_of" else folded[gi]
+        progress += min(got, need)
+    return min(progress, threshold)
 
 
 def match_task(task: dict, envelope: dict) -> Optional[dict]:
@@ -365,6 +451,28 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
     return None
 
 
+def accepts_submission_source(event: dict, envelope: dict) -> bool:
+    """Whether the event's submission_policy admits this envelope's intake
+    path (pure; no I/O). Only ``api_only`` rejects; a missing ``used_api``
+    flag (pre-upgrade queue entries, webhook-bot fallback) reads as non-API."""
+    if event.get("submission_policy") == "api_only":
+        return bool(envelope.get("used_api"))
+    return True
+
+
+def completion_status(event: dict, task: dict, envelope: dict) -> str:
+    """Initial ledger-row status for a match (pure; no I/O): ``pending`` when
+    the task or event forces confirmation (PRD D3), or when the event's
+    ``confirm_non_api`` policy holds a submission that didn't arrive via the
+    plugin API; ``auto`` otherwise."""
+    if task.get("requires_confirmation") or event.get("requires_confirmation"):
+        return "pending"
+    if (event.get("submission_policy") == "confirm_non_api"
+            and not envelope.get("used_api")):
+        return "pending"
+    return "auto"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Matcher state (loaded by the worker every 30s / on admin bump)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -391,6 +499,7 @@ def _event_to_dict(event) -> dict:
         "name": event.name,
         "group_id": event.group_id,
         "requires_confirmation": bool(event.requires_confirmation),
+        "submission_policy": getattr(event, "submission_policy", None) or "all",
         "has_bingo": bool(event.has_bingo),
         "board_size": int(event.board_size or 5),
         "bonus_line_points": int(event.bonus_line_points or 0),
@@ -861,6 +970,8 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         # Distinct-item semantics: recompute from the applied ledger instead
         # of folding quantity (which let one big stack complete the set).
         progress.progress = _distinct_item_progress(session, task, team_id, include=completion)
+    elif _list_kind(task) == "groups":
+        progress.progress = _grouped_item_progress(session, task, team_id, include=completion)
     else:
         progress.progress = int(progress.progress or 0) + quantity
 
@@ -960,8 +1071,7 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
     from db.models import EventCompletion
 
     data = envelope.get("data") or {}
-    status = "pending" if (task.get("requires_confirmation")
-                           or event.get("requires_confirmation")) else "auto"
+    status = completion_status(event, task, envelope)
     guid = envelope.get("guid")
     proof = data.get("image_url") or None
     completion = EventCompletion(
@@ -1038,6 +1148,8 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict) ->
         if event["window_start"] is not None and submitted_at < event["window_start"]:
             continue
         if event["window_end"] is not None and submitted_at > event["window_end"]:
+            continue
+        if not accepts_submission_source(event, envelope):
             continue
 
         xp_delta = None  # baseline folded at most once per (event, envelope)
@@ -1176,6 +1288,8 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
         # Distinct-item semantics (the revoked row is already excluded — its
         # status flipped before this recompute).
         new_progress = _distinct_item_progress(session, task, team_id)
+    elif _list_kind(task) == "groups":
+        new_progress = _grouped_item_progress(session, task, team_id)
     else:
         survivors = (session.query(EventCompletion)
                      .filter(EventCompletion.task_id == task["id"],

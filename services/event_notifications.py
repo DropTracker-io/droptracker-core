@@ -32,6 +32,9 @@ KIND_FOR_TYPE = {
     "event_pending": "admin",
     # Task 21: the scheduler sweep could not activate a scheduled draft.
     "event_activation_failed": "admin",
+    # Interactive "Sign up" prompt (posted on demand by an admin) — carries a
+    # button the notification sender attaches (services/notification_service).
+    "event_signup_prompt": "announcements",
 }
 
 EVENT_NOTIFICATION_TYPES = tuple(KIND_FOR_TYPE)
@@ -50,11 +53,39 @@ _COLORS = {
     "event_lead_change": 0xFFD700,
     "event_pending": 0xE67E22,
     "event_activation_failed": 0xED4245,
+    "event_signup_prompt": 0x5865F2,  # Discord blurple — a call to action
 }
 
 
 def event_url(event_id) -> str:
     return f"{EVENT_BASE_URL}/{event_id}"
+
+
+def event_ping_role_ids(ping_config_json, key: str) -> list:
+    """Role ids configured for one ping key in ``web_events.ping_config``
+    (JSON ``{key: [role ids]}``). [] on unset/corrupt config — pings must
+    never break a send."""
+    import json
+
+    if not ping_config_json:
+        return []
+    try:
+        data = json.loads(ping_config_json)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    roles = data.get(key)
+    if not isinstance(roles, list):
+        return []
+    return [str(r) for r in roles if r]
+
+
+def ping_content(role_ids) -> Optional[str]:
+    """`<@&id>` mention prefix for a notification message, or None when no
+    roles are configured (embed-only send, exactly as before)."""
+    mentions = " ".join(f"<@&{rid}>" for rid in role_ids)
+    return mentions or None
 
 
 def resolve_event_channel(channels_by_kind: dict, notification_type: str) -> Optional[str]:
@@ -202,6 +233,23 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             field("Review", f"[Open the review queue]({review_url})", inline=False)
         if data.get("proof_url"):
             spec["thumbnail"] = data["proof_url"]
+
+    elif notification_type == "event_signup_prompt":
+        spec["title"] = f"\U0001F4E3 Sign up for {event_name}"
+        how = {
+            "self_join": "Pick your account, then choose your team.",
+            "auto_assign": "Pick your account — you'll be placed on a team automatically.",
+            "signup_pool": "Pick your account to join the sign-up pool; "
+                           "admins will sort teams later.",
+        }.get(data.get("formation_mode"), "Pick your account to enter.")
+        spec["description"] = (
+            f"{data.get('description') or 'This event is open for sign-ups!'}\n\n"
+            f"{how}\n-# One account per person. "
+            f"Not linked yet? Sign in at droptracker.io first."
+        )
+        ends = _fmt_ts(data.get("ends_at"))
+        if ends:
+            field("Sign-ups close", ends)
 
     elif notification_type == "event_activation_failed":
         spec["title"] = f"⚠️ {event_name} could not start"

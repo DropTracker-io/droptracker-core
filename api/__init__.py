@@ -24,6 +24,9 @@ _LOOP_LAG_THRESHOLD_SECONDS = float(os.getenv("EVENT_LOOP_LAG_THRESHOLD", "0.5")
 
 
 def create_app() -> Quart:
+    from utils.sentry import init_sentry
+    init_sentry("droptracker-api")
+
     app = Quart(__name__)
 
     # Configure logging to suppress HTTP access logs

@@ -58,6 +58,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     game_message = pet_data.get("game_message", None)
     unique_id = pet_data.get("guid", None)
     video_key = pet_data.get("video_key")
+    plugin_version = pet_data.get("p_v", None)
     notice = ""
     dedup_type = "seasonal_pet" if is_seasonal else "pet"
     if not await ensure_can_create(session, unique_id, dedup_type):
@@ -164,9 +165,23 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     if should_notify:
         debug_print(f"Creating notifications for pet submission")
         player_groups = get_player_groups_with_global(session, player)
+        # Per-group manual policy (suggestion #45): suppress this group's
+        # notification for a manual submission it doesn't trust. NB pet_data
+        # ["source"] is the pet's NPC — the intake marker is "intake_source".
+        manual_suppressed = set()
+        if pet_data.get("intake_source") == "manual" and not is_seasonal:
+            try:
+                from .manual_policy import manual_notification_suppressed_groups
+                manual_suppressed = manual_notification_suppressed_groups(
+                    session, player, [g.group_id for g in player_groups]
+                )
+            except Exception as e:
+                print(f"[ManualPolicy] pet suppression check failed: {e}")
         for group in player_groups:
             debug_print(f"Checking group: {group.group_name}")
             group_id = group.group_id
+            if group_id in manual_suppressed:
+                continue
             from utils import group_config as gc
             pet_notify_val = gc.get(session, group_id, f"{config_prefix}notify_pets")
             group_points_result = {
@@ -239,6 +254,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                     "group_points_member_count": len(awarded_members),
                     "group_points_members_awarded": awarded_members,
                     "world_type": world_type,
+                    "plugin_version": plugin_version,
                 }
                 await create_notification(
                     "pet",
@@ -271,6 +287,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                         "image_url": dl_path,
                         "video_key": video_key,
                         "world_type": world_type,
+                        "plugin_version": plugin_version,
                     },
                     existing_session=session if use_external_session else None,
                 )

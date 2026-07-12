@@ -69,6 +69,7 @@ async def quest_processor(quest_data, external_session=None, world_type="main"):
     total_quest_points = quest_data.get("total_quest_points")
     qp_percentage = quest_data.get("qp_percentage")
     timestamp = quest_data.get("timestamp")
+    plugin_version = quest_data.get("p_v", None)
     debug_print(f"[QUEST] quest_name={quest_name} unique_id={unique_id} timestamp={timestamp}")
 
     notice = ""
@@ -159,6 +160,7 @@ async def quest_processor(quest_data, external_session=None, world_type="main"):
             "video_key": video_key,
             "video_url": video_url,
             "world_type": world_type,
+            "plugin_version": plugin_version,
         }
         print(f"Notification data: {notification_data}")
 
@@ -192,6 +194,7 @@ async def quest_processor(quest_data, external_session=None, world_type="main"):
                     "image_url": image_url or "",
                     "video_key": video_key,
                     "world_type": world_type,
+                    "plugin_version": plugin_version,
                 },
                 existing_session=session if use_external_session else None,
             )

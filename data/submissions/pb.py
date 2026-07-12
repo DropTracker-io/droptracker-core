@@ -70,6 +70,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     unique_id = pb_data.get("guid", None)
     video_key = pb_data.get("video_key")
     video_url = pb_data.get("video_url")
+    plugin_version = pb_data.get("p_v", None)
 
     notice = ""
 
@@ -88,6 +89,20 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     )
     if npc_id is None:
         return
+    # Hard-block: some NPCs have no real personal best (the game exposes none, so
+    # our tracking is bugged and produces junk). PB submissions for a runtime-
+    # managed set of npc_ids are dropped here at the single intake chokepoint —
+    # covering every path (webhook API, queue consumer, both bots) and both
+    # world types. Managed by superadmins via utils/pb_blocklist.
+    try:
+        from utils import pb_blocklist
+
+        if pb_blocklist.is_blocked(npc_id, session):
+            debug_print(f"PB submission for blocked npc_id={npc_id} ({npc_name}) dropped")
+            return
+    except Exception:
+        # Fail open: a blocklist read error must never break PB intake.
+        pass
     player, authed, user_exists = await ensure_player_by_name_then_auth(
         session, player_name, account_hash, auth_key
     )
@@ -139,6 +154,10 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                 )
         elif downloaded:
             dl_path = image_url
+    # Whether the *stored* PB row changed — i.e. whether the Hall of Fame
+    # leaderboard for this boss could now look different (a faster time, or a
+    # brand-new team-size bracket). Drives the near-real-time HOF refresh below.
+    pb_row_changed = False
     if pb_entry:
         if pb_entry.personal_best > current_ms:
             old_time = pb_entry.personal_best
@@ -150,6 +169,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
             if video_url:
                 pb_entry.video_url = video_url
             is_personal_best = True
+            pb_row_changed = True
         else:
             is_personal_best = False
     else:
@@ -167,11 +187,27 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
             unique_id=unique_id,
         )
         session.add(pb_entry)
+        pb_row_changed = True
 
     if use_external_session:
         session.flush()
     else:
         session.commit()
+
+    # Near-real-time Hall of Fame refresh (main-world only; the HOF reads
+    # PersonalBestEntry, not the seasonal mirror). Best-effort cross-process
+    # signal: the HOF bot drains this queue and edits just the affected boss
+    # message within seconds instead of waiting for its periodic sweep.
+    if pb_row_changed and not is_seasonal:
+        try:
+            import json as _json
+            from utils.redis import redis_client as _rc
+            _rc.client.rpush(
+                "hof:refresh:queue",
+                _json.dumps({"player_id": int(player_id), "npc_id": int(npc_id)}),
+            )
+        except Exception:
+            pass
 
     # Event engine hook (Task 17): gated, fire-and-forget LPUSH. EVERY kill
     # time (not just new PBs) is pushed so pb_target tasks match any
@@ -202,6 +238,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                     "source_id": getattr(pb_entry, "id", None),
                 },
                 world_type=world_type, player_name=player_name,
+                used_api=used_api,
             )
     except Exception:
         pass
@@ -215,9 +252,24 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
             bulk = gc.get_bulk(session, group_ids, [f"{config_prefix}notify_pbs"])
             pb_notify_configs = {gid: val for (gid, _key), val in bulk.items()}
 
+        # Per-group manual policy (suggestion #45): suppress this group's
+        # notification for a manual submission it doesn't trust (non-drop
+        # types are notification-only — no leaderboard, no review queue).
+        manual_suppressed = set()
+        if pb_data.get("intake_source") == "manual" and not is_seasonal:
+            try:
+                from .manual_policy import manual_notification_suppressed_groups
+                manual_suppressed = manual_notification_suppressed_groups(
+                    session, player, group_ids
+                )
+            except Exception as e:
+                print(f"[ManualPolicy] pb suppression check failed: {e}")
+
         for group in player_groups:
             await asyncio.sleep(0)
             group_id = group.group_id
+            if group_id in manual_suppressed:
+                continue
             pb_notify_config = pb_notify_configs.get(group_id)
             group_points_result = {
                 "receiver_points_awarded": 0,
@@ -277,6 +329,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                     "group_points_member_count": len(group_points_result.get("awarded_members", []) or []),
                     "group_points_members_awarded": group_points_result.get("awarded_members", []) or [],
                     "world_type": world_type,
+                    "plugin_version": plugin_version,
                 }
                 await create_notification(
                     "pb",
@@ -308,6 +361,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                         "image_url": pb_entry.image_url,
                         "video_key": video_key,
                         "world_type": world_type,
+                        "plugin_version": plugin_version,
                     },
                     existing_session=session if use_external_session else None,
                 )

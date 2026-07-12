@@ -26,10 +26,12 @@ OSRS_SKILLS = (
 _SKILL_BY_NORM = {s.lower(): s for s in OSRS_SKILLS}
 
 # Item-collection config kinds the engine understands (any_of/all_of via the
-# generic items map, point_collection weighting, assembly best-effort).
-ITEM_CONFIG_KINDS = ("any_of", "all_of", "point_collection", "assembly")
+# generic items map, point_collection weighting, assembly best-effort,
+# groups combining all-of/any-of sub-requirements).
+ITEM_CONFIG_KINDS = ("any_of", "all_of", "point_collection", "assembly", "groups")
 
 MAX_CONFIG_ITEMS = 100
+MAX_CONFIG_GROUPS = 10
 
 # Non-semantic config keys preserved verbatim across validation (the bingo
 # designer's auto-created marker — see event_admin._BINGO_AUTO_KEY).
@@ -114,6 +116,56 @@ def _validated_item_entries(s, items, *, with_points: bool) -> list[dict]:
     return out
 
 
+def _validated_groups(s, groups) -> tuple[list[dict], int]:
+    """Validate a ``kind: "groups"`` config: every group is its own all-of or
+    any-of item requirement, and the task completes when all groups are
+    satisfied (e.g. a godsword: ALL three shards + ANY one hilt).
+
+    Returns ``(normalized groups, total target_value)`` where each group is
+    ``{"mode", "items", "need"}`` — need is len(items) for all_of, the
+    requested count (default 1) for any_of.
+    """
+    if not isinstance(groups, list) or not groups:
+        abort_problem(422, "Invalid config", "Grouped config requires a non-empty 'groups' array.")
+    if len(groups) > MAX_CONFIG_GROUPS:
+        abort_problem(422, "Invalid config", f"At most {MAX_CONFIG_GROUPS} requirement groups per task.")
+    out: list[dict] = []
+    seen: dict[str, int] = {}
+    total_items = 0
+    total_need = 0
+    for gi, group in enumerate(groups, start=1):
+        if not isinstance(group, dict):
+            abort_problem(422, "Invalid config", "Each requirement group must be an object.")
+        mode = group.get("mode")
+        if mode not in ("all_of", "any_of"):
+            abort_problem(422, "Invalid config",
+                          f"Group {gi}: mode must be 'all_of' or 'any_of'.")
+        entries = _validated_item_entries(s, group.get("items"), with_points=False)
+        names = [e["item_name"] for e in entries]
+        for name in names:
+            key = name.lower()
+            if key in seen:
+                abort_problem(
+                    422, "Invalid config",
+                    f"'{name}' appears in more than one requirement group — an item "
+                    "can only count toward one group.",
+                )
+            seen[key] = gi
+        total_items += len(names)
+        if total_items > MAX_CONFIG_ITEMS:
+            abort_problem(422, "Invalid config", f"At most {MAX_CONFIG_ITEMS} items per task.")
+        if mode == "any_of":
+            # Quantities fold, so 'need' may legitimately exceed the list
+            # length (e.g. any 500 javelins across the javelin types).
+            need = _require_target_value(group.get("need", 1), what=f"Group {gi} 'need'")
+            out.append({"mode": "any_of", "items": names, "need": need})
+            total_need += need
+        else:
+            out.append({"mode": "all_of", "items": names, "need": len(names)})
+            total_need += len(names)
+    return out, total_need
+
+
 def validate_task_payload(s, body: dict) -> dict:
     """Validate + normalize a full task create payload.
 
@@ -135,7 +187,11 @@ def validate_task_payload(s, body: dict) -> dict:
                 422, "Invalid config",
                 f"Item collection config kind must be one of {list(ITEM_CONFIG_KINDS)}.",
             )
-        if config is not None:
+        if config is not None and kind == "groups":
+            groups, tv = _validated_groups(s, config.get("groups"))
+            config = {"kind": "groups", "groups": groups}
+            target = ""
+        elif config is not None:
             config = {
                 "kind": kind,
                 "items": _validated_item_entries(
@@ -144,7 +200,9 @@ def validate_task_payload(s, body: dict) -> dict:
             }
             target = ""
             if kind == "any_of":
-                tv = 1
+                # "Any N from the list" — quantities fold, so a stack of a
+                # listed item counts its size. Default: any single one.
+                tv = _require_target_value(tv if tv is not None else 1, what="Quantity")
             elif kind in ("all_of", "assembly"):
                 tv = len(config["items"])
             else:  # point_collection — points threshold to reach

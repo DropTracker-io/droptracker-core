@@ -3,96 +3,320 @@
   "info": {
     "title": "DropTracker Web API",
     "version": "1.0.0",
-    "description": "Versioned, browser-oriented JSON API consumed by the Next.js BFF. Separate from the RuneLite intake API. See FRONTEND_PLAN.md §6."
+    "description": "Versioned, browser-oriented JSON API consumed by the Next.js BFF. Separate from the RuneLite intake API. See FRONTEND_PLAN.md \u00a76."
   },
-  "servers": [{ "url": "/api/v1" }],
+  "servers": [
+    {
+      "url": "/api/v1"
+    }
+  ],
   "tags": [
-    { "name": "leaderboards" },
-    { "name": "players" },
-    { "name": "groups" },
-    { "name": "announcements" },
-    { "name": "me" }
+    {
+      "name": "leaderboards"
+    },
+    {
+      "name": "players"
+    },
+    {
+      "name": "groups"
+    },
+    {
+      "name": "announcements"
+    },
+    {
+      "name": "me"
+    }
   ],
   "paths": {
+    "/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "listEvents",
+        "summary": "List events (drafts visible to event admins only)",
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "draft",
+                "active",
+                "past"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Events visible to the requester.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EventSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "createEvent",
+        "summary": "Create a draft event (group admin; superadmin for global)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Id of the created draft event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/events/{eventId}": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "getEvent",
+        "summary": "Event detail (tasks, teams, progress, bingo board)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event detail payload. join_code appears only for event admins.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "updateEvent",
+        "summary": "Update event settings (event admin)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventPatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The refreshed event detail.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/leaderboards/players": {
       "get": {
-        "tags": ["leaderboards"],
+        "tags": [
+          "leaderboards"
+        ],
         "operationId": "getPlayerLeaderboard",
         "summary": "Player loot leaderboard",
         "parameters": [
-          { "$ref": "#/components/parameters/Period" },
-          { "$ref": "#/components/parameters/Scope" },
-          { "$ref": "#/components/parameters/Page" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/Period"
+          },
+          {
+            "$ref": "#/components/parameters/Scope"
+          },
+          {
+            "$ref": "#/components/parameters/Page"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
         "responses": {
           "200": {
             "description": "A page of leaderboard entries.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/LeaderboardPage" }
+                "schema": {
+                  "$ref": "#/components/schemas/LeaderboardPage"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/Error" }
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/leaderboards/groups": {
       "get": {
-        "tags": ["leaderboards"],
+        "tags": [
+          "leaderboards"
+        ],
         "operationId": "getGroupLeaderboard",
         "summary": "Group loot leaderboard",
         "parameters": [
-          { "$ref": "#/components/parameters/Period" },
-          { "$ref": "#/components/parameters/Page" },
-          { "$ref": "#/components/parameters/Limit" }
+          {
+            "$ref": "#/components/parameters/Period"
+          },
+          {
+            "$ref": "#/components/parameters/Page"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
         ],
         "responses": {
           "200": {
             "description": "A page of group leaderboard entries.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/LeaderboardPage" }
+                "schema": {
+                  "$ref": "#/components/schemas/LeaderboardPage"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/Error" }
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/players/{playerId}": {
       "get": {
-        "tags": ["players"],
+        "tags": [
+          "players"
+        ],
         "operationId": "getPlayer",
         "summary": "Player profile",
-        "parameters": [{ "$ref": "#/components/parameters/PlayerId" }],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PlayerId"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Player profile payload.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/PlayerProfile" }
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerProfile"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/Error" }
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/players/{playerId}/loot": {
       "get": {
-        "tags": ["players"],
+        "tags": [
+          "players"
+        ],
         "operationId": "getPlayerLoot",
         "summary": "Player loot tracker (drops grouped by NPC for one month)",
         "parameters": [
-          { "$ref": "#/components/parameters/PlayerId" },
+          {
+            "$ref": "#/components/parameters/PlayerId"
+          },
           {
             "name": "partition",
             "in": "query",
             "required": false,
             "description": "YYYYMM month to show; defaults to the current month.",
-            "schema": { "type": "integer" }
+            "schema": {
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -100,21 +324,78 @@
             "description": "Loot tracker payload.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/PlayerLootTracker" }
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerLootTracker"
+                }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/Error" },
-          "404": { "$ref": "#/components/responses/Error" }
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/resolve/{kind}": {
+      "get": {
+        "tags": [
+          "search"
+        ],
+        "operationId": "resolveSlug",
+        "summary": "Resolve a nice-URL slug to an entity, or to disambiguation candidates",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "group",
+                "player",
+                "npc",
+                "item"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resolution result: a single match, or candidates for a disambiguation page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolveResult"
+                }
+              }
+            }
+          }
         }
       }
     },
     "/players/search": {
       "get": {
-        "tags": ["players"],
+        "tags": [
+          "players"
+        ],
         "operationId": "searchPlayers",
         "summary": "Search players by name",
-        "parameters": [{ "$ref": "#/components/parameters/Query" }],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Query"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Matching players.",
@@ -122,7 +403,9 @@
               "application/json": {
                 "schema": {
                   "type": "array",
-                  "items": { "$ref": "#/components/schemas/PlayerSummary" }
+                  "items": {
+                    "$ref": "#/components/schemas/PlayerSummary"
+                  }
                 }
               }
             }
@@ -132,38 +415,56 @@
     },
     "/groups/{groupId}": {
       "get": {
-        "tags": ["groups"],
+        "tags": [
+          "groups"
+        ],
         "operationId": "getGroup",
         "summary": "Group profile",
-        "parameters": [{ "$ref": "#/components/parameters/GroupId" }],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/GroupId"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Group profile payload.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/GroupProfile" }
+                "schema": {
+                  "$ref": "#/components/schemas/GroupProfile"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/Error" }
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     },
     "/announcements": {
       "get": {
-        "tags": ["announcements"],
+        "tags": [
+          "announcements"
+        ],
         "operationId": "listAnnouncements",
         "summary": "List announcements",
         "parameters": [
-          { "$ref": "#/components/parameters/Scope" },
-          { "$ref": "#/components/parameters/Cursor" }
+          {
+            "$ref": "#/components/parameters/Scope"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
         ],
         "responses": {
           "200": {
             "description": "A page of announcements.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/AnnouncementPage" }
+                "schema": {
+                  "$ref": "#/components/schemas/AnnouncementPage"
+                }
               }
             }
           }
@@ -172,20 +473,144 @@
     },
     "/me": {
       "get": {
-        "tags": ["me"],
+        "tags": [
+          "me"
+        ],
         "operationId": "getMe",
         "summary": "Current session: user, linked players, group roles",
-        "security": [{ "session": [] }],
+        "security": [
+          {
+            "session": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Authenticated user payload.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Me" }
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
               }
             }
           },
-          "401": { "$ref": "#/components/responses/Error" }
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/groups/{groupId}/subscription/summary": {
+      "get": {
+        "summary": "Public subscription-pool summary for a group (tier, pool total, next tier)",
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupSubscriptionSummary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/npcs/{npcId}": {
+      "get": {
+        "tags": [
+          "npcs"
+        ],
+        "operationId": "getNpc",
+        "summary": "NPC overview (lifetime/month totals, top players, recent drops)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NpcId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "NPC overview payload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NpcDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/npcs/{npcId}/drop-table": {
+      "get": {
+        "tags": [
+          "npcs"
+        ],
+        "operationId": "getNpcDropTable",
+        "summary": "Wiki drop table with most-recent receiver per item",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NpcId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Drop table payload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NpcDropTable"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/items/{itemId}": {
+      "get": {
+        "tags": [
+          "items"
+        ],
+        "operationId": "getItem",
+        "summary": "Item overview (totals, recent/top receivers, drop sources)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ItemId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Item overview payload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
         }
       }
     }
@@ -203,46 +628,96 @@
         "name": "period",
         "in": "query",
         "description": "Time partition: YYYYMM (monthly), YYYYWW (weekly), YYYYMMDD (daily) or 'all'.",
-        "schema": { "type": "string", "default": "all" }
+        "schema": {
+          "type": "string",
+          "default": "all"
+        }
       },
       "Scope": {
         "name": "scope",
         "in": "query",
         "description": "global | group:{id} | npc:{id} | player:{id}",
-        "schema": { "type": "string", "default": "global" }
+        "schema": {
+          "type": "string",
+          "default": "global"
+        }
       },
       "Page": {
         "name": "page",
         "in": "query",
-        "schema": { "type": "integer", "minimum": 1, "default": 1 }
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1
+        }
       },
       "Limit": {
         "name": "limit",
         "in": "query",
-        "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 }
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 25
+        }
       },
       "Cursor": {
         "name": "cursor",
         "in": "query",
-        "schema": { "type": "string" }
+        "schema": {
+          "type": "string"
+        }
       },
       "Query": {
         "name": "q",
         "in": "query",
         "required": true,
-        "schema": { "type": "string", "minLength": 1 }
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "PlayerId": {
         "name": "playerId",
         "in": "path",
         "required": true,
-        "schema": { "type": "integer" }
+        "schema": {
+          "type": "integer"
+        }
       },
       "GroupId": {
         "name": "groupId",
         "in": "path",
         "required": true,
-        "schema": { "type": "integer" }
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "EventId": {
+        "name": "eventId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "NpcId": {
+        "name": "npcId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        },
+        "description": "NPC id (npc_list.npc_id)."
+      },
+      "ItemId": {
+        "name": "itemId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        },
+        "description": "Item id (items.item_id)."
       }
     },
     "responses": {
@@ -250,221 +725,1007 @@
         "description": "RFC-7807 problem details.",
         "content": {
           "application/json": {
-            "schema": { "$ref": "#/components/schemas/Problem" }
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
           }
         }
       }
     },
     "schemas": {
+      "EventSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "group_id",
+          "name",
+          "status",
+          "starts_at",
+          "ends_at",
+          "has_bingo",
+          "formation_mode",
+          "requires_confirmation",
+          "submission_policy",
+          "board_size",
+          "bonus_line_points",
+          "bonus_blackout_points"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "group_id": {
+            "type": "integer",
+            "nullable": true,
+            "description": "null => global event."
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "active",
+              "past"
+            ]
+          },
+          "starts_at": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Unix seconds."
+          },
+          "ends_at": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Unix seconds."
+          },
+          "has_bingo": {
+            "type": "boolean",
+            "default": false
+          },
+          "formation_mode": {
+            "type": "string",
+            "enum": [
+              "self_join",
+              "auto_assign",
+              "admin_assign"
+            ],
+            "default": "admin_assign"
+          },
+          "requires_confirmation": {
+            "type": "boolean",
+            "default": false,
+            "description": "Event-level force: all completions queue for admin review."
+          },
+          "submission_policy": {
+            "type": "string",
+            "enum": [
+              "all",
+              "confirm_non_api",
+              "api_only"
+            ],
+            "default": "all",
+            "description": "Which submissions the completion engine accepts: 'all' \u2014 everything counts; 'confirm_non_api' \u2014 non-plugin submissions land as pending completions needing admin confirmation; 'api_only' \u2014 submissions without the plugin API flag are ignored."
+          },
+          "board_size": {
+            "type": "integer",
+            "default": 5
+          },
+          "bonus_line_points": {
+            "type": "integer",
+            "default": 0
+          },
+          "bonus_blackout_points": {
+            "type": "integer",
+            "default": 0
+          },
+          "activated_at": {
+            "type": "integer",
+            "nullable": true
+          },
+          "ended_at": {
+            "type": "integer",
+            "nullable": true
+          }
+        }
+      },
+      "EventTask": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "label",
+          "points",
+          "requires_confirmation"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "item_collection",
+              "kc_target",
+              "xp_target",
+              "ehp_target",
+              "ehb_target",
+              "pb_target",
+              "skill_target",
+              "loot_value",
+              "custom"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string",
+            "nullable": true
+          },
+          "target_value": {
+            "type": "integer",
+            "nullable": true
+          },
+          "points": {
+            "type": "integer",
+            "default": 0
+          },
+          "requires_confirmation": {
+            "type": "boolean",
+            "default": false
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "public",
+            "description": "How the task's reusable library copy is shared: public (any group may copy it) or private (owning group only)."
+          },
+          "config": {
+            "type": "string",
+            "nullable": true,
+            "description": "JSON string: any_of/assembly/point_collection item lists etc."
+          }
+        }
+      },
+      "EventMember": {
+        "type": "object",
+        "required": [
+          "player_id",
+          "player_name",
+          "joined_at"
+        ],
+        "properties": {
+          "player_id": {
+            "type": "integer"
+          },
+          "player_name": {
+            "type": "string"
+          },
+          "joined_at": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Unix seconds; the credit cutoff."
+          }
+        }
+      },
+      "EventTeam": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "score",
+          "member_count"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "score": {
+            "type": "integer",
+            "default": 0
+          },
+          "member_count": {
+            "type": "integer",
+            "default": 0
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventMember"
+            }
+          }
+        }
+      },
+      "EventProgress": {
+        "type": "object",
+        "required": [
+          "task_id",
+          "team_id",
+          "progress",
+          "completed"
+        ],
+        "properties": {
+          "task_id": {
+            "type": "integer"
+          },
+          "team_id": {
+            "type": "integer"
+          },
+          "progress": {
+            "type": "integer",
+            "default": 0
+          },
+          "completed": {
+            "type": "boolean",
+            "default": false
+          },
+          "completed_at": {
+            "type": "integer",
+            "nullable": true
+          }
+        }
+      },
+      "BingoCellCompletion": {
+        "type": "object",
+        "properties": {
+          "team_id": {
+            "type": "integer",
+            "nullable": true
+          },
+          "team_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "player_id": {
+            "type": "integer",
+            "nullable": true
+          },
+          "player_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "completed_at": {
+            "type": "integer",
+            "nullable": true
+          }
+        }
+      },
+      "BingoCell": {
+        "type": "object",
+        "required": [
+          "index",
+          "label"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer"
+          },
+          "label": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "integer",
+            "nullable": true
+          },
+          "completed_by": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "completions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BingoCellCompletion"
+            }
+          }
+        }
+      },
+      "BingoBoard": {
+        "type": "object",
+        "required": [
+          "size",
+          "cells"
+        ],
+        "properties": {
+          "size": {
+            "type": "integer",
+            "description": "Board is size \u00d7 size."
+          },
+          "cells": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BingoCell"
+            }
+          }
+        }
+      },
+      "EventViewer": {
+        "type": "object",
+        "properties": {
+          "player_ids_on_event": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "team_id": {
+            "type": "integer",
+            "nullable": true
+          }
+        }
+      },
+      "EventDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventSummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "join_requires_code"
+            ],
+            "properties": {
+              "tasks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EventTask"
+                }
+              },
+              "teams": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EventTeam"
+                }
+              },
+              "progress": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EventProgress"
+                }
+              },
+              "bingo": {
+                "$ref": "#/components/schemas/BingoBoard"
+              },
+              "viewer": {
+                "$ref": "#/components/schemas/EventViewer"
+              },
+              "join_requires_code": {
+                "type": "boolean",
+                "default": false
+              },
+              "join_code": {
+                "type": "string",
+                "nullable": true,
+                "description": "Admin-only: present only when the requester administers the event."
+              },
+              "discord_guild_id": {
+                "type": "string",
+                "nullable": true
+              }
+            }
+          }
+        ]
+      },
+      "EventInput": {
+        "type": "object",
+        "required": [
+          "group_id",
+          "name"
+        ],
+        "properties": {
+          "group_id": {
+            "type": "integer",
+            "nullable": true,
+            "description": "null => global event (superadmin only)."
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "starts_at": {
+            "type": "integer",
+            "nullable": true
+          },
+          "ends_at": {
+            "type": "integer",
+            "nullable": true
+          },
+          "formation_mode": {
+            "type": "string",
+            "enum": [
+              "self_join",
+              "auto_assign",
+              "admin_assign"
+            ]
+          },
+          "requires_confirmation": {
+            "type": "boolean"
+          },
+          "submission_policy": {
+            "type": "string",
+            "enum": [
+              "all",
+              "confirm_non_api",
+              "api_only"
+            ],
+            "description": "422 on any other value."
+          },
+          "join_code": {
+            "type": "string",
+            "nullable": true
+          },
+          "board_size": {
+            "type": "integer"
+          },
+          "bonus_line_points": {
+            "type": "integer"
+          },
+          "bonus_blackout_points": {
+            "type": "integer"
+          }
+        }
+      },
+      "EventPatch": {
+        "type": "object",
+        "description": "Any subset of EventInput fields except group_id.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "starts_at": {
+            "type": "integer",
+            "nullable": true
+          },
+          "ends_at": {
+            "type": "integer",
+            "nullable": true
+          },
+          "formation_mode": {
+            "type": "string",
+            "enum": [
+              "self_join",
+              "auto_assign",
+              "admin_assign"
+            ]
+          },
+          "requires_confirmation": {
+            "type": "boolean"
+          },
+          "submission_policy": {
+            "type": "string",
+            "enum": [
+              "all",
+              "confirm_non_api",
+              "api_only"
+            ],
+            "description": "422 on any other value."
+          },
+          "join_code": {
+            "type": "string",
+            "nullable": true
+          },
+          "board_size": {
+            "type": "integer"
+          },
+          "bonus_line_points": {
+            "type": "integer"
+          },
+          "bonus_blackout_points": {
+            "type": "integer"
+          }
+        }
+      },
       "Problem": {
         "type": "object",
         "description": "RFC-7807 error envelope.",
-        "required": ["title", "status"],
+        "required": [
+          "title",
+          "status"
+        ],
         "properties": {
-          "type": { "type": "string" },
-          "title": { "type": "string" },
-          "status": { "type": "integer" },
-          "detail": { "type": "string" }
+          "type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          }
         }
       },
       "Money": {
         "type": "object",
         "description": "GP value: raw integer plus a preformatted display string.",
-        "required": ["value", "value_formatted"],
+        "required": [
+          "value",
+          "value_formatted"
+        ],
         "properties": {
-          "value": { "type": "integer", "format": "int64" },
-          "value_formatted": { "type": "string", "examples": ["123.5M"] }
+          "value": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "value_formatted": {
+            "type": "string",
+            "examples": [
+              "123.5M"
+            ]
+          }
         }
       },
       "PageMeta": {
         "type": "object",
-        "required": ["page", "limit", "total"],
+        "required": [
+          "page",
+          "limit",
+          "total"
+        ],
         "properties": {
-          "page": { "type": "integer" },
-          "limit": { "type": "integer" },
-          "total": { "type": "integer" }
+          "page": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          }
+        }
+      },
+      "GroupFlair": {
+        "type": "object",
+        "description": "Cosmetic subscription-tier display style for a group's name. Present only for groups with an active/trialing subscription to a tier whose flair is not 'none'.",
+        "required": [
+          "tier_key",
+          "tier_name",
+          "style"
+        ],
+        "properties": {
+          "tier_key": {
+            "type": "string"
+          },
+          "tier_name": {
+            "type": "string"
+          },
+          "style": {
+            "type": "string",
+            "enum": [
+              "none",
+              "bronze",
+              "gold",
+              "amethyst",
+              "dragon"
+            ]
+          }
         }
       },
       "LeaderboardEntry": {
         "type": "object",
-        "required": ["rank", "id", "name", "loot"],
+        "required": [
+          "rank",
+          "id",
+          "name",
+          "loot"
+        ],
         "properties": {
-          "rank": { "type": "integer" },
-          "id": { "type": "integer" },
-          "name": { "type": "string" },
-          "loot": { "$ref": "#/components/schemas/Money" },
-          "delta": { "type": "integer", "description": "Recent change in GP (for live deltas)." }
+          "rank": {
+            "type": "integer"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "delta": {
+            "type": "integer",
+            "description": "Recent change in GP (for live deltas)."
+          },
+          "flair": {
+            "$ref": "#/components/schemas/GroupFlair"
+          }
         }
       },
       "LeaderboardPage": {
         "type": "object",
-        "required": ["period", "scope", "entries", "meta"],
+        "required": [
+          "period",
+          "scope",
+          "entries",
+          "meta"
+        ],
         "properties": {
-          "period": { "type": "string" },
-          "scope": { "type": "string" },
+          "period": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
           "entries": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/LeaderboardEntry" }
+            "items": {
+              "$ref": "#/components/schemas/LeaderboardEntry"
+            }
           },
-          "meta": { "$ref": "#/components/schemas/PageMeta" }
+          "meta": {
+            "$ref": "#/components/schemas/PageMeta"
+          }
         }
       },
       "PlayerSummary": {
         "type": "object",
-        "required": ["id", "name"],
+        "required": [
+          "id",
+          "name"
+        ],
         "properties": {
-          "id": { "type": "integer" },
-          "name": { "type": "string" },
-          "global_rank": { "type": "integer" },
-          "total_loot": { "$ref": "#/components/schemas/Money" }
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "global_rank": {
+            "type": "integer"
+          },
+          "total_loot": {
+            "$ref": "#/components/schemas/Money"
+          }
         }
       },
       "Submission": {
         "type": "object",
-        "required": ["id", "type", "label", "ts"],
+        "required": [
+          "id",
+          "type",
+          "label",
+          "ts"
+        ],
         "properties": {
-          "id": { "type": "integer" },
+          "id": {
+            "type": "integer"
+          },
           "type": {
             "type": "string",
-            "enum": ["drop", "clog", "pb", "ca", "pet", "level", "quest"]
+            "enum": [
+              "drop",
+              "clog",
+              "pb",
+              "ca",
+              "pet",
+              "level",
+              "quest"
+            ]
           },
-          "label": { "type": "string" },
-          "value": { "$ref": "#/components/schemas/Money" },
-          "image_url": { "type": "string" },
-          "ts": { "type": "integer", "description": "Unix seconds." }
+          "label": {
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "image_url": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "integer",
+            "description": "Unix seconds."
+          }
         }
       },
       "GroupMembership": {
         "type": "object",
-        "required": ["id", "name"],
+        "required": [
+          "id",
+          "name"
+        ],
         "properties": {
-          "id": { "type": "integer" },
-          "name": { "type": "string" }
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "flair": {
+            "$ref": "#/components/schemas/GroupFlair"
+          }
         }
       },
       "TopBoss": {
         "type": "object",
-        "required": ["npc_id", "name", "loot", "drops"],
+        "required": [
+          "npc_id",
+          "name",
+          "loot",
+          "drops"
+        ],
         "properties": {
-          "npc_id": { "type": "integer" },
-          "name": { "type": "string" },
-          "loot": { "$ref": "#/components/schemas/Money" },
-          "drops": { "type": "integer" }
+          "npc_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "drops": {
+            "type": "integer"
+          }
         }
       },
       "LootTrackerItem": {
         "type": "object",
-        "required": ["item_id", "name", "quantity", "loot"],
+        "required": [
+          "item_id",
+          "name",
+          "quantity",
+          "loot"
+        ],
         "properties": {
-          "item_id": { "type": "integer" },
-          "name": { "type": "string" },
-          "quantity": { "type": "integer", "format": "int64" },
-          "loot": { "$ref": "#/components/schemas/Money" }
+          "item_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "drops": {
+            "type": "integer",
+            "description": "Distinct drop rows this item came from this month."
+          },
+          "first_ts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds of the first time this item was received this month."
+          },
+          "last_ts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds of the most recent time this item was received this month."
+          }
         }
       },
       "LootTrackerNpc": {
         "type": "object",
-        "required": ["npc_id", "name", "kills", "loot", "items"],
+        "required": [
+          "npc_id",
+          "name",
+          "kills",
+          "loot",
+          "items"
+        ],
         "properties": {
-          "npc_id": { "type": "integer" },
-          "name": { "type": "string" },
+          "npc_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
           "kills": {
             "type": "integer",
             "description": "Distinct drop events (multi-item kills counted once)."
           },
-          "loot": { "$ref": "#/components/schemas/Money" },
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
           "items": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/LootTrackerItem" }
+            "items": {
+              "$ref": "#/components/schemas/LootTrackerItem"
+            }
           }
         }
       },
       "PlayerLootTracker": {
         "type": "object",
-        "required": ["player_id", "partition", "earliest_partition", "npcs"],
+        "required": [
+          "player_id",
+          "partition",
+          "earliest_partition",
+          "npcs"
+        ],
         "properties": {
-          "player_id": { "type": "integer" },
-          "partition": { "type": "integer", "description": "YYYYMM month shown." },
+          "player_id": {
+            "type": "integer"
+          },
+          "partition": {
+            "type": "integer",
+            "description": "YYYYMM month shown."
+          },
           "earliest_partition": {
             "type": "integer",
             "description": "First YYYYMM with tracked drops (month-picker lower bound)."
           },
           "npcs": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/LootTrackerNpc" }
+            "items": {
+              "$ref": "#/components/schemas/LootTrackerNpc"
+            }
           }
         }
       },
       "GroupTopPlayer": {
         "type": "object",
-        "required": ["rank", "id", "name", "loot"],
+        "required": [
+          "rank",
+          "id",
+          "name",
+          "loot"
+        ],
         "properties": {
-          "rank": { "type": "integer" },
-          "id": { "type": "integer" },
-          "name": { "type": "string" },
-          "loot": { "$ref": "#/components/schemas/Money" }
+          "rank": {
+            "type": "integer"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          }
         }
       },
       "GroupRecord": {
         "type": "object",
-        "required": ["npc_id", "boss", "time_ms", "time_display", "team_size", "holder", "date_ts"],
+        "required": [
+          "npc_id",
+          "boss",
+          "time_ms",
+          "time_display",
+          "team_size",
+          "holder",
+          "date_ts"
+        ],
         "properties": {
-          "npc_id": { "type": "integer" },
-          "boss": { "type": "string" },
-          "time_ms": { "type": "integer" },
-          "time_display": { "type": "string" },
-          "team_size": { "type": "string" },
+          "npc_id": {
+            "type": "integer"
+          },
+          "boss": {
+            "type": "string"
+          },
+          "time_ms": {
+            "type": "integer"
+          },
+          "time_display": {
+            "type": "string"
+          },
+          "team_size": {
+            "type": "string"
+          },
           "holder": {
             "type": "object",
-            "required": ["id", "name"],
+            "required": [
+              "id",
+              "name"
+            ],
             "properties": {
-              "id": { "type": "integer" },
-              "name": { "type": "string" }
+              "id": {
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              }
             }
           },
-          "date_ts": { "type": "integer", "description": "Unix seconds the record was set." }
+          "date_ts": {
+            "type": "integer",
+            "description": "Unix seconds the record was set."
+          }
         }
       },
       "PersonalBestSummary": {
         "type": "object",
-        "required": ["npc_id", "boss", "time_ms", "time_display", "team_size", "date_ts"],
+        "required": [
+          "npc_id",
+          "boss",
+          "time_ms",
+          "time_display",
+          "team_size",
+          "date_ts"
+        ],
         "properties": {
-          "npc_id": { "type": "integer" },
-          "boss": { "type": "string" },
-          "time_ms": { "type": "integer" },
-          "time_display": { "type": "string" },
-          "team_size": { "type": "string" },
-          "date_ts": { "type": "integer" }
+          "npc_id": {
+            "type": "integer"
+          },
+          "boss": {
+            "type": "string"
+          },
+          "time_ms": {
+            "type": "integer"
+          },
+          "time_display": {
+            "type": "string"
+          },
+          "team_size": {
+            "type": "string"
+          },
+          "date_ts": {
+            "type": "integer"
+          }
         }
       },
       "PlayerProfile": {
         "allOf": [
-          { "$ref": "#/components/schemas/PlayerSummary" },
+          {
+            "$ref": "#/components/schemas/PlayerSummary"
+          },
           {
             "type": "object",
             "properties": {
-              "points": { "type": "integer" },
-              "top_npc": { "type": "string" },
-              "previous_month_loot": { "$ref": "#/components/schemas/Money" },
+              "points": {
+                "type": "integer"
+              },
+              "top_npc": {
+                "type": "string"
+              },
+              "previous_month_loot": {
+                "$ref": "#/components/schemas/Money"
+              },
               "ranked_players": {
                 "type": "integer",
                 "description": "Total players on the global board, for percentile context."
               },
               "top_bosses": {
                 "type": "array",
-                "items": { "$ref": "#/components/schemas/TopBoss" }
+                "items": {
+                  "$ref": "#/components/schemas/TopBoss"
+                }
               },
               "personal_bests": {
                 "type": "array",
-                "items": { "$ref": "#/components/schemas/PersonalBestSummary" }
+                "items": {
+                  "$ref": "#/components/schemas/PersonalBestSummary"
+                }
               },
               "groups": {
                 "type": "array",
-                "items": { "$ref": "#/components/schemas/GroupMembership" }
+                "items": {
+                  "$ref": "#/components/schemas/GroupMembership"
+                }
               },
               "recent_submissions": {
                 "type": "array",
-                "items": { "$ref": "#/components/schemas/Submission" }
+                "items": {
+                  "$ref": "#/components/schemas/Submission"
+                }
+              },
+              "canonical_slug": {
+                "type": "string",
+                "nullable": true,
+                "description": "Pretty-URL slug this profile declares as canonical, or null when the name collides with another visible player (id url stays canonical)."
               }
             }
           }
@@ -472,83 +1733,855 @@
       },
       "GroupProfile": {
         "type": "object",
-        "required": ["id", "name", "member_count"],
+        "required": [
+          "id",
+          "name",
+          "member_count"
+        ],
         "properties": {
-          "id": { "type": "integer" },
-          "name": { "type": "string" },
-          "description": { "type": "string" },
-          "member_count": { "type": "integer" },
-          "global_rank": { "type": "integer" },
-          "monthly_loot": { "$ref": "#/components/schemas/Money" },
-          "discord_url": { "type": "string" },
-          "top_player": { "$ref": "#/components/schemas/PlayerSummary" },
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Group icon uploaded by a group admin (also used for social-card previews)."
+          },
+          "member_count": {
+            "type": "integer"
+          },
+          "global_rank": {
+            "type": "integer"
+          },
+          "monthly_loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "discord_url": {
+            "type": "string"
+          },
+          "top_player": {
+            "$ref": "#/components/schemas/PlayerSummary"
+          },
           "top_players": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/GroupTopPlayer" }
+            "items": {
+              "$ref": "#/components/schemas/GroupTopPlayer"
+            }
           },
           "top_bosses": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/TopBoss" }
+            "items": {
+              "$ref": "#/components/schemas/TopBoss"
+            }
           },
           "records": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/GroupRecord" }
+            "items": {
+              "$ref": "#/components/schemas/GroupRecord"
+            }
           },
           "recent_submissions": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/Submission" }
+            "items": {
+              "$ref": "#/components/schemas/Submission"
+            }
+          },
+          "flair": {
+            "$ref": "#/components/schemas/GroupFlair"
+          },
+          "canonical_slug": {
+            "type": "string",
+            "nullable": true,
+            "description": "Pretty-URL slug this group declares as canonical, or null when the name collides with another group (id url stays canonical)."
+          }
+        }
+      },
+      "ResolveCandidate": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": "string"
+          },
+          "member_count": {
+            "type": "integer",
+            "description": "Groups only."
+          },
+          "created_ts": {
+            "type": "integer",
+            "description": "Groups only — unix seconds the group was created."
+          },
+          "total_loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "flair": {
+            "$ref": "#/components/schemas/GroupFlair"
+          }
+        }
+      },
+      "ResolveResult": {
+        "type": "object",
+        "required": [
+          "kind",
+          "slug",
+          "match",
+          "candidates"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "group",
+              "player",
+              "npc",
+              "item"
+            ]
+          },
+          "slug": {
+            "type": "string"
+          },
+          "match": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ResolveCandidate"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The single resolved entity, or null when ambiguous (candidates set) or not found (candidates empty)."
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResolveCandidate"
+            }
           }
         }
       },
       "Announcement": {
         "type": "object",
-        "required": ["id", "scope_type", "title", "body_md", "published_at"],
+        "required": [
+          "id",
+          "scope_type",
+          "title",
+          "body_md",
+          "published_at"
+        ],
         "properties": {
-          "id": { "type": "integer" },
-          "scope_type": { "type": "string", "enum": ["global", "group"] },
-          "group_id": { "type": "integer", "nullable": true },
-          "title": { "type": "string" },
-          "body_md": { "type": "string" },
-          "cover_image_url": { "type": "string", "nullable": true },
-          "pinned": { "type": "boolean" },
-          "author_name": { "type": "string" },
-          "published_at": { "type": "integer", "description": "Unix seconds." }
+          "id": {
+            "type": "integer"
+          },
+          "scope_type": {
+            "type": "string",
+            "enum": [
+              "global",
+              "group"
+            ]
+          },
+          "group_id": {
+            "type": "integer",
+            "nullable": true
+          },
+          "title": {
+            "type": "string"
+          },
+          "body_md": {
+            "type": "string"
+          },
+          "cover_image_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "pinned": {
+            "type": "boolean"
+          },
+          "author_name": {
+            "type": "string"
+          },
+          "published_at": {
+            "type": "integer",
+            "description": "Unix seconds."
+          }
         }
       },
       "AnnouncementPage": {
         "type": "object",
-        "required": ["items"],
+        "required": [
+          "items"
+        ],
         "properties": {
           "items": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/Announcement" }
+            "items": {
+              "$ref": "#/components/schemas/Announcement"
+            }
           },
-          "next_cursor": { "type": "string", "nullable": true }
+          "next_cursor": {
+            "type": "string",
+            "nullable": true
+          }
         }
       },
       "Me": {
         "type": "object",
-        "required": ["user_id", "discord_id", "players", "groups"],
+        "required": [
+          "user_id",
+          "discord_id",
+          "players",
+          "groups"
+        ],
         "properties": {
-          "user_id": { "type": "integer" },
-          "discord_id": { "type": "string" },
-          "display_name": { "type": "string" },
-          "avatar_url": { "type": "string", "nullable": true },
+          "user_id": {
+            "type": "integer"
+          },
+          "discord_id": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "avatar_url": {
+            "type": "string",
+            "nullable": true
+          },
           "players": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/PlayerSummary" }
+            "items": {
+              "$ref": "#/components/schemas/PlayerSummary"
+            }
           },
           "groups": {
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["id", "name", "role"],
+              "required": [
+                "id",
+                "name",
+                "role"
+              ],
               "properties": {
-                "id": { "type": "integer" },
-                "name": { "type": "string" },
+                "id": {
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
                 "role": {
                   "type": "string",
-                  "enum": ["owner", "admin", "member"]
+                  "enum": [
+                    "owner",
+                    "admin",
+                    "member"
+                  ]
+                },
+                "flair": {
+                  "$ref": "#/components/schemas/GroupFlair"
+                }
+              }
+            }
+          }
+        }
+      },
+      "GroupSubscriptionSummary": {
+        "type": "object",
+        "description": "Subscription-pool summary: the tier a group's live contribution legs cover, the pool total, and what the next tier costs on top.",
+        "required": [
+          "group_id",
+          "tier_key",
+          "tier_name",
+          "total_monthly_cents"
+        ],
+        "properties": {
+          "group_id": {
+            "type": "integer"
+          },
+          "tier_key": {
+            "type": "string",
+            "nullable": true
+          },
+          "tier_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "total_monthly_cents": {
+            "type": "integer"
+          },
+          "next_tier": {
+            "type": "object",
+            "nullable": true,
+            "required": [
+              "key",
+              "name",
+              "price_cents",
+              "delta_cents"
+            ],
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "price_cents": {
+                "type": "integer"
+              },
+              "delta_cents": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "NpcLifetimeStats": {
+        "type": "object",
+        "required": [
+          "loot",
+          "drop_count",
+          "unique_players"
+        ],
+        "properties": {
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "drop_count": {
+            "type": "integer"
+          },
+          "unique_players": {
+            "type": "integer"
+          },
+          "last_drop_ts": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "NpcMonthStats": {
+        "type": "object",
+        "required": [
+          "partition",
+          "loot",
+          "drop_count",
+          "unique_players"
+        ],
+        "properties": {
+          "partition": {
+            "type": "integer"
+          },
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "drop_count": {
+            "type": "integer"
+          },
+          "unique_players": {
+            "type": "integer"
+          }
+        }
+      },
+      "NpcTopPlayer": {
+        "type": "object",
+        "required": [
+          "rank",
+          "player_id",
+          "player_name",
+          "loot",
+          "drop_count"
+        ],
+        "properties": {
+          "rank": {
+            "type": "integer"
+          },
+          "player_id": {
+            "type": "integer"
+          },
+          "player_name": {
+            "type": "string"
+          },
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "drop_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "NpcRecentDrop": {
+        "type": "object",
+        "required": [
+          "drop_id",
+          "item_name",
+          "player_id",
+          "player_name",
+          "value",
+          "quantity",
+          "ts"
+        ],
+        "properties": {
+          "drop_id": {
+            "type": "integer"
+          },
+          "item_id": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "player_id": {
+            "type": "integer"
+          },
+          "player_name": {
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "ts": {
+            "type": "integer"
+          }
+        }
+      },
+      "NpcDetail": {
+        "type": "object",
+        "required": [
+          "npc_id",
+          "name",
+          "icon_url",
+          "wiki_url",
+          "lifetime",
+          "month",
+          "top_players",
+          "recent_drops"
+        ],
+        "properties": {
+          "npc_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": "string"
+          },
+          "wiki_url": {
+            "type": "string"
+          },
+          "canonical_slug": {
+            "type": "string",
+            "nullable": true,
+            "description": "Pretty-URL slug this NPC declares as canonical (duplicate names collapse to a primary id); null only if the name is unslugifiable."
+          },
+          "lifetime": {
+            "$ref": "#/components/schemas/NpcLifetimeStats"
+          },
+          "month": {
+            "$ref": "#/components/schemas/NpcMonthStats"
+          },
+          "top_players": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NpcTopPlayer"
+            }
+          },
+          "recent_drops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NpcRecentDrop"
+            }
+          }
+        }
+      },
+      "NpcDropTableItem": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "name",
+          "icon_url",
+          "quantity",
+          "noted",
+          "rarity",
+          "rolls",
+          "last_drop"
+        ],
+        "properties": {
+          "item_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string",
+            "description": "Wiki quantity spelling, e.g. \"1\" or \"1-3\"."
+          },
+          "noted": {
+            "type": "boolean"
+          },
+          "rarity": {
+            "type": "number",
+            "description": "Drop probability in [0,1]; 1 = always."
+          },
+          "rolls": {
+            "type": "integer"
+          },
+          "last_drop": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "required": [
+              "player_id",
+              "player_name",
+              "ts",
+              "value"
+            ],
+            "properties": {
+              "player_id": {
+                "type": "integer"
+              },
+              "player_name": {
+                "type": "string"
+              },
+              "ts": {
+                "type": "integer"
+              },
+              "value": {
+                "$ref": "#/components/schemas/Money"
+              }
+            }
+          }
+        }
+      },
+      "NpcDropTable": {
+        "type": "object",
+        "required": [
+          "npc_id",
+          "name",
+          "items",
+          "last_drops_status"
+        ],
+        "properties": {
+          "npc_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NpcDropTableItem"
+            }
+          },
+          "last_drops_status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "building"
+            ],
+            "description": "\"building\" while the last-received registry is cold-built in the background."
+          }
+        }
+      },
+      "ItemLifetimeStats": {
+        "type": "object",
+        "required": [
+          "loot",
+          "quantity",
+          "drop_count",
+          "unique_players"
+        ],
+        "properties": {
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "drop_count": {
+            "type": "integer"
+          },
+          "unique_players": {
+            "type": "integer"
+          },
+          "last_drop_ts": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "ItemMonthStats": {
+        "type": "object",
+        "required": [
+          "partition",
+          "loot",
+          "quantity",
+          "drop_count",
+          "unique_players"
+        ],
+        "properties": {
+          "partition": {
+            "type": "integer"
+          },
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "drop_count": {
+            "type": "integer"
+          },
+          "unique_players": {
+            "type": "integer"
+          }
+        }
+      },
+      "ItemTopReceiver": {
+        "type": "object",
+        "required": [
+          "rank",
+          "player_id",
+          "player_name",
+          "loot",
+          "quantity",
+          "drop_count"
+        ],
+        "properties": {
+          "rank": {
+            "type": "integer"
+          },
+          "player_id": {
+            "type": "integer"
+          },
+          "player_name": {
+            "type": "string"
+          },
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "drop_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "ItemRecentDrop": {
+        "type": "object",
+        "required": [
+          "drop_id",
+          "player_id",
+          "player_name",
+          "value",
+          "quantity",
+          "ts"
+        ],
+        "properties": {
+          "drop_id": {
+            "type": "integer"
+          },
+          "npc_id": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "npc_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "npc_icon_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "player_id": {
+            "type": "integer"
+          },
+          "player_name": {
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "ts": {
+            "type": "integer"
+          }
+        }
+      },
+      "ItemSource": {
+        "type": "object",
+        "required": [
+          "npc_id",
+          "name",
+          "icon_url",
+          "quantity",
+          "rarity",
+          "rolls"
+        ],
+        "properties": {
+          "npc_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "rarity": {
+            "type": "number"
+          },
+          "rolls": {
+            "type": "integer"
+          }
+        }
+      },
+      "ItemDetail": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "name",
+          "icon_url",
+          "wiki_url",
+          "stackable",
+          "lifetime",
+          "month",
+          "top_receivers",
+          "stats_status",
+          "recent_drops",
+          "sources"
+        ],
+        "properties": {
+          "item_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": "string"
+          },
+          "wiki_url": {
+            "type": "string"
+          },
+          "canonical_slug": {
+            "type": "string",
+            "nullable": true,
+            "description": "Pretty-URL slug this item declares as canonical (name variants collapse to a primary id); null only if the name is unslugifiable."
+          },
+          "stackable": {
+            "type": "boolean"
+          },
+          "ge_value": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Money"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lifetime": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ItemLifetimeStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "month": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ItemMonthStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "top_receivers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ItemTopReceiver"
+            }
+          },
+          "stats_status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "building"
+            ],
+            "description": "\"building\" while heavy aggregates are cold-built in the background."
+          },
+          "recent_drops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ItemRecentDrop"
+            }
+          },
+          "sources": {
+            "type": "object",
+            "required": [
+              "total",
+              "npcs"
+            ],
+            "properties": {
+              "total": {
+                "type": "integer"
+              },
+              "npcs": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ItemSource"
                 }
               }
             }

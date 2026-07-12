@@ -18,7 +18,9 @@ ExecStart=/store/droptracker/disc/venv/bin/python -u -m bots.main
 
 # Automatically restart the service if it fails
 Restart=on-failure
-RestartSec=5s # Wait 5 seconds before restarting
+# Wait 5 seconds before restarting (systemd rejects inline comments on
+# directive lines — an inline comment here silently reverts to the 100ms default)
+RestartSec=5s
 
 # Graceful shutdown timeout
 TimeoutStopSec=30s

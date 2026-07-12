@@ -282,6 +282,68 @@ class TestDistinctItemProgress:
         assert engine._list_kind(_task(config=None)) is None
 
 
+# ── grouped (all-of + any-of) progress ───────────────────────────────────────
+
+GODSWORD = {
+    "kind": "groups",
+    "groups": [
+        {"mode": "all_of",
+         "items": ["Godsword shard 1", "Godsword shard 2", "Godsword shard 3"]},
+        {"mode": "any_of", "need": 1,
+         "items": ["Armadyl hilt", "Bandos hilt", "Saradomin hilt", "Zamorak hilt"]},
+    ],
+}
+# Threshold = 3 (all shards) + 1 (any hilt).
+GODSWORD_THRESHOLD = 4
+
+
+class TestGroupedItemProgress:
+    def test_groups_items_are_matchable(self):
+        task = _task(config=GODSWORD)
+        assert engine.item_match_quantity(task, "Godsword shard 2") == 1
+        assert engine.item_match_quantity(task, "bandos hilt", 1) == 1
+        assert engine.item_match_quantity(task, "Abyssal whip") is None
+
+    def test_all_shards_without_hilt_is_incomplete(self):
+        rows = [_Row("Godsword shard 1"), _Row("Godsword shard 2"), _Row("Godsword shard 3")]
+        assert engine._grouped_progress_from_rows(rows, GODSWORD, GODSWORD_THRESHOLD) == 3
+
+    def test_two_hilts_only_fill_the_hilt_group_once(self):
+        rows = [_Row("Armadyl hilt"), _Row("Zamorak hilt")]
+        assert engine._grouped_progress_from_rows(rows, GODSWORD, GODSWORD_THRESHOLD) == 1
+
+    def test_duplicate_shards_do_not_inflate(self):
+        rows = [_Row("Godsword shard 1", quantity=3), _Row("Godsword shard 1")]
+        assert engine._grouped_progress_from_rows(rows, GODSWORD, GODSWORD_THRESHOLD) == 1
+
+    def test_complete_godsword(self):
+        rows = [
+            _Row("Godsword shard 1"), _Row("Godsword shard 2"),
+            _Row("Godsword shard 3"), _Row("Saradomin hilt"),
+        ]
+        assert engine._grouped_progress_from_rows(rows, GODSWORD, GODSWORD_THRESHOLD) == 4
+
+    def test_any_of_group_folds_quantities(self):
+        config = {
+            "kind": "groups",
+            "groups": [{"mode": "any_of", "need": 2,
+                        "items": ["Boater", "Red boater", "Orange boater"]}],
+        }
+        assert engine._grouped_progress_from_rows([_Row("Boater")], config, 2) == 1
+        assert engine._grouped_progress_from_rows(
+            [_Row("Boater"), _Row("Boater")], config, 2) == 2
+        assert engine._grouped_progress_from_rows(
+            [_Row("Red boater", quantity=2)], config, 2) == 2
+
+    def test_wildcard_manual_awards_fill_any_group(self):
+        rows = [_Row(None, quantity=4, source_type="manual")]
+        assert engine._grouped_progress_from_rows(rows, GODSWORD, GODSWORD_THRESHOLD) == 4
+
+    def test_bonus_rows_ignored(self):
+        rows = [_Row(None, quantity=10, source_type="bonus")]
+        assert engine._grouped_progress_from_rows(rows, GODSWORD, GODSWORD_THRESHOLD) == 0
+
+
 # ── kc dedupe: kill_count keying + cooldown fallback ─────────────────────────
 
 class _FakeRedis:
@@ -346,3 +408,62 @@ class TestKcDedupe:
         r = _FakeRedis()
         assert engine._kc_dedupe(r, 2, 9, 5, _env("drop", {"npc_name": "Zulrah"}, ts=1000, player_id=5)) is True
         assert engine._kc_dedupe(r, 2, 9, 6, _env("drop", {"npc_name": "Zulrah"}, ts=1001, player_id=6)) is True
+
+
+# ── submission_policy (api_only / confirm_non_api / all) ─────────────────────
+
+def _event(**kw):
+    base = {
+        "id": 10, "name": "ev", "group_id": 1,
+        "requires_confirmation": False, "submission_policy": "all",
+        "has_bingo": False, "board_size": 5,
+        "bonus_line_points": 0, "bonus_blackout_points": 0,
+        "window_start": None, "window_end": None,
+    }
+    base.update(kw)
+    return base
+
+
+class TestSubmissionPolicy:
+    def test_all_accepts_both_sources(self):
+        ev = _event(submission_policy="all")
+        assert engine.accepts_submission_source(ev, {"used_api": True}) is True
+        assert engine.accepts_submission_source(ev, {"used_api": False}) is True
+        assert engine.accepts_submission_source(ev, {}) is True  # legacy envelope
+
+    def test_api_only_rejects_non_api(self):
+        ev = _event(submission_policy="api_only")
+        assert engine.accepts_submission_source(ev, {"used_api": True}) is True
+        assert engine.accepts_submission_source(ev, {"used_api": False}) is False
+        assert engine.accepts_submission_source(ev, {}) is False  # legacy envelope
+
+    def test_confirm_non_api_accepts_but_holds(self):
+        ev = _event(submission_policy="confirm_non_api")
+        task = _task()
+        assert engine.accepts_submission_source(ev, {"used_api": False}) is True
+        assert engine.completion_status(ev, task, {"used_api": True}) == "auto"
+        assert engine.completion_status(ev, task, {"used_api": False}) == "pending"
+        assert engine.completion_status(ev, task, {}) == "pending"  # legacy envelope
+
+    def test_requires_confirmation_still_forces_pending(self):
+        env = {"used_api": True}
+        assert engine.completion_status(
+            _event(requires_confirmation=True), _task(), env) == "pending"
+        assert engine.completion_status(
+            _event(), _task(requires_confirmation=True), env) == "pending"
+
+    def test_all_policy_auto_for_non_api(self):
+        assert engine.completion_status(_event(), _task(), {"used_api": False}) == "auto"
+
+    def test_handle_envelope_skips_api_only_event_for_non_api(self):
+        # End-to-end through handle_envelope: the api_only event is skipped
+        # before any task matching / DB work (session=None would blow up
+        # if a match were recorded).
+        state = engine.MatcherState(
+            events={10: _event(submission_policy="api_only")},
+            tasks_by_event={10: [_task(target="Twisted bow")]},
+            participants={5: [(10, 77, None)]},
+        )
+        env = _env("drop", {"item_name": "Twisted bow", "quantity": 1})
+        env["used_api"] = False
+        assert engine.handle_envelope(None, _FakeRedis(), state, env) == []

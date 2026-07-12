@@ -1,0 +1,63 @@
+"""Shapes the bot's guild channel cache (``guild:{id}:channels``).
+
+The cache now carries three entry kinds so the website's channel pickers can
+offer forum threads as notification destinations (suggestion #3 — groups that
+keep e.g. one "achievements" forum with a thread per notification type instead
+of a dozen text channels):
+
+    {"id", "name", "position", "type": "text"}
+    {"id", "name", "position", "type": "forum"}
+    {"id", "name", "position", "type": "thread", "parent_id": "<forum/text id>"}
+
+Threads are emitted immediately after their parent channel, so consumers that
+ignore ``type`` still see a sensibly ordered flat list. Only *active* threads
+are listed (one ``GET /guilds/{id}/threads/active`` call — archived threads
+would need a paginated fetch per channel, and pasting an archived thread's id
+still works: Discord auto-unarchives on message send).
+
+Pure shaping lives here (unit-testable without a bot); the fetching stays in
+``bots/main.py``.
+"""
+from __future__ import annotations
+
+from typing import Iterable, List
+
+
+def shape_channel_cache(raw_channels: Iterable, threads: Iterable) -> List[dict]:
+    """Build the cache payload from fetched guild channels + active threads.
+
+    ``raw_channels`` are interactions.py channel objects (or anything with
+    ``id``/``name``/``position`` and a class name); ``threads`` need
+    ``id``/``name``/``parent_id``. Threads whose parent isn't a cached
+    text/forum channel (e.g. under an announcement channel) are dropped.
+    """
+    channels = []
+    for c in raw_channels:
+        kind = type(c).__name__
+        if kind == "GuildText":
+            ctype = "text"
+        elif kind == "GuildForum":
+            ctype = "forum"
+        else:
+            continue
+        channels.append(
+            {"id": str(c.id), "name": c.name, "position": c.position or 0, "type": ctype}
+        )
+    channels.sort(key=lambda c: c["position"])
+
+    threads_by_parent: dict[str, list[dict]] = {}
+    for t in threads:
+        parent_id = str(getattr(t, "parent_id", "") or "")
+        if not parent_id:
+            continue
+        threads_by_parent.setdefault(parent_id, []).append(
+            {"id": str(t.id), "name": t.name, "type": "thread", "parent_id": parent_id}
+        )
+
+    out: List[dict] = []
+    for channel in channels:
+        out.append(channel)
+        for thread in sorted(threads_by_parent.get(channel["id"], []), key=lambda t: t["name"].lower()):
+            thread["position"] = channel["position"]
+            out.append(thread)
+    return out

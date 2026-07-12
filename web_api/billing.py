@@ -11,6 +11,7 @@ The source of truth for subscription state is always the provider webhook
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta
 from typing import Optional
@@ -138,6 +139,72 @@ def start_user_checkout(user_id: int, tier, subscription, amount_cents: int | No
         raise RuntimeError(f"Stripe checkout failed: {e}")
 
 
+def start_group_leg_checkout(group_id: int, payer_user_id: int, tier, delta_cents: int) -> dict:
+    """Begin a contribution "leg" toward a group's subscription pool.
+
+    Pool model: the member pays the DIFFERENCE between the target tier's
+    monthly price and the group's current live pool total, as their own
+    recurring subscription. Same contract as ``start_checkout``: Stripe
+    returns a hosted URL (state confirmed by webhook), manual returns an
+    ``apply`` dict the caller persists as a new leg row.
+    """
+    amount = int(delta_cents)
+    stripe = _stripe()
+    if stripe is None:
+        period = timedelta(days=365 if tier.interval == "year" else 30)
+        return {
+            "url": None,
+            "apply": {
+                "tier_key": tier.key,
+                "status": "active",
+                "provider": "manual",
+                "current_period_end": datetime.now() + period,
+                "cancel_at_period_end": False,
+                "amount_cents": amount,
+                "user_id": payer_user_id,
+            },
+        }
+
+    try:
+        meta = {
+            "scope": "group",
+            "group_id": str(group_id),
+            "tier_key": tier.key,
+            "payer_user_id": str(payer_user_id),
+        }
+        # Difference-priced legs need an ad-hoc recurring price (same pattern
+        # as supporter pay-what-you-want). Reuse the tier's product if it has
+        # one so the Stripe dashboard stays tidy.
+        price_data = {
+            "currency": (tier.currency or "USD").lower(),
+            "unit_amount": amount,
+            "recurring": {"interval": "month"},
+        }
+        product_id = None
+        if tier.provider_price_id:
+            try:
+                product_id = stripe.Price.retrieve(tier.provider_price_id).product
+            except Exception:
+                product_id = None
+        if product_id:
+            price_data["product"] = product_id
+        else:
+            price_data["product_data"] = {"name": f"DropTracker {tier.key} (group contribution)"}
+
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            line_items=[{"price_data": price_data, "quantity": 1}],
+            success_url=f"{SITE_URL}/groups/{group_id}/subscription?checkout=success",
+            cancel_url=f"{SITE_URL}/groups/{group_id}/subscription?checkout=cancel",
+            client_reference_id=str(group_id),
+            metadata=meta,
+            subscription_data={"metadata": meta},
+        )
+        return {"url": session.url, "apply": None}
+    except Exception as e:
+        raise RuntimeError(f"Stripe checkout failed: {e}")
+
+
 def cancel(subscription) -> dict:
     """Set cancel-at-period-end with the provider. Returns fields to persist."""
     stripe = _stripe()
@@ -188,14 +255,27 @@ def _portal(subscription, return_url: str) -> Optional[str]:
 
 
 def verify_webhook(payload: bytes, signature: str):
-    """Verify + parse a Stripe webhook. Returns the event dict or None."""
+    """Verify + parse a Stripe webhook. Returns the event as a plain dict or None.
+
+    ``construct_event`` is used only for signature verification. It returns a
+    ``stripe.Event`` whose ``StripeObject`` base stopped subclassing dict in
+    newer stripe-python (15.x has no ``.get``/``.to_dict_recursive``), which
+    made the webhook route's dict-style access crash with 500s and silently
+    drop every subscription event. Parse the verified raw payload instead so
+    the route always sees plain dicts.
+    """
     stripe = _stripe()
     if stripe is None or not STRIPE_WEBHOOK_SECRET:
         return None
     try:
-        return stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
+        stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
     except Exception:
         return None
+    try:
+        event = json.loads(payload)
+    except Exception:
+        return None
+    return event if isinstance(event, dict) else None
 
 
 def ensure_provider_price(tier) -> Optional[str]:

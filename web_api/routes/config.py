@@ -12,10 +12,13 @@ Every PATCH writes an ``audit_log`` row (actor, group, key, before, after).
 ``discord-channels`` never talks to Discord itself (the Web API holds no bot
 token / gateway connection — every other Discord-touching feature in this
 codebase delegates to the bot process instead). The bot caches each guild's
-text channels to Redis (``guild:{id}:channels``, ``bots/main.py``); this just
-reads that cache. If the bot hasn't populated it yet (or is down), the list
-comes back empty and the frontend falls back to manual channel-id entry —
-this must never be the only way to set a channel.
+text channels, forums, and active forum threads to Redis
+(``guild:{id}:channels``, ``bots/main.py``); this just reads that cache and
+asks the bot to re-fetch for next time. If the bot hasn't populated it yet
+(or is down), the list comes back empty and the frontend falls back to manual
+channel-id entry — this must never be the only way to set a channel. Pasted
+ids may be plain channels *or* threads: notification sending goes through
+``bot.fetch_channel(id).send(...)``, which works identically for both.
 """
 from __future__ import annotations
 
@@ -43,6 +46,7 @@ from web_api.deps import (
     manageable_guild_ids,
 )
 from web_api.entitlements_registry import HALL_OF_FAME_CONFIG_KEYS
+from web_api.routes.event_discord import _request_channel_refresh
 
 config_bp = Blueprint("v1_config", __name__)
 
@@ -224,6 +228,12 @@ async def get_group_discord_channels(group_id: int):
                 cached = True
         except Exception:
             pass
+
+    # Always ask the bot to re-fetch this guild (drained within ~15s), so a
+    # channel/thread the admin just created shows up on the next page load
+    # instead of waiting for the 5-minute sweep. Cheap: one SADD here, one
+    # REST fetch bot-side.
+    _request_channel_refresh(guild_id)
 
     return private_no_store(jsonify({"channels": channels, "cached": cached}))
 

@@ -90,7 +90,8 @@ class DatabaseOperations:
         pass
 
     async def create_drop_object(self, item_id, player_id, date_received, npc_id, value, quantity, image_url: str = "", authed: bool = False,
-                                attachment_url: str = "", attachment_type: str = "", add_to_queue: bool = True, used_api: bool = False, unique_id: str = None, existing_session=None, model_class=None):
+                                attachment_url: str = "", attachment_type: str = "", add_to_queue: bool = True, used_api: bool = False, unique_id: str = None, existing_session=None, model_class=None,
+                                source: str = None):
         """
         Create a drop object and optionally add it to the processing queue.
         
@@ -182,6 +183,11 @@ class DatabaseOperations:
                     image_url=image_url,
                     used_api=used_api,
                     unique_id=unique_id)
+        # Intake-path marker ('manual' for website submissions). Only the main
+        # Drop model carries the column; seasonal manual drops can't occur
+        # (the /manual-submit route is main-world only).
+        if source and hasattr(drop_model, "source"):
+            newdrop.source = source
 
         try:
             # Add the drop to the session and persist enough to generate drop_id.

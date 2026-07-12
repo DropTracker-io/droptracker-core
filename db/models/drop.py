@@ -83,6 +83,10 @@ class Drop(Base):
     hidden = Column(Boolean, default=False, nullable=False, server_default="0")
     partition = Column(Integer, default=get_current_partition, index=True)
     unique_id = Column(String(255), nullable=True)
+    # Intake path: NULL = RuneLite plugin (/webhook), 'manual' = website
+    # manual submit (/manual-submit). Drives per-group manual-submission
+    # policies (suggestion #45) and the events confirm_non_api gate.
+    source = Column(String(16), nullable=True)
 
     # Relationships
     player = relationship("Player", back_populates="drops")

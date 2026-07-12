@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import json as _json
 import os
 import uuid
@@ -49,7 +50,8 @@ def _normalize_submission_type(raw_submission_type):
             return "drop"
         case "kill_time" | "npc_kill":
             return "personal_best"
-        case "experience_update" | "experience_milestone" | "level_up":
+        case "experience_update" | "experience_milestone" | "level_up" | "xp_milestone":
+            # "xp_milestone" is the legacy type string older plugin builds send
             return "experience"
         case "quest_completion":
             return "quest"
@@ -274,7 +276,7 @@ async def _queue_webhook_request():
 
 
 @webhook_bp.post("/submit")
-@rate_limit(limit=10, period=timedelta(seconds=1))
+@rate_limit(limit=100, period=timedelta(seconds=1))
 async def submit_data():
     return await webhook_data()
 
@@ -421,7 +423,7 @@ async def _process_webhook_request(req_start):
                                     g.submission_type = submission_type
                                     response = await submissions.ca_processor(processed_data, external_session=db_session)
                                     log_phase("ca_processed")
-                                case "experience_update" | "experience_milestone" | "level_up":
+                                case "experience_update" | "experience_milestone" | "level_up" | "xp_milestone":
                                     g.submission_type = "experience"
                                     response = await submissions.experience_processor(processed_data, external_session=db_session)
                                     log_phase("experience_processed")
@@ -461,7 +463,10 @@ async def _process_webhook_request(req_start):
                     success = True
                 except Exception as processor_error:
                     logger.log_sync("error", f"Processor error inside {submission_type} processor: {processor_error}")
-                    return jsonify({"error": f"Error processing data: {str(processor_error)}"}), 200
+                    # 500 (not 200): the plugin treats any 2xx as delivered and
+                    # never retries; processor failures may be transient, so let
+                    # the client's retry/backoff logic engage.
+                    return jsonify({"error": f"Error processing data: {str(processor_error)}"}), 500
                 finally:
                     if db_session:
                         db_session.close()
@@ -662,18 +667,59 @@ def _parse_nearby_players(raw):
     return None
 
 
+MANUAL_SUBMIT_KEY_HEADER = "X-DT-Manual-Key"
+
+
+def _manual_submit_auth_error():
+    """Shared-secret gate for ``/manual-submit`` (server-to-server only).
+
+    The endpoint substitutes the target player's real ``account_hash`` into the
+    payload, so without a gate anyone who knows an RSN could forge submissions
+    as that player. Legitimate callers (``web_api/routes/submissions.py``,
+    which enforces session auth + player ownership) must send the shared
+    secret in the ``X-DT-Manual-Key`` header.
+
+    Same precedent as the ``XF_KEY`` auth in ``api/routes/group_create.py``:
+    fail closed when the secret is unconfigured (503), reject a missing/wrong
+    header (401). ``MANUAL_SUBMIT_KEY`` is read at request time so tests can
+    monkeypatch it. Returns a ``(response, status)`` tuple to short-circuit
+    with, or ``None`` when the request is authorized.
+    """
+    expected = (os.getenv("MANUAL_SUBMIT_KEY") or "").strip()
+    if not expected:
+        # Fail closed: if no secret is configured the endpoint is disabled.
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Manual submissions are not configured on the server.",
+                }
+            ),
+            503,
+        )
+    provided = (request.headers.get(MANUAL_SUBMIT_KEY_HEADER) or "").strip()
+    if not provided or not hmac.compare_digest(provided, expected):
+        return jsonify({"success": False, "error": "Unauthorized."}), 401
+    return None
+
+
 @webhook_bp.post("/manual-submit")
 @rate_limit(limit=10, period=timedelta(seconds=1))
 async def manual_submit():
     """
-    Handle manual submissions from the PHP front-end.
-    
+    Handle manual submissions forwarded by the website backend.
+
     This endpoint processes manually-submitted data for drops, collection log entries,
     personal bests, combat achievements, and pets. Unlike the webhook endpoint:
-    - No account hash is required (authentication handled by front-end)
+    - No account hash is required (the caller must present the shared
+      ``X-DT-Manual-Key`` secret; user auth + player ownership are enforced
+      upstream by ``web_api/routes/submissions.py``)
     - A unique submission ID is generated automatically
     - The submission is marked as using the API and considered pre-authenticated
     """
+    auth_error = _manual_submit_auth_error()
+    if auth_error is not None:
+        return auth_error
     import time
     req_start = time.perf_counter()
     return await _process_manual_submission(req_start)
@@ -776,6 +822,12 @@ async def _process_manual_submission(req_start):
             "acc_hash": placeholder_hash,
             "guid": unique_id,
             "used_api": True,
+            # Intake-path marker: downstream processors use this for the
+            # per-group manual-submission policy (suggestion #45) and to
+            # present manual submissions as non-plugin to the events engine.
+            # NOT "source" — that payload key already means the NPC/killer in
+            # the drop/clog/pet/death processors.
+            "intake_source": "manual",
             "downloaded": False,
             "world_type": world_type,
             "image_url": data.get("image_url"),

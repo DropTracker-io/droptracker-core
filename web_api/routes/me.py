@@ -21,6 +21,7 @@ from web_api.common import (
     player_month_total,
     private_no_store,
 )
+from web_api.flair import group_flairs
 from web_api.deps import (
     current_user_id,
     json_body,
@@ -172,6 +173,12 @@ async def get_me():
                 {"id": gid, "name": group_names.get(gid) or f"Group {gid}", "role": role}
                 for gid, role in group_roles.items()
             ]
+            # Flair for the user's subscribed groups (one query for all).
+            group_flair_map = group_flairs(s, [g["id"] for g in groups])
+            for g in groups:
+                flair = group_flair_map.get(g["id"])
+                if flair:
+                    g["flair"] = flair
 
             from db.entitlements import resolve_user_entitlements as _resolve_supporter
 

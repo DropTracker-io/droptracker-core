@@ -254,6 +254,15 @@ class TestGetGroupDropNotifySettings:
 
 # ── create_notification ───────────────────────────────────────────────────────
 
+def _configure_channels(mock_session, rows):
+    """Make the group-channel lookup in create_notification return `rows`.
+
+    Rows are (config_key, config_value) tuples, matching the
+    GroupConfiguration query in group_has_notification_channel.
+    """
+    mock_session.query.return_value.filter.return_value.all.return_value = rows
+
+
 class TestCreateNotification:
     @pytest.fixture(autouse=True)
     def _import(self):
@@ -261,6 +270,7 @@ class TestCreateNotification:
         self.fn = create_notification
 
     async def test_creates_notification_in_session(self, mock_session):
+        _configure_channels(mock_session, [("channel_id_to_post_loot", "123456789012345678")])
         data = {"item_name": "Dragon claws", "player_name": "Zezima", "value": 50_000_000}
         notification_id = await self.fn(
             "drop",
@@ -273,17 +283,126 @@ class TestCreateNotification:
         assert mock_session.add.called
 
     async def test_duplicate_data_hash_not_double_created(self, mock_session):
+        _configure_channels(mock_session, [("channel_id_to_post_loot", "123456789012345678")])
         data = {"item_name": "Twisted bow", "player_name": "Zezima", "value": 1_000_000_000}
         await self.fn("drop", player_id=42, data=data, group_id=5, existing_session=mock_session)
         call_count_after_first = mock_session.add.call_count
+        assert call_count_after_first == 1
 
         # Same data again — should be deduplicated by hash
         await self.fn("drop", player_id=42, data=data, group_id=5, existing_session=mock_session)
         assert mock_session.add.call_count == call_count_after_first
 
     async def test_different_data_creates_separate_notifications(self, mock_session):
+        _configure_channels(mock_session, [("channel_id_to_post_loot", "123456789012345678")])
         data_a = {"item_name": "Dragon claws", "player_name": "Alice", "value": 50_000_000}
         data_b = {"item_name": "Twisted bow", "player_name": "Alice", "value": 1_000_000_000}
         await self.fn("drop", player_id=1, data=data_a, group_id=5, existing_session=mock_session)
         await self.fn("drop", player_id=1, data=data_b, group_id=5, existing_session=mock_session)
         assert mock_session.add.call_count == 2
+
+
+# ── enqueue skip: groups with no notification channel ─────────────────────────
+
+class TestCreateNotificationChannelGate:
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from data.submissions.common import create_notification
+        self.fn = create_notification
+
+    async def test_group_type_skipped_when_no_channel_configured(self, mock_session):
+        _configure_channels(mock_session, [])
+        result = await self.fn(
+            "drop", player_id=42,
+            data={"item_name": "Dragon claws", "player_name": "Zezima"},
+            group_id=5, existing_session=mock_session,
+        )
+        assert result is None
+        assert not mock_session.add.called
+
+    async def test_group_type_skipped_when_channel_empty_or_zero(self, mock_session):
+        _configure_channels(mock_session, [("channel_id_to_post_loot", "")])
+        await self.fn("drop", player_id=42, data={"a": 1}, group_id=5, existing_session=mock_session)
+        assert not mock_session.add.called
+
+        _configure_channels(mock_session, [("channel_id_to_post_loot", "0")])
+        await self.fn("drop", player_id=42, data={"a": 2}, group_id=5, existing_session=mock_session)
+        assert not mock_session.add.called
+
+    async def test_fallback_loot_channel_allows_typed_notification(self, mock_session):
+        # quest has no dedicated channel but falls back to the loot channel
+        _configure_channels(mock_session, [
+            ("channel_id_to_post_quests", ""),
+            ("channel_id_to_post_loot", "123456789012345678"),
+        ])
+        await self.fn(
+            "quest", player_id=42,
+            data={"quest_name": "Dragon Slayer II", "player_name": "Zezima"},
+            group_id=5, existing_session=mock_session,
+        )
+        assert mock_session.add.called
+
+    async def test_level_up_has_no_loot_fallback(self, mock_session):
+        # level_up posts only to channel_id_to_post_levels (no loot fallback
+        # in send_level_up_notification_with_session) — mirror that here.
+        _configure_channels(mock_session, [("channel_id_to_post_loot", "123456789012345678")])
+        await self.fn(
+            "level_up", player_id=42,
+            data={"player_name": "Zezima", "skills_text": "Attack 99"},
+            group_id=5, existing_session=mock_session,
+        )
+        assert not mock_session.add.called
+
+    async def test_dm_types_never_gated(self, mock_session):
+        _configure_channels(mock_session, [])
+        await self.fn(
+            "dm_drop", player_id=42,
+            data={"item_name": "Dragon claws", "player_name": "Zezima"},
+            group_id=None, existing_session=mock_session,
+        )
+        assert mock_session.add.called
+
+    async def test_system_types_never_gated(self, mock_session):
+        _configure_channels(mock_session, [])
+        await self.fn(
+            "new_npc", player_id=42,
+            data={"npc_name": "Zulrah", "player_name": "Zezima"},
+            group_id=None, existing_session=mock_session,
+        )
+        assert mock_session.add.called
+
+    async def test_lookup_error_does_not_block_enqueue(self, mock_session):
+        mock_session.query.return_value.filter.return_value.all.side_effect = RuntimeError("db down")
+        await self.fn(
+            "drop", player_id=42,
+            data={"item_name": "Dragon claws", "player_name": "Zezima"},
+            group_id=5, existing_session=mock_session,
+        )
+        assert mock_session.add.called
+
+
+class TestGroupHasNotificationChannel:
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from data.submissions.common import group_has_notification_channel
+        self.fn = group_has_notification_channel
+
+    def test_unknown_type_is_never_gated(self, mock_session):
+        _configure_channels(mock_session, [])
+        assert self.fn(mock_session, 5, "monetary_contribution") is True
+
+    def test_no_group_is_never_gated(self, mock_session):
+        _configure_channels(mock_session, [])
+        assert self.fn(mock_session, None, "drop") is True
+
+    def test_configured_channel_passes(self, mock_session):
+        _configure_channels(mock_session, [("channel_id_to_post_pets", "123456789012345678")])
+        assert self.fn(mock_session, 5, "pet") is True
+
+    def test_missing_rows_fail(self, mock_session):
+        _configure_channels(mock_session, [])
+        assert self.fn(mock_session, 5, "clog") is False
+
+    def test_whitespace_value_fails(self, mock_session):
+        _configure_channels(mock_session, [("channel_id_to_post_loot", "   ")])
+        assert self.fn(mock_session, 5, "drop") is False

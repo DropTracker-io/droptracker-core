@@ -23,8 +23,16 @@ import json
 from datetime import datetime
 
 from quart import Blueprint, jsonify, request
+from sqlalchemy import func
 
-from db import GroupSubscription, SubscriptionTier, UserSubscription
+from db import Group, GroupSubscription, Player, SubscriptionTier, User, UserSubscription
+from db.models.associations import user_group_association
+from db.entitlements import (
+    effective_group_subscription,
+    effective_group_tiers,
+    paid_group_tiers_desc,
+    subscription_is_live,
+)
 from web_api import billing
 from web_api.common import abort_problem, db_session, private_no_store, with_cache_headers
 from web_api.entitlements import resolve_group_entitlements, resolve_user_entitlements
@@ -32,12 +40,17 @@ from web_api.entitlements_registry import (
     parse_stored_entitlements,
     resolve_tier_entitlements,
 )
+from web_api.payments import record_payment
+from web_api.tier_flair import normalize_flair
 from web_api.deps import (
     assert_group_admin,
+    assert_group_member,
     current_user_id,
+    is_group_admin_role,
     json_body,
     load_user,
     manageable_guild_ids,
+    resolve_group_role,
 )
 
 subscriptions_bp = Blueprint("v1_subscriptions", __name__)
@@ -60,11 +73,14 @@ def _serialize_tier(t: SubscriptionTier) -> dict:
         "interval": t.interval or "month",
         "features": features if isinstance(features, list) else [],
         "entitlements": resolve_tier_entitlements(stored, scope),
+        "flair": normalize_flair(getattr(t, "flair", None)),
         "recommended": bool(t.recommended),
     }
 
 
 def _serialize_sub(group_id: int, sub: GroupSubscription | None, entitlements: dict | None = None) -> dict:
+    """Serialize ONE leg row (admin comp/audit payloads). The group-level
+    effective view is ``_serialize_group_sub``."""
     if sub is None or sub.status == "none":
         base = {
             "group_id": group_id,
@@ -92,6 +108,60 @@ def _serialize_sub(group_id: int, sub: GroupSubscription | None, entitlements: d
     return payload
 
 
+def _leg_payload(leg: GroupSubscription, names: dict, viewer_user_id: int | None) -> dict:
+    return {
+        "id": int(leg.id),
+        "user_id": int(leg.user_id) if leg.user_id is not None else None,
+        "user_name": names.get(leg.user_id),
+        "tier_key": leg.tier_key,
+        "amount_cents": int(leg.amount_cents) if leg.amount_cents is not None else None,
+        "provider": leg.provider,
+        "status": leg.status,
+        "current_period_end": int(leg.current_period_end.timestamp())
+        if leg.current_period_end
+        else None,
+        "cancel_at_period_end": bool(leg.cancel_at_period_end),
+        "mine": viewer_user_id is not None and leg.user_id == viewer_user_id,
+    }
+
+
+def _serialize_group_sub(
+    s,
+    group_id: int,
+    entitlements: dict | None = None,
+    viewer_user_id: int | None = None,
+) -> dict:
+    """Effective pool view: computed tier + per-leg breakdown.
+
+    ``tier_key`` is the tier the group's live legs collectively cover — the
+    same resolution entitlements and flair use. ``provider`` is kept for
+    payload compat: the single distinct live-leg provider, or null when mixed.
+    """
+    resolved = effective_group_subscription(s, group_id)
+    tier = resolved["tier"]
+    live_providers = {leg.provider for leg in resolved["live_legs"] if leg.provider}
+    payload = {
+        "group_id": group_id,
+        "tier_key": tier.key if tier is not None else None,
+        "status": resolved["status"],
+        "provider": next(iter(live_providers)) if len(live_providers) == 1 else None,
+        "current_period_end": int(resolved["current_period_end"].timestamp())
+        if resolved["current_period_end"]
+        else None,
+        "cancel_at_period_end": bool(resolved["cancel_at_period_end"]),
+        "total_monthly_cents": int(resolved["total_monthly_cents"]),
+    }
+    payer_ids = [leg.user_id for leg in resolved["legs"] if leg.user_id is not None]
+    names: dict = {}
+    if payer_ids:
+        rows = s.query(User.user_id, User.username).filter(User.user_id.in_(payer_ids)).all()
+        names = {uid: name for uid, name in rows}
+    payload["legs"] = [_leg_payload(leg, names, viewer_user_id) for leg in resolved["legs"]]
+    if entitlements is not None:
+        payload["entitlements"] = entitlements
+    return payload
+
+
 @subscriptions_bp.get("/subscriptions/tiers")
 async def list_tiers():
     # Default to group tiers so pre-scope clients never see user tiers as
@@ -112,17 +182,158 @@ async def list_tiers():
     return with_cache_headers(jsonify(tiers), max_age=300)
 
 
+# --------------------------------------------------------------------------- #
+# Public "wall of supporters" — groups and individuals with a live PAID
+# subscription, shown on the homepage to thank the people funding the project.
+# No personal data beyond public names; hidden users/players are excluded, and
+# complimentary badge grants (no payment) are excluded by construction (they
+# have no subscription row).
+# --------------------------------------------------------------------------- #
+# Only these statuses can be live; pre-filtering avoids loading canceled rows.
+_SUPPORTER_QUERY_STATUSES = ("active", "trialing")
+
+
+def _load_group_supporters(s, limit: int) -> list[dict]:
+    """Groups whose live contribution pool covers a paid tier, most recent
+    supporter first. Flair is attached when the covered tier grants one."""
+    active_legs = (
+        s.query(GroupSubscription)
+        .filter(GroupSubscription.status.in_(_SUPPORTER_QUERY_STATUSES))
+        .all()
+    )
+    live_legs = [leg for leg in active_legs if subscription_is_live(leg)]
+    if not live_legs:
+        return []
+    candidate_ids = {int(leg.group_id) for leg in live_legs}
+    # {group_id: (tier, total_monthly_cents)} for the paid-tier subset.
+    effective = effective_group_tiers(s, list(candidate_ids))
+    if not effective:
+        return []
+
+    # Recency: newest live leg per qualifying group (when the pool last grew).
+    since: dict[int, datetime] = {}
+    for leg in live_legs:
+        gid = int(leg.group_id)
+        if gid not in effective or not leg.created_at:
+            continue
+        if gid not in since or leg.created_at > since[gid]:
+            since[gid] = leg.created_at
+
+    ids = list(effective.keys())
+    names = dict(
+        s.query(Group.group_id, Group.group_name).filter(Group.group_id.in_(ids)).all()
+    )
+    member_counts = dict(
+        s.query(
+            user_group_association.c.group_id,
+            func.count(user_group_association.c.player_id),
+        )
+        .filter(user_group_association.c.group_id.in_(ids))
+        .group_by(user_group_association.c.group_id)
+        .all()
+    )
+
+    rows: list[dict] = []
+    for gid, (tier, _total) in effective.items():
+        row = {
+            "id": gid,
+            "name": names.get(gid) or f"Group {gid}",
+            "tier_name": tier.name,
+            "member_count": int(member_counts.get(gid, 0)),
+            "since": int(since[gid].timestamp()) if gid in since else None,
+        }
+        style = normalize_flair(getattr(tier, "flair", None))
+        if style != "none":
+            row["flair"] = {"tier_key": tier.key, "tier_name": tier.name, "style": style}
+        rows.append(row)
+
+    rows.sort(key=lambda r: (r["since"] or 0), reverse=True)
+    return rows[:limit]
+
+
+def _load_user_supporters(s, limit: int) -> list[dict]:
+    """Individual supporters with a live paid user subscription, most recent
+    first. Each is represented by a visible linked player (privacy: hidden
+    users and hidden players are excluded); supporters with no visible player
+    to link to are omitted."""
+    subs = (
+        s.query(UserSubscription)
+        .filter(UserSubscription.status.in_(_SUPPORTER_QUERY_STATUSES))
+        .order_by(UserSubscription.created_at.desc())
+        .all()
+    )
+    live = [sub for sub in subs if subscription_is_live(sub)]
+    if not live:
+        return []
+    user_ids = [int(sub.user_id) for sub in live]
+
+    users = {u.user_id: u for u in s.query(User).filter(User.user_id.in_(user_ids)).all()}
+    # Representative visible player per user: highest total level wins, then
+    # lowest player_id for a stable tie-break. MySQL sorts NULL levels last.
+    rep: dict[int, tuple[int, str]] = {}
+    player_rows = (
+        s.query(Player.player_id, Player.player_name, Player.user_id)
+        .filter(
+            Player.user_id.in_(user_ids),
+            Player.hidden == False,  # noqa: E712
+            Player.player_name.isnot(None),
+        )
+        .order_by(Player.total_level.desc(), Player.player_id.asc())
+        .all()
+    )
+    for pid, pname, uid in player_rows:
+        rep.setdefault(int(uid), (int(pid), pname))
+
+    rows: list[dict] = []
+    for sub in live:  # preserves created_at-desc ordering
+        uid = int(sub.user_id)
+        user = users.get(uid)
+        if user is None or bool(user.hidden):
+            continue
+        rep_player = rep.get(uid)
+        if rep_player is None:
+            continue  # nothing public to link to
+        rows.append(
+            {
+                "user_id": uid,
+                "player_id": rep_player[0],
+                "name": rep_player[1],
+                "since": int(sub.created_at.timestamp()) if sub.created_at else None,
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+@subscriptions_bp.get("/supporters")
+async def list_supporters():
+    """Public homepage "supporters" section: paid subscriber groups + players."""
+    try:
+        limit = int(request.args.get("limit", 60))
+    except (TypeError, ValueError):
+        limit = 60
+    limit = max(1, min(limit, 200))
+
+    def _load():
+        with db_session() as s:
+            return {
+                "groups": _load_group_supporters(s, limit),
+                "players": _load_user_supporters(s, limit),
+            }
+
+    payload = await asyncio.to_thread(_load)
+    return with_cache_headers(jsonify(payload), max_age=300)
+
+
 def _require_admin_and_sub(user_id, group_id):
     with db_session() as s:
         user = load_user(s, user_id)
         assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
-        sub = (
-            s.query(GroupSubscription)
-            .filter(GroupSubscription.group_id == group_id)
-            .first()
-        )
         entitlements = resolve_group_entitlements(s, group_id, user=user)
-        return _serialize_sub(group_id, sub, entitlements=entitlements)
+        return _serialize_group_sub(
+            s, group_id, entitlements=entitlements, viewer_user_id=user_id
+        )
 
 
 @subscriptions_bp.get("/groups/<int:group_id>/subscription")
@@ -132,8 +343,51 @@ async def get_subscription(group_id: int):
     return private_no_store(jsonify(payload))
 
 
+@subscriptions_bp.get("/groups/<int:group_id>/subscription/summary")
+async def subscription_summary(group_id: int):
+    """Public pool summary for the group page "Support this clan" card.
+
+    No personal data: effective tier, pool total, and what the next tier
+    costs on top of the current pool.
+    """
+
+    def _load():
+        with db_session() as s:
+            resolved = effective_group_subscription(s, group_id)
+            tier = resolved["tier"]
+            total = int(resolved["total_monthly_cents"])
+            covered = int(tier.price_cents) if tier is not None else 0
+            # Cheapest paid tier the pool does NOT yet cover.
+            next_tier = None
+            for t in sorted(paid_group_tiers_desc(s), key=lambda t: int(t.price_cents)):
+                if int(t.price_cents) > covered:
+                    next_tier = {
+                        "key": t.key,
+                        "name": t.name,
+                        "price_cents": int(t.price_cents),
+                        "delta_cents": max(0, int(t.price_cents) - total),
+                    }
+                    break
+            return {
+                "group_id": group_id,
+                "tier_key": tier.key if tier is not None else None,
+                "tier_name": tier.name if tier is not None else None,
+                "total_monthly_cents": total,
+                "next_tier": next_tier,
+            }
+
+    payload = await asyncio.to_thread(_load)
+    return with_cache_headers(jsonify(payload), max_age=60)
+
+
 @subscriptions_bp.post("/groups/<int:group_id>/subscription/checkout")
 async def checkout(group_id: int):
+    """Add a contribution leg toward ``tier_key``.
+
+    Pool model: any group MEMBER may contribute; the charge is the difference
+    between the target tier's monthly price and the group's current live pool
+    total. 422 when the pool already covers the tier.
+    """
     user_id = current_user_id()
     body = await json_body()
     tier_key = body.get("tier_key")
@@ -143,57 +397,71 @@ async def checkout(group_id: int):
     def _prepare():
         with db_session() as s:
             user = load_user(s, user_id)
-            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+            assert_group_member(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
             tier = (
                 s.query(SubscriptionTier)
-                .filter(SubscriptionTier.key == tier_key, SubscriptionTier.active == True)  # noqa: E712
+                .filter(
+                    SubscriptionTier.key == tier_key,
+                    SubscriptionTier.scope == "group",
+                    SubscriptionTier.active == True,  # noqa: E712
+                )
                 .first()
             )
             if not tier:
-                abort_problem(404, "Unknown tier", f"No active tier '{tier_key}'.")
-            sub = (
-                s.query(GroupSubscription)
-                .filter(GroupSubscription.group_id == group_id)
-                .first()
-            )
+                abort_problem(404, "Unknown tier", f"No active group tier '{tier_key}'.")
+            resolved = effective_group_subscription(s, group_id)
+            delta = int(tier.price_cents) - int(resolved["total_monthly_cents"])
+            if delta <= 0:
+                abort_problem(
+                    422,
+                    "Tier already covered",
+                    "The group's current contributions already cover this tier.",
+                )
             # Detach a lightweight snapshot for the provider call.
             return {
                 "key": tier.key,
                 "interval": tier.interval,
                 "provider_price_id": tier.provider_price_id,
-            }, (sub is not None and sub.status == "active")
+                "currency": tier.currency,
+                "delta_cents": delta,
+            }
 
-    tier_snapshot, _has_active = await asyncio.to_thread(_prepare)
+    tier_snapshot = await asyncio.to_thread(_prepare)
 
     # Provider call (may be network I/O for Stripe).
-    class _T:  # minimal attr holder for billing.start_checkout
+    class _T:  # minimal attr holder for billing.start_group_leg_checkout
         key = tier_snapshot["key"]
         interval = tier_snapshot["interval"]
         provider_price_id = tier_snapshot["provider_price_id"]
+        currency = tier_snapshot["currency"]
 
     try:
-        result = await asyncio.to_thread(billing.start_checkout, group_id, _T(), None)
+        result = await asyncio.to_thread(
+            billing.start_group_leg_checkout,
+            group_id,
+            user_id,
+            _T(),
+            tier_snapshot["delta_cents"],
+        )
     except Exception as e:
         abort_problem(502, "Checkout failed", str(e))
 
-    # Manual provider grants immediately — persist it now.
+    # Manual provider grants immediately — persist the new leg now.
     apply = result.get("apply")
     if apply:
         def _persist():
             with db_session() as s:
-                sub = (
-                    s.query(GroupSubscription)
-                    .filter(GroupSubscription.group_id == group_id)
-                    .first()
+                leg = GroupSubscription(
+                    group_id=group_id,
+                    user_id=apply.get("user_id"),
+                    tier_key=apply["tier_key"],
+                    amount_cents=apply.get("amount_cents"),
+                    status=apply["status"],
+                    provider=apply["provider"],
+                    current_period_end=apply["current_period_end"],
+                    cancel_at_period_end=apply["cancel_at_period_end"],
                 )
-                if not sub:
-                    sub = GroupSubscription(group_id=group_id)
-                    s.add(sub)
-                sub.tier_key = apply["tier_key"]
-                sub.status = apply["status"]
-                sub.provider = apply["provider"]
-                sub.current_period_end = apply["current_period_end"]
-                sub.cancel_at_period_end = apply["cancel_at_period_end"]
+                s.add(leg)
                 s.commit()
 
         await asyncio.to_thread(_persist)
@@ -201,82 +469,103 @@ async def checkout(group_id: int):
     return jsonify({"url": result.get("url")})
 
 
-@subscriptions_bp.post("/groups/<int:group_id>/subscription/cancel")
-async def cancel_subscription(group_id: int):
+def _resolve_leg(s, user_id: int, group_id: int, leg_id: int | None):
+    """Load the leg a cancel/resume targets and enforce payer-or-admin auth.
+
+    ``leg_id=None`` (legacy group-wide endpoints) targets the caller's own
+    leg. Group admins may manage any leg; members only their own.
+    """
+    user = load_user(s, user_id)
+    role = resolve_group_role(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+    if role is None:
+        abort_problem(403, "Forbidden", "Group membership is required.")
+    q = s.query(GroupSubscription).filter(GroupSubscription.group_id == group_id)
+    if leg_id is not None:
+        leg = q.filter(GroupSubscription.id == leg_id).first()
+        if not leg or leg.status == "none":
+            abort_problem(404, "No such contribution", "No matching contribution found.")
+        if leg.user_id != user_id and not is_group_admin_role(role):
+            abort_problem(403, "Forbidden", "You can only manage your own contribution.")
+    else:
+        leg = (
+            q.filter(GroupSubscription.user_id == user_id)
+            .order_by(GroupSubscription.created_at.desc())
+            .first()
+        )
+        if not leg or leg.status == "none":
+            abort_problem(404, "No subscription", "You have no contribution to this group.")
+    return leg
+
+
+async def _leg_action(group_id: int, leg_id: int | None, action):
+    """Shared cancel/resume flow: resolve+authorize, provider call, persist."""
     user_id = current_user_id()
 
-    def _load_sub():
+    def _load():
         with db_session() as s:
-            user = load_user(s, user_id)
-            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
-            sub = s.query(GroupSubscription).filter(GroupSubscription.group_id == group_id).first()
-            if not sub or sub.status == "none":
-                abort_problem(404, "No subscription", "This group has no active subscription.")
-            return sub.provider_subscription_id
+            leg = _resolve_leg(s, user_id, group_id, leg_id)
+            return leg.id, leg.provider_subscription_id
 
-    prov_sub_id = await asyncio.to_thread(_load_sub)
+    resolved_leg_id, prov_sub_id = await asyncio.to_thread(_load)
 
     class _S:
         provider_subscription_id = prov_sub_id
 
     try:
-        fields = await asyncio.to_thread(billing.cancel, _S())
+        fields = await asyncio.to_thread(action, _S())
     except Exception as e:
-        abort_problem(502, "Cancel failed", str(e))
+        abort_problem(502, "Subscription update failed", str(e))
 
     def _persist():
         with db_session() as s:
-            sub = s.query(GroupSubscription).filter(GroupSubscription.group_id == group_id).first()
-            sub.cancel_at_period_end = fields["cancel_at_period_end"]
+            leg = s.query(GroupSubscription).filter(GroupSubscription.id == resolved_leg_id).first()
+            leg.cancel_at_period_end = fields["cancel_at_period_end"]
             s.commit()
-            return _serialize_sub(group_id, sub)
+            return _serialize_group_sub(s, group_id, viewer_user_id=user_id)
 
     return jsonify(await asyncio.to_thread(_persist))
+
+
+@subscriptions_bp.post("/groups/<int:group_id>/subscription/legs/<int:leg_id>/cancel")
+async def cancel_leg(group_id: int, leg_id: int):
+    return await _leg_action(group_id, leg_id, billing.cancel)
+
+
+@subscriptions_bp.post("/groups/<int:group_id>/subscription/legs/<int:leg_id>/resume")
+async def resume_leg(group_id: int, leg_id: int):
+    return await _leg_action(group_id, leg_id, billing.resume)
+
+
+# Legacy group-wide endpoints — now operate on the caller's own leg.
+@subscriptions_bp.post("/groups/<int:group_id>/subscription/cancel")
+async def cancel_subscription(group_id: int):
+    return await _leg_action(group_id, None, billing.cancel)
 
 
 @subscriptions_bp.post("/groups/<int:group_id>/subscription/resume")
 async def resume_subscription(group_id: int):
-    user_id = current_user_id()
-
-    def _load_sub():
-        with db_session() as s:
-            user = load_user(s, user_id)
-            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
-            sub = s.query(GroupSubscription).filter(GroupSubscription.group_id == group_id).first()
-            if not sub or sub.status == "none":
-                abort_problem(404, "No subscription", "This group has no subscription.")
-            return sub.provider_subscription_id
-
-    prov_sub_id = await asyncio.to_thread(_load_sub)
-
-    class _S:
-        provider_subscription_id = prov_sub_id
-
-    try:
-        fields = await asyncio.to_thread(billing.resume, _S())
-    except Exception as e:
-        abort_problem(502, "Resume failed", str(e))
-
-    def _persist():
-        with db_session() as s:
-            sub = s.query(GroupSubscription).filter(GroupSubscription.group_id == group_id).first()
-            sub.cancel_at_period_end = fields["cancel_at_period_end"]
-            s.commit()
-            return _serialize_sub(group_id, sub)
-
-    return jsonify(await asyncio.to_thread(_persist))
+    return await _leg_action(group_id, None, billing.resume)
 
 
 @subscriptions_bp.post("/groups/<int:group_id>/subscription/portal")
 async def portal(group_id: int):
+    """Provider billing portal for the CALLER's own contribution leg."""
     user_id = current_user_id()
 
     def _load_sub():
         with db_session() as s:
             user = load_user(s, user_id)
-            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
-            sub = s.query(GroupSubscription).filter(GroupSubscription.group_id == group_id).first()
-            return sub.provider_customer_id if sub else None
+            assert_group_member(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+            leg = (
+                s.query(GroupSubscription)
+                .filter(
+                    GroupSubscription.group_id == group_id,
+                    GroupSubscription.user_id == user_id,
+                )
+                .order_by(GroupSubscription.created_at.desc())
+                .first()
+            )
+            return leg.provider_customer_id if leg else None
 
     customer_id = await asyncio.to_thread(_load_sub)
 
@@ -566,12 +855,116 @@ async def billing_webhook():
             sub.status = obj.get("status", sub.status)
             sub.cancel_at_period_end = bool(obj.get("cancel_at_period_end"))
             cpe = obj.get("current_period_end")
+            if not cpe:
+                # Stripe API 2025-03+ moved current_period_end off the
+                # Subscription object onto its items.
+                items = ((obj.get("items") or {}).get("data")) or []
+                if items:
+                    cpe = items[0].get("current_period_end")
             if cpe:
                 sub.current_period_end = datetime.fromtimestamp(int(cpe))
         elif etype == "customer.subscription.deleted":
             sub.status = "canceled"
         elif etype == "invoice.payment_failed":
             sub.status = "past_due"
+
+    def _provider_subscription_id() -> str | None:
+        """The Stripe subscription id this event concerns, across shapes."""
+        if etype == "checkout.session.completed":
+            return obj.get("subscription")
+        if str(etype).startswith("customer.subscription."):
+            return obj.get("id")
+        if str(etype).startswith("invoice."):
+            sub_id = obj.get("subscription")
+            if not sub_id:
+                # Stripe API 2025-03+: invoices reference the subscription via
+                # parent.subscription_details.
+                details = (obj.get("parent") or {}).get("subscription_details") or {}
+                sub_id = details.get("subscription")
+            return sub_id
+        return None
+
+    def _record_ledger():
+        """invoice.paid / charge.refunded → subscription_payments rows.
+
+        Idempotent via the unique external_id; unmatched events are skipped
+        (they belong to some other product on the same Stripe account).
+        """
+        if etype in ("invoice.paid", "invoice.payment_succeeded"):
+            amount = obj.get("amount_paid")
+            prov_sub = _provider_subscription_id()
+            if not amount or not prov_sub:
+                return
+            paid_ts = ((obj.get("status_transitions") or {}).get("paid_at")) or obj.get("created")
+            paid_at = datetime.fromtimestamp(int(paid_ts)) if paid_ts else None
+            with db_session() as s:
+                leg = (
+                    s.query(GroupSubscription)
+                    .filter(GroupSubscription.provider_subscription_id == prov_sub)
+                    .first()
+                )
+                if leg is not None:
+                    fields = {
+                        "scope": "group",
+                        "group_id": leg.group_id,
+                        "user_id": leg.user_id,
+                        "subscription_id": leg.id,
+                        "tier_key": leg.tier_key,
+                    }
+                else:
+                    usub = (
+                        s.query(UserSubscription)
+                        .filter(UserSubscription.provider_subscription_id == prov_sub)
+                        .first()
+                    )
+                    if usub is None:
+                        return
+                    fields = {
+                        "scope": "user",
+                        "user_id": usub.user_id,
+                        "subscription_id": usub.id,
+                        "tier_key": usub.tier_key,
+                    }
+            record_payment(
+                provider="stripe",
+                amount_cents=int(amount),
+                currency=obj.get("currency") or "USD",
+                external_id=str(obj.get("id")),
+                paid_at=paid_at,
+                notify=True,
+                **fields,
+            )
+        elif etype == "charge.refunded":
+            amount = obj.get("amount_refunded")
+            invoice_id = obj.get("invoice")
+            if not amount or not invoice_id:
+                return
+            # Attribute the refund via the original invoice's ledger row.
+            from db import SubscriptionPayment
+
+            with db_session() as s:
+                original = (
+                    s.query(SubscriptionPayment)
+                    .filter(SubscriptionPayment.external_id == str(invoice_id))
+                    .first()
+                )
+                if original is None:
+                    return
+                fields = {
+                    "scope": original.scope,
+                    "group_id": original.group_id,
+                    "user_id": original.user_id,
+                    "subscription_id": original.subscription_id,
+                    "tier_key": original.tier_key,
+                }
+            record_payment(
+                provider="stripe",
+                amount_cents=int(amount),
+                currency=obj.get("currency") or "USD",
+                external_id=f"refund:{obj.get('id')}",
+                kind="refund",
+                **fields,
+            )
 
     def _apply():
         with db_session() as s:
@@ -599,55 +992,66 @@ async def billing_webhook():
                     _invalidate_user_entitlements(user_id)
                 return
 
-            group_id = None
-            if meta.get("group_id"):
-                try:
-                    group_id = int(meta["group_id"])
-                except (ValueError, TypeError):
-                    group_id = None
-            if group_id is None and obj.get("client_reference_id"):
-                try:
-                    group_id = int(obj["client_reference_id"])
-                except (ValueError, TypeError):
-                    group_id = None
+            # ---- Group contribution legs (subscription pool) ----
+            # A leg is keyed by its provider subscription id — never "the
+            # group's row"; a pool holds many legs.
+            prov_id = _provider_subscription_id()
 
-            if group_id is None:
-                # Recurring customer.subscription.* events created before
-                # subscription_data.metadata existed carry no scope/ids —
-                # match by provider subscription id across both tables.
-                prov_id = obj.get("id") if str(etype).startswith("customer.subscription.") else None
-                if not prov_id:
-                    return
-                sub = (
+            leg = None
+            if prov_id:
+                leg = (
                     s.query(GroupSubscription)
                     .filter(GroupSubscription.provider_subscription_id == prov_id)
                     .first()
                 )
-                if sub is None:
+                if leg is None:
+                    # Pre-metadata user-sub events land here too — match the
+                    # supporter table before assuming a group leg.
                     usub = (
                         s.query(UserSubscription)
                         .filter(UserSubscription.provider_subscription_id == prov_id)
                         .first()
                     )
-                    if usub is None:
+                    if usub is not None:
+                        _apply_fields(usub, meta)
+                        amt = _extract_amount_cents()
+                        if amt:
+                            usub.amount_cents = amt
+                        s.commit()
+                        _invalidate_user_entitlements(usub.user_id)
                         return
-                    _apply_fields(usub, meta)
-                    amt = _extract_amount_cents()
-                    if amt:
-                        usub.amount_cents = amt
-                    s.commit()
-                    _invalidate_user_entitlements(usub.user_id)
-                    return
-                _apply_fields(sub, meta)
-                s.commit()
-                return
 
-            sub = s.query(GroupSubscription).filter(GroupSubscription.group_id == group_id).first()
-            if not sub:
-                sub = GroupSubscription(group_id=group_id)
-                s.add(sub)
-            _apply_fields(sub, meta)
+            if leg is None:
+                # Only a completed checkout may CREATE a leg.
+                if etype != "checkout.session.completed":
+                    return
+                group_id = None
+                if meta.get("group_id"):
+                    try:
+                        group_id = int(meta["group_id"])
+                    except (ValueError, TypeError):
+                        group_id = None
+                if group_id is None and obj.get("client_reference_id"):
+                    try:
+                        group_id = int(obj["client_reference_id"])
+                    except (ValueError, TypeError):
+                        group_id = None
+                if group_id is None:
+                    return
+                leg = GroupSubscription(group_id=group_id)
+                s.add(leg)
+
+            _apply_fields(leg, meta)
+            amt = _extract_amount_cents()
+            if amt:
+                leg.amount_cents = amt
+            if leg.user_id is None and meta.get("payer_user_id"):
+                try:
+                    leg.user_id = int(meta["payer_user_id"])
+                except (ValueError, TypeError):
+                    pass
             s.commit()
 
+    await asyncio.to_thread(_record_ledger)
     await asyncio.to_thread(_apply)
     return jsonify({"received": True})

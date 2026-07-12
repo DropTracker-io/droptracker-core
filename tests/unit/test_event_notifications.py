@@ -22,7 +22,7 @@ _spec.loader.exec_module(en)
 ALL_TYPES = (
     "event_started", "event_ended", "event_completion", "event_cell",
     "event_line", "event_blackout", "event_lead_change", "event_pending",
-    "event_activation_failed",
+    "event_activation_failed", "event_signup_prompt",
 )
 
 
@@ -40,6 +40,7 @@ class TestKindMapping:
             "event_lead_change": "leaderboard",
             "event_pending": "admin",
             "event_activation_failed": "admin",
+            "event_signup_prompt": "announcements",
         }
 
     def test_all_families_covered(self):
@@ -91,6 +92,30 @@ class TestResolveEventChannel:
 
     def test_channel_id_coerced_to_string(self):
         assert en.resolve_event_channel({"announcements": 123}, "event_started") == "123"
+
+
+# ── role pings (web_events.ping_config) ─────────────────────────────────────
+
+class TestPingRoles:
+    def test_unset_config_pings_nobody(self):
+        assert en.event_ping_role_ids(None, "event_started") == []
+        assert en.event_ping_role_ids("", "event_started") == []
+
+    def test_corrupt_config_pings_nobody(self):
+        assert en.event_ping_role_ids("not json", "event_started") == []
+        assert en.event_ping_role_ids('["list"]', "event_started") == []
+        assert en.event_ping_role_ids('{"event_started": "123"}', "event_started") == []
+
+    def test_configured_key_returns_role_strings(self):
+        raw = '{"event_started": ["111", 222], "event_ended": ["333"]}'
+        assert en.event_ping_role_ids(raw, "event_started") == ["111", "222"]
+        assert en.event_ping_role_ids(raw, "event_ended") == ["333"]
+        # Types without a configured key stay silent.
+        assert en.event_ping_role_ids(raw, "event_completion") == []
+
+    def test_ping_content_mentions(self):
+        assert en.ping_content(["1", "2"]) == "<@&1> <@&2>"
+        assert en.ping_content([]) is None
 
 
 # ── embed content specs ──────────────────────────────────────────────────────

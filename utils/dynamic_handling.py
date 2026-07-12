@@ -91,6 +91,50 @@ def get_coin_image_id(quantity):
     best = max(possible)
     return mapping[best]
 
+def get_stacked_display_id(item_id, session):
+    """Resolve an OSRS item id to the icon id that best represents a *stack* of it.
+
+    Stackable items are submitted/stored as their single-unit id, but the game
+    client swaps to progressively larger "pile" graphics as the stack grows.
+    Each pile graphic is a distinct item id sharing the base item's name, with
+    the DB ``stacked`` column holding the count threshold it represents (this is
+    how coins 995..1004 and Zulrah's scales 12934/15323/3993..3999 are stored).
+    Loot leaderboards look best showing the fullest pile, so for a stackable item
+    we return the largest non-noted variant sharing its name — "landing on the
+    largest stack size for most cases" (suggestion #44).
+
+    Coins are intentionally left untouched here: their pile is chosen by
+    magnitude via :func:`get_coin_image_id` at the call site, which passes the
+    already-resolved coin id. Returns the original id for non-stackable items,
+    coins, unknown ids, or when no better variant exists.
+    """
+    try:
+        item_id = int(item_id)
+    except (TypeError, ValueError):
+        return item_id
+    # Local import keeps this module light and avoids import-time DB coupling.
+    from db.models import ItemList
+    item = session.query(ItemList).filter(ItemList.item_id == item_id).first()
+    if item is None or not item.stackable or item.item_name == "Coins":
+        return item_id
+    variants = (
+        session.query(ItemList.item_id, ItemList.stacked)
+        .filter(ItemList.item_name == item.item_name, ItemList.noted.is_(False))
+        .all()
+    )
+    if not variants:
+        return item_id
+    # Prefer the greatest stack-size threshold; break ties on the higher id
+    # (the "final non-noted item id available", per the suggestion).
+    best_id, best_stacked = max(variants, key=lambda v: (v[1] or 0, v[0]))
+    # Only swap when genuine larger-pile art exists (thresholds of 2+, as with
+    # arrows, bolts, seeds and Zulrah's scales). Items whose only same-named
+    # alternates are stacked 0/1 duplicates (runes, cannonballs, most drops)
+    # render identically at every size, so leave them on their submitted id.
+    if (best_stacked or 0) < 2:
+        return item_id
+    return best_id
+
 def get_value_color(numCoins):
     """
     Return a color based on the coin value thresholds:
