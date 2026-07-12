@@ -43,7 +43,7 @@ def real_redis_updates():
 
 class TestModuleLevelWrappers:
     def test_add_to_player_accepts_drop_processor_call_signature(self, real_redis_updates):
-        """drop_processor passes item_name/npc_name — the wrapper must accept them."""
+        """drop_processor passes item_name/npc_name/exclude_group_ids — the wrapper must accept them."""
         sig = inspect.signature(real_redis_updates.add_to_player)
         # Must not raise TypeError:
         sig.bind(
@@ -52,6 +52,7 @@ class TestModuleLevelWrappers:
             world_type="main",
             item_name="Twisted bow",
             npc_name="Chambers of Xeric",
+            exclude_group_ids={1, 2},
         )
 
     def test_add_to_player_forwards_to_loot_tracker(self, real_redis_updates):
@@ -69,6 +70,28 @@ class TestModuleLevelWrappers:
             world_type="seasonal",
             item_name="Enhanced crystal weapon seed",
             npc_name="The Gauntlet",
+            exclude_group_ids=None,
+        )
+
+    def test_add_to_player_forwards_exclude_group_ids(self, real_redis_updates):
+        """manual_submission_policy (suggestion #45): drop.py passes the set of
+        groups this drop must not count toward — the wrapper must forward it."""
+        tracker = MagicMock()
+        real_redis_updates.loot_tracker = tracker
+        player, drop = MagicMock(), MagicMock()
+
+        real_redis_updates.add_to_player(
+            player, drop, world_type="main", item_name="Scythe of vitur",
+            npc_name="Theatre of Blood", exclude_group_ids={17, 42},
+        )
+
+        tracker.add_to_player.assert_called_once_with(
+            player,
+            drop,
+            world_type="main",
+            item_name="Scythe of vitur",
+            npc_name="Theatre of Blood",
+            exclude_group_ids={17, 42},
         )
 
     def test_add_split_credit_exists_and_accepts_drop_processor_call_signature(self, real_redis_updates):
