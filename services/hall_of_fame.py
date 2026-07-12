@@ -39,12 +39,13 @@ import datetime
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import interactions
 from interactions import (
@@ -67,6 +68,7 @@ from interactions.models import (
     ThumbnailComponent,
 )
 
+from db.entitlements import resolve_group_entitlements
 from db.models import (
     Group,
     GroupConfiguration,
@@ -86,6 +88,7 @@ from utils.hof import (
     BossPlanEntry,
     build_boss_plan,
     build_message_plan,
+    canonical_display_name,
     chunk_select_options,
     fit_directory_lines,
     parse_boss_list,
@@ -102,12 +105,32 @@ _FOOTER_TEXT = (
     "[View all Personal Bests](https://www.droptracker.io/personal_bests)"
 )
 
-_CYCLE_SLEEP_SECONDS = 360
+# The periodic sweep is now a slow self-heal (deleted-message recovery + loot
+# refresh); near-real-time PB freshness comes from the Redis refresh queue (see
+# _refresh_loop), so the sweep can run less often to reduce edit pressure.
+_CYCLE_SLEEP_SECONDS = int(os.getenv("HOF_CYCLE_SECONDS", "600"))
 _GROUP_TIMEOUT_SECONDS = 900
-_FORBIDDEN_COOLDOWN_SECONDS = 1800
+# 403 (missing permissions) is usually a persistent misconfiguration, so back
+# off exponentially instead of hammering the same channel every 30 minutes.
+_FORBIDDEN_BASE_COOLDOWN_SECONDS = 1800
+_FORBIDDEN_MAX_COOLDOWN_SECONDS = 24 * 3600
 _CHANNEL_SCAN_LIMIT = 200
 _ORPHAN_MIN_AGE_SECONDS = 120
 _DISCORD_EPOCH_MS = 1420070400000
+
+# The global/template group is always processed and reads global (not
+# group-scoped) leaderboards; it is exempt from the premium entitlement gate.
+_GLOBAL_GROUP_ID = 2
+
+# Cross-process near-real-time refresh: pb_processor RPUSHes {player_id, npc_id}
+# onto this list when a stored PB changes; _refresh_loop drains it and edits
+# just the affected boss message(s) within seconds.
+_REFRESH_QUEUE_KEY = "hof:refresh:queue"
+_REFRESH_BLPOP_TIMEOUT = 5
+_REFRESH_DEBOUNCE_SECONDS = 2.0
+# Entitlement resolution runs a few subscription queries; cache the result for a
+# short window so the per-cycle and per-refresh gates stay cheap.
+_ENTITLEMENT_TTL_SECONDS = 120
 
 # Discord Components V2 limits (with head-room).
 _MAX_COMPONENT_COUNT = 38
@@ -118,6 +141,16 @@ _MAX_TEXT_CHARS = 3950
 # Bumping the version forces one clean re-verification wave of every message.
 _HASH_KEY_TEMPLATE = "hof:msghash:v2:{group_id}:{message_id}"
 _HASH_TTL_SECONDS = 14 * 24 * 3600
+
+
+class ChannelNotPostable(Exception):
+    """The HOF bot cannot use a group's configured channel.
+
+    ``fetch_channel`` returns a bare ``BaseChannel`` (no ``send``/``history``)
+    when the bot can't fully access the channel — typically because the HOF bot
+    (a separate Discord app from the main bot) isn't in the guild or lacks
+    View/Send permission. Treated like a 403 so the group backs off instead of
+    crashing its pass every cycle."""
 
 
 class RateLimiter:
@@ -181,14 +214,30 @@ class HallOfFame(Extension):
         self._global_limiter = RateLimiter(max_calls=6, period_seconds=1.0)
         self._channel_limiters: Dict[str, RateLimiter] = {}
         self._forbidden_until: Dict[int, float] = {}
+        self._forbidden_strikes: Dict[int, int] = {}
+        self._entitlement_cache: Dict[int, Tuple[float, bool]] = {}
+        # group_id -> (monotonic_ts, player_ids). Membership is re-queried once
+        # per group per cycle instead of once per boss (was O(bosses) queries).
+        self._player_ids_cache: Dict[int, Tuple[float, List[int]]] = {}
+        # Serialises the periodic sweep against the near-real-time refresh
+        # consumer: both mutate the shared DB session and edit the same
+        # channels, so they must never interleave at an await boundary (the
+        # single-writer invariant that fixed the duplicate-message races).
+        self._work_lock = asyncio.Lock()
         self._loop_task = asyncio.create_task(self._update_loop())
-        log.warning("HOF: reconciliation service started (cycle every %ds)", _CYCLE_SLEEP_SECONDS)
+        self._refresh_task = asyncio.create_task(self._refresh_loop())
+        log.warning(
+            "HOF: reconciliation service started (sweep every %ds, refresh queue live)",
+            _CYCLE_SLEEP_SECONDS,
+        )
 
     def drop(self):
-        try:
-            self._loop_task.cancel()
-        except Exception:
-            pass
+        for task in (getattr(self, "_loop_task", None), getattr(self, "_refresh_task", None)):
+            try:
+                if task is not None:
+                    task.cancel()
+            except Exception:
+                pass
         super().drop()
 
     # ------------------------------------------------------------------ #
@@ -214,35 +263,54 @@ class HallOfFame(Extension):
 
     async def _run_cycle(self, cycle: int) -> CycleStats:
         stats = CycleStats()
-        session.expire_all()
-        group_ids = [
-            row.group_id
-            for row in session.query(GroupConfiguration.group_id).filter(
-                GroupConfiguration.config_key == "create_pb_embeds",
-                GroupConfiguration.config_value == "1",
-            ).all()
-        ]
-        dev_mode = self._is_in_development()
-        for group_id in group_ids:
-            if dev_mode and group_id != 2:
-                continue
+        # Resolve the eligible groups under the lock, from a FRESH snapshot. The
+        # long-running session otherwise holds one REPEATABLE READ view and never
+        # sees a group that just toggled create_pb_embeds on until the process
+        # restarts. Entitlement is resolved here too so no session read happens
+        # outside the lock (which would race the refresh consumer).
+        async with self._work_lock:
+            self._begin_fresh_read()
+            group_ids = [
+                row.group_id
+                for row in session.query(GroupConfiguration.group_id).filter(
+                    GroupConfiguration.config_key == "create_pb_embeds",
+                    GroupConfiguration.config_value == "1",
+                ).all()
+            ]
+            dev_mode = self._is_in_development()
+            eligible: List[int] = []
+            for group_id in group_ids:
+                if dev_mode and group_id != _GLOBAL_GROUP_ID:
+                    continue
+                if self._group_is_entitled(group_id):
+                    eligible.append(group_id)
+                else:
+                    stats.skipped += 1
+        if dev_mode:
+            # This is trivially left on after testing and then silently freezes
+            # every other group's Hall of Fame — make it impossible to miss.
+            log.warning(
+                "HOF: is_in_development=1 on group %d — ONLY group %d is being "
+                "processed this cycle; ALL OTHER GROUPS ARE SKIPPED. Clear that "
+                "config row to resume normal operation.",
+                _GLOBAL_GROUP_ID, _GLOBAL_GROUP_ID,
+            )
+        for group_id in eligible:
             cooldown = self._forbidden_until.get(group_id)
             if cooldown and time.monotonic() < cooldown:
                 continue
             try:
-                await asyncio.wait_for(
-                    self._reconcile_group(group_id, stats),
-                    timeout=_GROUP_TIMEOUT_SECONDS,
-                )
+                async with self._work_lock:
+                    await asyncio.wait_for(
+                        self._reconcile_group(group_id, stats),
+                        timeout=_GROUP_TIMEOUT_SECONDS,
+                    )
+                self._clear_forbidden(group_id)
                 stats.groups += 1
-            except Forbidden:
+            except (Forbidden, ChannelNotPostable) as e:
                 self._safe_rollback()
-                self._forbidden_until[group_id] = time.monotonic() + _FORBIDDEN_COOLDOWN_SECONDS
+                self._note_forbidden(group_id, reason=str(e) if isinstance(e, ChannelNotPostable) else None)
                 stats.failures += 1
-                log.warning(
-                    "HOF: group %d returned 403, cooling down for %ds",
-                    group_id, _FORBIDDEN_COOLDOWN_SECONDS,
-                )
             except NotFound as e:
                 self._safe_rollback()
                 stats.failures += 1
@@ -257,6 +325,235 @@ class HallOfFame(Extension):
                 log.exception("HOF: group %d pass failed", group_id)
         return stats
 
+    # ------------------------------------------------------------------ #
+    # Entitlement gate + 403 backoff
+    # ------------------------------------------------------------------ #
+
+    def _group_is_entitled(self, group_id: int) -> bool:
+        """True when the group may run a Hall of Fame this cycle.
+
+        The global/template group is always allowed; every other group must
+        currently hold the ``hall_of_fame`` premium entitlement (this is what
+        gates editing the HOF config on the website, so runtime and paywall
+        stay consistent and lapsed groups stop being processed). Cached for a
+        short window to keep the per-cycle/per-refresh cost negligible.
+        """
+        if group_id == _GLOBAL_GROUP_ID:
+            return True
+        now = time.monotonic()
+        cached = self._entitlement_cache.get(group_id)
+        if cached and now - cached[0] < _ENTITLEMENT_TTL_SECONDS:
+            return cached[1]
+        try:
+            granted = bool(resolve_group_entitlements(session, group_id).get("hall_of_fame"))
+        except Exception:
+            self._safe_rollback()
+            # Fall back to the last known answer if we have one; otherwise fail
+            # closed rather than crash the cycle.
+            granted = cached[1] if cached else False
+        self._entitlement_cache[group_id] = (now, granted)
+        return granted
+
+    def _note_forbidden(self, group_id: int, reason: Optional[str] = None):
+        """Record a 403 / inaccessible channel and back off exponentially
+        (30m, 1h, 2h … capped)."""
+        strikes = self._forbidden_strikes.get(group_id, 0) + 1
+        self._forbidden_strikes[group_id] = strikes
+        cooldown = min(
+            _FORBIDDEN_BASE_COOLDOWN_SECONDS * (2 ** (strikes - 1)),
+            _FORBIDDEN_MAX_COOLDOWN_SECONDS,
+        )
+        self._forbidden_until[group_id] = time.monotonic() + cooldown
+        detail = reason or ("bot lacks permission to post/edit in its Hall of "
+                            "Fame channel")
+        log.warning(
+            "HOF: group %d not postable (strike %d) — %s; backing off %.0fmin",
+            group_id, strikes, detail, cooldown / 60.0,
+        )
+
+    def _clear_forbidden(self, group_id: int):
+        """A group pass succeeded, so reset its 403 backoff state."""
+        self._forbidden_strikes.pop(group_id, None)
+        self._forbidden_until.pop(group_id, None)
+
+    # ------------------------------------------------------------------ #
+    # Near-real-time refresh consumer
+    # ------------------------------------------------------------------ #
+
+    async def _refresh_loop(self):
+        """Drain the cross-process refresh queue and edit just the affected
+        boss message(s) so a new PB appears within seconds instead of waiting
+        for the next sweep.
+
+        Runs in the same event loop as the sweep and shares ``self._work_lock``
+        with it, so the two never interleave — preserving the single-writer
+        invariant that keeps the channel from duplicating/desyncing.
+        """
+        # Don't touch channels until the gateway is connected.
+        for _ in range(150):
+            if getattr(self.bot, "is_ready", False):
+                break
+            await asyncio.sleep(2)
+        while True:
+            try:
+                # The blocking drain must stay OUTSIDE the lock (it parks for up
+                # to _REFRESH_BLPOP_TIMEOUT and would otherwise stall the sweep).
+                raw_items = await self._drain_refresh_queue()
+                if not raw_items:
+                    continue
+                # Resolving touches the shared DB session, so it must hold the
+                # same lock as the sweep — the two never use the session at once.
+                async with self._work_lock:
+                    targets = self._resolve_refresh_targets(raw_items)
+                for group_id, display_name in targets:
+                    try:
+                        async with self._work_lock:
+                            await self._refresh_single_boss(group_id, display_name)
+                    except Forbidden:
+                        self._safe_rollback()
+                        self._note_forbidden(group_id)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        self._safe_rollback()
+                        log.exception(
+                            "HOF: refresh failed for group %d boss '%s'", group_id, display_name,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("HOF: refresh loop iteration failed (loop continues)")
+                await asyncio.sleep(1)
+
+    async def _drain_refresh_queue(self) -> List:
+        """Block for one refresh signal, then coalesce any others that arrive
+        within the debounce window. Returns the raw queue payloads (no DB work
+        here — resolution happens under the work lock in the caller)."""
+        first = await asyncio.to_thread(
+            redis_client.client.blpop, _REFRESH_QUEUE_KEY, _REFRESH_BLPOP_TIMEOUT,
+        )
+        if not first:
+            return []
+        raw_items = [first[1]]
+        # Coalesce a burst (e.g. several players PBing the same boss at once)
+        # so we edit each message once rather than N times.
+        await asyncio.sleep(_REFRESH_DEBOUNCE_SECONDS)
+        while True:
+            more = await asyncio.to_thread(redis_client.client.lpop, _REFRESH_QUEUE_KEY)
+            if not more:
+                break
+            raw_items.append(more)
+            if len(raw_items) >= 500:  # safety valve against unbounded drains
+                break
+        return raw_items
+
+    def _resolve_refresh_targets(self, raw_items: List) -> Set[Tuple[int, str]]:
+        """Map raw {player_id, npc_id} signals to the set of boss messages that
+        must be re-rendered, applying the same dev/entitlement gates as the
+        sweep so lapsed or dev-suppressed groups are never touched here."""
+        targets: Set[Tuple[int, str]] = set()
+        parsed: List[Tuple[int, int]] = []
+        for item in raw_items:
+            try:
+                if isinstance(item, bytes):
+                    item = item.decode("utf-8")
+                payload = json.loads(item)
+                parsed.append((int(payload["player_id"]), int(payload["npc_id"])))
+            except Exception:
+                continue
+        if not parsed:
+            return targets
+        try:
+            self._begin_fresh_read()
+            dev_mode = self._is_in_development()
+            # npc_id -> canonical display name (one query per distinct npc).
+            display_by_npc: Dict[int, Optional[str]] = {}
+            for _, npc_id in parsed:
+                if npc_id in display_by_npc:
+                    continue
+                npc = session.query(NpcList).filter(NpcList.npc_id == npc_id).first()
+                display_by_npc[npc_id] = canonical_display_name(npc.npc_name) if npc else None
+            for player_id, npc_id in parsed:
+                display_name = display_by_npc.get(npc_id)
+                if not display_name:
+                    continue
+                player = session.query(Player).filter(Player.player_id == player_id).first()
+                if not player:
+                    continue
+                for group in (player.groups or []):
+                    gid = group.group_id
+                    if dev_mode and gid != _GLOBAL_GROUP_ID:
+                        continue
+                    if not self._group_is_entitled(gid):
+                        continue
+                    cfg = self._load_group_config(gid)
+                    if not cfg.individual_messages or not cfg.boss_names:
+                        continue
+                    plan_names = {e.display_name for e in build_boss_plan(cfg.boss_names)}
+                    if display_name in plan_names:
+                        targets.add((gid, display_name))
+        except Exception:
+            self._safe_rollback()
+            log.exception("HOF: failed to resolve refresh targets")
+        return targets
+
+    async def _refresh_single_boss(self, group_id: int, display_name: str):
+        """Re-render one boss message in place (by message id, not positionally)
+        and edit it only if its content actually changed."""
+        self._begin_fresh_read()
+        group = session.query(Group).filter(Group.group_id == group_id).first()
+        if not group or not group.guild_id:
+            return
+        cfg = self._load_group_config(group_id)
+        if not cfg.channel_id or not cfg.individual_messages:
+            return
+        resolved = self._resolve_entries(group_id, build_boss_plan(cfg.boss_names))
+        match = next(((e, npcs) for e, npcs in resolved if e.display_name == display_name), None)
+        if match is None:
+            return
+        row = session.query(GroupPersonalBestMessage).filter(
+            GroupPersonalBestMessage.group_id == group_id,
+            GroupPersonalBestMessage.boss_name == display_name,
+            GroupPersonalBestMessage.channel_id == str(cfg.channel_id),
+        ).order_by(GroupPersonalBestMessage.message_id.asc()).first()
+        if row is None:
+            # Not materialised yet — the periodic sweep will create it.
+            return
+        channel = await self.bot.fetch_channel(int(cfg.channel_id))
+        if channel is None or not hasattr(channel, "fetch_message"):
+            return
+        directory_url = self._directory_jump_url(group)
+        entry, npcs = match
+        components = self._render_boss_entry(group, entry, npcs, directory_url, cfg)
+        if not components:
+            return
+        new_hash = self._components_hash(components)
+        if self._get_stored_hash(group_id, row.message_id) == new_hash:
+            return
+        try:
+            message = await self._get_channel_message(channel, row.message_id, scan=None)
+        except Exception as e:
+            log.warning("HOF: refresh fetch failed for group %d boss '%s': %s",
+                        group_id, display_name, e)
+            return
+        if message is None:
+            return  # deleted — the sweep will recreate it in the right slot
+        await self._discord_write(
+            str(channel.id), lambda: message.edit(components=components), expect_result=True,
+        )
+        row.date_updated = datetime.datetime.now()
+        session.commit()
+        self._store_hash(group_id, row.message_id, new_hash)
+        log.info("HOF: refreshed group %d boss '%s' from PB signal", group_id, display_name)
+
+    def _directory_jump_url(self, group: Group) -> Optional[str]:
+        """Jump URL of the group's top directory message, if it exists."""
+        row = session.query(GroupPersonalBestMessage).filter(
+            GroupPersonalBestMessage.group_id == group.group_id,
+            GroupPersonalBestMessage.boss_name == DIRECTORY_KEY,
+        ).order_by(GroupPersonalBestMessage.message_id.asc()).first()
+        return self._jump_url(group, row) if row is not None else None
+
     def _safe_rollback(self):
         """Discard any uncommitted session state so an aborted group pass can
         never leak pending deletes/updates into the next group's commit."""
@@ -264,6 +561,21 @@ class HallOfFame(Extension):
             session.rollback()
         except Exception:
             pass
+
+    def _begin_fresh_read(self):
+        """Reset the shared session to a fresh DB snapshot before a read pass.
+
+        The module-level session holds a single long-lived REPEATABLE READ
+        transaction, so an externally-committed change (e.g. a group that just
+        toggled create_pb_embeds on via the website) is invisible to plain
+        ``expire_all()`` until the process restarts. Rolling back first ends the
+        stale transaction; the next query autobegins one with a current
+        snapshot. Must be called while holding ``_work_lock``."""
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        session.expire_all()
 
     def _is_in_development(self) -> bool:
         cfg = session.query(GroupConfiguration).filter(
@@ -325,7 +637,7 @@ class HallOfFame(Extension):
         return resolved
 
     async def _reconcile_group(self, group_id: int, stats: CycleStats):
-        session.expire_all()
+        self._begin_fresh_read()
         group = session.query(Group).filter(Group.group_id == group_id).first()
         if not group or not group.guild_id:
             return
@@ -338,6 +650,12 @@ class HallOfFame(Extension):
         if channel is None:
             log.warning("HOF: group %d channel %s not found", group_id, cfg.channel_id)
             return
+        if not hasattr(channel, "send") or not hasattr(channel, "history"):
+            # Degraded BaseChannel: the HOF bot can't access this channel.
+            raise ChannelNotPostable(
+                f"group {group_id} channel {cfg.channel_id} is not accessible "
+                f"to the HOF bot (not in guild or missing permissions)"
+            )
 
         if not cfg.boss_names:
             # Never treat an empty (possibly accidentally wiped) boss list as a
@@ -928,14 +1246,25 @@ class HallOfFame(Extension):
             components.append(TextDisplayComponent(content=pb_text))
         return components, summary_content
 
+    def _group_player_ids(self, group_id: int) -> List[int]:
+        """Member player_ids for a group, cached briefly so a full render pass
+        (many bosses back-to-back) doesn't re-run the membership query per boss."""
+        cached = self._player_ids_cache.get(group_id)
+        now = time.monotonic()
+        if cached and now - cached[0] < _ENTITLEMENT_TTL_SECONDS:
+            return cached[1]
+        group = session.query(Group).filter(Group.group_id == group_id).first()
+        player_ids = list({p.player_id for p in group.get_players()}) if group else []
+        self._player_ids_cache[group_id] = (now, player_ids)
+        return player_ids
+
     def _get_pbs(self, group_id: int, npc_name: str) -> Dict[object, List[PersonalBestEntry]]:
         """Personal bests for a group + npc name, bucketed by team size and
         sorted fastest-first within each bucket."""
         npc_ids = [row[0] for row in session.query(NpcList.npc_id).filter(NpcList.npc_name == npc_name).all()]
-        group = session.query(Group).filter(Group.group_id == group_id).first()
-        if not group or not npc_ids:
+        if not npc_ids:
             return {}
-        player_ids = list({player.player_id for player in group.get_players()})
+        player_ids = self._group_player_ids(group_id)
         if not player_ids:
             return {}
         pbs = session.query(PersonalBestEntry).filter(

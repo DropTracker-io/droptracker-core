@@ -8,7 +8,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from interactions.api.events import MessageCreate, Startup
 from interactions import Embed, Intents, Message, ChannelType, OptionType, slash_command, Permissions, slash_option
-from sqlalchemy.sql import text
+from db.entitlements import resolve_group_entitlements
 from db.models import Group, ItemList, PersonalBestEntry, PlayerPet, Session, Player, User, GroupConfiguration
 from utils.format import convert_to_ms, get_true_boss_name
 from services import hall_of_fame
@@ -20,9 +20,18 @@ load_dotenv()
 
 bot = interactions.Client(token=os.getenv("HALL_OF_FAME_BOT_TOKEN"), intents=Intents.ALL)
 
+# The global/template group is always active and exempt from the premium gate
+# (mirrors services.hall_of_fame._GLOBAL_GROUP_ID).
+GLOBAL_GROUP_ID = 2
+
 # Global variables for systemd watchdog
 watchdog = None
 shutdown_event = asyncio.Event()
+# Allow the gateway a grace period to connect before the health check can report
+# "unhealthy" (otherwise it flaps on every startup and spams the journal). The
+# watchdog heartbeat is sent regardless, so this only affects the log line.
+_STARTUP_GRACE_SECONDS = 120
+_process_started_at = time.monotonic()
 
 # Health check function for systemd watchdog
 async def health_check():
@@ -30,8 +39,9 @@ async def health_check():
     try:
         # Check if bot is ready and connected
         if not bot.is_ready:
-            return False
-        
+            # Still coming up — don't report unhealthy during the grace window.
+            return (time.monotonic() - _process_started_at) < _STARTUP_GRACE_SECONDS
+
         return True
     except Exception as e:
         print(f"Health check failed: {e}")
@@ -56,18 +66,26 @@ async def on_startup(event: Startup):
     total_groups = 0
     try:
         local_session = Session()
-        groups_to_update = local_session.query(GroupConfiguration.group_id).filter(GroupConfiguration.config_key == "create_pb_embeds",
-                                                                                 GroupConfiguration.config_value == "1").all()
-        total_groups = len(groups_to_update)
-        for group in groups_to_update:
-            existing_subscription = local_session.execute(
-                text("SELECT * FROM xenforo.xf_dt_group_upgrade_active WHERE group_id = :group_id"),
-                {"group_id": group.group_id}
-            ).first()
-            if not existing_subscription or existing_subscription.group_upgrade_id < 2:
-                print(f"Group {group.group_id} does not have a subscription or is not a premium group, skipping")
-                total_groups -= 1
+        # Count exactly the groups the reconciliation loop will actually process:
+        # create_pb_embeds enabled AND (global group OR holds the hall_of_fame
+        # entitlement). Uses the same resolver as services.hall_of_fame so the
+        # presence count can't drift from reality.
+        group_ids = [
+            row.group_id
+            for row in local_session.query(GroupConfiguration.group_id).filter(
+                GroupConfiguration.config_key == "create_pb_embeds",
+                GroupConfiguration.config_value == "1",
+            ).all()
+        ]
+        for group_id in group_ids:
+            if group_id == GLOBAL_GROUP_ID:
+                total_groups += 1
                 continue
+            try:
+                if resolve_group_entitlements(local_session, group_id).get("hall_of_fame"):
+                    total_groups += 1
+            except Exception:
+                local_session.rollback()
     except Exception as e:
         # Presence count is cosmetic — never let it stop the service from loading.
         print("Error getting groups to update:", e)

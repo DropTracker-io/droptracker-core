@@ -95,8 +95,15 @@ _USER_BY_KEY = {f["key"]: f for f in USER_ENTITLEMENT_FIELDS}
 
 TIER_SCOPES = ("group", "user")
 
+# Group-config keys that require the hall_of_fame entitlement to edit. This is
+# the whole Hall of Fame surface — the master on/off switch (create_pb_embeds)
+# and everything that configures it. notify_pbs is deliberately NOT here: plain
+# PB Discord notifications stay available to every group, premium or not.
 HALL_OF_FAME_CONFIG_KEYS = frozenset({
+    "create_pb_embeds",
     "personal_best_embed_boss_list",
+    "number_of_pbs_to_display",
+    "channel_id_to_send_pb_embeds",
     "hof_individual_boss_messages",
 })
 

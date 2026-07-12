@@ -62,7 +62,11 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "post99_xp_interval", "type": "int", "default": 25000000, "min": 0},
 
     # --- Personal best ---
+    # notify_pbs (PB Discord notifications) is available to every group. The
+    # Hall of Fame keys below are premium (see HALL_OF_FAME_CONFIG_KEYS);
+    # create_pb_embeds is the master on/off switch the HOF bot keys off of.
     {"key": "notify_pbs", "type": "boolean", "default": True, "seasonal": True},
+    {"key": "create_pb_embeds", "type": "boolean", "default": False},
     {"key": "personal_best_embed_boss_list", "type": "bosslist", "default": ""},
     {"key": "number_of_pbs_to_display", "type": "int", "default": 5, "min": 1, "max": 10},
     {"key": "channel_id_to_send_pb_embeds", "type": "channel", "default": None},
@@ -86,6 +90,24 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
 
     # --- Split tracking (GP only; point splitting lives in the points routes) ---
     {"key": "split_gp_tracking", "type": "boolean", "default": False},
+
+    # --- Manual submissions (suggestion #45) ---
+    # How website manual submissions count for THIS group (never affects
+    # global tracking or other groups):
+    #   allow           — count immediately (default / legacy behavior)
+    #   authorized_only — only group admins/authorized users' manual
+    #                     submissions count; everyone else's are excluded
+    #                     from this group's boards & notifications
+    #   block           — no manual submission ever counts for this group
+    {
+        "key": "manual_submission_policy",
+        "type": "select",
+        "default": "allow",
+        "options": ["allow", "confirm", "authorized_only", "block"],
+    },
+    # Optional: channel for the "manual submission awaiting review" ping under
+    # the 'confirm' policy. Unset => no Discord ping (web review queue only).
+    {"key": "channel_id_to_post_manual_review", "type": "channel", "default": None},
 
     # --- Misc / integration ---
     {"key": "group_name", "type": "string", "default": ""},
