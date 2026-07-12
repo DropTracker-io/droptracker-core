@@ -4,6 +4,7 @@ from datetime import datetime
 import sys
 
 from utils.redis import RedisClient
+from utils import value_overrides
 
 # Base URLs for the APIs
 PRICES_API_BASE = "https://prices.runescape.wiki/api/v1/osrs"
@@ -54,54 +55,58 @@ async def _lookup_and_cache_ge_price(item_name: str, item_id=None) -> int:
     return 0
 
 
-async def get_true_item_value(item_name, provided_value: int = 0, item_id=None):
-    # Check if an incoming item matches our defined list of
-    # untradeables or otherwise unvalued items that hold a value indirectly
-    # for example, an ultor vestige has a 5M untradeable drop value, but actually is worth
-    # An ultor ring, minus 3 Chromium Ingots
-    item_lower = item_name.lower()
-    if "vestige" in item_lower:
-        ring = item_lower.replace("vestige", "ring")
-        ring_price = await get_most_recent_price_by_name(ring)
-        ingot_price = await get_most_recent_price_by_name("Chromium ingot")
-        return ring_price - (ingot_price * 3) if ring_price and ingot_price else provided_value
-    if "bludgeon" in item_lower:
-        if item_lower == "bludgeon axon" or item_lower == "bludgeon claw" or item_lower == "bludgeon spine":
-            bludgeon_value = await get_most_recent_price_by_name("Abyssal bludgeon")
-            return int(bludgeon_value / 3) if bludgeon_value else provided_value
-        else:
-            return provided_value
-    if item_lower == "hydra's eye" or item_lower == "hydra's fang" or item_lower == "hydra's heart":
-        brimstone_value = await get_most_recent_price_by_name("Brimstone ring")
-        return int(brimstone_value / 3) if brimstone_value else provided_value
-    if "noxious" in item_lower:
-        noxious_halberd_value = await get_most_recent_price_by_name("Noxious halberd")
-        if "point" in item_lower or "blade" in item_lower or "pommel" in item_lower:
-            return int(noxious_halberd_value / 3) if noxious_halberd_value else provided_value
-        else:
-            return provided_value
-    if item_lower == "araxyte fang":
-        amulet_of_rancour_value = await get_most_recent_price_by_name("Amulet of rancour")
-        torture_value = await get_most_recent_price_by_name("Amulet of torture")
-        if amulet_of_rancour_value and torture_value:
-            return amulet_of_rancour_value - torture_value
-        else:
-            return provided_value
-    if item_lower == "mokhaiotl cloth":
-        tormented_bracelet_value = await get_most_recent_price_by_name("Tormented bracelet")
-        demon_tear_value = await get_most_recent_price_by_name("Demon tear")
-        confliction_gauntlet_value = await get_most_recent_price_by_name("Confliction gauntlets")
-        if confliction_gauntlet_value and tormented_bracelet_value and demon_tear_value:
-            return confliction_gauntlet_value - tormented_bracelet_value - (demon_tear_value * 10000)
-        else:
-            return 5000000
+async def build_component_price_map(overrides) -> dict:
+    """Fetch each distinct component price once, in parallel, for a batch of
+    overrides. Used by the admin preview and the public /item-values listing so
+    they don't hit the GE API once per (override × component). The result is
+    keyed by ``value_overrides.component_price_key`` to match
+    ``compute_override_from_prices``."""
+    wanted: dict = {}
+    for override in overrides:
+        for component in override.get("components") or []:
+            wanted.setdefault(value_overrides.component_price_key(component), component)
 
-    else:
-        # When the client reports 0 gp, try to recover the real GE price so that
-        # notification thresholds and point awards aren't silently skipped.
-        if provided_value == 0:
-            return await _lookup_and_cache_ge_price(item_name, item_id)
-        return provided_value
+    async def _fetch(component):
+        price = None
+        component_id = component.get("item_id")
+        if component_id:
+            price = await get_most_recent_price_by_id(component_id)
+        if not price and component.get("item_name"):
+            price = await get_most_recent_price_by_name(component["item_name"])
+        return price
+
+    keys = list(wanted)
+    prices = await asyncio.gather(*(_fetch(wanted[k]) for k in keys))
+    return dict(zip(keys, prices))
+
+
+async def _compute_override_value(override: dict):
+    """Value a single dropped item from its override rule (drop-path entry)."""
+    price_map = await build_component_price_map([override])
+    return value_overrides.compute_override_from_prices(override, price_map)
+
+
+async def get_true_item_value(item_name, provided_value: int = 0, item_id=None):
+    # Some items are dropped with a 0gp value but are worth something because
+    # they're a component of a tradeable item (e.g. an ultor vestige is worth an
+    # ultor ring minus 3 Chromium ingots; a bludgeon axon is worth 1/3 of an
+    # Abyssal bludgeon). These rules live in the item_value_overrides table and
+    # are editable at runtime from the admin dashboard — see utils/value_overrides.py.
+    override = value_overrides.match(item_id, item_name)
+    if override:
+        computed = await _compute_override_value(override)
+        if computed is not None:
+            return computed
+        # A component couldn't be priced: use the rule's flat fallback, or the
+        # value the client reported when no fallback is configured.
+        fallback = override.get("fallback_value") or 0
+        return fallback if fallback else provided_value
+
+    # No override: when the client reports 0 gp, try to recover the real GE price
+    # so that notification thresholds and point awards aren't silently skipped.
+    if provided_value == 0:
+        return await _lookup_and_cache_ge_price(item_name, item_id)
+    return provided_value
 
 async def get_mapping():
     """Fetch the item mapping data which contains names, IDs, and other metadata"""

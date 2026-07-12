@@ -154,72 +154,13 @@ class PricingAPI:
             return None
     
     async def get_true_item_value(self, item_name: str, provided_value: int = 0) -> int:
+        """DEPRECATED — retained only for backwards compatibility.
+
+        The "component of X, worth Y" rules now live in the item_value_overrides
+        table and are applied by ``utils.ge_value.get_true_item_value`` — the
+        single source of truth, editable at runtime from the admin dashboard.
+        This delegates there; do not re-add hard-coded special-cases here.
         """
-        Get the true value of an item, accounting for untradeable items that have indirect value.
-        
-        For example, a vestige has untradeable drop value, but is actually worth
-        the corresponding ring minus 3 Chromium Ingots.
-        
-        Args:
-            item_name: Name of the item
-            provided_value: Fallback value if no calculation can be made
-            
-        Returns:
-            The calculated true value or the provided fallback value
-        """
-        try:
-            item_lower = item_name.lower()
-            
-            # Vestige calculations
-            if "vestige" in item_lower:
-                ring = item_lower.replace("vestige", "ring")
-                ring_price = await self.get_most_recent_price_by_name(ring)
-                ingot_price = await self.get_most_recent_price_by_name("Chromium ingot")
-                return ring_price - (ingot_price * 3) if ring_price and ingot_price else provided_value
-            
-            # Bludgeon piece calculations
-            if "bludgeon" in item_lower:
-                if item_lower in ["bludgeon axon", "bludgeon claw", "bludgeon spine"]:
-                    bludgeon_value = await self.get_most_recent_price_by_name("Abyssal bludgeon")
-                    return int(bludgeon_value / 3) if bludgeon_value else provided_value
-                else:
-                    return provided_value
-            
-            # Hydra piece calculations
-            if item_lower in ["hydra's eye", "hydra's fang", "hydra's heart"]:
-                brimstone_value = await self.get_most_recent_price_by_name("Brimstone ring")
-                return int(brimstone_value / 3) if brimstone_value else provided_value
-            
-            # Noxious halberd piece calculations
-            if "noxious" in item_lower:
-                noxious_halberd_value = await self.get_most_recent_price_by_name("Noxious halberd")
-                if any(part in item_lower for part in ["point", "blade", "pommel"]):
-                    return int(noxious_halberd_value / 3) if noxious_halberd_value else provided_value
-                else:
-                    return provided_value
-            
-            # Araxyte fang calculation
-            if item_lower == "araxyte fang":
-                amulet_of_rancour_value = await self.get_most_recent_price_by_name("Amulet of rancour")
-                torture_value = await self.get_most_recent_price_by_name("Amulet of torture")
-                if amulet_of_rancour_value and torture_value:
-                    return amulet_of_rancour_value - torture_value
-                else:
-                    return provided_value
-            
-            # Mokhaiotl cloth calculation
-            if item_lower == "mokhaiotl cloth":
-                tormented_bracelet_value = await self.get_most_recent_price_by_name("Tormented bracelet")
-                demon_tear_value = await self.get_most_recent_price_by_name("Demon tear")
-                confliction_gauntlet_value = await self.get_most_recent_price_by_name("Confliction gauntlets")
-                if confliction_gauntlet_value and tormented_bracelet_value and demon_tear_value:
-                    return confliction_gauntlet_value - tormented_bracelet_value - (demon_tear_value * 10000)
-                else:
-                    return 5000000
-            
-            # Default case - return provided value
-            return provided_value
-            
-        except Exception as e:
-            print(f"Error calculating true value for {item_name}: {e}")
-            return provided_value
+        from utils.ge_value import get_true_item_value as _ge_true_item_value
+
+        return await _ge_true_item_value(item_name, provided_value)
