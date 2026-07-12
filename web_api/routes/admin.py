@@ -18,6 +18,16 @@ Every endpoint independently enforces superadmin (403 otherwise):
   DELETE /api/v1/admin/badges/{key}              (soft delete)
   POST   /api/v1/admin/players/{id}/badges       { badge_key, note? }
   DELETE /api/v1/admin/players/{id}/badges/{award_id}
+  GET    /api/v1/admin/pb-blocks                  (blocked-PB NPC list)
+  GET    /api/v1/admin/pb-blocks/search?q=        (bosses to block, with impact)
+  POST   /api/v1/admin/pb-blocks                  { npc_id|npc_ids, confirm } (block + purge)
+  DELETE /api/v1/admin/pb-blocks/{npc_id}         (unblock; rows NOT restored)
+  GET    /api/v1/admin/item-values                 (list overrides + live preview)
+  GET    /api/v1/admin/item-values/item-search?q=  (resolve item name → id)
+  GET    /api/v1/admin/item-values/export          ({ txt } for valued_items.txt)
+  POST   /api/v1/admin/item-values                 { item_id, item_name, components, ... }
+  PATCH  /api/v1/admin/item-values/{override_id}   (partial update)
+  DELETE /api/v1/admin/item-values/{override_id}
 
 Service control is whitelisted to three units and shells out via systemctl /
 journalctl with **no** user input interpolated into the command. No SQL executor
@@ -45,6 +55,7 @@ from db import (
     GroupConfiguration,
     GroupSubscription,
     ItemList,
+    ItemValueOverride,
     Log,
     NotificationQueue,
     NpcList,
@@ -64,6 +75,7 @@ from web_api import admin_registry as registry
 from web_api import billing
 from web_api.common import abort_problem, db_session, parse_page, private_no_store
 from web_api.deps import assert_superadmin, current_user_id, json_body, load_user
+from utils import value_overrides
 from web_api.entitlements_registry import (
     EntitlementValidationError,
     entitlements_to_storage,
@@ -445,6 +457,266 @@ async def delete_tier(key: str):
 
     mode = await asyncio.to_thread(_apply)
     _audit(actor, "tier.delete", f"tier:{key}", after=mode)
+    return jsonify({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
+# Item value overrides — runtime-editable "component of X, worth Y" rules.
+# Replaces the hard-coded special-cases in utils/ge_value.py. Every write evicts
+# the shared cache (value_overrides.invalidate) so live services pick up the
+# change without a restart.
+# --------------------------------------------------------------------------- #
+def _override_to_dict(row) -> dict:
+    try:
+        components = json.loads(row.components) if row.components else []
+    except (ValueError, TypeError):
+        components = []
+    return {
+        "id": row.id,
+        "item_id": row.item_id,
+        "item_name": row.item_name,
+        "divisor": row.divisor,
+        "flat_bonus": row.flat_bonus,
+        "fallback_value": row.fallback_value,
+        "components": components,
+        "description": row.description,
+        "active": bool(row.active),
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def _validate_components(raw) -> list:
+    if not isinstance(raw, list):
+        abort_problem(422, "Invalid components", "components must be a list.")
+    out = []
+    for i, c in enumerate(raw):
+        if not isinstance(c, dict):
+            abort_problem(422, "Invalid component", f"Component {i + 1} must be an object.")
+        name = str(c.get("item_name") or "").strip()
+        if not name:
+            abort_problem(422, "Invalid component", f"Component {i + 1} requires an item name.")
+        try:
+            qty = int(c.get("quantity"))
+        except (TypeError, ValueError):
+            abort_problem(422, "Invalid component", f"Component {i + 1} quantity must be an integer.")
+        if qty == 0:
+            abort_problem(422, "Invalid component", f"Component {i + 1} quantity must be non-zero.")
+        cid = None
+        if c.get("item_id") not in (None, ""):
+            try:
+                cid = int(c["item_id"])
+            except (TypeError, ValueError):
+                abort_problem(422, "Invalid component", f"Component {i + 1} item_id must be an integer.")
+        out.append({"item_id": cid, "item_name": name[:125], "quantity": qty})
+    return out
+
+
+def _validate_override_body(body: dict, *, require_item: bool) -> dict:
+    """Validate + normalize an override payload. On create (require_item) every
+    column gets a value; on PATCH only the provided keys are returned."""
+    out: dict = {}
+    if "item_id" in body and body["item_id"] not in (None, ""):
+        try:
+            out["item_id"] = int(body["item_id"])
+        except (TypeError, ValueError):
+            abort_problem(422, "Invalid item_id", "item_id must be an integer.")
+    elif require_item:
+        out["item_id"] = None
+    if require_item or "item_name" in body:
+        name = str(body.get("item_name") or "").strip()
+        if not name:
+            abort_problem(422, "Missing item_name", "item_name is required.")
+        out["item_name"] = name[:125]
+    if require_item or "divisor" in body:
+        try:
+            divisor = int(body.get("divisor", 1))
+        except (TypeError, ValueError):
+            abort_problem(422, "Invalid divisor", "divisor must be an integer.")
+        if divisor < 1:
+            abort_problem(422, "Invalid divisor", "divisor must be ≥ 1.")
+        out["divisor"] = divisor
+    if "flat_bonus" in body:
+        try:
+            out["flat_bonus"] = int(body["flat_bonus"])
+        except (TypeError, ValueError):
+            abort_problem(422, "Invalid flat_bonus", "flat_bonus must be an integer.")
+    elif require_item:
+        out["flat_bonus"] = 0
+    if "fallback_value" in body:
+        try:
+            fv = int(body["fallback_value"])
+        except (TypeError, ValueError):
+            abort_problem(422, "Invalid fallback_value", "fallback_value must be an integer.")
+        if fv < 0:
+            abort_problem(422, "Invalid fallback_value", "fallback_value must be ≥ 0.")
+        out["fallback_value"] = fv
+    elif require_item:
+        out["fallback_value"] = 0
+    if require_item or "components" in body:
+        out["components"] = _validate_components(body.get("components") or [])
+    if require_item or "description" in body:
+        desc = str(body.get("description") or "").strip()
+        out["description"] = desc[:255] or None
+    if "active" in body:
+        out["active"] = bool(body["active"])
+    elif require_item:
+        out["active"] = True
+    return out
+
+
+def _apply_override_fields(row, fields: dict) -> None:
+    for key in ("item_id", "item_name", "divisor", "flat_bonus", "fallback_value",
+                "description", "active"):
+        if key in fields:
+            setattr(row, key, fields[key])
+    if "components" in fields:
+        row.components = json.dumps(fields["components"])
+
+
+@admin_bp.get("/admin/item-values")
+async def list_item_values():
+    await _require_superadmin()
+
+    def _load():
+        with db_session() as s:
+            rows = s.query(ItemValueOverride).order_by(ItemValueOverride.item_name.asc()).all()
+            items = [_override_to_dict(r) for r in rows]
+            from web_api.item_value_enrich import enrich_overrides
+            enrich_overrides(s, items)
+            return items
+
+    items = await asyncio.to_thread(_load)
+    # Best-effort live preview of each rule's current value. Never fail the list
+    # if the GE API is unavailable.
+    try:
+        from utils.ge_value import build_component_price_map
+
+        price_map = await build_component_price_map(items)
+        for it in items:
+            computed = value_overrides.compute_override_from_prices(it, price_map)
+            if computed is None:
+                computed = it["fallback_value"] or None
+            it["computed_value"] = computed
+    except Exception:
+        for it in items:
+            it["computed_value"] = None
+    return private_no_store(jsonify(items))
+
+
+@admin_bp.get("/admin/item-values/item-search")
+async def item_value_item_search():
+    await _require_superadmin()
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return jsonify([])
+
+    def _search():
+        with db_session() as s:
+            rows = (
+                s.query(ItemList)
+                .filter(ItemList.item_name.ilike(f"%{q}%"))
+                .order_by(ItemList.item_name.asc())
+                .limit(20)
+                .all()
+            )
+            return [{"item_id": r.item_id, "item_name": r.item_name} for r in rows]
+
+    return jsonify(await asyncio.to_thread(_search))
+
+
+@admin_bp.get("/admin/item-values/export")
+async def item_value_export():
+    """Comma-separated active item ids for the GitHub Pages valued_items.txt."""
+    await _require_superadmin()
+
+    def _load():
+        with db_session() as s:
+            rows = (
+                s.query(ItemValueOverride.item_id)
+                .filter(ItemValueOverride.active.is_(True), ItemValueOverride.item_id.isnot(None))
+                .order_by(ItemValueOverride.item_id.asc())
+                .all()
+            )
+            return [str(r[0]) for r in rows]
+
+    ids = await asyncio.to_thread(_load)
+    return jsonify({"txt": ",".join(ids), "count": len(ids)})
+
+
+@admin_bp.post("/admin/item-values")
+async def create_item_value():
+    actor = await _require_superadmin()
+    body = await json_body()
+    fields = _validate_override_body(body, require_item=True)
+
+    def _apply():
+        with db_session() as s:
+            if fields.get("item_id") is not None and (
+                s.query(ItemValueOverride)
+                .filter(ItemValueOverride.item_id == fields["item_id"])
+                .first()
+            ):
+                abort_problem(409, "Override exists",
+                              f"An override for item {fields['item_id']} already exists.")
+            row = ItemValueOverride(author_user_id=actor)
+            _apply_override_fields(row, fields)
+            s.add(row)
+            s.commit()
+            return row.id
+
+    new_id = await asyncio.to_thread(_apply)
+    value_overrides.invalidate()
+    _audit(actor, "item_value.create",
+           f"item_value_overrides:{fields.get('item_id') or fields.get('item_name')}")
+    return jsonify({"id": new_id})
+
+
+@admin_bp.patch("/admin/item-values/<int:override_id>")
+async def update_item_value(override_id: int):
+    actor = await _require_superadmin()
+    body = await json_body()
+    fields = _validate_override_body(body, require_item=False)
+    if not fields:
+        abort_problem(422, "No changes", "Provide at least one field to update.")
+
+    def _apply():
+        with db_session() as s:
+            row = s.query(ItemValueOverride).filter(ItemValueOverride.id == override_id).first()
+            if not row:
+                abort_problem(404, "Override not found", f"No override #{override_id}.")
+            if fields.get("item_id") is not None and fields["item_id"] != row.item_id:
+                if (
+                    s.query(ItemValueOverride)
+                    .filter(ItemValueOverride.item_id == fields["item_id"],
+                            ItemValueOverride.id != override_id)
+                    .first()
+                ):
+                    abort_problem(409, "Override exists",
+                                  f"An override for item {fields['item_id']} already exists.")
+            _apply_override_fields(row, fields)
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    value_overrides.invalidate()
+    _audit(actor, "item_value.update", f"item_value_overrides:{override_id}")
+    return jsonify({"ok": True})
+
+
+@admin_bp.delete("/admin/item-values/<int:override_id>")
+async def delete_item_value(override_id: int):
+    actor = await _require_superadmin()
+
+    def _apply():
+        with db_session() as s:
+            row = s.query(ItemValueOverride).filter(ItemValueOverride.id == override_id).first()
+            if not row:
+                abort_problem(404, "Override not found", f"No override #{override_id}.")
+            s.delete(row)
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    value_overrides.invalidate()
+    _audit(actor, "item_value.delete", f"item_value_overrides:{override_id}")
     return jsonify({"ok": True})
 
 
@@ -1563,3 +1835,171 @@ def _invalidate_badge_user_entitlements(user_id) -> None:
         invalidate_user_entitlement_cache(int(user_id))
     except Exception:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Personal-best NPC blocklist
+#
+# Some NPCs have no real personal best; the plugin still reports "kill times"
+# for them, producing junk rows. Superadmins maintain a global blocklist of
+# npc_ids — blocked NPCs are dropped at PB intake, and adding one permanently
+# purges its existing rows. Storage + enforcement live in utils.pb_blocklist;
+# a boss is always blocked/unblocked together with its variant ids (same name).
+# --------------------------------------------------------------------------- #
+def _group_npcs_by_name(s, npc_ids):
+    """Group ids into ``[{name, npc_ids, pb_count}]`` by case-insensitive name."""
+    from utils import pb_blocklist
+
+    ids = sorted({int(i) for i in npc_ids})
+    if not ids:
+        return []
+    rows = s.query(NpcList.npc_id, NpcList.npc_name).filter(NpcList.npc_id.in_(ids)).all()
+    by_name: dict = {}
+    seen: set = set()
+    for nid, name in rows:
+        seen.add(int(nid))
+        by_name.setdefault((name or "").strip().lower(), {"name": name, "npc_ids": []})[
+            "npc_ids"
+        ].append(int(nid))
+    for nid in ids:  # ids with no npc_list row — surface so they can be removed
+        if nid not in seen:
+            by_name[f"#{nid}"] = {"name": f"Unknown NPC #{nid}", "npc_ids": [nid]}
+    out = []
+    for g in by_name.values():
+        g["npc_ids"] = sorted(g["npc_ids"])
+        g["pb_count"] = pb_blocklist.pb_entry_count(s, g["npc_ids"])
+        out.append(g)
+    out.sort(key=lambda x: (x["name"] or "").lower())
+    return out
+
+
+def _body_npc_ids(body) -> list:
+    raw = body.get("npc_ids")
+    if raw is None and body.get("npc_id") is not None:
+        raw = [body.get("npc_id")]
+    if not isinstance(raw, list) or not raw:
+        abort_problem(422, "Missing npc_id", "Provide 'npc_id' or a non-empty 'npc_ids' list.")
+    out = []
+    for v in raw:
+        try:
+            out.append(int(v))
+        except (TypeError, ValueError):
+            abort_problem(422, "Invalid npc_id", f"'{v}' is not a valid npc id.")
+    return out
+
+
+@admin_bp.get("/admin/pb-blocks")
+async def admin_pb_blocks_list():
+    """Currently-blocked bosses (grouped by name, with remaining PB counts)."""
+    await _require_superadmin()
+
+    def _load():
+        from utils import pb_blocklist
+
+        with db_session() as s:
+            blocked = sorted(pb_blocklist.get_blocked_ids(s))
+            return {"bosses": _group_npcs_by_name(s, blocked), "blocked_ids": blocked}
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@admin_bp.get("/admin/pb-blocks/search")
+async def admin_pb_blocks_search():
+    """Search npc_list for bosses to block; annotate impact + current state."""
+    await _require_superadmin()
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return private_no_store(jsonify({"results": []}))
+
+    def _search():
+        from utils import pb_blocklist
+
+        like = f"%{q}%"
+        with db_session() as s:
+            rows = (
+                s.query(NpcList.npc_id, NpcList.npc_name)
+                .filter(NpcList.npc_name.ilike(like))
+                .order_by(NpcList.npc_name)
+                .limit(200)
+                .all()
+            )
+            blocked = pb_blocklist.get_blocked_ids(s)
+            by_name: dict = {}
+            for nid, name in rows:
+                by_name.setdefault((name or "").strip().lower(), {"name": name, "npc_ids": []})[
+                    "npc_ids"
+                ].append(int(nid))
+            results = []
+            for g in by_name.values():
+                ids = sorted(g["npc_ids"])
+                results.append(
+                    {
+                        "name": g["name"],
+                        "npc_ids": ids,
+                        "pb_count": pb_blocklist.pb_entry_count(s, ids),
+                        "blocked": all(i in blocked for i in ids),
+                    }
+                )
+            results.sort(key=lambda x: (-x["pb_count"], (x["name"] or "").lower()))
+            return results[:25]
+
+    return private_no_store(jsonify({"results": await asyncio.to_thread(_search)}))
+
+
+@admin_bp.post("/admin/pb-blocks")
+async def admin_pb_blocks_add():
+    """Block a boss (all its variant ids) AND purge its existing PB rows.
+
+    Destructive: requires ``confirm=true``; without it, returns 409 echoing the
+    number of rows that would be deleted so the UI can hard-confirm first.
+    """
+    actor = await _require_superadmin()
+    body = await json_body()
+    seed_ids = _body_npc_ids(body)
+    confirm = bool(body.get("confirm"))
+
+    def _apply():
+        from utils import pb_blocklist
+
+        with db_session() as s:
+            ids = sorted(pb_blocklist.sibling_ids(s, seed_ids) or set(seed_ids))
+            if not ids:
+                abort_problem(404, "Unknown NPC", "No npc_list rows matched the given id(s).")
+            bosses = _group_npcs_by_name(s, ids)
+            pb_count = pb_blocklist.pb_entry_count(s, ids)
+            if not confirm:
+                abort_problem(
+                    409,
+                    "Confirmation required",
+                    f"Blocking will permanently delete {pb_count} personal-best row(s). "
+                    "Re-send with confirm=true.",
+                )
+            result = pb_blocklist.block_and_purge(s, ids)
+            result["bosses"] = bosses
+            return result
+
+    result = await asyncio.to_thread(_apply)
+    label = ", ".join(b["name"] for b in result.get("bosses", [])) or str(seed_ids)
+    _audit(actor, "pb_block.add", label, after=f"deleted_pb={result.get('deleted_pb', 0)}")
+    return jsonify({"ok": True, **result})
+
+
+@admin_bp.delete("/admin/pb-blocks/<int:npc_id>")
+async def admin_pb_blocks_remove(npc_id: int):
+    """Unblock a boss (all its variant ids). Purged rows are NOT restored."""
+    actor = await _require_superadmin()
+
+    def _apply():
+        from utils import pb_blocklist
+
+        with db_session() as s:
+            ids = sorted(pb_blocklist.sibling_ids(s, [npc_id]) or {npc_id})
+            bosses = _group_npcs_by_name(s, ids)
+            result = pb_blocklist.unblock(s, ids)
+            result["bosses"] = bosses
+            return result
+
+    result = await asyncio.to_thread(_apply)
+    label = ", ".join(b["name"] for b in result.get("bosses", [])) or str(npc_id)
+    _audit(actor, "pb_block.remove", label)
+    return jsonify({"ok": True, **result})

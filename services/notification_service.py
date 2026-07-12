@@ -34,8 +34,10 @@ from services.xf_services import get_user_id, create_alert
 from services.contribution_notifications import format_money
 from services.event_notifications import (
     EVENT_NOTIFICATION_TYPES,
+    event_ping_role_ids,
     event_url,
     load_event_channels,
+    ping_content,
     resolve_event_channel,
 )
 from utils.wiseoldman import fetch_group_members
@@ -205,6 +207,9 @@ class NotificationService:
         if receiver_total > 0:
             values["{group_points_receiver_total}"] = str(receiver_total)
         return values
+
+    def _plugin_version_placeholder_map(self, data: dict) -> dict:
+        return {"{plugin_version}": str(data.get("plugin_version") or "")}
 
     def _build_default_quest_embed(self, data: dict, player_name: str, player_id: int, video_url: str = "") -> interactions.Embed:
         """
@@ -893,6 +898,7 @@ class NotificationService:
                 "{video_url}": "",
                 "{video_link}": "",
             }
+            replacements.update(self._plugin_version_placeholder_map(data))
 
             embed = replace_placeholders(embed_template, replacements)
             if group_id == 2:
@@ -991,6 +997,7 @@ class NotificationService:
                 "{video_url}": "",
                 "{video_link}": "",
             }
+            replacements.update(self._plugin_version_placeholder_map(data))
 
             embed = replace_placeholders(embed_template, replacements)
             if group_id == 2:
@@ -1081,6 +1088,7 @@ class NotificationService:
                     # Prefer video for display; keep screenshot in data["image_url"] for attachments
                     "{image_url}": video_url or image_url or "",
                 }
+                replacements.update(self._plugin_version_placeholder_map(data))
 
                 embed = replace_placeholders(embed_template, replacements)
                 if group_id == 2:
@@ -1192,6 +1200,7 @@ class NotificationService:
                     # Prefer video for display; keep screenshot in data["image_url"] for attachments
                     "{image_url}": video_url or image_url or "",
                 }
+                replacements.update(self._plugin_version_placeholder_map(data))
 
                 embed = replace_placeholders(embed_template, replacements)
                 if group_id == 2:
@@ -1301,6 +1310,7 @@ class NotificationService:
                     # Prefer video for display; keep screenshot in data["image_url"] for attachments
                     "{image_url}": video_url or image_url or "",
                 }
+                replacements.update(self._plugin_version_placeholder_map(data))
 
                 embed = replace_placeholders(embed_template, replacements)
                 if group_id == 2:
@@ -1410,6 +1420,7 @@ class NotificationService:
                     "{video_link}": f"[Video]({video_url})" if video_url else "",
                     "{image_url}": video_url or image_url or "",
                 }
+                replacements.update(self._plugin_version_placeholder_map(data))
 
                 embed = replace_placeholders(embed_template, replacements)
                 if group_id == 2:
@@ -1586,7 +1597,19 @@ class NotificationService:
 
             from utils.embeds import build_event_embed
             embed = build_event_embed(notification_type, data, standings=standings)
-            await channel.send(embed=embed)
+            # Configured role pings for this lifecycle post (web_events.
+            # ping_config, keys 'event_started'/'event_ended'); content stays
+            # None for unconfigured types/events — embed-only, as before.
+            content = ping_content(
+                event_ping_role_ids(getattr(event, "ping_config", None), notification_type)
+            )
+            if content:
+                await channel.send(
+                    content=content, embed=embed,
+                    allowed_mentions=interactions.AllowedMentions(parse=["roles"]),
+                )
+            else:
+                await channel.send(embed=embed)
 
             notification.status = 'sent'
             notification.processed_at = datetime.now()
@@ -2378,6 +2401,7 @@ class NotificationService:
                 "{video_link}": f"[Video]({video_url})" if video_url else "",
             }
             values.update(self._group_points_placeholder_map(data))
+            values.update(self._plugin_version_placeholder_map(data))
             #print("Sending to replace_placeholders")
             
             embed = replace_placeholders(embed_template, values)
@@ -2625,6 +2649,7 @@ class NotificationService:
                 "{image_url}": image_url or ""
             }
             values.update(self._group_points_placeholder_map(data))
+            values.update(self._plugin_version_placeholder_map(data))
             #print("Sending to replace_placeholders")
             
             embed = replace_placeholders(embed_template, values)
@@ -3200,6 +3225,7 @@ class NotificationService:
                 "{personal_best}": time_formatted,
             }
             replacements.update(self._group_points_placeholder_map(data))
+            replacements.update(self._plugin_version_placeholder_map(data))
             video_url = self._maybe_get_video_url(db_session, data)
             replacements["{video_url}"] = video_url or ""
             replacements["{video_link}"] = f"[Video]({video_url})" if video_url else ""
@@ -3389,6 +3415,7 @@ class NotificationService:
                 "{personal_best}": time_formatted,
             }
             replacements.update(self._group_points_placeholder_map(data))
+            replacements.update(self._plugin_version_placeholder_map(data))
             
             embed = replace_placeholders(embed_template, replacements)
             embed = self._finalize_group_points_embed(embed)
@@ -3476,6 +3503,7 @@ class NotificationService:
             "{previously_owned}": previously_owned
         }
         value_dict.update(self._group_points_placeholder_map(data))
+        value_dict.update(self._plugin_version_placeholder_map(data))
         video_url = self._maybe_get_video_url(db_session, data)
         value_dict["{video_url}"] = video_url or ""
         value_dict["{video_link}"] = f"[Video]({video_url})" if video_url else ""
@@ -3601,6 +3629,7 @@ class NotificationService:
             "{previously_owned}": previously_owned
         }
         value_dict.update(self._group_points_placeholder_map(data))
+        value_dict.update(self._plugin_version_placeholder_map(data))
         try:
             channel = await self.bot.fetch_channel(channel_id=channel_id_config.config_value)
             formatted_name = get_formatted_name(player_name, group_id, session)
@@ -3745,6 +3774,7 @@ class NotificationService:
                     "{points_left}": points_left
                 }
             value_dict.update(self._group_points_placeholder_map(data))
+            value_dict.update(self._plugin_version_placeholder_map(data))
             video_url = self._maybe_get_video_url(db_session, data)
             value_dict["{video_url}"] = video_url or ""
             value_dict["{video_link}"] = f"[Video]({video_url})" if video_url else ""
@@ -3910,6 +3940,7 @@ class NotificationService:
                     "{points_left}": points_left
                 }
             value_dict.update(self._group_points_placeholder_map(data))
+            value_dict.update(self._plugin_version_placeholder_map(data))
             
             embed = replace_placeholders(embed_template, value_dict)
             embed = self._finalize_group_points_embed(embed)
@@ -4032,6 +4063,7 @@ class NotificationService:
                 "{total_tracked}": user_count
             }
             replacements.update(self._group_points_placeholder_map(data))
+            replacements.update(self._plugin_version_placeholder_map(data))
             video_url = self._maybe_get_video_url(db_session, data)
             replacements["{video_url}"] = video_url or ""
             replacements["{video_link}"] = f"[Video]({video_url})" if video_url else ""
@@ -4174,6 +4206,7 @@ class NotificationService:
                 "{total_tracked}": user_count
             }
             replacements.update(self._group_points_placeholder_map(data))
+            replacements.update(self._plugin_version_placeholder_map(data))
             
             embed = replace_placeholders(embed_template, replacements)
             embed = self._finalize_group_points_embed(embed)

@@ -780,6 +780,12 @@ async def _process_manual_submission(req_start):
             "acc_hash": placeholder_hash,
             "guid": unique_id,
             "used_api": True,
+            # Intake-path marker: downstream processors use this for the
+            # per-group manual-submission policy (suggestion #45) and to
+            # present manual submissions as non-plugin to the events engine.
+            # NOT "source" — that payload key already means the NPC/killer in
+            # the drop/clog/pet/death processors.
+            "intake_source": "manual",
             "downloaded": False,
             "world_type": world_type,
             "image_url": data.get("image_url"),

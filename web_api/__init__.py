@@ -30,16 +30,24 @@ from web_api.routes.docs import docs_bp
 from web_api.routes.embeds import embeds_bp
 from web_api.routes.event_admin import event_admin_bp
 from web_api.routes.event_discord import event_discord_bp
+from web_api.routes.event_participants import event_participants_bp
+from web_api.routes.event_templates import event_templates_bp
 from web_api.routes.events import events_bp
 from web_api.routes.group_admin import group_admin_bp
+from web_api.routes.item_values import item_values_bp
+from web_api.routes.items import items_bp
 from web_api.routes.leaderboards import leaderboards_bp
 from web_api.routes.lootboard import lootboard_bp
+from web_api.routes.manual_submissions import manual_submissions_bp
 from web_api.routes.me import me_bp
+from web_api.routes.npcs import npcs_bp
 from web_api.routes.paypal_ipn import paypal_ipn_bp
 from web_api.routes.personal_bests import personal_bests_bp
 from web_api.routes.points import points_bp
 from web_api.routes.profiles import profiles_bp
 from web_api.routes.realtime import realtime_bp
+from web_api.routes.redirects import redirects_bp
+from web_api.routes.resolve import resolve_bp
 from web_api.routes.search import search_bp
 from web_api.routes.submissions import submissions_bp
 from web_api.routes.subscriptions import subscriptions_bp
@@ -133,15 +141,23 @@ def create_app() -> Quart:
     app.register_blueprint(embeds_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_admin_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_discord_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(event_participants_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(event_templates_bp, url_prefix=API_PREFIX)
     app.register_blueprint(events_bp, url_prefix=API_PREFIX)
     app.register_blueprint(group_admin_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(item_values_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(items_bp, url_prefix=API_PREFIX)
     app.register_blueprint(lootboard_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(manual_submissions_bp, url_prefix=API_PREFIX)
     app.register_blueprint(me_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(npcs_bp, url_prefix=API_PREFIX)
     app.register_blueprint(paypal_ipn_bp, url_prefix=API_PREFIX)
     app.register_blueprint(leaderboards_bp, url_prefix=API_PREFIX)
     app.register_blueprint(personal_bests_bp, url_prefix=API_PREFIX)
     app.register_blueprint(points_bp, url_prefix=API_PREFIX)
     app.register_blueprint(profiles_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(redirects_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(resolve_bp, url_prefix=API_PREFIX)
     app.register_blueprint(search_bp, url_prefix=API_PREFIX)
     app.register_blueprint(realtime_bp, url_prefix=API_PREFIX)
     app.register_blueprint(submissions_bp, url_prefix=API_PREFIX)

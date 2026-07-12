@@ -67,7 +67,18 @@ async def get_drops_for_group_optimized(player_ids: List[int], partition: str, g
     with get_db_session() as session:
         # Single query for all players
         query_start = time.time()
-        
+
+        # Per-group manual-submission exclusions (drop_group_moderation):
+        # drops a group's manual_submission_policy withheld must not appear on
+        # ITS board (they still count globally / for other groups).
+        excluded_drop_ids = set()
+        if group_id:
+            try:
+                from services.drop_moderation import excluded_drop_ids_for_group
+                excluded_drop_ids = excluded_drop_ids_for_group(session, int(group_id))
+            except Exception as e:
+                print(f"Couldn't load manual-policy exclusions for group {group_id}: {e}")
+
         # Fetch all drops in one query
         drops_query = select(
             Drop.drop_id,
@@ -86,6 +97,8 @@ async def get_drops_for_group_optimized(player_ids: List[int], partition: str, g
                 Drop.item_id.isnot(None)
             )
         )
+        if excluded_drop_ids:
+            drops_query = drops_query.where(Drop.drop_id.notin_(excluded_drop_ids))
         
         result = session.execute(drops_query)
         all_drops = result.fetchall()
@@ -173,9 +186,15 @@ async def get_drops_for_group_optimized(player_ids: List[int], partition: str, g
     
     return group_items_formatted, player_totals_dict, recent_drops, total_loot
 
-async def get_drops_for_group(player_ids, partition: str, only_include_items_over_minimum: bool = False, group_minimum_value: int = 500000):
-    """ Returns the drops stored in redis cache 
+async def get_drops_for_group(player_ids, partition: str, only_include_items_over_minimum: bool = False, group_minimum_value: int = 500000,
+                              group_id: int = None):
+    """ Returns the drops stored in redis cache
         for the specific list of player_ids
+
+        ``group_id``: when given, drops excluded from that group by
+        manual_submission_policy (drop_group_moderation) are backed out of the
+        aggregates — the per-player Redis caches are player-scoped/global, so
+        they still contain drops individual groups have excluded.
     """
     group_items = {}
     recent_drops = []
@@ -271,6 +290,42 @@ async def get_drops_for_group(player_ids, partition: str, only_include_items_ove
         player_totals[player_id] = player_total
         total_loot += player_total
         recent_drops.extend(player_recent_items)
+
+    # Back out this group's manual-policy exclusions: the Redis player caches
+    # are global (player-scoped), so drops other groups may count but THIS
+    # group excluded are still in them.
+    if group_id:
+        try:
+            from services.drop_moderation import group_excluded_drops
+            with get_db_session() as _mod_session:
+                excluded = group_excluded_drops(_mod_session, int(group_id), player_ids, partition)
+        except Exception as e:
+            print(f"Couldn't load manual-policy exclusions for group {group_id}: {e}")
+            excluded = []
+        if excluded:
+            excluded_ids = {e["drop_id"] for e in excluded}
+            for e in excluded:
+                # Items below the board minimum were never aggregated when the
+                # over-minimum filter is on — don't subtract them twice.
+                if only_include_items_over_minimum and e["per_item_value"] < int(group_minimum_value):
+                    continue
+                item_key = str(e["item_id"])
+                if item_key in group_items:
+                    try:
+                        qty, val = map(int, group_items[item_key].split(","))
+                        qty -= e["quantity"]
+                        val -= e["total_value"]
+                        if qty > 0 and val > 0:
+                            group_items[item_key] = f"{qty},{val}"
+                        else:
+                            del group_items[item_key]
+                    except (ValueError, KeyError):
+                        pass
+                pid = e["player_id"]
+                if pid in player_totals:
+                    player_totals[pid] = max(player_totals[pid] - e["total_value"], 0)
+                total_loot = max(total_loot - e["total_value"], 0)
+            recent_drops = [d for d in recent_drops if d.get("drop_id") not in excluded_ids]
 
     # Ensure recent drops are in chronological order (newest first)
     try:
@@ -511,7 +566,8 @@ async def generate_server_board_temporary(group_id: int = 0, wom_group_id: int =
         player_ids,
         partition,
         only_include_items_over_minimum=only_include_items_over_minimum_flag,
-        group_minimum_value=group_min_value_cfg
+        group_minimum_value=group_min_value_cfg,
+        group_id=int(group.group_id),
     )
     #print("Got recent drops:", len(recent_drops))
     redis_client.client.zadd(f'gleaderboard:{partition}', {group.group_id: total_loot})

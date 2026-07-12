@@ -227,3 +227,37 @@ class SuggestionMessage(Base):
     discord_message_id = Column(String(32), nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     edited_at = Column(DateTime, nullable=True)
+
+
+class SiteRedirect(Base):
+    """Admin-configurable URL redirects, resolved at request time by the
+    front-end's Next.js middleware — no code deploy is needed to add or change
+    one, which is the whole point of the feature. Same DB-table-as-CMS pattern
+    as ``DocsPage``: edited through ``/admin/redirects``.
+
+    ``source`` is a path-to-regexp pattern using the same syntax as the static
+    map in the front-end's ``next.config.ts`` (e.g. ``/players/view/:id(\\d+)``).
+    ``destination`` is either an internal path (``/docs``) or an absolute URL
+    (``https://runelite.net``); ``:param`` tokens captured from the source are
+    substituted into it. ``permanent`` selects the HTTP status: 308 when true,
+    307 when false. Entries are evaluated in ``order`` (ascending); first match
+    wins.
+    """
+
+    __tablename__ = "site_redirects"
+    __table_args__ = (
+        Index("idx_site_redirect_order", "order", "id"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(512), nullable=False, unique=True)
+    destination = Column(String(1024), nullable=False)
+    permanent = Column(Boolean, nullable=False, default=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    order = Column(Integer, nullable=False, default=100)
+    forward_query = Column(Boolean, nullable=False, default=True)
+    note = Column(String(255), nullable=True)
+    author_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

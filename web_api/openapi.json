@@ -339,6 +339,51 @@
         }
       }
     },
+    "/resolve/{kind}": {
+      "get": {
+        "tags": [
+          "search"
+        ],
+        "operationId": "resolveSlug",
+        "summary": "Resolve a nice-URL slug to an entity, or to disambiguation candidates",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "group",
+                "player",
+                "npc",
+                "item"
+              ]
+            }
+          },
+          {
+            "name": "slug",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resolution result: a single match, or candidates for a disambiguation page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolveResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/players/search": {
       "get": {
         "tags": [
@@ -481,6 +526,93 @@
           }
         }
       }
+    },
+    "/npcs/{npcId}": {
+      "get": {
+        "tags": [
+          "npcs"
+        ],
+        "operationId": "getNpc",
+        "summary": "NPC overview (lifetime/month totals, top players, recent drops)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NpcId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "NPC overview payload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NpcDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/npcs/{npcId}/drop-table": {
+      "get": {
+        "tags": [
+          "npcs"
+        ],
+        "operationId": "getNpcDropTable",
+        "summary": "Wiki drop table with most-recent receiver per item",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NpcId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Drop table payload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NpcDropTable"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/items/{itemId}": {
+      "get": {
+        "tags": [
+          "items"
+        ],
+        "operationId": "getItem",
+        "summary": "Item overview (totals, recent/top receivers, drop sources)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ItemId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Item overview payload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ItemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -568,6 +700,24 @@
         "schema": {
           "type": "integer"
         }
+      },
+      "NpcId": {
+        "name": "npcId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        },
+        "description": "NPC id (npc_list.npc_id)."
+      },
+      "ItemId": {
+        "name": "itemId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "integer"
+        },
+        "description": "Item id (items.item_id)."
       }
     },
     "responses": {
@@ -729,6 +879,15 @@
           "requires_confirmation": {
             "type": "boolean",
             "default": false
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "public",
+            "description": "How the task's reusable library copy is shared: public (any group may copy it) or private (owning group only)."
           },
           "config": {
             "type": "string",
@@ -1562,6 +1721,11 @@
                 "items": {
                   "$ref": "#/components/schemas/Submission"
                 }
+              },
+              "canonical_slug": {
+                "type": "string",
+                "nullable": true,
+                "description": "Pretty-URL slug this profile declares as canonical, or null when the name collides with another visible player (id url stays canonical)."
               }
             }
           }
@@ -1630,6 +1794,83 @@
           },
           "flair": {
             "$ref": "#/components/schemas/GroupFlair"
+          },
+          "canonical_slug": {
+            "type": "string",
+            "nullable": true,
+            "description": "Pretty-URL slug this group declares as canonical, or null when the name collides with another group (id url stays canonical)."
+          }
+        }
+      },
+      "ResolveCandidate": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": "string"
+          },
+          "member_count": {
+            "type": "integer",
+            "description": "Groups only."
+          },
+          "created_ts": {
+            "type": "integer",
+            "description": "Groups only — unix seconds the group was created."
+          },
+          "total_loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "flair": {
+            "$ref": "#/components/schemas/GroupFlair"
+          }
+        }
+      },
+      "ResolveResult": {
+        "type": "object",
+        "required": [
+          "kind",
+          "slug",
+          "match",
+          "candidates"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "group",
+              "player",
+              "npc",
+              "item"
+            ]
+          },
+          "slug": {
+            "type": "string"
+          },
+          "match": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ResolveCandidate"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The single resolved entity, or null when ambiguous (candidates set) or not found (candidates empty)."
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResolveCandidate"
+            }
           }
         }
       },
@@ -1802,6 +2043,546 @@
               },
               "delta_cents": {
                 "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "NpcLifetimeStats": {
+        "type": "object",
+        "required": [
+          "loot",
+          "drop_count",
+          "unique_players"
+        ],
+        "properties": {
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "drop_count": {
+            "type": "integer"
+          },
+          "unique_players": {
+            "type": "integer"
+          },
+          "last_drop_ts": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "NpcMonthStats": {
+        "type": "object",
+        "required": [
+          "partition",
+          "loot",
+          "drop_count",
+          "unique_players"
+        ],
+        "properties": {
+          "partition": {
+            "type": "integer"
+          },
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "drop_count": {
+            "type": "integer"
+          },
+          "unique_players": {
+            "type": "integer"
+          }
+        }
+      },
+      "NpcTopPlayer": {
+        "type": "object",
+        "required": [
+          "rank",
+          "player_id",
+          "player_name",
+          "loot",
+          "drop_count"
+        ],
+        "properties": {
+          "rank": {
+            "type": "integer"
+          },
+          "player_id": {
+            "type": "integer"
+          },
+          "player_name": {
+            "type": "string"
+          },
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "drop_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "NpcRecentDrop": {
+        "type": "object",
+        "required": [
+          "drop_id",
+          "item_name",
+          "player_id",
+          "player_name",
+          "value",
+          "quantity",
+          "ts"
+        ],
+        "properties": {
+          "drop_id": {
+            "type": "integer"
+          },
+          "item_id": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "player_id": {
+            "type": "integer"
+          },
+          "player_name": {
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "ts": {
+            "type": "integer"
+          }
+        }
+      },
+      "NpcDetail": {
+        "type": "object",
+        "required": [
+          "npc_id",
+          "name",
+          "icon_url",
+          "wiki_url",
+          "lifetime",
+          "month",
+          "top_players",
+          "recent_drops"
+        ],
+        "properties": {
+          "npc_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": "string"
+          },
+          "wiki_url": {
+            "type": "string"
+          },
+          "canonical_slug": {
+            "type": "string",
+            "nullable": true,
+            "description": "Pretty-URL slug this NPC declares as canonical (duplicate names collapse to a primary id); null only if the name is unslugifiable."
+          },
+          "lifetime": {
+            "$ref": "#/components/schemas/NpcLifetimeStats"
+          },
+          "month": {
+            "$ref": "#/components/schemas/NpcMonthStats"
+          },
+          "top_players": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NpcTopPlayer"
+            }
+          },
+          "recent_drops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NpcRecentDrop"
+            }
+          }
+        }
+      },
+      "NpcDropTableItem": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "name",
+          "icon_url",
+          "quantity",
+          "noted",
+          "rarity",
+          "rolls",
+          "last_drop"
+        ],
+        "properties": {
+          "item_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string",
+            "description": "Wiki quantity spelling, e.g. \"1\" or \"1-3\"."
+          },
+          "noted": {
+            "type": "boolean"
+          },
+          "rarity": {
+            "type": "number",
+            "description": "Drop probability in [0,1]; 1 = always."
+          },
+          "rolls": {
+            "type": "integer"
+          },
+          "last_drop": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "required": [
+              "player_id",
+              "player_name",
+              "ts",
+              "value"
+            ],
+            "properties": {
+              "player_id": {
+                "type": "integer"
+              },
+              "player_name": {
+                "type": "string"
+              },
+              "ts": {
+                "type": "integer"
+              },
+              "value": {
+                "$ref": "#/components/schemas/Money"
+              }
+            }
+          }
+        }
+      },
+      "NpcDropTable": {
+        "type": "object",
+        "required": [
+          "npc_id",
+          "name",
+          "items",
+          "last_drops_status"
+        ],
+        "properties": {
+          "npc_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NpcDropTableItem"
+            }
+          },
+          "last_drops_status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "building"
+            ],
+            "description": "\"building\" while the last-received registry is cold-built in the background."
+          }
+        }
+      },
+      "ItemLifetimeStats": {
+        "type": "object",
+        "required": [
+          "loot",
+          "quantity",
+          "drop_count",
+          "unique_players"
+        ],
+        "properties": {
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "drop_count": {
+            "type": "integer"
+          },
+          "unique_players": {
+            "type": "integer"
+          },
+          "last_drop_ts": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "ItemMonthStats": {
+        "type": "object",
+        "required": [
+          "partition",
+          "loot",
+          "quantity",
+          "drop_count",
+          "unique_players"
+        ],
+        "properties": {
+          "partition": {
+            "type": "integer"
+          },
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "drop_count": {
+            "type": "integer"
+          },
+          "unique_players": {
+            "type": "integer"
+          }
+        }
+      },
+      "ItemTopReceiver": {
+        "type": "object",
+        "required": [
+          "rank",
+          "player_id",
+          "player_name",
+          "loot",
+          "quantity",
+          "drop_count"
+        ],
+        "properties": {
+          "rank": {
+            "type": "integer"
+          },
+          "player_id": {
+            "type": "integer"
+          },
+          "player_name": {
+            "type": "string"
+          },
+          "loot": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "drop_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "ItemRecentDrop": {
+        "type": "object",
+        "required": [
+          "drop_id",
+          "player_id",
+          "player_name",
+          "value",
+          "quantity",
+          "ts"
+        ],
+        "properties": {
+          "drop_id": {
+            "type": "integer"
+          },
+          "npc_id": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "npc_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "npc_icon_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "player_id": {
+            "type": "integer"
+          },
+          "player_name": {
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "ts": {
+            "type": "integer"
+          }
+        }
+      },
+      "ItemSource": {
+        "type": "object",
+        "required": [
+          "npc_id",
+          "name",
+          "icon_url",
+          "quantity",
+          "rarity",
+          "rolls"
+        ],
+        "properties": {
+          "npc_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "rarity": {
+            "type": "number"
+          },
+          "rolls": {
+            "type": "integer"
+          }
+        }
+      },
+      "ItemDetail": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "name",
+          "icon_url",
+          "wiki_url",
+          "stackable",
+          "lifetime",
+          "month",
+          "top_receivers",
+          "stats_status",
+          "recent_drops",
+          "sources"
+        ],
+        "properties": {
+          "item_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": "string"
+          },
+          "wiki_url": {
+            "type": "string"
+          },
+          "canonical_slug": {
+            "type": "string",
+            "nullable": true,
+            "description": "Pretty-URL slug this item declares as canonical (name variants collapse to a primary id); null only if the name is unslugifiable."
+          },
+          "stackable": {
+            "type": "boolean"
+          },
+          "ge_value": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Money"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lifetime": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ItemLifetimeStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "month": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ItemMonthStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "top_receivers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ItemTopReceiver"
+            }
+          },
+          "stats_status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "building"
+            ],
+            "description": "\"building\" while heavy aggregates are cold-built in the background."
+          },
+          "recent_drops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ItemRecentDrop"
+            }
+          },
+          "sources": {
+            "type": "object",
+            "required": [
+              "total",
+              "npcs"
+            ],
+            "properties": {
+              "total": {
+                "type": "integer"
+              },
+              "npcs": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ItemSource"
+                }
               }
             }
           }

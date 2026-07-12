@@ -25,6 +25,7 @@ from db import (
 from web_api.common import (
     cache_get,
     cache_set,
+    canonical_slug_for,
     db_session,
     decode_member,
     hidden_player_ids,
@@ -136,6 +137,8 @@ def _build_submissions(rows, s, partition, player_names: dict | None = None):
                 "value": money((drop.value or 0) * (drop.quantity or 1)),
                 "quantity": int(drop.quantity or 1),
                 "image_url": f"{IMG_BASE}/itemdb/{drop.item_id}.png",
+                "item_id": int(drop.item_id) if drop.item_id else None,
+                "npc_id": int(drop.npc_id) if drop.npc_id else None,
                 "npc_name": npc.npc_name if npc else None,
                 "player_id": player_id,
                 "player_name": player_name,
@@ -157,6 +160,8 @@ def _build_submissions(rows, s, partition, player_names: dict | None = None):
                 "type": "clog",
                 "label": label,
                 "image_url": f"{IMG_BASE}/itemdb/{clog.item_id}.png",
+                "item_id": int(clog.item_id) if clog.item_id else None,
+                "npc_id": int(clog.npc_id) if clog.npc_id else None,
                 "npc_name": npc.npc_name if npc else None,
                 "player_id": player_id,
                 "player_name": player_name,
@@ -183,6 +188,7 @@ def _build_submissions(rows, s, partition, player_names: dict | None = None):
                 "type": "pb",
                 "label": label,
                 "image_url": f"{IMG_BASE}/npcdb/{pb.npc_id}.png",
+                "npc_id": int(pb.npc_id) if pb.npc_id else None,
                 "npc_name": npc_name,
                 "player_id": player_id,
                 "player_name": player_name,
@@ -424,6 +430,9 @@ async def player_profile(player_id: int):
                 "total_loot": money(loot),
                 "groups": groups,
                 "recent_submissions": submissions,
+                # Pretty-URL slug this profile declares as canonical (null when
+                # the name collides with another visible player → id url stays).
+                "canonical_slug": canonical_slug_for(s, "player", player_id, player.player_name),
             }
             # Supporter flair: user-level premium display perk.
             try:
@@ -698,6 +707,9 @@ async def group_profile(group_id: int):
                 "member_count": member_count,
                 "monthly_loot": money(monthly),
                 "recent_submissions": submissions,
+                # Pretty-URL slug this group declares as canonical (null when the
+                # name collides with another group → id url stays canonical).
+                "canonical_slug": canonical_slug_for(s, "group", group_id, group.group_name),
             }
             if group.description:
                 payload["description"] = group.description

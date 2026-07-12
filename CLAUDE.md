@@ -85,6 +85,7 @@ droptracker/
 │                           # group_admin, events, event_admin, event_discord,
 │                           # badges, announcements, docs (CMS), submissions,
 │                           # subscriptions, paypal_ipn, lootboard, realtime (SSE),
+│                           # npcs (drop table + totals), items (item pages),
 │                           # admin (superadmin), health
 │
 ├── workers/                # Redis queue consumers (systemd: droptracker-events, droptracker-webhook-consumer)
