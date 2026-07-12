@@ -18,6 +18,9 @@ import time
 
 load_dotenv()
 
+from utils.sentry import init_sentry
+init_sentry("droptracker-hof")
+
 bot = interactions.Client(token=os.getenv("HALL_OF_FAME_BOT_TOKEN"), intents=Intents.ALL)
 
 # The global/template group is always active and exempt from the premium gate

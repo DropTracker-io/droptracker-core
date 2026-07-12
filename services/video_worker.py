@@ -25,6 +25,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from utils.sentry import init_sentry
+
+init_sentry("droptracker-video-worker")
+
 from db.models.base import Session
 from db.models.video_upload import VideoUpload
 from utils.b2_storage import B2_CDN_BASE_URL

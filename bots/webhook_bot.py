@@ -20,6 +20,9 @@ from db.models.base import engine as db_engine
 from dotenv import load_dotenv
 load_dotenv()
 
+from utils.sentry import init_sentry
+init_sentry("droptracker-webhooks")
+
 # Provide a no-op watchdog in dev to avoid systemd usage on Windows
 class _DummyWatchdog:
     def set_health_check(self, fn):

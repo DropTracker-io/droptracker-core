@@ -43,6 +43,9 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
+from utils.sentry import init_sentry
+init_sentry("droptracker-player-updates")
+
 # Create the Quart application
 app = Quart(__name__)
 

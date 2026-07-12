@@ -101,3 +101,6 @@ typing_extensions==4.12.2
 
 # Payments
 stripe==15.3.0
+
+# Monitoring (optional at runtime - utils/sentry.py no-ops without SENTRY_DSN)
+sentry-sdk==2.64.0

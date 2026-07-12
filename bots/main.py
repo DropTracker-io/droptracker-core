@@ -88,6 +88,9 @@ redis_client = RedisClient()
 ## Category IDs that contain DropTracker webhooks that receive messages from the RuneLite client
 load_dotenv()
 
+from utils.sentry import init_sentry
+init_sentry("droptracker-core")
+
 next_sync_time = datetime.now() + timedelta(minutes=5)
 
 # Hypercorn configuration

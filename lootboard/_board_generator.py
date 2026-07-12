@@ -3,6 +3,9 @@ import signal
 import sys
 from monitor.sdnotifier import SystemdWatchdog
 
+from utils.sentry import init_sentry
+init_sentry("droptracker-lootboards")
+
 """
 Lootboard Generator
 

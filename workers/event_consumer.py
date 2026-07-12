@@ -35,6 +35,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from utils.sentry import init_sentry
+
+init_sentry("droptracker-events")
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)s %(message)s",
