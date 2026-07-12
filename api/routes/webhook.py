@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import json as _json
 import os
 import uuid
@@ -666,18 +667,59 @@ def _parse_nearby_players(raw):
     return None
 
 
+MANUAL_SUBMIT_KEY_HEADER = "X-DT-Manual-Key"
+
+
+def _manual_submit_auth_error():
+    """Shared-secret gate for ``/manual-submit`` (server-to-server only).
+
+    The endpoint substitutes the target player's real ``account_hash`` into the
+    payload, so without a gate anyone who knows an RSN could forge submissions
+    as that player. Legitimate callers (``web_api/routes/submissions.py``,
+    which enforces session auth + player ownership) must send the shared
+    secret in the ``X-DT-Manual-Key`` header.
+
+    Same precedent as the ``XF_KEY`` auth in ``api/routes/group_create.py``:
+    fail closed when the secret is unconfigured (503), reject a missing/wrong
+    header (401). ``MANUAL_SUBMIT_KEY`` is read at request time so tests can
+    monkeypatch it. Returns a ``(response, status)`` tuple to short-circuit
+    with, or ``None`` when the request is authorized.
+    """
+    expected = (os.getenv("MANUAL_SUBMIT_KEY") or "").strip()
+    if not expected:
+        # Fail closed: if no secret is configured the endpoint is disabled.
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Manual submissions are not configured on the server.",
+                }
+            ),
+            503,
+        )
+    provided = (request.headers.get(MANUAL_SUBMIT_KEY_HEADER) or "").strip()
+    if not provided or not hmac.compare_digest(provided, expected):
+        return jsonify({"success": False, "error": "Unauthorized."}), 401
+    return None
+
+
 @webhook_bp.post("/manual-submit")
 @rate_limit(limit=10, period=timedelta(seconds=1))
 async def manual_submit():
     """
-    Handle manual submissions from the PHP front-end.
-    
+    Handle manual submissions forwarded by the website backend.
+
     This endpoint processes manually-submitted data for drops, collection log entries,
     personal bests, combat achievements, and pets. Unlike the webhook endpoint:
-    - No account hash is required (authentication handled by front-end)
+    - No account hash is required (the caller must present the shared
+      ``X-DT-Manual-Key`` secret; user auth + player ownership are enforced
+      upstream by ``web_api/routes/submissions.py``)
     - A unique submission ID is generated automatically
     - The submission is marked as using the API and considered pre-authenticated
     """
+    auth_error = _manual_submit_auth_error()
+    if auth_error is not None:
+        return auth_error
     import time
     req_start = time.perf_counter()
     return await _process_manual_submission(req_start)

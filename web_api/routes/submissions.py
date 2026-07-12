@@ -30,6 +30,17 @@ submissions_bp = Blueprint("v1_submissions", __name__)
 INTAKE_API_URL = os.getenv("INTAKE_API_URL", "http://127.0.0.1:31323")
 B2_CDN_BASE_URL = os.getenv("B2_CDN_BASE_URL", "https://videos.droptracker.io")
 
+# Shared secret the intake API requires on /manual-submit (the endpoint
+# substitutes the player's real account_hash, so it must never be publicly
+# callable). Read at request time (matches the intake-side gate; also lets
+# tests monkeypatch it).
+MANUAL_SUBMIT_KEY_HEADER = "X-DT-Manual-Key"
+
+
+def _manual_submit_headers() -> dict:
+    key = (os.getenv("MANUAL_SUBMIT_KEY") or "").strip()
+    return {MANUAL_SUBMIT_KEY_HEADER: key} if key else {}
+
 # Contract type -> intake `/manual-submit` submission_type.
 _TYPE_MAP = {
     "drop": "drop",
@@ -124,7 +135,11 @@ async def manual_submission():
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(f"{INTAKE_API_URL}/manual-submit", json=payload)
+            resp = await client.post(
+                f"{INTAKE_API_URL}/manual-submit",
+                json=payload,
+                headers=_manual_submit_headers(),
+            )
     except Exception as e:
         abort_problem(502, "Submission pipeline unavailable", str(e))
 
