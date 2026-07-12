@@ -18,6 +18,7 @@ global events where group_id is NULL):
   DELETE /api/v1/events/{id}/tasks/{taskId}                    -> { ok }
   GET    /api/v1/events/meta/items?q=       -> [{ id, name }]  (task-form autocomplete)
   GET    /api/v1/events/meta/npcs?q=        -> [{ id, name }]
+  GET    /api/v1/events/meta/resolve?kind=item|npc&names=a|b -> [{ id, name }]
   POST   /api/v1/events/{id}/teams          { EventTeamInput } -> { id }
   POST   /api/v1/events/{id}/teams/{teamId}/members   { player_id } -> { ok }
   DELETE /api/v1/events/{id}/teams/{teamId}/members/{playerId}      -> { ok }
@@ -47,11 +48,13 @@ from db import (
     EventCompletion,
     EventGroup,
     EventProgress,
+    EventSignup,
     EventTask,
     EventTeam,
     EventTeamMember,
     EVENT_DISCORD_POLICIES,
     EVENT_FORMATION_MODES,
+    EVENT_SELF_SIGNUP_MODES,
     EVENT_MODES,
     EVENT_PING_KEYS,
     EVENT_SUBMISSION_POLICIES,
@@ -273,9 +276,21 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
         on_event = [
             (m.player_id, m.team_id) for m, _ in member_rows if m.player_id in my_player_ids
         ]
+        # Sign-up-pool opt-ins that aren't (yet) on a team. Only signup_pool
+        # events have signup rows, so other modes issue no extra query.
+        signed_up_pids = []
+        if my_player_ids and (ev.formation_mode or "") == "signup_pool":
+            signed_up_pids = [
+                pid for (pid,) in
+                s.query(EventSignup.player_id)
+                .filter(EventSignup.event_id == ev.id,
+                        EventSignup.player_id.in_(my_player_ids))
+                .all()
+            ]
         viewer = {
             "player_ids_on_event": [pid for pid, _ in on_event],
             "team_id": on_event[0][1] if on_event else None,
+            "signed_up_player_ids": signed_up_pids,
         }
 
     bingo = None
@@ -922,17 +937,43 @@ def clean_task_visibility(body: dict, default: str | None = "public") -> str | N
     return visibility
 
 
-def save_task_to_library(s, ev: Event, task: EventTask, visibility: str) -> None:
+def _canonical_config(config) -> str | None:
+    """Whitespace/key-order-insensitive form of a task config for equality
+    checks. Falls back to the raw value on unparseable input."""
+    if not config:
+        return None
+    try:
+        parsed = json.loads(config) if isinstance(config, str) else config
+    except (TypeError, ValueError):
+        return str(config)
+    if not parsed:
+        return None
+    return json.dumps(parsed, sort_keys=True)
+
+
+def save_task_to_library(s, ev: Event, task: EventTask, visibility: str) -> str:
     """Upsert the task's reusable library copy (source='group').
 
     Public rows show in every group's picker; private rows only in the owning
     group's. Keyed per group by lower-cased name so re-saving a same-named
     task updates the preset instead of duplicating it. The bingo designer's
     ``bingo_auto`` config marker is task-instance bookkeeping and is stripped
-    from the preset."""
+    from the preset.
+
+    The global library keeps at most one public preset per set of
+    *requirements* (type + target + target_value + config; custom tasks are
+    identified by their name too, since their requirements are free-form):
+
+    - Copying a preset the group can already see (same name AND requirements)
+      saves nothing — the picker row already exists.
+    - Saving a same-requirements task under a new name as "public" is demoted
+      to a private, group-only preset instead of a second public copy.
+
+    Returns the visibility actually stored so callers can mirror it onto the
+    task row (it may differ from the requested one via the demotion rule)."""
     name = (task.label or "").strip()[:120]
     if not name:
-        return
+        return visibility
     config = task.config
     if config:
         try:
@@ -941,6 +982,9 @@ def save_task_to_library(s, ev: Event, task: EventTask, visibility: str) -> None
                 config = json.dumps(parsed) if parsed else None
         except (TypeError, ValueError):
             pass
+    target = task.target[:120] if task.target else None
+    canon_config = _canonical_config(config)
+
     group_match = (
         EventTaskLibraryItem.group_id == ev.group_id
         if ev.group_id is not None
@@ -955,18 +999,62 @@ def save_task_to_library(s, ev: Event, task: EventTask, visibility: str) -> None
         )
         .first()
     )
+
+    # Requirement duplicates among presets this group's picker already shows:
+    # public rows from anywhere, plus the group's own. Target/type matching
+    # rides the DB's case-insensitive collation; config equality is checked
+    # canonically in Python (the table is small).
+    target_filter = (
+        EventTaskLibraryItem.target == target
+        if target
+        else sa_or(EventTaskLibraryItem.target.is_(None), EventTaskLibraryItem.target == "")
+    )
+    tv_filter = (
+        EventTaskLibraryItem.target_value == task.target_value
+        if task.target_value is not None
+        else EventTaskLibraryItem.target_value.is_(None)
+    )
+    candidates = (
+        s.query(EventTaskLibraryItem)
+        .filter(
+            EventTaskLibraryItem.active.is_(True),
+            EventTaskLibraryItem.type == task.type,
+            target_filter,
+            tv_filter,
+        )
+        .all()
+    )
+    dups = [
+        r for r in candidates
+        if (row is None or r.id != row.id)
+        and ((r.visibility or "public") == "public" or r.group_id == ev.group_id)
+        and _canonical_config(r.config) == canon_config
+    ]
+    if task.type == "custom":
+        # Free-form manual tasks: empty goal fields don't make two different
+        # chores "the same task" — only an outright name collision does.
+        dups = [r for r in dups if r.name.lower() == name.lower()]
+
+    if row is None and any(r.name.lower() == name.lower() for r in dups):
+        # Straight copy of a preset the group can already pick — saving a
+        # duplicate row would only clutter the pickers.
+        return visibility
+    if visibility == "public" and any((r.visibility or "public") == "public" for r in dups):
+        visibility = "private"
+
     if row is None:
         row = EventTaskLibraryItem(
             name=name, source="group", group_id=ev.group_id, default_points=0,
         )
         s.add(row)
     row.type = task.type
-    row.target = task.target[:120] if task.target else None
+    row.target = target
     row.target_value = task.target_value
     row.default_points = int(task.points or 0)
     row.config = config or None
     row.visibility = visibility
     row.active = True
+    return visibility
 
 
 @events_bp.post("/events/<int:event_id>/tasks")
@@ -1000,13 +1088,15 @@ async def add_task(event_id: int):
                 **normalized,
             )
             s.add(task)
-            save_task_to_library(s, ev, task, visibility)
+            task.visibility = save_task_to_library(s, ev, task, visibility)
             s.commit()
-            return task.id
+            return task.id, task.visibility
 
-    task_id = await asyncio.to_thread(_apply)
+    task_id, effective_visibility = await asyncio.to_thread(_apply)
     _bump(event_id)
-    return jsonify({"id": task_id})
+    # visibility echoes what was stored: a "public" save whose requirements
+    # duplicate an existing public preset is demoted to "private".
+    return jsonify({"id": task_id, "visibility": effective_visibility})
 
 
 @events_bp.get("/events/meta/items")
@@ -1033,6 +1123,46 @@ async def search_items():
             return [{"id": i, "name": n} for i, n in rows]
 
     return jsonify(await asyncio.to_thread(_search))
+
+
+@events_bp.get("/events/meta/resolve")
+async def resolve_meta_names():
+    """Resolve exact item/NPC names to their game ids (session required).
+
+    Batch lookup for the task form's selection chips: tasks store names only,
+    so editing an existing task needs a name -> id pass to render the
+    itemdb/npcdb icons. ``names`` is |-separated (names never contain pipes);
+    unknown names are simply absent from the response."""
+    current_user_id()
+    kind = (request.args.get("kind") or "item").strip()
+    if kind not in ("item", "npc"):
+        abort_problem(422, "Invalid kind", "kind must be 'item' or 'npc'.")
+    names = [n.strip() for n in (request.args.get("names") or "").split("|") if n.strip()]
+    if not names:
+        return jsonify([])
+    names = names[:100]
+
+    def _resolve():
+        from db import ItemList, NpcList
+
+        with db_session() as s:
+            if kind == "item":
+                rows = (
+                    s.query(func.min(ItemList.item_id), ItemList.item_name)
+                    .filter(ItemList.item_name.in_(names), ItemList.noted.is_(False))
+                    .group_by(ItemList.item_name)
+                    .all()
+                )
+            else:
+                rows = (
+                    s.query(func.min(NpcList.npc_id), NpcList.npc_name)
+                    .filter(NpcList.npc_name.in_(names))
+                    .group_by(NpcList.npc_name)
+                    .all()
+                )
+            return [{"id": i, "name": n} for i, n in rows]
+
+    return jsonify(await asyncio.to_thread(_resolve))
 
 
 @events_bp.get("/events/meta/npcs")
@@ -1063,6 +1193,16 @@ async def search_npcs():
 
 @events_bp.delete("/events/<int:event_id>/tasks/<int:task_id>")
 async def delete_task(event_id: int, task_id: int):
+    """Delete a task and everything that references it.
+
+    ``web_event_bingo_cells.task_id``, ``web_event_completions.task_id`` and
+    ``web_event_progress.task_id`` all FK this row with no cascade, so a bare
+    delete trips an IntegrityError the moment the task is bound to a board —
+    which is exactly what template instantiation produces (this used to make
+    tasks on template-created events undeletable). Bound cells survive as
+    labeled, unbound cells (rebindable in the designer, same as a skipped
+    template task); the task's ledger/progress rows are removed and any points
+    it granted are taken back from team scores."""
     user_id = current_user_id()
 
     def _apply():
@@ -1076,9 +1216,68 @@ async def delete_task(event_id: int, task_id: int):
                 .filter(EventTask.id == task_id, EventTask.event_id == event_id)
                 .first()
             )
-            if task:
-                s.delete(task)
-                s.commit()
+            if not task:
+                return
+            task_label = task.label
+
+            # Take back points the task granted: a completed (task, team)
+            # rollup awarded task.points, and applied bonus rows written
+            # against this task's id store their granted points in quantity.
+            deltas: dict[int, int] = {}
+            points = int(task.points or 0)
+            if points:
+                for p in (
+                    s.query(EventProgress)
+                    .filter(EventProgress.task_id == task_id,
+                            EventProgress.completed.is_(True))
+                    .all()
+                ):
+                    deltas[p.team_id] = deltas.get(p.team_id, 0) + points
+            for c in (
+                s.query(EventCompletion)
+                .filter(EventCompletion.task_id == task_id,
+                        EventCompletion.source_type == "bonus",
+                        EventCompletion.status.in_(_APPLIED_STATUSES))
+                .all()
+            ):
+                if c.team_id is not None:
+                    deltas[c.team_id] = deltas.get(c.team_id, 0) + max(int(c.quantity or 0), 0)
+            for team_id_, delta in deltas.items():
+                team = s.query(EventTeam).filter(EventTeam.id == team_id_).first()
+                if team is not None:
+                    team.score = max(int(team.score or 0) - delta, 0)
+
+            # Unbind the task's bingo cells — the labeled cell stays on the
+            # board (rebindable), but its completions go with the binding.
+            cell_ids = [
+                cid for (cid,) in s.query(EventBingoCell.id)
+                .filter(EventBingoCell.task_id == task_id)
+                .all()
+            ]
+            if cell_ids:
+                (s.query(EventBingoCompletion)
+                 .filter(EventBingoCompletion.cell_id.in_(cell_ids))
+                 .delete(synchronize_session=False))
+                (s.query(EventBingoCell)
+                 .filter(EventBingoCell.id.in_(cell_ids))
+                 .update({EventBingoCell.task_id: None}, synchronize_session=False))
+
+            (s.query(EventCompletion)
+             .filter(EventCompletion.task_id == task_id)
+             .delete(synchronize_session=False))
+            (s.query(EventProgress)
+             .filter(EventProgress.task_id == task_id)
+             .delete(synchronize_session=False))
+            s.delete(task)
+            s.add(AuditLog(
+                actor_user_id=user_id,
+                group_id=ev.group_id,
+                action="event.task.delete",
+                target=f"web_events.{event_id}.task.{task_id}",
+                before=f"label:{task_label}",
+                after=None,
+            ))
+            s.commit()
 
     await asyncio.to_thread(_apply)
     _bump(event_id)
@@ -1302,6 +1501,56 @@ def _event_membership(s, event_id: int, player_id: int) -> EventTeamMember | Non
     )
 
 
+def _signup_row(s, event_id: int, player_id: int) -> EventSignup | None:
+    return (
+        s.query(EventSignup)
+        .filter(EventSignup.event_id == event_id, EventSignup.player_id == player_id)
+        .first()
+    )
+
+
+def _signup_group_for_player(s, ev, player_id: int) -> int | None:
+    """Which clan a player signs up under: their participating clan for
+    clan_vs_clan, else the event's group (None for global)."""
+    if (getattr(ev, "mode", None) or "standard") == "clan_vs_clan":
+        overlap = (
+            s.query(user_group_association.c.group_id)
+            .filter(
+                user_group_association.c.player_id == player_id,
+                user_group_association.c.group_id.in_(participating_group_ids(s, ev)),
+            )
+            .first()
+        )
+        return overlap[0] if overlap else None
+    return ev.group_id
+
+
+def _user_other_entry(s, ev, event_id: int, user_id: int, player_id: int) -> int | None:
+    """A DIFFERENT account of ``user_id`` already signed up or placed on this
+    event (one RSN per person). Returns that player_id, or None."""
+    other_pids = [
+        pid for (pid,) in
+        s.query(Player.player_id).filter(Player.user_id == user_id).all()
+        if pid != player_id
+    ]
+    if not other_pids:
+        return None
+    row = (
+        s.query(EventSignup.player_id)
+        .filter(EventSignup.event_id == event_id, EventSignup.player_id.in_(other_pids))
+        .first()
+    )
+    if row:
+        return row[0]
+    row = (
+        s.query(EventTeamMember.player_id)
+        .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+        .filter(EventTeam.event_id == event_id, EventTeamMember.player_id.in_(other_pids))
+        .first()
+    )
+    return row[0] if row else None
+
+
 @events_bp.post("/events/<int:event_id>/join")
 async def join_event(event_id: int):
     """Player-facing join. Behavior depends on the event's formation mode
@@ -1331,6 +1580,30 @@ async def join_event(event_id: int):
 
             if _event_membership(s, event_id, player_id):
                 abort_problem(409, "Already joined", "That player is already on a team in this event.")
+
+            # One RSN per person on the new self-service surfaces (clan-vs-clan
+            # and the sign-up pool). Legacy standard self_join/auto_assign events
+            # keep their prior behavior untouched (no extra query, no new 409).
+            if (getattr(ev, "mode", None) or "standard") == "clan_vs_clan" or mode == "signup_pool":
+                other = _user_other_entry(s, ev, event_id, user_id, player_id)
+                if other is not None:
+                    abort_problem(
+                        409, "Already signed up",
+                        "You've already entered this event with another account. "
+                        "Only one account per person can take part.",
+                    )
+
+            # Sign-up pool: record the opt-in with NO team; admins sort the pool
+            # into teams later. Teams need not exist yet.
+            if mode == "signup_pool":
+                if _signup_row(s, event_id, player_id) is None:
+                    s.add(EventSignup(
+                        event_id=event_id, player_id=player_id,
+                        group_id=_signup_group_for_player(s, ev, player_id),
+                        user_id=user_id, source="web",
+                    ))
+                    s.commit()
+                return {"team_id": None, "pooled": True}
 
             teams = (
                 s.query(EventTeam)
@@ -1383,9 +1656,11 @@ async def join_event(event_id: int):
             s.commit()
             return team.id
 
-    team_id = await asyncio.to_thread(_apply)
+    result = await asyncio.to_thread(_apply)
     _bump(event_id)
-    return private_no_store(jsonify({"team_id": team_id}))
+    if isinstance(result, dict):
+        return private_no_store(jsonify(result))
+    return private_no_store(jsonify({"team_id": result}))
 
 
 @events_bp.post("/events/<int:event_id>/leave")
@@ -1404,6 +1679,14 @@ async def leave_event(event_id: int):
             membership = _event_membership(s, event_id, player_id)
             if membership:
                 s.delete(membership)
+            # Also withdraw a sign-up-pool opt-in. Only signup_pool events ever
+            # write signup rows, so other modes stay byte-for-byte (no query).
+            signup = None
+            if (ev.formation_mode or "admin_assign") == "signup_pool":
+                signup = _signup_row(s, event_id, player_id)
+                if signup:
+                    s.delete(signup)
+            if membership or signup:
                 s.commit()
 
     await asyncio.to_thread(_apply)
@@ -1518,6 +1801,196 @@ async def admin_remove_member(event_id: int, team_id: int, player_id: int):
                     )
                 )
                 s.commit()
+
+    await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify({"ok": True}))
+
+
+# --------------------------------------------------------------------------- #
+# Sign-up pool (formation_mode == "signup_pool") — admin sort & randomize
+# --------------------------------------------------------------------------- #
+@events_bp.get("/events/<int:event_id>/signups")
+async def list_event_signups(event_id: int):
+    """The sign-up pool for an event: everyone who opted in, with each
+    player's current team placement (null while unassigned). Event admins."""
+    user_id = current_user_id()
+
+    def _load():
+        from services.event_signup import list_pool
+
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            return list_pool(s, ev)
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@events_bp.post("/events/<int:event_id>/signups/assign")
+async def assign_signup(event_id: int):
+    """Place one signed-up player onto a team (admin manual sort)."""
+    user_id = current_user_id()
+    body = await json_body()
+    player_id = body.get("player_id")
+    team_id = body.get("team_id")
+    if not isinstance(player_id, int) or not isinstance(team_id, int):
+        abort_problem(422, "Invalid body", "'player_id' and 'team_id' must be integers.")
+
+    def _apply():
+        from services.event_signup import SignupError, assign_from_pool
+
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            _assert_roster_open(ev)
+            try:
+                assign_from_pool(s, ev, player_id, team_id)
+            except SignupError as exc:
+                abort_problem(exc.status, exc.title, exc.detail)
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id,
+                action="event.signup.assign",
+                target=f"web_events.{event_id}.player.{player_id}",
+                before=None, after=f"team:{team_id}",
+            ))
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify({"ok": True}))
+
+
+@events_bp.post("/events/<int:event_id>/signups/randomize")
+async def randomize_signups(event_id: int):
+    """Randomly distribute the sign-up pool across teams (balanced; clan-aware).
+    Repeatable — each call reshuffles everyone. Optional body ``{group_id}``
+    re-rolls just one clan (clan-vs-clan)."""
+    user_id = current_user_id()
+    body = await json_body(required=False)
+    group_id = (body or {}).get("group_id")
+    if group_id is not None and not isinstance(group_id, int):
+        abort_problem(422, "Invalid group_id", "'group_id' must be an integer or omitted.")
+
+    def _apply():
+        from services.event_signup import randomize_pool
+
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            _assert_roster_open(ev)
+            result = randomize_pool(s, ev, group_id=group_id)
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id,
+                action="event.signup.randomize",
+                target=f"web_events.{event_id}",
+                before=None, after=f"assigned:{result['assigned']}",
+            ))
+            s.commit()
+            return result
+
+    result = await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify(result))
+
+
+@events_bp.post("/events/<int:event_id>/signup-message")
+async def post_signup_message(event_id: int):
+    """Post an interactive "Sign up" button to the event's Discord announcements
+    channel. Event admin; self-signup events only; requires the announcements
+    channel to be configured (Event → Discord)."""
+    user_id = current_user_id()
+
+    def _apply():
+        import json as _json
+        from datetime import datetime as _dt2
+
+        from db.models import EventChannel, NotificationQueue
+
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            if (ev.formation_mode or "admin_assign") not in EVENT_SELF_SIGNUP_MODES:
+                abort_problem(422, "Sign-ups closed",
+                              "Set the event to let players sign up first "
+                              "(self-join, auto-assign, or sign-up pool).")
+            channel = (
+                s.query(EventChannel)
+                .filter(EventChannel.event_id == event_id,
+                        EventChannel.kind == "announcements")
+                .first()
+            )
+            if not channel:
+                abort_problem(422, "No Discord channel",
+                              "Configure this event's Discord announcements "
+                              "channel first (Event → Discord).")
+            rep = _representative_player_id(s, event_id)
+            if rep is None:
+                abort_problem(422, "No players", "There are no players to route the post through yet.")
+            payload = {
+                "event_id": event_id,
+                "event_name": ev.name,
+                "formation_mode": ev.formation_mode,
+                "description": ev.description or None,
+                "ends_at": _ts(ev.ends_at),
+                # Nonce so repeated posts don't collide on the notification
+                # queue's unique (type, player, group, data) index.
+                "posted_at": int(_dt2.now().timestamp()),
+            }
+            s.add(NotificationQueue(
+                notification_type="event_signup_prompt",
+                player_id=rep,
+                group_id=ev.group_id,
+                data=_json.dumps(payload),
+                status="pending",
+            ))
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id,
+                action="event.signup.message",
+                target=f"web_events.{event_id}", before=None, after="posted",
+            ))
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    return private_no_store(jsonify({"ok": True}))
+
+
+def _representative_player_id(s, event_id: int) -> int | None:
+    """A player id to hang the notification_queue row on (player_id is NOT
+    NULL; the event sender never uses it). Prefers a roster member, else any
+    player."""
+    row = (
+        s.query(EventTeamMember.player_id)
+        .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+        .filter(EventTeam.event_id == event_id)
+        .first()
+    )
+    if row:
+        return row[0]
+    row = s.query(Player.player_id).order_by(Player.player_id.asc()).first()
+    return row[0] if row else None
+
+
+@events_bp.delete("/events/<int:event_id>/signups/<int:player_id>")
+async def remove_event_signup(event_id: int, player_id: int):
+    """Admin withdraws a player from the pool (and any team placement)."""
+    user_id = current_user_id()
+
+    def _apply():
+        from services.event_signup import remove_signup
+
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            _assert_roster_open(ev)
+            remove_signup(s, ev, player_id)
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id,
+                action="event.signup.remove",
+                target=f"web_events.{event_id}.player.{player_id}",
+                before="signed_up", after=None,
+            ))
+            s.commit()
 
     await asyncio.to_thread(_apply)
     _bump(event_id)

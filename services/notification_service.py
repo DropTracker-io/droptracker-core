@@ -1597,6 +1597,19 @@ class NotificationService:
 
             from utils.embeds import build_event_embed
             embed = build_event_embed(notification_type, data, standings=standings)
+            # The interactive "Sign up" prompt carries a button that opens the
+            # in-Discord signup flow (services/event_signup_discord.py).
+            send_kwargs = {}
+            if notification_type == "event_signup_prompt":
+                try:
+                    send_kwargs["components"] = [interactions.ActionRow(interactions.Button(
+                        style=interactions.ButtonStyle.PRIMARY,
+                        label="Sign up",
+                        emoji="\U0001F4DD",
+                        custom_id=f"evtsignup:{event.id}",
+                    ))]
+                except Exception:
+                    send_kwargs = {}  # never let a component error drop the post
             # Configured role pings for this lifecycle post (web_events.
             # ping_config, keys 'event_started'/'event_ended'); content stays
             # None for unconfigured types/events — embed-only, as before.
@@ -1607,9 +1620,10 @@ class NotificationService:
                 await channel.send(
                     content=content, embed=embed,
                     allowed_mentions=interactions.AllowedMentions(parse=["roles"]),
+                    **send_kwargs,
                 )
             else:
-                await channel.send(embed=embed)
+                await channel.send(embed=embed, **send_kwargs)
 
             notification.status = 'sent'
             notification.processed_at = datetime.now()

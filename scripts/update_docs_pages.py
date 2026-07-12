@@ -484,55 +484,525 @@ details.
     # Events
     # ------------------------------------------------------------------
     "events": (
-        "Events",
+        "Events overview",
         "Join or run clan events — task races, bingo boards, and teams.",
         "Events", 1, """
 # Events
 
-Events are group-run competitions: a set of **tasks** to complete, optionally
-laid out as a **bingo board**, played solo or in **teams**. Progress is
-tracked automatically from your in-game submissions.
+Events are group-run competitions built from **tasks** — objectives to complete
+in-game, like collecting an item, killing a boss a number of times, or reaching
+an XP goal. Tasks can be arranged on a **bingo board**, played solo or in
+**teams**, and progress is tracked **automatically** from your in-game
+submissions.
 
-## Joining an event (players)
+Whether you're joining your clan's next bingo or building one from scratch,
+these pages walk through the whole system.
 
-1. Browse [events](/events) or open one from your group's page.
-2. [Sign in with Discord](/api/auth/login) — you'll need at least one
-   [claimed OSRS account](/docs/link-account).
-3. Join from the event page. Depending on how the event is set up, you either
-   pick a team yourself (possibly with a **join code** from your clan),
-   get assigned automatically, or are placed by an admin.
+## For players
 
-> **Important:** enable **Use API Connections** in the
-> [RuneLite plugin](/docs/runelite-plugin) — it's required for your drops and
-> achievements to count toward event tasks.
+- **[Joining & playing an event](/docs/events-players)** — find an event, get on
+  a team, and make sure your progress counts.
 
-Once the event is live, the event page shows the board, teams, and progress in
-real time. Some tasks are verified automatically from your submissions; others
-need an admin to confirm them.
+## For group leaders
 
-## Running an event (group admins)
+- **[Creating & running an event](/docs/events-create)** — the create form,
+  event settings, and the draft → active → past lifecycle.
+- **[Building tasks](/docs/events-tasks)** — every task type, the drag-and-drop
+  item/NPC builder, points, and review rules.
+- **[Bingo boards](/docs/events-bingo)** — the board designer, line and blackout
+  bonuses, and free cells.
+- **[Teams, sign-ups & clan vs clan](/docs/events-teams)** — how players end up
+  on teams, the sign-up pool, and challenging another clan.
+- **[Reviewing, scoring & Discord](/docs/events-review)** — the review queue,
+  manual awards, and routing announcements to Discord.
+- **[Reusing your work](/docs/events-templates)** — the shared task library and
+  saving an event as a reusable template.
 
-Events are available to groups on the **Patron** tier
-([see premium](/docs/premium)), with one active event at a time.
+## Key ideas
 
-From your group's **Events** tab you can:
+- **Task** — one objective, worth some **points**. Most complete automatically;
+  a few are marked for manual review or awarded by an admin.
+- **Board** — an optional bingo grid of tasks; completing lines or the whole
+  board can award bonus points.
+- **Team** — everyone competes as a team, even a team of one. A team's score is
+  the points of everything it has completed.
+- **Lifecycle** — an event is a **draft** while you build it, **active** while it
+  runs, and **past** once it ends.
 
-- **Create an event** — name, description, dates, and how teams are formed
-  (self-join with an optional join code, automatic assignment, or
-  admin-assigned).
-- **Build the task list** — pick tasks from the shared task library or write
-  your own, with per-task points and an optional "requires confirmation" flag
-  for things that can't be verified automatically.
-- **Design a bingo board** — arrange tasks on a grid with the board designer.
-- **Manage teams and participants** — create teams, move players, and track
-  standings.
-- **Review submissions** — a review queue holds task completions that need
-  manual confirmation.
-- **Connect Discord channels** — route event announcements and progress
-  updates to channels in your server.
+> Running events requires the **Patron** tier ([see premium](/docs/premium)).
+> Joining one is free for any player with a claimed account.
+""",
+    ),
 
-Events move through a simple lifecycle: **draft** while you build, **active**
-while it runs, and **past** when it ends.
+    "events-players": (
+        "Joining & playing an event",
+        "Get on a team and make sure your in-game progress counts.",
+        "Events", 2, """
+# Joining & playing an event
+
+Any player with a claimed OSRS account can take part in their clan's events.
+Here's how to get in and make sure your effort counts.
+
+## Before you join
+
+1. **[Sign in with Discord](/api/auth/login).** You'll need at least one
+   [claimed OSRS account](/docs/link-account) — that's how an event knows which
+   in-game character is you.
+2. **Turn on API connections in the plugin.** In the
+   [RuneLite plugin](/docs/runelite-plugin) settings, enable **Use API
+   Connections**. This is what lets your drops and achievements reach
+   DropTracker and count toward tasks.
+
+> **Without "Use API Connections", your progress will not count.** If your
+> completions aren't registering, check this setting first.
+
+## Joining
+
+Open the [events list](/events) or find the event on your group's page, then
+press **Join**. What happens next depends on how the organiser set the event up:
+
+- **Pick your team** — you choose which team to join. Some events require a
+  **join code** from your clan first.
+- **Auto-assigned** — you're placed on the smallest team automatically to keep
+  things balanced.
+- **Sign-up pool** — you sign up now, and an admin sorts everyone into teams
+  before the event starts.
+- **Admin-assigned** — an admin adds you to a team; there's no self sign-up.
+
+Your clan may also post a **Sign up** button in Discord — clicking it adds you to
+the pool without leaving the server.
+
+## While the event runs
+
+The event page updates in real time. You'll see the board or task list with your
+team's progress, the team standings, and a live feed of completions as they land.
+
+Most tasks complete on their own the moment a qualifying drop, kill, personal
+best, or level-up is tracked for you. Tasks the organiser marked **needs review**
+wait for an admin to confirm them, and a few types (like EHP/EHB or custom goals)
+are awarded by an admin by hand.
+
+## What counts toward a task
+
+Different task types are credited from different things you do in-game:
+
+| Task | Completed by |
+|---|---|
+| Item collection | Drops and collection-log entries for the listed item(s) |
+| Kill count | Tracked kills of the target boss/NPC |
+| Personal best | A tracked personal best that beats the time limit |
+| XP / Skill level | XP gained, or a level reached, during the event |
+| Loot value | GP from drops (optionally only from certain NPCs) |
+| EHP / EHB / Custom | Awarded manually by an admin |
+
+Only progress made **after you join a team** counts. If an admin moves you to a
+different team mid-event, your credit starts fresh on the new team — so choose
+carefully.
+
+## Troubleshooting
+
+- **Nothing is counting.** Confirm **Use API Connections** is on, and that the
+  relevant category (drops, collection log, etc.) is enabled in the plugin.
+- **A completion is stuck "pending".** That task needs admin review — it'll count
+  once an organiser confirms it.
+- **You joined the wrong team.** Ask an admin to move you (this resets your credit
+  on the new team).
+""",
+    ),
+
+    "events-create": (
+        "Creating & running an event",
+        "The create form, event settings, and the event lifecycle.",
+        "Events", 3, """
+# Creating & running an event
+
+Events are run from your group's **Events** tab (**Manage group → Events**).
+Creating one requires the **Patron** tier ([see premium](/docs/premium)), and a
+group can have a limited number of events running at once.
+
+## Create the event
+
+Choose **Brand-new event** (or **Start from a template** to reuse a saved one —
+see [Reusing your work](/docs/events-templates)), then fill in the basics:
+
+- **Name & description** — what players see on the event page.
+- **Start and end dates** — optional. A scheduled event **auto-activates** at its
+  start time (once it passes the readiness checks below) and can auto-end at its
+  end time. Leave them blank to start and stop it by hand.
+- **Team formation** — how players end up on teams. See
+  [Teams, sign-ups & clan vs clan](/docs/events-teams) for the full breakdown.
+- **Join code** — an optional code players must enter to self-join, so only your
+  clan can get in.
+- **Submission policy** — which submissions count. See
+  [Reviewing, scoring & Discord](/docs/events-review).
+
+Press **Create event**. A new event starts as a **draft** so you can build it in
+private before anyone can join.
+
+## Build it out
+
+While it's a draft, add the pieces from the same Events screen:
+
+- **[Tasks](/docs/events-tasks)** — the objectives players complete.
+- **[A bingo board](/docs/events-bingo)** — optional; arrange tasks on a grid.
+- **[Teams](/docs/events-teams)** — who competes against whom.
+- **[Discord channels](/docs/events-review)** — where announcements go.
+
+You can change the event's name, description, dates, formation mode, join code
+and policies at any time from **Edit** on the same screen.
+
+## The lifecycle
+
+Events move through three stages:
+
+| Stage | What it means |
+|---|---|
+| **Draft** | You're building it. Players can't join yet; nothing is scored. |
+| **Active** | It's live. Players join, submissions count, standings update. |
+| **Past** | It's over. Final standings are posted and history is read-only. |
+
+### Activating
+
+Press **Activate** to go live (or let a scheduled start do it). Before an event
+can activate it must pass a few checks:
+
+- at least **one team**,
+- a **complete bingo board** if the event uses one (every cell filled), and
+- an **end date in the future**, if one is set.
+
+Because the Patron tier allows only a limited number of **simultaneously active
+events**, activation is blocked if you're already at that limit — end an existing
+event first.
+
+### Ending
+
+Press **End event** (or let the scheduled end time do it). Ending locks the
+event, freezes standings, and posts the **final results** to your event's Discord
+channel. Ending can't be undone.
+
+## Reusing an event
+
+Once you've built a great event, you don't have to start over next time. **Save
+it as a template** and spin up a fresh copy whenever you like — see
+[Reusing your work](/docs/events-templates).
+""",
+    ),
+
+    "events-tasks": (
+        "Building tasks",
+        "Task types, the drag-and-drop item/NPC builder, points, and review.",
+        "Events", 4, """
+# Building tasks
+
+Tasks are the heart of an event — each one is a single objective worth some
+**points**. Add them from the **Tasks** section of your event: **New task** to
+build one, or **From library** to copy an existing one.
+
+## Task types
+
+Pick the type that matches your objective; the form then asks only for the fields
+that type needs.
+
+| Type | Goal | How it completes |
+|---|---|---|
+| **Item collection** | Get a specific item, or items from a list | Drops & collection-log entries |
+| **Kill count** | Kill an NPC a number of times | Tracked kills |
+| **Personal best** | Beat a boss within a time limit | Tracked personal bests |
+| **XP target** | Gain XP in a skill | XP during the event |
+| **Skill level** | Reach a level in a skill | Level reached during the event |
+| **Loot value** | Earn a GP amount | Drops (optionally from set NPCs) |
+| **EHP / EHB** | Reach an efficiency goal | Awarded manually by an admin |
+| **Custom** | Anything else | Awarded manually by an admin |
+
+> Item and NPC names must be **exact in-game names** — the tracker matches by
+> name. The search picker only offers real names, so you never have to guess the
+> spelling.
+
+## The item & NPC picker
+
+Item- and NPC-based tasks use a **drag-and-drop picker**. Type in the search box
+on the left and matching results appear instantly with their icons. Add one by
+**clicking it** or **dragging it** into the selection panel on the right; remove
+it by dragging it back out or clicking the **×**. Everything drag does, click
+does too — handy on touchscreens.
+
+### Collection modes
+
+Item-collection tasks have four modes:
+
+- **Single item** — one item, with a quantity (e.g. 5× Dragon warhammer).
+- **Any item from a list** — getting *any one* of the listed items completes it.
+- **All items from a list** — the team must collect *every* item on the list.
+- **Points from a list** — each item is worth points and the team races to a
+  points goal. Give each item its own weight so rare drops are worth more.
+
+## Points & review
+
+- **Points** — what the task adds to a team's score when completed. A team's total
+  is the sum of everything it has finished, plus any board bonuses.
+- **Completions require admin review** — tick this for tasks that can't be trusted
+  to auto-verify. Completions then wait in the
+  [review queue](/docs/events-review) until an admin confirms them. EHP, EHB and
+  Custom tasks are always awarded by hand.
+
+## Editing & deleting tasks
+
+Everything about a task is editable after you create it — **including item lists
+and source NPCs**. Use **Edit** to change the goal, points, review flag or list
+contents in place; use **Remove** to delete it.
+
+Removing a task erases its progress and completions. If the task sits on a bingo
+board, its **cell stays on the board, unbound**, ready for you to drop a new task
+into it from the [board designer](/docs/events-bingo).
+
+## Sharing tasks: the task library
+
+Every task you create is also saved to the reusable **task library**, so you — and
+optionally other clans — can drop it into future events without rebuilding it.
+Each task carries a visibility:
+
+- **Public** — any clan can find and reuse it from their library.
+- **Private** — saved for your clan's future events only.
+
+To reuse one, press **From library** when adding a task and search the presets:
+curated tasks, anything shared publicly, and your clan's private saves. See
+[Reusing your work](/docs/events-templates) for more.
+""",
+    ),
+
+    "events-bingo": (
+        "Bingo boards",
+        "The board designer, line and blackout bonuses, and free cells.",
+        "Events", 5, """
+# Bingo boards
+
+A bingo board lays your tasks out on a grid. Players complete cells, and you can
+award **bonus points** for finishing full lines or the whole board — the classic
+clan-bingo format, scored automatically.
+
+## Designing the board
+
+From your draft event, open the **Board** designer and choose a size (for example
+5×5). Each cell can hold:
+
+- **an existing task** from your event,
+- **a task from the library** (copied into the event when you place it),
+- **a brand-new task** you create inline, or
+- **nothing** — a **free cell** that every team starts with already completed.
+
+Arrange tasks across the grid however you like while the event is a draft.
+
+> The board is **locked once the event starts** — finalise your layout before you
+> activate. (You can still tweak individual tasks' points and review flags.)
+
+## Bonuses
+
+In the event's settings you can set two optional bonuses:
+
+- **Line points** — awarded each time a team completes a full row, column, or
+  diagonal.
+- **Blackout points** — awarded when a team completes the *entire* board.
+
+Bonuses are scored automatically as cells are completed, and they're taken back
+correctly if a completion is later revoked.
+
+## Free cells
+
+Any empty cell is a **free space**: every team has it completed from the moment
+the event goes live, exactly like the middle square on a traditional bingo card.
+Use them to make lines more achievable or to give everyone a head start.
+
+## Tips
+
+- Leaving the centre cell empty gives the familiar free-space feel.
+- Deleting a task that's on the board leaves its cell **unbound** rather than
+  removing the cell, so the grid keeps its shape — just bind a new task to it.
+- Balance line and blackout bonuses against per-task points so the board rewards
+  both steady progress and the final push.
+""",
+    ),
+
+    "events-teams": (
+        "Teams, sign-ups & clan vs clan",
+        "How players end up on teams, the sign-up pool, and clan-vs-clan events.",
+        "Events", 6, """
+# Teams, sign-ups & clan vs clan
+
+Every event is scored by **team** — even a solo event is just teams of one. How
+players end up on a team is set by the event's **formation mode**, and
+DropTracker supports everything from open sign-up to challenging a rival clan.
+
+## Formation modes
+
+Choose one when you create the event (changeable while it's a draft):
+
+| Mode | How players join |
+|---|---|
+| **Self sign-up — pick your team** | Players choose their own team (optionally gated by a join code). |
+| **Self sign-up — auto-assigned** | Players sign up and are placed on the smallest team automatically. |
+| **Sign-up pool — sort later** | Players sign up into a pool with no team; you sort them before it starts. |
+| **Admin assign** | No self sign-up; admins place every player. |
+
+## Managing teams
+
+From the **Teams** section you can:
+
+- **Create teams** and name them.
+- **Add or remove players** — search your group's members and add them to a team,
+  or remove them.
+- **Rename** a team to fix a typo, or **delete** one made by mistake (its roster
+  and progress are cleared and standings recompute).
+
+> Moving a player to a different team **resets their credit** on the new team —
+> their join time, which is what progress is measured from, starts over.
+
+## The sign-up pool
+
+In **sign-up pool** mode, players opt in without a team and you sort them when
+you're ready, from the **Sign-ups** section:
+
+- **Assign** players onto teams by hand, or
+- **Randomize** the whole pool across your teams — re-roll as often as you like
+  until it looks fair.
+- **Post a "Sign up" button to Discord** so members can join the pool straight
+  from your server.
+
+## Clan vs clan
+
+Want to compete against another clan? Create the event in **Clan vs clan** mode
+and **invite an opponent clan**. Once they accept:
+
+- Each team belongs to one of the participating clans.
+- Both clans' admins can **co-manage** the event — the opponent doesn't need their
+  own Patron subscription to take part; only the host pays.
+- Players are added from their own clan's roster.
+
+Everything else — tasks, board, scoring — works exactly as in a standard event.
+""",
+    ),
+
+    "events-review": (
+        "Reviewing, scoring & Discord",
+        "The review queue, manual awards, submission policies, and Discord routing.",
+        "Events", 7, """
+# Reviewing, scoring & Discord
+
+Most completions land automatically, but you stay in control: a review queue for
+anything that needs a human, manual awards for the things that can't be tracked,
+and Discord channels to keep your clan in the loop.
+
+## How scoring works
+
+A team's score is the total **points** of every task it has completed, plus any
+**bingo line/blackout bonuses**. Scores update live as completions are applied,
+and the event's admin view shows the standings and a per-task progress matrix.
+
+## The review queue
+
+Some completions don't apply straight away — they wait in **Review** for an admin.
+A completion is held for review when:
+
+- the **task** is marked *completions require admin review*, or
+- the **event** requires confirmation for *every* completion, or
+- the event's **submission policy** holds non-plugin submissions (below).
+
+For each pending item you can **Confirm** it — it then applies exactly like an
+automatic completion, points and board cells and all — or **Reject** it (no
+points, optionally with a note).
+
+## Submission policies
+
+An event's submission policy decides which submissions are trusted:
+
+| Policy | Effect |
+|---|---|
+| **All submissions count** | Everything counts immediately, however it was sent. |
+| **Non-plugin submissions need review** | Plugin submissions count at once; anything else queues for review. |
+| **Plugin submissions only** | Only RuneLite-plugin submissions count; others are ignored. |
+
+This is why players are asked to enable **Use API Connections** — plugin
+submissions are the trusted path.
+
+## Manual awards & revokes
+
+For tasks that can't be auto-tracked (EHP, EHB, Custom) — or to credit something
+earned before a player joined — use **Award** to grant a completion to a team by
+hand. You can award a set quantity or mark the task fully complete. If something
+was credited in error, **Revoke** it and the event re-computes that team's
+progress, score, and any affected board bonuses.
+
+## Discord destinations
+
+From the event's **Discord** settings, point the event at a server and choose a
+channel for each kind of message:
+
+- **Announcements** — the event going live, ending, and other milestones.
+- **Completions** — individual task completions as they happen.
+- **Leaderboard** — standings updates.
+- **Admin** — organiser-facing notices.
+
+You can also have DropTracker create a **Discord scheduled event** for the start,
+and **ping specific roles** for key moments. Any server the bot is in can be
+targeted, so a dedicated events server works fine.
+""",
+    ),
+
+    "events-templates": (
+        "Reusing your work",
+        "The shared task library and saving an event as a reusable template.",
+        "Events", 8, """
+# Reusing your work
+
+Building a good event takes effort — the task library and event templates let you
+keep that effort and reuse it.
+
+## The task library
+
+Every task you create in an event is saved to the **task library** as a reusable
+preset. When adding a task, press **From library** to search:
+
+- **Curated presets** maintained by the DropTracker team,
+- tasks other clans have **shared publicly**, and
+- your own clan's **private saves**.
+
+Picking one copies it into your event as an ordinary task you can then edit or
+delete — the original preset is untouched.
+
+Each task you make carries a **visibility**, set from the **Task library**
+dropdown in the task form:
+
+- **Public** — any clan can find and reuse it.
+- **Private** — kept for your clan's future events only.
+
+Re-saving a task with the same name updates its preset rather than creating a
+duplicate.
+
+## Event templates
+
+A template is a snapshot of a whole event's **structure** — its settings, tasks,
+bingo layout, and team names — that you can turn into a fresh event whenever you
+want.
+
+### Saving a template
+
+From an event (in any state), use **Save as template**, give it a name, and choose
+**Public** (any clan can start from it) or **Private** (your clan only). Re-saving
+with the same name updates the existing template.
+
+A template captures structure **only**. It never carries dates, players, scores,
+join codes, Discord settings, or clan-vs-clan opponents — those are unique to each
+run.
+
+### Starting from a template
+
+When creating an event, choose **Start from a template**, pick one, and press
+**Create event from template**. You get a fresh **draft** pre-filled with all its
+tasks and board, ready for you to set new dates and activate. A clan-vs-clan
+template re-runs as a standard event (invite your opponent again for the new run).
+
+If an item or NPC in a saved task no longer exists (renamed in-game, say), that
+one task is **skipped** and reported rather than failing the whole thing — its
+board cell comes through unbound so you can rebind it in the designer.
 """,
     ),
 
@@ -626,10 +1096,23 @@ or hide from leaderboards entirely. See
 def main() -> int:
     ap = argparse.ArgumentParser(description="Rewrite docs_pages content (2026-07 overhaul).")
     ap.add_argument("--dry-run", action="store_true", help="Preview without writing.")
+    ap.add_argument(
+        "--prefix",
+        help="Only apply pages whose slug starts with this (e.g. 'events'). "
+        "Use this to re-drop one section without clobbering CMS edits to the "
+        "rest — a full run overwrites every listed slug.",
+    )
     args = ap.parse_args()
 
+    pages = PAGES
+    if args.prefix:
+        pages = {s: v for s, v in PAGES.items() if s.startswith(args.prefix)}
+        if not pages:
+            print(f"No pages match prefix {args.prefix!r}.")
+            return 1
+
     created = updated = 0
-    for slug, (title, description, category, order, body) in PAGES.items():
+    for slug, (title, description, category, order, body) in pages.items():
         body = body.strip() + "\n"
         row = session.query(DocsPage).filter(DocsPage.slug == slug).first()
         action = "update" if row else "create"
@@ -649,7 +1132,7 @@ def main() -> int:
 
     if not args.dry_run:
         session.commit()
-    print(f"\n{'Previewed' if args.dry_run else 'Done'}: {created} created, {updated} updated, {len(PAGES)} total.")
+    print(f"\n{'Previewed' if args.dry_run else 'Done'}: {created} created, {updated} updated, {len(pages)} total.")
     return 0
 
 

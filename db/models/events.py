@@ -37,7 +37,20 @@ EVENT_TASK_TYPES = (
     "custom",
 )
 
-EVENT_FORMATION_MODES = ("self_join", "auto_assign", "admin_assign")
+# How players get onto teams (web_events.formation_mode). All but admin_assign
+# let players self-sign-up from the event page / a Discord button; they differ
+# only in how a signed-up player reaches a team:
+# - "self_join"    — the player picks their team at sign-up.
+# - "auto_assign"  — the server places them immediately (balanced).
+# - "signup_pool"  — sign-ups collect in a pool with NO team; admins sort them
+#                    into teams later (manually or by repeated randomize).
+# - "admin_assign" — no self sign-up at all; admins place every player.
+EVENT_FORMATION_MODES = ("self_join", "auto_assign", "signup_pool", "admin_assign")
+
+# Formation modes that let a player sign themselves up (everything but
+# admin_assign). Used by the join route, the recruiting banner and the Discord
+# signup button.
+EVENT_SELF_SIGNUP_MODES = ("self_join", "auto_assign", "signup_pool")
 
 # Task-library sharing (web_event_tasks.visibility / web_event_task_library.visibility):
 # every task an admin creates is saved to the reusable task library — "public"
@@ -199,6 +212,37 @@ class EventTeamMember(Base):
     player_id = Column(Integer, ForeignKey("players.player_id"), primary_key=True)
     # Credit cutoff: the engine ignores submissions timestamped earlier (PRD D10).
     joined_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+class EventSignup(Base):
+    """A player's self-service opt-in to an event ("Sign up!").
+
+    One row per (event, player); the app layer additionally enforces one
+    sign-up per *user* per event (a player enters with a single RSN). In
+    ``signup_pool`` mode a sign-up carries NO team — admins later sort the pool
+    into teams (creating ``web_event_team_members`` rows). In self_join /
+    auto_assign the placement is immediate, but a sign-up row is still recorded
+    so the pool view, Discord button and audit trail see a single source of
+    truth for "who opted in". Events that never use self sign-up
+    (admin_assign) write no rows here, so their behavior is unchanged."""
+
+    __tablename__ = "web_event_signups"
+    __table_args__ = (
+        Index("uq_web_event_signup", "event_id", "player_id", unique=True),
+        Index("idx_web_event_signup_event", "event_id"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    player_id = Column(Integer, ForeignKey("players.player_id"), nullable=False)
+    # The clan the player signs up under (clan_vs_clan); the event's group for a
+    # standard group event; NULL for a global event.
+    group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    # How the sign-up arrived, for the admin pool view: "web" | "discord".
+    source = Column(String(16), nullable=False, default="web", server_default="web")
+    created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
 class EventBingoCell(Base):

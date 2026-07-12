@@ -97,19 +97,25 @@ def main():
             player_id=p_opp.player_id, group_id=opp.group_id))
 
         # ── Draft clan-vs-clan event; host seeded accepted ────────────────────
+        # discord_event_policy="immediate" so the mirror is desired while still
+        # a draft (the default on_activate would desire nothing until activation).
         ev = Event(name="CvC IT event", status="draft", group_id=host.group_id,
                    mode="clan_vs_clan", formation_mode="self_join",
                    starts_at=now - timedelta(days=1), ends_at=now + timedelta(days=1),
                    has_bingo=False, requires_confirmation=False, board_size=5,
                    bonus_line_points=0, bonus_blackout_points=0,
+                   discord_event_policy="immediate",
                    discord_guild_id=str(host.guild_id))
         session.add(ev)
         session.flush()
         event_id = ev.id
         session.add(EventGroup(event_id=ev.id, group_id=host.group_id, role="host",
                                status="accepted", responded_at=now))
+        # mirror_discord_event=True: the opponent opted in to mirroring the
+        # scheduled event into its own guild (accept-time checkbox).
         session.add(EventGroup(event_id=ev.id, group_id=opp.group_id,
-                               role="opponent", status="invited"))
+                               role="opponent", status="invited",
+                               mirror_discord_event=True))
         session.flush()
 
         def accepted_ids():

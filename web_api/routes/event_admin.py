@@ -20,6 +20,13 @@ Task 20 (bingo designer):
   GET   /api/v1/event-task-library?query=&type=&page=  -> EventTaskLibraryItem[]
         (session + any group admin / superadmin)
 
+Task-library management (superadmin CP — curated/global presets shape every
+clan's pickers):
+  POST   /api/v1/event-task-library        { name, type, goal…, default_points?,
+                                             difficulty?, visibility? } -> row
+  PATCH  /api/v1/event-task-library/{id}   { partial }                  -> row
+  DELETE /api/v1/event-task-library/{id}   -> { ok }   (soft: active=false)
+
 Semantics:
 - confirm/award reuse ``services.event_engine.apply_completion`` so a
   confirmed pending row (or a manual award) takes the *exact* same apply path
@@ -433,20 +440,39 @@ async def update_task(event_id: int, task_id: int):
                 if not (1 <= len(label) <= 255):
                     abort_problem(422, "Invalid label", "Task label must be 1–255 characters.")
                 task.label = label
-            if "target" in body or "target_value" in body:
+            if "target" in body or "target_value" in body or "config" in body:
                 # Re-validate the merged goal per task type so an edit can't
-                # leave a task the engine will never match.
+                # leave a task the engine will never match. `config` edits let
+                # the task form change item lists / source NPCs in place
+                # (instead of the old delete-and-recreate flow); explicit
+                # `config: null` switches an item_collection back to
+                # single-item semantics.
                 from web_api.routes.event_task_validation import validate_task_payload
 
                 target = body.get("target", task.target)
                 if target is not None and not isinstance(target, str):
                     abort_problem(422, "Invalid target", "'target' must be a string or null.")
+                config = body.get("config", task.config)
+                if config is not None and not isinstance(config, (str, dict)):
+                    abort_problem(422, "Invalid config", "'config' must be a JSON object, string or null.")
                 normalized = validate_task_payload(s, {
                     "type": task.type,
                     "target": target,
                     "target_value": body.get("target_value", task.target_value),
-                    "config": task.config,
+                    "config": config,
                 })
+                if "config" in body and task.config:
+                    # A replacement config from the form must not strip the
+                    # designer's auto-created marker off a board task.
+                    try:
+                        old_cfg = json.loads(task.config)
+                        if isinstance(old_cfg, dict) and old_cfg.get(_BINGO_AUTO_KEY):
+                            new_cfg = json.loads(normalized["config"]) if normalized["config"] else {}
+                            if isinstance(new_cfg, dict) and _BINGO_AUTO_KEY not in new_cfg:
+                                new_cfg[_BINGO_AUTO_KEY] = old_cfg[_BINGO_AUTO_KEY]
+                                normalized["config"] = json.dumps(new_cfg)
+                    except (TypeError, ValueError):
+                        pass
                 task.target = normalized["target"]
                 task.target_value = normalized["target_value"]
                 task.config = normalized["config"]
@@ -462,8 +488,7 @@ async def update_task(event_id: int, task_id: int):
             # preset with the chosen publicity.
             visibility = clean_task_visibility(body, default=None)
             if visibility is not None:
-                task.visibility = visibility
-                save_task_to_library(s, ev, task, visibility)
+                task.visibility = save_task_to_library(s, ev, task, visibility)
             s.commit()
             return {
                 "id": task.id,
@@ -474,6 +499,7 @@ async def update_task(event_id: int, task_id: int):
                 "points": int(task.points or 0),
                 "requires_confirmation": bool(task.requires_confirmation),
                 "visibility": task.visibility or "public",
+                "config": task.config or None,
             }
 
     payload = await asyncio.to_thread(_apply)
@@ -717,7 +743,7 @@ async def put_bingo_board(event_id: int):
                         config=_merged_auto_config(normalized["config"]),
                     )
                     s.add(task)
-                    save_task_to_library(s, ev, task, visibility)
+                    task.visibility = save_task_to_library(s, ev, task, visibility)
                     s.flush()
                     task_id = task.id
                     label = label or task.label
@@ -854,23 +880,250 @@ async def list_task_library():
                     .offset((page - 1) * _LIBRARY_PAGE_SIZE)
                     .limit(_LIBRARY_PAGE_SIZE)
                     .all())
-            return [
-                {
-                    "id": r.id,
-                    "name": r.name,
-                    "description": r.description,
-                    "type": r.type,
-                    "target": r.target,
-                    "target_value": r.target_value,
-                    "default_points": int(r.default_points or 0),
-                    "difficulty": r.difficulty,
-                    "config": r.config,
-                    "source": r.source,
-                    "group_id": r.group_id,
-                    "visibility": r.visibility or "public",
-                }
-                for r in rows
-            ]
+            return [_library_row(r) for r in rows]
 
     payload = await asyncio.to_thread(_load)
     return private_no_store(jsonify(payload))
+
+
+def _library_row(r: EventTaskLibraryItem) -> dict:
+    return {
+        "id": r.id,
+        "name": r.name,
+        "description": r.description,
+        "type": r.type,
+        "target": r.target,
+        "target_value": r.target_value,
+        "default_points": int(r.default_points or 0),
+        "difficulty": r.difficulty,
+        "config": r.config,
+        "source": r.source,
+        "group_id": r.group_id,
+        "visibility": r.visibility or "public",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Task-library management (superadmin CP)
+# --------------------------------------------------------------------------- #
+# The library's read side above is shared with every group admin; writes are
+# site-staff only — curated presets and globally-public rows shape every
+# clan's pickers, so they're managed from /admin. Goal fields go through the
+# same validate_task_payload as event tasks: a preset that saves is a preset
+# that instantiates.
+
+_LIBRARY_DIFFICULTIES = ("air", "water", "earth", "fire")
+
+
+def _assert_library_admin(s, user_id: int) -> None:
+    from web_api.deps import assert_superadmin
+
+    assert_superadmin(load_user(s, user_id))
+
+
+def _clean_library_name(body: dict, *, required: bool) -> str | None:
+    if "name" not in body and not required:
+        return None
+    name = (str(body.get("name") or "")).strip()
+    if not (1 <= len(name) <= 120):
+        abort_problem(422, "Invalid name", "Preset name must be 1–120 characters.")
+    return name
+
+
+def _clean_library_fields(body: dict) -> dict:
+    """Validated non-goal fields present in ``body`` (absent = unchanged)."""
+    out: dict = {}
+    if "description" in body:
+        description = body.get("description")
+        if description is not None and not isinstance(description, str):
+            abort_problem(422, "Invalid description", "description must be a string or null.")
+        out["description"] = (description or "").strip()[:2000] or None
+    if "default_points" in body:
+        points = body.get("default_points")
+        if not isinstance(points, int) or isinstance(points, bool) or points < 0:
+            abort_problem(422, "Invalid default_points",
+                          "'default_points' must be a non-negative integer.")
+        out["default_points"] = points
+    if "difficulty" in body:
+        difficulty = body.get("difficulty")
+        if difficulty is not None and difficulty not in _LIBRARY_DIFFICULTIES:
+            abort_problem(422, "Invalid difficulty",
+                          f"difficulty must be one of {list(_LIBRARY_DIFFICULTIES)} or null.")
+        out["difficulty"] = difficulty
+    visibility = clean_task_visibility(body, default=None)
+    if visibility is not None:
+        out["visibility"] = visibility
+    return out
+
+
+def _validated_library_goal(s, ttype: str, body: dict, row: EventTaskLibraryItem | None) -> dict:
+    """Merged + revalidated target/target_value/config for a library write."""
+    from web_api.routes.event_task_validation import validate_task_payload
+
+    target = body.get("target", row.target if row else None)
+    if target is not None and not isinstance(target, str):
+        abort_problem(422, "Invalid target", "'target' must be a string or null.")
+    config = body.get("config", row.config if row else None)
+    if config is not None and not isinstance(config, (str, dict)):
+        abort_problem(422, "Invalid config", "'config' must be a JSON object, string or null.")
+    normalized = validate_task_payload(s, {
+        "type": ttype,
+        "target": target,
+        "target_value": body.get("target_value", row.target_value if row else None),
+        "config": config,
+    })
+    return normalized
+
+
+def _assert_library_name_free(s, name: str, *, source: str, group_id, exclude_id=None) -> None:
+    """The (name, source, group_id) unique index, surfaced as a 409 instead of
+    an opaque IntegrityError."""
+    group_match = (
+        EventTaskLibraryItem.group_id == group_id
+        if group_id is not None
+        else EventTaskLibraryItem.group_id.is_(None)
+    )
+    q = s.query(EventTaskLibraryItem.id).filter(
+        EventTaskLibraryItem.source == source,
+        group_match,
+        EventTaskLibraryItem.name == name,
+    )
+    if exclude_id is not None:
+        q = q.filter(EventTaskLibraryItem.id != exclude_id)
+    if q.first() is not None:
+        abort_problem(409, "Name taken", f"A preset named '{name}' already exists.")
+
+
+@event_admin_bp.post("/event-task-library")
+async def create_task_library_item():
+    """Create a curated preset (site-wide, ``source='curated'``)."""
+    user_id = current_user_id()
+    body = await json_body()
+    name = _clean_library_name(body, required=True)
+    ttype = body.get("type")
+    if ttype not in EVENT_TASK_TYPES:
+        abort_problem(422, "Invalid task type", f"type must be one of {list(EVENT_TASK_TYPES)}.")
+    fields = _clean_library_fields(body)
+
+    def _apply():
+        with db_session() as s:
+            _assert_library_admin(s, user_id)
+            normalized = _validated_library_goal(s, ttype, body, None)
+            _assert_library_name_free(s, name, source="curated", group_id=None)
+            row = EventTaskLibraryItem(
+                name=name,
+                type=ttype,
+                target=normalized["target"],
+                target_value=normalized["target_value"],
+                config=normalized["config"],
+                source="curated",
+                group_id=None,
+                default_points=fields.get("default_points", 0),
+                description=fields.get("description"),
+                difficulty=fields.get("difficulty"),
+                visibility=fields.get("visibility", "public"),
+                active=True,
+            )
+            s.add(row)
+            s.flush()
+            s.add(AuditLog(
+                actor_user_id=user_id,
+                group_id=None,
+                action="event.library.create",
+                target=f"web_event_task_library.{row.id}",
+                before=None,
+                after=json.dumps(_library_row(row)),
+            ))
+            s.commit()
+            return _library_row(row)
+
+    payload = await asyncio.to_thread(_apply)
+    return private_no_store(jsonify(payload))
+
+
+@event_admin_bp.patch("/event-task-library/<int:item_id>")
+async def update_task_library_item(item_id: int):
+    """Edit any preset — curated seeds and group-saved rows alike (absent keys
+    are left unchanged). Changing goal fields (target/target_value/config, or
+    type) revalidates the whole goal."""
+    user_id = current_user_id()
+    body = await json_body()
+    name = _clean_library_name(body, required=False)
+    ttype = body.get("type")
+    if ttype is not None and ttype not in EVENT_TASK_TYPES:
+        abort_problem(422, "Invalid task type", f"type must be one of {list(EVENT_TASK_TYPES)}.")
+    fields = _clean_library_fields(body)
+
+    def _apply():
+        with db_session() as s:
+            _assert_library_admin(s, user_id)
+            row = (
+                s.query(EventTaskLibraryItem)
+                .filter(EventTaskLibraryItem.id == item_id,
+                        EventTaskLibraryItem.active.is_(True))
+                .first()
+            )
+            if row is None:
+                abort_problem(404, "Preset not found", f"No task-library item {item_id}.")
+            before = _library_row(row)
+            if name is not None and name != row.name:
+                _assert_library_name_free(
+                    s, name, source=row.source, group_id=row.group_id, exclude_id=row.id,
+                )
+                row.name = name
+            if ttype is not None or "target" in body or "target_value" in body or "config" in body:
+                new_type = ttype or row.type
+                normalized = _validated_library_goal(s, new_type, body, row)
+                row.type = new_type
+                row.target = normalized["target"]
+                row.target_value = normalized["target_value"]
+                row.config = normalized["config"]
+            for key, value in fields.items():
+                setattr(row, key, value)
+            after = _library_row(row)
+            if after != before:
+                s.add(AuditLog(
+                    actor_user_id=user_id,
+                    group_id=row.group_id,
+                    action="event.library.update",
+                    target=f"web_event_task_library.{row.id}",
+                    before=json.dumps(before),
+                    after=json.dumps(after),
+                ))
+            s.commit()
+            return after
+
+    payload = await asyncio.to_thread(_apply)
+    return private_no_store(jsonify(payload))
+
+
+@event_admin_bp.delete("/event-task-library/<int:item_id>")
+async def delete_task_library_item(item_id: int):
+    """Soft-delete (active=false): the preset leaves every picker, but tasks
+    already copied into events are their own rows and are untouched."""
+    user_id = current_user_id()
+
+    def _apply():
+        with db_session() as s:
+            _assert_library_admin(s, user_id)
+            row = (
+                s.query(EventTaskLibraryItem)
+                .filter(EventTaskLibraryItem.id == item_id,
+                        EventTaskLibraryItem.active.is_(True))
+                .first()
+            )
+            if row is None:
+                abort_problem(404, "Preset not found", f"No task-library item {item_id}.")
+            row.active = False
+            s.add(AuditLog(
+                actor_user_id=user_id,
+                group_id=row.group_id,
+                action="event.library.delete",
+                target=f"web_event_task_library.{row.id}",
+                before=json.dumps(_library_row(row)),
+                after=None,
+            ))
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    return private_no_store(jsonify({"ok": True}))

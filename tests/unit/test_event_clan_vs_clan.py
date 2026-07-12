@@ -116,6 +116,18 @@ class TestAssertEventAdminClan:
         _patch_roles(monkeypatch, evr, superadmin=True)
         evr._assert_event_admin(_S(), 7, _cvc())  # no participant query needed
 
+    def test_opponent_admin_needs_no_entitlement(self, monkeypatch):
+        # The challenged (non-subscriber) clan's admin can co-manage: the clan
+        # branch must NEVER consult the events entitlement. If it does, this
+        # blows up loudly.
+        _patch_roles(monkeypatch, evr, roles={20: "admin"})
+
+        def _boom(*a, **k):
+            raise AssertionError("entitlement must not be checked for opponents")
+
+        monkeypatch.setattr(evr, "assert_group_entitlement", _boom)
+        evr._assert_event_admin(_S([(10,), (20,)]), 7, _cvc())  # no raise
+
     def test_standard_event_object_takes_entitlement_path(self, monkeypatch):
         seen = {}
         monkeypatch.setattr(evr, "load_user", lambda s, uid: "USER")
@@ -280,6 +292,7 @@ class TestJoinClanRouting:
             [(10,), (20,)],                 # participating groups (eligibility)
             [(1,)],                         # player is in a participating clan
             [],                             # not already on a team
+            [(3,)],                         # one-RSN: user's players (only self)
             [_team(1, group_id=10), _team(2, group_id=20)],
             [(20,)],                        # the player's clans -> clan 20
         )
@@ -290,7 +303,7 @@ class TestJoinClanRouting:
 
     async def test_cannot_pick_other_clans_team(self, client, monkeypatch):
         s = _S(
-            [_cvc()], [_player()], [(10,), (20,)], [(1,)], [],
+            [_cvc()], [_player()], [(10,), (20,)], [(1,)], [], [(3,)],
             [_team(1, group_id=10), _team(2, group_id=20)],
             [(20,)],
         )
@@ -303,7 +316,7 @@ class TestJoinClanRouting:
     async def test_auto_assign_balances_within_own_clan(self, client, monkeypatch):
         s = _S(
             [_cvc(formation_mode="auto_assign")], [_player()],
-            [(10,), (20,)], [(1,)], [],
+            [(10,), (20,)], [(1,)], [], [(3,)],
             [_team(1, group_id=10), _team(2, group_id=10), _team(3, group_id=20)],
             [(10,)],                        # player's clan: 10 -> teams 1 and 2
             [(1, 4), (2, 1), (3, 0)],       # team 3 is smallest overall but foreign
@@ -315,13 +328,24 @@ class TestJoinClanRouting:
 
     async def test_no_team_for_own_clan_yet(self, client, monkeypatch):
         s = _S(
-            [_cvc()], [_player()], [(10,), (20,)], [(1,)], [],
+            [_cvc()], [_player()], [(10,), (20,)], [(1,)], [], [(3,)],
             [_team(1, group_id=10)],
             [(20,)],                        # own clan 20 has no team
         )
         _wire_events(monkeypatch, s)
         r = await client.post("/api/v1/events/1/join", json={"player_id": 3})
         assert r.status_code == 404
+
+    async def test_second_account_of_same_user_rejected(self, client, monkeypatch):
+        # One-RSN: the user already entered with player 9; player 3 is refused.
+        s = _S(
+            [_cvc()], [_player()], [(10,), (20,)], [(1,)], [],
+            [(3,), (9,)],   # user owns 3 and 9
+            [(9,)],         # player 9 already signed up (other account)
+        )
+        _wire_events(monkeypatch, s)
+        r = await client.post("/api/v1/events/1/join", json={"player_id": 3})
+        assert r.status_code == 409
 
 
 # ── admin_add_member: team clan constraint ───────────────────────────────────

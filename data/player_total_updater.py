@@ -305,29 +305,44 @@ async def github_update_loop():
         print("Skipping GitHub update loop on dev instance")
         ## Do not perform github updates on dev instances
         return
-    last_update = redis_client.client.get("github_update_last_timestamp")
-    if last_update:
-        if last_update > datetime.now() - timedelta(minutes=30):
-            ## Ensure we are only updating once per 30 minutes, at minimum
-            return
-    redis_client.client.set("github_update_last_timestamp", datetime.now().isoformat())
     updater = GithubPagesUpdater()
     app_logger.log(log_type="access", data=f"Started GitHub update loop", app_name="player_updates", description="github_update_loop")
-    
+
     while not shutdown_event.is_set():
+        last_update = redis_client.client.get("github_update_last_timestamp")
+        last_update_dt = None
+        if last_update:
+            try:
+                # redis_client.client is not decode_responses, so .get() returns bytes;
+                # the timestamp was stored as an ISO string, so decode + parse before comparing.
+                last_update_dt = datetime.fromisoformat(
+                    last_update.decode() if isinstance(last_update, bytes) else last_update
+                )
+            except (ValueError, TypeError):
+                # Malformed/blank value: treat as "no recent update".
+                last_update_dt = None
+
+        if last_update_dt is not None and last_update_dt > datetime.now() - timedelta(minutes=30):
+            ## Ensure we are only updating once per 30 minutes, at minimum. Sleep out the
+            ## remainder of the window and re-check, rather than ending the task entirely.
+            remaining = (last_update_dt + timedelta(minutes=30)) - datetime.now()
+            await sleep_with_watchdog_heartbeats(int(remaining.total_seconds()) + 1)
+            continue
+
+        redis_client.client.set("github_update_last_timestamp", datetime.now().isoformat())
         try:
             # Send watchdog heartbeat before GitHub update
             await send_watchdog_heartbeat()
-            
+
             # Pass watchdog instance to prevent timeout during webhook checking
             await updater.update_github_pages(watchdog)
-            
+
             # Send watchdog heartbeat after GitHub update
             await send_watchdog_heartbeat()
-            
+
         except Exception as e:
             print(f"Error in GitHub update loop: {e}")
-        
+
         # Sleep with periodic heartbeats (1 hour = 3600 seconds)
         await sleep_with_watchdog_heartbeats(3600)
 

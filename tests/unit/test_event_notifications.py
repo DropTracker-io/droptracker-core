@@ -22,7 +22,7 @@ _spec.loader.exec_module(en)
 ALL_TYPES = (
     "event_started", "event_ended", "event_completion", "event_cell",
     "event_line", "event_blackout", "event_lead_change", "event_pending",
-    "event_activation_failed",
+    "event_activation_failed", "event_signup_prompt",
 )
 
 
@@ -40,6 +40,7 @@ class TestKindMapping:
             "event_lead_change": "leaderboard",
             "event_pending": "admin",
             "event_activation_failed": "admin",
+            "event_signup_prompt": "announcements",
         }
 
     def test_all_families_covered(self):

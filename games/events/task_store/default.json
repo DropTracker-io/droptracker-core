@@ -1,6 +1,30 @@
 {
   "tasks": [
     {
+      "name": "Rune Armour",
+      "description": "Obtain 1 set of Rune Armour per member of your team.",
+      "type": "assembly",
+      "is_assembly": true,
+      "required_items": [
+        {
+          "item_name": "Rune full helm",
+          "quantity": 1,
+          "per_member": true
+        },
+        {
+          "item_name": "Rune platebody",
+          "quantity": 1,
+          "per_member": true
+        },
+        {
+          "item_name": "Rune platelegs",
+          "quantity": 1,
+          "per_member": true
+        }
+      ],
+      "difficulty": "air"
+    },
+    {
       "name": "Abyssal whip",
       "description": "Obtain 1 Abyssal Whip",
       "type": "exact_item",
@@ -15,7 +39,7 @@
     },
     {
       "name": "10 Barrows Points",
-      "description": "Obtain Barrows Items until you reach the required number of </points:1348436781019959318>",
+      "description": "Obtain Barrows Items until you reach the required number of points",
       "type": "point_collection",
       "is_assembly": false,
       "points": 10,
@@ -369,7 +393,7 @@
     },
     {
       "name": "10 Saradomin Points",
-      "description": "Obtain Commander Zilyana drops until you reach the required number of </points:1348436781019959318>",
+      "description": "Obtain Commander Zilyana drops until you reach the required number of points",
       "type": "point_collection",
       "is_assembly": false,
       "points": 10,
@@ -474,7 +498,7 @@
     },
     {
       "name": "20 DK Points",
-      "description": "Obtain Dagannoth King drops until you reach the required number of </points:1348436781019959318>",
+      "description": "Obtain Dagannoth King drops until you reach the required number of points",
       "type": "point_collection",
       "is_assembly": false,
       "points": 10,
@@ -606,7 +630,7 @@
     },
     {
       "name": "10 Demonic Points",
-      "description": "Obtain Demonic Gorilla drops until you reach the required number of </points:1348436781019959318>",
+      "description": "Obtain Demonic Gorilla drops until you reach the required number of points",
       "type": "point_collection",
       "is_assembly": false,
       "points": 10,
@@ -722,7 +746,7 @@
     },
     {
       "name": "Bandos Points",
-      "description": "Obtain General Graardor drops until you reach the required number of </points:1348436781019959318>",
+      "description": "Obtain General Graardor drops until you reach the required number of points",
       "type": "point_collection",
       "is_assembly": false,
       "points": 10,
@@ -813,7 +837,7 @@
     },
     {
       "name": "10 Godwars Points",
-      "description": "Obtain items from Godwars Dungeon bosses until you reach the required number of </points:1348436781019959318>",
+      "description": "Obtain items from Godwars Dungeon bosses until you reach the required number of points",
       "type": "point_collection",
       "is_assembly": false,
       "points": 10,
@@ -866,7 +890,7 @@
     },
     {
       "name": "10 Zamorak Points",
-      "description": "Obtain K'ril Tsutsaroth drops until you reach the required number of </points:1348436781019959318>",
+      "description": "Obtain K'ril Tsutsaroth drops until you reach the required number of points",
       "type": "point_collection",
       "is_assembly": false,
       "points": 10,
@@ -997,7 +1021,7 @@
     },
     {
       "name": "10 Armadyl Points",
-      "description": "Obtain Kree'arra drops until you reach the required number of </points:1348436781019959318>",
+      "description": "Obtain Kree'arra drops until you reach the required number of points",
       "type": "point_collection",
       "is_assembly": false,
       "points": 10,
@@ -1453,7 +1477,7 @@
     },
     {
       "name": "20 Points",
-      "description": "Obtain TzHarr drops until you reach the required number of </points:1348436781019959318>",
+      "description": "Obtain TzHarr drops until you reach the required number of points",
       "type": "point_collection",
       "is_assembly": false,
       "points": 20,
@@ -1688,7 +1712,7 @@
     },
     {
       "name": "10 Wintertodt Points",
-      "description": "Obtain Wintertodt drops until you reach the required number of </points:1348436781019959318>",
+      "description": "Obtain Wintertodt drops until you reach the required number of points",
       "type": "point_collection",
       "is_assembly": false,
       "points": 10,
@@ -1715,7 +1739,7 @@
     },
     {
       "name": "10 Tempoross Points",
-      "description": "Obtain Tempoross drops until you reach the required number of </points:1348436781019959318>",
+      "description": "Obtain Tempoross drops until you reach the required number of points",
       "type": "point_collection",
       "is_assembly": false,
       "points": 10,
@@ -1755,7 +1779,7 @@
     },
     {
       "name": "10 Revenant Points",
-      "description": "Obtain Revenants drops until you reach the required number of </points:1348436781019959318>",
+      "description": "Obtain Revenants drops until you reach the required number of points",
       "type": "point_collection",
       "is_assembly": false,
       "points": 10,
@@ -1990,7 +2014,7 @@
     },
     {
       "name": "1000 Slayer Points",
-      "description": "Obtain 1000 Slayer Points (type </points:1348436781019959318>",
+      "description": "Obtain 1000 Slayer Points.",
       "type": "point_collection",
       "is_assembly": false,
       "points": 10,

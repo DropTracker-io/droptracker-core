@@ -61,6 +61,10 @@ class _Q:
         # Bulk delete: SQLAlchemy returns the affected row count.
         return len(self._r)
 
+    def update(self, *a, **k):
+        # Bulk update: SQLAlchemy returns the affected row count.
+        return len(self._r)
+
 
 class _S:
     """Scripted session: query() returns the next batch, in order. Running
