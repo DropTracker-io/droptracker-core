@@ -2,9 +2,13 @@ name: CI
 
 on:
   push:
-    branches: ["new-api", "claude/**"]
+    branches: ["**"]
   pull_request:
     branches: ["new-api"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   unit-tests:
