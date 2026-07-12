@@ -12,6 +12,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from utils.sentry import init_sentry
+
+init_sentry("droptracker-webhook-consumer")
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)s %(message)s",
@@ -39,8 +43,10 @@ async def _process_entry(entry_bytes: bytes) -> None:
     from api.core import get_db_session, reset_db_connections
     from api.routes.webhook import (
         _dispatch_seasonal_submission,
+        _link_video_to_submission,
         _normalize_submission_type,
         _normalize_world_type,
+        _try_attach_video_url_to_drop,
     )
     from data import submissions
     from db.models import Player
@@ -106,9 +112,16 @@ async def _process_entry(entry_bytes: bytes) -> None:
                 elif world_type != "main":
                     continue
 
+                # Mirror the synchronous intake path: link any uploaded video to
+                # this submission before dispatch, then (for drops) attach the
+                # serving URL to the created Drop row afterwards. Without these
+                # the queue path silently drops all video linkage.
+                await _link_video_to_submission(processed_data, db_session)
+
                 match norm_type:
                     case "drop":
                         await submissions.drop_processor(processed_data, external_session=db_session)
+                        await _try_attach_video_url_to_drop(processed_data, db_session)
                     case "collection_log":
                         await submissions.clog_processor(processed_data, external_session=db_session)
                     case "personal_best":
