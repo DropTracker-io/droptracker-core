@@ -428,6 +428,126 @@ async def group_lootboard(group_id: int):
     return with_cache_headers(jsonify(payload), max_age=30)
 
 
+@lootboard_bp.post("/groups/<int:group_id>/lootboard/timeframe")
+async def generate_timeframe_lootboard(group_id: int):
+    """Generate a custom-timeframe lootboard PNG for group leaders.
+
+    Body: { "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD" } (inclusive).
+    Group-admin gated. Data comes from the tiered timeframe sources
+    (lootboard/timeframe.py): Redis daily hashes for recent ranges, the
+    player_item_hourly_totals rollup for older ones. The PNG render runs in a
+    subprocess (CPU-bound PIL work must not block the API workers), guarded by
+    a per-group Redis cooldown so a click-happy admin can't stack renders.
+    """
+    import subprocess  # noqa: F401  (documentational; asyncio subprocess below)
+    import sys
+    from datetime import date as _date, datetime as _dt
+
+    from lootboard import timeframe as tf
+    from web_api.deps import (
+        assert_group_admin,
+        current_user_id,
+        json_body,
+        load_user,
+        manageable_guild_ids,
+    )
+
+    user_id = current_user_id()
+    body = await json_body()
+
+    def _parse_day(key: str) -> _date:
+        raw = str((body or {}).get(key, "")).strip()
+        try:
+            return _dt.strptime(raw, "%Y-%m-%d").date()
+        except ValueError:
+            abort_problem(422, "Invalid date", f"'{key}' must be YYYY-MM-DD.")
+
+    start_day = _parse_day("start_date")
+    end_day = _parse_day("end_date")
+
+    # Range sanity + tier selection (raises with a user-presentable message).
+    try:
+        plan = tf.classify_range(start_day, end_day)
+    except ValueError as e:
+        abort_problem(422, "Invalid range", str(e))
+
+    def _authorize_and_precheck():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+            if plan.mode == "hourly":
+                missing = tf.missing_rollup_partitions(
+                    s, tf.month_partitions(start_day, end_day)
+                )
+                if missing:
+                    abort_problem(
+                        422, "Range not available yet",
+                        "Loot data for "
+                        + ", ".join(f"{p // 100}-{p % 100:02d}" for p in missing)
+                        + " is still being backfilled — try a more recent range.",
+                    )
+
+    await asyncio.to_thread(_authorize_and_precheck)
+
+    # Per-group cooldown (multi-worker safe via Redis SET NX). The abort must
+    # live OUTSIDE the try: it raises, and a blanket except would swallow it.
+    conn = _rc()
+    on_cooldown = False
+    if conn is not None:
+        try:
+            on_cooldown = not conn.set(f"tfboard:cooldown:{group_id}", "1", nx=True, ex=60)
+        except Exception:
+            on_cooldown = False  # cooldown is best-effort; never block on Redis
+    if on_cooldown:
+        abort_problem(429, "Slow down",
+                      "A board was just generated for this group — try again in a minute.")
+
+    start_iso = f"{start_day.isoformat()}T00:00:00"
+    end_iso = f"{end_day.isoformat()}T23:59:59"
+    cmd = [
+        sys.executable, "timeframe_board_cli.py",
+        "--group-id", str(group_id),
+        "--start-time", start_iso,
+        "--end-time", end_iso,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd="/store/droptracker/disc",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        abort_problem(504, "Generation timed out", "Board generation took longer than 120s.")
+
+    stdout_str = (stdout or b"").decode(errors="ignore").strip()
+    stderr_str = (stderr or b"").decode(errors="ignore").strip()
+    if proc.returncode != 0:
+        # The CLI surfaces classify/backfill errors as "Error generating board: <msg>".
+        detail = stderr_str.splitlines()[-1] if stderr_str else "Board generation failed."
+        if detail.startswith("Error generating board: "):
+            detail = detail[len("Error generating board: "):]
+        abort_problem(422, "Generation failed", detail)
+
+    image_path = next(
+        (line.strip() for line in reversed(stdout_str.splitlines())
+         if line.strip().startswith("/store/") and line.strip().endswith(".png")),
+        None,
+    )
+    url = tf.image_path_to_url(image_path or "")
+    if not url:
+        abort_problem(500, "Generation failed", "Generator returned no image path.")
+    return jsonify({
+        "url": url,
+        "start_date": start_day.isoformat(),
+        "end_date": end_day.isoformat(),
+        "source": plan.mode,
+    })
+
+
 @lootboard_bp.post("/groups/<int:group_id>/lootboard/generate")
 async def generate_lootboard_image(group_id: int):
     """Wrap the existing PNG generator (share affordance). Returns { url } or

@@ -1367,26 +1367,58 @@ async def generate_timeframe_board(group_id: int = 0, wom_group_id: int = 0,
     )
     use_gp_colors = config_truthy(config.get('use_gp_colors'), default=True)
     
-    # Get player IDs for the group
-    if group_id != 2:
-        if wom_group_id == 0 and group:
-            wom_group_id = group.wom_id
-        
-        if wom_group_id != 0:
-            player_wom_ids = await fetch_group_members(wom_group_id)
-        else:
-            player_wom_ids = [player[0] for player in session.query(Player.wom_id).all()]
-    else:
-        player_wom_ids = [p.wom_id for p in session.query(Player.wom_id).all()]
-    
-    player_ids = await associate_player_ids(player_wom_ids)
-    
+    # Member resolution comes from the group-association table (the same rule
+    # the leaderboards apply) — the old WOM API round-trip added seconds of
+    # latency and external API load for data we already have locally.
+    from lootboard import timeframe as tf
+
+    board_session = get_db_session()
+    try:
+        player_ids = tf.resolve_group_member_ids(board_session, group_id)
+    finally:
+        board_session.close()
+
     print(f"[TimeframeBoard] Generating board for {len(player_ids)} players from {start_time} to {end_time}")
-    
-    # Query drops directly from database for the timeframe
-    group_items, player_totals, recent_drops, total_loot = await get_drops_for_timeframe_from_db(
-        player_ids, start_time, end_time, group_id, npc_id
+
+    # Tiered data source: Redis daily hashes for recent day-aligned ranges
+    # (~ms), the hourly rollup for older ranges (~50ms), and the raw drops
+    # scan only for NPC-filtered requests (no aggregate carries an npc
+    # dimension per item). classify_range raises ValueError with a
+    # user-presentable message for impossible ranges.
+    day_aligned = (
+        (start_time.hour, start_time.minute, start_time.second) == (0, 0, 0)
+        and (end_time.hour, end_time.minute, end_time.second) in ((0, 0, 0), (23, 59, 59))
     )
+    if npc_id:
+        group_items, player_totals, recent_drops, total_loot = await get_drops_for_timeframe_from_db(
+            player_ids, start_time, end_time, group_id, npc_id
+        )
+    else:
+        plan = tf.classify_range(start_time.date(), end_time.date())
+        if plan.mode == "redis" and day_aligned:
+            days = tf.daily_tokens(plan.start_day, plan.end_day)
+            group_items, player_totals, recent_drops, total_loot = tf.fetch_timeframe_from_redis(
+                redis_client.client, player_ids, days
+            )
+            print(f"[TimeframeBoard] Redis fast path: {len(days)} day(s), {len(group_items)} items")
+        else:
+            board_session = get_db_session()
+            try:
+                missing = tf.missing_rollup_partitions(
+                    board_session, tf.month_partitions(plan.start_day, plan.end_day)
+                )
+                if missing:
+                    raise ValueError(
+                        "Loot data for "
+                        + ", ".join(f"{p // 100}-{p % 100:02d}" for p in missing)
+                        + " is still being backfilled — try a more recent range."
+                    )
+                group_items, player_totals, recent_drops, total_loot = tf.fetch_timeframe_from_hourly(
+                    board_session, player_ids, plan.start_day, plan.end_day
+                )
+            finally:
+                board_session.close()
+            print(f"[TimeframeBoard] Hourly rollup path: {len(group_items)} items")
 
     print(f"[TimeframeBoard] Got {len(recent_drops)} recent drops, total loot: {total_loot:,}")
     
