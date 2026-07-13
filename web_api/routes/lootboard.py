@@ -58,6 +58,47 @@ DEFAULT_MIN_VALUE = 2_500_000
 _THEME_PREFIX = "/store/droptracker/disc/lootboard/"
 _DEFAULT_THEME_URL = f"{IMG_BASE}/lootboard/bank-new-clean-dark.png"
 
+# Rendered preview images for the style catalog (one per ``lootboards`` row,
+# named ``{id}.png``), served by the image host at /img/lootboards/{id}.png.
+_STYLE_PREVIEW_DIR = "/store/droptracker/disc/static/assets/img/lootboards"
+
+
+@lootboard_bp.get("/lootboard-styles")
+async def lootboard_styles():
+    """Catalog of selectable lootboard styles (public, cached).
+
+    Backs the board-style picker in the group config editor — the ~87-row
+    ``lootboards`` table the legacy XenForo selector used. Styles without a
+    rendered preview image are omitted so the picker never shows a broken
+    thumbnail.
+    """
+    def _load():
+        with db_session() as s:
+            rows = (
+                s.query(LootboardStyle)
+                .order_by(LootboardStyle.category, LootboardStyle.id)
+                .all()
+            )
+            styles = []
+            for r in rows:
+                if not os.path.exists(os.path.join(_STYLE_PREVIEW_DIR, f"{r.id}.png")):
+                    continue
+                # Never offer a style whose theme background is missing on
+                # disk — the PNG generator would fail for any group using it.
+                if r.local_url and not os.path.exists(r.local_url):
+                    continue
+                styles.append({
+                    "id": int(r.id),
+                    "name": r.name or f"Style {r.id}",
+                    "category": r.category or "Other",
+                    "description": r.description or "",
+                    "preview_url": f"{IMG_BASE}/lootboards/{r.id}.png",
+                })
+            return styles
+
+    styles = await asyncio.to_thread(_load)
+    return with_cache_headers(jsonify({"styles": styles}), max_age=300)
+
 # Item icon PNGs, served over the image server at ``{IMG_BASE}/itemdb/{id}.png``.
 # Used to confirm a resolved stacked-pile icon is actually cached before pointing
 # the browser at it (the web read path has no on-demand download, unlike the PNG

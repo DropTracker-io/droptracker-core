@@ -90,7 +90,10 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     },
 
     # --- Board settings ---
-    {"key": "loot_board_type", "type": "select", "default": "1", "options": ["1", "2", "3"]},
+    # boardstyle: a lootboards-table row id chosen via the preview picker
+    # (GET /lootboard-styles). Existence is validated in the PATCH route —
+    # the catalog lives in the DB, not this static registry.
+    {"key": "loot_board_type", "type": "boardstyle", "default": "1"},
     {"key": "use_dynamic_colors", "type": "boolean", "default": True},
     {"key": "use_gp_colors", "type": "boolean", "default": True},
     {"key": "repost_lootboard", "type": "boolean", "default": False},

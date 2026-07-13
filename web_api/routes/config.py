@@ -27,7 +27,7 @@ import json
 
 from quart import Blueprint, jsonify
 
-from db import AuditLog, Group, GroupConfiguration, NpcList, PersonalBestEntry
+from db import AuditLog, Group, GroupConfiguration, LootboardStyle, NpcList, PersonalBestEntry
 from web_api.common import abort_problem, db_session, private_no_store, _rc
 from web_api.config_registry import (
     ConfigValidationError,
@@ -142,6 +142,24 @@ async def patch_group_config(group_id: int):
             coerced[key] = coerce_to_storage(key, value)
         except ConfigValidationError as e:
             abort_problem(422, "Invalid config value", e.detail)
+
+    # boardstyle keys reference lootboards-table rows; the catalog lives in
+    # the DB (GET /lootboard-styles), so existence is checked here rather
+    # than against the static registry.
+    for key in ("loot_board_type", "seasonal_loot_board_type"):
+        if key in coerced:
+            try:
+                style_id = int(str(coerced[key]).strip())
+            except (TypeError, ValueError):
+                abort_problem(422, "Invalid config value", f"'{key}' must be a lootboard style id.")
+
+            def _style_exists(sid=style_id):
+                with db_session() as s:
+                    return s.query(LootboardStyle.id).filter(LootboardStyle.id == sid).first() is not None
+
+            if not await asyncio.to_thread(_style_exists):
+                abort_problem(422, "Invalid config value", f"Unknown lootboard style id {style_id}.")
+            coerced[key] = str(style_id)
 
     def _apply():
         with db_session() as s:
