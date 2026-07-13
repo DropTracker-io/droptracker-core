@@ -67,10 +67,67 @@ SELECT_CUSTOM_ID_PREFIX = "hof_boss_select"
 
 
 def canonical_display_name(boss_name: str) -> str:
-    """Map a configured boss name to the display name of the message it lives in."""
+    """Map a configured boss name to the display name of the message it lives in.
+
+    Spelling variants are honoured here too ('Corrupted Gauntlet' must land in
+    the same grouped message as 'The Corrupted Gauntlet'), otherwise a group
+    whose list carries both spellings renders the same boss twice.
+    """
     if SEPULCHRE_FLOOR_RE.match(boss_name):
         return SEPULCHRE_CANONICAL
-    return RAID_VARIANT_TO_CANONICAL.get(boss_name, boss_name)
+    for candidate in npc_name_candidates(boss_name):
+        canonical = RAID_VARIANT_TO_CANONICAL.get(candidate)
+        if canonical:
+            return canonical
+    return boss_name
+
+
+def plan_dedupe_key(display_name: str) -> str:
+    """Key under which plan entries merge: case- and 'The '-insensitive.
+
+    'Whisperer' and 'The Whisperer' are the same boss; groups routinely have
+    both spellings in their configured list, and each must not get its own
+    Hall of Fame message.
+    """
+    key = display_name.strip().casefold()
+    if key.startswith("the "):
+        key = key[4:]
+    return key
+
+
+_MODE_SUFFIX_RE = re.compile(r"^(.*?):? (Entry|Hard|Expert|Challenge) Mode$")
+
+
+def npc_name_candidates(name: str) -> List[str]:
+    """NpcList lookup candidates for a configured boss name, exact form first.
+
+    Group boss lists are user-entered / migrated and routinely miss the exact
+    NpcList spelling — 'Leviathan' vs 'The Leviathan', 'Tombs of Amascut Expert
+    Mode' vs 'Tombs of Amascut: Expert Mode'. Silently dropping those bosses
+    from the Hall of Fame is far worse than a fuzzy match, so try the obvious
+    spelling variants ("The " prefix added/stripped, raid-mode colon inserted/
+    removed) in a deterministic order.
+    """
+    name = (name or "").strip()
+    if not name:
+        return []
+    candidates = [name]
+    if name.casefold().startswith("the "):
+        candidates.append(name[4:])
+    else:
+        candidates.append(f"The {name}")
+    mode_match = _MODE_SUFFIX_RE.match(name)
+    if mode_match:
+        base, mode = mode_match.group(1), mode_match.group(2)
+        candidates.append(f"{base}: {mode} Mode")
+        candidates.append(f"{base} {mode} Mode")
+    seen: set[str] = set()
+    unique: List[str] = []
+    for candidate in candidates:
+        if candidate.casefold() not in seen:
+            seen.add(candidate.casefold())
+            unique.append(candidate)
+    return unique
 
 
 def parse_boss_list(config_value: str | None, long_value: str | None) -> List[str]:
@@ -114,9 +171,12 @@ def build_boss_plan(boss_names: List[str]) -> List[BossPlanEntry]:
     for boss in boss_names:
         display = canonical_display_name(boss)
         grouped = display in RAID_GROUPS or display == SEPULCHRE_CANONICAL
-        entry = entries.get(display)
+        # Merge spelling variants of the same boss ('Whisperer' + 'The
+        # Whisperer') into one entry; the first-seen display name is the label.
+        key = plan_dedupe_key(display)
+        entry = entries.get(key)
         if entry is None:
-            entries[display] = BossPlanEntry(display, [boss], grouped)
+            entries[key] = BossPlanEntry(display, [boss], grouped)
         elif boss not in entry.variant_names:
             entry.variant_names.append(boss)
     return sorted(entries.values(), key=lambda e: e.display_name.casefold())

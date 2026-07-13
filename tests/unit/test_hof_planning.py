@@ -180,3 +180,66 @@ class TestSelectMenus:
         assert parse_select_custom_id("poll_vote_1_2") is None
         assert parse_select_custom_id("hof_boss_select") is None
         assert parse_select_custom_id("hof_boss_select:abc:0") is None
+
+
+class TestNpcNameCandidates:
+    """Spelling-variant lookup for configured boss names (Rancour PvM's seven
+    silently-missing bosses: 'Leviathan' vs NpcList's 'The Leviathan', etc.)."""
+
+    def test_exact_name_first(self):
+        from utils.hof import npc_name_candidates
+        assert npc_name_candidates("Zulrah")[0] == "Zulrah"
+
+    def test_adds_the_prefix(self):
+        from utils.hof import npc_name_candidates
+        assert "The Leviathan" in npc_name_candidates("Leviathan")
+        assert "The Whisperer" in npc_name_candidates("Whisperer")
+        assert "The Hueycoatl" in npc_name_candidates("Hueycoatl")
+        assert "The Mimic" in npc_name_candidates("Mimic")
+        assert "The Corrupted Gauntlet" in npc_name_candidates("Corrupted Gauntlet")
+        assert "The Nightmare" in npc_name_candidates("Nightmare")
+
+    def test_strips_the_prefix(self):
+        from utils.hof import npc_name_candidates
+        assert "Leviathan" in npc_name_candidates("The Leviathan")
+
+    def test_raid_mode_colon_variants(self):
+        from utils.hof import npc_name_candidates
+        cands = npc_name_candidates("Tombs of Amascut Expert Mode")
+        assert "Tombs of Amascut: Expert Mode" in cands
+        cands = npc_name_candidates("Theatre of Blood: Hard Mode")
+        assert "Theatre of Blood Hard Mode" in cands
+
+    def test_dedupes_and_handles_empty(self):
+        from utils.hof import npc_name_candidates
+        cands = npc_name_candidates("Zulrah")
+        assert len(cands) == len({c.casefold() for c in cands})
+        assert npc_name_candidates("") == []
+        assert npc_name_candidates(None) == []
+
+
+class TestSpellingVariantMerging:
+    """A config list carrying both spellings of a boss must not produce two
+    Hall of Fame messages (Rancour PvM had 'Whisperer' + 'The Whisperer')."""
+
+    def test_the_prefix_variants_merge(self):
+        from utils.hof import build_boss_plan
+        plan = build_boss_plan(["The Whisperer", "Whisperer", "Zulrah"])
+        names = [e.display_name for e in plan]
+        assert len([n for n in names if "Whisperer" in n]) == 1
+        entry = next(e for e in plan if "Whisperer" in e.display_name)
+        assert set(entry.variant_names) == {"The Whisperer", "Whisperer"}
+        assert entry.display_name == "The Whisperer"  # first-seen label wins
+
+    def test_colonless_corrupted_gauntlet_joins_raid_group(self):
+        from utils.hof import build_boss_plan, canonical_display_name
+        assert canonical_display_name("Corrupted Gauntlet") == "The Gauntlet"
+        plan = build_boss_plan(["The Gauntlet", "Corrupted Gauntlet"])
+        assert len(plan) == 1
+        assert plan[0].display_name == "The Gauntlet"
+        assert plan[0].grouped
+
+    def test_distinct_bosses_do_not_merge(self):
+        from utils.hof import build_boss_plan
+        plan = build_boss_plan(["Zulrah", "Vorkath", "The Whisperer"])
+        assert len(plan) == 3

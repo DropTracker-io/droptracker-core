@@ -58,7 +58,7 @@ from interactions import (
     UnfurledMediaItem,
     listen,
 )
-from interactions.api.events import Component
+from interactions.api.events import Component, GuildJoin
 from interactions.client.errors import BadRequest, Forbidden, HTTPException, NotFound, RateLimited
 from interactions.models import (
     ContainerComponent,
@@ -89,6 +89,7 @@ from utils.hof import (
     build_boss_plan,
     build_message_plan,
     canonical_display_name,
+    npc_name_candidates,
     chunk_select_options,
     fit_directory_lines,
     parse_boss_list,
@@ -112,8 +113,12 @@ _CYCLE_SLEEP_SECONDS = int(os.getenv("HOF_CYCLE_SECONDS", "600"))
 _GROUP_TIMEOUT_SECONDS = 900
 # 403 (missing permissions) is usually a persistent misconfiguration, so back
 # off exponentially instead of hammering the same channel every 30 minutes.
+# The cap stays low (2h) because the failure is user-fixable at any moment —
+# Rancour PvM re-invited the bot and still waited out an 8h cooldown before the
+# GuildJoin/channel-change resets below existed. A probe every 2h is one cheap
+# fetch; a day of silence after the admin already fixed the problem is not.
 _FORBIDDEN_BASE_COOLDOWN_SECONDS = 1800
-_FORBIDDEN_MAX_COOLDOWN_SECONDS = 24 * 3600
+_FORBIDDEN_MAX_COOLDOWN_SECONDS = 2 * 3600
 _CHANNEL_SCAN_LIMIT = 200
 _ORPHAN_MIN_AGE_SECONDS = 120
 _DISCORD_EPOCH_MS = 1420070400000
@@ -215,6 +220,9 @@ class HallOfFame(Extension):
         self._channel_limiters: Dict[str, RateLimiter] = {}
         self._forbidden_until: Dict[int, float] = {}
         self._forbidden_strikes: Dict[int, int] = {}
+        # group_id -> channel_id the strike happened on, so a channel
+        # re-configuration can void the cooldown instead of waiting it out.
+        self._forbidden_channel: Dict[int, str] = {}
         self._entitlement_cache: Dict[int, Tuple[float, bool]] = {}
         # group_id -> (monotonic_ts, player_ids). Membership is re-queried once
         # per group per cycle instead of once per boss (was O(bosses) queries).
@@ -282,10 +290,12 @@ class HallOfFame(Extension):
             for group_id in group_ids:
                 if dev_mode and group_id != _GLOBAL_GROUP_ID:
                     continue
-                if self._group_is_entitled(group_id):
-                    eligible.append(group_id)
-                else:
+                if not self._group_is_entitled(group_id):
                     stats.skipped += 1
+                    continue
+                if self._cooldown_active(group_id):
+                    continue
+                eligible.append(group_id)
         if dev_mode:
             # This is trivially left on after testing and then silently freezes
             # every other group's Hall of Fame — make it impossible to miss.
@@ -296,9 +306,6 @@ class HallOfFame(Extension):
                 _GLOBAL_GROUP_ID, _GLOBAL_GROUP_ID,
             )
         for group_id in eligible:
-            cooldown = self._forbidden_until.get(group_id)
-            if cooldown and time.monotonic() < cooldown:
-                continue
             try:
                 async with self._work_lock:
                     await asyncio.wait_for(
@@ -309,7 +316,11 @@ class HallOfFame(Extension):
                 stats.groups += 1
             except (Forbidden, ChannelNotPostable) as e:
                 self._safe_rollback()
-                self._note_forbidden(group_id, reason=str(e) if isinstance(e, ChannelNotPostable) else None)
+                self._note_forbidden(
+                    group_id,
+                    reason=str(e) if isinstance(e, ChannelNotPostable) else None,
+                    channel_id=getattr(e, "channel_id", None),
+                )
                 stats.failures += 1
             except NotFound as e:
                 self._safe_rollback()
@@ -354,9 +365,11 @@ class HallOfFame(Extension):
         self._entitlement_cache[group_id] = (now, granted)
         return granted
 
-    def _note_forbidden(self, group_id: int, reason: Optional[str] = None):
+    def _note_forbidden(self, group_id: int, reason: Optional[str] = None,
+                        channel_id=None):
         """Record a 403 / inaccessible channel and back off exponentially
-        (30m, 1h, 2h … capped)."""
+        (30m, 1h, 2h capped). Remembers the offending channel so a channel
+        re-configuration voids the cooldown immediately."""
         strikes = self._forbidden_strikes.get(group_id, 0) + 1
         self._forbidden_strikes[group_id] = strikes
         cooldown = min(
@@ -364,6 +377,10 @@ class HallOfFame(Extension):
             _FORBIDDEN_MAX_COOLDOWN_SECONDS,
         )
         self._forbidden_until[group_id] = time.monotonic() + cooldown
+        if channel_id is None:
+            channel_id = self._configured_channel_id(group_id)
+        if channel_id:
+            self._forbidden_channel[group_id] = str(channel_id)
         detail = reason or ("bot lacks permission to post/edit in its Hall of "
                             "Fame channel")
         log.warning(
@@ -372,9 +389,43 @@ class HallOfFame(Extension):
         )
 
     def _clear_forbidden(self, group_id: int):
-        """A group pass succeeded, so reset its 403 backoff state."""
+        """A group pass succeeded (or its blocker went away), so reset its
+        403 backoff state."""
         self._forbidden_strikes.pop(group_id, None)
         self._forbidden_until.pop(group_id, None)
+        self._forbidden_channel.pop(group_id, None)
+
+    def _configured_channel_id(self, group_id: int) -> Optional[str]:
+        try:
+            row = session.query(GroupConfiguration).filter(
+                GroupConfiguration.group_id == group_id,
+                GroupConfiguration.config_key == "channel_id_to_send_pb_embeds",
+            ).first()
+            return str(row.config_value) if row and row.config_value else None
+        except Exception:
+            self._safe_rollback()
+            return None
+
+    def _cooldown_active(self, group_id: int) -> bool:
+        """True while a 403 backoff is in force — unless the group re-configured
+        its Hall of Fame channel since the strike, which voids the cooldown (the
+        admin plainly acted; waiting out hours of backoff against the OLD
+        channel is what stranded Rancour PvM). Called under ``_work_lock``."""
+        until = self._forbidden_until.get(group_id)
+        if not until or time.monotonic() >= until:
+            return False
+        struck_channel = self._forbidden_channel.get(group_id)
+        if struck_channel:
+            current = self._configured_channel_id(group_id)
+            if current and current != struck_channel:
+                log.warning(
+                    "HOF: group %d re-configured its channel (%s -> %s) — "
+                    "clearing backoff and retrying this cycle",
+                    group_id, struck_channel, current,
+                )
+                self._clear_forbidden(group_id)
+                return False
+        return True
 
     # ------------------------------------------------------------------ #
     # Near-real-time refresh consumer
@@ -490,8 +541,16 @@ class HallOfFame(Extension):
                     if not cfg.individual_messages or not cfg.boss_names:
                         continue
                     plan_names = {e.display_name for e in build_boss_plan(cfg.boss_names)}
-                    if display_name in plan_names:
-                        targets.add((gid, display_name))
+                    # The group's plan key may be a spelling variant of the
+                    # NpcList name ('Leviathan' vs 'The Leviathan') — match on
+                    # candidates and target the PLAN's key, since that is what
+                    # group_personal_best_message.boss_name stores.
+                    matched = next(
+                        (c for c in npc_name_candidates(display_name) if c in plan_names),
+                        None,
+                    )
+                    if matched:
+                        targets.add((gid, matched))
         except Exception:
             self._safe_rollback()
             log.exception("HOF: failed to resolve refresh targets")
@@ -622,12 +681,21 @@ class HallOfFame(Extension):
     def _resolve_entries(
         self, group_id: int, entries: List[BossPlanEntry]
     ) -> List[Tuple[BossPlanEntry, List[NpcList]]]:
-        """Attach NpcList rows to each plan entry, dropping unresolvable bosses."""
+        """Attach NpcList rows to each plan entry, dropping unresolvable bosses.
+
+        Configured names are user-entered and often miss NpcList's exact
+        spelling ('Leviathan' vs 'The Leviathan'), so each variant tries the
+        deterministic candidate spellings before being declared missing.
+        """
         resolved: List[Tuple[BossPlanEntry, List[NpcList]]] = []
         for entry in entries:
             npcs: List[NpcList] = []
             for name in entry.variant_names:
-                npc = session.query(NpcList).filter(NpcList.npc_name == name).first()
+                npc = None
+                for candidate in npc_name_candidates(name):
+                    npc = session.query(NpcList).filter(NpcList.npc_name == candidate).first()
+                    if npc:
+                        break
                 if npc:
                     npcs.append(npc)
                 else:
@@ -652,10 +720,12 @@ class HallOfFame(Extension):
             return
         if not hasattr(channel, "send") or not hasattr(channel, "history"):
             # Degraded BaseChannel: the HOF bot can't access this channel.
-            raise ChannelNotPostable(
+            exc = ChannelNotPostable(
                 f"group {group_id} channel {cfg.channel_id} is not accessible "
                 f"to the HOF bot (not in guild or missing permissions)"
             )
+            exc.channel_id = cfg.channel_id
+            raise exc
 
         if not cfg.boss_names:
             # Never treat an empty (possibly accidentally wiped) boss list as a
@@ -1438,6 +1508,66 @@ class HallOfFame(Extension):
             )
         except Exception as e:
             log.warning("HOF: hash store failed for %s/%s: %s", group_id, message_id, e)
+
+    # ------------------------------------------------------------------ #
+    # Guild join: clear backoff + reconcile immediately
+    # ------------------------------------------------------------------ #
+
+    @listen(GuildJoin)
+    async def on_guild_join(self, event: GuildJoin):
+        """When the HOF bot is (re-)invited to a guild, retry its group now.
+
+        Without this, a group that fixes the exact problem the backoff was
+        punishing (bot missing from the guild) still waits out the remaining
+        cooldown — Rancour PvM re-invited the bot and sat through an 8h
+        cooldown before anything posted. interactions also fires GuildJoin for
+        every guild during the startup sync; a fresh process has no strike
+        state, so the strikes-guard makes those a no-op.
+        """
+        try:
+            guild_id = str(event.guild.id)
+        except Exception:
+            return
+        try:
+            async with self._work_lock:
+                self._begin_fresh_read()
+                groups = session.query(Group).filter(Group.guild_id == guild_id).all()
+                targets = [
+                    g.group_id for g in groups
+                    if g.group_id in self._forbidden_until
+                    or g.group_id in self._forbidden_strikes
+                ]
+        except Exception:
+            self._safe_rollback()
+            log.exception("HOF: guild-join lookup failed for guild %s", guild_id)
+            return
+        for group_id in targets:
+            log.warning(
+                "HOF: bot (re)joined guild %s — clearing backoff for group %d "
+                "and reconciling now", guild_id, group_id,
+            )
+            self._clear_forbidden(group_id)
+            stats = CycleStats()
+            try:
+                async with self._work_lock:
+                    await asyncio.wait_for(
+                        self._reconcile_group(group_id, stats),
+                        timeout=_GROUP_TIMEOUT_SECONDS,
+                    )
+                log.warning("HOF: guild-join reconcile for group %d done | %s",
+                            group_id, stats.summary())
+            except (Forbidden, ChannelNotPostable) as e:
+                self._safe_rollback()
+                self._note_forbidden(
+                    group_id,
+                    reason=str(e) if isinstance(e, ChannelNotPostable) else None,
+                    channel_id=getattr(e, "channel_id", None),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._safe_rollback()
+                log.exception("HOF: guild-join reconcile failed for group %d", group_id)
 
     # ------------------------------------------------------------------ #
     # Boss-select interaction (ephemeral leaderboards)
