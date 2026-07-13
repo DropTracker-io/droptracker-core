@@ -5,6 +5,11 @@ Every endpoint independently enforces superadmin (403 otherwise):
   GET  /api/v1/admin/services
   POST /api/v1/admin/services/{unit}            { action: start|stop|restart }
   GET  /api/v1/admin/services/{unit}/logs
+  GET  /api/v1/admin/backups                    (timer/service state + local sets)
+  GET  /api/v1/admin/backups/logs
+  GET  /api/v1/admin/backups/offsite            (B2 dt_backups/ listing)
+  POST /api/v1/admin/backups/run
+  GET  /api/v1/admin/b2/usage                   (bucket-wide storage + cost estimate)
   POST /api/v1/admin/discord/send               { channel_id, content }
   GET  /api/v1/admin/lookup?q=
   POST   /api/v1/admin/subscriptions/tiers      { SubscriptionTier }
@@ -38,8 +43,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import shutil
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from sqlalchemy import or_, text as sa_text
 
@@ -164,6 +172,39 @@ def _service_status(unit: str) -> dict:
     }
 
 
+@admin_bp.get("/admin/seasonal")
+async def admin_get_seasonal():
+    """Current state of the global seasonal-processing switch."""
+    await _require_superadmin()
+    from services.seasonal_state import is_seasonal_active
+
+    active = await asyncio.to_thread(is_seasonal_active)
+    return private_no_store(jsonify({"active": active}))
+
+
+@admin_bp.post("/admin/seasonal")
+async def admin_set_seasonal():
+    """Toggle seasonal-world submission processing globally.
+
+    Turned off between Leagues/Deadman seasons so the intake paths skip
+    seasonal submissions entirely instead of running the seasonal processors.
+    """
+    actor = await _require_superadmin()
+    body = await json_body()
+    active = body.get("active")
+    if not isinstance(active, bool):
+        abort_problem(422, "Invalid value", "active must be a boolean.")
+
+    from services.seasonal_state import set_seasonal_active
+
+    try:
+        await asyncio.to_thread(set_seasonal_active, active)
+    except Exception:
+        abort_problem(502, "Toggle failed", "Could not persist the seasonal switch.")
+    _audit(actor, "seasonal.toggle", "global", after="on" if active else "off")
+    return jsonify({"ok": True, "active": active})
+
+
 @admin_bp.get("/admin/services")
 async def admin_services():
     await _require_superadmin()
@@ -222,6 +263,281 @@ async def admin_service_logs(unit: str):
 
     lines = await asyncio.to_thread(_logs)
     return private_no_store(jsonify({"unit": unit, "lines": lines}))
+
+
+# --------------------------------------------------------------------------- #
+# Database backups (droptracker-db-backup.timer → scripts/db_backup.sh)
+# --------------------------------------------------------------------------- #
+BACKUP_UNIT = "droptracker-db-backup"
+BACKUP_ROOT = Path("/store/droptracker/backups")
+BACKUP_B2_PREFIX = "dt_backups/"
+_BACKUP_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_B2_DATE_IN_KEY = re.compile(r"/(\d{4}-\d{2}-\d{2})/")
+# Required artifacts per nightly set; the Redis snapshot is best-effort and a
+# set without it still counts as complete (leaderboards are rebuildable).
+_BACKUP_REQUIRED = ("data-{d}.sql.gz", "data-schema-{d}.sql.gz", "xenforo-{d}.sql.gz")
+# Mirror the retention defaults in scripts/db_backup.sh.
+_BACKUP_LOCAL_RETENTION_DAYS = 7
+_BACKUP_REMOTE_RETENTION_DAYS = 30
+
+
+def _systemd_show(unit: str, props: list[str]) -> dict:
+    code, out, _ = _run(["systemctl", "show", unit, "--property=" + ",".join(props)])
+    parsed: dict[str, str] = {}
+    if code == 0:
+        for line in out.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                parsed[k] = v.strip()
+    return parsed
+
+
+def _systemd_ts(value: str | None) -> int | None:
+    """Parse systemctl's human timestamps ('Sun 2026-07-13 08:36:13 UTC')."""
+    if not value or value in ("n/a", "0"):
+        return None
+    for fmt in ("%a %Y-%m-%d %H:%M:%S %Z", "%a %Y-%m-%d %H:%M:%S"):
+        try:
+            return int(datetime.strptime(value.strip(), fmt).timestamp())
+        except ValueError:
+            continue
+    return None
+
+
+def _backup_running(svc_props: dict) -> bool:
+    # The backup service is Type=oneshot: it reports "activating" for the
+    # whole run and never a steady "active".
+    return svc_props.get("ActiveState") in ("activating", "active", "deactivating")
+
+
+def _backup_overview() -> dict:
+    svc = _systemd_show(f"{BACKUP_UNIT}.service", [
+        "ActiveState", "Result", "ExecMainStatus",
+        "ExecMainStartTimestamp", "ExecMainExitTimestamp",
+    ])
+    timer = _systemd_show(f"{BACKUP_UNIT}.timer", [
+        "ActiveState", "UnitFileState", "NextElapseUSecRealtime", "LastTriggerUSec",
+    ])
+
+    running = _backup_running(svc)
+    started = _systemd_ts(svc.get("ExecMainStartTimestamp"))
+    finished = None if running else _systemd_ts(svc.get("ExecMainExitTimestamp"))
+    result = svc.get("Result") or "unknown"
+    exit_status = svc.get("ExecMainStatus") or ""
+    last_run = None
+    if started:
+        last_run = {
+            "started": started,
+            "finished": finished,
+            "duration_seconds": (finished - started) if (finished and finished >= started) else None,
+            "success": (not running) and result == "success",
+            "result": "running" if running else result,
+            "exit_status": int(exit_status) if exit_status.lstrip("-").isdigit() else None,
+        }
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    sets = []
+    if BACKUP_ROOT.is_dir():
+        for d in sorted(BACKUP_ROOT.iterdir(), key=lambda p: p.name, reverse=True):
+            if not (d.is_dir() and _BACKUP_DATE_RE.match(d.name)):
+                continue
+            files = []
+            for f in sorted(d.iterdir()):
+                if f.is_file():
+                    st = f.stat()
+                    files.append({"name": f.name, "size": st.st_size, "modified": int(st.st_mtime)})
+            required = {t.format(d=d.name) for t in _BACKUP_REQUIRED}
+            present = {f["name"] for f in files if f["size"] > 0}
+            if required <= present:
+                status = "complete"
+            elif running and d.name == today:
+                status = "in_progress"
+            else:
+                status = "incomplete"
+            sets.append({
+                "date": d.name,
+                "status": status,
+                "total_bytes": sum(f["size"] for f in files),
+                "files": files,
+            })
+
+    du = shutil.disk_usage(BACKUP_ROOT if BACKUP_ROOT.is_dir() else BACKUP_ROOT.parent)
+
+    return {
+        "unit": BACKUP_UNIT,
+        "running": running,
+        "timer": {
+            "enabled": timer.get("UnitFileState") == "enabled",
+            "active": timer.get("ActiveState") == "active",
+            "next_run": _systemd_ts(timer.get("NextElapseUSecRealtime")),
+            "last_trigger": _systemd_ts(timer.get("LastTriggerUSec")),
+        },
+        "last_run": last_run,
+        "sets": sets,
+        "disk": {"free_bytes": du.free, "total_bytes": du.total},
+        "retention": {
+            "local_days": _BACKUP_LOCAL_RETENTION_DAYS,
+            "remote_days": _BACKUP_REMOTE_RETENTION_DAYS,
+        },
+    }
+
+
+@admin_bp.get("/admin/backups")
+async def admin_backups():
+    await _require_superadmin()
+    overview = await asyncio.to_thread(_backup_overview)
+    return private_no_store(jsonify(overview))
+
+
+@admin_bp.get("/admin/backups/logs")
+async def admin_backup_logs():
+    await _require_superadmin()
+    unit = f"{BACKUP_UNIT}.service"
+
+    def _logs():
+        # short-iso: the job runs nightly, so lines need full dates.
+        cmd = ["journalctl", "-u", unit, "-n", str(_MAX_LOG_LINES), "--no-pager", "-o", "short-iso"]
+        code, out, err = _run(cmd, timeout=15)
+        if code != 0:
+            code, out, err = _run(["sudo", "-n", *cmd], timeout=15)
+        text = out if code == 0 else (err or "logs unavailable")
+        return text.splitlines()[-_MAX_LOG_LINES:]
+
+    lines = await asyncio.to_thread(_logs)
+    return private_no_store(jsonify({"unit": BACKUP_UNIT, "lines": lines}))
+
+
+@admin_bp.get("/admin/backups/offsite")
+async def admin_backup_offsite():
+    """List the offsite (B2) copies under dt_backups/, grouped by date."""
+    await _require_superadmin()
+
+    def _list():
+        from utils.b2_storage import B2_BUCKET_NAME, _get_s3_client
+
+        client = _get_s3_client()
+        days: dict[str, dict] = {}
+        total = 0
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=B2_BUCKET_NAME, Prefix=BACKUP_B2_PREFIX):
+            for obj in page.get("Contents", []):
+                m = _B2_DATE_IN_KEY.search(obj["Key"])
+                day = days.setdefault(m.group(1) if m else "other", {
+                    "date": m.group(1) if m else "other",
+                    "objects": 0, "total_bytes": 0, "files": [],
+                })
+                day["objects"] += 1
+                day["total_bytes"] += obj["Size"]
+                day["files"].append({
+                    "name": obj["Key"].rsplit("/", 1)[-1],
+                    "size": obj["Size"],
+                    "modified": int(obj["LastModified"].timestamp()),
+                })
+                total += obj["Size"]
+        return {
+            "bucket": B2_BUCKET_NAME,
+            "prefix": BACKUP_B2_PREFIX,
+            "total_bytes": total,
+            "days": sorted(days.values(), key=lambda d: d["date"], reverse=True),
+        }
+
+    try:
+        data = await asyncio.to_thread(_list)
+    except Exception as e:
+        abort_problem(502, "Offsite check failed", str(e)[:200])
+    return private_no_store(jsonify(data))
+
+
+@admin_bp.post("/admin/backups/run")
+async def admin_backup_run():
+    """Kick off a manual backup run (same unit the nightly timer starts)."""
+    actor = await _require_superadmin()
+
+    svc = await asyncio.to_thread(
+        _systemd_show, f"{BACKUP_UNIT}.service", ["ActiveState"]
+    )
+    if _backup_running(svc):
+        abort_problem(409, "Backup already running", "Wait for the current run to finish.")
+
+    def _start():
+        # --no-block: a full run takes ~20 min; don't hold the request open.
+        cmd = ["systemctl", "start", "--no-block", f"{BACKUP_UNIT}.service"]
+        code, _out, err = _run(cmd, timeout=20)
+        if code != 0:
+            code, _out, err = _run(["sudo", "-n", *cmd], timeout=20)
+        return code, err
+
+    code, err = await asyncio.to_thread(_start)
+    _audit(actor, "backup.run", BACKUP_UNIT, after="ok" if code == 0 else err[:200])
+    if code != 0:
+        abort_problem(502, "Could not start backup", err[:200] or "systemctl error")
+    return jsonify({"ok": True})
+
+
+# Backblaze B2 pricing (https://www.backblaze.com/cloud-storage/pricing):
+# $6/TB/month storage after a 10 GB free tier; egress is free up to 3x the
+# monthly average bytes stored, then $0.01/GB. Bandwidth actually used is NOT
+# exposed by B2's public API (console-only), so the estimate covers storage.
+_B2_STORAGE_USD_PER_GB_MONTH = 0.006
+_B2_FREE_STORAGE_GB = 10
+_B2_LARGEST_COUNT = 10
+
+
+@admin_bp.get("/admin/b2/usage")
+async def admin_b2_usage():
+    """Bucket-wide B2 storage usage (everything under the key's dt_ namePrefix),
+    grouped by top-level prefix, with a monthly storage-cost estimate."""
+    await _require_superadmin()
+
+    def _scan():
+        import heapq
+
+        from utils.b2_storage import B2_BUCKET_NAME, _get_s3_client
+
+        client = _get_s3_client()
+        prefixes: dict[str, dict] = {}
+        heap: list[tuple] = []  # (size, key, modified) — top N largest objects
+        objects = 0
+        total = 0
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=B2_BUCKET_NAME, Prefix="dt_"):
+            for obj in page.get("Contents", []):
+                objects += 1
+                total += obj["Size"]
+                top = obj["Key"].split("/", 1)[0]
+                p = prefixes.setdefault(top, {"prefix": top, "objects": 0, "total_bytes": 0})
+                p["objects"] += 1
+                p["total_bytes"] += obj["Size"]
+                item = (obj["Size"], obj["Key"], int(obj["LastModified"].timestamp()))
+                if len(heap) < _B2_LARGEST_COUNT:
+                    heapq.heappush(heap, item)
+                elif item > heap[0]:
+                    heapq.heapreplace(heap, item)
+
+        billable_gb = max(0.0, total / 1_000_000_000 - _B2_FREE_STORAGE_GB)
+        return {
+            "bucket": B2_BUCKET_NAME,
+            "generated_at": int(datetime.now(timezone.utc).timestamp()),
+            "objects": objects,
+            "total_bytes": total,
+            "prefixes": sorted(prefixes.values(), key=lambda p: -p["total_bytes"]),
+            "largest": [
+                {"key": k, "size": s, "modified": m}
+                for s, k, m in sorted(heap, reverse=True)
+            ],
+            "estimate": {
+                "storage_rate_usd_per_gb_month": _B2_STORAGE_USD_PER_GB_MONTH,
+                "free_storage_bytes": _B2_FREE_STORAGE_GB * 1_000_000_000,
+                "storage_usd_per_month": round(billable_gb * _B2_STORAGE_USD_PER_GB_MONTH, 2),
+                "free_egress_bytes_per_month": total * 3,
+            },
+        }
+
+    try:
+        data = await asyncio.to_thread(_scan)
+    except Exception as e:
+        abort_problem(502, "B2 usage scan failed", str(e)[:200])
+    return private_no_store(jsonify(data))
 
 
 # --------------------------------------------------------------------------- #

@@ -40,6 +40,20 @@ def provider_name() -> str:
     return "stripe" if _stripe() is not None else "manual"
 
 
+def _guard_manual_grant():
+    """Refuse the manual (free, immediate) grant in production.
+
+    The manual provider exists so dev/test environments work end-to-end
+    without Stripe. In production a missing/broken Stripe configuration must
+    fail the checkout loudly instead of silently giving the tier away.
+    """
+    state = (os.getenv("STATE") or "").strip().strip('"').lower()
+    if state in ("live", "prod", "production"):
+        raise RuntimeError(
+            "Billing is not configured (Stripe unavailable); refusing manual grant in production."
+        )
+
+
 def start_checkout(group_id: int, tier, subscription) -> dict:
     """Begin (or switch to) a paid tier. Returns {'url': str|None, 'apply': dict|None}.
 
@@ -50,6 +64,7 @@ def start_checkout(group_id: int, tier, subscription) -> dict:
     stripe = _stripe()
     if stripe is None:
         # Manual grant: activate for one interval; the caller persists this.
+        _guard_manual_grant()
         period = timedelta(days=365 if tier.interval == "year" else 30)
         return {
             "url": None,
@@ -92,6 +107,7 @@ def start_user_checkout(user_id: int, tier, subscription, amount_cents: int | No
     amount = int(amount_cents or tier.price_cents or 0)
     stripe = _stripe()
     if stripe is None:
+        _guard_manual_grant()
         period = timedelta(days=365 if tier.interval == "year" else 30)
         return {
             "url": None,
@@ -151,6 +167,7 @@ def start_group_leg_checkout(group_id: int, payer_user_id: int, tier, delta_cent
     amount = int(delta_cents)
     stripe = _stripe()
     if stripe is None:
+        _guard_manual_grant()
         period = timedelta(days=365 if tier.interval == "year" else 30)
         return {
             "url": None,

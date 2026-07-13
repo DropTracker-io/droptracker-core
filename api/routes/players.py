@@ -9,7 +9,7 @@ import copy
 from quart import Blueprint, jsonify, request
 from quart_rate_limiter import rate_limit
 from datetime import timedelta
-from sqlalchemy import or_, text
+from sqlalchemy import bindparam, or_, text
 
 from api.core import get_db_session, redis_client, redis_tracker
 from api.routes.helpers import assemble_submission_data
@@ -164,13 +164,48 @@ async def player_search():
         player_group_ids_result = db_session.execute(text(player_group_id_query), {"player_id": player.player_id}).fetchall()
         player_group_ids = [g[0] for g in player_group_ids_result if g[0] > 2]
         player_groups = []
-        for gid in player_group_ids:
-            group_object: Group = db_session.query(Group).filter(Group.group_id == gid).first()
-            player_groups.append({"name": group_object.group_name, 
-                                  "id": gid,
-                                  "loot": format_number(group_object.get_current_total()),
-                                  "members": group_object.get_player_count(session_to_use=db_session)})
-        player_groups.sort(key=lambda x: x["loot"], reverse=True)
+        if player_group_ids:
+            # Batched: group names in one query, member counts in one grouped
+            # query, monthly totals from the precomputed group leaderboard in
+            # one pipelined pass. This used to recompute each group's total
+            # from every member's per-player Redis key.
+            name_map = dict(
+                db_session.query(Group.group_id, Group.group_name)
+                .filter(Group.group_id.in_(player_group_ids))
+                .all()
+            )
+            member_counts = dict(
+                db_session.execute(
+                    text("SELECT group_id, COUNT(player_id) FROM user_group_association "
+                         "WHERE group_id IN :gids GROUP BY group_id")
+                    .bindparams(bindparam("gids", expanding=True)),
+                    {"gids": player_group_ids},
+                ).fetchall()
+            )
+            partition = get_current_partition()
+            group_totals = {}
+            try:
+                pipe = redis_client.client.pipeline(transaction=False)
+                for gid in player_group_ids:
+                    pipe.zscore(f"gleaderboard:{partition}", gid)
+                for gid, score in zip(player_group_ids, pipe.execute()):
+                    group_totals[gid] = int(float(score)) if score is not None else 0
+            except Exception as e:
+                print(f"player_search: failed reading group totals: {e}")
+            for gid in player_group_ids:
+                if gid not in name_map:
+                    continue
+                player_groups.append({
+                    "name": name_map[gid],
+                    "id": gid,
+                    "_loot_raw": group_totals.get(gid, 0),
+                    "loot": format_number(group_totals.get(gid, 0)),
+                    "members": int(member_counts.get(gid, 0)),
+                })
+            # Sort numerically (sorting the formatted strings put "999M" above "1.2B").
+            player_groups.sort(key=lambda x: x["_loot_raw"], reverse=True)
+            for pg in player_groups:
+                pg.pop("_loot_raw", None)
         from services.points import get_player_lifetime_points_earned
         player_lifetime_points = get_player_lifetime_points_earned(player_id=player.player_id,session=db_session)
 
@@ -181,7 +216,6 @@ async def player_search():
             "total_loot": format_number(player_loot),
             "global_rank": player_rank,
             "top_npc": top_npc_data,
-            "best_pb_rank": 42,
             "points": player_lifetime_points,
             "groups": player_groups,
             "recent_submissions": final_submission_data,
@@ -192,15 +226,15 @@ async def player_search():
         db_session.close()
 
 
-@players_bp.get("/top_players")
-async def top_players():
+async def get_top_players_payload():
+    """Cached /top_players payload; also reused by the /panel_data aggregate."""
     try:
         limit = 5
         partition = get_current_partition()
         cache_key = f"top_players:{partition}:{limit}"
         cached_payload = _cache_get(cache_key, TOP_PLAYERS_CACHE_TTL_SECONDS)
         if cached_payload is not None:
-            return jsonify(cached_payload), 200
+            return cached_payload
         redis_conn = getattr(redis_client, "client", None)
         top_entries: List[Tuple[int, int]] = []
 
@@ -220,10 +254,8 @@ async def top_players():
                     limit,
                 )
 
-        #print(f"Top players raw totals: {top_entries}")
-
         if not top_entries:
-            return jsonify({"players": []}), 200
+            return {"players": []}
 
         db_session = get_db_session()
         try:
@@ -246,28 +278,52 @@ async def top_players():
                 "player_name": player_name,
                 "total_loot": format_number(total_loot)
             })
-        #print(f"Top players data: {top_players_data}")
         payload = {"players": top_players_data}
         _cache_set(cache_key, payload)
-        return jsonify(payload), 200
+        return payload
     except Exception as e:
         print(f"Exception in top_players: {e}")
-        return jsonify({"error": "Internal server error", "players": []}), 500
+        return {"players": []}
+
+
+@players_bp.get("/top_players")
+async def top_players():
+    resp = jsonify(await get_top_players_payload())
+    resp.headers["Cache-Control"] = "public, max-age=15"
+    return resp, 200
 
 
 @players_bp.get("/player")
 @rate_limit(limit=5, period=timedelta(seconds=10))
 async def get_player():
-    player_name = request.args.get("player_name")
-    if not player_name:
-        return jsonify({"error": "Player name is required"}), 400
+    player_name = request.args.get("player_name") or request.args.get("name")
+    player_id = request.args.get("id")
+    if not player_name and not player_id:
+        return jsonify({"error": "Player name or id is required"}), 400
 
     db_session = get_db_session()
     try:
-        player = db_session.query(Player).filter(Player.player_name == player_name).first()
-        if not player:
+        query = db_session.query(Player)
+        if player_id:
+            try:
+                query = query.filter(Player.player_id == int(player_id))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid player id"}), 400
+        else:
+            query = query.filter(Player.player_name == player_name)
+        player = query.first()
+        # Hidden players are excluded from public lookups (privacy setting).
+        if not player or player.hidden:
             return jsonify({"error": "Player not found"}), 404
-        return jsonify({"player": player.to_dict()})
+        return jsonify({"player": {
+            "player_id": player.player_id,
+            "player_name": player.player_name,
+            "wom_id": player.wom_id,
+            "total_level": player.total_level,
+            "log_slots": player.log_slots,
+            "date_added": player.date_added.isoformat() if player.date_added else None,
+            "date_updated": player.date_updated.isoformat() if player.date_updated else None,
+        }})
     finally:
         db_session.close()
 
@@ -296,6 +352,89 @@ async def item_value_modifications():
         pass
     return legacy
 
+def _group_configs_for(player_name, acc_hash, db_session):
+    """Build the /load_config group-config list for a player, or None when the
+    player is unknown. Shared by /load_config and /panel_data."""
+    # Canonical identity lookup by account hash first.
+    player = db_session.query(Player).filter(Player.account_hash == acc_hash).first()
+    if not player:
+        # Fallback for older rows/clients that still rely on strict name+hash matching.
+        player = (
+            db_session.query(Player)
+            .filter(Player.player_name == player_name, Player.account_hash == acc_hash)
+            .first()
+        )
+    if not player:
+        return None
+    if (
+        player.player_name
+        and player.player_name != player_name
+        and player.account_hash == acc_hash
+    ):
+        # Keep the display name current when identity is already verified by account hash.
+        player.player_name = player_name
+        db_session.commit()
+    player_gids = db_session.execute(text("SELECT group_id FROM user_group_association WHERE player_id = :player_id"), {"player_id": player.player_id}).all()
+
+    # Events v2: advertise whether an active event with XP-based tasks
+    # (xp_target / skill_target) is tracking this player, so the plugin
+    # submits periodic experience snapshots instead of only level-ups.
+    xp_events_active = False
+    try:
+        xp_event_row = db_session.execute(
+            text(
+                "SELECT 1 FROM web_event_team_members m "
+                "JOIN web_event_teams t ON t.id = m.team_id "
+                "JOIN web_events e ON e.id = t.event_id "
+                "JOIN web_event_tasks k ON k.event_id = e.id "
+                "WHERE m.player_id = :player_id AND e.status = 'active' "
+                "AND k.type IN ('xp_target', 'skill_target') LIMIT 1"
+            ),
+            {"player_id": player.player_id},
+        ).first()
+        xp_events_active = xp_event_row is not None
+    except Exception as e:
+        print(f"Exception checking active xp events in load_config: {e}")
+
+    group_configs = []
+    def get_config_value(current_group_configs, key: str):
+        for group_config in current_group_configs:
+            if group_config.config_key == key:
+                if key == "level_minimum_for_notifications":
+                    return group_config.config_value
+                config_val = group_config.config_value if group_config.config_value and group_config.config_value != "" else group_config.long_value
+                if config_val == "true" or config_val == "1":
+                    return True
+                elif config_val == "false" or config_val == "0":
+                    return False
+                elif config_val == "":
+                    return None
+                return config_val
+        return ""
+    for group_id_row in player_gids:
+        group_id = group_id_row[0]
+        group = db_session.query(Group).filter(Group.group_id == group_id).first()
+        current_group_configs = db_session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id).all()
+        group_configs.append({"group_id": group_id,
+                            "group_name": group.group_name,
+                            "min_value": get_config_value(current_group_configs, "minimum_value_to_notify"),
+                            "minimum_drop_value": get_config_value(current_group_configs, "minimum_value_to_notify"),
+                            "only_screenshots": get_config_value(current_group_configs, "only_send_messages_with_images"),
+                            "send_drops": True,
+                            "send_pbs": get_config_value(current_group_configs, "notify_pbs"),
+                            "send_clogs": get_config_value(current_group_configs, "notify_clogs"),
+                            "send_cas": get_config_value(current_group_configs, "notify_cas"),
+                            "send_pets": get_config_value(current_group_configs, "send_pets"),
+                            "send_deaths": get_config_value(current_group_configs, "notify_deaths"),
+                            "send_diaries": get_config_value(current_group_configs, "notify_diaries"),
+                            "send_xp": get_config_value(current_group_configs, "notify_levels"),
+                            "minimum_level": get_config_value(current_group_configs, "level_minimum_for_notifications"),
+                            "send_stacked_items": get_config_value(current_group_configs, "send_stacks_of_items"),
+                            "minimum_ca_tier": get_config_value(current_group_configs, "min_ca_tier_to_notify"),
+                            "track_xp_events": xp_events_active})
+    return group_configs
+
+
 @players_bp.get("/load_config")
 async def load_config():
     player_name = request.args.get("player_name", None)
@@ -303,88 +442,13 @@ async def load_config():
     if not player_name or not acc_hash:
         return jsonify({"error": "Player name and acc_hash are required"}), 400
     db_session = get_db_session()
-    # print("Checking configs for player:", player_name, acc_hash)
     try:
-        # Canonical identity lookup by account hash first.
-        player = db_session.query(Player).filter(Player.account_hash == acc_hash).first()
-        if not player:
-            # Fallback for older rows/clients that still rely on strict name+hash matching.
-            player = (
-                db_session.query(Player)
-                .filter(Player.player_name == player_name, Player.account_hash == acc_hash)
-                .first()
-            )
-        if not player:
-            return jsonify({"error": "Player not found"}), 404
-        if (
-            player.player_name
-            and player.player_name != player_name
-            and player.account_hash == acc_hash
-        ):
-            # Keep the display name current when identity is already verified by account hash.
-            player.player_name = player_name
-            db_session.commit()
-        player_gids = db_session.execute(text("SELECT group_id FROM user_group_association WHERE player_id = :player_id"), {"player_id": player.player_id}).all()
-
-        # Events v2: advertise whether an active event with XP-based tasks
-        # (xp_target / skill_target) is tracking this player, so the plugin
-        # submits periodic experience snapshots instead of only level-ups.
-        xp_events_active = False
-        try:
-            xp_event_row = db_session.execute(
-                text(
-                    "SELECT 1 FROM web_event_team_members m "
-                    "JOIN web_event_teams t ON t.id = m.team_id "
-                    "JOIN web_events e ON e.id = t.event_id "
-                    "JOIN web_event_tasks k ON k.event_id = e.id "
-                    "WHERE m.player_id = :player_id AND e.status = 'active' "
-                    "AND k.type IN ('xp_target', 'skill_target') LIMIT 1"
-                ),
-                {"player_id": player.player_id},
-            ).first()
-            xp_events_active = xp_event_row is not None
-        except Exception as e:
-            print(f"Exception checking active xp events in load_config: {e}")
-
-        group_configs = []
-        def get_config_value(current_group_configs, key: str):
-            for group_config in current_group_configs:
-                if group_config.config_key == key:
-                    if key == "level_minimum_for_notifications":
-                        return group_config.config_value
-                    config_val = group_config.config_value if group_config.config_value and group_config.config_value != "" else group_config.long_value
-                    if config_val == "true" or config_val == "1":
-                        return True
-                    elif config_val == "false" or config_val == "0":
-                        return False
-                    elif config_val == "":
-                        return None
-                    return config_val
-            return ""
-        for group_id_row in player_gids:
-            group_id = group_id_row[0]
-            group = db_session.query(Group).filter(Group.group_id == group_id).first()
-            current_group_configs = db_session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id).all()
-            group_configs.append({"group_id": group_id,
-                                "group_name": group.group_name,
-                                "min_value": get_config_value(current_group_configs, "minimum_value_to_notify"),
-                                "minimum_drop_value": get_config_value(current_group_configs, "minimum_value_to_notify"),
-                                "only_screenshots": get_config_value(current_group_configs, "only_send_messages_with_images"),
-                                "send_drops": True,
-                                "send_pbs": get_config_value(current_group_configs, "notify_pbs"),
-                                "send_clogs": get_config_value(current_group_configs, "notify_clogs"),
-                                "send_cas": get_config_value(current_group_configs, "notify_cas"),
-                                "send_pets": get_config_value(current_group_configs, "send_pets"),
-                                "send_deaths": get_config_value(current_group_configs, "notify_deaths"),
-                                "send_diaries": get_config_value(current_group_configs, "notify_diaries"),
-                                "send_xp": get_config_value(current_group_configs, "notify_levels"),
-                                "minimum_level": get_config_value(current_group_configs, "level_minimum_for_notifications"),
-                                "send_stacked_items": get_config_value(current_group_configs, "send_stacks_of_items"),
-                                "minimum_ca_tier": get_config_value(current_group_configs, "min_ca_tier_to_notify"),
-                                "track_xp_events": xp_events_active})
-        return jsonify(group_configs), 200
+        group_configs = _group_configs_for(player_name, acc_hash, db_session)
     finally:
         db_session.close()
+    if group_configs is None:
+        return jsonify({"error": "Player not found"}), 404
+    return jsonify(group_configs), 200
 
 
 # Hardcoded fallbacks when no GroupConfiguration override exists (group_id=2).
@@ -392,9 +456,8 @@ PLUGIN_LATEST_VERSION_FALLBACK = "5.4.0"
 PLUGIN_MINIMUM_VERSION_FALLBACK = "5.0.0"
 
 
-@players_bp.get("/plugin_version")
-async def plugin_version():
-    """Plugin version check for the RuneLite plugin (no auth required).
+def _plugin_version_payload():
+    """Plugin version payload for /plugin_version and /panel_data.
 
     Values are sourced from GroupConfiguration rows on the global group
     (group_id=2) with config keys 'plugin_latest_version' /
@@ -434,6 +497,79 @@ async def plugin_version():
     payload = {"latest_version": latest_version, "minimum_version": minimum_version}
     if message:
         payload["message"] = message
-    return jsonify(payload), 200
+    return payload
+
+
+@players_bp.get("/plugin_version")
+async def plugin_version():
+    """Plugin version check for the RuneLite plugin (no auth required)."""
+    return jsonify(_plugin_version_payload()), 200
+
+
+@players_bp.get("/panel_data")
+async def panel_data():
+    """One-round-trip aggregate for the plugin side panel boot.
+
+    Combines /load_config, /top_players, /top_groups, /plugin_version and the
+    welcome/news strings so the panel needs a single request instead of six.
+    `player_name`/`acc_hash` are optional: without them (or for an unknown
+    player) `configs` is null and everything else still loads.
+    """
+    from api.routes.groups import get_top_groups_payload
+
+    player_name = request.args.get("player_name", None)
+    acc_hash = request.args.get("acc_hash", None)
+
+    configs = None
+    if player_name and acc_hash:
+        def _load_configs():
+            db_session = get_db_session()
+            try:
+                return _group_configs_for(player_name, acc_hash, db_session)
+            finally:
+                db_session.close()
+        try:
+            configs = await asyncio.to_thread(_load_configs)
+        except Exception as e:
+            print(f"panel_data: config load failed: {e}")
+
+    try:
+        top_groups_payload = await get_top_groups_payload()
+    except Exception as e:
+        print(f"panel_data: top_groups failed: {e}")
+        top_groups_payload = {"groups": []}
+
+    try:
+        top_players_payload = await get_top_players_payload()
+    except Exception as e:
+        print(f"panel_data: top_players failed: {e}")
+        top_players_payload = {"players": []}
+
+    try:
+        version_payload = await asyncio.to_thread(_plugin_version_payload)
+    except Exception as e:
+        print(f"panel_data: version failed: {e}")
+        version_payload = {
+            "latest_version": PLUGIN_LATEST_VERSION_FALLBACK,
+            "minimum_version": PLUGIN_MINIMUM_VERSION_FALLBACK,
+        }
+
+    from api.worker import get_latest_welcome_message, get_latest_news
+    try:
+        # The handlers return (body, status, headers) tuples; only the body matters here.
+        welcome = (await get_latest_welcome_message())[0]
+        news = (await get_latest_news())[0]
+    except Exception:
+        welcome, news = "Welcome to the DropTracker!", ""
+
+    return jsonify({
+        "configs": configs,
+        "player_found": configs is not None,
+        "top_groups": top_groups_payload,
+        "top_players": top_players_payload,
+        "welcome": welcome,
+        "news": news,
+        "version": version_payload,
+    }), 200
 
 

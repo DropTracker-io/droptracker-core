@@ -225,7 +225,7 @@ async def build_player_setup(bot=None):
                         "-# **How can I remove a previously claimed account from my Discord?**\n" +
                         f"-# > Using the </unclaim-rsn:{unclaim_rsn_id}> command, and selecting the account you want to disassociate.\n\n" +
                         "-# **How do I manage direct message notifications from the bot?**\n" +
-                        f"-# > Using the </dm-settings:{dm_settings_id}> command to enable or disable update logs and points-earned notifications.\n\n" +
+                        f"-# > Using the </dm-settings:{dm_settings_id}> command to enable or disable account-related DMs, such as name-change notifications for your claimed accounts.\n\n" +
                         "-# **What types of information does the DropTracker store about me and my account(s)?**\n" +
                         "-# 1. Your account(s) unique identifier, or 'account hash'. This is provided by Jagex, and is unique to each individual character; remaining consistent thru name changes.\n" +
                         "-# 2. Your submitted achievements/drops.\n\n" +

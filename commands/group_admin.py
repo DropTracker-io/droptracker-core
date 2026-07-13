@@ -195,7 +195,8 @@ class GroupAdminCommands(Extension):
             session.commit()
         except Exception as e:
             session.rollback()
-            return await ctx.send(f"Failed to add points: {e}", ephemeral=True)
+            print(f"Failed to add points for player {target.player_id} in group {group.group_id}: {e}")
+            return await ctx.send("Failed to add points — please try again in a few minutes.", ephemeral=True)
 
         embed = Embed(
             title="Points Added",
@@ -327,7 +328,8 @@ class GroupAdminCommands(Extension):
             session.commit()
         except Exception as e:
             session.rollback()
-            return await ctx.send(f"Failed to remove points: {e}", ephemeral=True)
+            print(f"Failed to remove points for player {target.player_id} in group {group.group_id}: {e}")
+            return await ctx.send("Failed to remove points — please try again in a few minutes.", ephemeral=True)
 
         embed = Embed(
             title="Points Removed",

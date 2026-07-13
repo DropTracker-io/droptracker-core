@@ -98,6 +98,12 @@ async def _dispatch_seasonal_submission(submission_type, embed_data, session):
         case "quest":
             from data.submissions import quest_processor
             return await quest_processor(embed_data, external_session=session, world_type="seasonal")
+        case "death":
+            from data.submissions import death_processor
+            return await death_processor(embed_data, external_session=session, world_type="seasonal")
+        case "diary":
+            from data.submissions import diary_processor
+            return await diary_processor(embed_data, external_session=session, world_type="seasonal")
         case _:
             # experience and adventure_log not yet tracked for seasonal worlds
             return None
@@ -181,7 +187,7 @@ async def on_member_update(event: MemberUpdate):
                         if role.id == role_id:
                             if not previously_boosting:
                                 ## This event contains the player's boost role update -- we need to apply points here
-                                await award_nitro_boost(event.before.user.id)
+                                await apply_nitro_boost_points(event.before.user.id)
         except Exception as e:
             print(f"Error processing member update: {e}")
         finally:
@@ -189,7 +195,7 @@ async def on_member_update(event: MemberUpdate):
 
 @slash_command(name="nitro_user",
                    description="Award nitro boost points to a user")
-async def award_nitro_boost(self, ctx: SlashContext):
+async def nitro_user_cmd(ctx: SlashContext):
     author = ctx.author
     author_roles = author.roles
     can_award = False
@@ -201,14 +207,14 @@ async def award_nitro_boost(self, ctx: SlashContext):
         embed = Embed(description=":warning: You do not have permission to use this command.")
         await ctx.send(embeds=[embed])
         return
-    
+
     # Use local session to avoid conflicts
-    await award_nitro_boost(ctx.author.id)
+    await apply_nitro_boost_points(ctx.author.id)
     return await ctx.send(f"Nitro boost points awarded to {ctx.author.username}.", ephemeral=True)
 
 
 
-async def award_nitro_boost(user_id: int, session_to_use = None):
+async def apply_nitro_boost_points(user_id: int, session_to_use = None):
     if not session_to_use:
         local_session = Session()
     else:
@@ -267,7 +273,12 @@ async def process_submission_with_session(submission_type, embed_data):
     try:
         success = False
         if world_type == "seasonal":
-            result = await _dispatch_seasonal_submission(normalized_submission_type, embed_data, session)
+            from services.seasonal_state import is_seasonal_active
+            if is_seasonal_active():
+                result = await _dispatch_seasonal_submission(normalized_submission_type, embed_data, session)
+            else:
+                # Global kill switch (admin panel): skip seasonal processing.
+                result = None
             success = True
         elif world_type != MAIN_WORLD_TYPE:
             result = None

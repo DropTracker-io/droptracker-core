@@ -8,17 +8,16 @@ import copy
 from quart import Blueprint, jsonify, request
 from quart_cors import route_cors
 from quart_rate_limiter import rate_limit
-from sqlalchemy import or_, text
+from sqlalchemy import func, or_, text
 
 from api.core import get_db_session, redis_client
+from api.routes.group_create import require_service_key
 from api.routes.helpers import assemble_submission_data
 from lootboard import generator
 from services.redis_updates import get_player_list_loot_sum
 from utils.format import format_number
-from utils.wiseoldman import fetch_group_members
 from db import Player, Group, GroupConfiguration, NotifiedSubmission, NpcList, get_current_partition
-from db.ops import associate_player_ids, sync_group_from_wom_with_stats
-from utils.redis import calculate_rank_amongst_groups
+from db.ops import sync_group_from_wom_with_stats
 
 
 groups_bp = Blueprint("groups", __name__)
@@ -46,68 +45,135 @@ def _groups_cache_set(cache_key: str, value):
         _groups_endpoint_cache[cache_key] = {"ts": time.time(), "value": copy.deepcopy(value)}
 
 
-@groups_bp.get("/top_groups")
-async def top_groups():
+def _decode_redis_int(raw):
+    try:
+        return int(raw.decode("utf-8")) if isinstance(raw, (bytes, bytearray)) else int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_group_totals_slow(db_session):
+    """Legacy O(groups × members) recompute, kept only as a fallback for the
+    brief window after a month rollover before the lootboard generator has
+    repopulated `gleaderboard:{partition}`."""
+    group_totals = {}
+    groups = db_session.query(Group).all()
+    for group_object in groups:
+        group_id = group_object.group_id
+        if group_id in (0, 2):
+            continue
+        players_in_group = db_session.query(Player.player_id).join(Player.groups).filter(Group.group_id == group_id).all()
+        try:
+            group_totals[group_id] = get_player_list_loot_sum([player.player_id for player in players_in_group])
+        except Exception as e:
+            print(f"Error getting group total for group {group_id}: {e}")
+            group_totals[group_id] = 0
+    return sorted(group_totals.items(), key=lambda x: x[1], reverse=True)
+
+
+def _build_top_groups_payload(partition):
+    """Build the /top_groups payload from the precomputed group-total sorted
+    set (`gleaderboard:{partition}`, maintained every ~2 min by the lootboard
+    generator) plus three batched DB queries and one pipelined Redis pass —
+    instead of the old per-group/per-player recompute."""
+    totals = []
+    try:
+        raw = redis_client.client.zrevrange(f"gleaderboard:{partition}", 0, -1, withscores=True)
+        for member_raw, score in raw:
+            gid = _decode_redis_int(member_raw)
+            if gid is None or gid in (0, 2):
+                continue
+            totals.append((gid, int(float(score))))
+    except Exception as e:
+        print(f"top_groups: failed reading gleaderboard:{partition}: {e}")
+
+    db_session = get_db_session()
+    try:
+        if not totals:
+            totals = _compute_group_totals_slow(db_session)
+        if not totals:
+            return {"groups": []}
+
+        gids = [gid for gid, _ in totals]
+
+        name_map = dict(
+            db_session.query(Group.group_id, Group.group_name)
+            .filter(Group.group_id.in_(gids))
+            .all()
+        )
+        member_counts = dict(
+            db_session.query(Group.group_id, func.count(Player.player_id))
+            .select_from(Player)
+            .join(Player.groups)
+            .filter(Group.group_id.in_(gids))
+            .group_by(Group.group_id)
+            .all()
+        )
+
+        # One pipelined round-trip for every group's #1 player this month.
+        top_pid_by_gid = {}
+        try:
+            pipe = redis_client.client.pipeline(transaction=False)
+            for gid in gids:
+                pipe.zrevrange(f"leaderboard:{partition}:group:{gid}", 0, 0)
+            for gid, result in zip(gids, pipe.execute()):
+                if result:
+                    pid = _decode_redis_int(result[0])
+                    if pid is not None:
+                        top_pid_by_gid[gid] = pid
+        except Exception as e:
+            print(f"top_groups: failed reading per-group top players: {e}")
+
+        player_name_map = {}
+        if top_pid_by_gid:
+            player_name_map = dict(
+                db_session.query(Player.player_id, Player.player_name)
+                .filter(Player.player_id.in_(set(top_pid_by_gid.values())))
+                .all()
+            )
+
+        final_groups = []
+        rank = 0
+        for gid, group_total in totals:
+            group_name = name_map.get(gid)
+            if group_name is None:
+                # Deleted group still lingering in the sorted set — skip it.
+                continue
+            rank += 1
+            top_player_display = player_name_map.get(top_pid_by_gid.get(gid))
+            final_groups.append({
+                "group_name": group_name,
+                "total_loot": format_number(group_total),
+                "rank": rank,
+                "group_id": gid,
+                "member_count": int(member_counts.get(gid, 0)),
+                "top_player": top_player_display,
+                # The plugin's TopGroupResult deserializes "top_member".
+                "top_member": top_player_display,
+            })
+        return {"groups": final_groups}
+    finally:
+        db_session.close()
+
+
+async def get_top_groups_payload():
+    """Cached /top_groups payload; also reused by the /panel_data aggregate."""
     partition = get_current_partition()
     cache_key = f"top_groups:{partition}"
     cached_payload = _groups_cache_get(cache_key, TOP_GROUPS_CACHE_TTL_SECONDS)
     if cached_payload is not None:
-        return jsonify(cached_payload), 200
+        return cached_payload
 
-    db_session = get_db_session()
-    try:
-        groups = db_session.query(Group).all()
+    payload = await asyncio.to_thread(_build_top_groups_payload, partition)
+    _groups_cache_set(cache_key, payload)
+    return payload
 
-        group_totals = {}
-        for group_object in groups:
-            group_id = group_object.group_id
-            if group_id == 2 or group_id == 0:
-                continue
-            players_in_group = db_session.query(Player.player_id).join(Player.groups).filter(Group.group_id == group_id).all()
-            group_totals[group_id] = 0
-            try:
-                group_month_total = get_player_list_loot_sum([player.player_id for player in players_in_group])
-                group_totals[group_id] = group_month_total
-            except Exception as e:
-                print(f"Error getting group total for group {group_id}: {e}")
-                group_totals[group_id] = 0
 
-        sorted_groups = sorted(group_totals.items(), key=lambda x: x[1], reverse=True)
-        final_groups = []
-        for rank, (g_id, group_total) in enumerate(sorted_groups, start=1):
-            group_object = db_session.query(Group).filter(Group.group_id == g_id).first()
-            if g_id != 2 and g_id != 0:
-                top_player_data = redis_client.client.zrevrange(
-                    f"leaderboard:{get_current_partition()}:group:{g_id}",
-                    0,
-                    0,
-                    withscores=True
-                )
-
-                top_player_display = None
-                if top_player_data:
-                    player_id_raw, player_score = top_player_data[0]
-                    try:
-                        player_id_int = int(player_id_raw.decode("utf-8")) if isinstance(player_id_raw, (bytes, bytearray)) else int(player_id_raw)
-                    except Exception:
-                        player_id_int = int(player_id_raw)
-                    top_player = db_session.query(Player).filter(Player.player_id == player_id_int).first()
-                    if top_player:
-                        top_player_display = f"{top_player.player_name}"
-
-                final_groups.append({
-                    "group_name": group_object.group_name,
-                    "total_loot": format_number(group_total),
-                    "rank": rank,
-                    "group_id": group_object.group_id,
-                    "member_count": len(players_in_group),
-                    "top_player": top_player_display,
-                })
-        payload = {"groups": final_groups}
-        _groups_cache_set(cache_key, payload)
-        return jsonify(payload), 200
-    finally:
-        db_session.close()
+@groups_bp.get("/top_groups")
+async def top_groups():
+    resp = jsonify(await get_top_groups_payload())
+    resp.headers["Cache-Control"] = "public, max-age=15"
+    return resp, 200
 
 
 @groups_bp.get("/group_search")
@@ -117,25 +183,44 @@ async def group_search():
     if not group_name:
         return jsonify({"error": "Group name is required"}), 400
 
+    partition = get_current_partition()
     db_session = get_db_session()
     try:
         group: Group = db_session.query(Group).filter(Group.group_name == group_name).first()
         if not group:
+            group = db_session.query(Group).filter(Group.group_name.ilike(f"%{group_name}%")).first()
+        if not group or group.group_id in (0, 2):
             return jsonify({"error": "Group " + group_name + " not found"}), 404
-        group_wom_id = db_session.query(Group.wom_id).filter(Group.group_id == group.group_id).first()
-        wom_member_list = []
-        try:
-            if group_wom_id:
-                group_wom_id = group_wom_id[0]
-            if group_wom_id:
-                wom_member_list = await fetch_group_members(wom_group_id=int(group_wom_id), session_to_use=db_session)
-        except Exception as e:
-            print("Couldn't get the member list", e)
 
-        player_ids = await associate_player_ids(wom_member_list,session_to_use=db_session)
-        group_rank, total_groups = calculate_rank_amongst_groups(group.group_id, player_ids, session_to_use=db_session)
+        # Monthly total + rank come from the precomputed group leaderboard
+        # (maintained by the lootboard generator). This used to trigger a live
+        # WOM member fetch plus a per-member Redis loot sum on every search.
+        group_total = 0
+        group_rank = None
+        total_groups = 0
+        try:
+            raw = redis_client.client.zrevrange(f"gleaderboard:{partition}", 0, -1, withscores=True)
+            standings = []
+            for member_raw, score in raw:
+                gid = _decode_redis_int(member_raw)
+                if gid is None or gid in (0, 2):
+                    continue
+                standings.append((gid, int(float(score))))
+            total_groups = len(standings)
+            for idx, (gid, score) in enumerate(standings, start=1):
+                if gid == group.group_id:
+                    group_rank = idx
+                    group_total = score
+                    break
+        except Exception as e:
+            print(f"group_search: failed reading gleaderboard:{partition}: {e}")
+        if group_rank is None:
+            # Not on the board yet (new/empty group): rank it last.
+            total_groups += 1
+            group_rank = total_groups
+
         top_player_data = redis_client.client.zrevrange(
-            f"leaderboard:{get_current_partition()}:group:{group.group_id}",
+            f"leaderboard:{partition}:group:{group.group_id}",
             0,
             0,
             withscores=True
@@ -144,19 +229,15 @@ async def group_search():
         top_player_display = None
         if top_player_data:
             player_id_raw, player_score = top_player_data[0]
-            try:
-                player_id_int = int(player_id_raw.decode("utf-8")) if isinstance(player_id_raw, (bytes, bytearray)) else int(player_id_raw)
-            except Exception:
-                player_id_int = int(player_id_raw)
-            top_player = db_session.query(Player).filter(Player.player_id == player_id_int).first()
-            if top_player:
-                top_player_display = f"{top_player.player_name}"
+            player_id_int = _decode_redis_int(player_id_raw)
+            if player_id_int is not None:
+                top_player = db_session.query(Player).filter(Player.player_id == player_id_int).first()
+                if top_player:
+                    top_player_display = f"{top_player.player_name}"
 
         player_count = group.get_player_count(session_to_use=db_session)
         group_recent_submissions = db_session.query(NotifiedSubmission).filter(or_(NotifiedSubmission.pb_id != None, NotifiedSubmission.drop_id != None, NotifiedSubmission.clog_id != None)).filter(NotifiedSubmission.group_id == group.group_id).order_by(NotifiedSubmission.date_added.desc()).limit(10).all()
         final_submission_data = await assemble_submission_data(group_recent_submissions, db_session)
-        players_in_group = db_session.query(Player.player_id).join(Player.groups).filter(Group.group_id == group.group_id).all()
-        group_total = get_player_list_loot_sum([player.player_id for player in players_in_group])
         return jsonify({
             "group_name": group.group_name,
             "group_description": group.description,
@@ -227,6 +308,7 @@ async def group_board_update(group_id: int):
 
 @groups_bp.get("/groups/admin_diagnostics/<int:group_id>")
 @route_cors(allow_origin="https://www.droptracker.io")
+@require_service_key
 async def group_admin_diagnostics(group_id: int):
     db_session = get_db_session()
     try:

@@ -5,7 +5,7 @@ This package contains all Discord slash commands for the DropTracker bot,
 organized by permission level and functionality for better maintainability.
 
 Modules:
-    user: User-level commands (help, accounts, settings, etc.)
+    user: User-level commands (help, accounts, claim-rsn, dm-settings, etc.)
     admin: Administrator commands (group management, webhooks, etc.)
     group_admin: Group admin commands (manual point adjustments, audit log)
     utils: Utility functions and helpers for commands

@@ -352,7 +352,12 @@ class UserCommands(Extension):
                 
         account_emb = Embed(title="Your Registered Accounts:",
                             description=f"{account_names}(total: `{count}`)")
-        account_emb.add_field(name="/claim-rsn",value="To claim another, you can use the </claim-rsn:1269466219841327108> command.", inline=False)
+        claim_rsn_id = await get_command_id(self.bot, "claim-rsn")
+        if claim_rsn_id and claim_rsn_id != "`command not yet added`":
+            claim_rsn_mention = f"</claim-rsn:{claim_rsn_id}>"
+        else:
+            claim_rsn_mention = "`/claim-rsn`"
+        account_emb.add_field(name="/claim-rsn",value=f"To claim another, you can use the {claim_rsn_mention} command.", inline=False)
         account_emb.add_field(name="/unclaim-rsn", value="To remove an account, use the `/unclaim-rsn` command.", inline=False)
         account_emb.set_footer(text="https://www.droptracker.io/")
         await ctx.send(embed=account_emb, ephemeral=True)
@@ -748,7 +753,7 @@ class UserCommands(Extension):
 
         # Authorization: guild administrator OR listed in the group's authed_users config
         user = session.query(User).filter(User.discord_id == str(ctx.author.id)).first()
-        if not is_admin(ctx) and not (user and is_user_authorized(user.user_id, group)):
+        if not await is_admin(ctx) and not (user and is_user_authorized(user.user_id, group)):
             return await ctx.send(
                 "You are not authorized to request a WOM sync for this group.",
                 ephemeral=True,
@@ -760,7 +765,11 @@ class UserCommands(Extension):
             from db.ops import sync_group_from_wom_with_stats
             result = await sync_group_from_wom_with_stats(wom_id=int(group.wom_id))
         except Exception as e:
-            return await ctx.send(f"WOM sync failed: {e}", ephemeral=True)
+            print(f"WOM sync failed for WOM group {group.wom_id}: {e}")
+            return await ctx.send(
+                "WOM sync failed — please try again in a few minutes.",
+                ephemeral=True,
+            )
 
         if result["on_cooldown"]:
             remaining = result["cooldown_remaining_seconds"]

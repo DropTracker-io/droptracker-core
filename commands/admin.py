@@ -12,12 +12,10 @@ Author: joelhalen
 
 import json
 import random
-import asyncio
 from datetime import datetime
 from interactions import (
     SlashContext, Embed, OptionType, Extension, slash_command, slash_option,
-    Permissions, GuildText, UnfurledMediaItem, ContainerComponent, SeparatorComponent,
-    TextDisplayComponent, SectionComponent, ThumbnailComponent, File
+    Permissions, GuildText, File
 )
 from sqlalchemy import delete
 from db.clan_sync import insert_xf_group
@@ -26,8 +24,9 @@ from db.models import (
     GroupRecentDrops, NotificationQueue, NotifiedSubmission, PlayerPoints, Webhook, 
     user_group_association, session
 )
+from services.components import build_player_setup
 from utils.format import get_command_id
-from .utils import try_create_user
+from .utils import try_create_user, is_admin
 
 
 class ClanCommands(Extension):
@@ -63,15 +62,16 @@ class ClanCommands(Extension):
             group_name (str): Display name for the group
             wom_id (str): Wise Old Man group ID (3-6 digits)
         """
+        await ctx.defer(ephemeral=True)
         try:
             wom_id = int(wom_id)
         except Exception as e:
             return await ctx.send(f"Please enter your WOM group ID with no commas or special characters. It should be only 3-6 digits long.")
-            
+
         if not ctx.guild_id:
             return await ctx.send(f"You must use this command in a Discord server")
-            
-        if ctx.author_permissions.ALL:
+
+        if await is_admin(ctx):
             user = session.query(User).filter(User.discord_id == ctx.author.id).first()
             if not user:
                 await try_create_user(ctx=ctx)
@@ -182,7 +182,6 @@ class ClanCommands(Extension):
                               f"Please visit the website to configure your group settings manually: https://www.droptracker.io/login",
                               ephemeral=True)
                               
-            await asyncio.sleep(5)
             await ctx.send(f"To continue setting up, please [sign in on the website](https://www.droptracker.io/login) using your Discord account.",
                             ephemeral=True)
         else:
@@ -410,8 +409,9 @@ class ClanCommands(Extension):
             member_count = target_group.get_player_count()
         except Exception as e:
             session.rollback()
+            print(f"Force sync failed for WOM group {target_wom_id}: {e}")
             return await ctx.send(
-                f"Force sync failed for WOM group `{target_wom_id}`: {e}",
+                f"Force sync failed for WOM group `{target_wom_id}` — please try again in a few minutes.",
                 ephemeral=True
             )
 
@@ -487,45 +487,9 @@ class ClanCommands(Extension):
         Args:
             ctx (SlashContext): The slash command context
         """
-        logo_media = UnfurledMediaItem(url="https://www.droptracker.io/img/droptracker-small.gif")
-        
-        player_setup = [
-            ContainerComponent(
-                SeparatorComponent(divider=True),
-                TextDisplayComponent(content="## Player FAQs - DropTracker.io"),
-                SeparatorComponent(divider=True),
-                SectionComponent(
-                    components=[
-                        TextDisplayComponent(
-                            content="-# **What is the DropTracker?**\\n" +
-                            "-# > A community-driven, all-in-one loot and achievement tracking system built for Old School RuneScape groups.\\n" +
-                            "-# > We leverage the *[WiseOldMan](https://wiseoldman.net)* to manage group memberships, and provide group leaders a seamless way to configure their group's achievement notification settings.\\n\\n" +
-                            "-# **How do I get started?**\\n" +
-                            "-# > 1. Install the **DropTracker** plugin on your RuneLite client, via the plugin hub.\\n" +
-                            "-# > 2. Visit the plugin settings panel (gear tab on RuneLite side panel) to configure which achievements you *personally* want tracked.\\n" +
-                            "-# > 3. (Optionally) Claim your in-game-name using the </claim-rsn:1369493380358209537> command to associate your Discord account with your character(s).\\n\\n" +
-                            "-# **How can I get pinged when my account(s) have notifications sent?**\\n" +
-                            "-# > Using the </claim-rsn:1369493380358209537> command, entering your in-game-name **exactly as it appears**.\\n\\n" +
-                            "-# **How can I prevent my submissions from being shared to the global DropTracker discord channels?**\\n" +
-                            "-# > Using the </hideme:1369493380358209544> command, and selecting which account(s)/context(s) you want to be hidden from.\\n\\n" +
-                            "-# **How can I get (or not get) pinged by the <@1172933457010245762> bot when my account(s) have notifications sent?**\\n" +
-                            "-# > Using the </pingme:1369493380358209541> command, and selecting which account(s)/context(s) you do or do not want to receive pings for.\\n\\n" +
-                            "-# **What types of information does the DropTracker store about me and my account(s)?**\\n" +
-                            "-# 1. Your account(s) unique identifier, or 'account hash'. This is provided by Jagex, and is unique to each individual character; remaining consistent thru name changes.\\n" +
-                            "-# 2. Your submitted achievements/drops.\\n\\n" +
-                            "-# 3. Your Discord ID (if you claim your account or execute commands through our bot)\\n\\n" +
-                            "-# **What can I do to support the continued development of the DropTracker project?**\\n\\n" +
-                            "-# This passion project began as something far more simple, and has continued to evolve into what you see before you today.\\n" + 
-                            "-# Without the continued support of our premium groups, the development work we do would be impossible.\\n" +
-                            "-# If you feel as though we've provided a notable value to your OSRS experience, feel free to show support through our [Patreon](https://www.patreon.com/droptracker).\\n" +
-                            "-# Players who have subscribed and then upgraded their groups using that subscription are provided early access to new features, alongside a few premium-only functionalities."
-                        )
-                    ],
-                    accessory=ThumbnailComponent(media=logo_media)
-                ),
-                SeparatorComponent(divider=True),
-            )
-        ]
+        # Reuse the shared FAQ builder so command mentions resolve dynamically
+        # instead of relying on hardcoded (stale) command IDs.
+        player_setup = await build_player_setup(self.bot)
         await ctx.channel.send(components=player_setup)
 
     @slash_command(
@@ -567,7 +531,8 @@ class ClanCommands(Extension):
             session.commit()
         except Exception as e:
             session.rollback()
-            return await ctx.send(f"Failed to update setting: {e}", ephemeral=True)
+            print(f"Failed to toggle split tracking for group {guild.group_id}: {e}")
+            return await ctx.send("Failed to update the setting — please try again in a few minutes.", ephemeral=True)
 
         state = "**enabled**" if new_value == "1" else "**disabled**"
         embed = Embed(

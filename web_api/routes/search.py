@@ -11,7 +11,8 @@ import asyncio
 from quart import Blueprint, jsonify, request
 from sqlalchemy import text
 
-from db import NpcList, Player, Group, User
+from db import Player, Group, User
+from utils.npc_names import npc_match_key, npc_match_variants, npc_slug_sql_expr
 from web_api.common import (
     db_session,
     money,
@@ -69,25 +70,57 @@ def _search_groups(s, q):
     return out
 
 
+def _primary_npc(s, name_or_slug):
+    """(npc_id, npc_name) of the primary row for this boss's match key — the
+    variant that actually has tracked data, then lowest id. Same rule as
+    /resolve, so search hits and nice URLs land on the same page."""
+    from sqlalchemy import bindparam
+
+    variants = npc_match_variants(name_or_slug)
+    if not variants:
+        return None
+    expr = npc_slug_sql_expr("npc_name")
+    return s.execute(
+        text(
+            f"SELECT npc_id, npc_name, "
+            f"       EXISTS(SELECT 1 FROM player_npc_hourly_totals t "
+            f"              WHERE t.npc_id = npc_list.npc_id) AS tracked "
+            f"FROM npc_list WHERE {expr} IN :variants "
+            f"ORDER BY tracked DESC, npc_id ASC LIMIT 1"
+        ).bindparams(bindparam("variants", expanding=True)),
+        {"variants": variants},
+    ).fetchone()
+
+
 def _search_npcs(s, q):
-    """NPCs by name. Duplicate names (multi-id bosses) collapse to the lowest
-    id — that's where drops/PBs concentrate (see the Zulrah rows)."""
-    rows = (
-        s.query(NpcList.npc_id, NpcList.npc_name)
-        .filter(NpcList.npc_name.ilike(f"%{q}%"))
-        .order_by(NpcList.npc_name.asc(), NpcList.npc_id.asc())
-        .limit(LIMIT_EACH * 3)
-        .all()
-    )
+    """NPCs by name. Hits collapse by MATCH KEY (slug + "The " article +
+    aliases), not exact name, and each surfaces as its primary page — so
+    "Chambers of Xeric (Challenge mode)" and "... Challenge Mode" are one
+    result, and searching "hunllef" lands on The Gauntlet (suggestion #50)."""
+    rows = s.execute(
+        text(
+            "SELECT n.npc_id, n.npc_name, "
+            "       EXISTS(SELECT 1 FROM player_npc_hourly_totals t "
+            "              WHERE t.npc_id = n.npc_id) AS tracked "
+            "FROM npc_list n WHERE n.npc_name LIKE :pat "
+            "ORDER BY tracked DESC, n.npc_name ASC, n.npc_id ASC LIMIT :lim"
+        ),
+        {"pat": f"%{q}%", "lim": LIMIT_EACH * 4},
+    ).fetchall()
     out = []
-    seen_names = set()
-    for nid, name in rows:
-        if name in seen_names:
+    seen_keys = set()
+    for nid, name, _tracked in rows:
+        key = npc_match_key(name)
+        if not key or key in seen_keys:
             continue
-        seen_names.add(name)
-        out.append({"id": int(nid), "name": name, "icon_url": f"{IMG_BASE}/npcdb/{nid}.png"})
+        seen_keys.add(key)
+        primary = _primary_npc(s, name)
+        pid, pname = (int(primary[0]), primary[1]) if primary else (int(nid), name)
+        out.append({"id": pid, "name": pname, "icon_url": f"{IMG_BASE}/npcdb/{pid}.png"})
         if len(out) >= LIMIT_EACH:
             break
+    # tracked-first ordering serves collapse priority; present alphabetically.
+    out.sort(key=lambda r: r["name"].lower())
     return out
 
 

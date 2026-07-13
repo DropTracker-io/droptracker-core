@@ -42,10 +42,13 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "announcements_channel_id", "type": "channel", "default": None},
 
     # --- Drop notifications ---
-    {"key": "minimum_value_to_notify", "type": "int", "default": 100000, "min": 0},
+    # Defaults here must match the runtime fallbacks the processors use when a
+    # key is absent (data/submissions/drop.py), otherwise the editor shows one
+    # behavior and the bot does another.
+    {"key": "minimum_value_to_notify", "type": "int", "default": 2500000, "min": 0},
     {"key": "only_include_items_over_minimum", "type": "boolean", "default": False, "seasonal": True},
     {"key": "only_send_messages_with_images", "type": "boolean", "default": False, "seasonal": True},
-    {"key": "send_stacks_of_items", "type": "boolean", "default": True, "seasonal": True},
+    {"key": "send_stacks_of_items", "type": "boolean", "default": False, "seasonal": True},
     {"key": "notify_clogs", "type": "boolean", "default": True, "seasonal": True},
     {"key": "notify_cas", "type": "boolean", "default": True, "seasonal": True},
     {"key": "notify_pets", "type": "boolean", "default": True, "seasonal": True},
@@ -55,10 +58,15 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "notify_diaries", "type": "boolean", "default": False, "seasonal": True},
 
     # --- Level notifications ---
+    # notify_levels is the master toggle for the whole level/XP family
+    # (level-ups, total-level milestones, post-99 XP milestones).
     {"key": "notify_levels", "type": "boolean", "default": False, "seasonal": True},
-    {"key": "level_minimum_for_notifications", "type": "int", "default": 80, "min": 1, "max": 99},
+    {"key": "level_minimum_for_notifications", "type": "int", "default": 1, "min": 1, "max": 99},
     {"key": "level_increment", "type": "int", "default": 1, "min": 1, "max": 99},
-    {"key": "level_milestones", "type": "csv", "default": "50,75,99"},
+    # TOTAL-level milestones (e.g. 1500,2000,2277) that always notify.
+    {"key": "level_milestones", "type": "csv", "default": ""},
+    # Post-99 XP notification interval; 0 disables. Plugin reports at 1M
+    # granularity, so values should be multiples of 1,000,000.
     {"key": "post99_xp_interval", "type": "int", "default": 25000000, "min": 0},
 
     # --- Personal best ---
@@ -108,6 +116,17 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # Optional: channel for the "manual submission awaiting review" ping under
     # the 'confirm' policy. Unset => no Discord ping (web review queue only).
     {"key": "channel_id_to_post_manual_review", "type": "channel", "default": None},
+
+    # --- Member activity log + voice-channel stat displays ---
+    # channel_id_to_send_logs: member join/leave embeds (db/ops.py notify_group).
+    # vc_to_display_*: voice channels renamed every 10 min with live stats
+    # (services/channel_names.py). The channel picker's manual-id entry is how
+    # voice channels are selected (the guild channel cache is text-only).
+    {"key": "channel_id_to_send_logs", "type": "channel", "default": None},
+    {"key": "vc_to_display_monthly_loot", "type": "channel", "default": None},
+    {"key": "vc_to_display_monthly_loot_text", "type": "string", "default": "{month}: {gp_amount} gp"},
+    {"key": "vc_to_display_droptracker_users", "type": "channel", "default": None},
+    {"key": "vc_to_display_droptracker_users_text", "type": "string", "default": "{member_count} members"},
 
     # --- Misc / integration ---
     {"key": "group_name", "type": "string", "default": ""},

@@ -18,7 +18,6 @@ nohup.out
 broken*
 missing*.json
 lootboard/themes/*
-bot_state.py
 player_board.py
 
 

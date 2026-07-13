@@ -34,6 +34,19 @@ rs_font_path = "static/assets/fonts/runescape_uf.ttf"
 tracker_fontpath = 'static/assets/fonts/droptrackerfont.ttf'
 main_font = ImageFont.truetype(rs_font_path, font_size)
 
+def config_truthy(value, default=False):
+    """Coerce a group_configurations text value to bool.
+
+    The web config editor stores booleans as "1"/"0"; legacy rows may hold
+    "true"/"false". Treat missing/empty as the caller's default.
+    """
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 def get_db_session():
     """Get a fresh session using the existing session factory"""
     return Session()
@@ -404,12 +417,13 @@ async def generate_server_board(group_id: int = 0, wom_group_id: int = 0, partit
     bg_img, draw = load_background_image(local_url)
 
     # Compute the dynamic text color based on the background image. (- added BY Smoke [https://github.com/Varietyz/])
-    use_dynamic_colors = config.get('use_dynamic_lootboard_colors', True)
-    if use_dynamic_colors and use_dynamic_colors == "1":
-        use_dynamic_colors = True
-    else:
-        use_dynamic_colors = False
-    use_gp_colors = config.get('use_gp_colors', True)
+    # Canonical key is use_dynamic_colors (what the web config editor writes);
+    # use_dynamic_lootboard_colors is the legacy key this file used to read.
+    use_dynamic_colors = config_truthy(
+        config.get('use_dynamic_colors', config.get('use_dynamic_lootboard_colors')),
+        default=True,
+    )
+    use_gp_colors = config_truthy(config.get('use_gp_colors'), default=True)
     #print(f"Dynamic color selected: {dynamic_color}")
     
     #f"Group ID: {group_id}")
@@ -519,12 +533,13 @@ async def generate_server_board_temporary(group_id: int = 0, wom_group_id: int =
     bg_img, draw = load_background_image(local_url)
 
     # Compute the dynamic text color based on the background image. (- added BY Smoke [https://github.com/Varietyz/])
-    use_dynamic_colors = config.get('use_dynamic_lootboard_colors', True)
-    if use_dynamic_colors and use_dynamic_colors == "1":
-        use_dynamic_colors = True
-    else:
-        use_dynamic_colors = False
-    use_gp_colors = config.get('use_gp_colors', True)
+    # Canonical key is use_dynamic_colors (what the web config editor writes);
+    # use_dynamic_lootboard_colors is the legacy key this file used to read.
+    use_dynamic_colors = config_truthy(
+        config.get('use_dynamic_colors', config.get('use_dynamic_lootboard_colors')),
+        default=True,
+    )
+    use_gp_colors = config_truthy(config.get('use_gp_colors'), default=True)
     #print(f"Dynamic color selected: {dynamic_color}")
     if wom_group_id == 0:
         try:
@@ -1344,12 +1359,13 @@ async def generate_timeframe_board(group_id: int = 0, wom_group_id: int = 0,
     bg_img, draw = load_background_image(local_url)
     
     # Get dynamic color settings
-    use_dynamic_colors = config.get('use_dynamic_lootboard_colors', True)
-    if use_dynamic_colors and use_dynamic_colors == "1":
-        use_dynamic_colors = True
-    else:
-        use_dynamic_colors = False
-    use_gp_colors = config.get('use_gp_colors', True)
+    # Canonical key is use_dynamic_colors (what the web config editor writes);
+    # use_dynamic_lootboard_colors is the legacy key this file used to read.
+    use_dynamic_colors = config_truthy(
+        config.get('use_dynamic_colors', config.get('use_dynamic_lootboard_colors')),
+        default=True,
+    )
+    use_gp_colors = config_truthy(config.get('use_gp_colors'), default=True)
     
     # Get player IDs for the group
     if group_id != 2:

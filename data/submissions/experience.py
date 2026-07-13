@@ -266,6 +266,49 @@ def _is_snapshot_submission(experience_data) -> bool:
     return sub_type == "experience_update" or bool(experience_data.get("skills_data"))
 
 
+def _is_milestone_submission(experience_data) -> bool:
+    """True for post-99 XP milestone submissions.
+
+    The plugin sends these as type ``experience_milestone`` (legacy builds:
+    ``xp_milestone``) whenever a 99'd skill crosses a 1M XP boundary, with an
+    ``xp_milestone_interval`` field plus per-skill ``{skill}_xp_milestone``
+    fields carrying the crossed boundary.
+    """
+    sub_type = str(experience_data.get("type") or "").strip().lower()
+    if sub_type in ("experience_milestone", "xp_milestone"):
+        return True
+    return "xp_milestone_interval" in experience_data
+
+
+def _parse_milestone_skills(experience_data: dict) -> list[dict]:
+    """Extract the milestone skills from an XP-milestone submission.
+
+    Returns dicts of ``{"skill_key", "skill_name", "milestone_xp", "xp_total"}``
+    where ``milestone_xp`` is the crossed boundary (e.g. 50_000_000).
+    """
+    out: list[dict] = []
+    skills_trained = experience_data.get("skills_trained") or experience_data.get("skills_leveled") or ""
+    for part in [p.strip() for p in str(skills_trained).split(",") if p and str(p).strip()]:
+        key = part.lower()
+        if key not in SKILL_NAMES:
+            continue
+        milestone_xp = _safe_int(experience_data.get(f"{key}_xp_milestone"), default=0)
+        xp_total = _safe_int(experience_data.get(f"{key}_xp_total"), default=0)
+        if milestone_xp <= 0 and xp_total > 0:
+            # Legacy payloads without the explicit milestone field: floor the
+            # total to the plugin's 1M reporting granularity.
+            milestone_xp = xp_total - (xp_total % 1_000_000)
+        if milestone_xp <= 0:
+            continue
+        out.append({
+            "skill_key": key,
+            "skill_name": key.title(),
+            "milestone_xp": milestone_xp,
+            "xp_total": xp_total or milestone_xp,
+        })
+    return out
+
+
 async def experience_processor(experience_data, external_session=None):
     """Process experience/level-up submissions.
     
@@ -502,6 +545,134 @@ async def experience_processor(experience_data, external_session=None):
         except Exception:
             pass
 
+        # Post-99 XP milestone submissions: no level-up occurred, so the
+        # level-notification loop below would silently skip every group
+        # (new_level is 0). Handle them with their own notification type,
+        # gated per group on notify_levels + post99_xp_interval.
+        stage = "xp_milestone_detection"
+        if _is_milestone_submission(experience_data):
+            milestone_skills = _parse_milestone_skills(experience_data)
+            if not milestone_skills:
+                return SubmissionResponse(
+                    success=True,
+                    message="XP milestone recorded (no notifiable skills).",
+                )
+
+            milestone_text = ", ".join(
+                f"{s['skill_name']} — {s['milestone_xp']:,} XP" for s in milestone_skills
+            )
+
+            stage = "xp_milestone_group_loop"
+            for group in get_player_groups_with_global(session, player):
+                await asyncio.sleep(0)  # Yield to event loop
+                group_id = group.group_id
+
+                # notify_levels is the master toggle for the level/XP family.
+                level_notify_config = (
+                    session.query(GroupConfiguration)
+                    .filter(
+                        GroupConfiguration.group_id == group_id,
+                        GroupConfiguration.config_key == "notify_levels",
+                    )
+                    .first()
+                )
+                if not level_notify_config or not is_truthy_config(level_notify_config.config_value):
+                    continue
+
+                interval_config = (
+                    session.query(GroupConfiguration)
+                    .filter(
+                        GroupConfiguration.group_id == group_id,
+                        GroupConfiguration.config_key == "post99_xp_interval",
+                    )
+                    .first()
+                )
+                interval = (
+                    _safe_int(getattr(interval_config, "config_value", None), default=25_000_000)
+                    if interval_config
+                    else 25_000_000
+                )
+                if interval <= 0:
+                    # 0 disables post-99 XP milestone notifications for the group.
+                    continue
+
+                # The plugin reports every 1M crossing; only notify the group at
+                # multiples of its configured interval (200M max XP always counts).
+                qualifying = [
+                    s for s in milestone_skills
+                    if s["milestone_xp"] % interval == 0 or s["milestone_xp"] >= 200_000_000
+                ]
+                if not qualifying:
+                    continue
+
+                if await screenshot_required(session, group_id):
+                    if not image_url:
+                        notice = (
+                            f"Your XP milestone submission did not include a screenshot "
+                            f"(required for {group.group_name})."
+                        )
+                        continue
+
+                qualifying_text = ", ".join(
+                    f"{s['skill_name']} — {s['milestone_xp']:,} XP" for s in qualifying
+                )
+                notification_data = {
+                    "player_name": player_name,
+                    "player_id": player_id,
+                    "skill_name": ", ".join(s["skill_name"] for s in qualifying),
+                    "skills_names": ", ".join(s["skill_name"] for s in qualifying),
+                    "skills_text": qualifying_text,
+                    "new_level": "",
+                    "levels_gained": "",
+                    "xp_total": max(s["xp_total"] for s in qualifying),
+                    "milestone_xp": max(s["milestone_xp"] for s in qualifying),
+                    "skills": qualifying,
+                    "total_level": total_level,
+                    "total_xp": total_xp,
+                    "combat_level": combat_level,
+                    "image_url": image_url if image_url else "",
+                    "plugin_version": plugin_version,
+                }
+
+                stage = "create_xp_milestone_notifications"
+                await create_notification(
+                    "xp_milestone",
+                    player_id,
+                    notification_data,
+                    group_id,
+                    existing_session=session if use_external_session else None,
+                )
+
+            # Supporter DM: reuse the dm_levels opt-in with milestone text
+            # (previously these submissions produced a nonsense "Skill 0" DM).
+            stage = "xp_milestone_dm"
+            try:
+                if player and player.user and is_user_dm_enabled(session, player.user_id, "dm_levels"):
+                    await create_notification(
+                        "dm_level_up",
+                        player_id,
+                        {
+                            "player_name": player_name,
+                            "player_id": player_id,
+                            "guid": unique_id,
+                            "skill_name": ", ".join(s["skill_name"] for s in milestone_skills),
+                            "skills_text": milestone_text,
+                            "total_level": total_level,
+                            "combat_level": combat_level,
+                            "image_url": image_url if image_url else "",
+                            "plugin_version": plugin_version,
+                        },
+                        existing_session=session if use_external_session else None,
+                    )
+            except Exception as e:
+                print(f"Couldn't queue personal XP-milestone DM notification: {e}")
+
+            return SubmissionResponse(
+                success=True,
+                message=f"XP milestone recorded: {milestone_text}",
+                notice=notice if notice else None,
+            )
+
         # If this looks like an initial "0 -> real level" sync, we should NOT notify.
         # Still update the stored XP/levels above so the backend stays accurate.
         stage = "bulk_sync_detection"
@@ -574,15 +745,41 @@ async def experience_processor(experience_data, external_session=None):
             minimum_level_to_notify = (
                 _safe_int(getattr(minimum_level, "config_value", None), default=1) if minimum_level else 1
             )
+            # Canonical key is level_milestones (what the web config editor
+            # writes); level_milestones_to_notify is the legacy key this
+            # processor used to read. These are TOTAL-level milestones.
             milestone_levels = (
                 session.query(GroupConfiguration)
                 .filter(
                     GroupConfiguration.group_id == group_id,
-                    GroupConfiguration.config_key == "level_milestones_to_notify",
+                    GroupConfiguration.config_key.in_(
+                        ["level_milestones", "level_milestones_to_notify"]
+                    ),
+                    GroupConfiguration.config_value.isnot(None),
+                    GroupConfiguration.config_value != "",
+                )
+                .order_by(
+                    # Prefer the canonical key when both rows exist.
+                    (GroupConfiguration.config_key != "level_milestones").asc()
                 )
                 .first()
             )
             milestone_levels_to_notify = _parse_int_list_config(milestone_levels)
+            level_increment_config = (
+                session.query(GroupConfiguration)
+                .filter(
+                    GroupConfiguration.group_id == group_id,
+                    GroupConfiguration.config_key == "level_increment",
+                )
+                .first()
+            )
+            level_increment = (
+                _safe_int(getattr(level_increment_config, "config_value", None), default=1)
+                if level_increment_config
+                else 1
+            )
+            if level_increment < 1:
+                level_increment = 1
 
             # Per-group diagnostic print (helps isolate config-related failures)
             # try:
@@ -605,6 +802,19 @@ async def experience_processor(experience_data, external_session=None):
             max_new_level = max((_safe_int(s.get("new_level"), default=0) for s in skills), default=0)
             if max_new_level < minimum_level_to_notify and not is_milestone_level():
                 continue
+            # level_increment: only notify every Nth level (1 = every level).
+            # Level 99 always notifies; a milestone total level always notifies.
+            if level_increment > 1 and not is_milestone_level():
+                aligned = any(
+                    _safe_int(s.get("new_level"), default=0) >= minimum_level_to_notify
+                    and (
+                        _safe_int(s.get("new_level"), default=0) % level_increment == 0
+                        or _safe_int(s.get("new_level"), default=0) == 99
+                    )
+                    for s in skills
+                )
+                if not aligned:
+                    continue
             if not level_notify_config:
                 continue
             if not is_truthy_config(level_notify_config.config_value):

@@ -829,6 +829,8 @@ class NotificationService:
                 await self.send_pet_notification_with_session(notification, data, db_session)
             elif notification_type == 'level_up':
                 await self.send_level_up_notification_with_session(notification, data, db_session)
+            elif notification_type in ('xp_milestone', 'total_level_milestone'):
+                await self.send_xp_milestone_notification_with_session(notification, data, db_session)
             elif notification_type == 'quest':
                 await self.send_quest_notification_with_session(notification, data, db_session)
             elif notification_type == 'death':
@@ -897,11 +899,17 @@ class NotificationService:
             group_id = notification.group_id
             player_id = notification.player_id
 
-            # Channel: reuse loot channel unless you add a dedicated config key later
+            # Dedicated levels channel, falling back to the loot channel (the
+            # config editor documents this fallback).
             channel_id_config = db_session.query(GroupConfiguration).filter(
                 GroupConfiguration.group_id == group_id,
                 GroupConfiguration.config_key == 'channel_id_to_post_levels'
             ).first()
+            if not channel_id_config or not channel_id_config.config_value:
+                channel_id_config = db_session.query(GroupConfiguration).filter(
+                    GroupConfiguration.group_id == group_id,
+                    GroupConfiguration.config_key == 'channel_id_to_post_loot'
+                ).first()
 
             if not channel_id_config or not channel_id_config.config_value:
                 notification.status = 'failed'
@@ -968,6 +976,114 @@ class NotificationService:
                 embed = await self.remove_group_field(embed)
 
             content = f"{formatted_name} levelled-up:"
+
+            if image_url:
+                try:
+                    local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
+                    if os.path.exists(local_path):
+                        attachment = interactions.File(local_path)
+                        await channel.send(content, embed=embed, files=attachment)
+                    else:
+                        await channel.send(content, embed=embed)
+                except Exception:
+                    await channel.send(content, embed=embed)
+            else:
+                await channel.send(content, embed=embed)
+
+            notification.status = 'sent'
+            notification.processed_at = datetime.now()
+            db_session.commit()
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = str(e)
+            db_session.commit()
+            raise
+
+    async def send_xp_milestone_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
+        """Send a post-99 XP milestone or total-level milestone notification.
+
+        Both types reuse the group's level_up embed template so no new embed
+        rows are required; only the content line differs.
+        """
+        notification.status = 'processing'
+        db_session.commit()
+        try:
+            group_id = notification.group_id
+            player_id = notification.player_id
+
+            # Dedicated levels channel, falling back to the loot channel.
+            channel_id_config = db_session.query(GroupConfiguration).filter(
+                GroupConfiguration.group_id == group_id,
+                GroupConfiguration.config_key == 'channel_id_to_post_levels'
+            ).first()
+            if not channel_id_config or not channel_id_config.config_value:
+                channel_id_config = db_session.query(GroupConfiguration).filter(
+                    GroupConfiguration.group_id == group_id,
+                    GroupConfiguration.config_key == 'channel_id_to_post_loot'
+                ).first()
+
+            if not channel_id_config or not channel_id_config.config_value:
+                notification.status = 'failed'
+                notification.error_message = f"No channel configured for group {group_id}"
+                db_session.commit()
+                return
+
+            channel, channel_error = await self._fetch_sendable_channel(channel_id_config.config_value)
+            if channel is None:
+                notification.status = 'failed'
+                notification.error_message = channel_error or f"Channel not found for group {group_id}"
+                db_session.commit()
+                return
+
+            upgrade_active = has_custom_embeds(group_id)
+            if upgrade_active:
+                embed_template = await self.db_ops.get_group_embed('level_up', group_id)
+            else:
+                embed_template = await self.db_ops.get_group_embed('level_up', 1)
+
+            if not embed_template:
+                notification.status = 'failed'
+                notification.error_message = f"No embed template for group {group_id}"
+                db_session.commit()
+                return
+
+            player_name = data.get("player_name") or ""
+            image_url = data.get("image_url") or ""
+            skills_text = data.get("skills_text") or ""
+
+            formatted_name = get_formatted_name(player_name, group_id, db_session)
+
+            replacements = {
+                "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
+                "{skill_name}": str(data.get("skill_name") or data.get("skills_names") or ""),
+                "{skills_names}": str(data.get("skills_names") or ""),
+                "{skills_text}": str(skills_text or ""),
+                "{new_level}": str(data.get("new_level") or ""),
+                "{levels_gained}": str(data.get("levels_gained") or ""),
+                "{xp_total}": str(data.get("xp_total") or ""),
+                "{milestone_xp}": str(data.get("milestone_xp") or ""),
+                "{total_level}": str(data.get("total_level") or ""),
+                "{total_xp}": str(data.get("total_xp") or ""),
+                "{combat_level}": str(data.get("combat_level") or ""),
+                "{image_url}": image_url,
+                "{video_url}": "",
+                "{video_link}": "",
+            }
+            replacements.update(self._plugin_version_placeholder_map(data))
+
+            embed = replace_placeholders(embed_template, replacements)
+            if group_id == 2:
+                embed = await self.remove_group_field(embed)
+
+            if notification.notification_type == 'total_level_milestone':
+                milestone_label = str(data.get("total_level") or "")
+                content = (
+                    f"{formatted_name} reached total level {milestone_label}!"
+                    if milestone_label
+                    else f"{formatted_name} reached a total level milestone!"
+                )
+            else:
+                content = f"{formatted_name} reached an XP milestone: {skills_text}"
 
             if image_url:
                 try:

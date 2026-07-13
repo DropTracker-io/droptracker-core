@@ -33,6 +33,7 @@ from quart import Blueprint, jsonify, request
 from sqlalchemy import text
 
 from db import NpcList, Player
+from utils.npc_names import npc_family_tiers, npc_slug_sql_expr
 from utils.redis import redis_client
 from web_api.common import (
     abort_problem,
@@ -389,6 +390,42 @@ async def npc_detail(npc_id: int):
     return with_cache_headers(jsonify(payload), max_age=60)
 
 
+def _wiki_table_rows(s, nid: int):
+    return s.execute(
+        text(
+            "SELECT l.item_id, COALESCE(i.item_name, CONCAT('Item ', l.item_id)), "
+            "       l.quantity, l.noted, l.rarity, l.rolls "
+            "FROM xenforo.dt_npc_loot l "
+            "LEFT JOIN items i ON i.item_id = l.item_id "
+            "WHERE l.npc_id = :nid ORDER BY l.rarity DESC, l.item_id ASC"
+        ),
+        {"nid": nid},
+    ).fetchall()
+
+
+def _family_table_rows(s, npc_id: int, npc_name: str):
+    """Wiki rows from the nearest boss-family donor when this npc has none.
+
+    The importer landed each family's table on one arbitrary member (CoX table
+    on the base raid, ToB's on Hard Mode), so mode/spelling/article/alias
+    variants render empty without this. Priority tiers: same boss (spelling,
+    "The ", alias variants) → base raid → mode siblings (suggestion #50).
+    """
+    from sqlalchemy import bindparam
+
+    expr = npc_slug_sql_expr("npc_name")
+    sql = text(
+        f"SELECT npc_id FROM npc_list "
+        f"WHERE {expr} IN :slugs AND npc_id <> :nid ORDER BY npc_id ASC"
+    ).bindparams(bindparam("slugs", expanding=True))
+    for tier in npc_family_tiers(npc_name):
+        for (sid,) in s.execute(sql, {"slugs": tier, "nid": npc_id}).fetchall():
+            rows = _wiki_table_rows(s, int(sid))
+            if rows:
+                return rows
+    return []
+
+
 @npcs_bp.get("/npcs/<int:npc_id>/drop-table")
 async def npc_drop_table(npc_id: int):
     """Wiki drop table + who most recently received each item from this NPC."""
@@ -396,16 +433,9 @@ async def npc_drop_table(npc_id: int):
     def _load():
         with db_session() as s:
             npc_name = _npc_or_404(npc_id, s).npc_name
-            rows = s.execute(
-                text(
-                    "SELECT l.item_id, COALESCE(i.item_name, CONCAT('Item ', l.item_id)), "
-                    "       l.quantity, l.noted, l.rarity, l.rolls "
-                    "FROM xenforo.dt_npc_loot l "
-                    "LEFT JOIN items i ON i.item_id = l.item_id "
-                    "WHERE l.npc_id = :nid ORDER BY l.rarity DESC, l.item_id ASC"
-                ),
-                {"nid": npc_id},
-            ).fetchall()
+            rows = _wiki_table_rows(s, npc_id)
+            if not rows:
+                rows = _family_table_rows(s, npc_id, npc_name)
 
             # No wiki table → nothing to annotate; skip the registry entirely
             # (a cold build on a busy NPC is minutes of scanning for nothing).
@@ -421,8 +451,16 @@ async def npc_drop_table(npc_id: int):
             )
 
         items = []
+        # dt_npc_loot carries repeated-import duplicates (identical tuples up
+        # to 60×: CoX 561 rows / 51 items) — collapse them; distinct tuples
+        # for one item (e.g. two legit rarity tiers) are kept.
+        seen_rows = set()
         for item_id, item_name, quantity, noted, rarity, rolls in rows:
             item_id = int(item_id)
+            row_key = (item_id, str(quantity), bool(noted), float(rarity), int(rolls or 1))
+            if row_key in seen_rows:
+                continue
+            seen_rows.add(row_key)
             entry = last_drops.get(item_id)
             last = None
             if entry and entry.get("player_id") and entry["player_id"] not in hidden:

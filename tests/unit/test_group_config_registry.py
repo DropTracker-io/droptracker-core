@@ -40,7 +40,8 @@ class TestRegistry:
 
         ifield = reg.get_config_field("minimum_value_to_notify")
         assert reg.coerce_from_storage(ifield, "2500000") == 2500000
-        assert reg.coerce_from_storage(ifield, None) == 100000  # default
+        # Default matches the runtime fallback in data/submissions/drop.py.
+        assert reg.coerce_from_storage(ifield, None) == 2500000  # default
 
     def test_coerce_from_storage_out_of_range_int_is_default(self):
         # Legacy sentinel: template group seeds number_of_pbs_to_display='0'

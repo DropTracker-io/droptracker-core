@@ -41,16 +41,32 @@ _MAX_CANDIDATES = 25
 
 
 def _resolve_npc(s, slug: str):
-    """Duplicate npc names (Guard, Zombie, multi-id bosses) collapse to the
-    lowest id — where drops/PBs concentrate, matching search.py."""
+    """NPC variants collapse to one primary: duplicate names, spelling
+    variants (same slug), "The " article variants and outright aliases
+    (Crystalline Hunllef → The Gauntlet) all resolve to the id that actually
+    has tracked data, then lowest id — so a stray empty variant row never
+    shadows the real page (suggestion #50)."""
+    from sqlalchemy import bindparam
+
+    from utils.npc_names import npc_match_variants
+
+    variants = npc_match_variants(slug)
+    if not variants:
+        return None, []
     expr = slug_sql_expr("npc_name")
     row = s.execute(
-        text(f"SELECT npc_id, npc_name FROM npc_list WHERE {expr} = :slug ORDER BY npc_id ASC LIMIT 1"),
-        {"slug": slug},
+        text(
+            f"SELECT npc_id, npc_name, "
+            f"       EXISTS(SELECT 1 FROM player_npc_hourly_totals t "
+            f"              WHERE t.npc_id = npc_list.npc_id) AS tracked "
+            f"FROM npc_list WHERE {expr} IN :variants "
+            f"ORDER BY tracked DESC, npc_id ASC LIMIT 1"
+        ).bindparams(bindparam("variants", expanding=True)),
+        {"variants": variants},
     ).fetchone()
     if not row:
         return None, []
-    nid, name = row
+    nid, name, _tracked = row
     match = {"id": int(nid), "name": name, "icon_url": f"{IMG_BASE}/npcdb/{nid}.png"}
     return match, [match]
 

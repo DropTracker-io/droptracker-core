@@ -302,6 +302,30 @@ async def npc_totals_loop():
         await sleep_with_watchdog_heartbeats(60)
 
 
+async def item_totals_loop():
+    """Keep the player_item_hourly_totals rollup current (powers the item
+    pages' receive totals + search ranking). Tails the drops table by drop_id
+    every 60s, same pattern as npc_totals_loop."""
+    from services import item_totals
+
+    while not shutdown_event.is_set():
+        try:
+            await send_watchdog_heartbeat()
+            loop = asyncio.get_event_loop()
+            scanned = await loop.run_in_executor(None, item_totals.process_new_drops)
+            if scanned:
+                print(f"item_totals: folded {scanned} new drops into hourly rollup")
+        except Exception as e:
+            print(f"Error in item totals loop: {e}")
+            app_logger.log(
+                log_type="error",
+                data=f"Error in item totals loop: {e}",
+                app_name="player_updates",
+                description="item_totals_loop",
+            )
+        await sleep_with_watchdog_heartbeats(60)
+
+
 async def github_update_loop():
     """Enhanced github_update_loop with watchdog notifications"""
     if os.getenv("STATUS") == "dev" or os.getenv("STATE") == "dev":
@@ -355,6 +379,7 @@ async def setup_background_tasks():
     app.update_task = asyncio.create_task(update_players())
     app.github_task = asyncio.create_task(github_update_loop())
     app.npc_totals_task = asyncio.create_task(npc_totals_loop())
+    app.item_totals_task = asyncio.create_task(item_totals_loop())
     app_logger.log(log_type="access", data=f"Started background tasks", app_name="player_updates", description="setup_background_tasks")
 
 async def get_all_groups(session_to_use = None):
@@ -392,7 +417,14 @@ async def cleanup_background_tasks():
             await app.npc_totals_task
         except asyncio.CancelledError:
             pass
-    
+
+    if hasattr(app, 'item_totals_task'):
+        app.item_totals_task.cancel()
+        try:
+            await app.item_totals_task
+        except asyncio.CancelledError:
+            pass
+
     app_logger.log(log_type="access", data=f"Background tasks were cancelled", app_name="player_updates", description="cleanup_background_tasks")
 
 async def main():

@@ -44,11 +44,13 @@ async def _process_entry(entry_bytes: bytes) -> None:
     from api.routes.webhook import (
         _dispatch_seasonal_submission,
         _link_video_to_submission,
+        _mark_submission_outcome,
         _normalize_submission_type,
         _normalize_world_type,
         _try_attach_video_url_to_drop,
     )
     from data import submissions
+    from data.submissions.common import SubmissionResponse
     from db.models import Player
     from utils.download import download_image
 
@@ -106,8 +108,19 @@ async def _process_entry(entry_bytes: bytes) -> None:
 
             try:
                 if world_type == "seasonal":
-                    await _dispatch_seasonal_submission(norm_type, processed_data, db_session)
+                    from services.seasonal_state import is_seasonal_active
+                    if not is_seasonal_active():
+                        # Global kill switch (admin panel): skip seasonal
+                        # processing entirely between seasons.
+                        _mark_submission_outcome(
+                            processed_data,
+                            norm_type,
+                            SubmissionResponse(False, "Seasonal processing is currently disabled."),
+                        )
+                        continue
+                    response = await _dispatch_seasonal_submission(norm_type, processed_data, db_session)
                     db_session.commit()
+                    _mark_submission_outcome(processed_data, norm_type, response)
                     continue
                 elif world_type != "main":
                     continue
@@ -120,31 +133,37 @@ async def _process_entry(entry_bytes: bytes) -> None:
 
                 match norm_type:
                     case "drop":
-                        await submissions.drop_processor(processed_data, external_session=db_session)
+                        response = await submissions.drop_processor(processed_data, external_session=db_session)
                         await _try_attach_video_url_to_drop(processed_data, db_session)
                     case "collection_log":
-                        await submissions.clog_processor(processed_data, external_session=db_session)
+                        response = await submissions.clog_processor(processed_data, external_session=db_session)
                     case "personal_best":
-                        await submissions.pb_processor(processed_data, external_session=db_session)
+                        response = await submissions.pb_processor(processed_data, external_session=db_session)
                     case "combat_achievement":
-                        await submissions.ca_processor(processed_data, external_session=db_session)
+                        response = await submissions.ca_processor(processed_data, external_session=db_session)
                     case "experience":
-                        await submissions.experience_processor(processed_data, external_session=db_session)
+                        response = await submissions.experience_processor(processed_data, external_session=db_session)
                     case "quest":
-                        await submissions.quest_processor(processed_data, external_session=db_session)
+                        response = await submissions.quest_processor(processed_data, external_session=db_session)
                     case "death":
-                        await submissions.death_processor(processed_data, external_session=db_session)
+                        response = await submissions.death_processor(processed_data, external_session=db_session)
                     case "diary":
-                        await submissions.diary_processor(processed_data, external_session=db_session)
+                        response = await submissions.diary_processor(processed_data, external_session=db_session)
                     case "pet":
-                        await submissions.pet_processor(processed_data, external_session=db_session)
+                        response = await submissions.pet_processor(processed_data, external_session=db_session)
                     case "adventure_log":
-                        await submissions.adventure_log_processor(processed_data, external_session=db_session)
+                        response = await submissions.adventure_log_processor(processed_data, external_session=db_session)
                     case _:
                         log.warning("Unknown submission type %r; skipping", norm_type)
+                        _mark_submission_outcome(
+                            processed_data,
+                            norm_type,
+                            SubmissionResponse(False, f"Unsupported submission type: {norm_type}"),
+                        )
                         continue
 
                 db_session.commit()
+                _mark_submission_outcome(processed_data, norm_type, response)
             except Exception:
                 db_session.rollback()
                 raise

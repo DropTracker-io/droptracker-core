@@ -12,6 +12,8 @@ from api.core import logger, get_db_session, metrics, reset_db_connections
 from data import submissions
 from db import Player, Drop
 from db.models.video_upload import VideoUpload
+from services.seasonal_state import is_seasonal_active
+from services.submission_status import mark_submission_processed, mark_submission_rejected
 from utils.download import download_image
 from utils.video_storage import backend_for_video_record, get_public_video_url
 
@@ -41,6 +43,22 @@ def _normalize_world_type(raw_world_type):
         return MAIN_WORLD_TYPE
     normalized = str(raw_world_type).strip().lower()
     return normalized or MAIN_WORLD_TYPE
+
+
+def _mark_submission_outcome(processed_data, submission_type, response):
+    """Write the per-submission status marker from the processor's verdict.
+
+    A SubmissionResponse with success=False is a definitive rejection
+    (duplicate, failed auth, unknown item/NPC) — record it as such so /check
+    reports the real outcome. A missing response object means the processor
+    completed without an explicit verdict; treat that as processed, matching
+    the pre-status-marker behavior.
+    """
+    guid = processed_data.get("guid") or processed_data.get("unique_id")
+    if response is not None and getattr(response, "success", True) is False:
+        mark_submission_rejected(guid, submission_type, reason=getattr(response, "message", None))
+    else:
+        mark_submission_processed(guid, submission_type)
 
 
 def _normalize_submission_type(raw_submission_type):
@@ -293,6 +311,12 @@ async def webhook_data():
 
 async def _process_webhook_request(req_start):
     import time
+    # Function-level import: a top-level `from data.submissions.common import
+    # SubmissionResponse` is circular when this module is reached VIA
+    # data.submissions.common (bots.webhook_bot -> data.submissions -> common
+    # -> api.core -> api/__init__ -> this module) while common is still
+    # partially initialized. By call time all modules are fully loaded.
+    from data.submissions.common import SubmissionResponse
 
     success = False
     request_type = "webhook"
@@ -349,12 +373,29 @@ async def _process_webhook_request(req_start):
                         processed_data["world_type"] = world_type
 
                         if world_type == "seasonal":
+                            if not is_seasonal_active():
+                                # Global kill switch (admin panel): skip seasonal
+                                # processing entirely between seasons.
+                                response = SubmissionResponse(
+                                    False, "Seasonal processing is currently disabled."
+                                )
+                                _mark_submission_outcome(
+                                    processed_data,
+                                    _normalize_submission_type(submission_type),
+                                    response,
+                                )
+                                continue
                             response = await _dispatch_seasonal_submission(
                                 _normalize_submission_type(submission_type),
                                 processed_data,
                                 db_session,
                             )
                             db_session.commit()
+                            _mark_submission_outcome(
+                                processed_data,
+                                _normalize_submission_type(submission_type),
+                                response,
+                            )
                             continue
                         elif world_type != MAIN_WORLD_TYPE:
                             continue
@@ -453,9 +494,21 @@ async def _process_webhook_request(req_start):
                                     log_phase("adventure_log_processed")
                                 case _:
                                     g.submission_type = submission_type or "webhook"
+                                    # Unknown type: acknowledge with 200 so no plugin
+                                    # build retry-loops, but record the truth instead
+                                    # of a fake success.
+                                    logger.log_sync(
+                                        "warning",
+                                        f"Unsupported submission type received: {submission_type!r}",
+                                    )
+                                    response = SubmissionResponse(
+                                        False, f"Unsupported submission type: {submission_type}"
+                                    )
+                                    _mark_submission_outcome(processed_data, submission_type, response)
                                     continue
                             db_session.commit()
                             log_phase("committed")
+                            _mark_submission_outcome(processed_data, submission_type, response)
                         except Exception:
                             db_session.rollback()
                             raise
@@ -472,21 +525,31 @@ async def _process_webhook_request(req_start):
                         db_session.close()
                         db_session = None
 
+                # HTTP status stays 200 for rejections: the plugin's retry logic
+                # must NOT engage for definitive rejects (duplicates, failed auth).
+                # The "status" field is additive — legacy builds ignore it.
                 if response:
-                    return jsonify({"message": response.message, "notice": response.notice}), 200
+                    accepted = getattr(response, "success", True) is not False
+                    return jsonify({
+                        "message": response.message,
+                        "notice": response.notice,
+                        "status": "accepted" if accepted else "rejected",
+                    }), 200
                 else:
-                    return jsonify({"message": "Webhook data processed successfully"}), 200
+                    return jsonify({
+                        "message": "Webhook data processed successfully",
+                        "status": "accepted",
+                    }), 200
 
             except Exception as e:
                 logger.log_sync("error", f"Error processing multipart request: {e}")
                 return jsonify({"error": f"Error processing request: {str(e)}"}), 400
         else:
-            try:
-                data = await request.get_json()
-                return jsonify({"message": "JSON data processed"}), 200
-            except Exception as e:
-                logger.log_sync("error", f"Error processing JSON request: {e}")
-                return jsonify({"error": f"Error processing request: {str(e)}"}), 400
+            # No client ships data here as JSON — the plugin always posts
+            # multipart. Previously this branch acknowledged (and discarded)
+            # arbitrary JSON with a fake success; be honest instead.
+            logger.log_sync("warning", "Rejected non-multipart POST to /webhook")
+            return jsonify({"error": "Expected multipart/form-data with a payload_json field"}), 400
     except Exception as e:
         logger.log_sync("error", f"Webhook Exception: {e}")
         return jsonify({"error": str(e)}), 500
@@ -802,10 +865,13 @@ async def _process_manual_submission(req_start):
 
         world_type = _normalize_world_type(data.get("world_type"))
         if world_type != MAIN_WORLD_TYPE:
-            _dispatch_non_main_submission(world_type, _normalize_submission_type(submission_type))
+            # Manual submissions are main-world only; seasonal/league data must
+            # arrive via the plugin webhook path so it carries a real account
+            # hash for identity verification.
             success = True
             return jsonify({
                 "success": True,
+                "status": "ignored",
                 "message": f"Ignored {submission_type} submission for world_type '{world_type}'"
             }), 200
         
@@ -1013,16 +1079,21 @@ async def _process_manual_submission(req_start):
             db_session.commit()
             log_phase("committed")
             success = True
-            
+
             if response:
+                # Reflect the processor's actual verdict: a rejection (duplicate,
+                # failed auth, unknown item/NPC) is not a success even though the
+                # request itself completed.
                 return jsonify({
-                    "success": True,
+                    "success": bool(response.success),
+                    "status": "accepted" if response.success else "rejected",
                     "message": response.message,
                     "notice": response.notice
                 }), 200
             else:
                 return jsonify({
                     "success": True,
+                    "status": "accepted",
                     "message": f"Manual {submission_type} submission processed successfully"
                 }), 200
         

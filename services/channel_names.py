@@ -36,7 +36,7 @@ class ChannelNames(Extension):
                                 #print("Channel is a voice channel")
                                 template = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_monthly_loot_text',
                                                                                     GroupConfiguration.group_id == channel_setting.group_id).first()
-                                template_str = template.config_value
+                                template_str = template.config_value if template else ""
                                 if template_str == "" or not template_str:
                                     template_str = "{month}: {gp_amount} gp"
                                 if channel_setting.group_id != 2:
@@ -89,7 +89,7 @@ class ChannelNames(Extension):
                         channel = await bot.fetch_channel(channel_id=channel_setting.config_value)
                         template = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_droptracker_users_text',
                                                                             GroupConfiguration.group_id == channel_setting.group_id).first()
-                        template_str = template.config_value
+                        template_str = template.config_value if template else ""
                         if template_str == "" or not template_str:
                             template_str = "{member_count} members"
                         if channel:

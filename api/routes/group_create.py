@@ -18,6 +18,7 @@ Parity:
 """
 
 import asyncio
+import hmac
 import os
 from datetime import timedelta
 from functools import wraps
@@ -140,7 +141,7 @@ def require_service_key(func):
                 503,
             )
         provided = _extract_request_key()
-        if not provided or provided != expected:
+        if not provided or not hmac.compare_digest(str(provided), str(expected)):
             return jsonify({"success": False, "error": "Unauthorized."}), 401
         return await func(*args, **kwargs)
 

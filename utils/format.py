@@ -126,6 +126,30 @@ def get_true_boss_name(npc_name: str):
         print("Found an exact match for", npc_name, "in the database:", npc.npc_name, npc.npc_id)
         return npc.npc_name, npc.npc_id
     else:
+        # Normalized match (suggestion #50): same match key ⇒ same boss
+        # (spelling, punctuation, "The " article and alias variants like
+        # Crystalline Hunllef → The Gauntlet), preferring the id that already
+        # has tracked data — instead of the ilike guess below.
+        from sqlalchemy import bindparam
+        from sqlalchemy import text as _text
+
+        from utils.npc_names import npc_match_variants, npc_slug_sql_expr
+
+        variants = npc_match_variants(npc_name)
+        if variants:
+            row = session.execute(
+                _text(
+                    f"SELECT n.npc_id, n.npc_name, "
+                    f"       EXISTS(SELECT 1 FROM player_npc_hourly_totals t "
+                    f"              WHERE t.npc_id = n.npc_id) AS tracked "
+                    f"FROM npc_list n WHERE {npc_slug_sql_expr('n.npc_name')} IN :variants "
+                    f"ORDER BY tracked DESC, n.npc_id ASC LIMIT 1"
+                ).bindparams(bindparam("variants", expanding=True)),
+                {"variants": variants},
+            ).first()
+            if row:
+                print("Found a normalized match for", npc_name, "in the database:", row[1], row[0])
+                return row[1], int(row[0])
         ## Try to find the closest match in the database
         npc = session.query(NpcList).filter(NpcList.npc_name.ilike(f"%{npc_name}%")).first()
         if npc:

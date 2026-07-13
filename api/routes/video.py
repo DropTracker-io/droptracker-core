@@ -807,6 +807,13 @@ async def video_status():
         if not video_key:
             return jsonify({"error": "Missing 'key' parameter"}), 400
 
+        # Ownership check: the caller must present the account hash of the
+        # player who created the upload. Without this, anyone holding a key
+        # could resolve it to a public video URL.
+        acc_hash = request.args.get("acc_hash") or request.headers.get("X-Acc-Hash", "")
+        if not acc_hash:
+            return jsonify({"error": "Missing acc_hash parameter"}), 400
+
         db_session = get_db_session()
         video_record = await asyncio.to_thread(
             lambda: db_session.query(VideoUpload).filter(
@@ -815,6 +822,15 @@ async def video_status():
         )
 
         if not video_record:
+            return jsonify({"error": "Video not found"}), 404
+
+        owner = await asyncio.to_thread(
+            lambda: db_session.query(Player).filter(
+                Player.account_hash == acc_hash
+            ).first()
+        )
+        if not owner or owner.player_id != video_record.player_id:
+            # 404 (not 403) so the endpoint doesn't confirm a key exists.
             return jsonify({"error": "Video not found"}), 404
 
         result = {

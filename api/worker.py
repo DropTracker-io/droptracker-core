@@ -91,13 +91,15 @@ async def get_items():
 @worker_bp.route('/latest_welcome', methods=['GET'])
 async def get_latest_welcome_message():
     welcome_message = "Welcome to the DropTracker (API v3.6.1)"
-    return str(welcome_message), 200
-        
+    # Explicit text/plain: Quart defaults bare-string responses to text/html,
+    # and the plugin treats HTML-looking news/welcome bodies as errors.
+    return str(welcome_message), 200, {"Content-Type": "text/plain; charset=utf-8"}
+
 
 @worker_bp.route('/latest_news', methods=['GET'])
 async def get_latest_news():
     news_message = "The DropTracker team is looking for developers & community support! Please reach out in our Discord if you are interested."
-    return str(news_message), 200
+    return str(news_message), 200, {"Content-Type": "text/plain; charset=utf-8"}
     
 
 @worker_bp.route("/api/item_by_search", methods=["GET"])

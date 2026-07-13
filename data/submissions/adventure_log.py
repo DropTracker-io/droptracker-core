@@ -96,7 +96,12 @@ async def adventure_log_processor(adventure_log_data, external_session=None):
                 continue
 
             boss_name = str(match.group("boss") or "").strip()
-            team_size = str(match.group("team") or "").strip()
+            # Raw log fragments arrive as "(2", "(2 players)", "5 s", … —
+            # normalize to the canonical team encodings so one team size
+            # never splits into parallel PB boards (suggestion #50).
+            from utils.npc_names import sanitize_team_size
+
+            team_size = sanitize_team_size(match.group("team"))
             kill_time = str(match.group("time") or "").strip()
             if not boss_name or not team_size or not kill_time:
                 debug_print(

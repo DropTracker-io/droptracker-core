@@ -744,6 +744,33 @@ async def ensure_npc_id_for_player(session, npc_name, player_id, player_name, us
     if npc_row:
         npc_list[npc_name] = npc_row.npc_id
         return npc_row.npc_id, npc_name
+    # Normalized fallback (suggestion #50): sources spell the same boss
+    # differently ("Tombs of Amascut: Expert Mode" vs "... Expert Mode",
+    # "The Whisperer" vs "Whisperer") or name it outright differently
+    # ("Crystalline Hunllef" vs "The Gauntlet"), which used to mint a second
+    # npc_list row and split PBs/drops across ids. Match by variant slugs and
+    # prefer the id that already has tracked data, returning the CANONICAL
+    # stored name so downstream rows/embeds use one spelling.
+    from sqlalchemy import bindparam
+
+    from utils.npc_names import npc_match_variants, npc_slug_sql_expr
+
+    variants = npc_match_variants(npc_name)
+    if variants:
+        norm_row = session.execute(
+            text(
+                f"SELECT n.npc_id, n.npc_name, "
+                f"       EXISTS(SELECT 1 FROM player_npc_hourly_totals t "
+                f"              WHERE t.npc_id = n.npc_id) AS tracked "
+                f"FROM npc_list n WHERE {npc_slug_sql_expr('n.npc_name')} IN :variants "
+                f"ORDER BY tracked DESC, n.npc_id ASC LIMIT 1"
+            ).bindparams(bindparam("variants", expanding=True)),
+            {"variants": variants},
+        ).first()
+        if norm_row:
+            canonical_id, canonical_name = int(norm_row[0]), norm_row[1]
+            npc_list[npc_name] = canonical_id
+            return canonical_id, canonical_name
     player_id = player_list.get(player_name)
     if player_id == 0:
         return None, npc_name

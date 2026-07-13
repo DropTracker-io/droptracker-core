@@ -8,13 +8,16 @@ from sqlalchemy import text
 
 from api.core import logger, metrics
 from api.core import get_db_session
+from api.routes.group_create import require_service_key
 from db import Drop, CollectionLogEntry, PersonalBestEntry, CombatAchievementEntry, Player
+from services.submission_status import get_submission_statuses
 
 
 utils_bp = Blueprint("utils", __name__)
 
 
 @utils_bp.get("/debug_logs")
+@require_service_key
 async def debug_logger():
     file = "data/logs/app_logs.json"
 
@@ -127,99 +130,76 @@ def _trim_guid_caches():
             guid_status_cache.pop(key, None)
 
 
+# A submission that never gets a Redis marker (rejected duplicate, unauthorized
+# player, or one submitted before markers were deployed) would otherwise poll
+# forever; after this many misses we tell the client it's done.
+MAX_STATUS_POLLS_BEFORE_GIVEUP = 10
+
+
+def _check_one_guid(guid: str, status: dict | None) -> dict:
+    """Build the /check result for a single guid from its Redis marker (or lack
+    of one), applying the poll-count give-up fallback."""
+    if status is not None:
+        guid_fail_cache.pop(guid, None)
+        result = {
+            "processed": True,
+            "status": status.get("status", "processed"),
+            "type": status.get("type"),
+            "uuid": guid,
+        }
+        # Rejected markers carry a human-readable reason for newer plugin builds.
+        if status.get("reason"):
+            result["reason"] = status.get("reason")
+        return result
+
+    polls = guid_fail_cache.get(guid, 0) + 1
+    guid_fail_cache[guid] = polls
+    if polls >= MAX_STATUS_POLLS_BEFORE_GIVEUP:
+        # Give up gracefully so the plugin stops polling; the submission was
+        # most likely rejected as a duplicate or predates status markers.
+        return {"processed": True, "status": "processed", "uuid": guid}
+    return {"processed": False, "status": "pending", "uuid": guid}
+
+
 @utils_bp.post("/check")
 async def check():
+    """Report whether submissions have finished processing.
+
+    Accepts either the legacy single form {"uuid": "..."} (returns a single
+    object) or a batch {"uuids": ["...", ...]} (returns {"results": [...]}).
+    Status markers are written by the intake paths via
+    services/submission_status.py.
+    """
     if not request.is_json:
         return jsonify({"error": "Content-Type must be application/json"}), 415
     try:
         # Periodically trim caches to prevent memory growth
         _trim_guid_caches()
-        
+
         data = await request.get_json()
         incoming_guid = data.get("uuid")
+        incoming_guids = data.get("uuids")
+
+        if incoming_guids is not None:
+            if not isinstance(incoming_guids, list) or not all(isinstance(g, str) for g in incoming_guids):
+                return jsonify({"error": "'uuids' must be a list of strings"}), 422
+            incoming_guids = incoming_guids[:100]
+            statuses = await asyncio.to_thread(get_submission_statuses, incoming_guids)
+            results = [_check_one_guid(g, statuses.get(g)) for g in incoming_guids]
+            return jsonify({"results": results}), 200
+
         if not incoming_guid:
             return jsonify({"error": "Missing 'uuid'"}), 422
 
-        # Run blocking DB lookups in a background thread to avoid stalling the event loop
-        if incoming_guid in guid_fail_cache:
-            if guid_fail_cache[incoming_guid] >= 10:
-                    ## Force return processed if this guid has pinged > 10 times
-                    print(f"Guid: {incoming_guid} has failed 5 times, returning processed despite its non-existent entry")
-                    return jsonify({
-                        "processed": True,
-                        "status": "processed",
-                        "uuid": incoming_guid
-                    }), 200
-            guid_fail_cache[incoming_guid] += 1
-        else:
-            guid_fail_cache[incoming_guid] = 1
-                
-
-        # def find_entry(guid: str):
-        #     session_local = get_db_session()
-        #     try:
-        #         entry = session_local.query(Drop).filter(Drop.unique_id == guid,
-        #                                                 Drop.used_api == True,
-        #                                                 Drop.date_added > datetime.now() - timedelta(hours=12)).first()
-        #         if entry:
-        #             return entry, "drop"
-        #         entry = session_local.query(CollectionLogEntry).filter(CollectionLogEntry.unique_id == guid,
-        #                                                                 CollectionLogEntry.used_api == True,
-        #                                                                 CollectionLogEntry.date_added > datetime.now() - timedelta(hours=5)).first()
-        #         if entry:
-        #             return entry, "collection_log"
-        #         entry = session_local.query(PersonalBestEntry).filter(PersonalBestEntry.unique_id == guid,
-        #                                                                 PersonalBestEntry.used_api == True,
-        #                                                                 PersonalBestEntry.date_added > datetime.now() - timedelta(hours=5)).first()
-        #         if entry:
-        #             return entry, "personal_best"
-        #         entry = session_local.query(CombatAchievementEntry).filter(CombatAchievementEntry.unique_id == guid,
-        #                                                                     CombatAchievementEntry.used_api == True,
-        #                                                                     CombatAchievementEntry.date_added > datetime.now() - timedelta(hours=5)).first()
-        #         if entry:
-        #             return entry, "combat_achievement"
-        #         return None, None
-        #     finally:
-        #         try:
-        #             session_local.close()
-        #         except:
-        #             pass
-
-        # try:
-        #     db_entry, entry_type = await asyncio.wait_for(
-        #         asyncio.to_thread(find_entry, incoming_guid), timeout=3.0
-        #     )
-        # except asyncio.TimeoutError:
-        #     print(f"/check lookup timed out for guid: {incoming_guid}")
-        #     return jsonify({
-        #         "processed": False,
-        #         "status": "timeout",
-        #         "uuid": incoming_guid
-        #     }), 200
-        db_entry = "Entry found"
-        # if not db_entry:
-        #     print("No database entry found for guid: " + str(incoming_guid))
-        #     return jsonify({
-        #         "processed": False,
-        #         "status": "not_found",
-        #         "uuid": incoming_guid
-        #     }), 200
-
-        # Return a minimal, serializable payload (avoid returning ORM objects)
-        payload = {"processed": True, "status": "processed", "uuid": incoming_guid, "type": "drop"}
-        #print("Returning payload: " + str(payload))
-        payload["id"] = 1234567890
-
-        return jsonify(payload), 200
+        statuses = await asyncio.to_thread(get_submission_statuses, [incoming_guid])
+        return jsonify(_check_one_guid(incoming_guid, statuses.get(incoming_guid))), 200
     except Exception as e:
         print(f"/check error: {e}")
         return jsonify({"error": "Malformed or invalid request"}), 400
-    finally:
-        # No outer DB session is used in /check now
-        pass
 
 
 @utils_bp.get("/metrics")
+@require_service_key
 async def get_metrics():
     return jsonify(metrics.get_stats())
 

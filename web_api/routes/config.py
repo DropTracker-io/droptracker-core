@@ -57,6 +57,21 @@ config_bp = Blueprint("v1_config", __name__)
 LONG_VALUE_KEYS = {"personal_best_embed_boss_list"}
 
 
+@config_bp.get("/seasonal-status")
+async def seasonal_status():
+    """Whether seasonal-world submission processing is globally enabled.
+
+    Public: the group config editor shows a notice on the Seasonal tab when
+    the switch is off (superadmins toggle it between Leagues/DMM seasons).
+    """
+    from services.seasonal_state import is_seasonal_active
+
+    active = await asyncio.to_thread(is_seasonal_active)
+    resp = jsonify({"active": active})
+    resp.headers["Cache-Control"] = "public, max-age=30"
+    return resp
+
+
 def _effective_stored_value(row: GroupConfiguration) -> str | None:
     """Mirror the HoF parser's precedence: config_value wins unless it's empty
     or suspiciously short, in which case the overflow long_value is used."""
