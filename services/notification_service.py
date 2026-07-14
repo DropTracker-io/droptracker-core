@@ -1579,6 +1579,7 @@ class NotificationService:
             # template group's seeded defaults). Any render failure falls back
             # to the legacy embed so a bad layout can't silence an event.
             try:
+                from services.activity_launch import channel_supports_launch
                 from services.event_message_layouts import (
                     notification_context,
                     render_event_components,
@@ -1589,6 +1590,9 @@ class NotificationService:
                     notification_context(notification_type, data),
                     standings=standings, ping_text=ping_text,
                     extra_rows=extra_rows,
+                    # Threads/announcement channels can't launch the Activity —
+                    # render the URL button instead of a dead launch button.
+                    allow_launch=channel_supports_launch(channel),
                 )
                 if allowed:
                     await channel.send(components=components, allowed_mentions=allowed)

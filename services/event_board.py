@@ -165,19 +165,23 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
         ):
             return False
 
+        channel = await bot.fetch_channel(channel_id=row.channel_id)
+        if channel is None or not callable(getattr(channel, "send", None)):
+            return False
+
+        from services.activity_launch import channel_supports_launch
+
         top_n = int(config["leaderboard"].get("top_n") or 10)
         layout = _apply_top_n(load_layout(session, event.group_id, "event_board"), top_n)
         spec = render_message_spec(
             layout,
             _board_context(session, event, config),
             standings=_standings(session, event.id, top_n),
-            deep_link=deeplink_enabled(),
+            # Threads/announcement channels can't launch the Activity — render
+            # the URL button instead of a dead launch button.
+            deep_link=deeplink_enabled() and channel_supports_launch(channel),
         )
         components = build_components(spec)
-
-        channel = await bot.fetch_channel(channel_id=row.channel_id)
-        if channel is None or not callable(getattr(channel, "send", None)):
-            return False
 
         message = None
         if row.message_id:

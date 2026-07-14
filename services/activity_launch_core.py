@@ -15,8 +15,18 @@ log = logging.getLogger("interactions")
 INTERACTION_APPLICATION_COMMAND = 2
 INTERACTION_MESSAGE_COMPONENT = 3
 COMMAND_PRIMARY_ENTRY_POINT = 4
+CALLBACK_CHANNEL_MESSAGE = 4
 CALLBACK_LAUNCH_ACTIVITY = 12
 MSG_FLAG_EPHEMERAL = 1 << 6  # 64
+
+# Channel types Discord will actually launch an Activity from: guild text,
+# DM, guild voice, group DM. Threads, announcement channels, stages and
+# forums reject the LAUNCH_ACTIVITY callback with
+# 400 "Cannot execute action on this channel type".
+LAUNCH_SUPPORTED_CHANNEL_TYPES = frozenset({0, 1, 2, 3})
+
+WEBSITE_URL = "https://www.droptracker.io"
+EVENT_BASE_URL = f"{WEBSITE_URL}/events"  # == services.event_notifications.EVENT_BASE_URL
 
 # Brand gold, matching the Activity's OSRS palette.
 ACCENT = 0xC8A24A
@@ -112,6 +122,44 @@ def launch_intent_from_interaction(data: dict) -> "tuple[str, str] | None":
     if not user_id:
         return None
     return user_id, event_id
+
+
+def launch_supported_channel_type(channel_type) -> bool:
+    """Whether a Discord channel type supports the LAUNCH_ACTIVITY callback.
+    Unknown/None counts as supported — the click-time fallback in the shell
+    answers anything Discord actually rejects, so a wrong True here costs
+    nothing while a wrong False needlessly hides working launch buttons."""
+    if channel_type is None:
+        return True
+    try:
+        return int(channel_type) in LAUNCH_SUPPORTED_CHANNEL_TYPES
+    except (TypeError, ValueError):
+        return True
+
+
+def build_launch_fallback_message(data: dict) -> dict:
+    """Ephemeral response for a launch Discord refused (unsupported channel
+    type — a thread or announcement channel). Explains why and offers the
+    web instead: the event page for an event-scoped button, else the site."""
+    event_id = parse_launch_custom_id((data.get("data") or {}).get("custom_id"))
+    if event_id:
+        label, url = "View this event on the web", f"{EVENT_BASE_URL}/{event_id}"
+    else:
+        label, url = "Open droptracker.io", WEBSITE_URL
+    return {
+        "content": (
+            "Discord can't open apps from this channel type — threads and "
+            "announcement channels don't support app launches. Try again from "
+            "a regular text channel, or use the web instead."
+        ),
+        "flags": MSG_FLAG_EPHEMERAL,
+        "components": [
+            {
+                "type": 1,  # action row
+                "components": [{"type": 2, "style": 5, "label": label, "url": url}],
+            }
+        ],
+    }
 
 
 def build_launch_message(data: dict) -> dict | None:

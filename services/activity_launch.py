@@ -32,14 +32,17 @@ from interactions.api.events import RawGatewayEvent
 
 from services import activity_launch_core as core
 from services.activity_launch_core import (  # re-exported for callers/tests
+    CALLBACK_CHANNEL_MESSAGE,
     CALLBACK_LAUNCH_ACTIVITY,
     LAUNCH_BUTTON_CUSTOM_ID,
     LAUNCH_INTENT_TTL,
+    build_launch_fallback_message,
     build_launch_message,
     intent_key,
     is_entry_point_interaction,
     is_launch_button_interaction,
     launch_intent_from_interaction,
+    launch_supported_channel_type,
 )
 
 log = logging.getLogger("interactions")
@@ -62,10 +65,24 @@ def _record_launch_intent(data: dict) -> None:
         log.debug("[ActivityLaunch] couldn't stash launch intent", exc_info=True)
 
 
-def build_launch_card():
+def channel_supports_launch(channel) -> bool:
+    """Whether an interactions channel object can host a LAUNCH_ACTIVITY
+    response (Discord refuses it in threads/announcement channels)."""
+    channel_type = getattr(channel, "type", None)
+    try:
+        channel_type = int(channel_type) if channel_type is not None else None
+    except (TypeError, ValueError):
+        channel_type = None
+    return launch_supported_channel_type(channel_type)
+
+
+def build_launch_card(supports_launch: bool = True):
     """Components-V2 "Open DropTracker" card. Its button (custom_id
     LAUNCH_BUTTON_CUSTOM_ID) opens the Activity when clicked. Matches the bot's
-    other V2 cards (services/components.py)."""
+    other V2 cards (services/components.py). With ``supports_launch`` False
+    (the configured channel is a thread/announcement channel, where Discord
+    refuses app launches) the button links to the website and the card says
+    how to get the in-Discord launcher back."""
     from interactions import ActionRow, Button, ButtonStyle, UnfurledMediaItem
     from interactions.models import (
         ContainerComponent,
@@ -74,6 +91,30 @@ def build_launch_card():
         TextDisplayComponent,
         ThumbnailComponent,
     )
+
+    if supports_launch:
+        cta = (
+            "Tap **Open DropTracker** to launch the app. Follow live bingo "
+            "boards, browse the leaderboards, and sign up for events without "
+            "leaving Discord."
+        )
+        button = Button(
+            label="Open DropTracker",
+            style=ButtonStyle.BLURPLE,
+            custom_id=LAUNCH_BUTTON_CUSTOM_ID,
+        )
+    else:
+        cta = (
+            "Discord can't launch apps inside threads or announcement "
+            "channels, so this card links to the website instead. Pick a "
+            "regular text channel as your launcher channel to open the app "
+            "right here in Discord."
+        )
+        button = Button(
+            label="Open DropTracker on the web",
+            style=ButtonStyle.URL,
+            url=core.WEBSITE_URL,
+        )
 
     logo = UnfurledMediaItem(url="https://www.droptracker.io/img/droptracker-small.gif")
     return [
@@ -92,21 +133,9 @@ def build_launch_card():
                 accessory=ThumbnailComponent(media=logo),
             ),
             SeparatorComponent(divider=True),
-            TextDisplayComponent(
-                content=(
-                    "Tap **Open DropTracker** to launch the app. Follow live bingo "
-                    "boards, browse the leaderboards, and sign up for events without "
-                    "leaving Discord."
-                )
-            ),
+            TextDisplayComponent(content=cta),
             SeparatorComponent(divider=True),
-            ActionRow(
-                Button(
-                    label="Open DropTracker",
-                    style=ButtonStyle.BLURPLE,
-                    custom_id=LAUNCH_BUTTON_CUSTOM_ID,
-                )
-            ),
+            ActionRow(button),
             SeparatorComponent(divider=True),
             TextDisplayComponent(content="-# Powered by the [DropTracker](https://www.droptracker.io)"),
         )
@@ -118,7 +147,9 @@ async def _post_card(bot, channel_id):
         channel = await bot.fetch_channel(channel_id=channel_id)
         if channel is None:
             return None
-        return await channel.send(components=build_launch_card())
+        return await channel.send(
+            components=build_launch_card(supports_launch=channel_supports_launch(channel))
+        )
     except Exception:
         log.warning("[ActivityLaunch] couldn't post card to channel %s", channel_id, exc_info=True)
         return None
@@ -169,8 +200,27 @@ class ActivityLaunch(Extension):
                 {"type": CALLBACK_LAUNCH_ACTIVITY}, interaction_id, token
             )
         except Exception:
-            log.exception("[ActivityLaunch] LAUNCH_ACTIVITY callback failed")
-            return  # launch failed; don't post a message about a non-launch
+            # Discord refuses LAUNCH_ACTIVITY in threads/announcement channels
+            # (400 "Cannot execute action on this channel type"). The
+            # interaction is still unacknowledged, so answer with an ephemeral
+            # explainer + web link instead of leaving the user a silent
+            # "This interaction failed".
+            log.warning(
+                "[ActivityLaunch] LAUNCH_ACTIVITY refused — sending web fallback",
+                exc_info=True,
+            )
+            try:
+                await self.bot.http.post_initial_response(
+                    {
+                        "type": CALLBACK_CHANNEL_MESSAGE,
+                        "data": build_launch_fallback_message(data),
+                    },
+                    interaction_id,
+                    token,
+                )
+            except Exception:
+                log.exception("[ActivityLaunch] launch fallback message failed")
+            return  # launch didn't happen; skip the launch follow-up
 
         # Optional entry-point follow-up (off by default; button never follows up).
         if not followup:

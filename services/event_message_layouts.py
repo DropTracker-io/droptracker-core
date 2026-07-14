@@ -485,11 +485,17 @@ def render_event_components(
     standings=None,
     ping_text: Optional[str] = None,
     extra_rows=None,
+    allow_launch: bool = True,
 ) -> list:
-    """One-stop: load the effective layout, resolve it, build components."""
+    """One-stop: load the effective layout, resolve it, build components.
+
+    ``allow_launch`` False (the destination is a thread/announcement channel,
+    where Discord refuses LAUNCH_ACTIVITY) drops launch buttons exactly as if
+    deep-linking were off — the layouts' URL buttons remain."""
     layout = load_layout(session, group_id, message_type)
     spec = render_message_spec(
-        layout, context, standings=standings, deep_link=deeplink_enabled()
+        layout, context, standings=standings,
+        deep_link=deeplink_enabled() and allow_launch,
     )
     return build_components(spec, ping_text=ping_text, extra_rows=extra_rows)
 

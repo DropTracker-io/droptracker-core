@@ -111,6 +111,36 @@ def test_public_message_has_no_flags(monkeypatch):
 
 def test_callback_constant_is_launch_activity():
     assert core.CALLBACK_LAUNCH_ACTIVITY == 12
+    assert core.CALLBACK_CHANNEL_MESSAGE == 4
+
+
+# --- unsupported channel types + fallback message ---------------------------- #
+def test_launch_supported_channel_types():
+    for supported in (0, 1, 2, 3):  # text, DM, voice, group DM
+        assert core.launch_supported_channel_type(supported)
+    for unsupported in (5, 10, 11, 12, 13, 15, 16):  # announcement, threads, stage, forum, media
+        assert not core.launch_supported_channel_type(unsupported)
+    assert core.launch_supported_channel_type("11") is False  # int-able strings coerce
+    # unknown shapes count as supported — the click-time fallback covers them
+    assert core.launch_supported_channel_type(None)
+    assert core.launch_supported_channel_type("garbage")
+
+
+def test_launch_fallback_message_event_scoped():
+    data = {"type": 3, "data": {"custom_id": "activity_launch_open:e:42"}}
+    payload = core.build_launch_fallback_message(data)
+    assert payload["flags"] == core.MSG_FLAG_EPHEMERAL
+    button = payload["components"][0]["components"][0]
+    assert button["style"] == 5  # URL button
+    assert button["url"] == f"{core.EVENT_BASE_URL}/42"
+
+
+def test_launch_fallback_message_bare_launch():
+    # entry point / bare card button — no event to link, offer the site
+    payload = core.build_launch_fallback_message({"type": 2, "data": {"type": 4}})
+    assert payload["flags"] == core.MSG_FLAG_EPHEMERAL
+    button = payload["components"][0]["components"][0]
+    assert button["url"] == core.WEBSITE_URL
 
 
 # --- ref parsing ------------------------------------------------------------ #
