@@ -438,12 +438,23 @@ async def list_events():
         group_id = int(group_id) if group_id else None
     except (ValueError, TypeError):
         group_id = None
+    # Discord-guild scoping for the embedded Activity: it only knows the guild
+    # it was launched in, not our group ids. Digits-only guard since snowflakes
+    # arrive as strings. groupId wins when both are supplied.
+    guild_id = (request.args.get("guildId") or "").strip()
+    guild_id = guild_id if guild_id.isdigit() else None
 
     viewer_id = optional_user_id()
 
     def _load():
         with db_session() as s:
             q = s.query(Event)
+            if group_id is None and guild_id is not None:
+                # Events owned by any group linked to this guild, plus events
+                # explicitly pointed at it (admins can re-target discord_guild_id).
+                guild_group_ids = s.query(Group.group_id).filter(Group.guild_id == guild_id)
+                q = q.filter(sa_or(Event.group_id.in_(guild_group_ids),
+                                   Event.discord_guild_id == guild_id))
             if group_id is not None:
                 # A group's list also includes clan-vs-clan events it has
                 # ACCEPTED as an opponent (its own web_event_groups rows).
