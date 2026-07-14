@@ -18,6 +18,7 @@ Every endpoint independently enforces superadmin (403 otherwise):
   GET  /api/v1/admin/audit?action=&actor_user_id=&group_id=&q=&page=&limit=
   GET  /api/v1/admin/users/{id}/overview
   POST /api/v1/admin/users/{id}/superadmin       { grant: bool }
+  POST /api/v1/admin/users/{id}/moderator        { grant: bool } (+ profile badge)
   GET    /api/v1/admin/badges
   POST   /api/v1/admin/badges                    { key, name, ... } (upsert)
   DELETE /api/v1/admin/badges/{key}              (soft delete)
@@ -34,10 +35,11 @@ Every endpoint independently enforces superadmin (403 otherwise):
   PATCH  /api/v1/admin/item-values/{override_id}   (partial update)
   DELETE /api/v1/admin/item-values/{override_id}
 
-Service control is whitelisted to three units and shells out via systemctl /
-journalctl with **no** user input interpolated into the command. No SQL executor
-is provided (deliberately omitted, §9/§14.1). No direct Discord connection —
-messages go through the outbox for the bot to send.
+Service control is whitelisted to the units in SERVICE_REGISTRY (all app units
+grouped by tier, plus read-only infrastructure rows) and shells out via
+systemctl / journalctl with **no** user input interpolated into the command.
+No SQL executor is provided (deliberately omitted, §9/§14.1). No direct Discord
+connection — messages go through the outbox for the bot to send.
 """
 from __future__ import annotations
 
@@ -82,7 +84,7 @@ from db.entitlements import (
 from web_api import admin_registry as registry
 from web_api import billing
 from web_api.common import abort_problem, db_session, parse_page, private_no_store
-from web_api.deps import assert_superadmin, current_user_id, json_body, load_user
+from web_api.deps import assert_moderator, assert_superadmin, current_user_id, json_body, load_user
 from utils import value_overrides
 from web_api.entitlements_registry import (
     EntitlementValidationError,
@@ -94,15 +96,85 @@ from web_api.routes.subscriptions import _serialize_group_sub, _serialize_sub, _
 
 admin_bp = Blueprint("v1_admin", __name__)
 
-# Whitelisted units the superadmin may control (contract SERVICE_UNITS).
-SERVICE_UNITS = {"droptracker-core", "droptracker-api", "droptracker-webhooks", "droptracker-webapi"}
-SERVICE_NAMES = {
-    "droptracker-core": "Discord bot (core)",
-    "droptracker-api": "RuneLite intake API",
-    "droptracker-webhooks": "Webhook reader bot",
-    "droptracker-webapi": "Web API (this backend)",
+# Whitelisted units the superadmin may see/control. Kinds drive the allowed
+# actions and the frontend's grouping:
+#   service — normal long-running unit: start/stop/restart
+#   web     — traffic-serving Next.js colour: restart only, and only with
+#             confirm:true (restarting the active colour drops the site;
+#             deploys should go through droptracker-node instead)
+#   deploy  — the blue-green deploy trigger (oneshot): restart only, issued
+#             --no-block since a deploy takes ~2 min; watch its logs to follow
+#   infra   — shared system service (nginx/MariaDB/Redis): status + logs only
+# `confirm_stop` mirrors the old guard: stopping these interrupts intake or
+# kills the backend serving this dashboard.
+SERVICE_REGISTRY: list[dict] = [
+    # --- Web & APIs -------------------------------------------------------
+    {"unit": "droptracker-api", "name": "RuneLite intake API", "category": "Web & APIs",
+     "description": "Receives plugin submissions (drops, PBs, clogs…)", "port": 31323,
+     "kind": "service", "confirm_stop": True},
+    {"unit": "droptracker-webapi", "name": "Web API (this backend)", "category": "Web & APIs",
+     "description": "Serves /api/v1 for the website — including this dashboard", "port": 31325,
+     "kind": "service", "confirm_stop": True},
+    {"unit": "droptracker-node", "name": "Website deploy (blue-green)", "category": "Web & APIs",
+     "description": "Restart = zero-downtime deploy: builds the idle colour, health-checks, flips nginx (~2 min)",
+     "port": None, "kind": "deploy", "confirm_stop": False},
+    {"unit": "droptracker-node-blue", "name": "Website front-end — blue", "category": "Web & APIs",
+     "description": "Next.js instance; one colour serves live traffic", "port": 31380,
+     "kind": "web", "confirm_stop": True},
+    {"unit": "droptracker-node-green", "name": "Website front-end — green", "category": "Web & APIs",
+     "description": "Next.js instance; one colour serves live traffic", "port": 31381,
+     "kind": "web", "confirm_stop": True},
+    # --- Discord bots -----------------------------------------------------
+    {"unit": "droptracker-core", "name": "Discord bot (core)", "category": "Discord bots",
+     "description": "Slash commands, notifications, lootboard posting", "port": None,
+     "kind": "service", "confirm_stop": False},
+    {"unit": "droptracker-webhooks", "name": "Webhook reader bot", "category": "Discord bots",
+     "description": "Reads webhook-channel messages (legacy intake fallback)", "port": None,
+     "kind": "service", "confirm_stop": False},
+    {"unit": "droptracker-heartbeat", "name": "Heartbeat bot", "category": "Discord bots",
+     "description": "Uptime heartbeat", "port": None,
+     "kind": "service", "confirm_stop": False},
+    {"unit": "droptracker-hof", "name": "Hall of Fame bot", "category": "Discord bots",
+     "description": "Generates and posts Hall of Fame images", "port": None,
+     "kind": "service", "confirm_stop": False},
+    # --- Processing & workers --------------------------------------------
+    {"unit": "droptracker-webhook-consumer", "name": "Intake queue consumer", "category": "Processing & workers",
+     "description": "Drains webhook:queue (fast-accept intake processing)", "port": None,
+     "kind": "service", "confirm_stop": True},
+    {"unit": "droptracker-events", "name": "Events consumer", "category": "Processing & workers",
+     "description": "Applies submissions to active event tasks / bingo / teams", "port": None,
+     "kind": "service", "confirm_stop": False},
+    {"unit": "droptracker-lootboards", "name": "Lootboard generator", "category": "Processing & workers",
+     "description": "Regenerates group lootboard images on a rolling schedule", "port": None,
+     "kind": "service", "confirm_stop": False},
+    {"unit": "droptracker-player-updates", "name": "Player updater", "category": "Processing & workers",
+     "description": "WOM sync + Redis leaderboard maintenance", "port": None,
+     "kind": "service", "confirm_stop": False},
+    {"unit": "droptracker-video-worker", "name": "Video worker", "category": "Processing & workers",
+     "description": "MJPEG→MP4 conversion + Backblaze B2 upload", "port": None,
+     "kind": "service", "confirm_stop": False},
+    # --- Infrastructure (read-only) ---------------------------------------
+    {"unit": "nginx", "name": "nginx", "category": "Infrastructure",
+     "description": "Reverse proxy fronting every HTTP service (behind Cloudflare)", "port": 80,
+     "kind": "infra", "confirm_stop": False},
+    {"unit": "mariadb", "name": "MariaDB", "category": "Infrastructure",
+     "description": "Primary database (data + xenforo schemas)", "port": 3306,
+     "kind": "infra", "confirm_stop": False},
+    {"unit": "redis-server", "name": "Redis", "category": "Infrastructure",
+     "description": "Leaderboards, queues, realtime pub/sub", "port": 6379,
+     "kind": "infra", "confirm_stop": False},
+]
+SERVICE_META = {s["unit"]: s for s in SERVICE_REGISTRY}
+SERVICE_UNITS = set(SERVICE_META)
+# Allowed control actions by kind (infra is status/logs only).
+_KIND_ACTIONS = {
+    "service": ("start", "stop", "restart"),
+    "web": ("restart",),
+    "deploy": ("restart",),
+    "infra": (),
 }
-_MAX_LOG_LINES = 200
+_MAX_LOG_LINES = 500
+_DEFAULT_LOG_LINES = 200
 
 
 async def _require_superadmin() -> int:
@@ -111,6 +183,20 @@ async def _require_superadmin() -> int:
     def _check():
         with db_session() as s:
             assert_superadmin(load_user(s, user_id))
+
+    await asyncio.to_thread(_check)
+    return user_id
+
+
+async def _require_moderator() -> int:
+    """Moderator-or-superadmin gate for the shared moderation surfaces
+    (pb-blocks, item values). Every mutation below is audit-logged with the
+    actor, so superadmins can review moderator activity in /admin/audit."""
+    user_id = current_user_id()
+
+    def _check():
+        with db_session() as s:
+            assert_moderator(load_user(s, user_id))
 
     await asyncio.to_thread(_check)
     return user_id
@@ -140,35 +226,74 @@ def _run(cmd: list[str], timeout: int = 10) -> tuple[int, str, str]:
 
 
 def _service_status(unit: str) -> dict:
+    meta = SERVICE_META.get(unit, {})
     code, out, _ = _run([
         "systemctl", "show", unit,
-        "--property=ActiveState,SubState,ActiveEnterTimestampMonotonic,ActiveEnterTimestamp",
+        "--property=ActiveState,SubState,ActiveEnterTimestamp,MainPID,"
+        "MemoryCurrent,NRestarts,UnitFileState,Result",
     ])
-    active_state = "unknown"
-    since = None
+    props: dict[str, str] = {}
     if code == 0 and out:
-        props = {}
         for line in out.splitlines():
             if "=" in line:
                 k, v = line.split("=", 1)
                 props[k] = v
-        active_state = props.get("ActiveState", "unknown")
-        ts = props.get("ActiveEnterTimestamp", "")
-        if ts:
-            for fmt in ("%a %Y-%m-%d %H:%M:%S %Z", "%a %Y-%m-%d %H:%M:%S"):
-                try:
-                    since = int(datetime.strptime(ts.strip(), fmt).timestamp())
-                    break
-                except Exception:
-                    continue
-    status_map = {"active": "running", "inactive": "stopped", "failed": "failed"}
+
+    active_state = props.get("ActiveState", "unknown")
+    sub_state = props.get("SubState", "")
+    since = None
+    ts = props.get("ActiveEnterTimestamp", "")
+    if ts:
+        for fmt in ("%a %Y-%m-%d %H:%M:%S %Z", "%a %Y-%m-%d %H:%M:%S"):
+            try:
+                since = int(datetime.strptime(ts.strip(), fmt).timestamp())
+                break
+            except Exception:
+                continue
+
+    # MemoryCurrent is bytes, or "[not set]" for units without accounting.
+    memory_mb = None
+    try:
+        memory_mb = round(int(props.get("MemoryCurrent", "")) / (1024 * 1024), 1)
+    except (TypeError, ValueError):
+        pass
+    try:
+        n_restarts = int(props.get("NRestarts", "0"))
+    except ValueError:
+        n_restarts = 0
+
+    status_map = {
+        "active": "running",
+        "inactive": "stopped",
+        "failed": "failed",
+        "activating": "starting",
+        "deactivating": "stopping",
+        "reloading": "starting",
+    }
     status = status_map.get(active_state, "unknown")
+
+    kind = meta.get("kind", "service")
     return {
         "unit": unit,
-        "name": SERVICE_NAMES.get(unit, unit),
+        "name": meta.get("name", unit),
         "status": status,
         "active": active_state == "active",
         "since": since,
+        # -- enriched fields (frontend renders richer rows from these) -----
+        "description": meta.get("description"),
+        "category": meta.get("category", "Services"),
+        "kind": kind,
+        "port": meta.get("port"),
+        "sub_state": sub_state or None,
+        "memory_mb": memory_mb,
+        "n_restarts": n_restarts,
+        "enabled": props.get("UnitFileState") in ("enabled", "static", "enabled-runtime"),
+        # Oneshot deploy trigger: Result reflects the last deploy outcome.
+        "last_result": props.get("Result") or None,
+        "actions": list(_KIND_ACTIONS.get(kind, ())),
+        "confirm_stop": bool(meta.get("confirm_stop")),
+        # Restarting a traffic-serving colour directly can drop the site.
+        "confirm_restart": kind == "web",
     }
 
 
@@ -208,8 +333,10 @@ async def admin_set_seasonal():
 @admin_bp.get("/admin/services")
 async def admin_services():
     await _require_superadmin()
+    # Registry order, not alphabetical — the frontend groups by category and
+    # the registry encodes the intended layout.
     statuses = await asyncio.to_thread(
-        lambda: [_service_status(u) for u in sorted(SERVICE_UNITS)]
+        lambda: [_service_status(s["unit"]) for s in SERVICE_REGISTRY]
     )
     return private_no_store(jsonify(statuses))
 
@@ -217,30 +344,50 @@ async def admin_services():
 @admin_bp.post("/admin/services/<unit>")
 async def admin_service_action(unit: str):
     actor = await _require_superadmin()
-    if unit not in SERVICE_UNITS:
+    meta = SERVICE_META.get(unit)
+    if meta is None:
         abort_problem(404, "Unknown unit", "That service is not managed.")
     body = await json_body()
     action = body.get("action")
     if action not in ("start", "stop", "restart"):
         abort_problem(422, "Invalid action", "action must be start|stop|restart.")
+    if action not in _KIND_ACTIONS.get(meta["kind"], ()):
+        abort_problem(
+            403, "Action not allowed",
+            "Infrastructure services are read-only here." if meta["kind"] == "infra"
+            else f"'{action}' is not available for this unit.",
+        )
 
-    # Guard: stopping the intake API halts submission processing, and stopping
-    # the web API kills the backend serving this dashboard (no UI to restart it).
-    if action == "stop" and unit in ("droptracker-api", "droptracker-webapi") and not body.get("confirm"):
+    # Guards. Stopping intake halts submissions; stopping the web API kills the
+    # backend serving this dashboard; restarting a serving colour can drop the
+    # live site (deploys should go through droptracker-node).
+    if action == "stop" and meta.get("confirm_stop") and not body.get("confirm"):
         abort_problem(409, "Confirmation required", "Stopping this service requires confirm:true.")
+    if action == "restart" and meta["kind"] == "web" and not body.get("confirm"):
+        abort_problem(
+            409, "Confirmation required",
+            "Restarting a serving colour directly can take the site down — deploys go "
+            "through the 'Website deploy' unit. Pass confirm:true to proceed anyway.",
+        )
+
+    # --no-block where waiting is wrong: the deploy trigger runs ~2 min (poll
+    # status / read its logs to follow), and a webapi restart would otherwise
+    # kill the very worker handling this request before it could respond.
+    no_block = unit == "droptracker-webapi" or meta["kind"] == "deploy"
+    cmd_action = [action, "--no-block", unit] if no_block else [action, unit]
 
     def _do():
         # Try direct systemctl, then sudo -n (non-interactive) as fallback.
-        code, _out, err = _run(["systemctl", action, unit], timeout=20)
+        code, _out, err = _run(["systemctl", *cmd_action], timeout=30)
         if code != 0:
-            code, _out, err = _run(["sudo", "-n", "systemctl", action, unit], timeout=20)
+            code, _out, err = _run(["sudo", "-n", "systemctl", *cmd_action], timeout=30)
         return code, err
 
     code, err = await asyncio.to_thread(_do)
     _audit(actor, f"service.{action}", unit, after="ok" if code == 0 else err[:200])
     if code != 0:
         abort_problem(502, "Service action failed", err[:200] or "systemctl error")
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "queued": no_block})
 
 
 @admin_bp.get("/admin/services/<unit>/logs")
@@ -248,18 +395,23 @@ async def admin_service_logs(unit: str):
     await _require_superadmin()
     if unit not in SERVICE_UNITS:
         abort_problem(404, "Unknown unit", "That service is not managed.")
+    try:
+        n_lines = int(request.args.get("lines", _DEFAULT_LOG_LINES))
+    except ValueError:
+        n_lines = _DEFAULT_LOG_LINES
+    n_lines = max(10, min(n_lines, _MAX_LOG_LINES))
 
     def _logs():
         code, out, err = _run(
-            ["journalctl", "-u", unit, "-n", str(_MAX_LOG_LINES), "--no-pager"], timeout=15
+            ["journalctl", "-u", unit, "-n", str(n_lines), "--no-pager"], timeout=15
         )
         if code != 0:
             code, out, err = _run(
-                ["sudo", "-n", "journalctl", "-u", unit, "-n", str(_MAX_LOG_LINES), "--no-pager"],
+                ["sudo", "-n", "journalctl", "-u", unit, "-n", str(n_lines), "--no-pager"],
                 timeout=15,
             )
         text = out if code == 0 else (err or "logs unavailable")
-        return [ln for ln in text.splitlines()][-_MAX_LOG_LINES:]
+        return [ln for ln in text.splitlines()][-n_lines:]
 
     lines = await asyncio.to_thread(_logs)
     return private_no_store(jsonify({"unit": unit, "lines": lines}))
@@ -891,7 +1043,7 @@ def _apply_override_fields(row, fields: dict) -> None:
 
 @admin_bp.get("/admin/item-values")
 async def list_item_values():
-    await _require_superadmin()
+    await _require_moderator()
 
     def _load():
         with db_session() as s:
@@ -921,7 +1073,7 @@ async def list_item_values():
 
 @admin_bp.get("/admin/item-values/item-search")
 async def item_value_item_search():
-    await _require_superadmin()
+    await _require_moderator()
     q = (request.args.get("q") or "").strip()
     if len(q) < 2:
         return jsonify([])
@@ -943,7 +1095,7 @@ async def item_value_item_search():
 @admin_bp.get("/admin/item-values/export")
 async def item_value_export():
     """Comma-separated active item ids for the GitHub Pages valued_items.txt."""
-    await _require_superadmin()
+    await _require_moderator()
 
     def _load():
         with db_session() as s:
@@ -961,7 +1113,7 @@ async def item_value_export():
 
 @admin_bp.post("/admin/item-values")
 async def create_item_value():
-    actor = await _require_superadmin()
+    actor = await _require_moderator()
     body = await json_body()
     fields = _validate_override_body(body, require_item=True)
 
@@ -989,7 +1141,7 @@ async def create_item_value():
 
 @admin_bp.patch("/admin/item-values/<int:override_id>")
 async def update_item_value(override_id: int):
-    actor = await _require_superadmin()
+    actor = await _require_moderator()
     body = await json_body()
     fields = _validate_override_body(body, require_item=False)
     if not fields:
@@ -1020,7 +1172,7 @@ async def update_item_value(override_id: int):
 
 @admin_bp.delete("/admin/item-values/<int:override_id>")
 async def delete_item_value(override_id: int):
-    actor = await _require_superadmin()
+    actor = await _require_moderator()
 
     def _apply():
         with db_session() as s:
@@ -1864,6 +2016,7 @@ async def admin_user_overview(user_id: int):
                     "discord_id": str(user.discord_id) if user.discord_id else None,
                     "username": user.username,
                     "is_superadmin": bool(getattr(user, "is_superadmin", False)),
+                    "is_moderator": bool(getattr(user, "is_moderator", False)),
                     "public": bool(user.public),
                     "hidden": bool(user.hidden),
                     "date_added": int(user.date_added.timestamp()) if user.date_added else None,
@@ -1907,6 +2060,83 @@ async def admin_set_user_superadmin(user_id: int):
     _audit(
         actor,
         "user.superadmin_grant" if grant else "user.superadmin_revoke",
+        f"user:{user_id}",
+        before=json.dumps(before),
+        after=json.dumps(grant),
+    )
+    return jsonify({"ok": True})
+
+
+# The profile badge that moderator status carries. Created on first grant;
+# awarded to every player account the user owns (slot "p:{player_id}" —
+# the manual-award slot, so revoking frees it for a future re-grant).
+_MODERATOR_BADGE = {
+    "key": "moderator",
+    "name": "Moderator",
+    "description": "DropTracker site moderator.",
+    "icon_emoji": "\U0001F6E1\uFE0F",  # shield
+    "tone": "sky",
+    "semantic": "permanent",
+}
+
+
+@admin_bp.post("/admin/users/<int:user_id>/moderator")
+async def admin_set_user_moderator(user_id: int):
+    """Grant/revoke the moderator flag (superadmin only). Also awards or
+    revokes the "moderator" profile badge on all the user's player accounts,
+    and audit-logs the change."""
+    actor = await _require_superadmin()
+    body = await json_body()
+    grant = body.get("grant")
+    if not isinstance(grant, bool):
+        abort_problem(422, "Invalid grant", "'grant' must be a boolean.")
+
+    def _apply():
+        from db import Badge, Player, PlayerBadge
+        from services.badges import award_badge, revoke_badge
+
+        with db_session() as s:
+            user = s.query(User).filter(User.user_id == user_id).first()
+            if not user:
+                abort_problem(404, "User not found", f"No user with id {user_id}.")
+            before = bool(getattr(user, "is_moderator", False))
+            user.is_moderator = grant
+
+            badge = s.query(Badge).filter(Badge.key == _MODERATOR_BADGE["key"]).first()
+            if badge is None and grant:
+                badge = Badge(active=True, criteria=None, scope="global", **_MODERATOR_BADGE)
+                s.add(badge)
+                s.flush()
+
+            player_ids = [
+                pid for (pid,) in s.query(Player.player_id).filter(Player.user_id == user_id).all()
+            ]
+            if badge is not None:
+                if grant:
+                    for pid in player_ids:
+                        award_badge(
+                            s, badge, pid, slot_key=f"p:{pid}",
+                            context={"note": "site moderator"}, awarded_by=actor,
+                        )
+                else:
+                    active = (
+                        s.query(PlayerBadge)
+                        .filter(
+                            PlayerBadge.badge_id == badge.badge_id,
+                            PlayerBadge.player_id.in_(player_ids or [0]),
+                            PlayerBadge.status == "active",
+                        )
+                        .all()
+                    )
+                    for award in active:
+                        revoke_badge(s, award)
+            s.commit()
+            return before
+
+    before = await asyncio.to_thread(_apply)
+    _audit(
+        actor,
+        "user.moderator_grant" if grant else "user.moderator_revoke",
         f"user:{user_id}",
         before=json.dumps(before),
         after=json.dumps(grant),
@@ -2207,7 +2437,7 @@ def _body_npc_ids(body) -> list:
 @admin_bp.get("/admin/pb-blocks")
 async def admin_pb_blocks_list():
     """Currently-blocked bosses (grouped by name, with remaining PB counts)."""
-    await _require_superadmin()
+    await _require_moderator()
 
     def _load():
         from utils import pb_blocklist
@@ -2222,7 +2452,7 @@ async def admin_pb_blocks_list():
 @admin_bp.get("/admin/pb-blocks/search")
 async def admin_pb_blocks_search():
     """Search npc_list for bosses to block; annotate impact + current state."""
-    await _require_superadmin()
+    await _require_moderator()
     q = (request.args.get("q") or "").strip()
     if not q:
         return private_no_store(jsonify({"results": []}))
@@ -2269,7 +2499,7 @@ async def admin_pb_blocks_add():
     Destructive: requires ``confirm=true``; without it, returns 409 echoing the
     number of rows that would be deleted so the UI can hard-confirm first.
     """
-    actor = await _require_superadmin()
+    actor = await _require_moderator()
     body = await json_body()
     seed_ids = _body_npc_ids(body)
     confirm = bool(body.get("confirm"))
@@ -2303,7 +2533,7 @@ async def admin_pb_blocks_add():
 @admin_bp.delete("/admin/pb-blocks/<int:npc_id>")
 async def admin_pb_blocks_remove(npc_id: int):
     """Unblock a boss (all its variant ids). Purged rows are NOT restored."""
-    actor = await _require_superadmin()
+    actor = await _require_moderator()
 
     def _apply():
         from utils import pb_blocklist
