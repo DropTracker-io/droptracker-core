@@ -126,6 +126,21 @@ def test_launch_supported_channel_types():
     assert core.launch_supported_channel_type("garbage")
 
 
+def test_interaction_channel_type():
+    # raw interactions carry a partial channel object — the pre-check reads it
+    assert core.interaction_channel_type({"channel": {"type": 11, "id": "1"}}) == 11
+    assert core.interaction_channel_type({"channel": {"type": 0}}) == 0
+    assert core.interaction_channel_type({"channel_id": "1"}) is None  # no channel object
+    assert core.interaction_channel_type({"channel": "weird"}) is None
+    assert core.interaction_channel_type(None) is None
+    # end-to-end: a thread interaction must fail the launch pre-check
+    assert not core.launch_supported_channel_type(
+        core.interaction_channel_type({"channel": {"type": 11}})
+    )
+    # ...and a missing channel object must NOT block the launch
+    assert core.launch_supported_channel_type(core.interaction_channel_type({}))
+
+
 def test_launch_fallback_message_event_scoped():
     data = {"type": 3, "data": {"custom_id": "activity_launch_open:e:42"}}
     payload = core.build_launch_fallback_message(data)

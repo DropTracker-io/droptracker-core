@@ -39,6 +39,7 @@ from services.activity_launch_core import (  # re-exported for callers/tests
     build_launch_fallback_message,
     build_launch_message,
     intent_key,
+    interaction_channel_type,
     is_entry_point_interaction,
     is_launch_button_interaction,
     launch_intent_from_interaction,
@@ -188,10 +189,41 @@ class ActivityLaunch(Extension):
             _record_launch_intent(data)
             await self._launch(data, followup=False)
 
+    async def _respond_fallback(self, data: dict, interaction_id, token) -> None:
+        """Answer the interaction with the ephemeral "can't launch here"
+        explainer + web link. Must be the INITIAL response — a refused
+        LAUNCH_ACTIVITY callback consumes the interaction (the retry gets
+        404 "Unknown interaction"), so callers pre-check where they can."""
+        try:
+            await self.bot.http.post_initial_response(
+                {
+                    "type": CALLBACK_CHANNEL_MESSAGE,
+                    "data": build_launch_fallback_message(data),
+                },
+                interaction_id,
+                token,
+            )
+        except Exception:
+            log.exception("[ActivityLaunch] launch fallback message failed")
+
     async def _launch(self, data: dict, *, followup: bool) -> None:
         interaction_id = data.get("id")
         token = data.get("token")
         if not interaction_id or not token:
+            return
+
+        # Discord refuses LAUNCH_ACTIVITY outside plain text/voice/DM channels
+        # (400 "Cannot execute action on this channel type") and that failed
+        # callback still consumes the interaction — no second response is
+        # possible. So decide up front from the interaction's own channel
+        # object: in an unsupported channel the ephemeral web fallback IS the
+        # initial response.
+        if not launch_supported_channel_type(interaction_channel_type(data)):
+            log.info(
+                "[ActivityLaunch] unsupported channel type %s — serving web fallback",
+                interaction_channel_type(data),
+            )
+            await self._respond_fallback(data, interaction_id, token)
             return
 
         # Open the Activity for the user — no default channel message.
@@ -200,26 +232,17 @@ class ActivityLaunch(Extension):
                 {"type": CALLBACK_LAUNCH_ACTIVITY}, interaction_id, token
             )
         except Exception:
-            # Discord refuses LAUNCH_ACTIVITY in threads/announcement channels
-            # (400 "Cannot execute action on this channel type"). The
-            # interaction is still unacknowledged, so answer with an ephemeral
-            # explainer + web link instead of leaving the user a silent
-            # "This interaction failed".
+            # Unexpected refusal (the pre-check thought this channel was
+            # fine). The fallback attempt below almost certainly 404s — see
+            # _respond_fallback — but it's the only move left and the logs
+            # tell us which channel type to add to the unsupported set.
             log.warning(
-                "[ActivityLaunch] LAUNCH_ACTIVITY refused — sending web fallback",
+                "[ActivityLaunch] LAUNCH_ACTIVITY refused in channel type %s "
+                "— attempting web fallback",
+                interaction_channel_type(data),
                 exc_info=True,
             )
-            try:
-                await self.bot.http.post_initial_response(
-                    {
-                        "type": CALLBACK_CHANNEL_MESSAGE,
-                        "data": build_launch_fallback_message(data),
-                    },
-                    interaction_id,
-                    token,
-                )
-            except Exception:
-                log.exception("[ActivityLaunch] launch fallback message failed")
+            await self._respond_fallback(data, interaction_id, token)
             return  # launch didn't happen; skip the launch follow-up
 
         # Optional entry-point follow-up (off by default; button never follows up).

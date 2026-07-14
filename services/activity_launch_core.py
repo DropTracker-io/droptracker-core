@@ -124,6 +124,17 @@ def launch_intent_from_interaction(data: dict) -> "tuple[str, str] | None":
     return user_id, event_id
 
 
+def interaction_channel_type(data: dict):
+    """The channel type from a raw interaction payload (Discord includes a
+    partial ``channel`` object on every interaction), or None if absent."""
+    if not isinstance(data, dict):
+        return None
+    channel = data.get("channel")
+    if not isinstance(channel, dict):
+        return None
+    return channel.get("type")
+
+
 def launch_supported_channel_type(channel_type) -> bool:
     """Whether a Discord channel type supports the LAUNCH_ACTIVITY callback.
     Unknown/None counts as supported — the click-time fallback in the shell
