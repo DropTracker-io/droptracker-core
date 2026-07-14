@@ -213,6 +213,11 @@ class EventTeam(Base):
     group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=True)
     # Admin-assigned accent color ("#rrggbb"); NULL = frontend palette default.
     color = Column(String(7), nullable=True)
+    # Whole-clan fallback (clan_vs_clan): auto-created at activation when no
+    # teams were set up. Credits every current member of ``group_id`` — no
+    # explicit roster rows — so it runs as "anyone in this clan". See
+    # services.event_lifecycle.activate_event / event_engine.load_matcher_state.
+    auto_clan = Column(Boolean, nullable=False, default=False, server_default="0")
 
 
 class EventGroup(Base):

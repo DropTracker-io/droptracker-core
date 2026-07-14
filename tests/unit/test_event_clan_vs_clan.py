@@ -548,6 +548,14 @@ class TestActivationBlockersClan:
         blockers = lc.activation_blockers(s, self._ready_event())
         assert any("at least one team" in b and "clan" in b for b in blockers)
 
+    def test_no_teams_is_ready_whole_clan(self):
+        # Teams are optional: two accepted clans and zero teams is ready —
+        # activation seeds a whole-clan team per clan (anyone-vs-anyone). Only
+        # two queries fire (team count + accepted clans); the team-group_id
+        # query is skipped when there are no teams.
+        s = _S([], [(10,), (20,)])
+        assert lc.activation_blockers(s, self._ready_event()) == []
+
 
 # ── dual-guild desired-state expansion ───────────────────────────────────────
 

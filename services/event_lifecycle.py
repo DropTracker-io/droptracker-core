@@ -78,20 +78,24 @@ def sweep_due(events, now: datetime) -> dict:
 
 def activation_blockers(session, event, now: Optional[datetime] = None) -> list:
     """Human-readable reasons ``event`` cannot activate right now (empty when
-    it can): needs ≥1 team; ``ends_at`` (if set) must be in the future; a
-    bingo event needs a complete ``board_size²`` board whose bound cells
-    reference this event's tasks. clan_vs_clan additionally needs ≥2 accepted
-    clans, each with at least one team."""
+    it can): ``ends_at`` (if set) must be in the future; a bingo event needs a
+    complete ``board_size²`` board whose bound cells reference this event's
+    tasks. Standard/global events need ≥1 team. clan_vs_clan needs ≥2 accepted
+    clans; teams are optional there — with none it runs whole-clan vs
+    whole-clan (auto-seeded at activation), but once any team exists every
+    accepted clan must have one."""
     from db.models import EventBingoCell, EventTask, EventTeam
 
     now = now or datetime.now()
     blockers = []
 
+    is_cvc = (getattr(event, "mode", None) or "standard") == "clan_vs_clan"
     team_count = session.query(EventTeam).filter(EventTeam.event_id == event.id).count()
-    if team_count < 1:
-        blockers.append("The event needs at least one team.")
 
-    if (getattr(event, "mode", None) or "standard") == "clan_vs_clan":
+    if not is_cvc:
+        if team_count < 1:
+            blockers.append("The event needs at least one team.")
+    else:
         from db.models import EventGroup
 
         accepted = [
@@ -105,18 +109,23 @@ def activation_blockers(session, event, now: Optional[datetime] = None) -> list:
                 "A clan-vs-clan event needs at least two accepted clans "
                 "(the host plus an opponent that accepted its invitation)."
             )
-        team_gids = {
-            gid for (gid,) in
-            session.query(EventTeam.group_id)
-            .filter(EventTeam.event_id == event.id)
-            .all()
-        }
-        clans_without_teams = [g for g in accepted if g not in team_gids]
-        if accepted and clans_without_teams:
-            blockers.append(
-                f"Every accepted clan needs at least one team — "
-                f"{len(clans_without_teams)} clan(s) have none yet."
-            )
+        # Teams are optional: with none, activation seeds one whole-clan team
+        # per clan (anyone-vs-anyone). But a half-built roster is ambiguous, so
+        # once any team exists every accepted clan must have at least one.
+        if team_count:
+            team_gids = {
+                gid for (gid,) in
+                session.query(EventTeam.group_id)
+                .filter(EventTeam.event_id == event.id)
+                .all()
+            }
+            clans_without_teams = [g for g in accepted if g not in team_gids]
+            if accepted and clans_without_teams:
+                blockers.append(
+                    f"Every accepted clan needs at least one team, or remove all "
+                    f"teams to run whole-clan vs whole-clan — "
+                    f"{len(clans_without_teams)} clan(s) have none yet."
+                )
 
     if event.ends_at is not None and event.ends_at <= now:
         blockers.append("The end date is in the past — move it into the future first.")
@@ -276,6 +285,37 @@ def _audit(session, actor_user_id, event, action: str, before: dict, after: dict
 # Transitions (routes + sweep share these — caller owns the commit)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _ensure_whole_clan_teams(session, event) -> int:
+    """clan_vs_clan fallback: when an event activates with no teams, seed one
+    ``auto_clan`` team per accepted clan (named after the clan). Each represents
+    the whole clan — the matcher credits every current member of ``group_id`` to
+    it (see :func:`services.event_engine.load_matcher_state`), so the event runs
+    as "anyone in clan A vs anyone in clan B". No-op for other modes or when
+    teams already exist. Returns the number of teams created."""
+    if (getattr(event, "mode", None) or "standard") != "clan_vs_clan":
+        return 0
+    from db.models import EventGroup, EventTeam, Group
+
+    if session.query(EventTeam).filter(EventTeam.event_id == event.id).count():
+        return 0
+    accepted = (
+        session.query(EventGroup.group_id)
+        .filter(EventGroup.event_id == event.id, EventGroup.status == "accepted")
+        .all()
+    )
+    created = 0
+    for (gid,) in accepted:
+        group = session.query(Group).filter(Group.group_id == gid).first()
+        name = ((getattr(group, "group_name", None) or "").strip() or f"Clan {gid}")[:80]
+        session.add(EventTeam(
+            event_id=event.id, name=name, score=0, group_id=gid, auto_clan=True,
+        ))
+        created += 1
+    if created:
+        session.flush()
+    return created
+
+
 def activate_event(session, event, *, actor_user_id=None, user=None,
                    now: Optional[datetime] = None) -> None:
     """draft -> active. Validates readiness and tier capacity, stamps
@@ -314,6 +354,11 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
     from services.event_scheduled_events import sync_event_guilds
 
     sync_event_guilds(session, event)
+
+    # clan_vs_clan with no teams set up: seed a whole-clan team per accepted
+    # clan so it runs as "anyone in clan A vs anyone in clan B". Must precede
+    # grant_free_cells so the freshly-created teams receive their free cells.
+    _ensure_whole_clan_teams(session, event)
 
     # Free cells complete for every team "from activation" (Task 20/21).
     event_engine.grant_free_cells(session, event)

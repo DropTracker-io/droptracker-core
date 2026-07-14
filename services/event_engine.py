@@ -610,6 +610,39 @@ def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
         for m in members:
             state.participants.setdefault(m.player_id, []).append(
                 (team_event[m.team_id], m.team_id, m.joined_at))
+
+    # Whole-clan fallback teams (clan_vs_clan, no explicit roster): credit every
+    # current member of the represented clan, so it runs "anyone in clan A vs
+    # anyone in clan B". Recomputed each reload, so members who join the clan
+    # mid-event start counting automatically. joined_at is None — the event
+    # window is the only credit cutoff. One team per (event, player): a player
+    # in both clans lands on whichever auto team is seen first.
+    auto_teams = [t for t in teams if getattr(t, "auto_clan", False) and t.group_id]
+    if auto_teams:
+        from db.models.associations import user_group_association
+
+        gids = list({t.group_id for t in auto_teams})
+        rows = (
+            session.query(
+                user_group_association.c.group_id,
+                user_group_association.c.player_id,
+            )
+            .filter(
+                user_group_association.c.group_id.in_(gids),
+                user_group_association.c.player_id.isnot(None),
+            )
+            .all()
+        )
+        members_by_gid: dict = {}
+        for gid, pid in rows:
+            members_by_gid.setdefault(gid, []).append(pid)
+        for t in auto_teams:
+            event_id = team_event[t.id]
+            for pid in members_by_gid.get(t.group_id, ()):  # noqa: E501
+                existing = state.participants.setdefault(pid, [])
+                if any(e == event_id for (e, _tid, _j) in existing):
+                    continue  # already mapped to a team for this event
+                existing.append((event_id, t.id, None))
     return state
 
 

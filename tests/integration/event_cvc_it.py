@@ -136,13 +136,21 @@ def main():
         session.flush()
         assert accepted_ids() == {host.group_id, opp.group_id}
 
+        # Teams are optional for clan-vs-clan: with two accepted clans and no
+        # teams, the event is ready — activation seeds a whole-clan team per
+        # clan so it runs anyone-vs-anyone.
+        assert event_lifecycle.activation_blockers(session, ev, now=now) == []
+
+        # ── Half-built roster is ambiguous: one clan has a team, one doesn't ──
+        team_h = EventTeam(event_id=ev.id, name="Hosts", score=0, group_id=host.group_id)
+        session.add(team_h)
+        session.flush()
         blockers = event_lifecycle.activation_blockers(session, ev, now=now)
         assert any("at least one team" in b for b in blockers), blockers
 
-        # ── Clan-bound teams; blockers clear ─────────────────────────────────
-        team_h = EventTeam(event_id=ev.id, name="Hosts", score=0, group_id=host.group_id)
+        # ── Both clans get a team; blockers clear ────────────────────────────
         team_o = EventTeam(event_id=ev.id, name="Opps", score=0, group_id=opp.group_id)
-        session.add_all([team_h, team_o])
+        session.add(team_o)
         session.flush()
         assert event_lifecycle.activation_blockers(session, ev, now=now) == []
 
