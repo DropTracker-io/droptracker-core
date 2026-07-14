@@ -945,15 +945,15 @@ async def _process_manual_submission(req_start):
                     # Validate drop-specific required fields
                     item_name = data.get("item_name")
                     npc_name = data.get("npc_name")
-                    value = data.get("value")
+                    # 0 = "unknown": get_true_item_value() recovers the real GE
+                    # price for 0gp values, so a web submitter can omit it.
+                    value = data.get("value") or 0
                     quantity = data.get("quantity") or 1
-                    
+
                     if not item_name:
                         return jsonify({"success": False, "error": "Drop submission requires 'item_name'"}), 400
                     if not npc_name:
                         return jsonify({"success": False, "error": "Drop submission requires 'npc_name'"}), 400
-                    if value is None:
-                        return jsonify({"success": False, "error": "Drop submission requires 'value'"}), 400
                     
                     nearby_players = _parse_nearby_players(
                         data.get("nearby_players") or data.get("players_included") or data.get("members")
@@ -985,6 +985,10 @@ async def _process_manual_submission(req_start):
                         "item": item_name,
                         "kc": data.get("kc"),
                         "reported_slots": data.get("reported_slots"),
+                        # clog_processor reads the unlock's NPC from "source"
+                        # (payload convention); accept npc_name as an alias so
+                        # the web form's field isn't silently dropped.
+                        "source": data.get("source") or data.get("npc_name"),
                     })
                     response = await submissions.clog_processor(processed_data, external_session=db_session)
                     log_phase("clog_processed")
@@ -1026,16 +1030,21 @@ async def _process_manual_submission(req_start):
                     tier = data.get("tier")
                     points = data.get("points")
                     total_points = data.get("total_points")
-                    
+
                     if not task:
                         return jsonify({"success": False, "error": "Combat achievement submission requires 'task'"}), 400
                     if not tier:
                         return jsonify({"success": False, "error": "Combat achievement submission requires 'tier'"}), 400
+                    # The plugin reports the client's live point counters; a web
+                    # submitter can't know them, so derive the task's points
+                    # from its tier (the in-game award scale) and treat the
+                    # running total as unknown.
+                    _TIER_POINTS = {"easy": 1, "medium": 2, "hard": 3, "elite": 4, "master": 5, "grandmaster": 6}
                     if points is None:
-                        return jsonify({"success": False, "error": "Combat achievement submission requires 'points'"}), 400
+                        points = _TIER_POINTS.get(str(tier).strip().lower(), 1)
                     if total_points is None:
-                        return jsonify({"success": False, "error": "Combat achievement submission requires 'total_points'"}), 400
-                    
+                        total_points = 0
+
                     processed_data.update({
                         "type": "combat_achievement",
                         "player_name": player_name,

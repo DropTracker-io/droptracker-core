@@ -111,23 +111,61 @@ async def manual_submission():
 
     player_name = await asyncio.to_thread(_authorize)
 
+    # Friendly per-type validation (the intake API would 400 anyway, but its
+    # messages are payload-key jargon; reject with field-level detail here).
+    item_name = (body.get("item_name") or "").strip() or None
+    npc_name = (body.get("npc_name") or "").strip() or None
+    if sub_type == "drop" and not (item_name and npc_name):
+        abort_problem(422, "Missing fields", "A drop needs both an item and the NPC it came from.")
+    if sub_type in ("clog", "pet") and not item_name:
+        noun = "collection log item" if sub_type == "clog" else "pet"
+        abort_problem(422, "Missing fields", f"Pick the {noun} you received.")
+    if sub_type == "pb" and not npc_name:
+        abort_problem(422, "Missing fields", "Pick the boss the personal best is for.")
+    if sub_type == "pb" and not body.get("time_ms"):
+        abort_problem(422, "Missing fields", "A personal best needs the kill time.")
+    if sub_type == "ca" and not ((body.get("task") or "").strip() and (body.get("tier") or "").strip()):
+        abort_problem(422, "Missing fields", "A combat achievement needs the task name and its tier.")
+
     # Build the intake `/manual-submit` payload (reuse the pipeline).
     payload = {
         "submission_type": _TYPE_MAP[sub_type],
         "player_name": player_name,
         "world_type": "main",
     }
-    if body.get("item_name"):
-        payload["item_name"] = body["item_name"]
-    if body.get("npc_name"):
-        payload["npc_name"] = body["npc_name"]
-        payload["boss_name"] = body["npc_name"]  # pb uses boss_name
+    if item_name:
+        payload["item_name"] = item_name
+    if npc_name:
+        payload["npc_name"] = npc_name
+        payload["boss_name"] = npc_name  # pb uses boss_name
+    if isinstance(body.get("item_id"), int):
+        payload["item_id"] = body["item_id"]
     if body.get("value") is not None:
         payload["value"] = int(body["value"])
     if body.get("quantity") is not None:
         payload["quantity"] = int(body["quantity"])
     if body.get("notes"):
         payload["notes"] = body["notes"]
+    if sub_type == "pb":
+        payload["time_ms"] = int(body["time_ms"])
+        if body.get("team_size"):
+            payload["team_size"] = int(body["team_size"])
+    elif sub_type == "ca":
+        payload["task"] = str(body["task"]).strip()
+        payload["tier"] = str(body["tier"]).strip().lower()
+    elif sub_type == "pet":
+        # The pet processor keys off pet_name (pets live in the item list);
+        # the boss/source and killcount ride along for the notification embed.
+        payload["pet_name"] = item_name
+        if npc_name:
+            payload["source"] = npc_name
+        if body.get("kc") is not None:
+            payload["killcount"] = int(body["kc"])
+    elif sub_type == "clog":
+        if body.get("kc") is not None:
+            payload["kc"] = int(body["kc"])
+        if npc_name:
+            payload["source"] = npc_name
     # Proof: a presigned B2 key becomes a public image URL the pipeline stores.
     key = body.get("proof_upload_key")
     if key:

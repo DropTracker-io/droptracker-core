@@ -429,6 +429,10 @@ async def ensure_item_for_drop(session, item_id, item_name):
     if item_id is not None:
         item = session.query(ItemList).filter(ItemList.item_id == item_id).first()
     if not item and item_name is not None:
+        # Manual submissions carry only a name (the plugin always sends an
+        # id), so fall back to the same name -> ItemList resolution the clog
+        # and pet processors use: exact-name row first, then a wiki lookup
+        # that mints the row with the item's real game id.
         # Release any open transaction before awaiting external API calls.
         # Otherwise the Session can keep a pooled DB connection checked out
         # while waiting on network I/O.
@@ -437,12 +441,7 @@ async def ensure_item_for_drop(session, item_id, item_name):
         except Exception:
             pass
         try:
-            async with osrs_api.create_client() as client:
-                real_item = await client.semantic.check_item_exists(item_name)
-            if real_item and item_id is not None:
-                item = ItemList(item_name=item_name, item_id=item_id, noted=0, stackable=0, stacked=0)
-                session.add(item)
-                session.commit()
+            item = await ensure_item_by_name(session, item_name)
         except Exception:
             return None
     return item
