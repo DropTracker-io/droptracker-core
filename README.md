@@ -52,7 +52,8 @@ Production runs as **systemd units**; canonical copies of the unit files live in
 |---|---|---|---|
 | `droptracker-api` | [api/app.py](api/app.py) (`api:create_app()`) | 31323 | Submission intake + public read API |
 | `droptracker-webapi` | [web_api/app.py](web_api/app.py) | 31325 | Website backend (`/api/v1`: auth, profiles, config, events, admin, SSE) |
-| `droptracker-node` | Next.js server (separate repo) | 31380 | Website frontend / BFF |
+| `droptracker-node-blue` / `-green` | Next.js servers (separate repo), zero-downtime blue-green pair behind nginx | 31380 / 31381 | Website frontend / BFF |
+| `droptracker-node` | Deploy trigger (oneshot → web `scripts/deploy.sh`); `systemctl restart` = zero-downtime deploy, not a server | — | Web deploy |
 | `droptracker-core` | [bots/main.py](bots/main.py) | — | Primary Discord bot: slash commands, notifications, lootboard posting |
 | `droptracker-webhooks` | [bots/webhook_bot.py](bots/webhook_bot.py) | — | Legacy fallback: parses submissions posted to Discord webhook channels |
 | `droptracker-hof` | [bots/hall_of_fame.py](bots/hall_of_fame.py) | — | Hall of Fame image bot |

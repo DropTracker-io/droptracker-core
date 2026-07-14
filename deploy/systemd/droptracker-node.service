@@ -1,25 +1,28 @@
 [Unit]
-Description=DropTracker Web (Next.js BFF)
-After=network.target droptracker-api.service
-Wants=network.target
+Description=DropTracker Web DEPLOY — zero-downtime blue-green (runs scripts/deploy.sh)
+# This is NOT the web server. `systemctl restart droptracker-node` runs a full
+# zero-downtime deploy: build the idle colour, health-check it, flip nginx via a
+# graceful reload. The actual Next.js instances are droptracker-node-blue
+# (:31380) and droptracker-node-green (:31381). Watch progress with
+# `journalctl -u droptracker-node -f`.
+#
+# There is deliberately NO [Install]/WantedBy: this is a manually-triggered job,
+# not a boot service (the servers boot via droptracker-node-blue/green). Enabling
+# it would rebuild + flip the site on every boot. It is `static` on purpose.
+After=network.target
 
 [Service]
-Type=simple
+Type=oneshot
+# Stay "active (exited)" after a successful deploy so `systemctl status` reflects
+# the last deploy result (green = ok, red = failed build/flip).
+RemainAfterExit=yes
 User=debian
-WorkingDirectory=/store/droptracker/web/apps/web
-# App configuration (USE_MOCK_API, WEB_API_INTERNAL_URL, NEXTAUTH_URL, Discord
-# OAuth, SESSION_COOKIE_SECRET, ...) is loaded by Next.js from
-# apps/web/.env.local, which is symlinked to /store/droptracker/web/.env.
-# Only process-level knobs are set here so they don't override the env file.
-Environment=NODE_ENV=production
-Environment=PORT=31380
-Environment=HOSTNAME=0.0.0.0
+WorkingDirectory=/store/droptracker/web
 Environment=HOME=/home/debian
-Environment=PATH=/store/droptracker/web/apps/web/node_modules/.bin:/home/debian/.nvm/versions/node/v20.20.1/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/store/droptracker/web/apps/web/node_modules/.bin/next start
-Restart=on-failure
-RestartSec=5
-KillMode=mixed
-
-[Install]
-WantedBy=multi-user.target
+Environment=NODE_ENV=production
+# pnpm/node from nvm + standard bins. deploy.sh's `sudo nginx`/`sudo systemctl`
+# resolve via sudo's secure_path; debian has NOPASSWD sudo so it runs unattended.
+Environment=PATH=/home/debian/.nvm/versions/node/v20.20.1/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+# A full deploy (install + gen + next build + flip) can take a few minutes.
+TimeoutStartSec=1800
+ExecStart=/store/droptracker/web/scripts/deploy.sh

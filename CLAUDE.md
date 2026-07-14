@@ -38,7 +38,8 @@ Production runs as **systemd units** (`/etc/systemd/system/droptracker-*.service
 |---|---|---|---|
 | `droptracker-api` | `api/app.py` (`api:create_app()`) | Submission intake + public read API | 31323 |
 | `droptracker-webapi` | `web_api/app.py` | Website backend `/api/v1` (auth, profiles, config, events, admin, SSE) | 31325 |
-| `droptracker-node` | Next.js server (separate `droptracker-web` repo, deployed at `/store/droptracker/web`) | Website frontend / BFF | 31380 |
+| `droptracker-node-blue` / `droptracker-node-green` | Next.js servers (separate `droptracker-web` repo at `/store/droptracker/web`); zero-downtime blue-green pair behind nginx `upstream droptracker_node` | Website frontend / BFF | 31380 / 31381 |
+| `droptracker-node` | **Deploy trigger** — oneshot that runs web `scripts/deploy.sh`; `systemctl restart droptracker-node` = full zero-downtime deploy (build idle colour → health-check → flip nginx). NOT a server. | Web deploy | — |
 | `droptracker-core` | `bots/main.py` | Primary Discord bot (slash commands, notifications, lootboard updates) | — |
 | `droptracker-webhooks` | `bots/webhook_bot.py` | Discord bot that reads webhook-channel messages (legacy fallback) | — |
 | `droptracker-lootboards` | `lootboard/_board_generator.py` | Generates lootboard images every 2 min | — |

@@ -14,7 +14,9 @@ sudo systemctl restart <unit>
 | `droptracker-api` | `api:create_app()` via Hypercorn (6 workers) | 31323 |
 | `droptracker-api-dev` | same, dev instance (disabled by default) | 31324 |
 | `droptracker-webapi` | `web_api/app.py` | 31325 |
-| `droptracker-node` | Next.js server (separate `droptracker-web` repo) | 31380 |
+| `droptracker-node-blue` | Next.js server, blue (separate `droptracker-web` repo) | 31380 |
+| `droptracker-node-green` | Next.js server, green (blue-green standby) | 31381 |
+| `droptracker-node` | **Deploy trigger** (oneshot → web `scripts/deploy.sh`); `systemctl restart` = zero-downtime deploy. Not a server. | — |
 | `droptracker-core` | `bots/main.py` | — |
 | `droptracker-webhooks` | `bots/webhook_bot.py` | — |
 | `droptracker-hof` | `bots/hall_of_fame.py` | — |

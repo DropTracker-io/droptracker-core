@@ -1,0 +1,28 @@
+[Unit]
+Description=DropTracker Web (Next.js BFF) — green (blue-green standby)
+After=network.target droptracker-api.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=debian
+WorkingDirectory=/store/droptracker/web/apps/web
+# Second Next.js instance for zero-downtime blue-green deploys. Identical to
+# droptracker-node.service except PORT (31381) and NEXT_DIST_DIR (.next-green).
+# Both instances run continuously; nginx's `upstream droptracker_node` points at
+# whichever colour is currently active. deploy.sh builds the idle colour,
+# restarts its unit, waits for /api/health, then flips nginx via a graceful
+# reload. App config still comes from apps/web/.env.local (symlinked to ../../.env).
+Environment=NODE_ENV=production
+Environment=PORT=31381
+Environment=NEXT_DIST_DIR=.next-green
+Environment=HOSTNAME=0.0.0.0
+Environment=HOME=/home/debian
+Environment=PATH=/store/droptracker/web/apps/web/node_modules/.bin:/home/debian/.nvm/versions/node/v20.20.1/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/store/droptracker/web/apps/web/node_modules/.bin/next start
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
