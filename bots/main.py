@@ -515,7 +515,9 @@ async def create_tasks():
     heartbeat_check.start()
     notification_force.start()
     drain_discord_outbox.start()
+    activity_launch_cards.start()
     reconcile_event_scheduled_events.start()
+    event_board_updates.start()
     badge_cycle.start()
     # Lootboard POSTING is user-visible and must stay with the interval tasks
     # above — NEVER gated behind the multi-minute, rate-limited guild-cache /
@@ -572,6 +574,19 @@ async def drain_discord_outbox():
         await drain_once(bot, _Session)
     except Exception as e:
         print(f"Couldn't drain discord outbox: {e}")
+
+
+@Task.create(IntervalTrigger(seconds=60))
+async def activity_launch_cards():
+    """Keep each group's standing "Open DropTracker" card in sync with its
+    activity_launch_channel config: post it, move it when the channel changes,
+    remove it when cleared. Cheap in steady state (DB reads only unless a card
+    actually needs posting/moving/deleting)."""
+    try:
+        from services.activity_launch import reconcile_all
+        await reconcile_all(bot, Session)
+    except Exception as e:
+        print(f"Couldn't reconcile activity launch cards: {e}")
 
 
 @Task.create(IntervalTrigger(seconds=30))

@@ -1,79 +1,128 @@
 """
-Discord Activity launch handler (Entry Point command, APP_HANDLER mode).
+Discord Activity launch handler (Entry Point command, APP_HANDLER mode) + the
+standing "Open DropTracker" card.
 
-When Activities are enabled, Discord auto-creates a PRIMARY_ENTRY_POINT command
-named "launch". Its default handler ``DISCORD_LAUNCH_ACTIVITY`` (2) makes Discord
-post a public "started an activity" message to the channel EVERY time anyone
-opens the app — noisy in busy servers. We instead run that command in
-``APP_HANDLER`` (1) mode, so the launch click arrives here as an interaction and
-we control the whole thing:
+Entry point: Discord's default handler (DISCORD_LAUNCH_ACTIVITY) posts a public
+"started an activity" message every time anyone opens the app. We run the
+"launch" command in APP_HANDLER mode instead, so the click arrives here and we
+answer with the LAUNCH_ACTIVITY callback (type 12) — the app opens with NO
+default channel message. (scripts/set_activity_entry_point_handler.py flips the
+handler; this extension is what makes that flip safe.)
 
-  1. open the Activity ourselves with the ``LAUNCH_ACTIVITY`` callback (type 12)
-     — this launches the app with NO default channel message, and
-  2. post our own message under our control.
-
-By default that message is **ephemeral** (only the person who launched sees it),
-so nothing clutters the channel — flip ``LAUNCH_MESSAGE_EPHEMERAL`` to False for
-a public message, or gate it per-group inside ``build_launch_message``.
+Standing card: a group leader picks a channel (``activity_launch_channel`` group
+config) and the bot keeps one Components-V2 card there. Its button is a normal
+custom_id button; clicking it is the same kind of interaction as the entry
+point, so it's answered the same way (a LAUNCH_ACTIVITY response). A ~60s
+reconcile sweep posts the card, moves it when the channel changes, and removes
+it when the channel is cleared.
 
 interactions.py 5.16 has no native entry-point / LAUNCH_ACTIVITY support, so we
-hook the raw gateway interaction and respond over HTTP directly. The framework's
-own dispatcher also sees this interaction, finds no registered command, and logs
-a harmless ``Unknown cmd_id received`` — that is expected and can be ignored.
+hook the raw gateway interaction and respond over HTTP. Its own dispatcher also
+sees the interaction, finds no registered command/component, and logs a harmless
+"Unknown cmd_id received" — expected.
 
-The matching command-handler flip (2 -> 1) is applied out-of-band via
-``scripts/set_activity_entry_point_handler.py``; this extension is what makes
-that flip safe (without it, APP_HANDLER launches would go unhandled).
+The pure decision logic lives in ``services/activity_launch_core.py`` (no
+interactions import, so it's unit-testable); this module is the Discord shell.
 """
+import functools
 import logging
 
 from interactions import Extension, listen
 from interactions.api.events import RawGatewayEvent
 
+from services import activity_launch_core as core
+from services.activity_launch_core import (  # re-exported for callers/tests
+    CALLBACK_LAUNCH_ACTIVITY,
+    LAUNCH_BUTTON_CUSTOM_ID,
+    build_launch_message,
+    is_entry_point_interaction,
+    is_launch_button_interaction,
+)
+
 log = logging.getLogger("interactions")
 
-# Discord numeric constants (absent from interactions.py 5.16 enums).
-_INTERACTION_APPLICATION_COMMAND = 2
-_COMMAND_PRIMARY_ENTRY_POINT = 4
-_CALLBACK_LAUNCH_ACTIVITY = 12
-_MSG_FLAG_EPHEMERAL = 1 << 6  # 64
 
-# Brand gold, matching the Activity's OSRS palette.
-_ACCENT = 0xC8A24A
+def build_launch_card():
+    """Components-V2 "Open DropTracker" card. Its button (custom_id
+    LAUNCH_BUTTON_CUSTOM_ID) opens the Activity when clicked. Matches the bot's
+    other V2 cards (services/components.py)."""
+    from interactions import ActionRow, Button, ButtonStyle, UnfurledMediaItem
+    from interactions.models import (
+        ContainerComponent,
+        SectionComponent,
+        SeparatorComponent,
+        TextDisplayComponent,
+        ThumbnailComponent,
+    )
 
-# When True the launch message is shown only to the launcher (no channel
-# clutter — the point of this whole extension). Set False for a public message.
-LAUNCH_MESSAGE_EPHEMERAL = True
+    logo = UnfurledMediaItem(url="https://www.droptracker.io/img/droptracker-small.gif")
+    return [
+        ContainerComponent(
+            SeparatorComponent(divider=True),
+            SectionComponent(
+                components=[
+                    TextDisplayComponent(content="## Open DropTracker"),
+                    TextDisplayComponent(
+                        content=(
+                            "-# Your clan's live event boards, leaderboards, personal "
+                            "bests and your own profile — right here in Discord."
+                        )
+                    ),
+                ],
+                accessory=ThumbnailComponent(media=logo),
+            ),
+            SeparatorComponent(divider=True),
+            TextDisplayComponent(
+                content=(
+                    "Tap **Open DropTracker** to launch the app. Follow live bingo "
+                    "boards, browse the leaderboards, and sign up for events without "
+                    "leaving Discord."
+                )
+            ),
+            SeparatorComponent(divider=True),
+            ActionRow(
+                Button(
+                    label="Open DropTracker",
+                    style=ButtonStyle.BLURPLE,
+                    custom_id=LAUNCH_BUTTON_CUSTOM_ID,
+                )
+            ),
+            SeparatorComponent(divider=True),
+            TextDisplayComponent(content="-# Powered by the [DropTracker](https://www.droptracker.io)"),
+        )
+    ]
 
 
-def is_entry_point_interaction(data: dict) -> bool:
-    """True iff this raw interaction is an Activity entry-point ("launch")
-    command — the only thing this extension handles."""
-    if not isinstance(data, dict) or data.get("type") != _INTERACTION_APPLICATION_COMMAND:
-        return False
-    return (data.get("data") or {}).get("type") == _COMMAND_PRIMARY_ENTRY_POINT
+async def _post_card(bot, channel_id):
+    try:
+        channel = await bot.fetch_channel(channel_id=channel_id)
+        if channel is None:
+            return None
+        return await channel.send(components=build_launch_card())
+    except Exception:
+        log.warning("[ActivityLaunch] couldn't post card to channel %s", channel_id, exc_info=True)
+        return None
 
 
-def build_launch_message(data: dict) -> dict | None:
-    """The message posted when someone opens the app. Return None to send
-    nothing. Ephemeral by default (see LAUNCH_MESSAGE_EPHEMERAL). `data` is the
-    raw interaction, so this can branch on guild/channel later."""
-    payload: dict = {
-        "embeds": [
-            {
-                "title": "DropTracker is open",
-                "description": (
-                    "Your clan's live event boards, leaderboards, and your own "
-                    "profile are all in here. Others can open it from the app "
-                    "tray to join too."
-                ),
-                "color": _ACCENT,
-            }
-        ]
-    }
-    if LAUNCH_MESSAGE_EPHEMERAL:
-        payload["flags"] = _MSG_FLAG_EPHEMERAL
-    return payload
+async def _delete_message(bot, channel_id, message_id) -> None:
+    try:
+        channel = await bot.fetch_channel(channel_id=channel_id)
+        if channel is None:
+            return
+        old = await channel.fetch_message(message_id=message_id)
+        await old.delete()
+    except Exception:
+        # Already gone, no perms, channel deleted — nothing to recover.
+        log.debug("[ActivityLaunch] couldn't delete stale card %s/%s", channel_id, message_id, exc_info=True)
+
+
+async def reconcile_all(bot, session_factory) -> None:
+    """Wire the bot's Discord side effects into the pure reconcile sweep."""
+    await core.reconcile_all(
+        session_factory,
+        post_card=functools.partial(_post_card, bot),
+        delete_message=functools.partial(_delete_message, bot),
+    )
 
 
 class ActivityLaunch(Extension):
@@ -81,24 +130,28 @@ class ActivityLaunch(Extension):
     async def _on_raw_interaction(self, event: RawGatewayEvent) -> None:
         data = event.data or {}
         if is_entry_point_interaction(data):
-            await self._handle_launch(data)
+            await self._launch(data, followup=True)
+        elif is_launch_button_interaction(data):
+            await self._launch(data, followup=False)
 
-    async def _handle_launch(self, data: dict) -> None:
+    async def _launch(self, data: dict, *, followup: bool) -> None:
         interaction_id = data.get("id")
         token = data.get("token")
         if not interaction_id or not token:
             return
 
-        # 1) Open the Activity for the user — no default channel message.
+        # Open the Activity for the user — no default channel message.
         try:
             await self.bot.http.post_initial_response(
-                {"type": _CALLBACK_LAUNCH_ACTIVITY}, interaction_id, token
+                {"type": CALLBACK_LAUNCH_ACTIVITY}, interaction_id, token
             )
         except Exception:
             log.exception("[ActivityLaunch] LAUNCH_ACTIVITY callback failed")
             return  # launch failed; don't post a message about a non-launch
 
-        # 2) Our own message (best-effort — the launch already succeeded).
+        # Optional entry-point follow-up (off by default; button never follows up).
+        if not followup:
+            return
         payload = build_launch_message(data)
         if not payload:
             return

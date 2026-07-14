@@ -40,6 +40,10 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "channel_id_to_post_deaths", "type": "channel", "default": None},
     {"key": "channel_id_to_post_diaries", "type": "channel", "default": None},
     {"key": "announcements_channel_id", "type": "channel", "default": None},
+    # Channel for the standing "Open DropTracker" card (the Discord Activity
+    # launcher). The bot posts/moves/removes it as this changes; the message id
+    # it manages lives in the un-registered `activity_launch_message_id` row.
+    {"key": "activity_launch_channel", "type": "channel", "default": None},
 
     # --- Drop notifications ---
     # Defaults here must match the runtime fallbacks the processors use when a
