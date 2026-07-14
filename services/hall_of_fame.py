@@ -184,7 +184,12 @@ class RateLimiter:
 class GroupHOFConfig:
     channel_id: Optional[str] = None
     boss_names: List[str] = field(default_factory=list)
-    individual_messages: bool = True
+    # MUST match the web config registry's default (False): the settings page
+    # renders a missing row as "off", so the bot treating missing as "on" made
+    # the UI lie — Rancour PvM configured directory-only, saw the toggle off,
+    # and still got 36 per-boss messages. Groups that ran individual boards on
+    # the old implicit default were given explicit '1' rows when this flipped.
+    individual_messages: bool = False
     pb_entries: int = 5
 
 
