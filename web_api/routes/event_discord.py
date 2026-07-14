@@ -44,6 +44,8 @@ from db import (
     GroupAdmin,
     EVENT_CHANNEL_KINDS,
     EVENT_DISCORD_POLICIES,
+    EVENT_MESSAGE_TOGGLE_KEYS,
+    EVENT_TASK_PROGRESS_MODES,
 )
 from web_api.common import abort_problem, db_session, private_no_store, _rc
 from web_api.deps import (
@@ -236,7 +238,66 @@ def _config_payload(s, ev: Event) -> dict:
         # which roles each ping key mentions — both edited on this same PUT.
         "discord_event_policy": getattr(ev, "discord_event_policy", None) or "on_activate",
         "pings": _event_pings(ev),
+        # Messaging verbosity + live board knobs, always returned fully
+        # merged with the defaults (the UI never needs its own default table).
+        # Lazy import: the unit-test conftest stubs `services` (established
+        # pattern — see services/event_notifications.py module docstring).
+        "messages": _effective_message_config(getattr(ev, "message_config", None)),
     }
+
+
+def _effective_message_config(raw):
+    from services.event_notifications import effective_message_config
+
+    return effective_message_config(raw)
+
+
+def _parse_message_config(value) -> str:
+    """Validate + normalize the PUT ``messages`` object into the JSON stored
+    on ``web_events.message_config``. Unknown toggle keys are rejected (a
+    typo silently doing nothing is worse than a 422); the stored document is
+    the fully-merged effective config, so reads never depend on defaults
+    changing under an event mid-flight."""
+    from services.event_notifications import LEADERBOARD_TOP_N_RANGE
+
+    if not isinstance(value, dict):
+        abort_problem(422, "Invalid messages", "'messages' must be an object.")
+
+    toggles = value.get("toggles") or {}
+    if not isinstance(toggles, dict):
+        abort_problem(422, "Invalid messages", "'messages.toggles' must be an object.")
+    for key, enabled in toggles.items():
+        if key not in EVENT_MESSAGE_TOGGLE_KEYS:
+            abort_problem(
+                422, "Unknown message toggle",
+                f"'{key}' is not one of {list(EVENT_MESSAGE_TOGGLE_KEYS)}.",
+            )
+        if not isinstance(enabled, bool):
+            abort_problem(422, "Invalid message toggle", f"'messages.toggles.{key}' must be a boolean.")
+
+    mode = value.get("task_progress")
+    if mode is not None and mode not in EVENT_TASK_PROGRESS_MODES:
+        abort_problem(
+            422, "Invalid task progress mode",
+            f"messages.task_progress must be one of {list(EVENT_TASK_PROGRESS_MODES)}.",
+        )
+
+    board = value.get("leaderboard") or {}
+    if not isinstance(board, dict):
+        abort_problem(422, "Invalid messages", "'messages.leaderboard' must be an object.")
+    for flag in ("live", "show_tasks"):
+        if flag in board and not isinstance(board[flag], bool):
+            abort_problem(422, "Invalid leaderboard option", f"'messages.leaderboard.{flag}' must be a boolean.")
+    if "top_n" in board:
+        lo, hi = LEADERBOARD_TOP_N_RANGE
+        if not isinstance(board["top_n"], int) or isinstance(board["top_n"], bool) \
+                or not (lo <= board["top_n"] <= hi):
+            abort_problem(
+                422, "Invalid leaderboard size",
+                f"messages.leaderboard.top_n must be an integer between {lo} and {hi}.",
+            )
+
+    return json.dumps(_effective_message_config(value))
 
 
 def _clean_snowflake(value, what: str) -> str:
@@ -367,6 +428,8 @@ async def put_event_discord(event_id: int):
         )
     pings_provided = "pings" in body
     ping_config = _parse_ping_config(body.get("pings")) if pings_provided else None
+    messages_provided = "messages" in body
+    message_config = _parse_message_config(body.get("messages")) if messages_provided else None
 
     if guild_id is None:
         if raw_channels:
@@ -430,6 +493,8 @@ async def put_event_discord(event_id: int):
                 ev.discord_event_policy = discord_event_policy
             if pings_provided:
                 ev.ping_config = ping_config
+            if messages_provided:
+                ev.message_config = message_config
 
             existing = {
                 row.kind: row
@@ -440,7 +505,14 @@ async def put_event_discord(event_id: int):
                     s.delete(row)
             for kind, channel_id in channels.items():
                 if kind in existing:
-                    existing[kind].channel_id = channel_id
+                    row = existing[kind]
+                    if str(row.channel_id) != str(channel_id):
+                        # Re-pointed channel: the persistent message (the live
+                        # standings board) lives in the OLD channel — forget
+                        # it so the bot posts fresh in the new one.
+                        row.message_id = None
+                        row.message_updated_at = None
+                    row.channel_id = channel_id
                 else:
                     s.add(EventChannel(event_id=event_id, kind=kind, channel_id=channel_id))
             # Keep the Discord scheduled-event mirror in step: a re-pointed
@@ -458,12 +530,12 @@ async def put_event_discord(event_id: int):
                 before=json.dumps({
                     "guild_id": before["guild_id"], "channels": before["channels"],
                     "discord_event_policy": before["discord_event_policy"],
-                    "pings": before["pings"],
+                    "pings": before["pings"], "messages": before["messages"],
                 }),
                 after=json.dumps({
                     "guild_id": after["guild_id"], "channels": after["channels"],
                     "discord_event_policy": after["discord_event_policy"],
-                    "pings": after["pings"],
+                    "pings": after["pings"], "messages": after["messages"],
                 }),
             ))
             s.commit()

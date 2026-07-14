@@ -97,6 +97,40 @@ EVENT_DISCORD_POLICIES = ("on_activate", "immediate")
 # - "event_started"/"event_ended" — the lifecycle announcements.
 EVENT_PING_KEYS = ("event_created", "event_started", "event_ended")
 
+# How chatty the bot is about partial task progress (web_events.message_config
+# JSON, key "task_progress"):
+# - "off"        — only completions post (default; the pre-2026-07 behaviour).
+# - "milestones" — a post when a team crosses 25/50/75% of a task's target.
+# - "all"        — a post for every recorded increment (very verbose; the
+#                  group leader's explicit choice).
+EVENT_TASK_PROGRESS_MODES = ("off", "milestones", "all")
+
+# notification_queue types a group leader can switch off per event via
+# web_events.message_config (JSON {"toggles": {type: bool}, "task_progress":
+# mode, "leaderboard": {live, top_n, show_tasks}}). Defaults and merge logic
+# live in services/event_notifications.py (pure/stdlib so it stays
+# unit-testable); admin-triggered types (event_signup_prompt) are
+# deliberately absent — an explicit action always posts.
+EVENT_MESSAGE_TOGGLE_KEYS = (
+    "event_started",
+    "event_ended",
+    "event_completion",
+    "event_task_progress",
+    "event_cell",
+    "event_line",
+    "event_blackout",
+    "event_lead_change",
+    "event_pending",
+    "event_activation_failed",
+)
+
+# Message types that have a component-layout row in web_event_message_layouts:
+# every queue type above plus the persistent live-standings board message.
+EVENT_MESSAGE_LAYOUT_TYPES = EVENT_MESSAGE_TOGGLE_KEYS + (
+    "event_signup_prompt",
+    "event_board",
+)
+
 
 class Event(Base):
     # Namespaced under `web_*` to avoid colliding with the pre-existing legacy
@@ -135,6 +169,11 @@ class Event(Base):
     # JSON {ping_key: [role snowflakes]} (EVENT_PING_KEYS) — which roles the
     # bot mentions on the scheduled-event companion message / lifecycle posts.
     ping_config = Column(Text, nullable=True)
+    # JSON messaging verbosity knobs ({"toggles": {queue type: bool},
+    # "task_progress": EVENT_TASK_PROGRESS_MODES, "leaderboard": {"live",
+    # "top_n", "show_tasks"}}). NULL = all defaults; merge semantics in
+    # services/event_notifications.py effective_message_config().
+    message_config = Column(Text, nullable=True)
     board_size = Column(Integer, nullable=False, default=5)  # EVENT_BOARD_SIZES
     bonus_line_points = Column(Integer, nullable=False, default=0)
     bonus_blackout_points = Column(Integer, nullable=False, default=0)
@@ -336,6 +375,12 @@ class EventChannel(Base):
     event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
     kind = Column(String(24), nullable=False)  # EVENT_CHANNEL_KINDS
     channel_id = Column(String(32), nullable=False)
+    # The persistent bot message living in this channel, when the kind has one
+    # (today: the 'leaderboard' kind's live standings board — the lootboard
+    # pattern: post once, edit in place, repost if it vanishes). Written back
+    # by the core bot (services/event_board.py); NULL until first post.
+    message_id = Column(String(32), nullable=True)
+    message_updated_at = Column(DateTime, nullable=True)
 
 
 class EventGuild(Base):
@@ -450,4 +495,36 @@ class EventTemplate(Base):
     payload = Column(Text, nullable=False)  # MEDIUMTEXT in MySQL (web36a)
     active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class EventMessageLayout(Base):
+    """Component-layout template for one event Discord message type.
+
+    The Components-V2 analogue of ``group_embeds`` (db/models/embed.py):
+    one row per (group, message type), with the system defaults living on
+    template group 1 and every group falling back to them unless it has the
+    ``custom_embeds`` entitlement and its own row. ``layout`` is versioned
+    JSON in the block DSL rendered by services/event_message_layouts.py
+    ({"blocks": [{"type": "text"|"section"|"separator"|"standings"|"buttons",
+    ...}]} with ``{placeholder}`` tokens) — kept as one JSON document rather
+    than normalized child rows for the same reason as EventTemplate.payload:
+    layouts are swapped wholesale, and the future web layout editor edits the
+    whole tree at once."""
+
+    __tablename__ = "web_event_message_layouts"
+    __table_args__ = (
+        Index("uq_web_event_msg_layout", "group_id", "message_type", unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Group 1 = the template group whose rows are the seeded system defaults
+    # (scripts/seed_event_message_layouts.py) — same convention as group_embeds.
+    group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=False, default=1)
+    message_type = Column(String(32), nullable=False)  # EVENT_MESSAGE_LAYOUT_TYPES
+    # Container accent bar, "#RRGGBB"; NULL = no accent.
+    accent_color = Column(String(7), nullable=True)
+    layout = Column(Text, nullable=False)  # MEDIUMTEXT in MySQL (web41a)
+    schema_version = Column(Integer, nullable=False, default=1)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

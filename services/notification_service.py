@@ -31,11 +31,13 @@ from utils import osrs_api
 from services.contribution_notifications import format_money
 from services.event_notifications import (
     EVENT_NOTIFICATION_TYPES,
+    effective_message_config,
     event_ping_role_ids,
     event_url,
     load_event_channels,
     ping_content,
     resolve_event_channel,
+    should_send_event_message,
 )
 from utils.wiseoldman import fetch_group_members
 from services.redis_updates import get_player_list_loot_sum, loot_tracker
@@ -1496,6 +1498,16 @@ class NotificationService:
                 db_session.commit()
                 return
 
+            # Verbosity re-check at send time (the engine already gates at
+            # enqueue; this covers rows queued before a config change).
+            message_config = effective_message_config(getattr(event, "message_config", None))
+            if not should_send_event_message(message_config, notification_type):
+                notification.status = 'sent'
+                notification.error_message = 'skipped: muted by event message config'
+                notification.processed_at = datetime.now()
+                db_session.commit()
+                return
+
             channels = load_event_channels(db_session, event.id)
             channel_id = resolve_event_channel(channels, notification_type)
             if not channel_id:
@@ -1539,39 +1551,78 @@ class NotificationService:
                 db_session.commit()
                 return
 
-            from utils.embeds import build_event_embed
-            embed = build_event_embed(notification_type, data, standings=standings)
             # The interactive "Sign up" prompt carries a button that opens the
             # in-Discord signup flow (services/event_signup_discord.py).
-            send_kwargs = {}
+            extra_rows = []
             if notification_type == "event_signup_prompt":
                 try:
-                    send_kwargs["components"] = [interactions.ActionRow(interactions.Button(
+                    extra_rows.append(interactions.ActionRow(interactions.Button(
                         style=interactions.ButtonStyle.PRIMARY,
                         label="Sign up",
                         emoji="\U0001F4DD",
                         custom_id=f"evtsignup:{event.id}",
-                    ))]
+                    )))
                 except Exception:
-                    send_kwargs = {}  # never let a component error drop the post
-            # Configured role pings for this lifecycle post (web_events.
-            # ping_config, keys 'event_started'/'event_ended'); content stays
-            # None for unconfigured types/events — embed-only, as before.
-            content = ping_content(
+                    extra_rows = []  # never let a component error drop the post
+
+            # Configured role pings (web_events.ping_config). Components V2
+            # forbids content= alongside components, so mentions render as
+            # the container's first text display — they still notify under
+            # allowed_mentions.
+            ping_text = ping_content(
                 event_ping_role_ids(getattr(event, "ping_config", None), notification_type)
             )
-            if content:
-                await channel.send(
-                    content=content, embed=embed,
-                    allowed_mentions=interactions.AllowedMentions(parse=["roles"]),
-                    **send_kwargs,
+            allowed = interactions.AllowedMentions(parse=["roles"]) if ping_text else None
+
+            # Preferred path: the group's Components-V2 layout
+            # (services/event_message_layouts.py — group row falls back to the
+            # template group's seeded defaults). Any render failure falls back
+            # to the legacy embed so a bad layout can't silence an event.
+            try:
+                from services.event_message_layouts import (
+                    notification_context,
+                    render_event_components,
                 )
-            else:
-                await channel.send(embed=embed, **send_kwargs)
+
+                components = render_event_components(
+                    db_session, event.group_id, notification_type,
+                    notification_context(notification_type, data),
+                    standings=standings, ping_text=ping_text,
+                    extra_rows=extra_rows,
+                )
+                if allowed:
+                    await channel.send(components=components, allowed_mentions=allowed)
+                else:
+                    await channel.send(components=components)
+            except interactions.errors.Forbidden:
+                raise
+            except Exception as render_error:
+                app_logger.log(log_type="error",
+                               data=f"Component render failed for {notification_type} "
+                                    f"(event {event.id}): {render_error} — falling back to embed",
+                               app_name="notification_service",
+                               description="send_event_notification")
+                from utils.embeds import build_event_embed
+                embed = build_event_embed(notification_type, data, standings=standings)
+                send_kwargs = {"components": extra_rows} if extra_rows else {}
+                if ping_text:
+                    await channel.send(content=ping_text, embed=embed,
+                                       allowed_mentions=allowed, **send_kwargs)
+                else:
+                    await channel.send(embed=embed, **send_kwargs)
 
             notification.status = 'sent'
             notification.processed_at = datetime.now()
             db_session.commit()
+
+            # Keep the live standings board hot on score changes. The
+            # notification is already committed 'sent' — board upkeep must
+            # never rewrite that, so even the import stays guarded.
+            try:
+                from services.event_board import refresh_after_notification
+                await refresh_after_notification(self.bot, db_session, event, notification_type)
+            except Exception:
+                pass  # refresh_event_board logs its own errors
         except interactions.errors.Forbidden:
             raise  # process_notification_with_session handles missing perms
         except Exception as e:

@@ -554,6 +554,7 @@ def _event_to_dict(event) -> dict:
         "group_id": event.group_id,
         "requires_confirmation": bool(event.requires_confirmation),
         "submission_policy": getattr(event, "submission_policy", None) or "all",
+        "message_config": getattr(event, "message_config", None),
         "has_bingo": bool(event.has_bingo),
         "board_size": int(event.board_size or 5),
         "bonus_line_points": int(event.bonus_line_points or 0),
@@ -714,6 +715,19 @@ def _enqueue_notification(session, notification_type: str, event: dict,
     if player_id is None:
         # Manual awards carry no player and notification_queue.player_id is
         # NOT NULL — those announce via the admin action itself (Task 19).
+        return
+    # Verbosity gate (web_events.message_config): a type the group leader
+    # switched off is never even queued. The sender re-checks at send time
+    # (covers rows queued before a config change), but this is the primary
+    # gate — no queue churn for muted types.
+    from services.event_notifications import (
+        effective_message_config,
+        should_send_event_message,
+    )
+
+    if not should_send_event_message(
+        effective_message_config(event.get("message_config")), notification_type
+    ):
         return
     from db.models.notification_queue import NotificationQueue
     payload = dict(data)
@@ -986,6 +1000,41 @@ def _complete_bingo_cells(session, event: dict, task: dict, team_id: int,
     return newly
 
 
+def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id,
+                            player_name, previous: int, current: int) -> None:
+    """Enqueue an ``event_task_progress`` notification when the event's
+    message_config asks for one ('all': every increment; 'milestones': only
+    when a 25/50/75% threshold was crossed). Completion itself is announced
+    by ``event_completion`` — this never fires for the crossing into 100%."""
+    from services.event_notifications import (
+        effective_message_config,
+        progress_milestones_crossed,
+    )
+
+    if current <= previous:
+        return
+    config = effective_message_config(event.get("message_config"))
+    mode = config.get("task_progress", "off")
+    if mode == "off" or not config["toggles"].get("event_task_progress", True):
+        return
+    target = completion_threshold(task)
+    payload = {
+        "task_id": task["id"],
+        "task_label": task.get("label"),
+        "team_id": team_id,
+        "player_id": player_id,
+        "player_name": player_name,
+        "progress": current,
+        "target": target,
+    }
+    if mode == "milestones":
+        crossed = progress_milestones_crossed(previous, current, target)
+        if not crossed:
+            return
+        payload["milestone_pct"] = max(crossed)
+    _enqueue_notification(session, "event_task_progress", event, player_id, payload)
+
+
 def _current_leader(session, event_id: int):
     """(team_id, score) of the current points leader, or None."""
     from db.models import EventTeam
@@ -1020,6 +1069,7 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
             progress=0, completed=False)
         session.add(progress)
     already_completed = bool(progress.completed)
+    previous_progress = int(progress.progress or 0)
     if _list_kind(task) in ("all_of", "assembly"):
         # Distinct-item semantics: recompute from the applied ledger instead
         # of folding quantity (which let one big stack complete the set).
@@ -1052,6 +1102,9 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
             if player_name:
                 frame["player_name"] = player_name
             _publish(event["id"], frame)
+            _maybe_enqueue_progress(
+                session, event, task, team_id, player_id, player_name,
+                previous_progress, int(progress.progress or 0))
         return result
 
     progress.completed = True

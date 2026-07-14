@@ -319,6 +319,20 @@ async def start_group_sync():
 async def update_group_members_task_channel_loop():
     await update_group_members_task_channel()
 
+@Task.create(IntervalTrigger(minutes=2))
+async def event_board_updates():
+    """Live event standings boards (services/event_board.py): the interval
+    catch-all that keeps every active event's leaderboard-channel message
+    fresh (time-remaining drift, missed hook refreshes) and renders the
+    final state for just-ended events. Score-change refreshes also happen
+    inline after each event notification sends."""
+    try:
+        from services.event_board import run_board_sweep
+        await run_board_sweep(bot)
+    except Exception as e:
+        print(f"Event board sweep error: {e}")
+
+
 @Task.create(IntervalTrigger(minutes=8))
 async def lootboard_updates():
     try:

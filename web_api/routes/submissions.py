@@ -276,6 +276,73 @@ async def uploads_presign():
     )
 
 
+_PROOF_MAX_BYTES = 10 * 1024 * 1024  # 10 MB — matches the submit form's client cap.
+# Pillow format -> (extension, content-type) for the image types accepted as proof.
+_PROOF_IMAGE_FORMATS = {
+    "PNG": ("png", "image/png"),
+    "JPEG": ("jpg", "image/jpeg"),
+    "WEBP": ("webp", "image/webp"),
+    "GIF": ("gif", "image/gif"),
+}
+
+
+@submissions_bp.post("/uploads/proof")
+async def upload_proof():
+    """Accept a proof screenshot and store it in B2 **server-side**.
+
+    Replaces the old browser→B2 presigned PUT: Backblaze's bucket CORS policy
+    only allows GET/HEAD, so a direct cross-origin PUT from the browser failed
+    its CORS preflight and surfaced to the user as "Failed to fetch". The
+    browser now POSTs the image to us (same origin, no CORS) and we stream it to
+    B2 with server credentials. Returns the same ``{key, public_url}`` shape the
+    old presign did, so the manual-submission route still consumes ``key`` as
+    ``proof_upload_key`` unchanged.
+    """
+    current_user_id()  # session required
+
+    files = await request.files
+    upload = files.get("file")
+    if upload is None:
+        abort_problem(422, "Invalid body", "A multipart 'file' field is required.")
+    raw = upload.read()
+    if not raw:
+        abort_problem(422, "Empty file", "The uploaded image was empty.")
+    if len(raw) > _PROOF_MAX_BYTES:
+        abort_problem(422, "File too large", "Proof screenshots are capped at 10 MB.")
+
+    import io
+
+    from PIL import Image, UnidentifiedImageError
+
+    # Validate it's a real image and derive the extension from the actual bytes
+    # (never trust the client's declared content-type). `.format` is populated
+    # at open() and stays readable after verify() invalidates the pixel data.
+    try:
+        im = Image.open(io.BytesIO(raw))
+        fmt_name = im.format
+        im.verify()
+    except (UnidentifiedImageError, OSError, ValueError):
+        abort_problem(422, "Unsupported image", "Upload a PNG, JPEG, WebP, or GIF image.")
+    fmt = _PROOF_IMAGE_FORMATS.get(fmt_name or "")
+    if fmt is None:
+        abort_problem(422, "Unsupported image", "Upload a PNG, JPEG, WebP, or GIF image.")
+    ext, content_type = fmt
+
+    # The B2 application key is namePrefix-restricted to "dt_" — keys outside
+    # that namespace fail with 403 "not entitled".
+    key = f"dt_uploads/{uuid.uuid4().hex}.{ext}"
+
+    try:
+        from utils.b2_storage import upload_bytes
+
+        await upload_bytes(raw, key, content_type)
+    except Exception as e:
+        abort_problem(502, "Upload service unavailable", str(e))
+
+    public_url = f"{B2_CDN_BASE_URL.rstrip('/')}/{key}"
+    return private_no_store(jsonify({"key": key, "public_url": public_url}))
+
+
 @submissions_bp.post("/video/upload-complete")
 async def video_upload_complete():
     current_user_id()  # session required

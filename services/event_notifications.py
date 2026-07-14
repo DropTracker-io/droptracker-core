@@ -35,6 +35,9 @@ KIND_FOR_TYPE = {
     # Interactive "Sign up" prompt (posted on demand by an admin) — carries a
     # button the notification sender attaches (services/notification_service).
     "event_signup_prompt": "announcements",
+    # Partial task progress (opt-in via message_config.task_progress —
+    # 'milestones' or 'all'; default off).
+    "event_task_progress": "completions",
 }
 
 EVENT_NOTIFICATION_TYPES = tuple(KIND_FOR_TYPE)
@@ -54,7 +57,128 @@ _COLORS = {
     "event_pending": 0xE67E22,
     "event_activation_failed": 0xED4245,
     "event_signup_prompt": 0x5865F2,  # Discord blurple — a call to action
+    "event_task_progress": 0x3498DB,  # informational blue — progress, not victory
 }
+
+
+# --------------------------------------------------------------------------- #
+# Per-event messaging verbosity (web_events.message_config)
+# --------------------------------------------------------------------------- #
+# Mirrors db.models.events.EVENT_TASK_PROGRESS_MODES / EVENT_MESSAGE_TOGGLE_KEYS
+# (kept literal here so this module stays stdlib-only for the unit tests).
+TASK_PROGRESS_MODES = ("off", "milestones", "all")
+
+# The percent thresholds 'milestones' mode announces when a team crosses them.
+PROGRESS_MILESTONES = (25, 50, 75)
+
+# Queue types a group leader can toggle per event, with their defaults. The
+# defaults reproduce today's behaviour exactly (everything that used to post
+# still posts; task progress is the one new, default-off type).
+DEFAULT_MESSAGE_TOGGLES = {
+    "event_started": True,
+    "event_ended": True,
+    "event_completion": True,
+    "event_task_progress": True,  # gated separately by task_progress mode
+    "event_cell": True,
+    "event_line": True,
+    "event_blackout": True,
+    "event_lead_change": True,
+    "event_pending": True,
+    "event_activation_failed": True,
+}
+
+DEFAULT_MESSAGE_CONFIG = {
+    "toggles": dict(DEFAULT_MESSAGE_TOGGLES),
+    "task_progress": "off",
+    "leaderboard": {"live": True, "top_n": 10, "show_tasks": True},
+}
+
+LEADERBOARD_TOP_N_RANGE = (3, 25)
+
+
+def effective_message_config(raw_json) -> dict:
+    """The full messaging config for one event: defaults overlaid with the
+    stored ``web_events.message_config`` JSON. Unknown keys and corrupt JSON
+    are ignored (a bad config must never break a send) — callers always get
+    every key of :data:`DEFAULT_MESSAGE_CONFIG` back, values normalized."""
+    import json
+
+    config = {
+        "toggles": dict(DEFAULT_MESSAGE_TOGGLES),
+        "task_progress": DEFAULT_MESSAGE_CONFIG["task_progress"],
+        "leaderboard": dict(DEFAULT_MESSAGE_CONFIG["leaderboard"]),
+    }
+    if not raw_json:
+        return config
+    if isinstance(raw_json, dict):
+        data = raw_json
+    else:
+        try:
+            data = json.loads(raw_json)
+        except (ValueError, TypeError):
+            return config
+    if not isinstance(data, dict):
+        return config
+
+    toggles = data.get("toggles")
+    if isinstance(toggles, dict):
+        for key, value in toggles.items():
+            if key in DEFAULT_MESSAGE_TOGGLES:
+                config["toggles"][key] = bool(value)
+
+    mode = data.get("task_progress")
+    if mode in TASK_PROGRESS_MODES:
+        config["task_progress"] = mode
+
+    board = data.get("leaderboard")
+    if isinstance(board, dict):
+        if "live" in board:
+            config["leaderboard"]["live"] = bool(board["live"])
+        if "show_tasks" in board:
+            config["leaderboard"]["show_tasks"] = bool(board["show_tasks"])
+        try:
+            top_n = int(board.get("top_n"))
+        except (TypeError, ValueError):
+            top_n = None
+        if top_n is not None:
+            lo, hi = LEADERBOARD_TOP_N_RANGE
+            config["leaderboard"]["top_n"] = max(lo, min(hi, top_n))
+
+    return config
+
+
+def should_send_event_message(message_config: dict, notification_type: str) -> bool:
+    """Whether one queue type is enabled by an event's (effective) messaging
+    config. Types without a toggle (event_signup_prompt — an explicit admin
+    action) always send. ``event_task_progress`` additionally requires the
+    task_progress mode to be on."""
+    toggles = (message_config or {}).get("toggles") or {}
+    if notification_type not in DEFAULT_MESSAGE_TOGGLES:
+        return True
+    if not toggles.get(notification_type, DEFAULT_MESSAGE_TOGGLES[notification_type]):
+        return False
+    if notification_type == "event_task_progress":
+        return (message_config or {}).get("task_progress", "off") != "off"
+    return True
+
+
+def progress_milestones_crossed(previous: int, current: int, target: int) -> list:
+    """The :data:`PROGRESS_MILESTONES` percentages newly crossed when a team's
+    task progress moves ``previous`` -> ``current`` toward ``target``.
+    Empty when the target is unset/reached-before or nothing was crossed;
+    100% is excluded (that's the completion notification's job)."""
+    try:
+        previous, current, target = int(previous or 0), int(current or 0), int(target or 0)
+    except (TypeError, ValueError):
+        return []
+    if target <= 0 or current <= previous:
+        return []
+    crossed = []
+    for pct in PROGRESS_MILESTONES:
+        threshold = target * pct / 100.0
+        if previous < threshold <= current < target:
+            crossed.append(pct)
+    return crossed
 
 
 def event_url(event_id) -> str:
@@ -192,6 +316,24 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             field("Bingo", f"Cell{'s' if len(cells) != 1 else ''} `{', '.join(str(c) for c in cells)}` marked")
         if data.get("proof_url"):
             spec["thumbnail"] = data["proof_url"]
+
+    elif notification_type == "event_task_progress":
+        spec["title"] = f"\U0001F4C8 Progress: {task_label or 'Task'}"
+        who = f"**{team}**" if team else "A team"
+        by = f" (`{player}`)" if player else ""
+        current = int(data.get("progress") or 0)
+        target = int(data.get("target") or 0)
+        milestone = data.get("milestone_pct")
+        if milestone:
+            spec["description"] = (
+                f"{who} passed **{int(milestone)}%** of **{task_label or 'a task'}**{by}"
+            )
+        else:
+            spec["description"] = f"{who} progressed **{task_label or 'a task'}**{by}"
+        if target:
+            spec["fields"].append(
+                {"name": "Progress", "value": f"`{current} / {target}`", "inline": True}
+            )
 
     elif notification_type == "event_cell":
         spec["title"] = "\U0001F3AF Bingo cell completed"

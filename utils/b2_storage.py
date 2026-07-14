@@ -192,6 +192,39 @@ async def upload_object(
     return object_key
 
 
+async def upload_bytes(
+    data: bytes,
+    object_key: str,
+    content_type: str,
+) -> str:
+    """
+    Upload raw bytes to B2 server-side (no presigned URL, no browser CORS).
+
+    Used for proof-media uploads that the browser POSTs to our own server: the
+    server streams them here with its credentials, so the bucket does not need a
+    CORS PUT rule (Backblaze's policy only permits GET/HEAD, which is why a
+    direct browser→B2 PUT failed the CORS preflight).
+
+    Args:
+        data: The raw file bytes to store.
+        object_key: Target object key in B2 (e.g. "dt_uploads/uuid.png").
+        content_type: MIME type stored on the object (drives how the CDN serves it).
+
+    Returns:
+        The object_key on success.
+    """
+    client = _get_s3_client()
+    await asyncio.to_thread(
+        lambda: client.put_object(
+            Bucket=B2_BUCKET_NAME,
+            Key=object_key,
+            Body=data,
+            ContentType=content_type,
+        )
+    )
+    return object_key
+
+
 async def delete_object(object_key: str) -> bool:
     """
     Delete an object from B2.

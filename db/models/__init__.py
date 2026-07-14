@@ -75,6 +75,7 @@ from .events import (
     EventGuild,
     EventTaskLibraryItem,
     EventTemplate,
+    EventMessageLayout,
     EVENT_TASK_TYPES,
     EVENT_TASK_VISIBILITIES,
     EVENT_TEMPLATE_SCHEMA_VERSION,
@@ -89,6 +90,9 @@ from .events import (
     EVENT_SUBMISSION_POLICIES,
     EVENT_DISCORD_POLICIES,
     EVENT_PING_KEYS,
+    EVENT_TASK_PROGRESS_MODES,
+    EVENT_MESSAGE_TOGGLE_KEYS,
+    EVENT_MESSAGE_LAYOUT_TYPES,
 )
 
 
@@ -197,6 +201,7 @@ __all__ = [
     "EventGuild",
     "EventTaskLibraryItem",
     "EventTemplate",
+    "EventMessageLayout",
     "EVENT_TEMPLATE_SCHEMA_VERSION",
     "EVENT_TASK_TYPES",
     "EVENT_TASK_VISIBILITIES",
@@ -213,4 +218,7 @@ __all__ = [
     "EXCLUDING_STATUSES",
     "EVENT_BOARD_SIZES",
     "EVENT_SUBMISSION_POLICIES",
+    "EVENT_TASK_PROGRESS_MODES",
+    "EVENT_MESSAGE_TOGGLE_KEYS",
+    "EVENT_MESSAGE_LAYOUT_TYPES",
 ]
