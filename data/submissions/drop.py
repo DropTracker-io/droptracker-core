@@ -278,11 +278,15 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         log_checkpoint("ensure_npc_id_for_player")
 
         player_id = player.player_id
-        item_cache = redis_client.get(item_id)
+        # "Item is known" cache. Namespaced + TTL'd: this used to be
+        # `SET <item_id> <item_id>` with no expiry, which littered the
+        # keyspace with thousands of permanent bare-number keys.
+        item_known_key = f"item:known:{item_id}"
+        item_cache = redis_client.get(item_known_key)
         if not item_cache:
             item_cache = session.query(type(item).item_id).filter(type(item).item_id == item_id).first()
         if item_cache:
-            redis_client.set(item_id, item_id)
+            redis_client.client.set(item_known_key, "1", ex=7 * 24 * 3600)
         else:
             notification_data = {
                 "item_name": item_name,

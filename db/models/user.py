@@ -76,6 +76,9 @@ class User(Base):
     premium_group = Column(Integer, nullable=True)
     # Site staff flag: unlocks superadmin surfaces (§9, backend Task 12).
     is_superadmin = Column(Boolean, default=False)
+    # Trusted-helper flag: unlocks the web moderation panel (pb-blocks,
+    # item values, event task library). Superadmin implies moderator.
+    is_moderator = Column(Boolean, default=False)
     
     # Relationships
     players = relationship("Player", back_populates="user")

@@ -77,6 +77,46 @@ class TestUpdateTeam:
         r = await client.patch("/api/v1/events/1/teams/4", json={"name": "x" * 81})
         assert r.status_code == 422
 
+    async def test_set_color_alone_persists_and_audits(self, client, monkeypatch):
+        team = _team(4, name="Reds")
+        s = _S([_event()], [team])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/events/1/teams/4", json={"color": "#E05C4C"})
+        assert r.status_code == 200
+        assert team.color == "#e05c4c"  # normalized lowercase
+        assert team.name == "Reds"      # untouched
+        assert s.committed and len(s.added) == 1
+
+    async def test_clear_color_with_null(self, client, monkeypatch):
+        team = _team(4, color="#e05c4c")
+        s = _S([_event()], [team])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/events/1/teams/4", json={"color": None})
+        assert r.status_code == 200
+        assert team.color is None
+        assert s.committed
+
+    async def test_bad_color_rejected(self, client, monkeypatch):
+        for bad in ("red", "#12345", "#12345g", "e05c4c"):
+            s = _S()
+            _wire(monkeypatch, s)
+            r = await client.patch("/api/v1/events/1/teams/4", json={"color": bad})
+            assert r.status_code == 422, bad
+
+    async def test_same_color_is_a_noop(self, client, monkeypatch):
+        team = _team(4, color="#e05c4c")
+        s = _S([_event()], [team])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/events/1/teams/4", json={"color": "#e05c4c"})
+        assert r.status_code == 200
+        assert s.added == [] and not s.committed
+
+    async def test_empty_patch_rejected(self, client, monkeypatch):
+        s = _S()
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/events/1/teams/4", json={})
+        assert r.status_code == 422
+
     async def test_unknown_team_404(self, client, monkeypatch):
         s = _S([_event()], [])  # team lookup finds nothing
         _wire(monkeypatch, s)

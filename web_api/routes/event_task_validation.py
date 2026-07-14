@@ -27,11 +27,18 @@ _SKILL_BY_NORM = {s.lower(): s for s in OSRS_SKILLS}
 
 # Item-collection config kinds the engine understands (any_of/all_of via the
 # generic items map, point_collection weighting, assembly best-effort,
-# groups combining all-of/any-of sub-requirements).
-ITEM_CONFIG_KINDS = ("any_of", "all_of", "point_collection", "assembly", "groups")
+# groups combining all-of/any-of sub-requirements, any_path completing on
+# whichever alternative requirement set finishes first).
+ITEM_CONFIG_KINDS = ("any_of", "all_of", "point_collection", "assembly", "groups",
+                     "any_path")
 
 MAX_CONFIG_ITEMS = 100
 MAX_CONFIG_GROUPS = 10
+MAX_CONFIG_PATHS = 4
+
+# any_path progress is tracked as a percentage of the closest-to-done path
+# (paths differ in size, so a raw item count would be meaningless).
+ANY_PATH_THRESHOLD = 100
 
 # Non-semantic config keys preserved verbatim across validation (the bingo
 # designer's auto-created marker — see event_admin._BINGO_AUTO_KEY).
@@ -166,6 +173,42 @@ def _validated_groups(s, groups) -> tuple[list[dict], int]:
     return out, total_need
 
 
+def _validated_paths(s, paths) -> tuple[list[dict], int]:
+    """Validate a ``kind: "any_path"`` config: each path is its own
+    groups-style requirement set and the task completes when ANY path is
+    satisfied — "dryness protection" tasks (suggestion #52), e.g. the full
+    Justiciar set OR any 5 Justiciar items.
+
+    Items may repeat across paths (the same drop advances every path that
+    lists it) but not within one path (enforced per-path by
+    :func:`_validated_groups`). Returns ``(normalized paths, target_value)``
+    with the threshold pinned to :data:`ANY_PATH_THRESHOLD` because progress
+    is a percentage of the closest path, not an item count.
+    """
+    if not isinstance(paths, list) or len(paths) < 2:
+        abort_problem(422, "Invalid config",
+                      "Either-or config requires at least two paths.")
+    if len(paths) > MAX_CONFIG_PATHS:
+        abort_problem(422, "Invalid config",
+                      f"At most {MAX_CONFIG_PATHS} paths per task.")
+    out: list[dict] = []
+    total_items = 0
+    for pi, path in enumerate(paths, start=1):
+        if not isinstance(path, dict):
+            abort_problem(422, "Invalid config", f"Path {pi} must be an object.")
+        groups, _need = _validated_groups(s, path.get("groups"))
+        total_items += sum(len(g["items"]) for g in groups)
+        if total_items > MAX_CONFIG_ITEMS:
+            abort_problem(422, "Invalid config",
+                          f"At most {MAX_CONFIG_ITEMS} items per task.")
+        norm: dict = {"groups": groups}
+        label = path.get("label")
+        if isinstance(label, str) and label.strip():
+            norm["label"] = label.strip()[:80]
+        out.append(norm)
+    return out, ANY_PATH_THRESHOLD
+
+
 def validate_task_payload(s, body: dict) -> dict:
     """Validate + normalize a full task create payload.
 
@@ -187,7 +230,11 @@ def validate_task_payload(s, body: dict) -> dict:
                 422, "Invalid config",
                 f"Item collection config kind must be one of {list(ITEM_CONFIG_KINDS)}.",
             )
-        if config is not None and kind == "groups":
+        if config is not None and kind == "any_path":
+            paths, tv = _validated_paths(s, config.get("paths"))
+            config = {"kind": "any_path", "paths": paths}
+            target = ""
+        elif config is not None and kind == "groups":
             groups, tv = _validated_groups(s, config.get("groups"))
             config = {"kind": "groups", "groups": groups}
             target = ""

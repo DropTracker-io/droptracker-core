@@ -221,6 +221,16 @@ def assert_superadmin(user: Optional[User]) -> None:
         abort_problem(403, "Forbidden", "Site staff access is required.")
 
 
+def is_moderator(user: Optional[User]) -> bool:
+    """Site moderator (or superadmin — staff implies moderator)."""
+    return is_superadmin(user) or bool(user and getattr(user, "is_moderator", False))
+
+
+def assert_moderator(user: Optional[User]) -> None:
+    if not is_moderator(user):
+        abort_problem(403, "Forbidden", "Moderator access is required.")
+
+
 def assert_group_entitlement(
     s,
     user_id: int,

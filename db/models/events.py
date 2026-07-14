@@ -172,6 +172,8 @@ class EventTeam(Base):
     score = Column(Integer, nullable=False, default=0)
     # The clan this team represents (clan_vs_clan only; NULL on standard/global).
     group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=True)
+    # Admin-assigned accent color ("#rrggbb"); NULL = frontend palette default.
+    color = Column(String(7), nullable=True)
 
 
 class EventGroup(Base):

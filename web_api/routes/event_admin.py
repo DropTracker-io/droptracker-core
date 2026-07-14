@@ -855,7 +855,9 @@ async def list_task_library():
 
         with db_session() as s:
             user = load_user(s, user_id)
-            superadmin = is_superadmin(user)
+            from web_api.deps import is_moderator
+
+            superadmin = is_moderator(user)  # staff view: all rows
             admin_gids: set[int] = set()
             if not superadmin:
                 admin_gids = _admin_group_ids(s, user_id, manage_ids)
@@ -916,9 +918,11 @@ _LIBRARY_DIFFICULTIES = ("air", "water", "earth", "fire")
 
 
 def _assert_library_admin(s, user_id: int) -> None:
-    from web_api.deps import assert_superadmin
+    # Moderators (and superadmins) manage the curated library; every
+    # create/update/delete below writes an AuditLog row with the actor.
+    from web_api.deps import assert_moderator
 
-    assert_superadmin(load_user(s, user_id))
+    assert_moderator(load_user(s, user_id))
 
 
 def _clean_library_name(body: dict, *, required: bool) -> str | None:

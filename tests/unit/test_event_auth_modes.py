@@ -122,8 +122,8 @@ def _event(**kw):
     return SimpleNamespace(**base)
 
 
-def _team(id, name="Team", group_id=None):
-    return SimpleNamespace(id=id, event_id=1, name=name, score=0, group_id=group_id)
+def _team(id, name="Team", group_id=None, color=None):
+    return SimpleNamespace(id=id, event_id=1, name=name, score=0, group_id=group_id, color=color)
 
 
 def _player(user_id=7, player_id=3):

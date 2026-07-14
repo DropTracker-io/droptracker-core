@@ -123,6 +123,17 @@ def is_retryable_database_error(error: Exception) -> bool:
     return any(marker in err_msg for marker in RETRYABLE_DB_ERROR_STRINGS)
 
 
+def rebuild_bot_client() -> None:
+    """Replace the global client with a fresh instance before a restart attempt.
+
+    interactions.Client cannot be re-started after stop(): every login() re-gathers
+    the module-level commands into interactions_by_scope, which stop() never clears,
+    so reusing the client raises "Duplicate Command! 0::nitro_user" forever.
+    """
+    global bot
+    bot = interactions.Client(token=bot_token, intents=Intents.ALL)
+
+
 async def shutdown_bot_client() -> None:
     """Attempt a clean shutdown to avoid leaked aiohttp sessions."""
     try:
@@ -479,6 +490,7 @@ async def main():
             consecutive_failures = 0
 
             while not shutdown_event.is_set():
+                started_at = time.monotonic()
                 bot_task = asyncio.create_task(bot.astart(token=bot_token))
 
                 done, pending = await asyncio.wait(
@@ -505,6 +517,9 @@ async def main():
                     except asyncio.CancelledError:
                         bot_error = None
 
+                # A long stable run means the previous failures were transient.
+                if time.monotonic() - started_at > 120:
+                    consecutive_failures = 0
                 consecutive_failures += 1
                 restart_delay = min(60, 2 ** min(consecutive_failures, 5))
                 if bot_error:
@@ -517,6 +532,7 @@ async def main():
                     break
                 print(f"Restarting bot in {restart_delay}s...")
                 await asyncio.sleep(restart_delay)
+                rebuild_bot_client()
 
             if not shutdown_wait_task.done():
                 shutdown_wait_task.cancel()

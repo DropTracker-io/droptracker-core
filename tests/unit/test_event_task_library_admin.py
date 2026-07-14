@@ -1,10 +1,12 @@
-"""Task-library management routes (superadmin CP).
+"""Task-library management routes (staff CP).
 
 POST/PATCH/DELETE /api/v1/event-task-library[/{id}] — the write side of the
 library is site-staff only (curated + globally-public presets shape every
-clan's pickers). Same scripted-session harness as the other event route
-tests; ``validate_task_payload`` is stubbed (its own contract is covered by
-the task-validation tests).
+clan's pickers); moderators and superadmins both qualify. The real
+``assert_moderator`` runs against a fake user carrying the staff flags.
+Same scripted-session harness as the other event route tests;
+``validate_task_payload`` is stubbed (its own contract is covered by the
+task-validation tests).
 """
 
 from __future__ import annotations
@@ -14,11 +16,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import web_api.deps as deps
 import web_api.routes.event_admin as evadm
 import web_api.routes.event_task_validation as etv
 import web_api.routes.events as evr
-from web_api.common import ProblemException
 
 from tests.unit.test_event_auth_modes import _S, _SessionCM
 
@@ -57,10 +57,16 @@ class FakeRow:
         self.__dict__.update(base)
 
 
-def _wire(monkeypatch, session, *, superadmin=True, user_id=7):
+def _wire(monkeypatch, session, *, moderator=True, superadmin=False, user_id=7):
     monkeypatch.setattr(evadm, "current_user_id", lambda: user_id)
     monkeypatch.setattr(evadm, "db_session", lambda: _SessionCM(session))
-    monkeypatch.setattr(evadm, "load_user", lambda s, uid: SimpleNamespace(id=uid))
+    # The real deps.assert_moderator runs against this fake user, so the
+    # flags decide the auth outcome (superadmin implies moderator in deps).
+    monkeypatch.setattr(
+        evadm, "load_user",
+        lambda s, uid: SimpleNamespace(
+            id=uid, is_moderator=moderator, is_superadmin=superadmin),
+    )
     monkeypatch.setattr(evadm, "EventTaskLibraryItem", FakeRow)
     monkeypatch.setattr(evadm, "EVENT_TASK_TYPES", _TASK_TYPES)
     # clean_task_visibility lives in the events module and reads this there.
@@ -71,19 +77,12 @@ def _wire(monkeypatch, session, *, superadmin=True, user_id=7):
                          "target_value": body.get("target_value"),
                          "config": None},
     )
-    if superadmin:
-        monkeypatch.setattr(deps, "assert_superadmin", lambda user: None)
-    else:
-        def _deny(user):
-            raise ProblemException(403, "Forbidden", "Site staff access is required.")
-
-        monkeypatch.setattr(deps, "assert_superadmin", _deny)
 
 
 class TestLibraryAdminAuth:
-    async def test_create_requires_superadmin(self, client, monkeypatch):
+    async def test_create_denied_for_non_moderator(self, client, monkeypatch):
         s = _S()
-        _wire(monkeypatch, s, superadmin=False)
+        _wire(monkeypatch, s, moderator=False)
         r = await client.post(
             "/api/v1/event-task-library",
             json={"name": "X", "type": "kc_target", "target": "Zulrah", "target_value": 5},
@@ -91,17 +90,27 @@ class TestLibraryAdminAuth:
         assert r.status_code == 403
         assert not s.committed
 
-    async def test_patch_requires_superadmin(self, client, monkeypatch):
+    async def test_patch_denied_for_non_moderator(self, client, monkeypatch):
         s = _S()
-        _wire(monkeypatch, s, superadmin=False)
+        _wire(monkeypatch, s, moderator=False)
         r = await client.patch("/api/v1/event-task-library/11", json={"name": "Y"})
         assert r.status_code == 403
 
-    async def test_delete_requires_superadmin(self, client, monkeypatch):
+    async def test_delete_denied_for_non_moderator(self, client, monkeypatch):
         s = _S()
-        _wire(monkeypatch, s, superadmin=False)
+        _wire(monkeypatch, s, moderator=False)
         r = await client.delete("/api/v1/event-task-library/11")
         assert r.status_code == 403
+
+    async def test_superadmin_flag_alone_suffices(self, client, monkeypatch):
+        # Staff implies moderator: is_superadmin without is_moderator passes.
+        s = _S([])
+        _wire(monkeypatch, s, moderator=False, superadmin=True)
+        r = await client.post(
+            "/api/v1/event-task-library",
+            json={"name": "X", "type": "kc_target", "target": "Zulrah", "target_value": 5},
+        )
+        assert r.status_code == 200
 
 
 class TestLibraryCreate:

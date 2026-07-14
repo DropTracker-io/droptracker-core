@@ -67,13 +67,39 @@ def _round_half_up_div(value: int, divisor: int) -> int:
     return (value + (divisor // 2)) // divisor
 
 
-def _ceil_div(value: int, divisor: int) -> int:
-    """Integer ceil division for split awards."""
-    if divisor <= 0:
-        return 0
-    if value <= 0:
-        return 0
-    return (value + divisor - 1) // divisor
+def _compute_split_shares(point_award, target_count, split_method):
+    """Divide a point award between the receiver and ``target_count`` other
+    in-group participants.
+
+    Returns ``(per_target_share, receiver_share)``.
+
+    - ``equal_split`` / ``equal``: floor-divide the award across every
+      participant (receiver + targets). Each target gets the floor share and the
+      receiver additionally keeps the indivisible remainder, so the distributed
+      total (``per_target_share * target_count + receiver_share``) always equals
+      the original award and never exceeds it.
+    - ``award_all``: every participant, receiver included, receives the full award.
+    - any other/disabled method: targets get nothing; the receiver keeps the
+      full award.
+
+    A non-positive award or ``target_count`` yields no split (targets get 0, the
+    receiver keeps the whole award).
+    """
+    total_award = int(point_award) if point_award and int(point_award) > 0 else 0
+    try:
+        targets = int(target_count)
+    except Exception:
+        targets = 0
+    if targets <= 0:
+        return 0, total_award
+    if split_method in ("equal_split", "equal"):
+        total_participants = targets + 1
+        per_person = _floor_div(total_award, total_participants)
+        remainder = total_award - per_person * total_participants
+        return per_person, per_person + remainder
+    if split_method == "award_all":
+        return total_award, total_award
+    return 0, total_award
 
 
 def _normalize_unix_seconds(value):
@@ -628,21 +654,21 @@ async def _check_and_award_points(
             )
             target_count = len(valid_share_targets)
             if target_count > 0:
-                # For equal_split, include the receiver in the total participant
-                # count so the full award is divided among everyone equally.
-                if split_method in ("equal_split", "equal"):
-                    total_participants = target_count + 1
-                    per_person = _ceil_div(int(point_award), int(total_participants))
-                else:
-                    per_person = None
+                # Divide the award among the receiver and the in-group targets.
+                # equal_split uses FLOOR division so the total distributed never
+                # exceeds the item's point value; the indivisible remainder goes
+                # to the receiving player. award_all gives everyone the full award.
+                per_target_share, receiver_share = _compute_split_shares(
+                    point_award, target_count, split_method
+                )
+                point_log(
+                    f"split_shares method={split_method} target_count={target_count} "
+                    f"point_award={point_award} per_target_share={per_target_share} "
+                    f"receiver_share={receiver_share}"
+                )
 
                 for target_player_id, target_player_name in valid_share_targets:
-                    if split_method in ("equal_split", "equal"):
-                        points_to_award = per_person
-                    elif split_method == "award_all":
-                        points_to_award = point_award
-                    else:
-                        points_to_award = 0
+                    points_to_award = per_target_share
                     if points_to_award > 0:
                         points_to_award = await modify_for_event(
                             reason,
@@ -679,13 +705,9 @@ async def _check_and_award_points(
                         )
                         _record_award(target_player_id, target_player_name, shared_awarded)
 
-                # Reduce the receiver's award to their equal share
-                if per_person is not None:
-                    point_award = per_person
-                    point_log(
-                        f"equal_split total_participants={total_participants} "
-                        f"per_person={per_person}"
-                    )
+                # Reduce the receiver's award to their share (equal_split: floor
+                # share + indivisible remainder; award_all: unchanged).
+                point_award = receiver_share
         else:
             point_log("point_sharing disabled; split awards skipped")
     point_award = await modify_for_event(

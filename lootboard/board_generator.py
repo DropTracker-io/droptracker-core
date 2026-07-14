@@ -5,8 +5,27 @@ from lootboard import generator
 from db.models import Group, Session, XenforoSession
 import asyncio
 import os
+import time
 
 last_board_updates = {}
+
+# Non-premium boards refresh at most once per this many minutes. The state
+# lives in the mtime of the generated lootboard.png — this module runs in a
+# fresh subprocess every cycle, so in-memory dicts reset between runs.
+NON_PREMIUM_REFRESH_MINUTES = 59
+# Cap non-premium regenerations per run so the hourly refresh is spread
+# across 2-minute cycles instead of one long run that risks the supervisor
+# timeout (30 runs/hour x 25 covers far more than the ~220 tracked groups).
+NON_PREMIUM_PER_RUN = 25
+
+
+def board_age_seconds(group_id: int) -> float:
+    """Seconds since this group's current board was last generated."""
+    path = f"/store/droptracker/disc/static/assets/img/clans/{group_id}/lb/lootboard.png"
+    try:
+        return time.time() - os.path.getmtime(path)
+    except OSError:
+        return float("inf")
 
 async def lootboard_update_loop():
     print("Starting lootboard update loop")
@@ -119,28 +138,36 @@ async def update_boards():
                 temp_group.group_id = g.group_id
                 groups.append(temp_group)
                 
-        # Process each group independently with its own session
-        print(f"Found {len(groups)} groups to process") 
-        for group in groups:
-            is_premium = False
-            ## Determine if the group has premium status with a separate short-lived session
-            if group.group_id == 2:
-                is_premium = True
-            else:
-                with get_fresh_xenforo_session() as xenforo_session:
-                    premium_status = xenforo_session.execute(
-                                text("SELECT * FROM xf_user_upgrade_active WHERE group_id = :group_id"), 
-                                {"group_id": group.group_id}
-                            ).first()
-                    if not premium_status:
-                        if group.group_id not in last_board_updates:
-                            last_board_updates[group.group_id] = datetime.now() - timedelta(days=7)
-                        if last_board_updates[group.group_id] > datetime.now() - timedelta(minutes=59):
-                            # Non-premium groups only get a 60-minute board refresh
-                            continue
-                    else:
-                        is_premium = True
-            
+        # Premium = live paid subscription pool (group_subscriptions is the
+        # canonical source post-XenForo-cutover). Group 2 is the global board.
+        premium_ids = {2}
+        try:
+            from db.entitlements import effective_group_tiers
+            with Session() as ent_session:
+                premium_ids |= {
+                    int(gid) for gid in
+                    effective_group_tiers(ent_session, [g.group_id for g in groups])
+                }
+        except Exception as e:
+            print(f"Error resolving premium tiers (non-premium cadence for all): {e}")
+
+        # Premium groups regenerate every run; non-premium at most hourly,
+        # most-stale first and capped per run so a killed/slow run can never
+        # starve the same groups twice.
+        premium_groups = [g for g in groups if g.group_id in premium_ids]
+        stale = [
+            (g, board_age_seconds(g.group_id))
+            for g in groups if g.group_id not in premium_ids
+        ]
+        stale = [(g, age) for g, age in stale if age >= NON_PREMIUM_REFRESH_MINUTES * 60]
+        stale.sort(key=lambda pair: pair[1], reverse=True)
+        deferred = max(0, len(stale) - NON_PREMIUM_PER_RUN)
+        todo = premium_groups + [g for g, _ in stale[:NON_PREMIUM_PER_RUN]]
+        print(
+            f"Found {len(groups)} groups: {len(premium_groups)} premium, "
+            f"{len(stale)} stale non-premium (processing {len(todo)}, deferring {deferred})"
+        )
+        for group in todo:
             try:
                 if not os.path.exists(f"/store/droptracker/disc/static/assets/img/clans/{group.group_id}/lb"):
                     os.makedirs(f"/store/droptracker/disc/static/assets/img/clans/{group.group_id}/lb")

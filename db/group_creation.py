@@ -329,6 +329,14 @@ async def create_web_group(
         session.rollback()
         print(f"[create_web_group] Failed to link guild to group: {exc}")
 
+    # Site-wide ticker (rt:feed): announce the new group. Best-effort.
+    try:
+        from services.realtime import publish_feed_group_created
+
+        publish_feed_group_created(group.group_id, group_name)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[create_web_group] Ticker publish failed: {exc}")
+
     # --- Mirror into the XenForo database (best effort, matches bot) ---
     try:
         await insert_xf_group(group)

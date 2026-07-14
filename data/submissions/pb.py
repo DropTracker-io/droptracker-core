@@ -212,6 +212,29 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
         except Exception:
             pass
 
+    # Site-wide ticker (rt:feed): announce a stored new PB when it lands in
+    # the top 25 of its (boss, team-size) board. Best-effort — the rank query
+    # only runs on actual PB improvements, never the drop hot path.
+    if pb_row_changed and is_personal_best and not is_seasonal:
+        try:
+            from utils.pb_rank import pb_board_rank
+            from services.realtime import publish_feed_personal_best
+
+            ranked = pb_board_rank(session, npc_id, team_size, player_id)
+            if ranked is not None and ranked[0] <= 25:
+                publish_feed_personal_best(
+                    player_id=player_id,
+                    player_name=player.player_name or player_name,
+                    npc_id=npc_id,
+                    npc_name=npc_name,
+                    time_ms=time_ms,
+                    time_display=convert_from_ms(time_ms),
+                    team_size=team_size,
+                    rank=ranked[0],
+                )
+        except Exception as e:
+            debug_print(f"Ticker PB publish failed: {e}")
+
     # Event engine hook (Task 17): gated, fire-and-forget LPUSH. EVERY kill
     # time (not just new PBs) is pushed so pb_target tasks match any
     # qualifying kill — but only a time this kill actually demonstrated: the

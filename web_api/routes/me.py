@@ -191,6 +191,7 @@ async def get_me():
                 "user_id": user.user_id,
                 "discord_id": str(user.discord_id or ""),
                 "is_superadmin": bool(getattr(user, "is_superadmin", False)),
+                "is_moderator": bool(getattr(user, "is_moderator", False)),
                 "is_supporter": is_supporter,
                 "players": players,
                 "groups": groups,

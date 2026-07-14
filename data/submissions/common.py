@@ -463,6 +463,26 @@ def check_group_point_system_active(group_id, external_session=None):
     return group_has_entitlement(group_id, "custom_points")
     
 
+def _announce_new_player(session, player) -> None:
+    """Site-wide ticker (rt:feed): sampled "new player started tracking" entry.
+
+    New players arrive constantly, so the realtime gate (Redis SET NX EX)
+    limits this to at most one ticker entry per cooldown window — the COUNT
+    query only runs after winning that slot. Best-effort; never raises.
+    """
+    try:
+        from sqlalchemy import func
+
+        from services.realtime import feed_new_player_gate, publish_feed_new_player
+
+        if not feed_new_player_gate():
+            return
+        total = session.query(func.count(Player.player_id)).scalar()
+        publish_feed_new_player(player.player_id, player.player_name, total)
+    except Exception as e:
+        debug_print(f"Ticker new-player publish failed: {e}")
+
+
 async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
     """Ensure player exists, cache id, then auth. Returns (player, authed, user_exists)."""
 
@@ -539,14 +559,18 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
                 total_level=total_level,
                 log_slots=wom_log_slots if wom_log_slots is not None else 0,
             )
+            created = False
             try:
                 session.add(player)
                 session.commit()
+                created = True
             except Exception:
                 session.rollback()
                 player = session.query(Player).filter(Player.wom_id == expected_wom_id).first()
                 if player is None:
                     return None, False, False
+            if created:
+                _announce_new_player(session, player)
         else:
             player, changed = _apply_authoritative_wom_identity(
                 session,
@@ -1122,6 +1146,7 @@ async def create_player(player_name, account_hash, existing_session=None):
                 app_name="core",
                 description="create_player",
             )
+            _announce_new_player(db_session, new_player)
             notification_data = {
                 "player_name": canonical_name,
                 "wom_id": expected_wom_id,

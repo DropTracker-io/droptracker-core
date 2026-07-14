@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 from datetime import datetime
 
 from quart import Blueprint, jsonify, request
@@ -66,6 +67,7 @@ from db import (
     user_group_association,
 )
 from web_api.common import abort_problem, db_session, private_no_store, with_cache_headers
+from web_api.task_tiles import build_tile, spec_names, tile_spec
 from web_api.deps import (
     assert_group_admin,
     assert_group_entitlement,
@@ -215,6 +217,46 @@ def _is_event_admin(s, viewer_id, ev: Event) -> bool:
     return role in ("owner", "admin")
 
 
+def _attach_task_tiles(s, tasks: list[dict]) -> None:
+    """Attach a ``tile`` block (badge + value + resolved icon refs) to each
+    serialized task dict. Names across all tasks resolve in two bulk queries
+    (items, npcs); unknown names keep ``id: None``. See web_api/task_tiles.py."""
+    from db import ItemList, NpcList
+
+    specs = [tile_spec(t) for t in tasks]
+    item_names: set[str] = set()
+    npc_names: set[str] = set()
+    for spec in specs:
+        items, npcs = spec_names(spec)
+        item_names |= items
+        npc_names |= npcs
+
+    item_ids: dict[str, int] = {}
+    if item_names:
+        # Stack/noted variants share a name — one id per name (min, like the
+        # designer's autocomplete). MySQL's ci collation makes IN() match the
+        # normalized lowercase keys.
+        for item_id, name in (
+            s.query(func.min(ItemList.item_id), ItemList.item_name)
+            .filter(ItemList.item_name.in_(item_names), ItemList.noted.is_(False))
+            .group_by(ItemList.item_name)
+            .all()
+        ):
+            item_ids[" ".join(name.strip().lower().split())] = item_id
+    npc_ids: dict[str, int] = {}
+    if npc_names:
+        for npc_id, name in (
+            s.query(func.min(NpcList.npc_id), NpcList.npc_name)
+            .filter(NpcList.npc_name.in_(npc_names))
+            .group_by(NpcList.npc_name)
+            .all()
+        ):
+            npc_ids[" ".join(name.strip().lower().split())] = npc_id
+
+    for task, spec in zip(tasks, specs):
+        task["tile"] = build_tile(spec, item_ids, npc_ids)
+
+
 def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
     base = _summary(ev)
 
@@ -234,6 +276,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
         }
         for t in s.query(EventTask).filter(EventTask.event_id == ev.id).all()
     ]
+    _attach_task_tiles(s, tasks)
 
     teams_rows = s.query(EventTeam).filter(EventTeam.event_id == ev.id).all()
     team_names = {tm.id: tm.name for tm in teams_rows}
@@ -262,6 +305,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             "name": tm.name,
             "score": int(tm.score or 0),
             "group_id": getattr(tm, "group_id", None),  # clan bound (clan_vs_clan)
+            "color": getattr(tm, "color", None),  # admin accent; null = palette default
             "member_count": len(members),
             "members": members,
         })
@@ -568,6 +612,7 @@ async def get_event_team(event_id: int, team_id: int):
                     "completed": bool(p.completed) if p else False,
                     "completed_at": _ts(p.completed_at) if p else None,
                 })
+            _attach_task_tiles(s, tasks)
 
             task_labels = {t.id: t.label for t in task_rows}
             player_names = {m.player_id: name for (m, name) in member_rows}
@@ -603,6 +648,7 @@ async def get_event_team(event_id: int, team_id: int):
                     "name": team.name,
                     "score": int(team.score or 0),
                     "group_id": getattr(team, "group_id", None),
+                    "color": getattr(team, "color", None),
                     "rank": rank,
                     "team_count": len(all_teams),
                     "member_count": len(members),
@@ -1321,14 +1367,25 @@ async def add_team(event_id: int):
 
 @events_bp.patch("/events/<int:event_id>/teams/<int:team_id>")
 async def update_team(event_id: int, team_id: int):
-    """Rename a team (fix a typo). Admin-only; audit-logged. The clan a
-    clan_vs_clan team represents is fixed at create time — only the display
-    name is editable. Allowed in any lifecycle state (renaming is cosmetic)."""
+    """Edit a team's cosmetics: rename (fix a typo) and/or set its accent
+    color. Admin-only; audit-logged. The clan a clan_vs_clan team represents
+    is fixed at create time. Allowed in any lifecycle state (cosmetic only).
+
+    ``color`` is "#rrggbb", or null/"" to clear back to the palette default;
+    ``name`` may be omitted to change the color alone."""
     user_id = current_user_id()
     body = await json_body()
-    name = (body.get("name") or "").strip()
-    if not (1 <= len(name) <= 80):
+    name = (body.get("name") or "").strip() if "name" in body else None
+    if name is not None and not (1 <= len(name) <= 80):
         abort_problem(422, "Invalid name", "Team name must be 1–80 characters.")
+    has_color = "color" in body
+    color = body.get("color")
+    if has_color and color is not None:
+        color = str(color).strip().lower() or None
+        if color is not None and not re.fullmatch(r"#[0-9a-f]{6}", color):
+            abort_problem(422, "Invalid color", 'Team color must be "#rrggbb" hex (or null to reset).')
+    if name is None and not has_color:
+        abort_problem(422, "Nothing to update", "Provide a name and/or a color.")
 
     def _apply():
         with db_session() as s:
@@ -1341,18 +1398,22 @@ async def update_team(event_id: int, team_id: int):
             )
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
-            before = team.name
-            if before == name:
+            before = {"name": team.name, "color": team.color}
+            if name is not None:
+                team.name = name
+            if has_color:
+                team.color = color
+            after = {"name": team.name, "color": team.color}
+            if before == after:
                 return  # no-op
-            team.name = name
             s.add(
                 AuditLog(
                     actor_user_id=user_id,
                     group_id=ev.group_id,
                     action="event.team.update",
                     target=f"web_events.{event_id}.team.{team_id}",
-                    before=before,
-                    after=name,
+                    before=json.dumps(before),
+                    after=json.dumps(after),
                 )
             )
             s.commit()

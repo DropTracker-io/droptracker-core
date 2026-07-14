@@ -197,13 +197,19 @@ def _config_item_entries(config: dict) -> dict:
             name = _norm(it.get("item_name") or it.get("name"))
             if name:
                 entries.setdefault(name, it)
-    for group in (config.get("groups") or []):
-        if isinstance(group, dict):
-            for it in (group.get("items") or []):
-                name = _norm(it if isinstance(it, str)
-                             else (it or {}).get("item_name") or (it or {}).get("name"))
-                if name:
-                    entries.setdefault(name, None)
+    def _add_group_items(groups) -> None:
+        for group in (groups or []):
+            if isinstance(group, dict):
+                for it in (group.get("items") or []):
+                    name = _norm(it if isinstance(it, str)
+                                 else (it or {}).get("item_name") or (it or {}).get("name"))
+                    if name:
+                        entries.setdefault(name, None)
+
+    _add_group_items(config.get("groups"))
+    for path in (config.get("paths") or []):
+        if isinstance(path, dict):
+            _add_group_items(path.get("groups"))
     return entries
 
 
@@ -247,7 +253,7 @@ def completion_threshold(task: dict) -> int:
 
 
 def _list_kind(task: dict) -> Optional[str]:
-    """Item-list config kind (any_of/all_of/point_collection/assembly/groups), if any."""
+    """Item-list config kind (any_of/all_of/point_collection/assembly/groups/any_path), if any."""
     config = task.get("config") or {}
     return config.get("kind") if isinstance(config, dict) else None
 
@@ -313,8 +319,9 @@ def _grouped_item_progress(session, task: dict, team_id, include=None) -> int:
                                        completion_threshold(task))
 
 
-def _grouped_progress_from_rows(rows, config: dict, threshold: int) -> int:
-    """Pure core of :func:`_grouped_item_progress` (unit-testable)."""
+def _parse_requirement_groups(config: dict) -> list[tuple[str, set, int]]:
+    """``groups`` config → normalized ``(mode, item-name set, need)`` tuples
+    (shared by the grouped and any_path rollups)."""
     groups: list[tuple[str, set, int]] = []
     for group in (config.get("groups") or []):
         if not isinstance(group, dict):
@@ -333,6 +340,12 @@ def _grouped_progress_from_rows(rows, config: dict, threshold: int) -> int:
         except (TypeError, ValueError):
             need = 1
         groups.append((mode, names, need))
+    return groups
+
+
+def _grouped_progress_from_rows(rows, config: dict, threshold: int) -> int:
+    """Pure core of :func:`_grouped_item_progress` (unit-testable)."""
+    groups = _parse_requirement_groups(config)
 
     distinct: list[set] = [set() for _ in groups]
     folded = [0] * len(groups)
@@ -358,6 +371,47 @@ def _grouped_progress_from_rows(rows, config: dict, threshold: int) -> int:
         got = len(distinct[gi]) if mode == "all_of" else folded[gi]
         progress += min(got, need)
     return min(progress, threshold)
+
+
+def _anypath_item_progress(session, task: dict, team_id, include=None) -> int:
+    """``kind: "any_path"`` rollup — each path is its own groups-style
+    requirement set and the task completes when ANY path is fully satisfied
+    ("dryness protection": the full Justiciar set OR any 5 Justiciar items).
+    A drop advances every path that lists it, so paths race independently.
+    """
+    from db.models import EventCompletion
+
+    rows = list(
+        session.query(EventCompletion)
+        .filter(EventCompletion.task_id == task["id"],
+                EventCompletion.team_id == team_id,
+                EventCompletion.status.in_(("auto", "confirmed", "manual")))
+        .all()
+    )
+    if include is not None and all(r.id != include.id for r in rows):
+        rows.append(include)
+    return _anypath_progress_from_rows(rows, task.get("config") or {},
+                                       completion_threshold(task))
+
+
+def _anypath_progress_from_rows(rows, config: dict, threshold: int) -> int:
+    """Pure core of :func:`_anypath_item_progress` (unit-testable).
+
+    Paths differ in size, so the single rollup integer is the *percentage* of
+    the closest-to-done path scaled to the threshold (validation pins
+    target_value to 100). Floor rounding means the threshold is hit exactly
+    when some path's own need is fully met, never one drop early.
+    """
+    best = 0
+    for path in (config.get("paths") or []):
+        if not isinstance(path, dict):
+            continue
+        need = sum(n for _mode, _names, n in _parse_requirement_groups(path))
+        if need <= 0:
+            continue
+        got = _grouped_progress_from_rows(rows, path, need)
+        best = max(best, (got * threshold) // need)
+    return min(best, threshold)
 
 
 def match_task(task: dict, envelope: dict) -> Optional[dict]:
@@ -972,6 +1026,8 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         progress.progress = _distinct_item_progress(session, task, team_id, include=completion)
     elif _list_kind(task) == "groups":
         progress.progress = _grouped_item_progress(session, task, team_id, include=completion)
+    elif _list_kind(task) == "any_path":
+        progress.progress = _anypath_item_progress(session, task, team_id, include=completion)
     else:
         progress.progress = int(progress.progress or 0) + quantity
 
@@ -1290,6 +1346,8 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
         new_progress = _distinct_item_progress(session, task, team_id)
     elif _list_kind(task) == "groups":
         new_progress = _grouped_item_progress(session, task, team_id)
+    elif _list_kind(task) == "any_path":
+        new_progress = _anypath_item_progress(session, task, team_id)
     else:
         survivors = (session.query(EventCompletion)
                      .filter(EventCompletion.task_id == task["id"],

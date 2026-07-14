@@ -31,7 +31,11 @@ async def _is_hidden_event(frame: str) -> bool:
         envelope = json.loads(frame)
         # Only these carry a player id in `data` ("id"/"player_id" mean other
         # entities on announcement/event_update frames).
-        if envelope.get("type") not in ("drop", "leaderboard_delta"):
+        if envelope.get("type") not in (
+            "drop", "leaderboard_delta",
+            # Feed-ticker types that name a player (services/realtime.py).
+            "personal_best", "pet", "new_player", "subscription",
+        ):
             return False
         data = envelope.get("data") or {}
         pid = data.get("player_id", data.get("id"))
@@ -105,10 +109,19 @@ async def feed_recent():
     events = []
     for item in raw:
         try:
-            data = json.loads(item)
-            if data.get("player_id") in hidden:
+            parsed = json.loads(item)
+            if not isinstance(parsed, dict):
                 continue
-            events.append({"v": 1, "type": "drop", "scope": "feed", "data": data})
+            # New entries are stored as full typed envelopes
+            # (services/realtime.py::publish_feed_event); entries written
+            # before the multi-type ticker are bare drop data dicts.
+            if parsed.get("v") == 1 and "type" in parsed and isinstance(parsed.get("data"), dict):
+                envelope = parsed
+            else:
+                envelope = {"v": 1, "type": "drop", "scope": "feed", "data": parsed}
+            if envelope["data"].get("player_id") in hidden:
+                continue
+            events.append(envelope)
         except Exception:
             continue
     return jsonify(events)

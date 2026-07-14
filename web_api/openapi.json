@@ -3,7 +3,7 @@
   "info": {
     "title": "DropTracker Web API",
     "version": "1.0.0",
-    "description": "Versioned, browser-oriented JSON API consumed by the Next.js BFF. Separate from the RuneLite intake API. See FRONTEND_PLAN.md \u00a76."
+    "description": "Versioned, browser-oriented JSON API consumed by the Next.js BFF. Separate from the RuneLite intake API. See FRONTEND_PLAN.md §6."
   },
   "servers": [
     {
@@ -810,7 +810,7 @@
               "api_only"
             ],
             "default": "all",
-            "description": "Which submissions the completion engine accepts: 'all' \u2014 everything counts; 'confirm_non_api' \u2014 non-plugin submissions land as pending completions needing admin confirmation; 'api_only' \u2014 submissions without the plugin API flag are ignored."
+            "description": "Which submissions the completion engine accepts: 'all' — everything counts; 'confirm_non_api' — non-plugin submissions land as pending completions needing admin confirmation; 'api_only' — submissions without the plugin API flag are ignored."
           },
           "board_size": {
             "type": "integer",
@@ -893,6 +893,9 @@
             "type": "string",
             "nullable": true,
             "description": "JSON string: any_of/assembly/point_collection item lists etc."
+          },
+          "tile": {
+            "$ref": "#/components/schemas/TaskTile"
           }
         }
       },
@@ -935,6 +938,11 @@
           "score": {
             "type": "integer",
             "default": 0
+          },
+          "color": {
+            "type": "string",
+            "nullable": true,
+            "description": "Admin-assigned accent color (\"#rrggbb\"); null = frontend palette default."
           },
           "member_count": {
             "type": "integer",
@@ -1042,7 +1050,7 @@
         "properties": {
           "size": {
             "type": "integer",
-            "description": "Board is size \u00d7 size."
+            "description": "Board is size × size."
           },
           "cells": {
             "type": "array",
@@ -2585,6 +2593,64 @@
                 }
               }
             }
+          }
+        }
+      },
+      "TaskTileIcon": {
+        "type": "object",
+        "required": [
+          "type",
+          "name"
+        ],
+        "description": "One icon of a task tile. `id` maps to /img/{itemdb|npcdb}/{id}.png; skill icons are keyed by name (/img/metrics/{name}.png) and carry id: null.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "item",
+              "npc",
+              "skill"
+            ]
+          },
+          "id": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Game id for item/npc icons; null when unresolved or for skills."
+          },
+          "name": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "integer",
+            "description": "Required count shown as a chip on the icon (present when > 1)."
+          }
+        }
+      },
+      "TaskTile": {
+        "type": "object",
+        "required": [
+          "icons"
+        ],
+        "description": "Display metadata for a task's board tile: resolved icon refs plus a legacy-style badge (\"KC TARGET\", \"FULL SET\", ...) and short value string (\"100.00M GP\"). The frontend composes tile art from these.",
+        "properties": {
+          "badge": {
+            "type": "string",
+            "nullable": true
+          },
+          "value": {
+            "type": "string",
+            "nullable": true
+          },
+          "icons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskTileIcon"
+            }
+          },
+          "icon_overflow": {
+            "type": "integer",
+            "default": 0,
+            "description": "Icons dropped past the server-side cap; render as a +N chip."
           }
         }
       }

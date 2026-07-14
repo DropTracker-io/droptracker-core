@@ -66,7 +66,137 @@ def publish_event_update(event_id: int, data: dict) -> None:
 IMG_BASE = "https://www.droptracker.io/img"
 
 FEED_HISTORY_KEY = "feed:recent"
-FEED_HISTORY_MAX = 30
+FEED_HISTORY_MAX = 40
+
+# Site-wide ticker gates. Drops must be a single high-value item (one Twisted
+# bow, not 40k cannonballs) so the banner stays a highlight reel, not a log.
+FEED_MIN_DROP_VALUE = 10_000_000
+# "New player started tracking" fires constantly at intake volume — sample it
+# down to at most one ticker entry per cooldown window.
+FEED_NEW_PLAYER_COOLDOWN_SECONDS = 3600
+_FEED_NEW_PLAYER_COOLDOWN_KEY = "feed:new_player:cooldown"
+
+
+def publish_feed_event(event_type: str, data: dict) -> None:
+    """Publish one event to the site-wide ticker (``rt:feed``) and persist the
+    full envelope to the capped ``feed:recent`` history list so the ticker can
+    hydrate typed entries on page load. Best-effort; never raises.
+
+    ``data`` must be display-ready (names/urls resolved by the caller) — this
+    module never touches the database.
+    """
+    conn = _rc()
+    if conn is None:
+        return
+    try:
+        data.setdefault("ts", int(time.time()))
+        envelope = {
+            "v": 1,
+            "type": event_type,
+            "scope": "feed",
+            "ts": int(data["ts"]),
+            "data": data,
+        }
+        payload = json.dumps(envelope)
+        conn.publish(f"{CHANNEL_PREFIX}feed", payload)
+        conn.lpush(FEED_HISTORY_KEY, payload)
+        conn.ltrim(FEED_HISTORY_KEY, 0, FEED_HISTORY_MAX - 1)
+    except Exception:
+        pass
+
+
+def publish_feed_personal_best(player_id: int, player_name: str, npc_id: int,
+                               npc_name: str, time_ms: int, time_display: str,
+                               team_size: str, rank: int) -> None:
+    """Ticker entry for a new personal best that lands in the top of its
+    (boss, team-size) leaderboard. Caller has already applied the rank gate."""
+    publish_feed_event("personal_best", {
+        "player_id": int(player_id),
+        "player_name": player_name,
+        "npc_id": int(npc_id),
+        "npc_name": npc_name,
+        "npc_icon_url": f"{IMG_BASE}/npcdb/{int(npc_id)}.png",
+        "time_ms": int(time_ms),
+        "time_display": time_display,
+        "team_size": team_size,
+        "rank": int(rank),
+    })
+
+
+def publish_feed_pet(player_id: int, player_name: str, pet_name: str,
+                     item_id: Optional[int] = None,
+                     npc_name: Optional[str] = None) -> None:
+    """Ticker entry for a newly obtained pet."""
+    data = {
+        "player_id": int(player_id),
+        "player_name": player_name,
+        "pet_name": pet_name,
+    }
+    if item_id:
+        data["item_id"] = int(item_id)
+        data["icon_url"] = f"{IMG_BASE}/itemdb/{int(item_id)}.png"
+    if npc_name:
+        data["npc_name"] = npc_name
+    publish_feed_event("pet", data)
+
+
+def publish_feed_group_created(group_id: int, group_name: str) -> None:
+    """Ticker entry for a newly registered group (web wizard or /create-group)."""
+    publish_feed_event("group_created", {
+        "group_id": int(group_id),
+        "group_name": group_name,
+    })
+
+
+def feed_new_player_gate() -> bool:
+    """True when a "new player" ticker entry may fire (claims the cooldown).
+
+    Uses SET NX EX so concurrent intake processes race safely; callers only
+    run their COUNT query after winning the slot.
+    """
+    conn = _rc()
+    if conn is None:
+        return False
+    try:
+        return bool(conn.set(
+            _FEED_NEW_PLAYER_COOLDOWN_KEY, "1",
+            nx=True, ex=FEED_NEW_PLAYER_COOLDOWN_SECONDS,
+        ))
+    except Exception:
+        return False
+
+
+def publish_feed_new_player(player_id: int, player_name: str,
+                            player_number: Optional[int] = None) -> None:
+    """Ticker entry for a newly tracked player (sampled via the gate above)."""
+    data = {
+        "player_id": int(player_id),
+        "player_name": player_name,
+    }
+    if player_number:
+        data["player_number"] = int(player_number)
+    publish_feed_event("new_player", data)
+
+
+def publish_feed_subscription(kind: str, name: str,
+                              group_id: Optional[int] = None,
+                              player_id: Optional[int] = None,
+                              tier_key: Optional[str] = None) -> None:
+    """Ticker entry for a NEW premium subscription (first settled payment only
+    — the caller already filters renewals). ``kind`` ∈ group|user. No amounts:
+    the public ticker celebrates the support, not the invoice.
+    """
+    data = {
+        "kind": "group" if kind == "group" else "user",
+        "name": name,
+    }
+    if group_id:
+        data["group_id"] = int(group_id)
+    if player_id:
+        data["player_id"] = int(player_id)
+    if tier_key:
+        data["tier_key"] = tier_key
+    publish_feed_event("subscription", data)
 
 
 def publish_drop(player, drop, total_value: int, partition: int,
@@ -122,12 +252,13 @@ def publish_drop(player, drop, total_value: int, partition: int,
 
         publish_to_scopes("leaderboard_delta", scopes, data)
 
-        # Site-wide live drop feed (header ticker). Only fires for drops with a
-        # value worth surfacing, to keep the ticker meaningful under load.
-        if total_value >= 1_000_000:
+        # Site-wide live drop feed (header ticker). Single high-value items
+        # only (>= 10M and quantity 1) so the ticker stays a highlight reel —
+        # lower-value and stacked drops still get their leaderboard_delta above.
+        quantity = getattr(drop, "quantity", 1) or 1
+        if total_value >= FEED_MIN_DROP_VALUE and int(quantity) == 1:
             item_id = getattr(drop, "item_id", None)
             feed_data = {
-                "ts": int(time.time()),
                 "player_id": player_id,
                 "player_name": getattr(player, "player_name", None),
                 "item_id": item_id,
@@ -141,14 +272,7 @@ def publish_drop(player, drop, total_value: int, partition: int,
                 feed_data["icon_url"] = f"{IMG_BASE}/itemdb/{item_id}.png"
             if npc_id:
                 feed_data["npc_icon_url"] = f"{IMG_BASE}/npcdb/{npc_id}.png"
-            publish_event("drop", "feed", feed_data)
-
-            # Persist to a capped history list so the ticker can hydrate with
-            # past drops on page load instead of starting empty.
-            try:
-                conn.lpush(FEED_HISTORY_KEY, json.dumps(feed_data))
-                conn.ltrim(FEED_HISTORY_KEY, 0, FEED_HISTORY_MAX - 1)
-            except Exception:
-                pass
+            # Publishes rt:feed AND persists to the capped hydration history.
+            publish_feed_event("drop", feed_data)
     except Exception:
         pass

@@ -284,11 +284,22 @@ async def npc_totals_loop():
     'top bosses' blocks). Tails the drops table by drop_id every 60s."""
     from services import npc_totals
 
+    def run_once():
+        # Fresh session per iteration: the module-global session is not
+        # thread-safe across executor threads, and a single MySQL timeout
+        # left it permanently in "invalid transaction" state.
+        with Session() as s:
+            try:
+                return npc_totals.process_new_drops(session=s)
+            except Exception:
+                s.rollback()
+                raise
+
     while not shutdown_event.is_set():
         try:
             await send_watchdog_heartbeat()
             loop = asyncio.get_event_loop()
-            scanned = await loop.run_in_executor(None, npc_totals.process_new_drops)
+            scanned = await loop.run_in_executor(None, run_once)
             if scanned:
                 print(f"npc_totals: folded {scanned} new drops into hourly rollup")
         except Exception as e:
@@ -308,11 +319,20 @@ async def item_totals_loop():
     every 60s, same pattern as npc_totals_loop."""
     from services import item_totals
 
+    def run_once():
+        # Fresh session per iteration — same rationale as npc_totals_loop.
+        with Session() as s:
+            try:
+                return item_totals.process_new_drops(session=s)
+            except Exception:
+                s.rollback()
+                raise
+
     while not shutdown_event.is_set():
         try:
             await send_watchdog_heartbeat()
             loop = asyncio.get_event_loop()
-            scanned = await loop.run_in_executor(None, item_totals.process_new_drops)
+            scanned = await loop.run_in_executor(None, run_once)
             if scanned:
                 print(f"item_totals: folded {scanned} new drops into hourly rollup")
         except Exception as e:

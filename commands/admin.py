@@ -123,6 +123,14 @@ class ClanCommands(Extension):
             except Exception as e:
                 session.rollback()
                 print(f"Error linking guild to group: {e}")
+
+            # Site-wide ticker (rt:feed): announce the new group. Best-effort.
+            try:
+                from services.realtime import publish_feed_group_created
+
+                publish_feed_group_created(group.group_id, group_name)
+            except Exception as e:
+                print(f"Ticker group-created publish failed: {e}")
                 
             # Create success embed with proper variable handling
             try:

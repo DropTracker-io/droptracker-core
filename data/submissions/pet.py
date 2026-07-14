@@ -160,6 +160,19 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
         award_points_to_player(
             player_id=player_id, amount=50, source=f"Pet: {pet_name}", expires_in_days=60
         )
+        # Site-wide ticker (rt:feed): pets are rare enough to always announce.
+        try:
+            from services.realtime import publish_feed_pet
+
+            publish_feed_pet(
+                player_id=player_id,
+                player_name=player.player_name or player_name,
+                pet_name=pet_name,
+                item_id=pet_item_id,
+                npc_name=npc_name,
+            )
+        except Exception as e:
+            debug_print(f"Ticker pet publish failed: {e}")
 
     should_notify = is_new_pet or (duplicate and not is_new_pet)
     if should_notify:

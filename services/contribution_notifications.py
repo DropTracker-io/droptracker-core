@@ -165,10 +165,43 @@ def queue_contribution_notification(
             )
             try:
                 s.commit()
-                return True
             except IntegrityError:
                 s.rollback()  # provider redelivery — already queued
                 return False
+
+            # Site-wide ticker (rt:feed): announce the new subscription. Only
+            # reached for first settled payments (renewals returned above), so
+            # this matches "a new group/player subscribed". Best-effort.
+            try:
+                from services.realtime import publish_feed_subscription
+
+                if scope == "group" and group_id is not None:
+                    from db.models import Group
+
+                    group = s.query(Group).filter(Group.group_id == group_id).first()
+                    if group is not None:
+                        publish_feed_subscription(
+                            "group", group.group_name,
+                            group_id=group_id, tier_key=tier_key,
+                        )
+                elif scope == "user":
+                    # `player` was resolved above (contributor's first tracked
+                    # player); fall back to their Discord-linked username.
+                    display_name = player.player_name if user_id is not None and player else None
+                    display_player_id = player.player_id if user_id is not None and player else None
+                    if display_name is None and user_id is not None:
+                        from db.models import User
+
+                        u = s.query(User).filter(User.user_id == user_id).first()
+                        display_name = u.username if u else None
+                    if display_name:
+                        publish_feed_subscription(
+                            "user", display_name,
+                            player_id=display_player_id, tier_key=tier_key,
+                        )
+            except Exception:
+                logger.exception("Ticker subscription publish failed")
+            return True
         finally:
             s.close()
     except Exception:

@@ -414,7 +414,14 @@ class RedisLootTracker:
         pipeline.incrbyfloat(keys['total_loot'], total_value)  # Monthly
         pipeline.incrbyfloat(keys['all_time_total_loot'], total_value)  # All-time
         pipeline.incrbyfloat(keys['daily_total_loot'], total_value)  # Daily
-        
+
+        # Daily per-player keys must expire: this hot path is what creates
+        # them, and before these EXPIREs it never set a TTL — ~100k daily
+        # hashes (~200MB) accumulated permanently between 2025-11 and 2026-07.
+        # 90 days matches _rebuild_daily_data's retention.
+        pipeline.expire(keys['daily_total_items'], self._DAILY_TTL)
+        pipeline.expire(keys['daily_total_loot'], self._DAILY_TTL)
+
         if int(drop.value * drop.quantity) > 1000000:
             # Add to recent items
             recent_item_data = {
@@ -437,6 +444,7 @@ class RedisLootTracker:
             pipeline.ltrim(keys['recent_items'], 0, 49)  # Keep last 50 items (monthly)
             pipeline.ltrim(keys['all_time_recent_items'], 0, 99)  # Keep last 100 items (all-time)
             pipeline.ltrim(keys['daily_recent_items'], 0, 24)  # Keep last 25 items (daily)
+            pipeline.expire(keys['daily_recent_items'], self._DAILY_TTL)
         
         # Execute all operations atomically
         try:
@@ -487,9 +495,13 @@ class RedisLootTracker:
             ).order_by(Drop.date_added.asc()).all()
             
             if not player_drops:
-                # No drops, clear Redis data and remove from leaderboards
+                # No drops, clear Redis data and remove from leaderboards.
+                # Still advance date_updated — otherwise drop-less players sit
+                # at the head of the stale-player queue forever and starve it.
                 self._clear_player_redis_data(player_id)
                 self._remove_from_leaderboards(player_id, player_group_ids)
+                player.date_updated = datetime.now()
+                session_to_use.commit()
                 return True
             
             # Group drops by partition (monthly) and by day
@@ -617,13 +629,21 @@ class RedisLootTracker:
             print(f"[RedisLootTracker] _apply_split_credits failed for player {player_id}: {e}")
 
     def _clear_player_redis_data(self, player_id: int):
-        """Clear all Redis data for a player"""
-        # Get all keys for this player
+        """Clear all Redis data for a player.
+
+        Uses SCAN, not KEYS: KEYS walks the entire keyspace (~1M keys) while
+        holding the Redis event loop, stalling every other client for
+        hundreds of ms per call (it dominated the slowlog).
+        """
         pattern = f"player:{player_id}:*"
-        keys = redis_client.client.keys(pattern)
-        
-        if keys:
-            redis_client.client.delete(*keys)
+        batch = []
+        for key in redis_client.client.scan_iter(match=pattern, count=1000):
+            batch.append(key)
+            if len(batch) >= 500:
+                redis_client.client.delete(*batch)
+                batch = []
+        if batch:
+            redis_client.client.delete(*batch)
     
     def _remove_from_leaderboards(self, player_id: int, group_ids: List[int]):
         """Remove player from the current-month + all-time global leaderboards.

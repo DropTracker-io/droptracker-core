@@ -18,6 +18,7 @@ KNOWN_ITEMS = {
     "Boater", "Red boater", "Orange boater",
     "Godsword shard 1", "Godsword shard 2", "Godsword shard 3",
     "Armadyl hilt", "Bandos hilt", "Saradomin hilt", "Zamorak hilt",
+    "Justiciar faceguard", "Justiciar chestguard", "Justiciar legguards",
 }
 _BY_NORM = {n.lower(): n for n in KNOWN_ITEMS}
 
@@ -151,3 +152,86 @@ def test_groups_reject_too_many_groups():
     with pytest.raises(ProblemException) as exc:
         _validate(body)
     assert "requirement groups" in (exc.value.detail or "")
+
+
+# ── any_path (either-or "dryness protection", suggestion #52) ─────────────────
+
+JUSTICIAR_BODY = {
+    "type": "item_collection",
+    "config": {
+        "kind": "any_path",
+        "paths": [
+            {"label": "Full set",
+             "groups": [{"mode": "all_of",
+                         "items": ["Justiciar faceguard", "Justiciar chestguard",
+                                   "Justiciar legguards"]}]},
+            {"label": "Any 5 pieces",
+             "groups": [{"mode": "any_of", "need": 5,
+                         "items": ["Justiciar faceguard", "Justiciar chestguard",
+                                   "Justiciar legguards"]}]},
+        ],
+    },
+}
+
+
+def test_any_path_normalizes_and_pins_percentage_threshold():
+    out = _validate(json.loads(json.dumps(JUSTICIAR_BODY)))
+    cfg = _cfg(out)
+    assert cfg["kind"] == "any_path"
+    assert [p["label"] for p in cfg["paths"]] == ["Full set", "Any 5 pieces"]
+    assert cfg["paths"][0]["groups"][0]["need"] == 3
+    assert cfg["paths"][1]["groups"][0]["need"] == 5
+    assert out["target_value"] == etv.ANY_PATH_THRESHOLD
+    assert out["target"] is None
+
+
+def test_any_path_allows_items_to_repeat_across_paths():
+    # The same drop advancing every path is the whole point — only
+    # within-path duplicates are rejected.
+    out = _validate(json.loads(json.dumps(JUSTICIAR_BODY)))
+    assert len(_cfg(out)["paths"]) == 2
+
+
+def test_any_path_rejects_within_path_duplicates():
+    with pytest.raises(ProblemException):
+        _validate({
+            "type": "item_collection",
+            "config": {"kind": "any_path", "paths": [
+                {"groups": [{"mode": "all_of", "items": ["Boater"]},
+                            {"mode": "any_of", "items": ["Boater"]}]},
+                {"groups": [{"mode": "any_of", "items": ["Red boater"]}]},
+            ]},
+        })
+
+
+def test_any_path_requires_two_paths():
+    for paths in ([], [{"groups": [{"mode": "any_of", "items": ["Boater"]}]}]):
+        with pytest.raises(ProblemException) as exc:
+            _validate({"type": "item_collection",
+                       "config": {"kind": "any_path", "paths": paths}})
+        assert "at least two paths" in (exc.value.detail or "")
+
+
+def test_any_path_rejects_too_many_paths():
+    body = {
+        "type": "item_collection",
+        "config": {"kind": "any_path", "paths": [
+            {"groups": [{"mode": "any_of", "items": ["Boater"]}]}
+            for _ in range(etv.MAX_CONFIG_PATHS + 1)
+        ]},
+    }
+    with pytest.raises(ProblemException) as exc:
+        _validate(body)
+    assert "paths per task" in (exc.value.detail or "")
+
+
+def test_any_path_rejects_unknown_items():
+    with pytest.raises(ProblemException) as exc:
+        _validate({
+            "type": "item_collection",
+            "config": {"kind": "any_path", "paths": [
+                {"groups": [{"mode": "any_of", "items": ["Nonexistent thing"]}]},
+                {"groups": [{"mode": "any_of", "items": ["Boater"]}]},
+            ]},
+        })
+    assert exc.value.status == 422

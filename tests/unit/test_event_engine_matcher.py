@@ -344,6 +344,83 @@ class TestGroupedItemProgress:
         assert engine._grouped_progress_from_rows(rows, GODSWORD, GODSWORD_THRESHOLD) == 0
 
 
+# ── any_path (either-or "dryness protection") progress ───────────────────────
+
+# Suggestion #52's motivating case: the full Justiciar set OR any 5
+# Justiciar items (duplicates folding). Threshold is a percentage.
+JUSTICIAR = {
+    "kind": "any_path",
+    "paths": [
+        {"label": "Full set",
+         "groups": [{"mode": "all_of",
+                     "items": ["Justiciar faceguard", "Justiciar chestguard",
+                               "Justiciar legguards"]}]},
+        {"label": "Any 5 pieces",
+         "groups": [{"mode": "any_of", "need": 5,
+                     "items": ["Justiciar faceguard", "Justiciar chestguard",
+                               "Justiciar legguards"]}]},
+    ],
+}
+ANY_PATH_THRESHOLD = 100
+
+
+class TestAnyPathProgress:
+    def test_path_items_are_matchable(self):
+        task = _task(config=JUSTICIAR)
+        assert engine.item_match_quantity(task, "Justiciar faceguard") == 1
+        assert engine.item_match_quantity(task, "justiciar  LEGGUARDS", 2) == 2
+        assert engine.item_match_quantity(task, "Abyssal whip") is None
+
+    def test_progress_is_the_closest_path_percentage(self):
+        # Two distinct pieces: full-set path 2/3 (66%) beats any-5 at 2/5 (40%).
+        rows = [_Row("Justiciar faceguard"), _Row("Justiciar chestguard")]
+        assert engine._anypath_progress_from_rows(
+            rows, JUSTICIAR, ANY_PATH_THRESHOLD) == 66
+
+    def test_full_set_completes(self):
+        rows = [_Row("Justiciar faceguard"), _Row("Justiciar chestguard"),
+                _Row("Justiciar legguards")]
+        assert engine._anypath_progress_from_rows(
+            rows, JUSTICIAR, ANY_PATH_THRESHOLD) == 100
+
+    def test_duplicates_complete_via_the_any_of_path(self):
+        # 5× the same piece never finishes the set, but the any-5 path folds
+        # quantities — this is exactly the dryness-protection semantics.
+        rows = [_Row("Justiciar faceguard", quantity=5)]
+        assert engine._anypath_progress_from_rows(
+            rows, JUSTICIAR, ANY_PATH_THRESHOLD) == 100
+
+    def test_one_drop_advances_every_path_that_lists_it(self):
+        rows = [_Row("Justiciar faceguard", quantity=4)]
+        # Full set: 1/3 → 33%; any-5: 4/5 → 80%.
+        assert engine._anypath_progress_from_rows(
+            rows, JUSTICIAR, ANY_PATH_THRESHOLD) == 80
+
+    def test_never_completes_one_drop_early(self):
+        rows = [_Row("Justiciar faceguard", quantity=4)]
+        assert engine._anypath_progress_from_rows(
+            rows, JUSTICIAR, ANY_PATH_THRESHOLD) < 100
+
+    def test_wildcard_manual_awards_advance_paths(self):
+        rows = [_Row(None, quantity=3, source_type="manual")]
+        assert engine._anypath_progress_from_rows(
+            rows, JUSTICIAR, ANY_PATH_THRESHOLD) == 100
+
+    def test_bonus_rows_ignored(self):
+        rows = [_Row(None, quantity=10, source_type="bonus")]
+        assert engine._anypath_progress_from_rows(
+            rows, JUSTICIAR, ANY_PATH_THRESHOLD) == 0
+
+    def test_empty_or_garbage_paths_yield_zero(self):
+        assert engine._anypath_progress_from_rows(
+            [_Row("Justiciar faceguard")], {"kind": "any_path", "paths": []},
+            ANY_PATH_THRESHOLD) == 0
+        assert engine._anypath_progress_from_rows(
+            [_Row("Justiciar faceguard")],
+            {"kind": "any_path", "paths": ["nonsense", {"groups": []}]},
+            ANY_PATH_THRESHOLD) == 0
+
+
 # ── kc dedupe: kill_count keying + cooldown fallback ─────────────────────────
 
 class _FakeRedis:

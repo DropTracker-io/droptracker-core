@@ -56,8 +56,8 @@ async def board_loop():
             # Wait for process with timeout, but don't block watchdog
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(), 
-                    timeout=300  # 5 minute timeout
+                    process.communicate(),
+                    timeout=600  # 10 minute timeout; normal runs are capped well below this
                 )
                 
                 if process.returncode != 0:
@@ -69,7 +69,7 @@ async def board_loop():
                         print(f"Output: {stdout.decode()}")
                         
             except asyncio.TimeoutError:
-                print("Board generation timed out after 5 minutes, terminating process...")
+                print("Board generation timed out after 10 minutes, terminating process...")
                 process.terminate()
                 try:
                     await asyncio.wait_for(process.wait(), timeout=10)
