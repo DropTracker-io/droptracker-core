@@ -617,6 +617,39 @@ async def player_loot(player_id: int):
     return with_cache_headers(jsonify(payload), max_age=60)
 
 
+@profiles_bp.get("/groups/by-guild/<guild_id>")
+async def group_by_guild(guild_id: str):
+    """Resolve a Discord guild to its registered group — a light lookup for
+    the Discord Activity, which only knows the guild it was launched in.
+    Anonymous; 404 when the guild has no group."""
+    guild_id = (guild_id or "").strip()
+    if not guild_id.isdigit():
+        return problem(404, "Group not found", "Invalid guild id")
+
+    def _load():
+        with db_session() as s:
+            group = s.query(Group).filter(Group.guild_id == guild_id).first()
+            if not group:
+                return None
+            member_count = (
+                s.query(Player.player_id).join(Player.groups)
+                .filter(Group.group_id == group.group_id).count()
+            )
+            payload = {
+                "id": group.group_id,
+                "name": group.group_name,
+                "member_count": member_count,
+            }
+            if group.icon_url:
+                payload["icon_url"] = group.icon_url
+            return payload
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        return problem(404, "Group not found", f"No group linked to guild {guild_id}")
+    return with_cache_headers(jsonify(payload), max_age=300)
+
+
 @profiles_bp.get("/groups/<int:group_id>")
 async def group_profile(group_id: int):
     def _load():
