@@ -113,6 +113,7 @@ def _board_context(session, event, config: dict) -> dict:
 
     context = {
         "event_name": event.name,
+        "event_id": event.id,  # raw id — powers the "Open in Discord" launch button
         "event_url": event_url(event.id),
         "board_status_line": status_line,
         "team_count": team_count or None,
@@ -144,6 +145,7 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
     try:
         from services.event_message_layouts import (
             build_components,
+            deeplink_enabled,
             load_layout,
             render_message_spec,
         )
@@ -169,6 +171,7 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
             layout,
             _board_context(session, event, config),
             standings=_standings(session, event.id, top_n),
+            deep_link=deeplink_enabled(),
         )
         components = build_components(spec)
 

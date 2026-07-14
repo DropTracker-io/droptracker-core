@@ -34,12 +34,32 @@ from services import activity_launch_core as core
 from services.activity_launch_core import (  # re-exported for callers/tests
     CALLBACK_LAUNCH_ACTIVITY,
     LAUNCH_BUTTON_CUSTOM_ID,
+    LAUNCH_INTENT_TTL,
     build_launch_message,
+    intent_key,
     is_entry_point_interaction,
     is_launch_button_interaction,
+    launch_intent_from_interaction,
 )
 
 log = logging.getLogger("interactions")
+
+
+def _record_launch_intent(data: dict) -> None:
+    """When a user clicks an event-scoped launch button, remember which event
+    so the Activity can open straight to it (claimed via the web_api
+    launch-intent endpoint after OAuth). Best-effort — a Redis hiccup just
+    means the app opens to its home hub instead of the event."""
+    intent = launch_intent_from_interaction(data)
+    if not intent:
+        return
+    user_id, event_id = intent
+    try:
+        from utils.redis import redis_client
+
+        redis_client.setex(intent_key(user_id), LAUNCH_INTENT_TTL, str(event_id))
+    except Exception:
+        log.debug("[ActivityLaunch] couldn't stash launch intent", exc_info=True)
 
 
 def build_launch_card():
@@ -132,6 +152,9 @@ class ActivityLaunch(Extension):
         if is_entry_point_interaction(data):
             await self._launch(data, followup=True)
         elif is_launch_button_interaction(data):
+            # Event-scoped buttons carry a deep-link target — stash it before
+            # opening so the Activity can claim it on boot.
+            _record_launch_intent(data)
             await self._launch(data, followup=False)
 
     async def _launch(self, data: dict, *, followup: bool) -> None:

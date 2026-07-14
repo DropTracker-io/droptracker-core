@@ -23,8 +23,13 @@ Block DSL (``layout`` JSON: ``{"accent_color": "#RRGGBB"?, "blocks": [...]}``):
     -> medal-list text block built from the standings passed by the sender
     (never from tokens — it's the one block with structured input).
 - ``{"type": "buttons", "buttons": [{"label": "...", "url": "..."}]}``
-    -> ``ActionRow`` of URL buttons; a button whose url doesn't resolve is
-    dropped, an empty row is dropped.
+    -> ``ActionRow`` of buttons. A button is either a URL button
+    (``{"label", "url"}``; dropped when its url doesn't resolve) or a launch
+    button (``{"label", "launch": true}``) that opens the Discord Activity
+    deep-linked to ``{event_id}`` from the context. Launch buttons are dropped
+    when deep-linking is disabled (:func:`deeplink_enabled`) or there is no
+    event id, so a row falling back to just its URL button still renders; an
+    empty row is dropped.
 
 Module-level imports are stdlib-only (same deal as event_notifications.py)
 so the unit tests can load it directly; interactions.py and db models are
@@ -33,6 +38,7 @@ lazy-imported inside the functions that need them.
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Optional
 
@@ -47,6 +53,22 @@ _TOKEN_RE = re.compile(r"\{[a-z_]+\}")
 TEMPLATE_GROUP_ID = 1
 
 LAYOUT_SCHEMA_VERSION = 1
+
+
+def deeplink_enabled() -> bool:
+    """Whether "Open in Discord" launch buttons are rendered on event messages.
+
+    Gated by ``ACTIVITY_DEEPLINK_ENABLED`` (default off): a launch button only
+    works once the primary Discord app has Activities enabled + a root URL
+    mapping, so until that portal step is live the buttons must fall back to
+    the website URL button. Flip this on the same deploy the Activity goes
+    live on the verified app."""
+    return os.environ.get("ACTIVITY_DEEPLINK_ENABLED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def _hex_to_int(color) -> Optional[int]:
@@ -102,7 +124,10 @@ DEFAULT_LAYOUTS = {
             {"type": "separator"},
             {
                 "type": "buttons",
-                "buttons": [{"label": "Follow the event live", "url": "{event_url}"}],
+                "buttons": [
+                    {"label": "\U0001F4F2 Open live board", "launch": True},
+                    {"label": "Follow the event live", "url": "{event_url}"},
+                ],
             },
         ],
     },
@@ -113,7 +138,13 @@ DEFAULT_LAYOUTS = {
             {"type": "separator"},
             {"type": "standings", "limit": 5, "title": "**Final standings**"},
             {"type": "separator"},
-            {"type": "buttons", "buttons": [{"label": "Full results", "url": "{event_url}"}]},
+            {
+                "type": "buttons",
+                "buttons": [
+                    {"label": "\U0001F4F2 Final standings", "launch": True},
+                    {"label": "Full results", "url": "{event_url}"},
+                ],
+            },
         ],
     },
     "event_completion": {
@@ -222,7 +253,13 @@ DEFAULT_LAYOUTS = {
             {"type": "separator"},
             {"type": "text", "content": "{tasks_summary}"},
             {"type": "text", "content": "-# Updated {updated_ts} • refreshes automatically"},
-            {"type": "buttons", "buttons": [{"label": "Full standings", "url": "{event_url}"}]},
+            {
+                "type": "buttons",
+                "buttons": [
+                    {"label": "\U0001F4F2 Open interactive board", "launch": True},
+                    {"label": "Full standings", "url": "{event_url}"},
+                ],
+            },
         ],
     },
 }
@@ -307,15 +344,19 @@ def _substitute(text: str, context: dict) -> str:
     return "\n".join(resolved_lines).strip()
 
 
-def render_message_spec(layout: dict, context: dict, standings=None) -> dict:
+def render_message_spec(
+    layout: dict, context: dict, standings=None, deep_link: bool = True
+) -> dict:
     """Resolve one layout against its context into primitive blocks —
     pure data in, pure data out (the unit-testable half of rendering).
 
     Returns ``{"accent_color": int|None, "blocks": [...]}`` where blocks are
     ``{"type": "text", "content"}``, ``{"type": "section", "content",
     "thumbnail"}``, ``{"type": "separator"}`` or ``{"type": "buttons",
-    "buttons": [{label, url}]}`` with every token resolved and every
-    unresolvable piece dropped."""
+    "buttons": [...]}`` (each button ``{label, url}`` or ``{label, launch:
+    True, event_id}``) with every token resolved and every unresolvable piece
+    dropped. ``deep_link`` False drops launch buttons (the deploy gate lives in
+    :func:`deeplink_enabled`; explicit here so the resolver stays pure)."""
     blocks = []
     for block in (layout or {}).get("blocks") or []:
         if not isinstance(block, dict):
@@ -353,8 +394,19 @@ def render_message_spec(layout: dict, context: dict, standings=None) -> dict:
                 if not isinstance(btn, dict):
                     continue
                 label = _substitute(str(btn.get("label") or ""), context)
+                if not label:
+                    continue
+                if btn.get("launch"):
+                    # Deep-link into the Discord Activity; the event id comes
+                    # from the context, not a URL. Dropped when deep-linking is
+                    # off or no event is in scope.
+                    event_id = (context or {}).get("event_id")
+                    if deep_link and event_id not in (None, "", 0):
+                        buttons.append({"label": label[:80], "launch": True,
+                                        "event_id": str(event_id)})
+                    continue
                 url = _substitute(str(btn.get("url") or ""), context)
-                if label and url.startswith("http"):
+                if url.startswith("http"):
                     buttons.append({"label": label[:80], "url": url})
             if buttons:
                 blocks.append({"type": "buttons", "buttons": buttons})
@@ -400,14 +452,21 @@ def build_components(spec: dict, ping_text: Optional[str] = None, extra_rows=Non
                 )
             )
         elif kind == "buttons":
-            children.append(
-                ActionRow(
-                    *[
-                        Button(style=ButtonStyle.URL, label=b["label"], url=b["url"])
-                        for b in block["buttons"]
-                    ]
-                )
-            )
+            from services.activity_launch_core import launch_button_custom_id
+
+            row = []
+            for b in block["buttons"]:
+                if b.get("launch"):
+                    row.append(
+                        Button(
+                            style=ButtonStyle.BLURPLE,
+                            label=b["label"],
+                            custom_id=launch_button_custom_id(b["event_id"]),
+                        )
+                    )
+                else:
+                    row.append(Button(style=ButtonStyle.URL, label=b["label"], url=b["url"]))
+            children.append(ActionRow(*row))
     for row in extra_rows or []:
         children.append(row)
     if not children:
@@ -429,7 +488,9 @@ def render_event_components(
 ) -> list:
     """One-stop: load the effective layout, resolve it, build components."""
     layout = load_layout(session, group_id, message_type)
-    spec = render_message_spec(layout, context, standings=standings)
+    spec = render_message_spec(
+        layout, context, standings=standings, deep_link=deeplink_enabled()
+    )
     return build_components(spec, ping_text=ping_text, extra_rows=extra_rows)
 
 
@@ -450,6 +511,7 @@ def notification_context(notification_type: str, data: dict) -> dict:
             context[key] = value
 
     event_id = data.get("event_id")
+    put("event_id", event_id)  # raw id — powers launch (deep-link) buttons
     put("event_name", data.get("event_name") or "Event")
     put("event_url", event_url(event_id) if event_id else None)
     put("description", data.get("description"))

@@ -506,6 +506,69 @@ async def list_events():
     return with_cache_headers(jsonify(events), max_age=30)
 
 
+@events_bp.get("/events/launch-intent")
+async def event_launch_intent():
+    """Claim (and clear) the current user's pending Activity deep-link target —
+    set by the bot when they clicked an "Open in Discord" launch button on an
+    event message. One-shot: returns the event id once, then it's gone.
+    ``{"event_id": null}`` when nothing is pending (app opens to its home hub).
+
+    Keyed by the user's Discord id, so a session only ever claims its own
+    intent."""
+    user_id = current_user_id()
+
+    def _claim():
+        from services.activity_launch_core import intent_key
+        from utils.redis import redis_client
+
+        with db_session() as s:
+            user = load_user(s, user_id)
+            discord_id = getattr(user, "discord_id", None) if user else None
+        if not discord_id:
+            return None
+        key = intent_key(discord_id)
+        raw = redis_client.get(key)
+        if raw is None:
+            return None
+        redis_client.delete(key)  # one-shot claim
+        value = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+        return int(value) if value.isdigit() else None
+
+    event_id = await asyncio.to_thread(_claim)
+    return private_no_store(jsonify({"event_id": event_id}))
+
+
+@events_bp.get("/events/by-channel/<channel_id>")
+async def event_by_channel(channel_id: str):
+    """Resolve a Discord channel to the event whose board/notifications live
+    there — the Activity's anonymous deep-link fallback: a launch button opens
+    the app in its channel, and ``sdk.channelId`` tells us which. Prefers the
+    active event; falls back to the most recent event pointed at the channel
+    (so an ended event's "Final standings" button still lands right).
+    ``{"event_id": null}`` when no event maps to the channel."""
+    channel_id = (channel_id or "").strip()
+    if not channel_id.isdigit():
+        return with_cache_headers(jsonify({"event_id": None}), max_age=30)
+
+    def _load():
+        from db.models import EventChannel
+
+        with db_session() as s:
+            base = (
+                s.query(EventChannel.event_id)
+                .join(Event, Event.id == EventChannel.event_id)
+                .filter(EventChannel.channel_id == channel_id)
+            )
+            row = (
+                base.filter(Event.status == "active").order_by(Event.id.desc()).first()
+                or base.order_by(Event.id.desc()).first()
+            )
+            return int(row[0]) if row else None
+
+    event_id = await asyncio.to_thread(_load)
+    return with_cache_headers(jsonify({"event_id": event_id}), max_age=30)
+
+
 @events_bp.get("/events/<int:event_id>")
 async def get_event(event_id: int):
     viewer_id = optional_user_id()

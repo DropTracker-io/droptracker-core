@@ -21,8 +21,18 @@ MSG_FLAG_EPHEMERAL = 1 << 6  # 64
 # Brand gold, matching the Activity's OSRS palette.
 ACCENT = 0xC8A24A
 
-# custom_id of the "Open DropTracker" button on the standing card.
+# custom_id of the "Open DropTracker" button on the standing card. Event-scoped
+# launch buttons (the "Open in Discord" buttons on event notifications) append
+# ``:e:<event_id>`` so the raw handler can record which event to deep-link to.
 LAUNCH_BUTTON_CUSTOM_ID = "activity_launch_open"
+LAUNCH_EVENT_INFIX = ":e:"
+
+# Deep-link handoff: the raw handler stashes {discord_user_id -> event_id} in
+# Redis when a user clicks an event-scoped launch button; the Activity claims it
+# after OAuth (web_api GET /events/launch-intent) and opens straight to that
+# event. Short TTL — it's a one-shot intent for the launch that just happened.
+LAUNCH_INTENT_PREFIX = "dt:activity:launch:"
+LAUNCH_INTENT_TTL = 120
 
 # Group-config key a leader sets (in the registry); and the bot-managed row that
 # tracks the posted card as "channel_id:message_id" (NOT in the config registry).
@@ -44,10 +54,64 @@ def is_entry_point_interaction(data: dict) -> bool:
 
 
 def is_launch_button_interaction(data: dict) -> bool:
-    """True iff this is a click on our "Open DropTracker" card button."""
+    """True iff this is a click on a launch button — the standing "Open
+    DropTracker" card button *or* an event-scoped "Open in Discord" button
+    (``activity_launch_open:e:<event_id>``) on an event notification."""
     if not isinstance(data, dict) or data.get("type") != INTERACTION_MESSAGE_COMPONENT:
         return False
-    return (data.get("data") or {}).get("custom_id") == LAUNCH_BUTTON_CUSTOM_ID
+    custom_id = (data.get("data") or {}).get("custom_id") or ""
+    return custom_id == LAUNCH_BUTTON_CUSTOM_ID or custom_id.startswith(
+        LAUNCH_BUTTON_CUSTOM_ID + LAUNCH_EVENT_INFIX
+    )
+
+
+def launch_button_custom_id(event_id=None) -> str:
+    """The custom_id for a launch button: the bare card button when
+    ``event_id`` is None, else the event-scoped deep-link variant."""
+    if event_id in (None, "", 0):
+        return LAUNCH_BUTTON_CUSTOM_ID
+    return f"{LAUNCH_BUTTON_CUSTOM_ID}{LAUNCH_EVENT_INFIX}{event_id}"
+
+
+def parse_launch_custom_id(custom_id) -> "str | None":
+    """The event id encoded in an event-scoped launch button's custom_id, or
+    None for the bare card button / anything else."""
+    if not isinstance(custom_id, str):
+        return None
+    prefix = LAUNCH_BUTTON_CUSTOM_ID + LAUNCH_EVENT_INFIX
+    if not custom_id.startswith(prefix):
+        return None
+    event_id = custom_id[len(prefix):].strip()
+    return event_id if event_id.isdigit() else None
+
+
+def interaction_user_id(data: dict) -> "str | None":
+    """The clicking user's Discord id from a raw interaction — ``member.user``
+    in a guild, top-level ``user`` in a DM."""
+    if not isinstance(data, dict):
+        return None
+    member = data.get("member") or {}
+    user = member.get("user") or data.get("user") or {}
+    uid = user.get("id")
+    return str(uid) if uid else None
+
+
+def intent_key(discord_user_id) -> str:
+    """Redis key for one user's pending launch-intent event id."""
+    return f"{LAUNCH_INTENT_PREFIX}{discord_user_id}"
+
+
+def launch_intent_from_interaction(data: dict) -> "tuple[str, str] | None":
+    """``(discord_user_id, event_id)`` to stash for a deep-link launch, or None
+    when this launch carries no event (the bare card button) or lacks a user.
+    Pure — the shell does the actual Redis write."""
+    event_id = parse_launch_custom_id((data.get("data") or {}).get("custom_id"))
+    if not event_id:
+        return None
+    user_id = interaction_user_id(data)
+    if not user_id:
+        return None
+    return user_id, event_id
 
 
 def build_launch_message(data: dict) -> dict | None:

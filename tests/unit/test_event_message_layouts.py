@@ -200,6 +200,36 @@ class TestRenderMessageSpec:
             {"blocks": [{"type": "standings", "limit": 3}]}, {}, standings=[])
         assert spec["blocks"][0]["content"] == "No teams yet."
 
+    def test_launch_button_resolves_from_event_id(self):
+        layout = {"blocks": [{"type": "buttons", "buttons": [
+            {"label": "Open in Discord", "launch": True},
+            {"label": "Website", "url": "{event_url}"},
+        ]}]}
+        spec = ml.render_message_spec(
+            layout, {"event_id": 42, "event_url": "https://x/e/42"}, deep_link=True)
+        assert spec["blocks"][0]["buttons"] == [
+            {"label": "Open in Discord", "launch": True, "event_id": "42"},
+            {"label": "Website", "url": "https://x/e/42"},
+        ]
+
+    def test_launch_button_dropped_when_deeplink_off(self):
+        layout = {"blocks": [{"type": "buttons", "buttons": [
+            {"label": "Open in Discord", "launch": True},
+            {"label": "Website", "url": "{event_url}"},
+        ]}]}
+        spec = ml.render_message_spec(
+            layout, {"event_id": 42, "event_url": "https://x/e/42"}, deep_link=False)
+        # only the URL button survives — behaviour identical to the old layouts
+        assert spec["blocks"][0]["buttons"] == [{"label": "Website", "url": "https://x/e/42"}]
+
+    def test_launch_only_row_dropped_without_event_id(self):
+        layout = {"blocks": [{"type": "buttons", "buttons": [
+            {"label": "Open in Discord", "launch": True},
+        ]}]}
+        # no event_id in context → nothing to deep-link to → empty row dropped
+        spec = ml.render_message_spec(layout, {}, deep_link=True)
+        assert spec["blocks"] == []
+
 
 class TestDefaultLayouts:
     def test_every_layout_type_has_a_default(self):

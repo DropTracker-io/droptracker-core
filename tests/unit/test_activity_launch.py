@@ -37,6 +37,59 @@ def test_launch_button_interaction_matches():
     assert not core.is_entry_point_interaction(good)  # a button is not the entry point
 
 
+def test_event_scoped_launch_button_matches():
+    scoped = {"type": 3, "data": {"custom_id": "activity_launch_open:e:42"}}
+    assert core.is_launch_button_interaction(scoped)
+    # a lookalike prefix without the separator is not a launch button
+    assert not core.is_launch_button_interaction(
+        {"type": 3, "data": {"custom_id": "activity_launch_open_evil"}}
+    )
+
+
+# --- launch custom_id round-trip + parsing ---------------------------------- #
+def test_launch_custom_id_round_trip():
+    assert core.launch_button_custom_id() == core.LAUNCH_BUTTON_CUSTOM_ID
+    assert core.launch_button_custom_id(None) == core.LAUNCH_BUTTON_CUSTOM_ID
+    assert core.launch_button_custom_id(0) == core.LAUNCH_BUTTON_CUSTOM_ID
+    scoped = core.launch_button_custom_id(42)
+    assert scoped == "activity_launch_open:e:42"
+    assert core.parse_launch_custom_id(scoped) == "42"
+
+
+def test_parse_launch_custom_id_rejects_non_events():
+    assert core.parse_launch_custom_id(core.LAUNCH_BUTTON_CUSTOM_ID) is None  # bare card button
+    assert core.parse_launch_custom_id("activity_launch_open:e:") is None
+    assert core.parse_launch_custom_id("activity_launch_open:e:abc") is None
+    assert core.parse_launch_custom_id("evtsignup:5") is None
+    assert core.parse_launch_custom_id(None) is None
+
+
+# --- interaction user id + intent handoff ----------------------------------- #
+def test_interaction_user_id_guild_and_dm():
+    assert core.interaction_user_id({"member": {"user": {"id": "111"}}}) == "111"
+    assert core.interaction_user_id({"user": {"id": "222"}}) == "222"  # DM shape
+    assert core.interaction_user_id({}) is None
+
+
+def test_launch_intent_from_interaction():
+    data = {"type": 3, "member": {"user": {"id": "111"}},
+            "data": {"custom_id": "activity_launch_open:e:42"}}
+    assert core.launch_intent_from_interaction(data) == ("111", "42")
+    # bare card button carries no event → no intent to stash
+    assert core.launch_intent_from_interaction(
+        {"type": 3, "member": {"user": {"id": "111"}},
+         "data": {"custom_id": core.LAUNCH_BUTTON_CUSTOM_ID}}
+    ) is None
+    # no user → nothing to key on
+    assert core.launch_intent_from_interaction(
+        {"type": 3, "data": {"custom_id": "activity_launch_open:e:42"}}
+    ) is None
+
+
+def test_intent_key():
+    assert core.intent_key("111") == "dt:activity:launch:111"
+
+
 # --- launch follow-up message (off by default) ------------------------------ #
 def test_no_launch_message_by_default():
     assert core.SEND_LAUNCH_MESSAGE is False
