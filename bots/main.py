@@ -114,6 +114,44 @@ bot = interactions.Client(intents=Intents.DIRECT_MESSAGES | Intents.GUILD_INTEGR
 bot.send_not_ready_messages = True
 bot.send_command_tracebacks = False
 
+# --- Preserve the Discord Activity "Launch" entry-point command across syncs ---
+# When Activities is enabled on this application, Discord auto-creates a type-4
+# PRIMARY_ENTRY_POINT command (the Activity launcher). interactions.py builds
+# its command-sync payload only from bot-defined commands and PUT-overwrites the
+# whole global command list, so any deploy that changes a slash command would
+# drop that launcher (a plain restart with no command changes doesn't sync, so
+# it survives those). We wrap the payload builder to re-append the existing
+# remote entry-point command whenever a sync would otherwise fire. This only
+# preserves what Discord already created — it never invents a command — and is
+# a no-op until Activities is enabled.
+_ENTRY_POINT_CMD_TYPE = 4  # ApplicationCommandType.PRIMARY_ENTRY_POINT
+_orig_build_sync_payload = bot._build_sync_payload
+
+
+def _build_sync_payload_keep_entry_point(remote_commands, cmd_scope, local_cmds_json, delete_cmds):
+    payload, needed = _orig_build_sync_payload(
+        remote_commands, cmd_scope, local_cmds_json, delete_cmds
+    )
+    # Only a firing sync (needed) rewrites the command list; the up-to-date
+    # no-op path leaves the remote entry point untouched already.
+    if needed:
+        try:
+            already = any(int(c.get("type", 1)) == _ENTRY_POINT_CMD_TYPE for c in payload)
+            if not already:
+                for rc in remote_commands:
+                    if int(rc.get("type", 1)) == _ENTRY_POINT_CMD_TYPE:
+                        payload.append({
+                            k: v for k, v in rc.items()
+                            if k not in ("id", "application_id", "version")
+                        })
+                        break
+        except Exception:
+            discord_logger.exception("Failed to preserve Activity entry-point command during sync")
+    return payload, needed
+
+
+bot._build_sync_payload = _build_sync_payload_keep_entry_point
+
 if os.getenv("STATUS") == "dev" or os.getenv("STATE") == "dev":
     bot_token = os.getenv('DEV_TOKEN')
 else:
