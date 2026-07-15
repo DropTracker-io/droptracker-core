@@ -1,6 +1,7 @@
 import asyncio
 import time
 from datetime import datetime
+from urllib.parse import quote
 import interactions
 from sqlalchemy import text
 from interactions import ActionRow, Button, ButtonStyle, ComponentContext, Embed, Extension, IntervalTrigger, OverwriteType, Permissions, Task, slash_command, slash_option, OptionType, SlashContext, listen
@@ -36,7 +37,7 @@ TICKET_TYPE_META = {
         "accent": 0x3498DB,
         "intro": "Something not tracking right on one of your accounts? Let's get it sorted.",
         "checklist": [
-            "The **exact in-game name(s)** of the affected account(s)",
+            "**Which account** is affected — your claimed accounts are loaded below; only include the exact RSN if it isn't listed",
             "What you expected to happen vs. what actually happened",
             "Roughly **when** the issue occurred, so we can check the logs",
             "A screenshot of your **RuneLite DropTracker plugin settings**, if submissions aren't arriving",
@@ -48,7 +49,7 @@ TICKET_TYPE_META = {
         "accent": 0x2ECC71,
         "intro": "Questions about your group's setup, configuration, or tracking? We can help.",
         "checklist": [
-            "Your **group name** (or group ID, if you know it)",
+            "**Which group** it's about, if it isn't one of the groups loaded below",
             "Which feature or setting the question is about (notifications, lootboard, events, ...)",
             "Screenshots of any settings or messages involved",
             "Whether your **WiseOldMan group** is up to date, if it's a membership issue",
@@ -72,10 +73,23 @@ TICKET_TYPE_META = {
         "intro": "Whatever it is, we're listening.",
         "checklist": [
             "A description of what you need help with",
-            "Any relevant screenshots, links, or account/group names",
+            "Any relevant screenshots or links",
         ],
     },
 }
+def _docs_footer_blocks():
+    """Trailing docs pointer for the account-snapshot card variants."""
+    return [
+        SeparatorComponent(divider=True),
+        TextDisplayComponent(
+            content="-# If we take a little while to reply, the docs cover most common setup and tracking questions."
+        ),
+        ActionRow(
+            Button(label="Browse the Docs", style=ButtonStyle.URL, url="https://www.droptracker.io/docs"),
+        ),
+    ]
+
+
 _DEFAULT_TYPE_META = {
     "label": "Support",
     "emoji": "🎫",
@@ -83,7 +97,7 @@ _DEFAULT_TYPE_META = {
     "intro": "Tell us what you need help with.",
     "checklist": [
         "A description of what you need help with",
-        "Any relevant screenshots, links, or account/group names",
+        "Any relevant screenshots or links",
     ],
 }
 
@@ -156,6 +170,7 @@ def build_ticket_snapshot(data: dict | None):
                         "plugin hub, then use `/claim-rsn` to link your in-game account(s) to Discord."
                     )
                 ),
+                *_docs_footer_blocks(),
                 accent_color=0xE74C3C,
             )
         ]
@@ -194,7 +209,9 @@ def build_ticket_snapshot(data: dict | None):
             )
         )
     for p in players:
-        wom_part = f"[`{p['wom_id']}`](https://wiseoldman.net/players/{p['wom_id']})" if p.get("wom_id") else "`—`"
+        # WOM's site routes by display name, not numeric ID
+        wom_url = f"https://wiseoldman.net/players/{quote(p['player_name'])}" if p.get("player_name") else None
+        wom_part = f"[`{p['wom_id']}`]({wom_url})" if p.get("wom_id") and wom_url else "`—`"
         detail_lines = [
             f"### 🧍 [{p['player_name']}](https://www.droptracker.io/players/{p['player_id']})",
             f"-# Player ID `{p['player_id']}` • WOM ID {wom_part}" + (f" • Total level `{p['total_level']}`" if p.get("total_level") else ""),
@@ -216,6 +233,7 @@ def build_ticket_snapshot(data: dict | None):
         blocks.append(SeparatorComponent(divider=True))
         blocks.append(TextDisplayComponent(content="\n".join(detail_lines)))
 
+    blocks.extend(_docs_footer_blocks())
     return [ContainerComponent(*blocks, accent_color=0x2ECC71)]
 
 
@@ -229,6 +247,7 @@ def build_ticket_snapshot_error():
                     "-# Please describe your issue and our team will help you shortly."
                 )
             ),
+            *_docs_footer_blocks(),
             accent_color=0xF39C12,
         )
     ]
