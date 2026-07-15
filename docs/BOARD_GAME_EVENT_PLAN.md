@@ -1,6 +1,10 @@
 # Board-Game Event Type — Full-Stack Implementation Plan
 
-**Status:** APPROVED 2026-07-15 — implementation in progress (P0 → P3). Author: investigation across events v2, legacy board-game archive, points systems, admin/entitlements, item/asset infra, and the bingo designer.
+**Status:** SHIPPED 2026-07-15 — P0–P3 core LIVE in production (migrations web43a/web44a/web45a applied; all phases E2E-verified against the live API; both repos committed + pushed + deployed). `board_game` is enabled + admin_only (staff testing) in /admin/event-types.
+
+**Deferred polish (tracked, not blocking):** rotating-shop turn-window editor UI (schema + filtering exist), Discord Activity board parity, admin turn-rewind tooling, custom piece-image upload, roadblock visibility choice (currently hidden traps).
+
+Author: investigation across events v2, legacy board-game archive, points systems, admin/entitlements, item/asset infra, and the bingo designer.
 
 This plan covers two features that ship together:
 
