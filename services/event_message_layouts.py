@@ -211,6 +211,19 @@ DEFAULT_LAYOUTS = {
             {"type": "standings", "limit": 3, "title": "**Standings**"},
         ],
     },
+    "event_board_turn": {
+        "accent_color": "#F1C40F",
+        "blocks": [
+            {"type": "text", "content": "### \U0001F3B2 {team_name} rolled `{dice_str}`"},
+            {
+                "type": "text",
+                "content": "Tile `{tile_from}` → `{tile_to}`\n"
+                           "**Next task** {next_task_label}\n"
+                           "**Coins** `+{coins_awarded}` (wallet `{coin_balance}`)\n"
+                           "-# Turn #{turn}, rolled after {player_name}'s completion",
+            },
+        ],
+    },
     "event_pending": {
         "accent_color": "#E67E22",
         "blocks": [

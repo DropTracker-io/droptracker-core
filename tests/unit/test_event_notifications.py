@@ -23,6 +23,7 @@ ALL_TYPES = (
     "event_started", "event_ended", "event_completion", "event_cell",
     "event_line", "event_blackout", "event_lead_change", "event_pending",
     "event_activation_failed", "event_signup_prompt", "event_task_progress",
+    "event_board_turn",
 )
 
 
@@ -42,6 +43,7 @@ class TestKindMapping:
             "event_activation_failed": "admin",
             "event_signup_prompt": "announcements",
             "event_task_progress": "completions",
+            "event_board_turn": "completions",
         }
 
     def test_all_families_covered(self):

@@ -292,6 +292,7 @@ class TestDefaultLayouts:
             "event_task_progress", "event_cell", "event_line",
             "event_blackout", "event_lead_change", "event_pending",
             "event_activation_failed", "event_signup_prompt", "event_board",
+            "event_board_turn",
         }
         assert set(ml.DEFAULT_LAYOUTS) == expected
 

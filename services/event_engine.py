@@ -553,6 +553,10 @@ class MatcherState:
     cells_by_task: dict = field(default_factory=dict)   # task_id -> [cell dict]
     participants: dict = field(default_factory=dict)    # player_id -> [(event_id, team_id, joined_at)]
     team_names: dict = field(default_factory=dict)      # team_id -> name
+    # Board-game turn pointers (web44a): (event_id, team_id) -> the ONE task
+    # id the matcher may evaluate for that team. Absent key = no live task
+    # (awaiting roll / blocked / finished) — submissions are ignored.
+    board_task_by_team: dict = field(default_factory=dict)
     loaded_at: float = 0.0
 
 
@@ -569,6 +573,7 @@ def _event_to_dict(event) -> dict:
         "submission_policy": getattr(event, "submission_policy", None) or "all",
         "message_config": getattr(event, "message_config", None),
         "has_bingo": bool(event.has_bingo),
+        "kind": getattr(event, "kind", None) or "standard",
         "board_size": int(event.board_size or 5),
         "bonus_line_points": int(event.bonus_line_points or 0),
         "bonus_blackout_points": int(event.bonus_blackout_points or 0),
@@ -601,6 +606,7 @@ def _task_to_dict(task) -> dict:
         "requires_confirmation": bool(task.requires_confirmation),
         "config": parse_task_config(task.config),
         "wom_metric": _task_wom_metric(task.type, task.target),
+        "difficulty": getattr(task, "difficulty", None),
     }
 
 
@@ -669,6 +675,18 @@ def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
                 if any(e == event_id for (e, _tid, _j) in existing):
                     continue  # already mapped to a team for this event
                 existing.append((event_id, t.id, None))
+
+    # Board-game turn pointers (web44a): only a team's CURRENT instance task
+    # may match. Loaded last so a roll mid-refresh still lands next tick.
+    board_ids = [eid for eid, e in state.events.items()
+                 if e.get("kind") == "board_game"]
+    if board_ids:
+        from db.models import EventBoardPosition
+
+        for pos in (session.query(EventBoardPosition)
+                    .filter(EventBoardPosition.event_id.in_(board_ids)).all()):
+            if pos.status == "active" and pos.current_task_id:
+                state.board_task_by_team[(pos.event_id, pos.team_id)] = pos.current_task_id
     return state
 
 
@@ -1286,6 +1304,42 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         player_name=player_name)
     session.flush()
 
+    # Board-game turn side-effects (web44a): coins, awaiting_roll, and — in
+    # auto-trigger mode — the dice roll itself. Same transaction; a board
+    # failure must not lose the completion, hence the broad guard.
+    board = None
+    if event.get("kind") == "board_game" and team_id is not None:
+        try:
+            from services.boardgame_engine import handle_board_completion
+
+            board = handle_board_completion(
+                session, redis_conn, event, task, team_id, player_id)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "board-game completion side-effects failed")
+    if board is not None:
+        result["board"] = board
+        if board.get("roll"):
+            # Auto-trigger mode rolled immediately: announce the move + the
+            # freshly drawn task alongside the completion message.
+            roll = board["roll"]
+            dice = roll.get("dice") or []
+            _enqueue_notification(session, "event_board_turn", event, player_id, {
+                "team_id": team_id,
+                "player_name": player_name,
+                "dice": dice,
+                "dice_str": " + ".join(str(d) for d in dice) or "?",
+                "tile_from": roll.get("from"),
+                "tile_to": roll.get("to"),
+                "turn": roll.get("turn"),
+                "won": bool(roll.get("won")),
+                "next_task_label": roll.get("task_label") or "—",
+                "coins_awarded": board.get("coins_awarded") or 0,
+                "coin_balance": board.get("coin_balance") or 0,
+            })
+
     frame = dict(result)
     if player_name:
         frame["player_name"] = player_name
@@ -1412,8 +1466,19 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict) ->
         if not accepts_submission_source(event, envelope):
             continue
 
+        # Board-game events (web44a): a team only ever works its CURRENT
+        # tile task — no live task (awaiting roll / blocked / finished)
+        # means nothing can match for this event.
+        board_task_id = None
+        if event.get("kind") == "board_game":
+            board_task_id = state.board_task_by_team.get((event_id, team_id))
+            if board_task_id is None:
+                continue
+
         xp_delta = None  # baseline folded at most once per (event, envelope)
         for task in state.tasks_by_event.get(event_id, []):
+            if board_task_id is not None and task["id"] != board_task_id:
+                continue
             match = match_task(task, envelope)
             if match is None:
                 continue

@@ -93,6 +93,50 @@ def _run_lifecycle_sweep(r) -> dict:
         reset_db_connections()
 
 
+def _end_won_event(r, event_id) -> None:
+    """End a board-game event whose winner just crossed the finish (win.rule
+    finish_tile). Reuses the normal lifecycle end (standings notification,
+    guild-mirror teardown, Redis gate)."""
+    from api.core import get_db_session, reset_db_connections
+    from db.models import Event
+    from services import event_lifecycle
+
+    if not event_id:
+        return
+    db_session = get_db_session()
+    try:
+        ev = db_session.query(Event).filter(Event.id == event_id).first()
+        if ev is not None and ev.status == "active":
+            event_lifecycle.end_event(db_session, ev)
+            db_session.commit()
+    except Exception:
+        db_session.rollback()
+        raise
+    finally:
+        db_session.close()
+        reset_db_connections()
+
+
+def _run_mercy_sweep(r) -> list:
+    """Board-game anti-stall tick (web44a): auto-complete overdue tile tasks
+    (zero coins) so an unobtainable drop can't freeze a team. Same cadence as
+    the lifecycle sweep; commit-per-run."""
+    from api.core import get_db_session, reset_db_connections
+    from services import boardgame_engine
+
+    db_session = get_db_session()
+    try:
+        swept = boardgame_engine.mercy_sweep(db_session, r)
+        db_session.commit()
+        return swept
+    except Exception:
+        db_session.rollback()
+        raise
+    finally:
+        db_session.close()
+        reset_db_connections()
+
+
 def _process_entry(r, state, entry_bytes) -> list:
     from api.core import get_db_session, reset_db_connections
     from services import event_engine
@@ -211,6 +255,16 @@ async def run_consumer() -> None:
                              summary.get("activated"), summary.get("ended"),
                              summary.get("failed"))
                     bumped = True  # transitions changed the active set
+                # Board-game mercy rule (web44a): overdue tile tasks
+                # auto-complete so RNG can't strand a team.
+                try:
+                    swept = await asyncio.to_thread(_run_mercy_sweep, r)
+                    if swept:
+                        log.info("Mercy sweep released %d team(s): %s",
+                                 len(swept), swept)
+                        bumped = True  # new instance tasks need a state reload
+                except Exception:
+                    log.error("Mercy sweep failed:\n%s", traceback.format_exc())
 
             if state is None or bumped or (time.time() - last_refresh) >= STATE_REFRESH_SECONDS:
                 state = await asyncio.to_thread(_refresh_state, r)
@@ -245,6 +299,20 @@ async def run_consumer() -> None:
                 log.info("Applied %s: event=%s task=%s team=%s",
                          outcome.get("kind"), outcome.get("event_id"),
                          outcome.get("task_id"), outcome.get("team_id"))
+                # Board game (web44a, win.rule=finish_tile): the first team
+                # to cross the finish ends the event — final standings post
+                # through the normal event_ended flow.
+                board = outcome.get("board") or {}
+                roll = board.get("roll") or {}
+                if roll.get("won"):
+                    # (The winning roll already published an admin bump, so
+                    # the state refreshes on the next loop pass.)
+                    try:
+                        await asyncio.to_thread(
+                            _end_won_event, r, outcome.get("event_id"))
+                    except Exception:
+                        log.error("Auto-end after board win failed:\n%s",
+                                  traceback.format_exc())
         except Exception:
             log.error("Error in event consumer loop:\n%s", traceback.format_exc())
             await asyncio.sleep(1)

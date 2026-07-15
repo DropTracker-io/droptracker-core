@@ -11,6 +11,7 @@ from __future__ import annotations
 from sqlalchemy import (
     BigInteger,
     Column,
+    Float,
     Integer,
     String,
     Text,
@@ -85,6 +86,25 @@ EVENT_CHANNEL_KINDS = ("announcements", "completions", "leaderboard", "admin")
 
 EVENT_BOARD_SIZES = (3, 4, 5, 6, 7)  # square boards; default 5
 
+# Task/tile difficulty tiers (legacy BoardGame elements, web44a): the tier a
+# board tile draws its random task from, and the tier→coin ladder's key.
+# Order matters — air is easiest, fire hardest.
+EVENT_TASK_DIFFICULTIES = ("air", "water", "earth", "fire")
+
+# Board-game tile roles (web_event_board_tiles.tile_kind).
+EVENT_BOARD_TILE_KINDS = ("start", "normal", "special", "finish")
+
+# Per-team turn state (web_event_board_positions.status):
+# - "active"        — the team has a live task on its current tile.
+# - "awaiting_roll" — task complete; waiting for the dice roll (manual
+#                     trigger mode) before advancing.
+# - "blocked"       — a roadblock/freeze effect is holding the team in place.
+# - "finished"      — reached the finish tile.
+EVENT_BOARD_POSITION_STATUSES = ("active", "awaiting_roll", "blocked", "finished")
+
+# web_event_coin_ledger.reason values.
+EVENT_COIN_REASONS = ("task_reward", "purchase", "refund", "admin", "bonus", "mercy")
+
 # Which intake paths may drive automatic task progress (web_events.submission_policy):
 # - "all"             — every processed submission counts (API + webhook fallback).
 # - "confirm_non_api" — non-API submissions count but always land as pending
@@ -132,6 +152,8 @@ EVENT_MESSAGE_TOGGLE_KEYS = (
     "event_lead_change",
     "event_pending",
     "event_activation_failed",
+    # Board game (web44a): a team rolled + moved (+ the next task drawn).
+    "event_board_turn",
 )
 
 # Message types that have a component-layout row in web_event_message_layouts:
@@ -212,6 +234,10 @@ class EventTask(Base):
     # EVENT_TASK_VISIBILITIES — how the task's library copy is shared: public
     # (any group may reuse it) or private (owning group only).
     visibility = Column(String(16), nullable=False, default="public", server_default="public")
+    # EVENT_TASK_DIFFICULTIES (web44a) — board-game tier. Rides over from the
+    # library row when a task is added so difficulty-tiles have a filterable
+    # roll pool; NULL on tasks that never set one (bingo/standard don't care).
+    difficulty = Column(String(24), nullable=True)
 
 
 class EventTeam(Base):
@@ -231,6 +257,14 @@ class EventTeam(Base):
     # explicit roster rows — so it runs as "anyone in this clan". See
     # services.event_lifecycle.activate_event / event_engine.load_matcher_state.
     auto_clan = Column(Boolean, nullable=False, default=False, server_default="0")
+    # --- board game (web44a) ---
+    # Coin wallet: running balance mirrored by the web_event_coin_ledger
+    # audit trail; every write is += / -= under a row lock (the score pattern).
+    coins = Column(Integer, nullable=False, default=0, server_default="0")
+    # Game piece: an OSRS item id rendered via /img/itemdb/{id}.png (zero
+    # upload), or a custom uploaded icon URL. item id wins when both set.
+    piece_item_id = Column(Integer, nullable=True)
+    piece_icon_url = Column(String(255), nullable=True)
 
 
 class EventGroup(Base):
@@ -595,4 +629,125 @@ class EventTypeTestGroup(Base):
     type_key = Column(String(24), ForeignKey("web_event_types.key"), nullable=False)
     group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=False)
     added_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+# --------------------------------------------------------------------------- #
+# Board game (web44a) — the dice-board event kind.
+# --------------------------------------------------------------------------- #
+class EventBoardTile(Base):
+    """One tile of a board-game event's track (the board designer's output).
+
+    ``idx`` is the 0..N-1 sequence order along the track (advancement order —
+    the LAST tile is the finish); ``x``/``y`` are fractional 0..1 positions on
+    the background image so the overlay stays responsive at any render size.
+
+    Task binding is difficulty-first: ``difficulty`` (the default mode) makes
+    the tile ROLL a random task from the event's per-difficulty task pool on
+    each landing, so different teams get different tasks; ``task_id`` pins one
+    specific task instead. Both NULL = a rest tile (no task; roll again)."""
+
+    __tablename__ = "web_event_board_tiles"
+    __table_args__ = (
+        Index("uq_web_board_tile_event_idx", "event_id", "idx", unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    idx = Column(Integer, nullable=False)
+    x = Column(Float, nullable=False, default=0.0)
+    y = Column(Float, nullable=False, default=0.0)
+    label = Column(String(255), nullable=True)
+    difficulty = Column(String(24), nullable=True)  # EVENT_TASK_DIFFICULTIES
+    task_id = Column(Integer, ForeignKey("web_event_tasks.id"), nullable=True)
+    tile_kind = Column(
+        String(16), nullable=False, default="normal", server_default="normal"
+    )  # EVENT_BOARD_TILE_KINDS
+    config = Column(Text, nullable=True)  # JSON: special-tile effects
+
+
+class EventBoardConfig(Base):
+    """Per-event board settings (one row per board-game event).
+
+    ``settings`` is the full §2.5 config surface as one JSON document
+    (movement/dice, tile_render, coins, shop, items, mercy, win) — swapped
+    wholesale by the Board settings UI, defaulted key-by-key at read time by
+    services/boardgame_engine.board_settings(), so a partial document never
+    breaks a mechanic. The background image lives on the /img static tree or
+    B2 depending on size; ``bg_width``/``bg_height`` preserve its aspect for
+    the fractional tile overlay."""
+
+    __tablename__ = "web_event_board_config"
+    __table_args__ = (
+        Index("uq_web_board_config_event", "event_id", unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    background_url = Column(String(255), nullable=True)
+    bg_width = Column(Integer, nullable=True)
+    bg_height = Column(Integer, nullable=True)
+    settings = Column(Text, nullable=True)  # JSON (§2.5); NULL = all defaults
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class EventBoardPosition(Base):
+    """A team's live board state — the turn pointer the whole mode hangs off.
+
+    One row per team, seeded at activation (tile 0, turn 0, first task).
+    ``current_task_id`` is the ONLY task the engine evaluates submissions
+    against for this team (board-game events filter the matcher to it);
+    ``turns_completed`` is the turn counter item-type cooldowns compare
+    against. ``mercy_deadline`` is the anti-stall auto-complete time (NULL
+    when the mercy rule is off)."""
+
+    __tablename__ = "web_event_board_positions"
+    __table_args__ = (
+        Index("idx_web_board_pos_event", "event_id"),
+        {"extend_existing": True},
+    )
+
+    team_id = Column(Integer, ForeignKey("web_event_teams.id"), primary_key=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    tile_idx = Column(Integer, nullable=False, default=0)
+    current_task_id = Column(Integer, ForeignKey("web_event_tasks.id"), nullable=True)
+    turns_completed = Column(Integer, nullable=False, default=0)
+    status = Column(
+        String(16), nullable=False, default="active", server_default="active"
+    )  # EVENT_BOARD_POSITION_STATUSES
+    # Last roll, JSON {"dice": [3, 5], "from": 7, "to": 15, "at": unix} — lets
+    # the client animate the exact faces and the audit trail reconstruct moves.
+    last_roll = Column(Text, nullable=True)
+    task_assigned_at = Column(DateTime, nullable=True)
+    mercy_deadline = Column(DateTime, nullable=True)
+    mercy_count = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class EventCoinLedger(Base):
+    """Append-only audit trail behind ``EventTeam.coins`` (one row per grant/
+    spend). The balance is the running column, NOT SUM(ledger) — the ledger
+    exists so admins can answer "where did this team's coins go" and refunds
+    can reference the original purchase row."""
+
+    __tablename__ = "web_event_coin_ledger"
+    __table_args__ = (
+        Index("idx_web_coin_ledger_team", "event_id", "team_id"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    team_id = Column(Integer, ForeignKey("web_event_teams.id"), nullable=False)
+    delta = Column(Integer, nullable=False)  # signed
+    reason = Column(String(16), nullable=False)  # EVENT_COIN_REASONS
+    # What this row credits/debits: e.g. ("task", task_id), ("purchase",
+    # inventory row id), ("tile", tile idx).
+    ref_type = Column(String(16), nullable=True)
+    ref_id = Column(BigInteger, nullable=True)
+    balance_after = Column(Integer, nullable=False)
+    acted_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    note = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)

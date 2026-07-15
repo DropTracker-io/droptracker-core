@@ -38,6 +38,8 @@ KIND_FOR_TYPE = {
     # Partial task progress (opt-in via message_config.task_progress —
     # 'milestones' or 'all'; default off).
     "event_task_progress": "completions",
+    # Board game (web44a): a team's dice roll + move + next task.
+    "event_board_turn": "completions",
 }
 
 EVENT_NOTIFICATION_TYPES = tuple(KIND_FOR_TYPE)
@@ -58,6 +60,7 @@ _COLORS = {
     "event_activation_failed": 0xED4245,
     "event_signup_prompt": 0x5865F2,  # Discord blurple — a call to action
     "event_task_progress": 0x3498DB,  # informational blue — progress, not victory
+    "event_board_turn": 0xF1C40F,  # dice gold — movement on the board
 }
 
 
@@ -85,6 +88,7 @@ DEFAULT_MESSAGE_TOGGLES = {
     "event_lead_change": True,
     "event_pending": True,
     "event_activation_failed": True,
+    "event_board_turn": True,
 }
 
 DEFAULT_MESSAGE_CONFIG = {
@@ -361,6 +365,33 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             )
         if data.get("task_icon"):
             spec["thumbnail"] = data["task_icon"]
+
+    elif notification_type == "event_board_turn":
+        dice = data.get("dice") or []
+        dice_str = " + ".join(str(d) for d in dice) if dice else "?"
+        total = sum(int(d) for d in dice) if dice else 0
+        if data.get("won"):
+            spec["title"] = f"\U0001F3C6 {team or 'A team'} reached the finish!"
+            spec["description"] = (
+                f"**{team or 'A team'}** rolled `{dice_str}` and crossed the "
+                f"finish line!"
+            )
+        else:
+            spec["title"] = f"\U0001F3B2 {team or 'A team'} rolled the dice"
+            spec["description"] = (
+                f"**{team or 'A team'}** rolled `{dice_str}`"
+                + (f" (**{total}**)" if len(dice) > 1 else "")
+                + f" — tile `{data.get('tile_from')}` → `{data.get('tile_to')}`"
+            )
+            nxt = data.get("next_task_label")
+            if nxt:
+                field("Next task", f"**{nxt}**", inline=False)
+        if data.get("coins_awarded"):
+            field("Coins", f"`+{int(data['coins_awarded'])}`")
+        if data.get("coin_balance") is not None:
+            field("Wallet", f"`{int(data['coin_balance'])} coins`")
+        if data.get("turn") is not None:
+            field("Turn", f"`#{int(data['turn'])}`")
 
     elif notification_type == "event_cell":
         spec["title"] = "\U0001F3AF Bingo cell completed"

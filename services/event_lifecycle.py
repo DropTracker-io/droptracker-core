@@ -158,6 +158,73 @@ def activation_blockers(session, event, now: Optional[datetime] = None) -> list:
                     f"Bingo cell(s) {unbound} are bound to tasks that do not "
                     "belong to this event — rebind or free them in the designer."
                 )
+
+    if (getattr(event, "kind", None) or "standard") == "board_game":
+        blockers.extend(_board_game_blockers(session, event))
+    return blockers
+
+
+def _board_game_blockers(session, event) -> list:
+    """Board-game readiness (web44a): a laid-out track, and a rollable task
+    pool covering every difficulty the tiles use (a difficulty-tile with an
+    empty pool would have nothing to draw on landing)."""
+    from db.models import EventBoardTile, EventTask
+
+    blockers = []
+    tiles = (
+        session.query(EventBoardTile)
+        .filter(EventBoardTile.event_id == event.id)
+        .order_by(EventBoardTile.idx)
+        .all()
+    )
+    if len(tiles) < 2:
+        blockers.append(
+            "The board needs at least two tiles (a start and a finish) — "
+            "lay out the track in the board designer first."
+        )
+        return blockers
+
+    from services.boardgame_engine import _ROLLABLE_TYPES, _is_board_instance
+
+    all_tasks = (
+        session.query(EventTask).filter(EventTask.event_id == event.id).all()
+    )
+    # Pins may target ANY event task (a custom manual task is fine); only the
+    # roll pool is restricted to auto-evaluable types.
+    task_ids = {t.id for t in all_tasks}
+    pool = [
+        t for t in all_tasks
+        if t.type in _ROLLABLE_TYPES and not _is_board_instance(t)
+    ]
+    pool_difficulties = {t.difficulty for t in pool if t.difficulty}
+
+    tile_difficulties = {t.difficulty for t in tiles if t.difficulty}
+    uncovered = sorted(d for d in tile_difficulties if d not in pool_difficulties)
+    if uncovered and not pool:
+        blockers.append(
+            "The event has no rollable tasks — add tasks (with difficulties) "
+            "so tiles can draw them."
+        )
+    elif uncovered:
+        # A missing tier falls back to the any-tier pool, so this is only a
+        # blocker when there is nothing at all; otherwise it would be a
+        # warning. Keep activation strict: tiers the designer used should
+        # exist in the pool.
+        blockers.append(
+            f"No tasks carry the difficulty tier(s) {', '.join(uncovered)} "
+            "used by the board's tiles — add tasks of those tiers (or retier "
+            "the tiles)."
+        )
+
+    unbound = sorted(
+        t.idx for t in tiles
+        if t.task_id is not None and t.task_id not in task_ids
+    )
+    if unbound:
+        blockers.append(
+            f"Board tile(s) {unbound} pin tasks that do not belong to this "
+            "event — rebind or clear them in the designer."
+        )
     return blockers
 
 
@@ -456,6 +523,14 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
 
     # Free cells complete for every team "from activation" (Task 20/21).
     event_engine.grant_free_cells(session, event)
+
+    # Board game (web44a): every team starts on tile 0 with its first task
+    # (and starting coins when configured). Idempotent, so a re-run after a
+    # failed activation is safe.
+    if (getattr(event, "kind", None) or "standard") == "board_game":
+        from services.boardgame_engine import seed_positions
+
+        seed_positions(session, event)
 
     from db.models import EventTeam
 
