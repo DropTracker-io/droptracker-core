@@ -457,7 +457,10 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
     base["viewer"] = viewer
     # Never the code itself on public reads — only whether one is required.
     base["join_requires_code"] = bool(ev.join_code)
-    if _is_event_admin(s, viewer_id, ev):
+    # Explicit admin signal for clients (the Activity's review affordances key
+    # off it) — join_code/discord_guild_id presence is not a reliable proxy.
+    base["can_manage"] = _is_event_admin(s, viewer_id, ev)
+    if base["can_manage"]:
         base["join_code"] = ev.join_code
         base["discord_guild_id"] = ev.discord_guild_id
     return base
@@ -589,32 +592,39 @@ async def list_events():
 async def event_launch_intent():
     """Claim (and clear) the current user's pending Activity deep-link target —
     set by the bot when they clicked an "Open in Discord" launch button on an
-    event message. One-shot: returns the event id once, then it's gone.
-    ``{"event_id": null}`` when nothing is pending (app opens to its home hub).
+    event message. One-shot: returns the target once, then it's gone.
+    ``{"event_id": null, "view": null}`` when nothing is pending (app opens to
+    its home hub). ``view`` names an in-app screen beyond the event page —
+    ``"review"`` (a "Review in app" button) opens the event's pending-
+    completions queue.
 
     Keyed by the user's Discord id, so a session only ever claims its own
     intent."""
     user_id = current_user_id()
 
     def _claim():
-        from services.activity_launch_core import intent_key
+        from services.activity_launch_core import LAUNCH_VIEWS, intent_key
         from utils.redis import redis_client
 
         with db_session() as s:
             user = load_user(s, user_id)
             discord_id = getattr(user, "discord_id", None) if user else None
         if not discord_id:
-            return None
+            return None, None
         key = intent_key(discord_id)
         raw = redis_client.get(key)
         if raw is None:
-            return None
+            return None, None
         redis_client.delete(key)  # one-shot claim
         value = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
-        return int(value) if value.isdigit() else None
+        # Wire format "<event_id>" or "<event_id>:<view>" (activity_launch_core).
+        event_id, _, view = value.partition(":")
+        if not event_id.isdigit():
+            return None, None
+        return int(event_id), (view if view in LAUNCH_VIEWS else None)
 
-    event_id = await asyncio.to_thread(_claim)
-    return private_no_store(jsonify({"event_id": event_id}))
+    event_id, view = await asyncio.to_thread(_claim)
+    return private_no_store(jsonify({"event_id": event_id, "view": view}))
 
 
 @events_bp.get("/events/by-channel/<channel_id>")

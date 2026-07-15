@@ -33,16 +33,31 @@ EVENT_BASE_URL = f"{WEBSITE_URL}/events"  # == services.event_notifications.EVEN
 ACTIVITY_APP_ID = os.environ.get("DISCORD_BOT_CLIENT_ID", "").strip() or "1172933457010245762"
 
 
-def activity_link_url(event_id=None) -> str:
+# In-app screens a deep link may open beyond the event page itself. Encoded as
+# a ``:<view>`` suffix on the event id everywhere it travels (button custom_id,
+# Activity Link custom_id, the Redis launch intent) — e.g. "review" opens the
+# event's pending-completions review queue.
+LAUNCH_VIEWS = frozenset({"review"})
+
+
+def _clean_view(view) -> "str | None":
+    return view if view in LAUNCH_VIEWS else None
+
+
+def activity_link_url(event_id=None, view=None) -> str:
     """Discord Activity Link — launches the app client-side when clicked, so
     it works from threads/announcement channels where the LAUNCH_ACTIVITY
     interaction callback is refused. An event id rides along as the link's
     ``custom_id`` (surfaced to the app as ``sdk.customId``, format
-    ``e:<event_id>``) so the Activity can deep-link to that event."""
+    ``e:<event_id>`` or ``e:<event_id>:<view>``) so the Activity can deep-link
+    to that event, optionally straight to one of its screens."""
     base = f"https://discord.com/activities/{ACTIVITY_APP_ID}"
     if event_id in (None, "", 0):
         return base
-    return f"{base}?custom_id=e%3A{event_id}"
+    target = f"e%3A{event_id}"
+    if _clean_view(view):
+        target += f"%3A{view}"
+    return f"{base}?custom_id={target}"
 
 # Brand gold, matching the Activity's OSRS palette.
 ACCENT = 0xC8A24A
@@ -91,24 +106,40 @@ def is_launch_button_interaction(data: dict) -> bool:
     )
 
 
-def launch_button_custom_id(event_id=None) -> str:
+def launch_button_custom_id(event_id=None, view=None) -> str:
     """The custom_id for a launch button: the bare card button when
-    ``event_id`` is None, else the event-scoped deep-link variant."""
+    ``event_id`` is None, else the event-scoped deep-link variant —
+    ``activity_launch_open:e:<event_id>[:<view>]``."""
     if event_id in (None, "", 0):
         return LAUNCH_BUTTON_CUSTOM_ID
-    return f"{LAUNCH_BUTTON_CUSTOM_ID}{LAUNCH_EVENT_INFIX}{event_id}"
+    custom_id = f"{LAUNCH_BUTTON_CUSTOM_ID}{LAUNCH_EVENT_INFIX}{event_id}"
+    if _clean_view(view):
+        custom_id += f":{view}"
+    return custom_id
 
 
-def parse_launch_custom_id(custom_id) -> "str | None":
-    """The event id encoded in an event-scoped launch button's custom_id, or
-    None for the bare card button / anything else."""
+def parse_launch_target(custom_id) -> "tuple[str, str | None] | None":
+    """``(event_id, view)`` from an event-scoped launch button's custom_id
+    (``view`` None for the plain event page), or None for the bare card
+    button / anything else. Unknown view suffixes degrade to the event page
+    rather than rejecting the whole click."""
     if not isinstance(custom_id, str):
         return None
     prefix = LAUNCH_BUTTON_CUSTOM_ID + LAUNCH_EVENT_INFIX
     if not custom_id.startswith(prefix):
         return None
-    event_id = custom_id[len(prefix):].strip()
-    return event_id if event_id.isdigit() else None
+    target = custom_id[len(prefix):].strip()
+    event_id, _, view = target.partition(":")
+    if not event_id.isdigit():
+        return None
+    return event_id, _clean_view(view)
+
+
+def parse_launch_custom_id(custom_id) -> "str | None":
+    """The event id encoded in an event-scoped launch button's custom_id, or
+    None for the bare card button / anything else."""
+    target = parse_launch_target(custom_id)
+    return target[0] if target else None
 
 
 def interaction_user_id(data: dict) -> "str | None":
@@ -128,16 +159,19 @@ def intent_key(discord_user_id) -> str:
 
 
 def launch_intent_from_interaction(data: dict) -> "tuple[str, str] | None":
-    """``(discord_user_id, event_id)`` to stash for a deep-link launch, or None
-    when this launch carries no event (the bare card button) or lacks a user.
-    Pure — the shell does the actual Redis write."""
-    event_id = parse_launch_custom_id((data.get("data") or {}).get("custom_id"))
-    if not event_id:
+    """``(discord_user_id, intent_value)`` to stash for a deep-link launch, or
+    None when this launch carries no event (the bare card button) or lacks a
+    user. The intent value is ``<event_id>`` or ``<event_id>:<view>`` — the
+    same wire format the web_api launch-intent claim parses. Pure — the shell
+    does the actual Redis write."""
+    target = parse_launch_target((data.get("data") or {}).get("custom_id"))
+    if not target:
         return None
     user_id = interaction_user_id(data)
     if not user_id:
         return None
-    return user_id, event_id
+    event_id, view = target
+    return user_id, (f"{event_id}:{view}" if view else event_id)
 
 
 def interaction_channel_type(data: dict):

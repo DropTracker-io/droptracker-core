@@ -215,6 +215,21 @@ class TestRenderMessageSpec:
             {"label": "Website", "url": "https://x/e/42"},
         ]
 
+    def test_launch_button_view_carried_through(self):
+        layout = {"blocks": [{"type": "buttons", "buttons": [
+            {"label": "Review in app", "launch": True, "view": "review"},
+        ]}]}
+        spec = ml.render_message_spec(layout, {"event_id": 42}, deep_link=True)
+        assert spec["blocks"][0]["buttons"] == [
+            {"label": "Review in app", "launch": True, "event_id": "42", "view": "review"},
+        ]
+        # unsupported channel: the Activity Link URL carries the view too
+        linked = ml.render_message_spec(
+            layout, {"event_id": 42}, deep_link=False, launch_link=True)
+        assert linked["blocks"][0]["buttons"] == [
+            {"label": "Review in app", "url": alc.activity_link_url(42, "review")},
+        ]
+
     def test_launch_button_dropped_when_deeplink_off(self):
         layout = {"blocks": [{"type": "buttons", "buttons": [
             {"label": "Open in Discord", "launch": True},

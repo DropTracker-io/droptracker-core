@@ -45,9 +45,11 @@ import json
 from datetime import datetime
 
 from quart import Blueprint, jsonify, request
+from sqlalchemy import func
 
 from db import (
     AuditLog,
+    Event,
     EventBingoCell,
     EventBingoCompletion,
     EventCompletion,
@@ -74,6 +76,7 @@ from web_api.routes.events import (
     _bump,
     _detail,
     _effective_status,
+    _is_event_admin,
     _load_event_or_404,
     _ts,
     clean_task_visibility,
@@ -151,6 +154,70 @@ def _clean_note(body: dict) -> str | None:
     if len(note) > 255:
         abort_problem(422, "Invalid note", "'note' must be at most 255 characters.")
     return note or None
+
+
+# --------------------------------------------------------------------------- #
+# Cross-event pending queue (Discord Activity review prompt)
+# --------------------------------------------------------------------------- #
+@event_admin_bp.get("/events/pending-review")
+async def my_pending_reviews():
+    """Pending completions awaiting the session user's confirmation, grouped
+    by event, across every ACTIVE event they administer. Powers the Discord
+    Activity's "awaiting review" pop-up and badges. Events the user can't
+    admin are silently absent — this is a personal work queue, not an audit
+    surface. Each event carries its newest pending rows (capped) plus the
+    true total, so the client can show a preview without paging."""
+    user_id = current_user_id()
+
+    def _load():
+        with db_session() as s:
+            counts = (
+                s.query(EventCompletion.event_id, func.count(EventCompletion.id))
+                .join(Event, Event.id == EventCompletion.event_id)
+                .filter(EventCompletion.status == "pending", Event.status == "active")
+                .group_by(EventCompletion.event_id)
+                .all()
+            )
+            if not counts:
+                return []
+            events = {
+                ev.id: ev
+                for ev in s.query(Event)
+                .filter(Event.id.in_([eid for eid, _ in counts]))
+                .all()
+            }
+            out = []
+            for event_id, count in counts:
+                ev = events.get(event_id)
+                if ev is None or not _is_event_admin(s, user_id, ev):
+                    continue
+                rows = (
+                    s.query(EventCompletion, EventTask.label, EventTeam.name,
+                            Player.player_name)
+                    .outerjoin(EventTask, EventTask.id == EventCompletion.task_id)
+                    .outerjoin(EventTeam, EventTeam.id == EventCompletion.team_id)
+                    .outerjoin(Player, Player.player_id == EventCompletion.player_id)
+                    .filter(EventCompletion.event_id == event_id,
+                            EventCompletion.status == "pending")
+                    .order_by(EventCompletion.id.desc())
+                    .limit(10)
+                    .all()
+                )
+                out.append({
+                    "event_id": event_id,
+                    "event_name": ev.name,
+                    "group_id": ev.group_id,
+                    "pending_count": int(count),
+                    "completions": [
+                        _completion_payload(c, task_label, team_name, player_name)
+                        for c, task_label, team_name, player_name in rows
+                    ],
+                })
+            out.sort(key=lambda e: -e["pending_count"])
+            return out
+
+    payload = await asyncio.to_thread(_load)
+    return private_no_store(jsonify(payload))
 
 
 # --------------------------------------------------------------------------- #

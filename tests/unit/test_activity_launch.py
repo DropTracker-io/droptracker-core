@@ -64,6 +64,17 @@ def test_parse_launch_custom_id_rejects_non_events():
     assert core.parse_launch_custom_id(None) is None
 
 
+def test_launch_custom_id_view_round_trip():
+    scoped = core.launch_button_custom_id(42, "review")
+    assert scoped == "activity_launch_open:e:42:review"
+    assert core.parse_launch_target(scoped) == ("42", "review")
+    assert core.parse_launch_custom_id(scoped) == "42"
+    # unknown views degrade to the plain event page, never reject the click
+    assert core.parse_launch_target("activity_launch_open:e:42:bogus") == ("42", None)
+    assert core.launch_button_custom_id(42, "bogus") == "activity_launch_open:e:42"
+    assert core.parse_launch_target(core.LAUNCH_BUTTON_CUSTOM_ID) is None
+
+
 # --- interaction user id + intent handoff ----------------------------------- #
 def test_interaction_user_id_guild_and_dm():
     assert core.interaction_user_id({"member": {"user": {"id": "111"}}}) == "111"
@@ -84,6 +95,11 @@ def test_launch_intent_from_interaction():
     assert core.launch_intent_from_interaction(
         {"type": 3, "data": {"custom_id": "activity_launch_open:e:42"}}
     ) is None
+    # view-scoped buttons stash "<event_id>:<view>" for the web_api claim
+    assert core.launch_intent_from_interaction(
+        {"type": 3, "member": {"user": {"id": "111"}},
+         "data": {"custom_id": "activity_launch_open:e:42:review"}}
+    ) == ("111", "42:review")
 
 
 def test_intent_key():

@@ -25,8 +25,10 @@ Block DSL (``layout`` JSON: ``{"accent_color": "#RRGGBB"?, "blocks": [...]}``):
 - ``{"type": "buttons", "buttons": [{"label": "...", "url": "..."}]}``
     -> ``ActionRow`` of buttons. A button is either a URL button
     (``{"label", "url"}``; dropped when its url doesn't resolve) or a launch
-    button (``{"label", "launch": true}``) that opens the Discord Activity
-    deep-linked to ``{event_id}`` from the context. Launch buttons are dropped
+    button (``{"label", "launch": true, "view"?: "review"}``) that opens the
+    Discord Activity deep-linked to ``{event_id}`` from the context — an
+    optional ``view`` targets a specific in-app screen (``"review"`` = the
+    event's pending-completions queue). Launch buttons are dropped
     when deep-linking is disabled (:func:`deeplink_enabled`) or there is no
     event id, so a row falling back to just its URL button still renders; an
     empty row is dropped.
@@ -220,7 +222,10 @@ DEFAULT_LAYOUTS = {
             },
             {
                 "type": "buttons",
-                "buttons": [{"label": "Open the review queue", "url": "{review_url}"}],
+                "buttons": [
+                    {"label": "\U0001F4F2 Review in app", "launch": True, "view": "review"},
+                    {"label": "Open the review queue", "url": "{review_url}"},
+                ],
             },
         ],
     },
@@ -418,19 +423,25 @@ def render_message_spec(
                     continue
                 if btn.get("launch"):
                     # Deep-link into the Discord Activity; the event id comes
-                    # from the context, not a URL. Dropped when deep-linking is
-                    # off or no event is in scope.
+                    # from the context, not a URL. An optional "view" opens a
+                    # specific in-app screen (e.g. "review" — the pending-
+                    # completions queue). Dropped when deep-linking is off or
+                    # no event is in scope.
                     event_id = (context or {}).get("event_id")
                     if event_id in (None, "", 0):
                         continue
+                    view = btn.get("view") if isinstance(btn.get("view"), str) else None
                     if deep_link:
-                        buttons.append({"label": label[:80], "launch": True,
-                                        "event_id": str(event_id)})
+                        button = {"label": label[:80], "launch": True,
+                                  "event_id": str(event_id)}
+                        if view:
+                            button["view"] = view
+                        buttons.append(button)
                     elif launch_link:
                         from services.activity_launch_core import activity_link_url
 
                         buttons.append({"label": label[:80],
-                                        "url": activity_link_url(event_id)})
+                                        "url": activity_link_url(event_id, view)})
                     continue
                 url = _substitute(str(btn.get("url") or ""), context)
                 if url.startswith("http"):
@@ -493,7 +504,7 @@ def build_components(spec: dict, ping_text: Optional[str] = None, extra_rows=Non
                         Button(
                             style=ButtonStyle.BLURPLE,
                             label=b["label"],
-                            custom_id=launch_button_custom_id(b["event_id"]),
+                            custom_id=launch_button_custom_id(b["event_id"], b.get("view")),
                         )
                     )
                 else:
