@@ -399,38 +399,29 @@ def perform_roll(session, redis_conn, event_id: int, team_id: int,
     tiles = load_tiles(session, event_id)
     if not tiles:
         return None
-    fin = finish_idx(tiles)
-    by_idx = {int(t.idx): t for t in tiles}
 
     faces = roll_dice(settings, rng)
     start = int(pos.tile_idx or 0)
-    # P3 hook: pass-through roadblock effects stop the piece short here.
-    dest = min(start + sum(faces), fin)
+    steps = sum(faces)
 
-    pos.tile_idx = dest
+    # Frozen (P3 freeze_opponent): the roll happens but the piece stays put —
+    # one charge of the freeze is consumed per roll.
+    frozen = _consume_freeze_charge(session, event_id, team_id)
+    if frozen:
+        steps = 0
+
     pos.turns_completed = int(pos.turns_completed or 0) + 1
+    summary = _move_piece(session, event_id, team_id, pos, tiles, start, steps,
+                          settings, rng=rng)
+    summary["dice"] = faces
+    if frozen:
+        summary["frozen"] = True
     pos.last_roll = json.dumps({
-        "dice": faces, "from": start, "to": dest,
+        "dice": faces, "from": start, "to": summary["to"],
         "at": int(datetime.now().timestamp()),
+        **({"frozen": True} if frozen else {}),
     })
-
-    summary: dict = {
-        "dice": faces, "from": start, "to": dest,
-        "turn": pos.turns_completed, "won": False,
-    }
-
-    if dest >= fin:
-        pos.status = "finished"
-        pos.current_task_id = None
-        pos.mercy_deadline = None
-        summary["won"] = True
-    else:
-        instance = assign_tile_task(
-            session, event_id, team_id, by_idx.get(dest), pos, settings, rng=rng)
-        if instance is not None:
-            summary["task_id"] = instance.id
-            summary["task_label"] = instance.label
-            summary["task_difficulty"] = instance.difficulty
+    summary["turn"] = pos.turns_completed
     session.flush()
 
     # Live board frame for the web/Activity views (SSE scope event:{id}).
@@ -453,6 +444,92 @@ def perform_roll(session, redis_conn, event_id: int, team_id: int,
         publish_event_admin_bump(redis_conn)
     except Exception:
         pass
+    return summary
+
+
+def _consume_freeze_charge(session, event_id: int, team_id: int) -> bool:
+    """One charge of an active freeze on this team (P3): True when frozen.
+    Decrements config.remaining; the effect expires at zero."""
+    from db.models import EventBoardEffect
+
+    effect = (session.query(EventBoardEffect)
+              .filter(EventBoardEffect.event_id == event_id,
+                      EventBoardEffect.target_team_id == team_id,
+                      EventBoardEffect.effect_type == "freeze_opponent",
+                      EventBoardEffect.status == "active")
+              .first())
+    if effect is None:
+        return False
+    try:
+        cfg = json.loads(effect.effect_config or "{}")
+        if not isinstance(cfg, dict):
+            cfg = {}
+    except (TypeError, ValueError):
+        cfg = {}
+    remaining = int(cfg.get("remaining", cfg.get("turns", 1)) or 1) - 1
+    cfg["remaining"] = remaining
+    effect.effect_config = json.dumps(cfg)
+    if remaining <= 0:
+        effect.status = "consumed"
+    session.flush()
+    return True
+
+
+def _first_roadblock(session, event_id: int, team_id: int, path: range):
+    """The nearest active roadblock on ``path`` NOT placed by this team."""
+    from db.models import EventBoardEffect
+
+    if not path:
+        return None
+    rows = (session.query(EventBoardEffect)
+            .filter(EventBoardEffect.event_id == event_id,
+                    EventBoardEffect.effect_type == "roadblock",
+                    EventBoardEffect.status == "active",
+                    EventBoardEffect.target_tile_idx.in_(list(path)),
+                    EventBoardEffect.source_team_id != team_id)
+            .all())
+    if not rows:
+        return None
+    return min(rows, key=lambda e: int(e.target_tile_idx))
+
+
+def _move_piece(session, event_id: int, team_id: int, pos, tiles: list,
+                start: int, steps: int, settings: dict,
+                rng: Optional[random.Random] = None) -> dict:
+    """Shared movement/landing core (rolls AND the advance power-up):
+    roadblock pass-through, finish clamp, landing task resolution. Mutates
+    ``pos``; caller stamps turn counters/last_roll and flushes."""
+    fin = finish_idx(tiles)
+    by_idx = {int(t.idx): t for t in tiles}
+    dest = min(start + max(0, steps), fin)
+
+    summary: dict = {"from": start, "to": dest, "won": False}
+
+    # Roadblocks (P3): the nearest one on the path stops the piece ON its
+    # tile and is consumed ("removed when it procs" — legacy Dinh's).
+    if dest > start:
+        block = _first_roadblock(session, event_id, team_id,
+                                 range(start + 1, dest + 1))
+        if block is not None:
+            dest = int(block.target_tile_idx)
+            block.status = "consumed"
+            summary["to"] = dest
+            summary["roadblock"] = {"tile_idx": dest,
+                                    "placed_by_team_id": block.source_team_id}
+
+    pos.tile_idx = dest
+    if dest >= fin:
+        pos.status = "finished"
+        pos.current_task_id = None
+        pos.mercy_deadline = None
+        summary["won"] = True
+    else:
+        instance = assign_tile_task(
+            session, event_id, team_id, by_idx.get(dest), pos, settings, rng=rng)
+        if instance is not None:
+            summary["task_id"] = instance.id
+            summary["task_label"] = instance.label
+            summary["task_difficulty"] = instance.difficulty
     return summary
 
 

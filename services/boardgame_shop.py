@@ -17,9 +17,11 @@ Type cooldowns compare against ``EventBoardPosition.turns_completed``:
 an item of type T is usable iff  turns_completed - last_used_turn(T)
 >= type_cooldown_turns.  Cooldown state lives in web_event_team_cooldowns.
 
-P2 handlers: skip_task / reroll_task / boost_coins (self-targeted).
-P3 (advance/roadblock/freeze/shield) raise UNIMPLEMENTED until their
-handlers land — their catalog rows ship inactive anyway.
+Live handlers — self-targeted (P2): skip_task / reroll_task / boost_coins;
+interference (P3): advance (teleport forward, roadblock-aware, no turn
+consumed), roadblock (tile trap: the next OTHER team to pass stops on it),
+freeze_opponent (target's next N rolls move 0 tiles; blocked by an armed
+shield), shield (absorbs the next offensive effect).
 
 Caller owns the transaction (routes commit); helpers only flush.
 """
@@ -49,7 +51,10 @@ class ShopError(Exception):
         self.detail = detail
 
 
-_P2_EFFECTS = ("skip_task", "reroll_task", "boost_coins")
+_LIVE_EFFECTS = (
+    "skip_task", "reroll_task", "boost_coins",          # P2 self-targeted
+    "advance", "roadblock", "freeze_opponent", "shield",  # P3 interference
+)
 
 
 def _cfg(raw) -> dict:
@@ -119,7 +124,7 @@ def available_items(session, event_id: int, settings: Optional[dict] = None) -> 
             "type_cooldown_turns": int(item.type_cooldown_turns or 0),
             "stock": rot.stock if rot is not None else None,
             # P3 effects surface greyed-out once their rows activate.
-            "usable_now": item.effect in _P2_EFFECTS,
+            "usable_now": item.effect in _LIVE_EFFECTS,
         })
     return out
 
@@ -173,7 +178,7 @@ def team_shop_state(session, event_id: int, team_id: int) -> dict:
                 last is None or turns - last >= cd
             ),
             "cooldown_ready_turn": ready_turn,
-            "usable_now": item.effect in _P2_EFFECTS,
+            "usable_now": item.effect in _LIVE_EFFECTS,
         })
     return {
         "team_id": team_id,
@@ -278,7 +283,7 @@ def use_item(session, redis_conn, event_id: int, team_id: int,
             item.effect in disabled_effects:
         raise ShopError(409, "Item disabled",
                         "The event's settings have disabled this item.")
-    if item.effect not in _P2_EFFECTS:
+    if item.effect not in _LIVE_EFFECTS:
         raise ShopError(409, "Not yet usable",
                         "This power-up's effect arrives in a later update.")
 
@@ -309,9 +314,13 @@ def use_item(session, redis_conn, event_id: int, team_id: int,
         "skip_task": _use_skip_task,
         "reroll_task": _use_reroll_task,
         "boost_coins": _use_boost_coins,
+        "advance": _use_advance,
+        "roadblock": _use_roadblock,
+        "freeze_opponent": _use_freeze_opponent,
+        "shield": _use_shield,
     }[item.effect]
     result = handler(session, redis_conn, event_id, team_id, pos, item,
-                     settings, rng=rng)
+                     settings, rng=rng, target=target)
 
     inv.status = "used"
     inv.used_turn = turns
@@ -344,7 +353,7 @@ def use_item(session, redis_conn, event_id: int, team_id: int,
 # P2 effect handlers (self-targeted)
 # --------------------------------------------------------------------------- #
 def _use_skip_task(session, redis_conn, event_id, team_id, pos, item,
-                   settings, rng=None) -> dict:
+                   settings, rng=None, target=None) -> dict:
     """Complete the current task without submissions (no coin reward) —
     the paid version of the mercy rule."""
     from db.models import EventProgress
@@ -376,7 +385,7 @@ def _use_skip_task(session, redis_conn, event_id, team_id, pos, item,
 
 
 def _use_reroll_task(session, redis_conn, event_id, team_id, pos, item,
-                     settings, rng=None) -> dict:
+                     settings, rng=None, target=None) -> dict:
     """Redraw the current tile's task (unobtainable-RNG escape hatch). The
     old instance is dropped (GC'd when progress-free); the new draw avoids
     repeating the same source task when the pool allows."""
@@ -447,7 +456,7 @@ def _use_reroll_task(session, redis_conn, event_id, team_id, pos, item,
 
 
 def _use_boost_coins(session, redis_conn, event_id, team_id, pos, item,
-                     settings, rng=None) -> dict:
+                     settings, rng=None, target=None) -> dict:
     """Arm a coin multiplier for the team's next completed task."""
     from db.models import EventBoardEffect
 
@@ -473,6 +482,163 @@ def _use_boost_coins(session, redis_conn, event_id, team_id, pos, item,
     ))
     session.flush()
     return {"boost_multiplier": multiplier}
+
+
+# --------------------------------------------------------------------------- #
+# P3 effect handlers (movement + interference)
+# --------------------------------------------------------------------------- #
+def _use_advance(session, redis_conn, event_id, team_id, pos, item,
+                 settings, rng=None, target=None) -> dict:
+    """Teleport forward without completing a task: rolls the item's own die
+    (effect_config.dice_sides, default 6) and moves — roadblock-aware, does
+    NOT consume a turn, and replaces any live task with the landed tile's."""
+    from services.boardgame_engine import _move_piece, load_tiles
+
+    if pos.status not in ("active", "awaiting_roll"):
+        raise ShopError(409, "Cannot teleport",
+                        f"The team is '{pos.status}' and cannot move.")
+    tiles = load_tiles(session, event_id)
+    if not tiles:
+        raise ShopError(409, "No board", "The event has no tiles.")
+    sides = 6
+    try:
+        sides = max(1, min(20, int(_cfg(item.effect_config).get("dice_sides", 6))))
+    except (TypeError, ValueError):
+        pass
+    steps = (rng or random).randint(1, sides)
+    start = int(pos.tile_idx or 0)
+    summary = _move_piece(session, event_id, team_id, pos, tiles, start, steps,
+                          settings, rng=rng)
+    session.flush()
+    # New instance task (or a finish) = matcher change.
+    try:
+        from services.event_engine import publish_event_admin_bump
+
+        publish_event_admin_bump(redis_conn)
+    except Exception:
+        pass
+    try:
+        from services.realtime import publish_event_update
+
+        publish_event_update(event_id, {
+            "kind": "board_roll", "event_id": event_id, "team_id": team_id,
+            "dice": [steps], "from": start, "to": summary["to"],
+            "won": summary["won"], "task_label": summary.get("task_label"),
+            "teleport": True,
+        })
+    except Exception:
+        pass
+    return {"teleport": True, **summary}
+
+
+def _use_roadblock(session, redis_conn, event_id, team_id, pos, item,
+                   settings, rng=None, target=None) -> dict:
+    """Place a trap on a tile: the next OTHER team whose movement crosses it
+    stops there (the block is consumed when it procs)."""
+    from db.models import EventBoardEffect
+    from services.boardgame_engine import finish_idx, load_tiles
+
+    tile_idx = (target or {}).get("target_tile_idx")
+    if tile_idx is None:
+        raise ShopError(422, "Pick a tile",
+                        "Pass target_tile_idx — the tile to block.")
+    tiles = load_tiles(session, event_id)
+    fin = finish_idx(tiles) or 0
+    valid = {int(t.idx) for t in tiles}
+    if int(tile_idx) not in valid or not (0 < int(tile_idx) < fin):
+        raise ShopError(422, "Bad tile",
+                        "Roadblocks go on a mid-track tile (not start/finish).")
+    existing = (session.query(EventBoardEffect)
+                .filter(EventBoardEffect.event_id == event_id,
+                        EventBoardEffect.effect_type == "roadblock",
+                        EventBoardEffect.status == "active",
+                        EventBoardEffect.target_tile_idx == int(tile_idx))
+                .first())
+    if existing is not None:
+        raise ShopError(409, "Tile occupied", "That tile is already blocked.")
+    session.add(EventBoardEffect(
+        event_id=event_id, source_team_id=team_id,
+        target_tile_idx=int(tile_idx), effect_type="roadblock",
+        effect_config=item.effect_config, status="active",
+    ))
+    session.flush()
+    return {"roadblock_tile_idx": int(tile_idx)}
+
+
+def _use_freeze_opponent(session, redis_conn, event_id, team_id, pos, item,
+                         settings, rng=None, target=None) -> dict:
+    """Freeze another team: their next N rolls move 0 tiles. An armed shield
+    on the target absorbs the freeze instead."""
+    from db.models import EventBoardEffect, EventBoardPosition
+
+    target_team = (target or {}).get("target_team_id")
+    if target_team is None:
+        raise ShopError(422, "Pick a target", "Pass target_team_id.")
+    target_team = int(target_team)
+    if target_team == team_id:
+        raise ShopError(422, "Bad target", "You cannot freeze your own team.")
+    tpos = (session.query(EventBoardPosition)
+            .filter(EventBoardPosition.team_id == target_team).first())
+    if tpos is None or tpos.event_id != event_id:
+        raise ShopError(404, "Bad target", "That team is not on this board.")
+    if tpos.status == "finished":
+        raise ShopError(409, "Bad target", "That team has already finished.")
+
+    # Shield check: an armed shield eats the freeze.
+    shield = (session.query(EventBoardEffect)
+              .filter(EventBoardEffect.event_id == event_id,
+                      EventBoardEffect.target_team_id == target_team,
+                      EventBoardEffect.effect_type == "shield",
+                      EventBoardEffect.status == "active")
+              .first())
+    if shield is not None:
+        shield.status = "consumed"
+        session.flush()
+        return {"blocked_by_shield": True, "target_team_id": target_team}
+
+    existing = (session.query(EventBoardEffect)
+                .filter(EventBoardEffect.event_id == event_id,
+                        EventBoardEffect.target_team_id == target_team,
+                        EventBoardEffect.effect_type == "freeze_opponent",
+                        EventBoardEffect.status == "active")
+                .first())
+    if existing is not None:
+        raise ShopError(409, "Already frozen", "That team is already frozen.")
+    turns = 2
+    try:
+        turns = max(1, min(5, int(_cfg(item.effect_config).get("turns", 2))))
+    except (TypeError, ValueError):
+        pass
+    session.add(EventBoardEffect(
+        event_id=event_id, source_team_id=team_id, target_team_id=target_team,
+        effect_type="freeze_opponent",
+        effect_config=json.dumps({"turns": turns, "remaining": turns}),
+        status="active",
+    ))
+    session.flush()
+    return {"target_team_id": target_team, "frozen_rolls": turns}
+
+
+def _use_shield(session, redis_conn, event_id, team_id, pos, item,
+                settings, rng=None, target=None) -> dict:
+    """Arm a one-shot shield: the next offensive effect against this team is
+    absorbed. One armed shield at a time."""
+    from db.models import EventBoardEffect
+
+    existing = (session.query(EventBoardEffect)
+                .filter(EventBoardEffect.event_id == event_id,
+                        EventBoardEffect.target_team_id == team_id,
+                        EventBoardEffect.effect_type == "shield",
+                        EventBoardEffect.status == "active")
+                .first())
+    if existing is not None:
+        raise ShopError(409, "Already shielded", "A shield is already armed.")
+    session.add(EventBoardEffect(
+        event_id=event_id, source_team_id=team_id, target_team_id=team_id,
+        effect_type="shield", effect_config=None, status="active",
+    ))
+    session.flush()
+    return {"shielded": True}
 
 
 def consume_coin_boost(session, event_id: int, team_id: int) -> int:
