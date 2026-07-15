@@ -151,7 +151,9 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # Optional WOM group verification code: lets event freshness passes queue
     # a group-wide WOM "update-all" (one API call) instead of per-player
     # updates. Admin-only, redacted in audit logs like export_api_key.
-    {"key": "wom_verification_code", "type": "string", "default": None},
+    # "password" coerces exactly like "string" (both coerce_* functions fall
+    # through); the type only changes how the web editor renders the input.
+    {"key": "wom_verification_code", "type": "password", "default": None},
 ]
 
 _BY_KEY = {f["key"]: f for f in GROUP_CONFIG_FIELDS}
