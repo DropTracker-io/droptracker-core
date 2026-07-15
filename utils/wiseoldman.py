@@ -826,33 +826,18 @@ _REDIS_BULK_GAINED_PREFIX = "wom:bulkgained:"
 _REDIS_BULK_HISCORES_PREFIX = "wom:bulkhiscores:"
 UPDATE_ALL_BADCODE_PREFIX = "wom:updateall:badcode:"
 
+# Skill/boss slug sets for family separation in metric mapping below. Single
+# source of truth is the wom.py enum — and we pin the DropTracker fork (see
+# requirements.txt / deploy/wom/README.md), which is kept current with the live
+# WOM API, so no second hand-maintained list is needed here. If a brand-new
+# boss/skill is missing, mapping just returns None for it (WOM-hybrid event
+# tracking falls back to plugin-only, logged by the reconciler) — never a crash.
 try:
     _WOM_SKILL_SLUGS = {m.value for m in wom.Skills}
     _WOM_BOSS_SLUGS = {m.value for m in wom.Bosses}
 except Exception:  # enum shape changed — validation degrades to pass-through
     _WOM_SKILL_SLUGS = set()
     _WOM_BOSS_SLUGS = set()
-
-# Metrics the WOM service tracks but pristine wom.py 1.0.0 doesn't know —
-# wom.py is unmaintained at our pin, so the venv's copy is hand-patched with
-# these (see deploy/wom/README.md; the canonical diff lives there). The
-# validation sets exist only to reject typos, so they must trail the live API,
-# not the library: augment here so metric mapping keeps working even on a
-# pristine (unpatched) install such as CI. Keep additive-only and in sync with
-# deploy/wom/enums-divergence.patch.
-if _WOM_SKILL_SLUGS:
-    _WOM_SKILL_SLUGS |= {"sailing"}
-if _WOM_BOSS_SLUGS:
-    _WOM_BOSS_SLUGS |= {
-        "amoxliatl",
-        "brutus",
-        "doom_of_mokhaiotl",
-        "the_hueycoatl",
-        "maggot_king",
-        "shellbane_gryphon",
-        "the_royal_titans",
-        "yama",
-    }
 
 _SKILL_METRIC_OVERRIDES = {"runecraft": "runecrafting"}
 
