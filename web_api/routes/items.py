@@ -85,14 +85,22 @@ def _compute_stats(item_id: int) -> dict:
     hidden = hidden_player_ids()
     partition = get_current_partition()
     with db_session() as s:
-        rows = s.execute(
+        # Aggregate in SQL rather than hydrating every per-player group into
+        # Python. Backed by the covering index idx_item_stats_covering
+        # (item_id, player_id, partition, total_value, quantity, drop_count,
+        # last_drop_time), all three reads are index-only — ubiquitous items
+        # (Coins: 800k+ hourly rows) went from millions of row lookups / 25s+
+        # (read-timeout → the failing background stats build) to a ~1s index
+        # scan. Mirrors `_npc_stats`.
+        lifetime = s.execute(
             text(
-                "SELECT player_id, SUM(total_value), SUM(quantity), SUM(drop_count), "
+                "SELECT COALESCE(SUM(total_value),0), COALESCE(SUM(quantity),0), "
+                "       COALESCE(SUM(drop_count),0), COUNT(DISTINCT player_id), "
                 "       MAX(last_drop_time) "
-                "FROM player_item_hourly_totals WHERE item_id = :iid GROUP BY player_id"
+                "FROM player_item_hourly_totals WHERE item_id = :iid"
             ),
             {"iid": item_id},
-        ).fetchall()
+        ).fetchone()
         month = s.execute(
             text(
                 "SELECT COALESCE(SUM(total_value),0), COALESCE(SUM(quantity),0), "
@@ -101,34 +109,34 @@ def _compute_stats(item_id: int) -> dict:
             ),
             {"iid": item_id, "part": partition},
         ).fetchone()
+        top_rows = s.execute(
+            text(
+                "SELECT player_id, SUM(total_value) AS v, SUM(quantity) AS q, "
+                "       SUM(drop_count) AS c "
+                "FROM player_item_hourly_totals WHERE item_id = :iid "
+                "GROUP BY player_id ORDER BY v DESC LIMIT :lim"
+            ),
+            {"iid": item_id, "lim": _TOP_RECEIVERS_LIMIT + len(hidden)},
+        ).fetchall()
 
-        total_value = total_qty = total_count = 0
+        top = [r for r in top_rows if int(r[0]) not in hidden][:_TOP_RECEIVERS_LIMIT]
+        names = _player_names(s, {int(r[0]) for r in top})
+
+    total_value = int(lifetime[0] or 0)
+    total_qty = int(lifetime[1] or 0)
+    total_count = int(lifetime[2] or 0)
+    unique_players = int(lifetime[3] or 0)
+    try:
+        last_ts = int(lifetime[4].timestamp()) if lifetime[4] else None
+    except Exception:
         last_ts = None
-        per_player = []
-        for pid, v, q, c, last in rows:
-            v, q, c = int(v or 0), int(q or 0), int(c or 0)
-            total_value += v
-            total_qty += q
-            total_count += c
-            try:
-                ts = int(last.timestamp()) if last else None
-            except Exception:
-                ts = None
-            if ts and (last_ts is None or ts > last_ts):
-                last_ts = ts
-            if int(pid) not in hidden:
-                per_player.append((int(pid), v, q, c))
-
-        per_player.sort(key=lambda r: r[1], reverse=True)
-        top = per_player[:_TOP_RECEIVERS_LIMIT]
-        names = _player_names(s, {pid for pid, *_ in top})
 
     return {
         "lifetime": {
             "loot": money(total_value),
             "quantity": total_qty,
             "drop_count": total_count,
-            "unique_players": len(rows),
+            "unique_players": unique_players,
             "last_drop_ts": last_ts,
         },
         "month": {
@@ -141,11 +149,11 @@ def _compute_stats(item_id: int) -> dict:
         "top_receivers": [
             {
                 "rank": i + 1,
-                "player_id": pid,
-                "player_name": names.get(pid, "Unknown"),
-                "loot": money(v),
-                "quantity": q,
-                "drop_count": c,
+                "player_id": int(pid),
+                "player_name": names.get(int(pid), "Unknown"),
+                "loot": money(int(v or 0)),
+                "quantity": int(q or 0),
+                "drop_count": int(c or 0),
             }
             for i, (pid, v, q, c) in enumerate(top)
         ],
