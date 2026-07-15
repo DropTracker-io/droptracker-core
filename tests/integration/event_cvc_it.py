@@ -29,7 +29,7 @@ for _k in ("DB_USER", "DB_PASS"):
         os.environ[_k] = _env[_k]
 
 import redis as _redis  # noqa: E402
-from sqlalchemy import create_engine, insert  # noqa: E402
+from sqlalchemy import create_engine, delete, insert  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from db.models import (  # noqa: E402
@@ -64,6 +64,85 @@ def env(kind, data, player_id=None, ts=None):
     return {"v": 1, "kind": kind, "guid": f"cvcit-{os.getpid()}-{_guid_counter[0]}",
             "player_id": player_id, "player_name": "CvcIT", "ts": int(ts),
             "data": data}
+
+
+def auto_clan_reconcile_scenario(session, pid_salt, now):
+    """Whole-clan (auto_clan) rosters mirror clan membership over the event's
+    life: activation materializes the current clan onto its team, and each
+    later sync adds players who joined the clan and removes players who left —
+    the behaviour a whole-clan event promises its organisers."""
+    ca = Group("CvC AC A", 95_000_000 + pid_salt, str(700_000 + pid_salt))
+    cb = Group("CvC AC B", 96_000_000 + pid_salt, str(800_000 + pid_salt))
+    session.add_all([ca, cb])
+    session.flush()
+
+    players = []
+    for i in range(4):
+        p = Player(wom_id=97_000_000 + pid_salt * 10 + i, player_name=f"ACp{i}",
+                   account_hash=f"cvcac-{pid_salt}-{i}")
+        players.append(p)
+    session.add_all(players)
+    session.flush()
+    a_members = [players[0].player_id, players[1].player_id, players[2].player_id]
+    b_members = [players[3].player_id]
+    for pid in a_members:
+        session.execute(insert(user_group_association).values(
+            player_id=pid, group_id=ca.group_id))
+    for pid in b_members:
+        session.execute(insert(user_group_association).values(
+            player_id=pid, group_id=cb.group_id))
+
+    # clan-vs-clan event with NO teams → whole-clan (auto_clan) mode.
+    ev = Event(name="CvC AC event", status="draft", group_id=ca.group_id,
+               mode="clan_vs_clan", formation_mode="admin_assign",
+               starts_at=now - timedelta(days=1), ends_at=now + timedelta(days=1),
+               has_bingo=False, board_size=5)
+    session.add(ev)
+    session.flush()
+    session.add(EventGroup(event_id=ev.id, group_id=ca.group_id, role="host",
+                           status="accepted", responded_at=now))
+    session.add(EventGroup(event_id=ev.id, group_id=cb.group_id, role="opponent",
+                           status="accepted", responded_at=now))
+    ev.activated_at = now
+    ev.status = "active"
+    session.flush()
+
+    def roster_for(gid):
+        return {pid for (pid,) in
+                session.query(EventTeamMember.player_id)
+                .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+                .filter(EventTeam.event_id == ev.id, EventTeam.group_id == gid).all()}
+
+    # Activation seeds one auto_clan team per clan and materializes the roster.
+    assert event_lifecycle._ensure_whole_clan_teams(session, ev) == 2
+    event_lifecycle.sync_auto_clan_rosters(session, ev, now=now)
+    assert roster_for(ca.group_id) == set(a_members), roster_for(ca.group_id)
+    assert roster_for(cb.group_id) == set(b_members), roster_for(cb.group_id)
+
+    # JOIN mid-event: a new player joins clan A → next reconcile adds them.
+    newp = Player(wom_id=98_000_000 + pid_salt, player_name="ACnew",
+                  account_hash=f"cvcac-new-{pid_salt}")
+    session.add(newp)
+    session.flush()
+    session.execute(insert(user_group_association).values(
+        player_id=newp.player_id, group_id=ca.group_id))
+    session.flush()
+    assert event_lifecycle.sync_auto_clan_rosters(session, ev, now=now) == 1
+    assert newp.player_id in roster_for(ca.group_id)
+
+    # LEAVE mid-event: an existing member leaves clan A → next reconcile removes
+    # them (their team row goes; any completions would stand).
+    session.execute(delete(user_group_association).where(
+        user_group_association.c.group_id == ca.group_id,
+        user_group_association.c.player_id == a_members[0]))
+    session.flush()
+    assert event_lifecycle.sync_auto_clan_rosters(session, ev, now=now) == 1
+    assert a_members[0] not in roster_for(ca.group_id)
+    assert roster_for(ca.group_id) == {a_members[1], a_members[2], newp.player_id}
+
+    # A settled roster is a no-op (idempotent).
+    assert event_lifecycle.sync_auto_clan_rosters(session, ev, now=now) == 0
+    print("AUTO_CLAN RECONCILE ASSERTIONS PASSED")
 
 
 def main():
@@ -187,6 +266,9 @@ def main():
         session.refresh(team_h)
         assert team_o.score == 10, team_o.score
         assert team_h.score == 0, team_h.score
+
+        # ── Whole-clan (auto_clan) roster reconcile: join adds, leave removes ─
+        auto_clan_reconcile_scenario(session, pid_salt, now)
 
         # ── End: guild rows retired for BOTH guilds ──────────────────────────
         event_lifecycle.end_event(session, ev, now=now)

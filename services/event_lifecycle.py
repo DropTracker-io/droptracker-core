@@ -317,23 +317,35 @@ def _ensure_whole_clan_teams(session, event) -> int:
 
 
 def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> int:
-    """Materialize whole-clan rosters (clan_vs_clan): every current member of
-    an ``auto_clan`` team's clan gets a real ``EventTeamMember`` row, so
-    nobody has to sign up — the teams page, join panel and Activity all show
-    the full clan from the moment the event starts.
+    """Reconcile whole-clan rosters (clan_vs_clan) so an ``auto_clan`` team's
+    materialized ``EventTeamMember`` rows always mirror its clan's *current*
+    membership. Two directions, both automatic — no sign-up needed:
 
-    The matcher already *credits* clan members roster-lessly
+    - **join**: a current clan member with no row gets one (``joined_at`` is the
+      event start, matching auto-clan credit semantics where the event window is
+      the only cutoff), so the teams page, join panel and Activity show the full
+      clan from the moment the event starts;
+    - **leave**: a materialized row whose player has since left the clan (or
+      switched to the other participating clan) is deleted, so they stop being
+      credited to a clan they no longer belong to.
+
+    Removal matches the player-facing ``POST /events/{id}/leave`` route: only
+    the roster row is deleted — the player's existing completions/progress stay
+    (history stands). ``auto_clan`` teams represent "the whole clan", so their
+    roster is a pure mirror of clan membership; a player explicitly placed on a
+    *non*-auto team is never touched (removal is scoped to auto_clan teams) and
+    never re-added while they hold that placement.
+
+    The matcher also credits clan members roster-lessly between ticks
     (:func:`services.event_engine.load_matcher_state` expands auto_clan teams
-    from ``user_group_association`` on every reload), so this is about
-    visibility and parity: real rows are what every read surface renders.
-    ``joined_at`` is the event start (not "now"), matching the auto-clan
-    credit semantics where the event window is the only cutoff.
+    from ``user_group_association`` on every reload), but only the materialized
+    rows here are what every read surface renders — and only deleting a departed
+    member's row stops the matcher loading it as an explicit participant.
 
     Idempotent and safe to run repeatedly — the sweep calls it every tick for
-    active clan_vs_clan events so players who join a clan mid-event appear on
-    its team automatically. Players already on ANY team in the event (explicit
-    placement, or a member of both clans) are never re-added. Returns the
-    number of members added; caller owns the commit."""
+    active clan_vs_clan events, so joining or leaving a participating clan
+    mid-event propagates within one tick. Returns the number of roster changes
+    (added + removed); caller owns the commit."""
     if (getattr(event, "mode", None) or "standard") != "clan_vs_clan":
         return 0
     from db.models import EventTeam, EventTeamMember
@@ -343,18 +355,14 @@ def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> in
     auto_teams = [t for t in teams if getattr(t, "auto_clan", False) and t.group_id]
     if not auto_teams:
         return 0
-    team_ids = [t.id for t in teams]
-    on_event = {
-        pid for (pid,) in session.query(EventTeamMember.player_id)
-        .filter(EventTeamMember.team_id.in_(team_ids))
-        .all()
-    }
-    joined_at = event.activated_at or event.starts_at or now or datetime.now()
-    added = 0
+
+    # Current membership of each auto_clan team's clan. distinct() — the known
+    # NULL-user_id insert race can leave duplicate association rows, and one
+    # player must map to one row.
+    clan_members: dict = {}
     for team in auto_teams:
-        # distinct() — user_group_association can hold duplicate rows (the
-        # known NULL-user_id insert race), and one player must map to one row.
-        clan_pids = (
+        clan_members[team.id] = {
+            pid for (pid,) in
             session.query(user_group_association.c.player_id)
             .filter(
                 user_group_association.c.group_id == team.group_id,
@@ -362,8 +370,33 @@ def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> in
             )
             .distinct()
             .all()
-        )
-        for (pid,) in clan_pids:
+        }
+
+    auto_team_ids = [t.id for t in auto_teams]
+    removed = 0
+    # Leave first: drop rows on an auto_clan team whose player is no longer in
+    # that team's clan. A clan-switcher lands on the other clan's team in the
+    # add pass below (they're on no team once this deletes their old row).
+    for m in (session.query(EventTeamMember)
+              .filter(EventTeamMember.team_id.in_(auto_team_ids)).all()):
+        if m.player_id not in clan_members.get(m.team_id, ()):
+            session.delete(m)
+            removed += 1
+    if removed:
+        session.flush()
+
+    # Who is on ANY team in the event now (post-removal): the one-team-per-
+    # player guard for the add pass (respects explicit placement + dual clans).
+    on_event = {
+        pid for (pid,) in
+        session.query(EventTeamMember.player_id)
+        .filter(EventTeamMember.team_id.in_([t.id for t in teams]))
+        .all()
+    }
+    joined_at = event.activated_at or event.starts_at or now or datetime.now()
+    added = 0
+    for team in auto_teams:
+        for pid in clan_members[team.id]:
             if pid in on_event:
                 continue
             session.add(EventTeamMember(team_id=team.id, player_id=pid, joined_at=joined_at))
@@ -371,7 +404,7 @@ def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> in
             added += 1
     if added:
         session.flush()
-    return added
+    return added + removed
 
 
 def activate_event(session, event, *, actor_user_id=None, user=None,
@@ -592,9 +625,10 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
             session.rollback()
             summary["failed"].append({"id": event_id, "detail": exc.detail})
 
-    # Whole-clan roster top-up: players who joined a participating clan after
-    # a clan_vs_clan event started get their team row on the next tick. No-op
-    # (two cheap queries) for events without auto_clan teams.
+    # Whole-clan roster reconcile: players who joined a participating clan after
+    # a clan_vs_clan event started get their team row on the next tick, and
+    # players who left get their row removed. No-op (one cheap query) for
+    # events without auto_clan teams.
     for event in rows:
         if event.status != "active" or event.id in due["end"]:
             continue
