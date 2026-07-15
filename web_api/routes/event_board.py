@@ -718,3 +718,142 @@ async def roll_board(event_id: int):
     summary = await asyncio.to_thread(_apply)
     _bump(event_id)
     return private_no_store(jsonify(summary))
+
+
+# --------------------------------------------------------------------------- #
+# Shop (web45a)
+# --------------------------------------------------------------------------- #
+def _resolve_team_for_action(s, ev, user_id: int, explicit_team_id):
+    """The (team_id, is_member, is_admin) context for shop/roll actions:
+    members act for their own team; event admins may act for any team by
+    passing team_id."""
+    user = load_user(s, user_id)
+    admin = _is_event_admin(s, user_id, ev) or is_superadmin(user)
+    my_team_ids = {
+        team_id for (team_id,) in
+        s.query(EventTeamMember.team_id)
+        .join(Player, Player.player_id == EventTeamMember.player_id)
+        .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+        .filter(EventTeam.event_id == ev.id, Player.user_id == user_id)
+        .all()
+    }
+    team_id = explicit_team_id
+    if team_id is None:
+        if len(my_team_ids) != 1:
+            abort_problem(422, "Which team?",
+                          "You are not on exactly one team — pass team_id.")
+        team_id = next(iter(my_team_ids))
+    is_member = team_id in my_team_ids
+    if not is_member and not admin:
+        abort_problem(403, "Forbidden", "You are not on that team.")
+    return team_id, is_member, admin
+
+
+@event_board_bp.get("/events/<int:event_id>/board/shop")
+async def get_board_shop(event_id: int):
+    """The event's purchasable catalog plus (when the caller is on a team or
+    passes ?team_id= as an admin) that team's wallet/inventory/cooldowns."""
+    user_id = current_user_id()
+    raw_team = (request.args.get("team_id") or "").strip()
+    explicit_team = int(raw_team) if raw_team.isdigit() else None
+
+    def _read():
+        from services.boardgame_shop import available_items, team_shop_state
+
+        with db_session() as s:
+            ev = _load_board_event(s, event_id, for_write=False)
+            if _effective_status(ev) == "draft" and not _can_view_draft(s, user_id, ev):
+                abort_problem(404, "Event not found", f"No event {event_id}.")
+            payload = {"items": available_items(s, ev.id)}
+            # Team context is optional — spectators still see the catalog.
+            try:
+                team_id, _m, _a = _resolve_team_for_action(
+                    s, ev, user_id, explicit_team)
+                payload["team"] = team_shop_state(s, ev.id, team_id)
+            except Exception:
+                payload["team"] = None
+            return payload
+
+    return private_no_store(jsonify(await asyncio.to_thread(_read)))
+
+
+@event_board_bp.post("/events/<int:event_id>/board/shop/buy")
+async def buy_board_item(event_id: int):
+    user_id = current_user_id()
+    body = await json_body()
+    shop_item_id = body.get("shop_item_id")
+    if not isinstance(shop_item_id, int) or isinstance(shop_item_id, bool):
+        abort_problem(422, "Invalid item", "'shop_item_id' must be an integer.")
+    explicit_team = body.get("team_id")
+    if explicit_team is not None and (
+            not isinstance(explicit_team, int) or isinstance(explicit_team, bool)):
+        abort_problem(422, "Invalid team_id", "'team_id' must be an integer.")
+
+    def _apply():
+        from services.boardgame_shop import ShopError, buy_item
+
+        with db_session() as s:
+            ev = _load_board_event(s, event_id, for_write=False)
+            if ev.status != "active":
+                abort_problem(409, "Event not live",
+                              "The shop opens while the event is active.")
+            team_id, _m, _a = _resolve_team_for_action(s, ev, user_id, explicit_team)
+            try:
+                result = buy_item(s, ev.id, team_id, shop_item_id, user_id)
+            except ShopError as e:
+                abort_problem(e.status, e.title, e.detail)
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id,
+                action="event.board.shop.buy", target=str(ev.id),
+                after=f"team={team_id} item={shop_item_id}",
+            ))
+            s.commit()
+            return {"team_id": team_id, **result}
+
+    result = await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify(result))
+
+
+@event_board_bp.post("/events/<int:event_id>/board/items/<int:inventory_id>/use")
+async def use_board_item(event_id: int, inventory_id: int):
+    user_id = current_user_id()
+    body = await json_body()
+    explicit_team = body.get("team_id")
+    if explicit_team is not None and (
+            not isinstance(explicit_team, int) or isinstance(explicit_team, bool)):
+        abort_problem(422, "Invalid team_id", "'team_id' must be an integer.")
+    target = {}
+    for key in ("target_team_id", "target_tile_idx"):
+        if body.get(key) is not None:
+            if not isinstance(body[key], int) or isinstance(body[key], bool):
+                abort_problem(422, "Invalid target", f"'{key}' must be an integer.")
+            target[key] = body[key]
+
+    def _apply():
+        from services.boardgame_shop import ShopError, use_item
+        from utils.redis import RedisClient
+
+        with db_session() as s:
+            ev = _load_board_event(s, event_id, for_write=False)
+            if ev.status != "active":
+                abort_problem(409, "Event not live",
+                              "Items can only be used while the event is active.")
+            team_id, _m, _a = _resolve_team_for_action(s, ev, user_id, explicit_team)
+            r = RedisClient().client
+            try:
+                result = use_item(s, r, ev.id, team_id, inventory_id, user_id,
+                                  target=target or None)
+            except ShopError as e:
+                abort_problem(e.status, e.title, e.detail)
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id,
+                action="event.board.item.use", target=str(ev.id),
+                after=f"team={team_id} inv={inventory_id} fx={result.get('effect')}",
+            ))
+            s.commit()
+            return {"team_id": team_id, **result}
+
+    result = await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify(result))

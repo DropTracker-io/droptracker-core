@@ -105,6 +105,30 @@ EVENT_BOARD_POSITION_STATUSES = ("active", "awaiting_roll", "blocked", "finished
 # web_event_coin_ledger.reason values.
 EVENT_COIN_REASONS = ("task_reward", "purchase", "refund", "admin", "bonus", "mercy")
 
+# Shop item types (web_boardgame_shop_items.item_type) — the COOLDOWN
+# grouping: a team may only use one item of a type every
+# ``type_cooldown_turns`` turns (turn = completed-task count).
+BOARDGAME_ITEM_TYPES = ("movement", "offensive", "defensive", "economy", "utility")
+
+# Effect handler keys (web_boardgame_shop_items.effect). P2 ships the
+# self-targeted set; the offensive/defensive handlers land in P3 (catalog
+# rows may exist earlier but stay inactive).
+BOARDGAME_EFFECTS = (
+    "skip_task",        # complete the current task instantly (no coins)
+    "reroll_task",      # redraw the current tile's task from its pool
+    "boost_coins",      # multiply the next task's coin reward
+    "advance",          # move forward N tiles without a task completion (P3)
+    "roadblock",        # place a block on a tile (P3)
+    "freeze_opponent",  # target team skips N turns (P3)
+    "shield",           # negate the next offensive effect (P3)
+)
+
+# web_event_team_inventory.status lifecycle.
+BOARDGAME_INVENTORY_STATUSES = ("owned", "used", "expired")
+
+# web_event_effects.status lifecycle.
+BOARDGAME_EFFECT_STATUSES = ("active", "consumed", "expired")
+
 # Which intake paths may drive automatic task progress (web_events.submission_policy):
 # - "all"             — every processed submission counts (API + webhook fallback).
 # - "confirm_non_api" — non-API submissions count but always land as pending
@@ -724,6 +748,126 @@ class EventBoardPosition(Base):
     mercy_deadline = Column(DateTime, nullable=True)
     mercy_count = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class BoardgameShopItem(Base):
+    """Site-wide curated shop catalog (web45a) — the power-ups teams buy with
+    coins. Superadmin-managed (/admin/boardgame-shop); per-event availability
+    and pricing live in ``EventShopRotation`` + the board settings' item kill
+    switches. The ``PremiumFeature`` pattern: this is the product table."""
+
+    __tablename__ = "web_boardgame_shop_items"
+    __table_args__ = (
+        Index("uq_web_bg_shop_key", "key", unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key = Column(String(32), nullable=False)  # stable slug ("teleport_tablet")
+    name = Column(String(80), nullable=False)
+    description = Column(Text, nullable=True)
+    # OSRS item id whose icon represents this power-up (/img/itemdb/{id}.png).
+    icon_item_id = Column(Integer, nullable=True)
+    item_type = Column(String(16), nullable=False)  # BOARDGAME_ITEM_TYPES
+    effect = Column(String(24), nullable=False)     # BOARDGAME_EFFECTS
+    effect_config = Column(Text, nullable=True)     # JSON: magnitude/duration/targets
+    cost_coins = Column(Integer, nullable=False, default=0)
+    # Turns before the team may use ANOTHER item of this item_type.
+    type_cooldown_turns = Column(Integer, nullable=False, default=0)
+    sort = Column(Integer, nullable=False, default=0)
+    active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class EventShopRotation(Base):
+    """Per-event shop stocking (web45a): which catalog items this event sells,
+    at what price, in which turn window. No rows = the event sells every
+    active catalog item at list price (minus the settings' kill switches) —
+    zero-config events still get a shop."""
+
+    __tablename__ = "web_event_shop_rotation"
+    __table_args__ = (
+        Index("uq_web_evt_shop_item", "event_id", "shop_item_id", unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    shop_item_id = Column(Integer, ForeignKey("web_boardgame_shop_items.id"), nullable=False)
+    price_override = Column(Integer, nullable=True)  # NULL = catalog price
+    # Turn-window availability (P3 rotation); NULL bounds = always available.
+    available_from_turn = Column(Integer, nullable=True)
+    available_until_turn = Column(Integer, nullable=True)
+    stock = Column(Integer, nullable=True)  # NULL = unlimited
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+class EventTeamInventory(Base):
+    """A team-held power-up (web45a) — the ``FeatureActivation`` analogue.
+    One row per purchased copy; ``used_turn``/``used_on`` record consumption."""
+
+    __tablename__ = "web_event_team_inventory"
+    __table_args__ = (
+        Index("idx_web_evt_inv_team", "event_id", "team_id", "status"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    team_id = Column(Integer, ForeignKey("web_event_teams.id"), nullable=False)
+    shop_item_id = Column(Integer, ForeignKey("web_boardgame_shop_items.id"), nullable=False)
+    price_paid = Column(Integer, nullable=False, default=0)
+    acquired_turn = Column(Integer, nullable=False, default=0)
+    status = Column(String(16), nullable=False, default="owned")  # BOARDGAME_INVENTORY_STATUSES
+    used_turn = Column(Integer, nullable=True)
+    used_at = Column(DateTime, nullable=True)
+    used_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    used_on = Column(Text, nullable=True)  # JSON: {target_team_id?, target_tile_idx?}
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+class EventTeamCooldown(Base):
+    """Last turn a team used each item TYPE (web45a). The O(1) gate behind
+    "each type usable once every N turns": usable iff
+    ``turns_completed - last_used_turn >= type_cooldown_turns``."""
+
+    __tablename__ = "web_event_team_cooldowns"
+    __table_args__ = (
+        Index("uq_web_evt_cooldown", "team_id", "item_type", unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    team_id = Column(Integer, ForeignKey("web_event_teams.id"), nullable=False)
+    item_type = Column(String(16), nullable=False)  # BOARDGAME_ITEM_TYPES
+    last_used_turn = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class EventBoardEffect(Base):
+    """A live board effect (web45a): coin boosts on self, and — P3 — road-
+    blocks bound to tiles, freezes/shields bound to teams. Consumed or
+    expired by the engine as turns advance."""
+
+    __tablename__ = "web_event_effects"
+    __table_args__ = (
+        Index("idx_web_evt_effects_event", "event_id", "status"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    source_team_id = Column(Integer, ForeignKey("web_event_teams.id"), nullable=False)
+    target_team_id = Column(Integer, ForeignKey("web_event_teams.id"), nullable=True)
+    target_tile_idx = Column(Integer, nullable=True)
+    effect_type = Column(String(24), nullable=False)  # BOARDGAME_EFFECTS
+    effect_config = Column(Text, nullable=True)  # JSON: multiplier/turns/…
+    expires_turn = Column(Integer, nullable=True)  # vs target team's turn counter
+    status = Column(String(16), nullable=False, default="active")  # BOARDGAME_EFFECT_STATUSES
+    inventory_id = Column(Integer, ForeignKey("web_event_team_inventory.id"), nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
 class EventCoinLedger(Base):

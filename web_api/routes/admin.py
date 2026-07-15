@@ -467,6 +467,109 @@ async def admin_remove_event_type_test_group(key: str, group_id: int):
     return jsonify(row)
 
 
+# --------------------------------------------------------------------------- #
+# Board-game shop catalog (web45a) — the site-wide power-up product table.
+# --------------------------------------------------------------------------- #
+def _shop_item_row(item) -> dict:
+    return {
+        "id": item.id,
+        "key": item.key,
+        "name": item.name,
+        "description": item.description or None,
+        "icon_item_id": item.icon_item_id,
+        "item_type": item.item_type,
+        "effect": item.effect,
+        "effect_config": item.effect_config or None,
+        "cost_coins": int(item.cost_coins or 0),
+        "type_cooldown_turns": int(item.type_cooldown_turns or 0),
+        "sort": int(item.sort or 0),
+        "active": bool(item.active),
+    }
+
+
+@admin_bp.get("/admin/boardgame-shop")
+async def admin_list_shop_items():
+    await _require_superadmin()
+
+    def _read():
+        from db.models import BoardgameShopItem
+
+        with db_session() as s:
+            rows = (s.query(BoardgameShopItem)
+                    .order_by(BoardgameShopItem.sort, BoardgameShopItem.id).all())
+            return [_shop_item_row(i) for i in rows]
+
+    return private_no_store(jsonify(await asyncio.to_thread(_read)))
+
+
+@admin_bp.patch("/admin/boardgame-shop/<int:item_id>")
+async def admin_patch_shop_item(item_id: int):
+    """Edit a catalog row: pricing, cooldown, icon, copy, active flag.
+    ``key``/``effect`` are code-level identity and stay immutable here."""
+    actor = await _require_superadmin()
+    body = await json_body()
+
+    def _apply():
+        from db.models import BOARDGAME_ITEM_TYPES, BoardgameShopItem
+
+        with db_session() as s:
+            item = (s.query(BoardgameShopItem)
+                    .filter(BoardgameShopItem.id == item_id).first())
+            if not item:
+                abort_problem(404, "Item not found", f"No shop item {item_id}.")
+            if "name" in body:
+                name = (body.get("name") or "").strip()
+                if not (1 <= len(name) <= 80):
+                    abort_problem(422, "Invalid name", "Name must be 1–80 characters.")
+                item.name = name
+            if "description" in body:
+                item.description = (body.get("description") or None)
+            if "icon_item_id" in body:
+                icon = body.get("icon_item_id")
+                if icon is not None and (not isinstance(icon, int) or isinstance(icon, bool)
+                                         or icon <= 0):
+                    abort_problem(422, "Invalid icon",
+                                  "'icon_item_id' must be a positive item id or null.")
+                item.icon_item_id = icon
+            if "item_type" in body:
+                if body["item_type"] not in BOARDGAME_ITEM_TYPES:
+                    abort_problem(422, "Invalid type",
+                                  f"item_type must be one of {list(BOARDGAME_ITEM_TYPES)}.")
+                item.item_type = body["item_type"]
+            for field, lo, hi in (("cost_coins", 0, 1_000_000),
+                                  ("type_cooldown_turns", 0, 100),
+                                  ("sort", 0, 10_000)):
+                if field in body:
+                    v = body.get(field)
+                    if not isinstance(v, int) or isinstance(v, bool) or not (lo <= v <= hi):
+                        abort_problem(422, "Invalid value",
+                                      f"'{field}' must be an integer {lo}–{hi}.")
+                    setattr(item, field, v)
+            if "effect_config" in body:
+                cfg = body.get("effect_config")
+                if cfg is not None:
+                    if not isinstance(cfg, str) or len(cfg) > 2000:
+                        abort_problem(422, "Invalid config",
+                                      "'effect_config' must be a JSON string ≤2000 chars.")
+                    try:
+                        json.loads(cfg)
+                    except ValueError:
+                        abort_problem(422, "Invalid config",
+                                      "'effect_config' must be valid JSON.")
+                item.effect_config = cfg
+            if "active" in body:
+                if not isinstance(body["active"], bool):
+                    abort_problem(422, "Invalid value", "'active' must be a boolean.")
+                item.active = body["active"]
+            s.commit()
+            return _shop_item_row(item)
+
+    row = await asyncio.to_thread(_apply)
+    _audit(actor, "boardgame_shop.update", str(item_id),
+           after=f"active={row['active']},cost={row['cost_coins']}")
+    return jsonify(row)
+
+
 @admin_bp.get("/admin/services")
 async def admin_services():
     await _require_superadmin()

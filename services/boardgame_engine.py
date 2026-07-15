@@ -348,6 +348,16 @@ def handle_board_completion(session, redis_conn, event: dict, task: dict,
     difficulty = task.get("difficulty")
     coins = coin_reward(settings, difficulty)
     if team is not None and coins > 0:
+        # An armed coin boost (shop, web45a) multiplies this completion.
+        try:
+            from services.boardgame_shop import consume_coin_boost
+
+            multiplier = consume_coin_boost(session, event["id"], team_id)
+        except Exception:
+            multiplier = 1
+        if multiplier > 1:
+            coins *= multiplier
+            board["coin_multiplier"] = multiplier
         board["coins_awarded"] = coins
         board["coin_balance"] = award_coins(
             session, event["id"], team, coins, "task_reward",
