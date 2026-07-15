@@ -144,8 +144,13 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                     entry_id=pb_entry.id if pb_entry else 0,
                     entry_name=boss_name,
                 )
+                # dl_path is the local filesystem path; what gets stored on
+                # the row (and shipped in notification embeds) must be the
+                # public URL. Assigning through pb_entry here also crashed on
+                # first-ever PBs (pb_entry is None until the row is created
+                # below) — the non-API screenshot bug reported 2026-07-15.
                 if external_url:
-                    pb_entry.image_url = external_url
+                    dl_path = external_url
             except Exception as e:
                 from .common import app_logger
 
