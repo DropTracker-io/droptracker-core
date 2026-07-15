@@ -28,13 +28,10 @@ and a ``contributors`` roll-up (who obtained what).
 """
 from __future__ import annotations
 
-from services.event_engine import (
-    _config_item_entries,
-    _norm,
-    _parse_requirement_groups,
-    completion_threshold,
-    parse_task_config,
-)
+# NOTE: services.event_engine is imported lazily inside functions (matching
+# event_admin.py) — the unit-test conftest stubs `services` in sys.modules, so
+# a module-level import here breaks collection of every test that imports
+# web_api.routes.events.
 
 # Manual "bonus" rows are excluded from progress rollups (they're score-only),
 # so they must be excluded here too — see event_engine._distinct_progress_from_rows.
@@ -54,6 +51,8 @@ _METER_UNITS = {
 
 def _icon_lookup(tile: dict | None) -> dict:
     """normalized item/npc/skill name -> icon ref from the resolved tile block."""
+    from services.event_engine import _norm
+
     out: dict = {}
     for icon in ((tile or {}).get("icons") or []):
         key = _norm(icon.get("name"))
@@ -77,6 +76,8 @@ def _display(name_norm: str, icons: dict) -> str:
 def _ledger_stats(rows) -> tuple[dict, set, int]:
     """(qty_by_norm_name, distinct_norm_names, wildcard_qty) from applied rows,
     excluding bonus rows (mirrors the engine rollups)."""
+    from services.event_engine import _norm
+
     qty: dict = {}
     distinct: set = set()
     wildcard = 0
@@ -179,6 +180,14 @@ def build_task_breakdown(task: dict, tile: dict | None, rows, progress_row,
     (status in auto/confirmed/manual); ``progress_row`` is the authoritative
     ``EventProgress`` rollup (or None); ``ts`` converts a datetime to an epoch.
     """
+    from services.event_engine import (
+        _config_item_entries,
+        _norm,
+        _parse_requirement_groups,
+        completion_threshold,
+        parse_task_config,
+    )
+
     config = parse_task_config(task.get("config"))
     kind = config.get("kind")
     ttype = task.get("type")

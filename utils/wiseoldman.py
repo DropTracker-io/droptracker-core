@@ -833,6 +833,27 @@ except Exception:  # enum shape changed — validation degrades to pass-through
     _WOM_SKILL_SLUGS = set()
     _WOM_BOSS_SLUGS = set()
 
+# Metrics the WOM service tracks but pristine wom.py 1.0.0 doesn't know —
+# wom.py is unmaintained at our pin, so the venv's copy is hand-patched with
+# these (see deploy/wom/README.md; the canonical diff lives there). The
+# validation sets exist only to reject typos, so they must trail the live API,
+# not the library: augment here so metric mapping keeps working even on a
+# pristine (unpatched) install such as CI. Keep additive-only and in sync with
+# deploy/wom/enums-divergence.patch.
+if _WOM_SKILL_SLUGS:
+    _WOM_SKILL_SLUGS |= {"sailing"}
+if _WOM_BOSS_SLUGS:
+    _WOM_BOSS_SLUGS |= {
+        "amoxliatl",
+        "brutus",
+        "doom_of_mokhaiotl",
+        "the_hueycoatl",
+        "maggot_king",
+        "shellbane_gryphon",
+        "the_royal_titans",
+        "yama",
+    }
+
 _SKILL_METRIC_OVERRIDES = {"runecraft": "runecrafting"}
 
 # Task targets / plugin NPC names that don't normalize onto WOM's boss slugs.

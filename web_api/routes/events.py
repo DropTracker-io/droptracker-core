@@ -68,7 +68,6 @@ from db import (
     user_group_association,
 )
 from web_api.common import abort_problem, db_session, private_no_store, with_cache_headers
-from web_api.event_breakdown import build_task_breakdown
 from web_api.task_tiles import build_tile, spec_names, tile_spec
 from web_api.deps import (
     assert_group_admin,
@@ -838,6 +837,10 @@ async def get_task_breakdown(event_id: int, task_id: int):
     param selects the team (defaults to the viewer's own team, else the current
     leader). Reconstructed from the applied ledger — see web_api/event_breakdown.
     """
+    # Lazy: event_breakdown pulls in services.event_engine, which the unit-test
+    # conftest stubs — a module-level import breaks test collection.
+    from web_api.event_breakdown import build_task_breakdown
+
     viewer_id = optional_user_id()
     team_arg = request.args.get("team_id") or request.args.get("teamId")
 
