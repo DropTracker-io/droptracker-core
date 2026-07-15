@@ -346,7 +346,7 @@ def _substitute(text: str, context: dict) -> str:
 
 def render_message_spec(
     layout: dict, context: dict, standings=None, deep_link: bool = True,
-    launch_link: bool = False,
+    launch_link: bool = False, footer: Optional[str] = None,
 ) -> dict:
     """Resolve one layout against its context into primitive blocks —
     pure data in, pure data out (the unit-testable half of rendering).
@@ -361,7 +361,14 @@ def render_message_spec(
     unless ``launch_link`` is True, which renders them as Activity Link URL
     buttons instead (the destination channel can't host a LAUNCH_ACTIVITY
     callback — threads/announcement channels — but a client-side app link
-    still opens the Activity from there)."""
+    still opens the Activity from there).
+
+    ``footer`` (an already-resolved line — see
+    :func:`services.event_notifications.event_footer_line`) is appended as a
+    trailing text block behind its own separator so every event message ends
+    with the same event-anchoring footer, regardless of the group's custom
+    layout. It is not token-substituted (it holds ``<t:…>`` tokens, not
+    ``{placeholders}``)."""
     blocks = []
     for block in (layout or {}).get("blocks") or []:
         if not isinstance(block, dict):
@@ -427,6 +434,11 @@ def render_message_spec(
         blocks.pop(0)
     while blocks and blocks[-1]["type"] == "separator":
         blocks.pop()
+    # Universal event footer: separated from the body, always last.
+    if footer:
+        if blocks:
+            blocks.append({"type": "separator"})
+        blocks.append({"type": "text", "content": footer})
     return {"accent_color": _hex_to_int((layout or {}).get("accent_color")), "blocks": blocks}
 
 
@@ -504,12 +516,20 @@ def render_event_components(
     ``allow_launch`` False (the destination is a thread/announcement channel,
     where Discord refuses LAUNCH_ACTIVITY) renders launch buttons as Activity
     Link URL buttons — a client-side launch that works from those channels."""
+    from services.event_notifications import event_footer_line
+
     layout = load_layout(session, group_id, message_type)
     enabled = deeplink_enabled()
+    footer = event_footer_line(
+        context.get("event_name"),
+        context.get("starts_at_unix"),
+        context.get("ends_at_unix"),
+    )
     spec = render_message_spec(
         layout, context, standings=standings,
         deep_link=enabled and allow_launch,
         launch_link=enabled and not allow_launch,
+        footer=footer,
     )
     return build_components(spec, ping_text=ping_text, extra_rows=extra_rows)
 
@@ -545,6 +565,10 @@ def notification_context(notification_type: str, data: dict) -> dict:
     put("bonus_points", int(data.get("bonus_points") or data.get("points") or 0))
     put("starts_at", _fmt_ts(data.get("starts_at")))
     put("ends_at", _fmt_ts(data.get("ends_at")))
+    # Raw unix seconds for the universal footer line (event_footer_line);
+    # kept separate from the pre-formatted starts_at/ends_at tokens above.
+    put("starts_at_unix", data.get("starts_at"))
+    put("ends_at_unix", data.get("ends_at"))
     put("team_count", data.get("team_count"))
     put("proof_url", data.get("proof_url"))
     put("review_url", data.get("review_url"))

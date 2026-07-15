@@ -248,6 +248,26 @@ class TestRenderMessageSpec:
         spec = ml.render_message_spec(layout, {}, deep_link=True)
         assert spec["blocks"] == []
 
+    def test_footer_appended_behind_separator(self):
+        layout = {"blocks": [{"type": "text", "content": "hi"}]}
+        spec = ml.render_message_spec(layout, {}, footer="-# Ev - Ends: <t:1:R>")
+        assert spec["blocks"] == [
+            {"type": "text", "content": "hi"},
+            {"type": "separator"},
+            {"type": "text", "content": "-# Ev - Ends: <t:1:R>"},
+        ]
+
+    def test_footer_without_body_has_no_leading_separator(self):
+        # every layout block dropped → footer stands alone, no dangling separator
+        layout = {"blocks": [{"type": "text", "content": "{gone}"}]}
+        spec = ml.render_message_spec(layout, {}, footer="-# Ev")
+        assert spec["blocks"] == [{"type": "text", "content": "-# Ev"}]
+
+    def test_no_footer_leaves_blocks_untouched(self):
+        layout = {"blocks": [{"type": "text", "content": "hi"}]}
+        assert ml.render_message_spec(layout, {})["blocks"] == [
+            {"type": "text", "content": "hi"}]
+
 
 class TestDefaultLayouts:
     def test_every_layout_type_has_a_default(self):
@@ -325,6 +345,36 @@ class TestNotificationContext:
             "event_id": 7, "cell_idxs": [3]})
         assert context["cell_list"] == "`3`"
         assert context["cell_plural"] == ""
+
+    def test_raw_unix_timestamps_carried_for_footer(self):
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "starts_at": 1700000000, "ends_at": 1700003600})
+        assert context["starts_at_unix"] == 1700000000
+        assert context["ends_at_unix"] == 1700003600
+        # ...and dropped when absent (so the footer half-drops)
+        bare = ml.notification_context("event_completion", {"event_id": 7})
+        assert "starts_at_unix" not in bare and "ends_at_unix" not in bare
+
+
+class TestEventFooterLine:
+    def test_full_line(self):
+        assert en.event_footer_line("Bingo Night", 1700000000, 1700003600) == (
+            "-# Bingo Night - Starts: <t:1700000000:R> - Ends: <t:1700003600:R>")
+
+    def test_half_drops_when_timestamp_missing(self):
+        assert en.event_footer_line("E", None, 1700003600) == (
+            "-# E - Ends: <t:1700003600:R>")
+        assert en.event_footer_line("E", 1700000000, None) == (
+            "-# E - Starts: <t:1700000000:R>")
+        assert en.event_footer_line("E") == "-# E"
+
+    def test_none_without_event_name(self):
+        assert en.event_footer_line(None, 1, 2) is None
+        assert en.event_footer_line("", 1, 2) is None
+
+    def test_bad_timestamps_ignored(self):
+        assert en.event_footer_line("E", "nope", 1700003600) == (
+            "-# E - Ends: <t:1700003600:R>")
 
 
 class TestProgressBar:

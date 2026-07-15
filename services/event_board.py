@@ -118,6 +118,9 @@ def _board_context(session, event, config: dict) -> dict:
         "board_status_line": status_line,
         "team_count": team_count or None,
         "updated_ts": f"<t:{int(datetime.now().timestamp())}:R>",
+        # Raw unix seconds for the universal event footer (event_footer_line).
+        "starts_at_unix": int(event.starts_at.timestamp()) if event.starts_at else None,
+        "ends_at_unix": int(event.ends_at.timestamp()) if event.ends_at else None,
     }
     if config["leaderboard"].get("show_tasks", True):
         summary = _tasks_summary(session, event)
@@ -149,7 +152,7 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
             load_layout,
             render_message_spec,
         )
-        from services.event_notifications import effective_message_config
+        from services.event_notifications import effective_message_config, event_footer_line
 
         config = effective_message_config(getattr(event, "message_config", None))
         if not config["leaderboard"].get("live", True):
@@ -176,12 +179,18 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
         # Threads/announcement channels can't host a LAUNCH_ACTIVITY callback —
         # render an Activity Link URL button (client-side launch) instead.
         enabled, supported = deeplink_enabled(), channel_supports_launch(channel)
+        context = _board_context(session, event, config)
         spec = render_message_spec(
             layout,
-            _board_context(session, event, config),
+            context,
             standings=_standings(session, event.id, top_n),
             deep_link=enabled and supported,
             launch_link=enabled and not supported,
+            footer=event_footer_line(
+                context.get("event_name"),
+                context.get("starts_at_unix"),
+                context.get("ends_at_unix"),
+            ),
         )
         components = build_components(spec)
 

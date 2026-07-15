@@ -1521,6 +1521,13 @@ class NotificationService:
             # --- enrichment the embed needs but the queue payload may lack ---
             data = dict(data)
             data.setdefault('event_name', event.name)
+            # Start/end (unix secs, the _ts convention) so every event message
+            # can carry the universal footer — not just event_started/signup,
+            # whose payloads already include them.
+            if event.starts_at and not data.get('starts_at'):
+                data['starts_at'] = int(event.starts_at.timestamp())
+            if event.ends_at and not data.get('ends_at'):
+                data['ends_at'] = int(event.ends_at.timestamp())
             team_id = data.get('team_id')
             if team_id and not data.get('team_name'):
                 team = db_session.query(EventTeam).filter(EventTeam.id == team_id).first()

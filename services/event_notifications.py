@@ -185,6 +185,29 @@ def event_url(event_id) -> str:
     return f"{EVENT_BASE_URL}/{event_id}"
 
 
+def event_footer_line(event_name, starts_at=None, ends_at=None) -> Optional[str]:
+    """The universal ``-# {name} - Starts: <t:R> - Ends: <t:R>`` footer line
+    appended to every event Discord message so a reader can tie the message
+    back to its event at a glance.
+
+    ``starts_at`` / ``ends_at`` are unix seconds (the ``_ts`` convention:
+    ``int(dt.timestamp())``); each half is dropped when its timestamp is
+    missing, and the whole line is ``None`` when there is no event name to
+    anchor it. Rendered as ``-#`` subtext so it reads like a footer while the
+    ``<t:…:R>`` tokens still resolve to relative times in a Discord message.
+    """
+    if not event_name:
+        return None
+    parts = [str(event_name)]
+    for label, ts in (("Starts", starts_at), ("Ends", ends_at)):
+        try:
+            if ts:
+                parts.append(f"{label}: <t:{int(ts)}:R>")
+        except (TypeError, ValueError):
+            continue
+    return "-# " + " - ".join(parts)
+
+
 def event_ping_role_ids(ping_config_json, key: str) -> list:
     """Role ids configured for one ping key in ``web_events.ping_config``
     (JSON ``{key: [role ids]}``). [] on unset/corrupt config — pings must

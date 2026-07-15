@@ -27,7 +27,7 @@ def build_event_embed(notification_type: str, data: dict, standings=None) -> Emb
     language as the drop embeds (author line, thumbnail, global footer,
     link to https://www.droptracker.io/events/{id}).
     """
-    from services.event_notifications import event_embed_spec
+    from services.event_notifications import event_embed_spec, event_footer_line
 
     spec = event_embed_spec(notification_type, data, standings=standings)
     embed = Embed(
@@ -40,6 +40,14 @@ def build_event_embed(notification_type: str, data: dict, standings=None) -> Emb
         embed.set_author(name=spec["author_name"], icon_url=DROPTRACKER_ICON)
     for f in spec.get("fields", []):
         embed.add_field(name=f["name"], value=f["value"], inline=bool(f.get("inline")))
+    # Universal event footer, mirroring the Components-V2 path. Discord does not
+    # render <t:…> timestamps inside an embed footer, so it goes in a trailing
+    # full-width field (whose value does render them) instead of set_footer.
+    footer_line = event_footer_line(
+        data.get("event_name"), data.get("starts_at"), data.get("ends_at")
+    )
+    if footer_line:
+        embed.add_field(name="​", value=footer_line, inline=False)
     if spec.get("thumbnail"):
         embed.set_thumbnail(url=spec["thumbnail"])
     embed.set_footer(global_footer)
