@@ -63,6 +63,7 @@ from db import (
     EVENT_TASK_VISIBILITIES,
     EventTaskLibraryItem,
     Group,
+    GroupAdmin,
     Player,
     user_group_association,
 )
@@ -443,13 +444,46 @@ async def list_events():
     # arrive as strings. groupId wins when both are supplied.
     guild_id = (request.args.get("guildId") or "").strip()
     guild_id = guild_id if guild_id.isdigit() else None
+    # "My events" scoping for the Activity's guild-less launches (DM launches
+    # via Activity Links): events of every group the session user belongs to.
+    mine = (request.args.get("mine") or "").strip().lower() in ("1", "true")
 
     viewer_id = optional_user_id()
 
     def _load():
         with db_session() as s:
             q = s.query(Event)
-            if group_id is None and guild_id is not None:
+            if group_id is None and mine:
+                if viewer_id is None:
+                    return []  # anonymous "mine" is empty, never the global list
+                # Memberships (user_group_association) + web admin grants —
+                # the same union /me reports as the user's groups.
+                my_gids = {
+                    gid
+                    for (gid,) in s.query(user_group_association.c.group_id)
+                    .filter(user_group_association.c.user_id == viewer_id)
+                    .all()
+                    if gid is not None
+                }
+                my_gids |= {
+                    gid
+                    for (gid,) in s.query(GroupAdmin.group_id)
+                    .filter(GroupAdmin.user_id == viewer_id)
+                    .all()
+                }
+                # Include clan-vs-clan events my groups accepted as opponents,
+                # matching the per-group listing below.
+                participant_event_ids = s.query(EventGroup.event_id).filter(
+                    EventGroup.group_id.in_(my_gids),
+                    EventGroup.status == "accepted",
+                )
+                q = q.filter(
+                    sa_or(
+                        Event.group_id.in_(my_gids),
+                        Event.id.in_(participant_event_ids),
+                    )
+                )
+            elif group_id is None and guild_id is not None:
                 # Events owned by any group linked to this guild, plus events
                 # explicitly pointed at it (admins can re-target discord_guild_id).
                 guild_group_ids = s.query(Group.group_id).filter(Group.guild_id == guild_id)
