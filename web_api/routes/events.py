@@ -68,6 +68,7 @@ from db import (
     user_group_association,
 )
 from web_api.common import abort_problem, db_session, private_no_store, with_cache_headers
+from web_api.event_breakdown import build_task_breakdown
 from web_api.task_tiles import build_tile, spec_names, tile_spec
 from web_api.deps import (
     assert_group_admin,
@@ -825,6 +826,109 @@ async def get_event_team(event_id: int, team_id: int):
     payload = await asyncio.to_thread(_load)
     if payload is None:
         abort_problem(404, "Team not found", f"No team {team_id} in event {event_id}.")
+    if viewer_id is not None:
+        return private_no_store(jsonify(payload))
+    return with_cache_headers(jsonify(payload), max_age=15)
+
+
+@events_bp.get("/events/<int:event_id>/tasks/<int:task_id>/breakdown")
+async def get_task_breakdown(event_id: int, task_id: int):
+    """Per-(task, team) item-level progress: which required items/requirements a
+    team has obtained vs still needs, plus who contributed. ``team_id`` query
+    param selects the team (defaults to the viewer's own team, else the current
+    leader). Reconstructed from the applied ledger — see web_api/event_breakdown.
+    """
+    viewer_id = optional_user_id()
+    team_arg = request.args.get("team_id") or request.args.get("teamId")
+
+    def _load():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if _effective_status(ev) == "draft" and not _can_view_draft(s, viewer_id, ev):
+                return None
+            task = (
+                s.query(EventTask)
+                .filter(EventTask.id == task_id, EventTask.event_id == event_id)
+                .first()
+            )
+            if task is None:
+                return None
+            teams = (
+                s.query(EventTeam)
+                .filter(EventTeam.event_id == event_id)
+                .order_by(EventTeam.score.desc(), EventTeam.id.asc())
+                .all()
+            )
+            if not teams:
+                return {"__no_teams__": True}
+
+            team = None
+            if team_arg:
+                try:
+                    tid = int(team_arg)
+                except (TypeError, ValueError):
+                    tid = None
+                team = next((t for t in teams if t.id == tid), None)
+            if team is None and viewer_id is not None:
+                # Default to the viewer's own team — the thing they care about.
+                my_pids = [
+                    pid for (pid,) in
+                    s.query(Player.player_id).filter(Player.user_id == viewer_id).all()
+                ]
+                if my_pids:
+                    vt = (
+                        s.query(EventTeamMember.team_id)
+                        .filter(EventTeamMember.player_id.in_(my_pids),
+                                EventTeamMember.team_id.in_([t.id for t in teams]))
+                        .first()
+                    )
+                    if vt:
+                        team = next((t for t in teams if t.id == vt[0]), None)
+            if team is None:
+                team = teams[0]
+
+            task_dict = {
+                "id": task.id, "type": task.type, "label": task.label,
+                "target": task.target or None, "target_value": task.target_value,
+                "points": int(task.points or 0), "config": task.config or None,
+            }
+            _attach_task_tiles(s, [task_dict])
+
+            rows = (
+                s.query(EventCompletion)
+                .filter(EventCompletion.event_id == event_id,
+                        EventCompletion.task_id == task_id,
+                        EventCompletion.team_id == team.id,
+                        EventCompletion.status.in_(_APPLIED_STATUSES))
+                .order_by(EventCompletion.id.desc())
+                .all()
+            )
+            progress_row = (
+                s.query(EventProgress)
+                .filter(EventProgress.task_id == task_id, EventProgress.team_id == team.id)
+                .first()
+            )
+            pids = {r.player_id for r in rows if r.player_id}
+            player_names: dict[int, str] = {}
+            if pids:
+                for pid, name in (
+                    s.query(Player.player_id, Player.player_name)
+                    .filter(Player.player_id.in_(pids)).all()
+                ):
+                    player_names[pid] = name
+
+            return build_task_breakdown(
+                task_dict, task_dict.get("tile"), rows, progress_row,
+                {"id": team.id, "name": team.name}, player_names, _ts,
+            )
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(404, "Not found", f"No task {task_id} in event {event_id}.")
+    if payload.get("__no_teams__"):
+        abort_problem(409, "No teams", "This event has no teams yet.")
     if viewer_id is not None:
         return private_no_store(jsonify(payload))
     return with_cache_headers(jsonify(payload), max_age=15)
