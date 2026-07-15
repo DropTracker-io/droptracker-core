@@ -10,9 +10,11 @@ seed is about making the defaults *visible and editable in the database*
 
 Idempotent: existing (group 1, message_type) rows are left untouched unless
 --force, which rewrites them from the code defaults (clobbers staff edits —
-same caveat as scripts/update_docs_pages.py).
+same caveat as scripts/update_docs_pages.py). ``--types a,b`` limits the run to
+specific message types, so a layout change can be pushed to just the rows it
+touched without rewriting (and clobbering) every other template row.
 
-Run: cd /store/droptracker/disc && venv/bin/python -m scripts.seed_event_message_layouts [--force]
+Run: cd /store/droptracker/disc && venv/bin/python -m scripts.seed_event_message_layouts [--force] [--types t1,t2]
 """
 from __future__ import annotations
 
@@ -31,8 +33,9 @@ from services.event_message_layouts import (  # noqa: E402
 )
 
 
-def seed(session=None, force: bool = False) -> dict:
+def seed(session=None, force: bool = False, types=None) -> dict:
     session = session or _default_session
+    only = set(types) if types else None
     created, updated, skipped = 0, 0, 0
     existing = {
         row.message_type: row
@@ -41,6 +44,8 @@ def seed(session=None, force: bool = False) -> dict:
         .all()
     }
     for message_type in EVENT_MESSAGE_LAYOUT_TYPES:
+        if only is not None and message_type not in only:
+            continue
         default = DEFAULT_LAYOUTS.get(message_type)
         if not default:
             continue
@@ -69,9 +74,18 @@ def seed(session=None, force: bool = False) -> dict:
 
 if __name__ == "__main__":
     force = "--force" in sys.argv
-    result = seed(force=force)
+    types = None
+    for arg in sys.argv[1:]:
+        if arg.startswith("--types="):
+            types = [t.strip() for t in arg.split("=", 1)[1].split(",") if t.strip()]
+        elif arg == "--types":
+            idx = sys.argv.index(arg)
+            if idx + 1 < len(sys.argv):
+                types = [t.strip() for t in sys.argv[idx + 1].split(",") if t.strip()]
+    result = seed(force=force, types=types)
+    scope = f" [{', '.join(types)}]" if types else ""
     print(
-        f"Seeded event message layouts (group {TEMPLATE_GROUP_ID}): "
+        f"Seeded event message layouts (group {TEMPLATE_GROUP_ID}){scope}: "
         f"{result['created']} created, {result['updated']} updated, "
         f"{result['skipped']} left untouched."
     )

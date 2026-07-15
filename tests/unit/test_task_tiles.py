@@ -7,6 +7,7 @@ from web_api.task_tiles import (
     COINS_ITEM_ID,
     MAX_TILE_ICONS,
     build_tile,
+    icon_asset_path,
     spec_names,
     tile_spec,
 )
@@ -159,3 +160,20 @@ def test_malformed_config_degrades_to_target():
     tile = _tile(_task(type="item_collection", target="Shark", config="{not json"))
     assert tile["badge"] == "COLLECT"
     assert tile["icons"][0]["name"] == "Shark"
+
+
+# ── icon asset paths (Discord thumbnail resolution) ──────────────────────────
+
+def test_icon_asset_path_item_and_npc():
+    assert icon_asset_path({"type": "item", "id": 20997, "name": "Twisted bow"}) == "itemdb/20997.png"
+    assert icon_asset_path({"type": "npc", "id": 2042, "name": "Zulrah"}) == "npcdb/2042.png"
+
+def test_icon_asset_path_skill_normalizes_name():
+    assert icon_asset_path({"type": "skill", "id": None, "name": "Slayer"}) == "metrics/slayer.png"
+    assert icon_asset_path({"type": "skill", "id": None, "name": "Abyssal Sire"}) == "metrics/abyssal_sire.png"
+
+def test_icon_asset_path_none_when_unresolved():
+    assert icon_asset_path({"type": "item", "id": None, "name": "Mystery"}) is None
+    assert icon_asset_path({"type": "npc", "id": None, "name": "Mystery"}) is None
+    assert icon_asset_path({"type": "skill", "id": None, "name": ""}) is None
+    assert icon_asset_path({"type": "other", "id": 1}) is None

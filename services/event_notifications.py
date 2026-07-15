@@ -337,8 +337,10 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         cells = data.get("cell_idxs") or []
         if cells:
             field("Bingo", f"Cell{'s' if len(cells) != 1 else ''} `{', '.join(str(c) for c in cells)}` marked")
-        if data.get("proof_url"):
-            spec["thumbnail"] = data["proof_url"]
+        # Proof screenshot if there is one, else the task's item/NPC icon.
+        thumb = data.get("completion_icon") or data.get("proof_url")
+        if thumb:
+            spec["thumbnail"] = thumb
 
     elif notification_type == "event_task_progress":
         spec["title"] = f"\U0001F4C8 Progress: {task_label or 'Task'}"
@@ -357,6 +359,8 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             spec["fields"].append(
                 {"name": "Progress", "value": f"`{current} / {target}`", "inline": True}
             )
+        if data.get("task_icon"):
+            spec["thumbnail"] = data["task_icon"]
 
     elif notification_type == "event_cell":
         spec["title"] = "\U0001F3AF Bingo cell completed"

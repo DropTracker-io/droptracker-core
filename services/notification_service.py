@@ -53,6 +53,12 @@ app_logger = AppLogger()
 global_footer = os.getenv('DISCORD_MESSAGE_FOOTER')
 db = DatabaseOperations()
 
+# Item/NPC/metric icon assets are served from /img and live on this same box,
+# so a task-tile icon URL can be existence-checked locally before it is handed
+# to Discord (missing file -> no thumbnail rather than a broken image).
+IMG_BASE = "https://www.droptracker.io/img"
+STATIC_IMG_DIR = "/store/droptracker/disc/static/assets/img"
+
 # Monetary contribution announcements (queued by web_api/payments.py via
 # services/contribution_notifications.py). Channel defaults to the same
 # global supporters channel the legacy group_upgrade notifications used.
@@ -1478,6 +1484,69 @@ class NotificationService:
     # event_cell / event_line / event_blackout / event_lead_change /
     # event_pending, produced by services/event_engine.py (+ Tasks 20/21).
     # ------------------------------------------------------------------ #
+    def _resolve_task_icon_url(self, db_session, task_id) -> str | None:
+        """Best icon URL for an event task's target — the item/NPC/skill a
+        completion or progress message is about.
+
+        Reuses the site's task-tile derivation (web_api/task_tiles.py) so
+        Discord and the website pick the same icon, resolves the tile's names
+        to game ids in two small bulk queries (mirroring ``_attach_task_tiles``),
+        and returns the first icon whose asset actually exists on disk — so a
+        task with no resolvable icon (custom/ehp, unknown item) simply gets no
+        thumbnail. Never raises: icon lookup must not break a notification.
+        """
+        if not task_id:
+            return None
+        try:
+            from sqlalchemy import func
+            from db import ItemList, NpcList
+            from db.models import EventTask
+            from web_api.task_tiles import (
+                build_tile,
+                icon_asset_path,
+                spec_names,
+                tile_spec,
+            )
+
+            task = db_session.query(EventTask).filter(EventTask.id == task_id).first()
+            if not task:
+                return None
+            spec = tile_spec({
+                "id": task.id, "type": task.type, "label": task.label,
+                "target": task.target, "target_value": task.target_value,
+                "config": task.config,
+            })
+            item_names, npc_names = spec_names(spec)
+            item_ids: dict = {}
+            if item_names:
+                for iid, name in (
+                    db_session.query(func.min(ItemList.item_id), ItemList.item_name)
+                    .filter(ItemList.item_name.in_(item_names), ItemList.noted.is_(False))
+                    .group_by(ItemList.item_name)
+                    .all()
+                ):
+                    item_ids[" ".join(name.strip().lower().split())] = iid
+            npc_ids: dict = {}
+            if npc_names:
+                for nid, name in (
+                    db_session.query(func.min(NpcList.npc_id), NpcList.npc_name)
+                    .filter(NpcList.npc_name.in_(npc_names))
+                    .group_by(NpcList.npc_name)
+                    .all()
+                ):
+                    npc_ids[" ".join(name.strip().lower().split())] = nid
+            tile = build_tile(spec, item_ids, npc_ids)
+            for icon in tile.get("icons") or []:
+                rel = icon_asset_path(icon)
+                if rel and os.path.exists(os.path.join(STATIC_IMG_DIR, rel)):
+                    return f"{IMG_BASE}/{rel}"
+        except Exception as e:
+            app_logger.log(log_type="warning",
+                           data=f"task icon resolution failed for task {task_id}: {e}",
+                           app_name="notification_service",
+                           description="resolve_task_icon")
+        return None
+
     async def send_event_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
         """Send one event notification to its per-event Discord destination.
 
@@ -1533,6 +1602,19 @@ class NotificationService:
                 team = db_session.query(EventTeam).filter(EventTeam.id == team_id).first()
                 if team:
                     data['team_name'] = team.name
+
+            # Task-tile icon: completion/progress messages show the item/NPC/skill
+            # the task is about (same icon the website's task tiles use). On
+            # completion a real proof screenshot still wins; the icon is the
+            # fallback so a completion is never image-less.
+            if notification_type in ('event_completion', 'event_task_progress') and data.get('task_id'):
+                task_icon = self._resolve_task_icon_url(db_session, data.get('task_id'))
+                if task_icon:
+                    data['task_icon'] = task_icon
+                if notification_type == 'event_completion':
+                    completion_icon = data.get('proof_url') or task_icon
+                    if completion_icon:
+                        data['completion_icon'] = completion_icon
 
             standings = None
             if notification_type in ('event_lead_change', 'event_ended'):

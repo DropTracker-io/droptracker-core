@@ -288,10 +288,12 @@ class TestDefaultLayouts:
             "event_completion": {"event_id": 7, "event_name": "E", "team_id": 1,
                                  "team_name": "Reds", "task_label": "Get a whip",
                                  "points": 10, "team_score": 30, "player_name": "Zed",
-                                 "proof_url": "https://p.png", "cell_idxs": [3, 4]},
+                                 "proof_url": "https://p.png",
+                                 "completion_icon": "https://p.png", "cell_idxs": [3, 4]},
             "event_task_progress": {"event_id": 7, "event_name": "E", "team_name": "Reds",
                                     "task_label": "Boaters", "progress": 5, "target": 10,
-                                    "milestone_pct": 50, "player_name": "Zed"},
+                                    "milestone_pct": 50, "player_name": "Zed",
+                                    "task_icon": "https://x/img/metrics/slayer.png"},
             "event_cell": {"event_id": 7, "team_name": "Reds", "cell_label": "B3", "points": 5},
             "event_line": {"event_id": 7, "team_name": "Reds", "bonus_points": 25},
             "event_blackout": {"event_id": 7, "team_name": "Reds", "bonus_points": 100},
@@ -354,6 +356,44 @@ class TestNotificationContext:
         # ...and dropped when absent (so the footer half-drops)
         bare = ml.notification_context("event_completion", {"event_id": 7})
         assert "starts_at_unix" not in bare and "ends_at_unix" not in bare
+
+    def test_task_and_completion_icons_carried(self):
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "task_icon": "https://x/itemdb/1.png",
+            "completion_icon": "https://x/p.png"})
+        assert context["task_icon"] == "https://x/itemdb/1.png"
+        assert context["completion_icon"] == "https://x/p.png"
+        bare = ml.notification_context("event_task_progress", {"event_id": 7})
+        assert "task_icon" not in bare and "completion_icon" not in bare
+
+
+class TestTaskIconLayouts:
+    def test_progress_renders_icon_as_section_thumbnail(self):
+        context = ml.notification_context("event_task_progress", {
+            "event_id": 7, "team_name": "Reds", "task_label": "Boaters",
+            "progress": 5, "target": 10, "player_name": "Zed",
+            "task_icon": "https://x/img/metrics/slayer.png"})
+        spec = ml.render_message_spec(ml.DEFAULT_LAYOUTS["event_task_progress"], context)
+        section = spec["blocks"][0]
+        assert section["type"] == "section"
+        assert section["thumbnail"] == "https://x/img/metrics/slayer.png"
+        assert "Reds — Boaters" in section["content"]
+
+    def test_progress_degrades_to_text_without_icon(self):
+        context = ml.notification_context("event_task_progress", {
+            "event_id": 7, "team_name": "Reds", "task_label": "Boaters",
+            "progress": 5, "target": 10})
+        spec = ml.render_message_spec(ml.DEFAULT_LAYOUTS["event_task_progress"], context)
+        assert spec["blocks"][0]["type"] == "text"  # no thumbnail → plain text
+
+    def test_completion_uses_completion_icon_thumbnail(self):
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "team_name": "Reds", "task_label": "Whip",
+            "points": 10, "team_score": 30, "player_name": "Zed",
+            "completion_icon": "https://x/img/itemdb/4151.png"})
+        spec = ml.render_message_spec(ml.DEFAULT_LAYOUTS["event_completion"], context)
+        section = next(b for b in spec["blocks"] if b["type"] == "section")
+        assert section["thumbnail"] == "https://x/img/itemdb/4151.png"
 
 
 class TestEventFooterLine:

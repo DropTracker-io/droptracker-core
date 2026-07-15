@@ -152,9 +152,12 @@ DEFAULT_LAYOUTS = {
         "blocks": [
             {"type": "text", "content": "### ✅ {team_name} completed **{task_label}**"},
             {
+                # Thumbnail is the proof screenshot when there is one, else the
+                # task's item/NPC icon (completion_icon, resolved by the sender);
+                # falls back to a plain text block when neither resolves.
                 "type": "section",
                 "content": "**Points** `+{points}`\n**Team total** `{team_score} pts`\n-# by {player_name}",
-                "thumbnail": "{proof_url}",
+                "thumbnail": "{completion_icon}",
             },
             {"type": "text", "content": "-# Bingo: cell{cell_plural} {cell_list} marked"},
         ],
@@ -162,11 +165,16 @@ DEFAULT_LAYOUTS = {
     "event_task_progress": {
         "accent_color": "#3498DB",
         "blocks": [
-            {"type": "text", "content": "### \U0001F4C8 {team_name} — {task_label}"},
-            {"type": "text", "content": "-# Passed **{milestone_pct}%**"},
             {
-                "type": "text",
-                "content": "{progress_bar} `{progress} / {target}`\n-# by {player_name}",
+                # One "task tile": progress text on the left, the target item/
+                # NPC/skill icon (task_icon) as the thumbnail on the right.
+                # Degrades to a plain text block when the icon can't resolve.
+                "type": "section",
+                "content": "### \U0001F4C8 {team_name} — {task_label}\n"
+                           "-# Passed **{milestone_pct}%**\n"
+                           "{progress_bar} `{progress} / {target}`\n"
+                           "-# by {player_name}",
+                "thumbnail": "{task_icon}",
             },
         ],
     },
@@ -573,6 +581,11 @@ def notification_context(notification_type: str, data: dict) -> dict:
     put("proof_url", data.get("proof_url"))
     put("review_url", data.get("review_url"))
     put("reason", data.get("reason"))
+    # Task-tile icon (the item/NPC/skill the task targets) for completion /
+    # progress messages; completion_icon prefers a real proof screenshot and
+    # falls back to the task icon. Both resolved by the sender.
+    put("task_icon", data.get("task_icon"))
+    put("completion_icon", data.get("completion_icon"))
 
     # Task progress
     progress, target = data.get("progress"), data.get("target")

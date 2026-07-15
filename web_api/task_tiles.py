@@ -222,6 +222,26 @@ def spec_names(spec: dict) -> tuple[set[str], set[str]]:
     return items, npcs
 
 
+def icon_asset_path(icon: dict) -> str | None:
+    """Relative ``/img`` asset path for one resolved tile icon, or ``None`` when
+    it can't map to an image (unresolved item/npc id, or a nameless skill).
+
+    Mirrors the frontend's tile art sources: items ``itemdb/{id}.png``, NPCs
+    ``npcdb/{id}.png``, skills/metrics ``metrics/{name}.png`` (lowercased,
+    spaces → underscores). Callers prepend the host and — since the same box
+    serves ``/img`` — should confirm the file exists before using the URL, so a
+    missing asset degrades to no icon rather than a broken Discord thumbnail.
+    """
+    kind = icon.get("type")
+    if kind == "item" and icon.get("id"):
+        return f"itemdb/{int(icon['id'])}.png"
+    if kind == "npc" and icon.get("id"):
+        return f"npcdb/{int(icon['id'])}.png"
+    if kind == "skill" and icon.get("name"):
+        return f"metrics/{_norm(icon['name']).replace(' ', '_')}.png"
+    return None
+
+
 def build_tile(spec: dict, item_ids: dict[str, int], npc_ids: dict[str, int]) -> dict:
     """Serialize a spec into the public ``tile`` block.
 
