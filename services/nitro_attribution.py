@@ -390,9 +390,41 @@ def nitro_boost_dm_text(context: Dict[str, Any], per_boost_cents: Optional[int] 
 def nitro_boost_announcement_text(
     mention: str, context: Dict[str, Any], per_boost_cents: Optional[int] = None
 ) -> str:
-    """One-liner for the contributors channel."""
+    """One-liner for the contributors channel (single live boost)."""
     amt = format_cents(NITRO_BOOST_CENTS if per_boost_cents is None else per_boost_cents)
     picked = context.get("picked_group_name") if context.get("linked") else None
     if picked:
         return f"🚀 {mention} just boosted the server — {amt}/mo of premium credit now supports **{picked}**! Thank you 💜"
     return f"🚀 {mention} just boosted the server — thank you for the support! 💜"
+
+
+def nitro_boost_summary_blocks(
+    entries: list, credited_cents: int, per_boost_cents: Optional[int] = None
+) -> list:
+    """Description block(s) for ONE consolidated thank-you (backfill), chunked to
+    <=10 embeds' worth. Each entry is ``{"discord_id": str, "group": str|None}``.
+    The caller wraps each block in an embed (mentions in embeds don't ping)."""
+    lines = []
+    for e in entries:
+        did = e.get("discord_id")
+        grp = e.get("group")
+        lines.append(f"• <@{did}> → **{grp}**" if grp else f"• <@{did}>")
+    blocks: list = []
+    buf: list = []
+    size = 0
+    for ln in lines:
+        if size + len(ln) + 1 > 3800 and buf:
+            blocks.append("\n".join(buf))
+            buf, size = [], 0
+        buf.append(ln)
+        size += len(ln) + 1
+    if buf:
+        blocks.append("\n".join(buf))
+    blocks = blocks[:10]
+    if blocks:
+        intro = (
+            f"These members boost the **DropTracker** Discord — together contributing "
+            f"**{format_cents(credited_cents)}/mo** of premium credit to their clans! Thank you 💜\n\n"
+        )
+        blocks[0] = intro + blocks[0]
+    return blocks

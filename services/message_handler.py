@@ -49,6 +49,34 @@ class MessageHandler(Extension):
             else:
                 await ctx.send("You don't have a valid Patreon subscription, or you already have a group assigned to it.")
                 return
+
+        if custom_id == "nitro_pick":
+            # Clan-picker select from a boost confirmation DM: set the booster's
+            # group designation (mirrors the patreon_group_ picker above).
+            from db.models import Session as _Session
+            from services import nitro_attribution
+            try:
+                gid = int(ctx.values[0])
+            except (IndexError, ValueError, TypeError):
+                return
+            name = None
+            _s = _Session()
+            try:
+                name = nitro_attribution.designate_group_for_discord_user(_s, str(ctx.author.id), gid)
+                if name:
+                    _s.commit()
+            except Exception as e:
+                print(f"[nitro] pick handler error: {e}")
+            finally:
+                _s.close()
+            msg = (
+                f"✓ Your boost now supports **{name}**. Change it any time at "
+                f"https://www.droptracker.io/settings."
+                if name
+                else "Couldn't update your choice — you may not be in that clan anymore."
+            )
+            await ctx.edit_origin(content=msg, components=[])
+            return
             
     async def send_invite_page(self, message: Message):
         channel = await self.bot.fetch_channel(message.channel.id)

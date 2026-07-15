@@ -6,14 +6,15 @@ import signal
 import sys
 from datetime import datetime
 from dotenv import load_dotenv
-from interactions.api.events import Component, MemberUpdate, MessageCreate, MessageReactionAdd, Startup
-from interactions import ActionRow, Embed, Intents, Message, ChannelType, OptionType, SlashContext, StringSelectMenu, StringSelectOption, listen, slash_command, Permissions, slash_option
+from interactions.api.events import MemberUpdate, MessageCreate, MessageReactionAdd, Startup
+from interactions import Embed, Intents, Message, ChannelType, OptionType, SlashContext, listen, slash_command, Permissions, slash_option
 from interactions.models import Member
 from db.models import Group, ItemList, PersonalBestEntry, PlayerPet, Session, Player, User, UserConfiguration
 from data.submissions import adventure_log_processor, clog_processor, ca_processor, pb_processor, drop_processor, pet_processor, experience_processor
 from api.services.metrics import MetricsTracker
 from services.points import award_points_to_player
 from services import nitro_attribution
+from services import nitro_notifications
 from utils.format import convert_to_ms, get_true_boss_name
 from services.ticket_system import Tickets
 from sqlalchemy.exc import OperationalError, DisconnectionError, InterfaceError, InternalError, DBAPIError
@@ -233,9 +234,13 @@ async def on_member_update(event: MemberUpdate):
         # a restart doesn't re-announce everyone already boosting).
         if _boosters_seeded and booster_id and booster_id not in _known_boosters:
             _known_boosters.add(booster_id)
-            member = after if after is not None else getattr(event, "member", None)
-            if member is not None:
-                await handle_new_boost(member)
+            # Enqueue for the MAIN bot to send the confirmation DM + channel
+            # line (it shares more guilds / is more recognizable). This bot only
+            # detects boosts and reconciles credit.
+            try:
+                await asyncio.to_thread(nitro_notifications.queue_nitro_boost, booster_id, True)
+            except Exception as e:
+                print(f"[nitro] failed to queue boost notification for {booster_id}: {e}")
     except Exception as e:
         print(f"[nitro] member update handling failed: {e}")
 
@@ -291,103 +296,6 @@ async def run_nitro_reconcile():
     _boosters_seeded = True
     print(f"[nitro] reconcile complete: {stats}")
     return stats
-
-
-def _nitro_contributors_channel_id():
-    """Channel for the boost one-liner (shared with contribution notifications)."""
-    raw = os.getenv("DISCORD_CONTRIBUTION_CHANNEL_ID", "1490419196012793866")
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
-
-
-def _nitro_pick_components(context: dict):
-    """A clan-picker select menu when the booster is in >1 group; else nothing."""
-    groups = context.get("groups") or []
-    if len(groups) < 2:
-        return []
-    picked = context.get("picked_group_id")
-    options = [
-        StringSelectOption(label=str(g["name"])[:100], value=str(g["id"]), default=(g["id"] == picked))
-        for g in groups[:25]
-    ]
-    return [
-        ActionRow(
-            StringSelectMenu(
-                options,
-                custom_id="nitro_pick",
-                placeholder="Choose which clan your boost supports",
-                min_values=1,
-                max_values=1,
-            )
-        )
-    ]
-
-
-async def handle_new_boost(member):
-    """Confirm a new boost to the booster (DM, with a clan picker if they're in
-    multiple groups) and post a one-liner to the contributors channel."""
-    discord_id = str(member.id)
-
-    def _ctx():
-        with Session() as s:
-            return nitro_attribution.booster_context(s, discord_id)
-
-    context = await asyncio.to_thread(_ctx)
-
-    # 1) Confirmation DM to the booster.
-    try:
-        await member.send(
-            content=nitro_attribution.nitro_boost_dm_text(context),
-            components=_nitro_pick_components(context),
-        )
-    except Exception as e:
-        print(f"[nitro] could not DM booster {discord_id}: {e}")
-
-    # 2) One-liner in the contributors channel.
-    try:
-        channel_id = _nitro_contributors_channel_id()
-        if channel_id:
-            channel = await bot.fetch_channel(channel_id=channel_id)
-            await channel.send(
-                nitro_attribution.nitro_boost_announcement_text(f"<@{discord_id}>", context)
-            )
-    except Exception as e:
-        print(f"[nitro] could not announce boost for {discord_id}: {e}")
-
-
-@listen(Component)
-async def on_nitro_component(event: Component):
-    """Clan-picker select in the boost DM: set the booster's group designation."""
-    ctx = event.ctx
-    if getattr(ctx, "custom_id", None) != "nitro_pick":
-        return
-    try:
-        gid = int(ctx.values[0])
-    except (IndexError, ValueError, TypeError):
-        return
-    discord_id = str(ctx.author.id)
-
-    def _apply():
-        with Session() as s:
-            name = nitro_attribution.designate_group_for_discord_user(s, discord_id, gid)
-            if name:
-                s.commit()
-            return name
-
-    name = await asyncio.to_thread(_apply)
-    if not name:
-        await ctx.edit_origin(
-            content="Couldn't update your choice — you may not be in that clan anymore.",
-            components=[],
-        )
-        return
-    _nitro_dirty.set()  # move the credit to the chosen clan promptly
-    await ctx.edit_origin(
-        content=f"✓ Your boost now supports **{name}**. Change it any time at https://www.droptracker.io/settings.",
-        components=[],
-    )
 
 
 async def _nitro_scheduler():

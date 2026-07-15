@@ -601,7 +601,7 @@ class NotificationService:
                 
                 # Get breakdown by notification type
                 type_breakdown = {}
-                for notification_type in ['drop', 'pb', 'ca', 'clog', 'pet', 'new_npc', 'new_item', 'name_change', 'new_player', 'user_upgrade', 'group_upgrade', 'monetary_contribution', 'update_log', 'points_earned']:
+                for notification_type in ['drop', 'pb', 'ca', 'clog', 'pet', 'new_npc', 'new_item', 'name_change', 'new_player', 'user_upgrade', 'group_upgrade', 'monetary_contribution', 'nitro_boost', 'nitro_boost_summary', 'update_log', 'points_earned']:
                     count = db_session.query(NotificationQueue).filter(
                         NotificationQueue.status == 'pending',
                         NotificationQueue.notification_type == notification_type
@@ -906,6 +906,10 @@ class NotificationService:
                 await self.send_group_upgrade_notification_with_session(notification, data, db_session)
             elif notification_type == 'monetary_contribution':
                 await self.send_contribution_notification_with_session(notification, data, db_session)
+            elif notification_type == 'nitro_boost':
+                await self.send_nitro_boost_notification_with_session(notification, data, db_session)
+            elif notification_type == 'nitro_boost_summary':
+                await self.send_nitro_boost_summary_with_session(notification, data, db_session)
             elif notification_type == 'update_log':
                 await self.send_update_log_data_with_session(notification, data, db_session)
             elif notification_type == 'points_earned':
@@ -2126,6 +2130,130 @@ class NotificationService:
             notification.error_message = str(e)
             db_session.commit()
             app_logger.log(log_type="error", data=f"Error sending contribution notification: {e}", app_name="notification_service", description="send_contribution_notification")
+            raise
+
+    def _nitro_pick_components(self, context: dict):
+        """Clan-picker select for a booster in >1 group; empty otherwise."""
+        groups = context.get("groups") or []
+        if len(groups) < 2:
+            return []
+        picked = context.get("picked_group_id")
+        options = [
+            interactions.StringSelectOption(
+                label=str(g["name"])[:100], value=str(g["id"]), default=(g["id"] == picked)
+            )
+            for g in groups[:25]
+        ]
+        return [
+            interactions.ActionRow(
+                interactions.StringSelectMenu(
+                    options,
+                    custom_id="nitro_pick",
+                    placeholder="Choose which clan your boost supports",
+                    min_values=1,
+                    max_values=1,
+                )
+            )
+        ]
+
+    async def send_nitro_boost_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
+        """Confirm a Nitro boost to the booster (DM, with a clan picker when they
+        belong to multiple groups) and — when ``announce`` — post a one-liner to
+        the contributors channel. Sent by the main bot (more mutual guilds, more
+        recognizable than the webhook bot that detected the boost)."""
+        from services import nitro_attribution
+        try:
+            discord_id = str(data.get("discord_id") or "")
+            announce = bool(data.get("announce", True))
+            context = (
+                nitro_attribution.booster_context(db_session, discord_id)
+                if discord_id else {"linked": False, "groups": []}
+            )
+            sent_any = False
+            errors = []
+
+            # 1) Confirmation DM to the booster (with the clan picker if multi-group).
+            if discord_id:
+                try:
+                    discord_user = await self.bot.fetch_user(discord_id)
+                    if discord_user:
+                        await discord_user.send(
+                            content=nitro_attribution.nitro_boost_dm_text(context),
+                            components=self._nitro_pick_components(context),
+                        )
+                        sent_any = True
+                except Exception as e:
+                    errors.append(f"booster DM: {e}")
+                    app_logger.log(log_type="error", data=f"Error DMing booster {discord_id}: {e}", app_name="notification_service", description="send_nitro_boost_notification")
+
+            # 2) One-liner in the contributors channel.
+            if announce:
+                try:
+                    channel = await self.bot.fetch_channel(CONTRIBUTION_CHANNEL_ID)
+                    if channel:
+                        await channel.send(
+                            nitro_attribution.nitro_boost_announcement_text(f"<@{discord_id}>", context)
+                        )
+                        sent_any = True
+                except Exception as e:
+                    errors.append(f"contributors channel: {e}")
+                    app_logger.log(log_type="error", data=f"Error announcing boost to contributors channel: {e}", app_name="notification_service", description="send_nitro_boost_notification")
+
+            notification.status = 'sent' if sent_any else 'failed'
+            notification.error_message = None if sent_any else ("; ".join(errors) or "No deliverable destination")
+            notification.processed_at = datetime.now()
+            db_session.commit()
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = str(e)
+            db_session.commit()
+            app_logger.log(log_type="error", data=f"Error sending nitro boost notification: {e}", app_name="notification_service", description="send_nitro_boost_notification")
+            raise
+
+    async def send_nitro_boost_summary_with_session(self, notification: NotificationQueue, data: dict, db_session):
+        """Post ONE consolidated Nitro-boost thank-you (the retroactive backfill)
+        to the contributors channel — a single message listing all boosters,
+        not one per person."""
+        from services import nitro_attribution
+        try:
+            entries = data.get("entries") or []
+            credited_cents = int(data.get("credited_cents") or 0)
+            blocks = nitro_attribution.nitro_boost_summary_blocks(entries, credited_cents)
+            embeds = []
+            for i, block in enumerate(blocks):
+                if i == 0:
+                    embed = interactions.Embed(
+                        title="🚀 Thank you to our Server Boosters!",
+                        description=block,
+                        color=CONTRIBUTION_COLOR,
+                    )
+                    embed.set_thumbnail(BRAND_THUMBNAIL)
+                else:
+                    embed = interactions.Embed(description=block, color=CONTRIBUTION_COLOR)
+                embed.set_footer(global_footer)
+                embeds.append(embed)
+
+            sent = False
+            error = None
+            if embeds:
+                try:
+                    channel = await self.bot.fetch_channel(CONTRIBUTION_CHANNEL_ID)
+                    if channel:
+                        await channel.send(embeds=embeds)
+                        sent = True
+                except Exception as e:
+                    error = f"contributors channel: {e}"
+                    app_logger.log(log_type="error", data=f"Error posting nitro boost summary: {e}", app_name="notification_service", description="send_nitro_boost_summary")
+
+            notification.status = 'sent' if sent else 'failed'
+            notification.error_message = None if sent else (error or "No boosters to announce")
+            notification.processed_at = datetime.now()
+            db_session.commit()
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = str(e)
+            db_session.commit()
+            app_logger.log(log_type="error", data=f"Error sending nitro boost summary: {e}", app_name="notification_service", description="send_nitro_boost_summary")
             raise
 
     async def send_drop_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):

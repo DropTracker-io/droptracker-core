@@ -228,6 +228,29 @@ def test_dm_text_multi_group_offers_picker():
     assert "Bravo" in txt and "Pick a different clan" in txt
 
 
+def test_summary_blocks_basic():
+    entries = [
+        {"discord_id": "1", "group": "Alpha"},
+        {"discord_id": "2", "group": None},
+    ]
+    blocks = nitro.nitro_boost_summary_blocks(entries, 1000)
+    assert len(blocks) == 1
+    body = blocks[0]
+    assert "$10/mo" in body  # 1000 cents credited
+    assert "<@1> → **Alpha**" in body
+    assert "<@2>" in body and "<@2> →" not in body  # groupless: no arrow
+
+
+def test_summary_blocks_empty():
+    assert nitro.nitro_boost_summary_blocks([], 0) == []
+
+
+def test_summary_blocks_chunks_and_caps():
+    entries = [{"discord_id": str(i), "group": "G" * 40} for i in range(400)]
+    blocks = nitro.nitro_boost_summary_blocks(entries, 400 * 500)
+    assert 1 < len(blocks) <= 10  # chunked, but capped at Discord's 10-embed limit
+
+
 def test_announcement_text_with_and_without_group():
     with_group = nitro.nitro_boost_announcement_text(
         "<@42>", {"linked": True, "picked_group_name": "Alpha"}, per_boost_cents=500
