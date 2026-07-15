@@ -742,8 +742,40 @@ async def reconcile_event_scheduled_events():
                         if ping_channel_id and ping_content:
                             ping_channel = await bot.fetch_channel(channel_id=ping_channel_id)
                             if ping_channel:
+                                # Deep-link buttons: members can open the event
+                                # inside the Discord Activity or on the website
+                                # right from the creation announcement — the
+                                # event page ships pre-activation for members
+                                # of participating groups, so these links work
+                                # even while the event is still a draft.
+                                from services.activity_launch_core import (
+                                    activity_link_url,
+                                    launch_button_custom_id,
+                                )
+                                from services.event_message_layouts import deeplink_enabled
+
+                                if deeplink_enabled():
+                                    open_btn = interactions.Button(
+                                        style=interactions.ButtonStyle.BLURPLE,
+                                        label="Open in Discord",
+                                        custom_id=launch_button_custom_id(ev.id),
+                                    )
+                                else:
+                                    open_btn = interactions.Button(
+                                        style=interactions.ButtonStyle.LINK,
+                                        label="Open in Discord",
+                                        url=activity_link_url(ev.id),
+                                    )
                                 await ping_channel.send(
                                     content=ping_content,
+                                    components=[interactions.ActionRow(
+                                        open_btn,
+                                        interactions.Button(
+                                            style=interactions.ButtonStyle.LINK,
+                                            label="Event page",
+                                            url=f"https://www.droptracker.io/events/{ev.id}",
+                                        ),
+                                    )],
                                     allowed_mentions=interactions.AllowedMentions(parse=["roles"]),
                                 )
                     except Exception as ping_err:

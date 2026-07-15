@@ -218,6 +218,41 @@ def _is_event_admin(s, viewer_id, ev: Event) -> bool:
     return role in ("owner", "admin")
 
 
+def _member_group_ids(s, viewer_id) -> set[int]:
+    """Group ids the viewer belongs to: membership rows
+    (user_group_association) plus explicit web admin grants (group_admins) —
+    the same union the /me groups list reports."""
+    if viewer_id is None:
+        return set()
+    gids = {
+        gid
+        for (gid,) in s.query(user_group_association.c.group_id)
+        .filter(user_group_association.c.user_id == viewer_id)
+        .all()
+        if gid is not None
+    }
+    gids |= {
+        gid
+        for (gid,) in s.query(GroupAdmin.group_id)
+        .filter(GroupAdmin.user_id == viewer_id)
+        .all()
+    }
+    return gids
+
+
+def _can_view_draft(s, viewer_id, ev: Event) -> bool:
+    """Draft visibility: event admins, plus MEMBERS of any participating
+    group — the pre-publication landing page. Members get the event page
+    (and its sign-up panel) as soon as the event exists, so a "the event is
+    coming, sign up!" Discord link works before activation; everyone else
+    still sees a 404."""
+    if _is_event_admin(s, viewer_id, ev):
+        return True
+    if viewer_id is None:
+        return False
+    return bool(participating_group_ids(s, ev) & _member_group_ids(s, viewer_id))
+
+
 def _attach_task_tiles(s, tasks: list[dict]) -> None:
     """Attach a ``tile`` block (badge + value + resolved icon refs) to each
     serialized task dict. Names across all tasks resolve in two bulk queries
@@ -518,25 +553,35 @@ async def list_events():
                             if role in ("owner", "admin"):
                                 admin_groups.add(ev.group_id)
 
+            # Members of a participating group see its drafts too — the
+            # pre-publication landing page (one cheap set for the whole list).
+            member_groups = _member_group_ids(s, viewer_id)
+
             out = []
             for ev in events:
                 eff = _effective_status(ev)
                 is_draft = eff == "draft"
                 if is_draft and not viewer_is_superadmin and (
                         not ev.group_id or ev.group_id not in admin_groups):
-                    # clan-vs-clan drafts are also visible to admins of any
-                    # accepted participant (mode check first: standard events
-                    # take the fast `continue` with no extra queries).
-                    if not ((getattr(ev, "mode", None) or "standard") == "clan_vs_clan"
-                            and viewer_id is not None
-                            and _is_event_admin(s, viewer_id, ev)):
-                        continue  # drafts hidden from non-admins
+                    if not (member_groups & participating_group_ids(s, ev)):
+                        # clan-vs-clan drafts are also visible to admins of any
+                        # accepted participant (mode check first: standard
+                        # events take the fast `continue` with no extra
+                        # queries; guild-derived admins aren't in member_groups).
+                        if not ((getattr(ev, "mode", None) or "standard") == "clan_vs_clan"
+                                and viewer_id is not None
+                                and _is_event_admin(s, viewer_id, ev)):
+                            continue  # drafts hidden from outsiders
                 if status and eff != status:
                     continue
                 out.append(_summary(ev))
             return out
 
     events = await asyncio.to_thread(_load)
+    if viewer_id is not None:
+        # Signed-in lists can include drafts the viewer administers or
+        # belongs to — viewer-specific, never shared-cacheable.
+        return private_no_store(jsonify(events))
     return with_cache_headers(jsonify(events), max_age=30)
 
 
@@ -613,8 +658,9 @@ async def get_event(event_id: int):
             if not ev:
                 return None
             if _effective_status(ev) == "draft":
-                # Drafts only visible to event admins.
-                if not _is_event_admin(s, viewer_id, ev):
+                # Drafts: event admins + members of participating groups
+                # (pre-publication landing page).
+                if not _can_view_draft(s, viewer_id, ev):
                     return None
             return _detail(s, ev, viewer_id=viewer_id)
 
@@ -645,7 +691,7 @@ async def get_event_team(event_id: int, team_id: int):
             ev = s.query(Event).filter(Event.id == event_id).first()
             if not ev:
                 return None
-            if _effective_status(ev) == "draft" and not _is_event_admin(s, viewer_id, ev):
+            if _effective_status(ev) == "draft" and not _can_view_draft(s, viewer_id, ev):
                 return None
             all_teams = (
                 s.query(EventTeam)
