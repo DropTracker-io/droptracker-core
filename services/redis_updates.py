@@ -488,13 +488,48 @@ class RedisLootTracker:
             player_group_ids = [group.group_id for group in player.groups]
             print(f"Player {player_id} belongs to groups: {player_group_ids}")
             
-            # Get all visible drops for the player (exclude hidden)
-            player_drops = session_to_use.query(Drop).filter(
-                Drop.player_id == player_id,
-                Drop.hidden != True,
-            ).order_by(Drop.date_added.asc()).all()
-            
-            if not player_drops:
+            # Stream all visible drops (exclude hidden) instead of buffering the
+            # whole result with .all(). A single buffered read of a mega-account
+            # (900k+ rows) blocks past pymysql read_timeout=30 under load and
+            # times out; the half-read socket is left protocol-desynced ("Packet
+            # sequence number wrong") and, returned to the pool, fails the NEXT
+            # player instantly ("Can't reconnect until invalid transaction is
+            # rolled back"). yield_per uses a server-side streaming cursor so rows
+            # arrive in bounded batches (each well under the socket timeout) and
+            # memory stays flatter. Safe here because only plain Drop columns are
+            # read below (no lazy relationship loads) and the iterator is fully
+            # consumed before any other query runs on this session (a streaming
+            # cursor forbids a concurrent query on the same connection).
+            drops_stream = (
+                session_to_use.query(Drop)
+                .filter(
+                    Drop.player_id == player_id,
+                    Drop.hidden != True,
+                )
+                .order_by(Drop.date_added.asc())
+                .yield_per(5000)
+            )
+
+            # Group drops by partition (monthly) and by day in a single pass.
+            partition_drops = {}  # monthly partitions
+            daily_drops = {}      # daily partitions
+            drop_count = 0
+
+            for drop in drops_stream:
+                drop_count += 1
+                # Monthly partition
+                partition = drop.partition
+                if partition not in partition_drops:
+                    partition_drops[partition] = []
+                partition_drops[partition].append(drop)
+
+                # Daily partition
+                daily_partition = drop.date_added.strftime('%Y%m%d')
+                if daily_partition not in daily_drops:
+                    daily_drops[daily_partition] = []
+                daily_drops[daily_partition].append(drop)
+
+            if drop_count == 0:
                 # No drops, clear Redis data and remove from leaderboards.
                 # Still advance date_updated — otherwise drop-less players sit
                 # at the head of the stale-player queue forever and starve it.
@@ -503,24 +538,7 @@ class RedisLootTracker:
                 player.date_updated = datetime.now()
                 session_to_use.commit()
                 return True
-            
-            # Group drops by partition (monthly) and by day
-            partition_drops = {}  # monthly partitions
-            daily_drops = {}      # daily partitions
-            
-            for drop in player_drops:
-                # Monthly partition
-                partition = drop.partition
-                if partition not in partition_drops:
-                    partition_drops[partition] = []
-                partition_drops[partition].append(drop)
-                
-                # Daily partition
-                daily_partition = drop.date_added.strftime('%Y%m%d')
-                if daily_partition not in daily_drops:
-                    daily_drops[daily_partition] = []
-                daily_drops[daily_partition].append(drop)
-            
+
             # Clear existing Redis data
             self._clear_player_redis_data(player_id)
             self._remove_from_leaderboards(player_id, player_group_ids)
@@ -581,17 +599,34 @@ class RedisLootTracker:
             
         except Exception as e:
             print(f"Force update failed for player {player_id}: {e}")
-            # Roll the session back before returning. The background updater
-            # reuses one session across a batch of players; if a query here dies
-            # mid-transaction (e.g. the drops SELECT hits pymysql read_timeout)
-            # and we DON'T roll back, the very next player on that session fails
-            # instantly with "Can't reconnect until invalid transaction is rolled
-            # back. Please rollback() fully before proceeding." — the chronic
-            # error pair seen in droptracker-player-updates.
+            # Clean up the session before returning so the next player starts
+            # fresh. The distinction matters: a CONNECTION-level failure (the
+            # drops SELECT hitting pymysql read_timeout, a lost/gone-away
+            # connection, or a packet-sequence desync) leaves the socket in an
+            # unknown protocol state. A plain rollback() would try to write
+            # ROLLBACK on that broken socket — it fails with "Packet sequence
+            # number wrong" and the still-poisoned connection goes back to the
+            # pool, where the NEXT player checks it out and dies instantly with
+            # "Can't reconnect until invalid transaction is rolled back." That is
+            # the exact 30s-timeout-then-instant-fail pair that wedged the stale
+            # queue. invalidate() instead DISCARDS the connection (closes it,
+            # drops it from the pool) so a healthy one is created next time.
+            from sqlalchemy.exc import (
+                OperationalError,
+                InternalError,
+                InterfaceError,
+                DBAPIError,
+            )
+            conn_level = isinstance(
+                e, (OperationalError, InternalError, InterfaceError)
+            ) or (isinstance(e, DBAPIError) and getattr(e, "connection_invalidated", False))
             try:
-                session_to_use.rollback()
-            except Exception as rollback_error:
-                print(f"Rollback after force-update failure also failed for player {player_id}: {rollback_error}")
+                if conn_level:
+                    session_to_use.invalidate()
+                else:
+                    session_to_use.rollback()
+            except Exception as cleanup_error:
+                print(f"Session cleanup after force-update failure also failed for player {player_id}: {cleanup_error}")
             return False
     
     def _apply_split_credits(self, player_id: int, session_to_use) -> None:
