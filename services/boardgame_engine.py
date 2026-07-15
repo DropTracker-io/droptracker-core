@@ -423,6 +423,18 @@ def perform_roll(session, redis_conn, event_id: int, team_id: int,
             summary["task_difficulty"] = instance.difficulty
     session.flush()
 
+    # Live board frame for the web/Activity views (SSE scope event:{id}).
+    try:
+        from services.realtime import publish_event_update
+
+        publish_event_update(event_id, {
+            "kind": "board_roll", "event_id": event_id, "team_id": team_id,
+            "dice": faces, "from": start, "to": dest,
+            "won": summary["won"], "task_label": summary.get("task_label"),
+        })
+    except Exception:
+        pass
+
     # The matcher caches (event, team) -> current task; nudge every consumer
     # to reload so the new instance starts matching immediately.
     try:

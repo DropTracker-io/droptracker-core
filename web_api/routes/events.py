@@ -344,6 +344,9 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             "score": int(tm.score or 0),
             "group_id": getattr(tm, "group_id", None),  # clan bound (clan_vs_clan)
             "color": getattr(tm, "color", None),  # admin accent; null = palette default
+            # Board game (web44a): coin wallet + game piece.
+            "coins": int(getattr(tm, "coins", 0) or 0),
+            "piece_item_id": getattr(tm, "piece_item_id", None),
             "member_count": len(members),
             "members": members,
         })
@@ -1727,8 +1730,17 @@ async def update_team(event_id: int, team_id: int):
         color = str(color).strip().lower() or None
         if color is not None and not re.fullmatch(r"#[0-9a-f]{6}", color):
             abort_problem(422, "Invalid color", 'Team color must be "#rrggbb" hex (or null to reset).')
-    if name is None and not has_color:
-        abort_problem(422, "Nothing to update", "Provide a name and/or a color.")
+    # Board-game game piece (web44a): an OSRS item id rendered via
+    # /img/itemdb/{id}.png. Null clears back to the color-dot default.
+    has_piece = "piece_item_id" in body
+    piece_item_id = body.get("piece_item_id")
+    if has_piece and piece_item_id is not None and (
+            not isinstance(piece_item_id, int) or isinstance(piece_item_id, bool)
+            or piece_item_id <= 0):
+        abort_problem(422, "Invalid piece",
+                      "'piece_item_id' must be a positive item id (or null to clear).")
+    if name is None and not has_color and not has_piece:
+        abort_problem(422, "Nothing to update", "Provide a name, color, and/or piece.")
 
     def _apply():
         with db_session() as s:
@@ -1741,12 +1753,16 @@ async def update_team(event_id: int, team_id: int):
             )
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
-            before = {"name": team.name, "color": team.color}
+            before = {"name": team.name, "color": team.color,
+                      "piece_item_id": getattr(team, "piece_item_id", None)}
             if name is not None:
                 team.name = name
             if has_color:
                 team.color = color
-            after = {"name": team.name, "color": team.color}
+            if has_piece:
+                team.piece_item_id = piece_item_id
+            after = {"name": team.name, "color": team.color,
+                     "piece_item_id": getattr(team, "piece_item_id", None)}
             if before == after:
                 return  # no-op
             s.add(
