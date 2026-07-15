@@ -62,7 +62,7 @@ STATIC_IMG_DIR = "/store/droptracker/disc/static/assets/img"
 # Monetary contribution announcements (queued by web_api/payments.py via
 # services/contribution_notifications.py). Channel defaults to the same
 # global supporters channel the legacy group_upgrade notifications used.
-CONTRIBUTION_CHANNEL_ID = int(os.getenv("DISCORD_CONTRIBUTION_CHANNEL_ID", "1373331322709479485"))
+CONTRIBUTION_CHANNEL_ID = int(os.getenv("DISCORD_CONTRIBUTION_CHANNEL_ID", "1490419196012793866"))
 SUPPORTER_EMOJI = "<:supporter:1263827303712948304>"
 DROPTRACKER_EMOJI = "<a:droptracker:1346787143778963497>"
 BRAND_THUMBNAIL = "https://www.droptracker.io/img/droptracker-small.gif"

@@ -295,7 +295,7 @@ async def run_nitro_reconcile():
 
 def _nitro_contributors_channel_id():
     """Channel for the boost one-liner (shared with contribution notifications)."""
-    raw = os.getenv("DISCORD_CONTRIBUTION_CHANNEL_ID", "1373331322709479485")
+    raw = os.getenv("DISCORD_CONTRIBUTION_CHANNEL_ID", "1490419196012793866")
     try:
         return int(raw)
     except (TypeError, ValueError):
