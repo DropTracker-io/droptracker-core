@@ -55,6 +55,7 @@ from db import (
     EventTeamMember,
     EVENT_DISCORD_POLICIES,
     EVENT_FORMATION_MODES,
+    EVENT_KINDS,
     EVENT_SELF_SIGNUP_MODES,
     EVENT_MODES,
     EVENT_PING_KEYS,
@@ -170,6 +171,7 @@ def _summary(ev: Event) -> dict:
         "ends_at": _ts(ev.ends_at),
         "has_bingo": bool(ev.has_bingo),
         "mode": getattr(ev, "mode", None) or "standard",
+        "kind": getattr(ev, "kind", None) or "standard",
         "formation_mode": ev.formation_mode or "admin_assign",
         "requires_confirmation": bool(ev.requires_confirmation),
         "submission_policy": ev.submission_policy or "all",
@@ -1010,6 +1012,11 @@ async def create_event():
     mode = body.get("mode") or "standard"
     if mode not in EVENT_MODES:
         abort_problem(422, "Invalid mode", f"mode must be one of {list(EVENT_MODES)}.")
+    # Game format (web43a) — orthogonal to mode. Which kinds THIS user may
+    # create is gated inside _apply() (needs a session + superadmin check).
+    kind = body.get("kind") or "standard"
+    if kind not in EVENT_KINDS:
+        abort_problem(422, "Invalid kind", f"kind must be one of {list(EVENT_KINDS)}.")
     # When the Discord scheduled-event mirror goes live: the creation form's
     # "create the Discord event now / when the event goes live" prompt.
     discord_event_policy = body.get("discord_event_policy") or "on_activate"
@@ -1032,6 +1039,22 @@ async def create_event():
             # Entitlement/admin on the HOST group — the host "pays" exactly
             # as for a standard event; invited opponents never need a tier.
             _assert_event_admin(s, user_id, group_id)
+            # Site-wide event-type gate (web43a): a disabled/admin_only kind
+            # is creatable only by superadmins and the kind's test groups.
+            # Creation-only — existing events of a toggled-off kind still run.
+            # creation_restricted is query-free on the common enabled path
+            # (warm registry cache); the user lookup only happens for
+            # restricted kinds.
+            from services.event_types import creation_restricted
+
+            if creation_restricted(s, kind, group_id=group_id) and not is_superadmin(
+                load_user(s, user_id)
+            ):
+                abort_problem(
+                    403, "Event type unavailable",
+                    f"The '{kind}' event type is not currently available to "
+                    "your group.",
+                )
             # Group events default their Discord destination to the group's
             # linked guild (Task 19); admins can re-point it at any guild the
             # bot is in via PUT /events/{id}/discord.
@@ -1058,6 +1081,7 @@ async def create_event():
                 join_code=join_code or None,
                 discord_guild_id=discord_guild_id,
                 mode=mode,
+                kind=kind,
                 discord_event_policy=discord_event_policy,
                 ping_config=ping_config,
             )
@@ -1156,6 +1180,30 @@ async def update_event(event_id: int):
                             EventGroup.event_id == ev.id
                         ).delete(synchronize_session=False)
                     ev.mode = new_mode
+            if "kind" in body:
+                new_kind = body.get("kind") or "standard"
+                if new_kind not in EVENT_KINDS:
+                    abort_problem(422, "Invalid kind",
+                                  f"kind must be one of {list(EVENT_KINDS)}.")
+                if new_kind != (getattr(ev, "kind", None) or "standard"):
+                    # Kind is structural (board/bingo state hangs off it):
+                    # drafts only, and the site-wide type gate re-binds.
+                    if ev.status != "draft":
+                        abort_problem(409, "Event already started",
+                                      "The event kind can only change while it is a draft.")
+                    from services.event_types import is_event_type_creatable
+
+                    if not is_event_type_creatable(
+                        s, new_kind,
+                        is_superadmin=is_superadmin(load_user(s, user_id)),
+                        group_id=ev.group_id,
+                    ):
+                        abort_problem(
+                            403, "Event type unavailable",
+                            f"The '{new_kind}' event type is not currently "
+                            "available to your group.",
+                        )
+                    ev.kind = new_kind
             if "requires_confirmation" in body:
                 # Event-level force: all completions queue for review (PRD D3).
                 ev.requires_confirmation = bool(body.get("requires_confirmation"))
@@ -1414,6 +1462,30 @@ async def add_task(event_id: int):
     # visibility echoes what was stored: a "public" save whose requirements
     # duplicate an existing public preset is demoted to "private".
     return jsonify({"id": task_id, "visibility": effective_visibility})
+
+
+@events_bp.get("/events/meta/types")
+async def list_event_kinds():
+    """Event kinds for the create form (session required).
+
+    Every registry row is returned (so the UI can show 'staff testing'
+    states), each annotated with ``creatable`` resolved for the current user
+    and the ``group_id`` query param (omit/empty for a global event, where
+    only superadmins create anyway)."""
+    user_id = current_user_id()
+    raw_gid = (request.args.get("group_id") or "").strip()
+    group_id = int(raw_gid) if raw_gid.isdigit() else None
+
+    def _read():
+        from services.event_types import creatable_kinds
+
+        with db_session() as s:
+            user = load_user(s, user_id)
+            return creatable_kinds(
+                s, is_superadmin=is_superadmin(user), group_id=group_id
+            )
+
+    return private_no_store(jsonify(await asyncio.to_thread(_read)))
 
 
 @events_bp.get("/events/meta/items")

@@ -94,6 +94,7 @@ _STUBS = [
     "services.nitro_attribution",
     "services.submission_status",
     "services.seasonal_state",
+    "services.event_types",
     "services.item_totals",
     "services.notification_service",
     "services.hall_of_fame",
@@ -202,6 +203,12 @@ sys.modules["services.redis_updates"].add_split_credit = MagicMock()
 
 # services.points stub
 sys.modules["services.points"].award_points_to_player = MagicMock()
+
+# services.event_types stub — default to "everything creatable" so the
+# event-create guardrail tests (scripted sessions, exact query counts) never
+# hit the restricted branch's user lookup.
+sys.modules["services.event_types"].creation_restricted = MagicMock(return_value=False)
+sys.modules["services.event_types"].is_event_type_creatable = MagicMock(return_value=True)
 
 # db.ops stub – DatabaseOperations and helpers
 _ops_stub = sys.modules["db.ops"]

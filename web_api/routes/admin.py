@@ -60,6 +60,8 @@ from db import (
     AuditLog,
     DiscordOutbox,
     Drop,
+    EventType,
+    EventTypeTestGroup,
     Group,
     GroupAdmin,
     GroupConfiguration,
@@ -330,6 +332,139 @@ async def admin_set_seasonal():
         abort_problem(502, "Toggle failed", "Could not persist the seasonal switch.")
     _audit(actor, "seasonal.toggle", "global", after="on" if active else "off")
     return jsonify({"ok": True, "active": active})
+
+
+# --------------------------------------------------------------------------- #
+# Event types (game formats) — site-wide enable/disable + test-group allowlist.
+# The durable analogue of the seasonal switch: rows in web_event_types gate
+# which kinds non-superadmins may CREATE (services/event_types.py); existing
+# events keep running regardless.
+# --------------------------------------------------------------------------- #
+def _event_type_row(s, t: EventType) -> dict:
+    test_rows = (
+        s.query(EventTypeTestGroup, Group.group_name)
+        .outerjoin(Group, Group.group_id == EventTypeTestGroup.group_id)
+        .filter(EventTypeTestGroup.type_key == t.key)
+        .order_by(EventTypeTestGroup.created_at)
+        .all()
+    )
+    return {
+        "key": t.key,
+        "label": t.label,
+        "description": t.description or None,
+        "enabled": bool(t.enabled),
+        "admin_only": bool(t.admin_only),
+        "sort": int(t.sort or 0),
+        "test_groups": [
+            {"group_id": tg.group_id, "group_name": name or f"Group {tg.group_id}"}
+            for (tg, name) in test_rows
+        ],
+    }
+
+
+@admin_bp.get("/admin/event-types")
+async def admin_list_event_types():
+    await _require_superadmin()
+
+    def _read():
+        with db_session() as s:
+            rows = s.query(EventType).order_by(EventType.sort, EventType.key).all()
+            return [_event_type_row(s, t) for t in rows]
+
+    return private_no_store(jsonify(await asyncio.to_thread(_read)))
+
+
+@admin_bp.patch("/admin/event-types/<key>")
+async def admin_patch_event_type(key: str):
+    actor = await _require_superadmin()
+    body = await json_body()
+    for field in ("enabled", "admin_only"):
+        if field in body and not isinstance(body[field], bool):
+            abort_problem(422, "Invalid value", f"'{field}' must be a boolean.")
+
+    def _apply():
+        with db_session() as s:
+            t = s.query(EventType).filter(EventType.key == key).first()
+            if not t:
+                abort_problem(404, "Unknown event type", f"No event type '{key}'.")
+            before = f"enabled={int(t.enabled)},admin_only={int(t.admin_only)}"
+            if "enabled" in body:
+                t.enabled = body["enabled"]
+            if "admin_only" in body:
+                t.admin_only = body["admin_only"]
+            s.commit()
+            after = f"enabled={int(t.enabled)},admin_only={int(t.admin_only)}"
+            row = _event_type_row(s, t)
+            return before, after, row
+
+    before, after, row = await asyncio.to_thread(_apply)
+    from services.event_types import invalidate_cache
+
+    invalidate_cache()
+    _audit(actor, "event_type.toggle", key, before=before, after=after)
+    return jsonify(row)
+
+
+@admin_bp.post("/admin/event-types/<key>/test-groups")
+async def admin_add_event_type_test_group(key: str):
+    actor = await _require_superadmin()
+    body = await json_body()
+    group_id = body.get("group_id")
+    if not isinstance(group_id, int) or isinstance(group_id, bool):
+        abort_problem(422, "Invalid group_id", "'group_id' must be an integer.")
+
+    def _apply():
+        with db_session() as s:
+            t = s.query(EventType).filter(EventType.key == key).first()
+            if not t:
+                abort_problem(404, "Unknown event type", f"No event type '{key}'.")
+            if not s.query(Group.group_id).filter(Group.group_id == group_id).first():
+                abort_problem(404, "Unknown group", f"No group {group_id}.")
+            exists = (
+                s.query(EventTypeTestGroup.id)
+                .filter(
+                    EventTypeTestGroup.type_key == key,
+                    EventTypeTestGroup.group_id == group_id,
+                )
+                .first()
+            )
+            if not exists:
+                s.add(EventTypeTestGroup(
+                    type_key=key, group_id=group_id, added_by_user_id=actor,
+                ))
+                s.commit()
+            return _event_type_row(s, t)
+
+    row = await asyncio.to_thread(_apply)
+    from services.event_types import invalidate_cache
+
+    invalidate_cache()
+    _audit(actor, "event_type.test_group.add", key, after=str(group_id))
+    return jsonify(row)
+
+
+@admin_bp.delete("/admin/event-types/<key>/test-groups/<int:group_id>")
+async def admin_remove_event_type_test_group(key: str, group_id: int):
+    actor = await _require_superadmin()
+
+    def _apply():
+        with db_session() as s:
+            t = s.query(EventType).filter(EventType.key == key).first()
+            if not t:
+                abort_problem(404, "Unknown event type", f"No event type '{key}'.")
+            s.query(EventTypeTestGroup).filter(
+                EventTypeTestGroup.type_key == key,
+                EventTypeTestGroup.group_id == group_id,
+            ).delete(synchronize_session=False)
+            s.commit()
+            return _event_type_row(s, t)
+
+    row = await asyncio.to_thread(_apply)
+    from services.event_types import invalidate_cache
+
+    invalidate_cache()
+    _audit(actor, "event_type.test_group.remove", key, before=str(group_id))
+    return jsonify(row)
 
 
 @admin_bp.get("/admin/services")

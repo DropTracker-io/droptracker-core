@@ -63,6 +63,16 @@ EVENT_TASK_VISIBILITIES = ("public", "private")
 # opponent groups, tracked in web_event_groups).
 EVENT_MODES = ("standard", "clan_vs_clan")
 
+# Event game formats (web_events.kind) — ORTHOGONAL to ``mode`` (ownership):
+# - "standard"   — a flat task list scored by completions.
+# - "bingo"      — the task grid (has_bingo boards); put_bingo_board stamps it.
+# - "board_game" — the dice-board mode (web43a+): tiles, turns, coins, shop.
+# Which kinds a non-superadmin may CREATE is governed site-wide by the
+# ``web_event_types`` registry (enabled/admin_only + per-type test-group
+# allowlist) — see services/event_types.py. Existing events of a disabled
+# kind keep running; the gate binds at creation only.
+EVENT_KINDS = ("standard", "bingo", "board_game")
+
 # web_event_groups participant roles / invite lifecycle.
 EVENT_GROUP_ROLES = ("host", "opponent")
 EVENT_GROUP_STATUSES = ("invited", "accepted", "declined")
@@ -160,6 +170,9 @@ class Event(Base):
     # EVENT_MODES. clan_vs_clan keeps group_id = the HOST group, so group
     # indexes, the default Discord guild, and entitlement gating work unchanged.
     mode = Column(String(16), nullable=False, default="standard", server_default="standard")
+    # EVENT_KINDS — the game format (web43a). Orthogonal to ``mode``; the
+    # web_event_types registry gates which kinds non-superadmins may create.
+    kind = Column(String(24), nullable=False, default="standard", server_default="standard")
     # EVENT_DISCORD_POLICIES: when the Discord scheduled-event mirror goes
     # live — on activation (default; drafts create nothing on Discord) or
     # immediately at creation.
@@ -533,3 +546,53 @@ class EventMessageLayout(Base):
     layout = Column(Text, nullable=False)  # MEDIUMTEXT in MySQL (web41a)
     schema_version = Column(Integer, nullable=False, default=1)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class EventType(Base):
+    """Site-wide registry row for one event kind (web43a).
+
+    The durable analogue of the seasonal Redis kill switch, but per game
+    format and with an allowlist: superadmins toggle ``enabled`` /
+    ``admin_only`` from /admin/event-types, and the CREATE gate
+    (services/event_types.py::is_event_type_creatable) resolves to
+
+        superadmin                    -> always allowed
+        disabled OR admin_only        -> only groups in web_event_type_test_groups
+        enabled + not admin_only      -> everyone (normal entitlement rules)
+
+    The gate binds at creation only — existing events of a toggled-off kind
+    keep running untouched. Seeded by the web43a migration; rows are never
+    deleted (kinds are code-level concepts), only toggled."""
+
+    __tablename__ = "web_event_types"
+    __table_args__ = ({"extend_existing": True},)
+
+    key = Column(String(24), primary_key=True)  # EVENT_KINDS
+    label = Column(String(48), nullable=False)
+    description = Column(Text, nullable=True)
+    enabled = Column(Boolean, nullable=False, default=True)
+    # Even while enabled, restrict creation to superadmins + test groups
+    # (how a new kind ships dark: enabled for staff, invisible to everyone
+    # else until the switch flips).
+    admin_only = Column(Boolean, nullable=False, default=False, server_default="0")
+    sort = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class EventTypeTestGroup(Base):
+    """Per-kind test-group allowlist (web43a): admins of a listed group may
+    create the kind even while it is disabled/admin_only — the "let this clan
+    beta-test board games" mechanism. Managed from /admin/event-types."""
+
+    __tablename__ = "web_event_type_test_groups"
+    __table_args__ = (
+        Index("uq_web_evt_type_test_group", "type_key", "group_id", unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    type_key = Column(String(24), ForeignKey("web_event_types.key"), nullable=False)
+    group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=False)
+    added_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)

@@ -841,6 +841,11 @@ async def put_bingo_board(event_id: int):
 
             ev.has_bingo = True
             ev.board_size = size
+            # Keep the game-format dimension consistent (web43a): saving a
+            # bingo board makes this a bingo event unless it's already a
+            # richer kind (board_game keeps its kind).
+            if (getattr(ev, "kind", None) or "standard") == "standard":
+                ev.kind = "bingo"
             s.flush()
 
             # Free cells complete for every team "at activation". With the
