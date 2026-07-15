@@ -6,8 +6,8 @@ import signal
 import sys
 from datetime import datetime
 from dotenv import load_dotenv
-from interactions.api.events import MemberUpdate, MessageCreate, MessageReactionAdd, Startup
-from interactions import Embed, Intents, Message, ChannelType, OptionType, SlashContext, listen, slash_command, Permissions, slash_option
+from interactions.api.events import Component, MemberUpdate, MessageCreate, MessageReactionAdd, Startup
+from interactions import ActionRow, Embed, Intents, Message, ChannelType, OptionType, SlashContext, StringSelectMenu, StringSelectOption, listen, slash_command, Permissions, slash_option
 from interactions.models import Member
 from db.models import Group, ItemList, PersonalBestEntry, PlayerPet, Session, Player, User, UserConfiguration
 from data.submissions import adventure_log_processor, clog_processor, ca_processor, pb_processor, drop_processor, pet_processor, experience_processor
@@ -59,6 +59,12 @@ MAIN_WORLD_TYPE = "main"
 # (debounced) by _nitro_scheduler, which is started once from on_startup.
 _nitro_dirty = asyncio.Event()
 _nitro_scheduler_started = False
+# Discord ids currently known to be boosting, seeded by each reconcile. Used to
+# fire the boost-time DM/announce exactly once per new boost (not for existing
+# boosters on every restart). `_boosters_seeded` gates announcing until the
+# first reconcile has populated the set.
+_known_boosters: set = set()
+_boosters_seeded = False
 try:
     NITRO_RECONCILE_SECONDS = max(300, int(os.getenv("NITRO_RECONCILE_MINUTES", "60")) * 60)
 except (TypeError, ValueError):
@@ -214,8 +220,22 @@ async def on_member_update(event: MemberUpdate):
         after = getattr(event, "after", None)
         before_boost = getattr(before, "premium_since", None) if before else None
         after_boost = getattr(after, "premium_since", None) if after else None
-        if before_boost != after_boost:
-            _nitro_dirty.set()
+        if before_boost == after_boost:
+            return
+        _nitro_dirty.set()  # boost state changed → recompute group credit
+
+        booster_id = str(getattr(after, "id", None) or getattr(before, "id", None) or "")
+        if after_boost is None:
+            # Stopped boosting.
+            _known_boosters.discard(booster_id)
+            return
+        # Started boosting: DM + announce once per new booster (once seeded, so
+        # a restart doesn't re-announce everyone already boosting).
+        if _boosters_seeded and booster_id and booster_id not in _known_boosters:
+            _known_boosters.add(booster_id)
+            member = after if after is not None else getattr(event, "member", None)
+            if member is not None:
+                await handle_new_boost(member)
     except Exception as e:
         print(f"[nitro] member update handling failed: {e}")
 
@@ -256,6 +276,7 @@ async def apply_nitro_boost_points(user_id: int, session_to_use = None):
 async def run_nitro_reconcile():
     """Enumerate current boosters of the main guild and reconcile per-group
     nitro credit legs. DB work runs off the event loop."""
+    global _boosters_seeded
     boosters = await nitro_attribution.fetch_booster_discord_ids(bot.http)
 
     def _db():
@@ -263,8 +284,110 @@ async def run_nitro_reconcile():
             return nitro_attribution.run_reconcile(s, boosters)
 
     stats = await asyncio.to_thread(_db)
+    # Seed the known-booster set so the boost-time DM/announce fires only for
+    # genuinely new boosters (self-heals any adds/removes the events missed).
+    _known_boosters.clear()
+    _known_boosters.update(str(b) for b in boosters)
+    _boosters_seeded = True
     print(f"[nitro] reconcile complete: {stats}")
     return stats
+
+
+def _nitro_contributors_channel_id():
+    """Channel for the boost one-liner (shared with contribution notifications)."""
+    raw = os.getenv("DISCORD_CONTRIBUTION_CHANNEL_ID", "1373331322709479485")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nitro_pick_components(context: dict):
+    """A clan-picker select menu when the booster is in >1 group; else nothing."""
+    groups = context.get("groups") or []
+    if len(groups) < 2:
+        return []
+    picked = context.get("picked_group_id")
+    options = [
+        StringSelectOption(label=str(g["name"])[:100], value=str(g["id"]), default=(g["id"] == picked))
+        for g in groups[:25]
+    ]
+    return [
+        ActionRow(
+            StringSelectMenu(
+                options,
+                custom_id="nitro_pick",
+                placeholder="Choose which clan your boost supports",
+                min_values=1,
+                max_values=1,
+            )
+        )
+    ]
+
+
+async def handle_new_boost(member):
+    """Confirm a new boost to the booster (DM, with a clan picker if they're in
+    multiple groups) and post a one-liner to the contributors channel."""
+    discord_id = str(member.id)
+
+    def _ctx():
+        with Session() as s:
+            return nitro_attribution.booster_context(s, discord_id)
+
+    context = await asyncio.to_thread(_ctx)
+
+    # 1) Confirmation DM to the booster.
+    try:
+        await member.send(
+            content=nitro_attribution.nitro_boost_dm_text(context),
+            components=_nitro_pick_components(context),
+        )
+    except Exception as e:
+        print(f"[nitro] could not DM booster {discord_id}: {e}")
+
+    # 2) One-liner in the contributors channel.
+    try:
+        channel_id = _nitro_contributors_channel_id()
+        if channel_id:
+            channel = await bot.fetch_channel(channel_id=channel_id)
+            await channel.send(
+                nitro_attribution.nitro_boost_announcement_text(f"<@{discord_id}>", context)
+            )
+    except Exception as e:
+        print(f"[nitro] could not announce boost for {discord_id}: {e}")
+
+
+@listen(Component)
+async def on_nitro_component(event: Component):
+    """Clan-picker select in the boost DM: set the booster's group designation."""
+    ctx = event.ctx
+    if getattr(ctx, "custom_id", None) != "nitro_pick":
+        return
+    try:
+        gid = int(ctx.values[0])
+    except (IndexError, ValueError, TypeError):
+        return
+    discord_id = str(ctx.author.id)
+
+    def _apply():
+        with Session() as s:
+            name = nitro_attribution.designate_group_for_discord_user(s, discord_id, gid)
+            if name:
+                s.commit()
+            return name
+
+    name = await asyncio.to_thread(_apply)
+    if not name:
+        await ctx.edit_origin(
+            content="Couldn't update your choice — you may not be in that clan anymore.",
+            components=[],
+        )
+        return
+    _nitro_dirty.set()  # move the credit to the chosen clan promptly
+    await ctx.edit_origin(
+        content=f"✓ Your boost now supports **{name}**. Change it any time at https://www.droptracker.io/settings.",
+        components=[],
+    )
 
 
 async def _nitro_scheduler():

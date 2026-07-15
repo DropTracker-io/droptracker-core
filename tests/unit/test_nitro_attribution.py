@@ -189,3 +189,51 @@ def test_reconcile_skips_zero_counts():
     stats = nitro.reconcile_nitro_legs(s, {10: 0})
     assert s.added == []
     assert stats["groups_credited"] == 0 and stats["boosters_credited"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Booster messaging helpers (pure text)
+# --------------------------------------------------------------------------- #
+def test_format_cents():
+    assert nitro.format_cents(500) == "$5"
+    assert nitro.format_cents(250) == "$2.50"
+    assert nitro.format_cents(1000) == "$10"
+    assert nitro.format_cents(0) == "$0"
+
+
+def test_dm_text_unlinked():
+    txt = nitro.nitro_boost_dm_text({"linked": False}, per_boost_cents=500)
+    assert "Link your Discord" in txt and "$5/mo" in txt
+
+
+def test_dm_text_linked_no_group():
+    txt = nitro.nitro_boost_dm_text({"linked": True, "groups": []}, per_boost_cents=500)
+    assert "join a clan" in txt.lower()
+
+
+def test_dm_text_single_group():
+    ctx = {"linked": True, "groups": [{"id": 7, "name": "Kittens"}], "picked_group_name": "Kittens"}
+    txt = nitro.nitro_boost_dm_text(ctx, per_boost_cents=500)
+    assert "Kittens" in txt and "now supports" in txt
+    assert "Pick a different clan" not in txt
+
+
+def test_dm_text_multi_group_offers_picker():
+    ctx = {
+        "linked": True,
+        "groups": [{"id": 1, "name": "Alpha"}, {"id": 2, "name": "Bravo"}],
+        "picked_group_name": "Bravo",
+    }
+    txt = nitro.nitro_boost_dm_text(ctx, per_boost_cents=500)
+    assert "Bravo" in txt and "Pick a different clan" in txt
+
+
+def test_announcement_text_with_and_without_group():
+    with_group = nitro.nitro_boost_announcement_text(
+        "<@42>", {"linked": True, "picked_group_name": "Alpha"}, per_boost_cents=500
+    )
+    assert "<@42>" in with_group and "Alpha" in with_group and "supports" in with_group
+
+    without = nitro.nitro_boost_announcement_text("<@42>", {"linked": False}, per_boost_cents=500)
+    assert "<@42>" in without and "thank you for the support" in without.lower()
+    assert "supports" not in without

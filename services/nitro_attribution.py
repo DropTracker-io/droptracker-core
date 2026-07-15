@@ -302,3 +302,97 @@ async def fetch_booster_discord_ids(
         if page_pause:
             await asyncio.sleep(page_pause)
     return boosters
+
+
+# --------------------------------------------------------------------------- #
+# Booster messaging helpers (used by the webhook bot's boost-time DM + the
+# contributors-channel announcement). DB lookups here; the bot owns Discord I/O.
+# --------------------------------------------------------------------------- #
+_SITE = "https://www.droptracker.io"
+
+
+def format_cents(cents: Optional[int]) -> str:
+    """`500 -> "$5"`, `250 -> "$2.50"`."""
+    cents = int(cents or 0)
+    return f"${cents // 100}" if cents % 100 == 0 else f"${cents / 100:.2f}"
+
+
+def booster_context(session, discord_id) -> Dict[str, Any]:
+    """Facts needed to message a booster: linkage, their real groups, and the
+    group their boost is (or would be) credited to."""
+    from db.models import Group, User
+
+    user = session.query(User).filter(User.discord_id == str(discord_id)).first()
+    if user is None:
+        return {"linked": False, "user_id": None, "groups": [], "picked_group_id": None, "picked_group_name": None}
+    gids = user_group_ids(session, user.user_id)
+    names: Dict[int, str] = {}
+    if gids:
+        names = {
+            int(gid): nm
+            for gid, nm in session.query(Group.group_id, Group.group_name)
+            .filter(Group.group_id.in_(gids))
+            .all()
+        }
+    picked = pick_group_for_user(session, user.user_id)
+    return {
+        "linked": True,
+        "user_id": user.user_id,
+        "groups": [{"id": gid, "name": names.get(gid) or f"Group {gid}"} for gid in gids],
+        "picked_group_id": picked,
+        "picked_group_name": (names.get(picked) or f"Group {picked}") if picked else None,
+    }
+
+
+def designate_group_for_discord_user(session, discord_id, group_id) -> Optional[str]:
+    """Validate the group is one the (linked) booster belongs to, set the
+    designation, and return the group name. None if not linked / not a member.
+    Caller commits."""
+    from db.models import Group, User
+
+    user = session.query(User).filter(User.discord_id == str(discord_id)).first()
+    if user is None:
+        return None
+    if int(group_id) not in user_group_ids(session, user.user_id):
+        return None
+    set_designated_group(session, user.user_id, int(group_id))
+    name = session.query(Group.group_name).filter(Group.group_id == int(group_id)).scalar()
+    return name or f"Group {int(group_id)}"
+
+
+def nitro_boost_dm_text(context: Dict[str, Any], per_boost_cents: Optional[int] = None) -> str:
+    """Confirmation DM body, varying by linkage and group count."""
+    amt = format_cents(NITRO_BOOST_CENTS if per_boost_cents is None else per_boost_cents)
+    if not context.get("linked"):
+        return (
+            f"🎉 Thanks for boosting **DropTracker**!\n"
+            f"Link your Discord at {_SITE} and your {amt}/mo of boost credit will go toward your clan's premium."
+        )
+    groups = context.get("groups") or []
+    if not groups:
+        return (
+            f"🎉 Thanks for boosting **DropTracker**!\n"
+            f"Once you join a clan on DropTracker, your {amt}/mo of boost credit will support it automatically."
+        )
+    if len(groups) == 1:
+        return (
+            f"🎉 Thanks for boosting **DropTracker**!\n"
+            f"Your {amt}/mo of premium credit now supports **{groups[0]['name']}**. Manage it at {_SITE}/settings."
+        )
+    picked = context.get("picked_group_name") or groups[0]["name"]
+    return (
+        f"🎉 Thanks for boosting **DropTracker**!\n"
+        f"Your {amt}/mo of premium credit is set to support **{picked}**. "
+        f"Pick a different clan below, or manage it any time at {_SITE}/settings."
+    )
+
+
+def nitro_boost_announcement_text(
+    mention: str, context: Dict[str, Any], per_boost_cents: Optional[int] = None
+) -> str:
+    """One-liner for the contributors channel."""
+    amt = format_cents(NITRO_BOOST_CENTS if per_boost_cents is None else per_boost_cents)
+    picked = context.get("picked_group_name") if context.get("linked") else None
+    if picked:
+        return f"🚀 {mention} just boosted the server — {amt}/mo of premium credit now supports **{picked}**! Thank you 💜"
+    return f"🚀 {mention} just boosted the server — thank you for the support! 💜"
