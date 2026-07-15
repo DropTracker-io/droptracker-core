@@ -25,7 +25,6 @@ KIND_FOR_TYPE = {
     "event_started": "announcements",
     "event_ended": "announcements",
     "event_completion": "completions",
-    "event_cell": "completions",
     "event_line": "completions",
     "event_blackout": "completions",
     "event_lead_change": "leaderboard",
@@ -52,7 +51,6 @@ _COLORS = {
     "event_started": 0x00FF00,
     "event_ended": 0xFFD700,
     "event_completion": 0x00FF00,
-    "event_cell": 0x9B59B6,
     "event_line": 0x9B59B6,
     "event_blackout": 0x2C2F33,
     "event_lead_change": 0xFFD700,
@@ -82,7 +80,6 @@ DEFAULT_MESSAGE_TOGGLES = {
     "event_ended": True,
     "event_completion": True,
     "event_task_progress": True,  # gated separately by task_progress mode
-    "event_cell": True,
     "event_line": True,
     "event_blackout": True,
     "event_lead_change": True,
@@ -428,14 +425,6 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             field("Wallet", f"`{int(data['coin_balance'])} coins`")
         if data.get("turn") is not None:
             field("Turn", f"`#{int(data['turn'])}`")
-
-    elif notification_type == "event_cell":
-        spec["title"] = "\U0001F3AF Bingo cell completed"
-        cell = data.get("cell_label") or (
-            f"Cell {data.get('cell_idx')}" if data.get("cell_idx") is not None else "A cell")
-        spec["description"] = f"**{team or 'A team'}** marked **{cell}**"
-        if points:
-            field("Points", f"`+{points}`")
 
     elif notification_type == "event_line":
         spec["title"] = "\U0001F4CF Line bonus!"

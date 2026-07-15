@@ -1532,7 +1532,7 @@ class NotificationService:
 
     # ------------------------------------------------------------------ #
     # Events (Task 19) — event_started / event_ended / event_completion /
-    # event_cell / event_line / event_blackout / event_lead_change /
+    # event_line / event_blackout / event_lead_change /
     # event_pending, produced by services/event_engine.py (+ Tasks 20/21).
     # ------------------------------------------------------------------ #
     def _resolve_task_icon_url(self, db_session, task_id) -> str | None:

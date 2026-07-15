@@ -20,7 +20,7 @@ sys.modules["_event_notifications_under_test"] = en
 _spec.loader.exec_module(en)
 
 ALL_TYPES = (
-    "event_started", "event_ended", "event_completion", "event_cell",
+    "event_started", "event_ended", "event_completion",
     "event_line", "event_blackout", "event_lead_change", "event_pending",
     "event_activation_failed", "event_signup_prompt", "event_task_progress",
     "event_board_turn",
@@ -35,7 +35,6 @@ class TestKindMapping:
             "event_started": "announcements",
             "event_ended": "announcements",
             "event_completion": "completions",
-            "event_cell": "completions",
             "event_line": "completions",
             "event_blackout": "completions",
             "event_lead_change": "leaderboard",
@@ -64,7 +63,6 @@ class TestResolveEventChannel:
         assert en.resolve_event_channel(self.FULL, "event_started") == "100"
         assert en.resolve_event_channel(self.FULL, "event_ended") == "100"
         assert en.resolve_event_channel(self.FULL, "event_completion") == "200"
-        assert en.resolve_event_channel(self.FULL, "event_cell") == "200"
         assert en.resolve_event_channel(self.FULL, "event_line") == "200"
         assert en.resolve_event_channel(self.FULL, "event_blackout") == "200"
         assert en.resolve_event_channel(self.FULL, "event_lead_change") == "300"
@@ -73,7 +71,7 @@ class TestResolveEventChannel:
 
     def test_fallback_to_announcements(self):
         only_ann = {"announcements": "100"}
-        for t in ("event_completion", "event_cell", "event_line",
+        for t in ("event_completion", "event_line",
                   "event_blackout", "event_lead_change", "event_pending",
                   "event_activation_failed"):
             assert en.resolve_event_channel(only_ann, t) == "100"
@@ -237,9 +235,7 @@ class TestEmbedSpecs:
         assert "Points" not in {f["name"] for f in spec["fields"]}
         assert spec["thumbnail"] is None
 
-    def test_cell_line_blackout(self):
-        cell = _spec("event_cell", {"team_name": "Red", "cell_label": "Any pet", "points": 5})
-        assert "Any pet" in cell["description"] and "**Red**" in cell["description"]
+    def test_line_blackout(self):
         line = _spec("event_line", {"team_name": "Red", "bonus_points": 25})
         assert "line" in line["description"]
         assert {f["name"]: f["value"] for f in line["fields"]}["Bonus"] == "`+25 pts`"

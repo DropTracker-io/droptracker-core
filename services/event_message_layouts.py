@@ -181,13 +181,6 @@ DEFAULT_LAYOUTS = {
             },
         ],
     },
-    "event_cell": {
-        "accent_color": "#9B59B6",
-        "blocks": [
-            {"type": "text", "content": "### \U0001F3AF {team_name} marked **{cell_label}**"},
-            {"type": "text", "content": "**Points** `+{points}`"},
-        ],
-    },
     "event_line": {
         "accent_color": "#9B59B6",
         "blocks": [

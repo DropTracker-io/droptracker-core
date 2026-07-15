@@ -170,7 +170,6 @@ EVENT_MESSAGE_TOGGLE_KEYS = (
     "event_ended",
     "event_completion",
     "event_task_progress",
-    "event_cell",
     "event_line",
     "event_blackout",
     "event_lead_change",

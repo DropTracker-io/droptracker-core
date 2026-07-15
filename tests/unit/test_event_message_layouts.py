@@ -86,7 +86,7 @@ class TestShouldSend:
     def test_muted_type(self):
         config = en.effective_message_config('{"toggles": {"event_completion": false}}')
         assert not en.should_send_event_message(config, "event_completion")
-        assert en.should_send_event_message(config, "event_cell")
+        assert en.should_send_event_message(config, "event_line")
 
     def test_progress_requires_mode_and_toggle(self):
         on = en.effective_message_config('{"task_progress": "all"}')
@@ -289,7 +289,7 @@ class TestDefaultLayouts:
         # Keep in sync with db.models.events.EVENT_MESSAGE_LAYOUT_TYPES
         expected = {
             "event_started", "event_ended", "event_completion",
-            "event_task_progress", "event_cell", "event_line",
+            "event_task_progress", "event_line",
             "event_blackout", "event_lead_change", "event_pending",
             "event_activation_failed", "event_signup_prompt", "event_board",
             "event_board_turn",
@@ -310,7 +310,6 @@ class TestDefaultLayouts:
                                     "task_label": "Boaters", "progress": 5, "target": 10,
                                     "milestone_pct": 50, "player_name": "Zed",
                                     "task_icon": "https://x/img/metrics/slayer.png"},
-            "event_cell": {"event_id": 7, "team_name": "Reds", "cell_label": "B3", "points": 5},
             "event_line": {"event_id": 7, "team_name": "Reds", "bonus_points": 25},
             "event_blackout": {"event_id": 7, "team_name": "Reds", "bonus_points": 100},
             "event_lead_change": {"event_id": 7, "team_name": "Reds", "task_label": "T"},

@@ -31,7 +31,6 @@ app_logger = AppLogger()
 REFRESH_AFTER_TYPES = (
     "event_started",
     "event_completion",
-    "event_cell",
     "event_line",
     "event_blackout",
     "event_lead_change",
