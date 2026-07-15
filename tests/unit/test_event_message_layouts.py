@@ -29,6 +29,9 @@ def _load(name, filename):
 
 
 en = _load("services.event_notifications", "event_notifications.py")
+# render_message_spec lazily imports services.activity_launch_core for
+# launch_link buttons — register the real module over the conftest stub.
+alc = _load("services.activity_launch_core", "activity_launch_core.py")
 ml = _load("_event_message_layouts_under_test", "event_message_layouts.py")
 
 
@@ -221,6 +224,21 @@ class TestRenderMessageSpec:
             layout, {"event_id": 42, "event_url": "https://x/e/42"}, deep_link=False)
         # only the URL button survives — behaviour identical to the old layouts
         assert spec["blocks"][0]["buttons"] == [{"label": "Website", "url": "https://x/e/42"}]
+
+    def test_launch_button_becomes_activity_link_in_unsupported_channel(self):
+        layout = {"blocks": [{"type": "buttons", "buttons": [
+            {"label": "Open in Discord", "launch": True},
+            {"label": "Website", "url": "{event_url}"},
+        ]}]}
+        spec = ml.render_message_spec(
+            layout, {"event_id": 42, "event_url": "https://x/e/42"},
+            deep_link=False, launch_link=True)
+        # thread/announcement destination: launch button renders as an
+        # Activity Link URL button (client-side launch works there)
+        assert spec["blocks"][0]["buttons"] == [
+            {"label": "Open in Discord", "url": alc.activity_link_url(42)},
+            {"label": "Website", "url": "https://x/e/42"},
+        ]
 
     def test_launch_only_row_dropped_without_event_id(self):
         layout = {"blocks": [{"type": "buttons", "buttons": [

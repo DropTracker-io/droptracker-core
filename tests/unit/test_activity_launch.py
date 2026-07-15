@@ -141,21 +141,31 @@ def test_interaction_channel_type():
     assert core.launch_supported_channel_type(core.interaction_channel_type({}))
 
 
+def test_activity_link_url():
+    bare = core.activity_link_url()
+    assert bare == f"https://discord.com/activities/{core.ACTIVITY_APP_ID}"
+    assert core.activity_link_url(None) == bare
+    assert core.activity_link_url(0) == bare
+    assert core.activity_link_url(42) == f"{bare}?custom_id=e%3A42"
+
+
 def test_launch_fallback_message_event_scoped():
     data = {"type": 3, "data": {"custom_id": "activity_launch_open:e:42"}}
     payload = core.build_launch_fallback_message(data)
     assert payload["flags"] == core.MSG_FLAG_EPHEMERAL
-    button = payload["components"][0]["components"][0]
-    assert button["style"] == 5  # URL button
-    assert button["url"] == f"{core.EVENT_BASE_URL}/42"
+    app_btn, web_btn = payload["components"][0]["components"]
+    assert app_btn["style"] == web_btn["style"] == 5  # URL buttons
+    assert app_btn["url"] == core.activity_link_url("42")
+    assert web_btn["url"] == f"{core.EVENT_BASE_URL}/42"
 
 
 def test_launch_fallback_message_bare_launch():
-    # entry point / bare card button — no event to link, offer the site
+    # entry point / bare card button — no event to deep-link to
     payload = core.build_launch_fallback_message({"type": 2, "data": {"type": 4}})
     assert payload["flags"] == core.MSG_FLAG_EPHEMERAL
-    button = payload["components"][0]["components"][0]
-    assert button["url"] == core.WEBSITE_URL
+    app_btn, web_btn = payload["components"][0]["components"]
+    assert app_btn["url"] == core.activity_link_url()
+    assert web_btn["url"] == core.WEBSITE_URL
 
 
 # --- ref parsing ------------------------------------------------------------ #

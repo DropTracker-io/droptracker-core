@@ -82,8 +82,8 @@ def build_launch_card(supports_launch: bool = True):
     LAUNCH_BUTTON_CUSTOM_ID) opens the Activity when clicked. Matches the bot's
     other V2 cards (services/components.py). With ``supports_launch`` False
     (the configured channel is a thread/announcement channel, where Discord
-    refuses app launches) the button links to the website and the card says
-    how to get the in-Discord launcher back."""
+    refuses the LAUNCH_ACTIVITY callback) the button becomes an Activity Link
+    URL button — a client-side launch that still opens the app from there."""
     from interactions import ActionRow, Button, ButtonStyle, UnfurledMediaItem
     from interactions.models import (
         ContainerComponent,
@@ -106,15 +106,15 @@ def build_launch_card(supports_launch: bool = True):
         )
     else:
         cta = (
-            "Discord can't launch apps inside threads or announcement "
-            "channels, so this card links to the website instead. Pick a "
-            "regular text channel as your launcher channel to open the app "
-            "right here in Discord."
+            "Tap **Open DropTracker** to launch the app. Follow live bingo "
+            "boards, browse the leaderboards, and sign up for events without "
+            "leaving Discord.\n-# Discord opens apps from threads via a link "
+            "— you may see a launch prompt first."
         )
         button = Button(
-            label="Open DropTracker on the web",
+            label="Open DropTracker",
             style=ButtonStyle.URL,
-            url=core.WEBSITE_URL,
+            url=core.activity_link_url(),
         )
 
     logo = UnfurledMediaItem(url="https://www.droptracker.io/img/droptracker-small.gif")

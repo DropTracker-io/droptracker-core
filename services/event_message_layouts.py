@@ -345,7 +345,8 @@ def _substitute(text: str, context: dict) -> str:
 
 
 def render_message_spec(
-    layout: dict, context: dict, standings=None, deep_link: bool = True
+    layout: dict, context: dict, standings=None, deep_link: bool = True,
+    launch_link: bool = False,
 ) -> dict:
     """Resolve one layout against its context into primitive blocks —
     pure data in, pure data out (the unit-testable half of rendering).
@@ -356,7 +357,11 @@ def render_message_spec(
     "buttons": [...]}`` (each button ``{label, url}`` or ``{label, launch:
     True, event_id}``) with every token resolved and every unresolvable piece
     dropped. ``deep_link`` False drops launch buttons (the deploy gate lives in
-    :func:`deeplink_enabled`; explicit here so the resolver stays pure)."""
+    :func:`deeplink_enabled`; explicit here so the resolver stays pure) —
+    unless ``launch_link`` is True, which renders them as Activity Link URL
+    buttons instead (the destination channel can't host a LAUNCH_ACTIVITY
+    callback — threads/announcement channels — but a client-side app link
+    still opens the Activity from there)."""
     blocks = []
     for block in (layout or {}).get("blocks") or []:
         if not isinstance(block, dict):
@@ -401,9 +406,16 @@ def render_message_spec(
                     # from the context, not a URL. Dropped when deep-linking is
                     # off or no event is in scope.
                     event_id = (context or {}).get("event_id")
-                    if deep_link and event_id not in (None, "", 0):
+                    if event_id in (None, "", 0):
+                        continue
+                    if deep_link:
                         buttons.append({"label": label[:80], "launch": True,
                                         "event_id": str(event_id)})
+                    elif launch_link:
+                        from services.activity_launch_core import activity_link_url
+
+                        buttons.append({"label": label[:80],
+                                        "url": activity_link_url(event_id)})
                     continue
                 url = _substitute(str(btn.get("url") or ""), context)
                 if url.startswith("http"):
@@ -490,12 +502,14 @@ def render_event_components(
     """One-stop: load the effective layout, resolve it, build components.
 
     ``allow_launch`` False (the destination is a thread/announcement channel,
-    where Discord refuses LAUNCH_ACTIVITY) drops launch buttons exactly as if
-    deep-linking were off — the layouts' URL buttons remain."""
+    where Discord refuses LAUNCH_ACTIVITY) renders launch buttons as Activity
+    Link URL buttons — a client-side launch that works from those channels."""
     layout = load_layout(session, group_id, message_type)
+    enabled = deeplink_enabled()
     spec = render_message_spec(
         layout, context, standings=standings,
-        deep_link=deeplink_enabled() and allow_launch,
+        deep_link=enabled and allow_launch,
+        launch_link=enabled and not allow_launch,
     )
     return build_components(spec, ping_text=ping_text, extra_rows=extra_rows)
 

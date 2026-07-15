@@ -8,6 +8,7 @@ and injects its ``post_card`` / ``delete_message`` side effects into
 ``reconcile_group`` here.
 """
 import logging
+import os
 
 log = logging.getLogger("interactions")
 
@@ -27,6 +28,21 @@ LAUNCH_SUPPORTED_CHANNEL_TYPES = frozenset({0, 1, 2, 3})
 
 WEBSITE_URL = "https://www.droptracker.io"
 EVENT_BASE_URL = f"{WEBSITE_URL}/events"  # == services.event_notifications.EVENT_BASE_URL
+
+# Discord application that owns the Activity (the primary bot app).
+ACTIVITY_APP_ID = os.environ.get("DISCORD_BOT_CLIENT_ID", "").strip() or "1172933457010245762"
+
+
+def activity_link_url(event_id=None) -> str:
+    """Discord Activity Link — launches the app client-side when clicked, so
+    it works from threads/announcement channels where the LAUNCH_ACTIVITY
+    interaction callback is refused. An event id rides along as the link's
+    ``custom_id`` (surfaced to the app as ``sdk.customId``, format
+    ``e:<event_id>``) so the Activity can deep-link to that event."""
+    base = f"https://discord.com/activities/{ACTIVITY_APP_ID}"
+    if event_id in (None, "", 0):
+        return base
+    return f"{base}?custom_id=e%3A{event_id}"
 
 # Brand gold, matching the Activity's OSRS palette.
 ACCENT = 0xC8A24A
@@ -150,24 +166,29 @@ def launch_supported_channel_type(channel_type) -> bool:
 
 def build_launch_fallback_message(data: dict) -> dict:
     """Ephemeral response for a launch Discord refused (unsupported channel
-    type — a thread or announcement channel). Explains why and offers the
-    web instead: the event page for an event-scoped button, else the site."""
+    type — a thread or announcement channel). Offers an Activity Link (a
+    client-side launch that DOES work from these channels) plus the web page:
+    the event page for an event-scoped button, else the site."""
     event_id = parse_launch_custom_id((data.get("data") or {}).get("custom_id"))
     if event_id:
-        label, url = "View this event on the web", f"{EVENT_BASE_URL}/{event_id}"
+        web_label, web_url = "View on the web", f"{EVENT_BASE_URL}/{event_id}"
     else:
-        label, url = "Open droptracker.io", WEBSITE_URL
+        web_label, web_url = "Open droptracker.io", WEBSITE_URL
     return {
         "content": (
-            "Discord can't open apps from this channel type — threads and "
-            "announcement channels don't support app launches. Try again from "
-            "a regular text channel, or use the web instead."
+            "Discord can't launch apps directly from this channel type — "
+            "threads and announcement channels don't support it. Use the "
+            "**Open DropTracker** link below instead, or view on the web."
         ),
         "flags": MSG_FLAG_EPHEMERAL,
         "components": [
             {
                 "type": 1,  # action row
-                "components": [{"type": 2, "style": 5, "label": label, "url": url}],
+                "components": [
+                    {"type": 2, "style": 5, "label": "Open DropTracker",
+                     "url": activity_link_url(event_id)},
+                    {"type": 2, "style": 5, "label": web_label, "url": web_url},
+                ],
             }
         ],
     }

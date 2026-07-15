@@ -173,13 +173,15 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
 
         top_n = int(config["leaderboard"].get("top_n") or 10)
         layout = _apply_top_n(load_layout(session, event.group_id, "event_board"), top_n)
+        # Threads/announcement channels can't host a LAUNCH_ACTIVITY callback —
+        # render an Activity Link URL button (client-side launch) instead.
+        enabled, supported = deeplink_enabled(), channel_supports_launch(channel)
         spec = render_message_spec(
             layout,
             _board_context(session, event, config),
             standings=_standings(session, event.id, top_n),
-            # Threads/announcement channels can't launch the Activity — render
-            # the URL button instead of a dead launch button.
-            deep_link=deeplink_enabled() and channel_supports_launch(channel),
+            deep_link=enabled and supported,
+            launch_link=enabled and not supported,
         )
         components = build_components(spec)
 
