@@ -201,17 +201,34 @@ async def health_check():
         print(f"Health check failed: {e}")
         return False
 
-# Signal handlers for graceful shutdown
-def signal_handler(signum, frame):
-    """Handle shutdown signals"""
-    print(f"Received signal {signum}, initiating graceful shutdown...")
+# Signal handling for graceful shutdown.
+#
+# Registered on the asyncio loop via loop.add_signal_handler (not signal.signal):
+# that wakes the selector immediately through asyncio's self-pipe. Crucially we
+# ALSO pass an explicit shutdown_trigger to hypercorn.asyncio.serve() in main()
+# so Hypercorn stops installing its OWN SIGTERM/SIGINT handlers (its default when
+# shutdown_trigger is None). Those handlers did their own loop.add_signal_handler
+# and clobbered ours, so `systemctl stop` only shut down the web server while the
+# main loop respawned it — the process never exited and systemd SIGKILLed it after
+# the 30s TimeoutStopSec (status=9/KILL). See main().
+def _request_shutdown(signum=None):
+    """Flag a graceful shutdown (runs in loop context via add_signal_handler)."""
+    if signum is not None:
+        print(f"Received signal {signum}, initiating graceful shutdown...")
+    else:
+        print("Shutdown requested, initiating graceful shutdown...")
     shutdown_event.set()
 
-def setup_signal_handlers():
-    """Setup signal handlers for graceful shutdown"""
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGHUP, signal_handler)
+def setup_signal_handlers(loop=None):
+    """Install SIGTERM/SIGINT/SIGHUP -> shutdown_event on the running loop."""
+    loop = loop or asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        try:
+            loop.add_signal_handler(sig, _request_shutdown, sig)
+        except (NotImplementedError, RuntimeError):
+            # Platforms without add_signal_handler (e.g. Windows) or no running
+            # loop: fall back to a plain signal handler.
+            signal.signal(sig, lambda s, _f: _request_shutdown(s))
 
 @listen(Startup)
 async def on_startup(event: Startup):
@@ -638,7 +655,7 @@ async def reconcile_event_scheduled_events():
             try:
                 if row.sync_status == "delete_pending":
                     if row.discord_scheduled_event_id:
-                        guild = await bot.fetch_guild(row.guild_id)
+                        guild = await fetch_guild_cached(row.guild_id)
                         # No guild (bot kicked) -> nothing left to clean up on
                         # Discord's side; just drop the row. force=True skips
                         # the library cache — a stale copy of an already-
@@ -667,7 +684,7 @@ async def reconcile_event_scheduled_events():
                 creatable = schedulable(ev)
                 if not row.discord_scheduled_event_id and not creatable:
                     continue  # stays pending until it has a valid future start
-                guild = await bot.fetch_guild(row.guild_id)
+                guild = await fetch_guild_cached(row.guild_id)
                 if not guild:
                     raise RuntimeError("bot is not a member of this guild")
                 if row.discord_scheduled_event_id:
@@ -798,7 +815,39 @@ async def reconcile_event_scheduled_events():
     finally:
         db_session.close()
 
-async def cache_channels_for_guild(guild_id) -> bool:
+# --- Negative cache for guilds the bot is no longer a member of --------------
+# This bot runs without the GUILDS intent, so it never receives GuildLeft: a
+# guild the bot is kicked from (or that is deleted) keeps lingering in
+# Group.guild_id / Event.discord_guild_id, and every periodic sweep re-fetches
+# it -> GET /guilds/{id} 404. That was ~20k 404s/day (pure Discord API-budget
+# waste + rate-limit pressure). We remember ids that 404 in Redis and skip them
+# for a while. Recovery is preserved: the TTL re-probes periodically, and
+# user-driven refreshes pass bypass_dead_cache=True (clearing the marker on
+# success), so a re-added guild is picked up immediately.
+_DEAD_GUILD_TTL = 6 * 3600  # seconds
+
+
+async def fetch_guild_cached(guild_id, *, bypass_dead_cache: bool = False):
+    """`bot.fetch_guild` guarded by a negative cache for 404ing guilds.
+
+    Returns the Guild, or None when the bot is not a member (a fresh 404 or a
+    still-valid cached 404 marker). bot.fetch_guild returns None only on 404
+    (NotFound); any other error (network / 5xx / rate limit) propagates
+    unchanged and never poisons the cache, so a transient blip can't make a live
+    guild look dead. Pass bypass_dead_cache=True on user-driven refreshes.
+    """
+    key = f"guild:dead:{guild_id}"
+    if not bypass_dead_cache and redis_client.get(key):
+        return None
+    guild = await bot.fetch_guild(guild_id)
+    if guild is None:
+        redis_client.setex(key, _DEAD_GUILD_TTL, "1")
+    else:
+        redis_client.delete(key)  # recovered / never dead -> clear any marker
+    return guild
+
+
+async def cache_channels_for_guild(guild_id, *, bypass_dead_cache: bool = False) -> bool:
     """Fetch one guild's text + forum channels (and the forums' active
     threads) via REST and cache them to Redis (`guild:{id}:channels`). Works
     for *any* guild the bot is a member of — not just group home guilds — so
@@ -807,7 +856,7 @@ async def cache_channels_for_guild(guild_id) -> bool:
     (suggestion #3). Also caches the guild's roles (`guild:{id}:roles`) for
     the announcement ping picker. Returns True when the cache was written."""
     try:
-        guild = await bot.fetch_guild(guild_id)
+        guild = await fetch_guild_cached(guild_id, bypass_dead_cache=bypass_dead_cache)
         if not guild:
             return False
         raw_channels = await guild.fetch_channels()
@@ -979,7 +1028,9 @@ async def drain_channel_cache_requests():
                 break
             guild_id = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
             if guild_id.isdigit():
-                await cache_channels_for_guild(guild_id)
+                # User-driven refresh from the web UI: bypass the negative cache
+                # so a just-re-added guild is picked up (and its marker cleared).
+                await cache_channels_for_guild(guild_id, bypass_dead_cache=True)
     except Exception as e:
         print(f"Couldn't drain channel cache requests: {e}")
 
@@ -1032,8 +1083,8 @@ async def run_bot():
 async def main():
     global watchdog
     
-    # Setup signal handlers
-    setup_signal_handlers()
+    # Setup signal handlers on the running loop (see setup_signal_handlers docs)
+    setup_signal_handlers(asyncio.get_running_loop())
     
     # Initialize systemd watchdog
     watchdog = SystemdWatchdog()
@@ -1048,25 +1099,47 @@ async def main():
             while not shutdown_event.is_set():  # Check for shutdown signal
                 bot_task = asyncio.create_task(run_bot())
                 hypercorn_config = create_hypercorn_config()
-                quart_task = asyncio.create_task(hypercorn.asyncio.serve(app, hypercorn_config))
-                
+                # Explicit shutdown_trigger so Hypercorn does NOT install its own
+                # SIGTERM/SIGINT handlers (its default when this is None) — those
+                # clobbered ours and left the process unable to exit on
+                # `systemctl stop`. Now a signal sets shutdown_event, which both
+                # trips this trigger (graceful web shutdown) and breaks the loop.
+                quart_task = asyncio.create_task(
+                    hypercorn.asyncio.serve(
+                        app, hypercorn_config, shutdown_trigger=shutdown_event.wait
+                    )
+                )
+                shutdown_wait_task = asyncio.create_task(shutdown_event.wait())
+
                 try:
                     # Wait for either tasks to complete or shutdown signal
                     done, pending = await asyncio.wait(
-                        [bot_task, quart_task, asyncio.create_task(shutdown_event.wait())],
+                        [bot_task, quart_task, shutdown_wait_task],
                         return_when=asyncio.FIRST_COMPLETED
                     )
-                    
+
+                    # Tidy the shutdown sentinel so it can't leak across restarts.
+                    if not shutdown_wait_task.done():
+                        shutdown_wait_task.cancel()
+
                     # If shutdown was requested, cancel all tasks
                     if shutdown_event.is_set():
                         print("Shutdown requested, cancelling tasks...")
-                        for task in [bot_task, quart_task]:
+                        for task in (bot_task, quart_task):
                             if not task.done():
                                 task.cancel()
-                                try:
-                                    await task
-                                except asyncio.CancelledError:
-                                    pass
+                        # Bound the wait so stuck cleanup can never exceed the
+                        # unit's TimeoutStopSec; anything still not done dies with
+                        # the process on exit below. Cancelling bot_task triggers
+                        # interactions' astart() finally -> bot.stop() (clean
+                        # gateway/HTTP close).
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.gather(bot_task, quart_task, return_exceptions=True),
+                                timeout=15,
+                            )
+                        except asyncio.TimeoutError:
+                            print("Timed out waiting for tasks to cancel; exiting anyway.")
                         break
                     
                     # Check if any task failed
