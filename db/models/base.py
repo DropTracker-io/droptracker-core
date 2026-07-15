@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
 import os
@@ -32,6 +32,12 @@ engine = create_engine(
     pool_timeout=DATA_POOL_TIMEOUT,
     pool_pre_ping=True,
     pool_recycle=3600,
+    # Every connection returned to the pool is rolled back, so residual/idle
+    # transaction state never travels back into the pool (this is SQLAlchemy's
+    # default, made explicit as a safety net after the 2026-07-15 webapi
+    # idle-transaction incident — a read that autobegan a transaction and was
+    # never committed/rolled back held a MetaData lock on `web_events` for ~1.7h).
+    pool_reset_on_return='rollback',
     connect_args={
         'connect_timeout': 10,
         'read_timeout': 30,
@@ -40,6 +46,22 @@ engine = create_engine(
         'autocommit': False
     }
 )
+
+
+# Belt-and-suspenders: explicitly roll back on check-in. This complements
+# `pool_reset_on_return='rollback'` above and guards against that default ever
+# being changed. NOTE: this only fires for connections that are actually
+# *returned* to the pool — it cannot rescue a session that is leaked (never
+# closed / never `.remove()`d), which keeps its connection checked out with an
+# open transaction indefinitely. Those must be fixed at the call site (use the
+# `db_session()` context manager or pass an explicit session), plus the web_api
+# request teardown that calls `session.remove()`.
+@event.listens_for(engine, "checkin")
+def _rollback_on_checkin(dbapi_connection, connection_record):
+    try:
+        dbapi_connection.rollback()
+    except Exception:
+        pass
 
 # Create session factory and scoped session (hot-swappable parity with legacy)
 Session = sessionmaker(bind=engine)

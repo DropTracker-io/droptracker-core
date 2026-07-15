@@ -1,5 +1,6 @@
 ## Handles all point-related logic for premium features and etc.
 
+import functools
 from typing import List, Optional, Dict, Tuple
 from datetime import datetime, timedelta
 
@@ -17,10 +18,43 @@ from db import (
 )
 
 
+def _autoclean_scoped_session(fn):
+    """Release the shared scoped session after a call that fell back to it.
+
+    Every public helper below defaults ``session`` to the module-level *scoped*
+    session (``db.session``) when the caller passes nothing. A read autobegins a
+    transaction that these helpers do not always commit or roll back, so the
+    scoped session keeps its connection checked out with an idle transaction —
+    the 2026-07-15 incident where a webapi worker held a MetaData lock on
+    ``web_events`` for ~1.7h and blocked an ALTER + a pile of SELECTs.
+
+    When the caller owns the session (passed ``session=...``) we touch nothing —
+    cleanup is their responsibility and internal calls always thread the session
+    through. When we fell back to the scoped session, we ``Session.remove()`` in
+    a ``finally``: that closes the current thread's scoped session and returns
+    its connection to the pool, rolling back any open read transaction. As a
+    bonus this also clears a stale autobegun transaction that would otherwise
+    make a later ``with session.begin()`` on the same thread raise.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if kwargs.get("session") is not None:
+            return fn(*args, **kwargs)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            try:
+                db_session.remove()
+            except Exception:
+                pass
+    return wrapper
+
+
 # ----------------------------
 # Awarding credits
 # ----------------------------
 
+@_autoclean_scoped_session
 def award_points_to_player(
     *,
     player_id: int,
@@ -69,6 +103,7 @@ def award_points_to_player(
     return get_player_point_balance_for_group(player_id=player_id, group_id=group_id, session=session)
 
 
+@_autoclean_scoped_session
 def award_points_to_group(*, group_id: int, amount: int, source: str = 'admin', expires_in_days: Optional[int] = None, session=None) -> int:
     """Create a PointCredit for a group (subscription, nitro boost mapped to guild, admin)."""
     if amount <= 0:
@@ -109,6 +144,7 @@ def _active_credit_filter(now: datetime):
             PointCredit.amount_remaining > 0)
 
 
+@_autoclean_scoped_session
 def get_player_point_balance(*, player_id: int, session=None) -> int:
     """Sum of a player's *global* (non-group-scoped) active, non-expired, remaining points."""
     if session is None:
@@ -122,6 +158,7 @@ def get_player_point_balance(*, player_id: int, session=None) -> int:
     return int(sum(r[0] for r in total))
 
 
+@_autoclean_scoped_session
 def get_player_point_balance_for_group(*, player_id: int, group_id: int, session=None) -> int:
     """Sum of a player's active points scoped to a specific group."""
     if session is None:
@@ -134,6 +171,7 @@ def get_player_point_balance_for_group(*, player_id: int, group_id: int, session
              .all())
     return int(sum(r[0] for r in total))
 
+@_autoclean_scoped_session
 def get_group_point_balance(*, group_id: int, session=None) -> int:
     """Sum of a group's active, non-expired, remaining points."""
     if session is None:
@@ -225,6 +263,7 @@ def _consume_points(session, credits_query, need: int) -> Tuple[List[Dict], int]
     return allocations, need
 
 
+@_autoclean_scoped_session
 def activate_feature_for_player(*, player_id: int, feature_key: str, auto_renew: bool = False, session=None) -> Dict:
     """Spend player's credits to activate a feature for themselves."""
     if session is None:
@@ -265,6 +304,7 @@ def activate_feature_for_player(*, player_id: int, feature_key: str, auto_renew:
     return {"activation_id": activation.id, "debit_id": debit.id}
 
 
+@_autoclean_scoped_session
 def activate_feature_for_group(*, group_id: int, feature_key: str, spender_player_id: Optional[int] = None, auto_renew: bool = False, session=None) -> Dict:
     """Spend group credits, or a specific player's credits (if member), to activate a feature for a group."""
     if session is None:
@@ -320,6 +360,7 @@ def activate_feature_for_group(*, group_id: int, feature_key: str, spender_playe
 # Active checks and listings
 # ----------------------------
 
+@_autoclean_scoped_session
 def is_feature_active_for_player(*, player_id: int, feature_key: str, session=None) -> bool:
     if session is None:
         session = db_session
@@ -333,6 +374,7 @@ def is_feature_active_for_player(*, player_id: int, feature_key: str, session=No
     return session.query(q.exists()).scalar()
 
 
+@_autoclean_scoped_session
 def is_feature_active_for_group(*, group_id: int, feature_key: str, session=None) -> bool:
     if session is None:
         session = db_session
@@ -346,6 +388,7 @@ def is_feature_active_for_group(*, group_id: int, feature_key: str, session=None
     return session.query(q.exists()).scalar()
 
 
+@_autoclean_scoped_session
 def list_active_features_for_player(*, player_id: int, session=None) -> List[Dict]:
     if session is None:
         session = db_session
@@ -359,6 +402,7 @@ def list_active_features_for_player(*, player_id: int, session=None) -> List[Dic
     return [{"key": f.key, "name": f.name, "end_at": a.end_at} for a, f in rows]
 
 
+@_autoclean_scoped_session
 def list_active_features_for_group(*, group_id: int, session=None) -> List[Dict]:
     if session is None:
         session = db_session
@@ -376,6 +420,7 @@ def list_active_features_for_group(*, group_id: int, session=None) -> List[Dict]
 # Expiry and revocation
 # ----------------------------
 
+@_autoclean_scoped_session
 def expire_due_credits(*, session=None) -> int:
     """Mark credits with past expires_at as expired. Returns count affected."""
     if session is None:
@@ -396,6 +441,7 @@ def expire_due_credits(*, session=None) -> int:
     return len(ids)
 
 
+@_autoclean_scoped_session
 def revoke_credit(*, credit_id: int, reason: Optional[str] = None, session=None) -> None:
     if session is None:
         session = db_session
@@ -411,6 +457,7 @@ def revoke_credit(*, credit_id: int, reason: Optional[str] = None, session=None)
 # Convenience helpers
 # ----------------------------
 
+@_autoclean_scoped_session
 def get_available_points_for_group_spend(*, group_id: int, spender_player_id: Optional[int] = None, session=None) -> int:
     """Total available points that can be used to pay for a group feature.
 
@@ -435,6 +482,7 @@ def get_available_points_for_group_spend(*, group_id: int, spender_player_id: Op
 # Reporting
 # ----------------------------
 
+@_autoclean_scoped_session
 def get_player_lifetime_points_earned(*, player_id: int, session=None) -> int:
     """Total points ever credited to a player, regardless of expiry or status.
 
@@ -479,6 +527,7 @@ def _find_rpg(session, *, player_id: int, source: str, external_ref: Optional[st
         q = q.filter(RecurringPointGrant.external_ref == external_ref)
     return q.first()
 
+@_autoclean_scoped_session
 def ensure_recurring_grant_for_player(
     *,
     player_id: int,
@@ -539,6 +588,7 @@ def ensure_recurring_grant_for_player(
         session.flush()
         return rpg.id
 
+@_autoclean_scoped_session
 def cancel_recurring_grant_for_player(
     *,
     player_id: int,
@@ -560,6 +610,7 @@ def cancel_recurring_grant_for_player(
         rpg.next_due_at = None
         return True
 
+@_autoclean_scoped_session
 def process_recurring_point_grants(*, batch_size: int = 100, session=None) -> int:
     """Grant points for all due recurring grants.
 

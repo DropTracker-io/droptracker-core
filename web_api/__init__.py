@@ -114,6 +114,24 @@ def create_app() -> Quart:
     async def openapi():
         return jsonify(openapi_doc)
 
+    # --- Scoped-session hygiene (idle-transaction safety net) ---
+    # Routes here use the `db_session()` context manager, but shared service /
+    # util helpers (e.g. services.points) fall back to the module-level *scoped*
+    # session when no session is passed. In an async app that scoped session is
+    # thread-local to the event-loop thread, so a helper that issues a read
+    # (autobegin) without committing/rolling back leaves an idle transaction — and
+    # its connection checked out — for the life of the worker. Clearing it after
+    # every request bounds any such leak to a single request. (2026-07-15
+    # incident: a webapi worker held a MetaData lock on `web_events` for ~1.7h.)
+    from db import session as _scoped_session
+
+    @app.teardown_appcontext
+    async def _release_scoped_session(_exc=None):
+        try:
+            _scoped_session.remove()
+        except Exception:
+            pass
+
     # --- Error handling ---
     @app.errorhandler(ProblemException)
     async def _handle_problem(e: ProblemException):
