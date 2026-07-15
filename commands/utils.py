@@ -68,8 +68,10 @@ async def try_create_user(discord_id: str = None, username: str = None, ctx: Sla
     except Exception as e:
         print("An error occured trying to add a new user to the database:", e)
         if ctx:
-            return await ctx.author.send(f"An error occurred attempting to register your account in the database.\\n" + 
-                                    f"Please reach out for help: https://www.droptracker.io/discord",ephemeral=True)
+            # Answer through the interaction (always deliverable) — a DM here
+            # 403s for users with no mutual guild / DMs disabled.
+            return await ctx.send(f"An error occurred attempting to register your account in the database.\n" +
+                                  f"Please reach out for help: https://www.droptracker.io/discord", ephemeral=True)
     default_config = session.query(UserConfiguration).filter(UserConfiguration.user_id == 1).all()
     # grab the default configuration options from the database
     if new_user:
@@ -129,7 +131,19 @@ async def try_create_user(discord_id: str = None, username: str = None, ctx: Sla
             reg_embed.add_field(name="Change your configuration settings:",
                                 value=f"Feel free to [sign in on the website](https://www.droptracker.io/) to configure your user settings.",
                                 inline=False)
-            await ctx.author.send(embed=reg_embed)
+            # Best-effort DM: Discord refuses it (403 "no mutual guilds") for
+            # user-installed/app-only contexts and users with DMs off — that
+            # must never kill the command that triggered registration (it was
+            # crashing /claim-rsn before the user's claim went through). Fall
+            # back to an ephemeral interaction response, and never raise: the
+            # caller's own flow (e.g. the claim result) is the real answer.
+            try:
+                await ctx.author.send(embed=reg_embed)
+            except Exception:
+                try:
+                    await ctx.send(embed=reg_embed, ephemeral=True)
+                except Exception as e:
+                    print("Couldn't deliver the registration notice:", e)
             return True
 
 
