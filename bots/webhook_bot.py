@@ -165,6 +165,14 @@ async def shutdown_bot_client() -> None:
             maybe_coro = bot.close()
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
+    except asyncio.CancelledError:
+        # interactions' Client.stop() awaits its own shard task, which is being
+        # cancelled as part of the stop — so the CancelledError bubbling out here
+        # is expected, not a failure. If we let it escape it propagates through
+        # main() and asyncio.run(), and the process exits status=1/FAILURE
+        # (systemd logs a failed unit + "Unclosed client session"). Swallow it so
+        # a deliberate shutdown exits 0.
+        print("Bot shard task cancelled during shutdown (expected, exiting cleanly).")
     except Exception as e:
         print(f"Error while closing bot client: {e}")
 

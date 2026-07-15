@@ -36,6 +36,39 @@ db = DatabaseOperations()
 last_board_updates = {}
 
 
+def _verify_high_value_drop_sync(item_name, npc_name, timeout: float = 20.0) -> bool:
+    """Verify a >1M drop's item/NPC pairing against the OSRS wiki, off the loop.
+
+    Runs inside a worker thread with its own event loop (dispatched via
+    ``asyncio.to_thread``) so the wiki lookup can never stall the caller's event
+    loop. The webhook bot shares that loop with a systemd-watchdog health check;
+    a slow/hanging wiki call here used to block the loop past the 30s health
+    threshold, so the external monitor SIGTERM-restarted the service (~2x/hr).
+    The osrs_api aiohttp client sets no request timeout, so we bound it here.
+
+    Returns True when the item is a valid drop from the NPC, or when the check
+    can't finish within ``timeout`` (fail-open — a slow wiki must not reject a
+    legitimate high-value submission). Returns False only when the wiki
+    definitively reports the pairing is invalid.
+    """
+    from .common import osrs_api
+
+    async def _check() -> bool:
+        async with osrs_api.create_client() as client:
+            return await client.semantic.check_drop(item_name, npc_name)
+
+    try:
+        return asyncio.run(asyncio.wait_for(_check(), timeout=timeout))
+    except asyncio.TimeoutError:
+        print(f"[DropPerf] high_value_verification timed out after {timeout}s for "
+              f"{item_name!r} from {npc_name!r}; allowing drop (fail-open)")
+        return True
+    except Exception as e:
+        print(f"High value verification errored for {item_name!r} from "
+              f"{npc_name!r}: {e}; allowing drop (fail-open)")
+        return True
+
+
 async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
                                    players_included: list, drop_value: int,
                                    world_type: str = "main") -> int:
@@ -315,10 +348,12 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
 
         if drop_value > 1000000:
             debug_print(f"High value drop detected, verifying item/NPC combination...")
-            from .common import osrs_api
-
-            async with osrs_api.create_client() as client:
-                is_from_npc = await client.semantic.check_drop(item_name, npc_name)
+            # Offload the wiki lookup to a worker thread so a slow/hanging
+            # verification can't block this event loop (and the systemd-watchdog
+            # health check that shares it). See _verify_high_value_drop_sync.
+            is_from_npc = await asyncio.to_thread(
+                _verify_high_value_drop_sync, item_name, npc_name
+            )
             if not is_from_npc:
                 print(f"Verification failed: {item_name} is not from {npc_name}")
                 return SubmissionResponse(
