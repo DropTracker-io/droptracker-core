@@ -287,20 +287,31 @@ async def update():
             player = session.query(Player).filter(Player.player_id == player_id).first()
             if player:
                 print("Player found, attempting to update using optimized method...")
-                
+
                 # Send heartbeat before starting update
                 await send_watchdog_heartbeat()
-                
-                # Run the update in a thread to avoid blocking
+
+                # Run the update in a thread to avoid blocking, with a FRESH
+                # session created inside that thread. Never share this handler's
+                # session with the worker: for a very large account the rebuild
+                # takes minutes, and if the HTTP client cancels (times out), the
+                # async side would close the session while the worker is still
+                # inside session.commit() -> IllegalStateChangeError. A private
+                # worker session makes cancellation harmless.
                 def update_player_sync():
-                    return redis_updates.force_update_player(player.player_id, session)
-                
+                    with Session() as worker_session:
+                        try:
+                            return redis_updates.force_update_player(player_id, worker_session)
+                        except Exception:
+                            worker_session.rollback()
+                            raise
+
                 loop = asyncio.get_event_loop()
                 updated = await loop.run_in_executor(None, update_player_sync)
-                
+
                 # Send heartbeat after update
                 await send_watchdog_heartbeat()
-                
+
                 print("Returned:", updated)
                 if updated and updated == True:
                     # Record the update time
