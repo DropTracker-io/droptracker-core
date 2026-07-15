@@ -19,6 +19,13 @@ Task 21 adds a ~60s lifecycle sweep (``services.event_lifecycle`` — the exact
 functions the activate/end routes use): scheduled drafts whose ``starts_at``
 passed are activated (validation failures notify the event's admin channel
 once, then skip), and active events whose ``ends_at`` passed are ended.
+
+WOM reconciliation (``services.event_wom_reconciler``) also lives in this
+loop: a periodic pass turns WiseOldMan bulk gains into synthetic envelopes on
+the same queue, key-moment freshness updates fire at activation / pre-end,
+and events whose window just closed get a final WOM pass + inline queue drain
+*before* the lifecycle sweep ends them (ended events drop out of the matcher
+state, so late envelopes would otherwise be silently ignored).
 """
 import asyncio
 import json
@@ -49,6 +56,8 @@ BRPOP_TIMEOUT = 5
 STATE_REFRESH_SECONDS = 30
 LIFECYCLE_SWEEP_SECONDS = 60
 _REDIS_PW = os.getenv("DB_PASS")
+# Cap for the pre-end inline drain — a runaway queue must not stall the loop.
+FINAL_DRAIN_MAX_ENTRIES = 5000
 
 
 def _get_redis():
@@ -110,8 +119,42 @@ def _process_entry(r, state, entry_bytes) -> list:
         reset_db_connections()
 
 
+async def _drain_queue_inline(r, state) -> int:
+    """Synchronously drain events:submissions (final WOM pass ordering: the
+    queued envelopes must be applied while the ending event is still in the
+    matcher state)."""
+    from services.event_engine import QUEUE_KEY
+
+    drained = 0
+    while drained < FINAL_DRAIN_MAX_ENTRIES:
+        entry = await asyncio.to_thread(r.rpop, QUEUE_KEY)
+        if entry is None:
+            break
+        await asyncio.to_thread(_process_entry, r, state, entry)
+        drained += 1
+    return drained
+
+
+async def _run_wom_final_passes(r, state) -> bool:
+    """Final WOM reconcile + inline drain for events whose window closed but
+    which the lifecycle sweep hasn't ended yet. Returns True if any ran."""
+    from services import event_wom_reconciler as wom
+
+    event_ids = wom.pending_final_event_ids(state, r)
+    if not event_ids:
+        return False
+    for event_id in event_ids:
+        stats = await wom.final_reconcile(state, r, event_id)
+        log.info("WOM final reconcile for event %s: %s", event_id, stats)
+    drained = await _drain_queue_inline(r, state)
+    if drained:
+        log.info("Drained %d queue entries ahead of event end", drained)
+    return True
+
+
 async def run_consumer() -> None:
     from services.event_engine import ADMIN_BUMP_CHANNEL, QUEUE_KEY
+    from services import event_wom_reconciler as wom
 
     log.info("Event consumer starting (queue=%s)", QUEUE_KEY)
     r = await asyncio.to_thread(_get_redis)
@@ -126,6 +169,7 @@ async def run_consumer() -> None:
     state = None
     last_refresh = 0.0
     last_sweep = 0.0
+    last_reconcile = 0.0
 
     while True:
         try:
@@ -142,8 +186,15 @@ async def run_consumer() -> None:
                 except Exception:
                     pass
 
-            # Lifecycle sweep (Task 21): scheduled activations / ends.
+            # Lifecycle sweep (Task 21): scheduled activations / ends. Events
+            # about to be ended get their final WOM pass (and a queue drain)
+            # first, while they're still in the matcher state.
             if (time.time() - last_sweep) >= LIFECYCLE_SWEEP_SECONDS:
+                if state is not None:
+                    try:
+                        await _run_wom_final_passes(r, state)
+                    except Exception:
+                        log.error("WOM final pass failed:\n%s", traceback.format_exc())
                 summary = await asyncio.to_thread(_run_lifecycle_sweep, r)
                 last_sweep = time.time()
                 if summary.get("activated") or summary.get("ended") or summary.get("failed"):
@@ -160,6 +211,21 @@ async def run_consumer() -> None:
                     len(state.events), len(state.participants),
                     " (admin bump)" if bumped else "",
                 )
+
+            # WOM reconciliation: periodic bulk-gains pass (WOM outages must
+            # never stall submission draining) + cheap key-moment scan.
+            if (time.time() - last_reconcile) >= wom.WOM_RECONCILE_SECONDS:
+                last_reconcile = time.time()
+                try:
+                    stats = await wom.reconcile_once(state, r)
+                    if stats.get("targets"):
+                        log.info("WOM reconcile: %s", stats)
+                except Exception:
+                    log.error("WOM reconcile failed:\n%s", traceback.format_exc())
+            try:
+                await wom.run_key_moment_updates(state, r)
+            except Exception:
+                log.error("WOM key-moment pass failed:\n%s", traceback.format_exc())
 
             result = await asyncio.to_thread(r.brpop, QUEUE_KEY, BRPOP_TIMEOUT)
             if result is None:

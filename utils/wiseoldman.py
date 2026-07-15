@@ -810,6 +810,186 @@ async def get_player_all_skills(username: str):
     
     return {}
 
+# ---------------------------------------------------------------------------
+# Event reconciliation: group bulk endpoints + metric mapping
+# ---------------------------------------------------------------------------
+# wom.py 1.0.0 predates /bulk-gained and /bulk-hiscores, so these go through
+# its custom-route layer and return plain parsed JSON (lists of dicts) rather
+# than wom.py model objects.
+from wom import routes as _wom_routes
+
+_BULK_GAINED_ROUTE = _wom_routes.Route("GET", "/groups/{}/bulk-gained")
+_BULK_HISCORES_ROUTE = _wom_routes.Route("GET", "/groups/{}/bulk-hiscores")
+
+WOM_BULK_CACHE_TTL = int(os.getenv("WOM_BULK_CACHE_TTL", "600"))
+_REDIS_BULK_GAINED_PREFIX = "wom:bulkgained:"
+_REDIS_BULK_HISCORES_PREFIX = "wom:bulkhiscores:"
+UPDATE_ALL_BADCODE_PREFIX = "wom:updateall:badcode:"
+
+try:
+    _WOM_SKILL_SLUGS = {m.value for m in wom.Skills}
+    _WOM_BOSS_SLUGS = {m.value for m in wom.Bosses}
+except Exception:  # enum shape changed — validation degrades to pass-through
+    _WOM_SKILL_SLUGS = set()
+    _WOM_BOSS_SLUGS = set()
+
+_SKILL_METRIC_OVERRIDES = {"runecraft": "runecrafting"}
+
+# Task targets / plugin NPC names that don't normalize onto WOM's boss slugs.
+_BOSS_METRIC_OVERRIDES = {
+    "barrows": "barrows_chests",
+    "the_nightmare": "nightmare",
+    "gauntlet": "the_gauntlet",
+    "crystalline_hunllef": "the_gauntlet",
+    "corrupted_gauntlet": "the_corrupted_gauntlet",
+    "corrupted_hunllef": "the_corrupted_gauntlet",
+    "tombs_of_amascut_expert_mode": "tombs_of_amascut_expert",
+    "hueycoatl": "the_hueycoatl",
+    "leviathan": "the_leviathan",
+    "whisperer": "the_whisperer",
+    "royal_titans": "the_royal_titans",
+    "fortis_colosseum": "sol_heredit",
+}
+
+
+def _norm_metric_token(name: str) -> str:
+    token = str(name or "").strip().lower()
+    for ch in ("'", ":", ",", "."):
+        token = token.replace(ch, "")
+    for ch in (" ", "-"):
+        token = token.replace(ch, "_")
+    while "__" in token:
+        token = token.replace("__", "_")
+    return token.strip("_")
+
+
+def wom_skill_metric(skill: str) -> Optional[str]:
+    """Map a DropTracker skill key ('runecraft') to its WOM skill slug."""
+    token = _norm_metric_token(skill)
+    token = _SKILL_METRIC_OVERRIDES.get(token, token)
+    if _WOM_SKILL_SLUGS and token not in _WOM_SKILL_SLUGS:
+        return None
+    return token or None
+
+
+def wom_boss_metric(npc_name: str) -> Optional[str]:
+    """Map an NPC display name ('Theatre of Blood: Hard Mode') to its WOM
+    boss metric slug, or None when WOM has no hiscores boss metric for it."""
+    token = _norm_metric_token(npc_name)
+    token = _BOSS_METRIC_OVERRIDES.get(token, token)
+    if _WOM_BOSS_SLUGS and token not in _WOM_BOSS_SLUGS:
+        return None
+    return token or None
+
+
+def _iso_utc(dt) -> str:
+    """Naive-UTC datetime (server tz is UTC) → WOM's ISO-8601 'Z' format."""
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+async def _fetch_bulk_route(route, cache_key: str) -> Optional[list]:
+    try:
+        raw = redis_client.client.get(cache_key)
+        if raw is not None:
+            return json.loads(raw)
+    except Exception as e:
+        logger.debug("WOM bulk cache read failed for %s: %s", cache_key, e)
+    if not await limiter.wait():
+        return None
+    await client.start()
+    _log_wom_call("bulk.fetch", uri=route.uri)
+    try:
+        raw = await client._http.fetch(route)
+    except Exception as e:
+        logger.warning("WOM bulk fetch errored for %s: %s", route.uri, e)
+        return None
+    if not isinstance(raw, (bytes, bytearray, str)):
+        logger.warning("WOM bulk fetch failed for %s: %s", route.uri,
+                       getattr(raw, "message", raw))
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError) as e:
+        logger.warning("WOM bulk response unparseable for %s: %s", route.uri, e)
+        return None
+    if not isinstance(data, list):
+        logger.warning("WOM bulk response for %s not a list: %s", route.uri,
+                       str(data)[:200])
+        return None
+    try:
+        redis_client.client.setex(cache_key, WOM_BULK_CACHE_TTL, json.dumps(data))
+    except Exception as e:
+        logger.debug("WOM bulk cache write failed for %s: %s", cache_key, e)
+    return data
+
+
+async def get_group_bulk_gained(wom_group_id: int, start_dt, end_dt) -> Optional[list]:
+    """GET /groups/:id/bulk-gained — per-member {metric, gained, start, end}
+    for every metric, for members with ≥1 snapshot inside the window. Rows:
+    {"player": {...}, "startDate": ..., "endDate": ..., "data": [...]}."""
+    route = _BULK_GAINED_ROUTE.compile(int(wom_group_id)).with_params(
+        {"startDate": _iso_utc(start_dt), "endDate": _iso_utc(end_dt)})
+    cache_key = (f"{_REDIS_BULK_GAINED_PREFIX}{int(wom_group_id)}:"
+                 f"{int(start_dt.timestamp())}:{int(end_dt.timestamp())}")
+    return await _fetch_bulk_route(route, cache_key)
+
+
+async def get_group_bulk_hiscores(wom_group_id: int) -> Optional[list]:
+    """GET /groups/:id/bulk-hiscores — every member's latest snapshot. Rows:
+    {"player": {...}, "data": {"createdAt": ..., "data": {"skills": {...},
+    "bosses": {...}, "activities": {...}, "computed": {...}}}}."""
+    route = _BULK_HISCORES_ROUTE.compile(int(wom_group_id))
+    return await _fetch_bulk_route(
+        route, f"{_REDIS_BULK_HISCORES_PREFIX}{int(wom_group_id)}")
+
+
+async def request_player_update(username: str) -> bool:
+    """Ask WOM to re-scrape one player's hiscores (event freshness pass)."""
+    if not username or not await limiter.wait():
+        return False
+    await client.start()
+    try:
+        _log_wom_call("players.update_player", username=username)
+        result = await client.players.update_player(username=username)
+        return bool(result.is_ok)
+    except Exception as e:
+        logger.warning("WOM update_player failed for %s: %s", username, e)
+        return False
+
+
+async def request_group_update_all(wom_group_id: int, verification_code: str) -> Optional[str]:
+    """POST /groups/:id/update-all — queue every >24h-outdated member for a
+    WOM-side update (WOM paces the queue and retries 3x per player).
+
+    Returns WOM's message on success. On a 400/403 (bad verification code)
+    sets ``wom:updateall:badcode:{gid}`` so callers stop retrying the code.
+    """
+    if not verification_code or not await limiter.wait():
+        return None
+    await client.start()
+    try:
+        _log_wom_call("groups.update_outdated_members", id=wom_group_id)
+        result = await client.groups.update_outdated_members(
+            int(wom_group_id), verification_code)
+    except Exception as e:
+        logger.warning("WOM update-all errored for group %s: %s", wom_group_id, e)
+        return None
+    if result.is_ok:
+        return getattr(result.unwrap(), "message", "ok")
+    err = result.unwrap_err()
+    status = getattr(err, "status", -1)
+    logger.warning("WOM update-all failed for group %s (status=%s): %s",
+                   wom_group_id, status, getattr(err, "message", err))
+    if status in (400, 403):
+        try:
+            redis_client.client.setex(
+                f"{UPDATE_ALL_BADCODE_PREFIX}{int(wom_group_id)}",
+                7 * 86400, str(status))
+        except Exception:
+            pass
+    return None
+
+
 async def get_player_all_skills_by_id(wom_id: int):
     """
     Returns all skills and their experience points for a player by WOM ID

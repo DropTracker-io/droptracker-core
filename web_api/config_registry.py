@@ -142,13 +142,23 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "discord_url", "type": "string", "default": ""},
     {"key": "auto_provision_members", "type": "boolean", "default": False},
     {"key": "export_api_key", "type": "string", "default": None},
+
+    # --- Events: WOM reconciliation ---
+    # Hybrid event XP/KC tracking from WiseOldMan bulk gains
+    # (services/event_wom_reconciler.py). On by default for any group with a
+    # linked WOM group id; this key force-disables it.
+    {"key": "event_wom_reconciliation", "type": "boolean", "default": True},
+    # Optional WOM group verification code: lets event freshness passes queue
+    # a group-wide WOM "update-all" (one API call) instead of per-player
+    # updates. Admin-only, redacted in audit logs like export_api_key.
+    {"key": "wom_verification_code", "type": "string", "default": None},
 ]
 
 _BY_KEY = {f["key"]: f for f in GROUP_CONFIG_FIELDS}
 
 # Sensitive keys never returned to non-admins (the endpoint is admin-gated, but
 # guard explicitly per §11 / Task 05).
-SENSITIVE_KEYS = {"export_api_key"}
+SENSITIVE_KEYS = {"export_api_key", "wom_verification_code"}
 
 
 def all_config_keys() -> List[str]:

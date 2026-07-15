@@ -441,6 +441,14 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
                 "matched_target": str(data.get("item_name") or "").strip()[:120] or None}
 
     if task_type == "kc_target":
+        if kind == "wom_kc":
+            # WOM reconciler envelope: absolute boss KC keyed by WOM metric
+            # slug (precomputed on the task dict at state-load time).
+            # Quantity (the watermark delta) is resolved later, like xp.
+            metric = task.get("wom_metric")
+            if not metric or metric != str(data.get("boss_metric") or "").strip().lower():
+                return None
+            return {"mode": "kc_abs", "quantity": 0}
         if kind != "drop":
             return None
         if _norm(data.get("npc_name")) != _norm(task.get("target")) or not task.get("target"):
@@ -508,7 +516,11 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
 def accepts_submission_source(event: dict, envelope: dict) -> bool:
     """Whether the event's submission_policy admits this envelope's intake
     path (pure; no I/O). Only ``api_only`` rejects; a missing ``used_api``
-    flag (pre-upgrade queue entries, webhook-bot fallback) reads as non-API."""
+    flag (pre-upgrade queue entries, webhook-bot fallback) reads as non-API.
+    WOM-reconciler envelopes are hiscores-sourced server-side data — trusted
+    under every policy."""
+    if envelope.get("source") == "wom":
+        return True
     if event.get("submission_policy") == "api_only":
         return bool(envelope.get("used_api"))
     return True
@@ -522,7 +534,8 @@ def completion_status(event: dict, task: dict, envelope: dict) -> str:
     if task.get("requires_confirmation") or event.get("requires_confirmation"):
         return "pending"
     if (event.get("submission_policy") == "confirm_non_api"
-            and not envelope.get("used_api")):
+            and not envelope.get("used_api")
+            and envelope.get("source") != "wom"):
         return "pending"
     return "auto"
 
@@ -564,6 +577,18 @@ def _event_to_dict(event) -> dict:
     }
 
 
+def _task_wom_metric(task_type, target) -> Optional[str]:
+    """WOM metric slug for a kc_target's NPC target (None when WOM has no
+    hiscores metric for it — that task stays plugin-only)."""
+    if task_type != "kc_target" or not target:
+        return None
+    try:
+        from utils.wiseoldman import wom_boss_metric
+        return wom_boss_metric(target)
+    except Exception:
+        return None
+
+
 def _task_to_dict(task) -> dict:
     return {
         "id": task.id,
@@ -575,6 +600,7 @@ def _task_to_dict(task) -> dict:
         "points": int(task.points or 0),
         "requires_confirmation": bool(task.requires_confirmation),
         "config": parse_task_config(task.config),
+        "wom_metric": _task_wom_metric(task.type, task.target),
     }
 
 
@@ -667,11 +693,15 @@ def _xp_baseline_key(event_id: int, player_id: int, skill: str) -> str:
     return f"events:{event_id}:xpbase:{player_id}:{_norm(skill)}"
 
 
-def _fold_xp_baseline(redis_conn, event_id: int, player_id: int, skill, xp) -> int:
+def _fold_xp_baseline(redis_conn, event_id: int, player_id: int, skill, xp,
+                      seed=None) -> int:
     """Return xp gained since the last stored baseline and advance it.
 
     The first report after join only sets the baseline (delta 0) — PRD D10:
-    no retroactive credit.
+    no retroactive credit. Exception: WOM reconciler envelopes may carry a
+    ``seed`` (the player's XP at the event window start, per WOM's snapshot
+    history) — when the baseline is unset, the first fold credits from the
+    seed instead, so plugin-less players still earn their in-window gains.
     """
     try:
         xp = int(xp or 0)
@@ -684,12 +714,100 @@ def _fold_xp_baseline(redis_conn, event_id: int, player_id: int, skill, xp) -> i
         prev = redis_conn.get(key)
         if prev is None:
             redis_conn.set(key, xp, ex=_STATE_KEY_TTL)
-            return 0
+            try:
+                seed = int(seed)
+            except (TypeError, ValueError):
+                return 0
+            return xp - seed if 0 < seed < xp else 0
         prev = int(prev)
         if xp <= prev:
             return 0
         redis_conn.set(key, xp, ex=_STATE_KEY_TTL)
         return xp - prev
+    except Exception:
+        return 0
+
+
+def _seed_allowed(joined_at, window_start) -> bool:
+    """WOM window-start seeding is only honest for players who joined at/before
+    the window start; late joiners keep the lazy first-report baseline."""
+    if joined_at is None or window_start is None:
+        return True
+    return joined_at <= window_start
+
+
+def _kc_fallback_key(event_id: int, task_id: int, player_id: int) -> str:
+    return f"events:{event_id}:kcfallback:{task_id}:{player_id}"
+
+
+def _legacy_kcdedupe_max(redis_conn, event_id: int, task_id: int, player_id: int) -> int:
+    """Max kill_count already credited via the pre-watermark ``kcdedupe`` set
+    (deploy transition: don't re-credit kills counted under the old scheme)."""
+    try:
+        members = redis_conn.smembers(
+            f"events:{event_id}:kcdedupe:{task_id}:{player_id}")
+    except Exception:
+        return 0
+    best = 0
+    for member in members or ():
+        try:
+            raw = member.decode() if isinstance(member, bytes) else str(member)
+            best = max(best, int(raw.rpartition(":")[2]))
+        except (ValueError, AttributeError, UnicodeDecodeError):
+            continue
+    return best
+
+
+def _fold_kc_watermark(redis_conn, event_id: int, task_id: int, player_id: int,
+                       kc_abs, *, seed=None, first_credit_offset: int = 0) -> int:
+    """Return kills gained since the stored absolute-KC watermark, advance it.
+
+    One watermark per (event, task, player), advanced by BOTH sources of
+    absolute KC — plugin drops' ``kill_count`` and WOM hiscores — so whichever
+    is ahead wins and the other folds to 0 (the double-count guard).
+
+    First observation: baseline = ``seed`` (WOM's window-start KC) when given,
+    else ``kc_abs - first_credit_offset`` (offset 1 keeps a first plugin drop
+    crediting +1, as before). Credits already granted through the
+    no-kill_count cooldown fallback (``kcfallback`` counter) are subtracted
+    from any positive delta so they never double-count.
+    """
+    try:
+        kc_abs = int(kc_abs)
+    except (TypeError, ValueError):
+        return 0
+    if kc_abs <= 0:
+        return 0
+    key = f"events:{event_id}:kcbase:{task_id}:{player_id}"
+    try:
+        prev = redis_conn.get(key)
+        if prev is None:
+            try:
+                seed = int(seed)
+            except (TypeError, ValueError):
+                seed = None
+            base = seed if seed is not None and 0 < seed <= kc_abs \
+                else max(kc_abs - int(first_credit_offset), 0)
+            base = max(base, _legacy_kcdedupe_max(
+                redis_conn, event_id, task_id, player_id))
+        else:
+            base = int(prev)
+        delta = max(0, kc_abs - base)
+        redis_conn.set(key, max(kc_abs, base), ex=_STATE_KEY_TTL)
+        if delta > 0:
+            fb_key = _kc_fallback_key(event_id, task_id, player_id)
+            try:
+                pending = int(redis_conn.get(fb_key) or 0)
+            except (TypeError, ValueError):
+                pending = 0
+            if pending > 0:
+                consumed = min(pending, delta)
+                delta -= consumed
+                if pending - consumed > 0:
+                    redis_conn.set(fb_key, pending - consumed, ex=_STATE_KEY_TTL)
+                else:
+                    redis_conn.delete(fb_key)
+        return delta
     except Exception:
         return 0
 
@@ -1300,15 +1418,47 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict) ->
             if match is None:
                 continue
             quantity = match["quantity"]
+            data = envelope.get("data") or {}
+            # WOM envelopes carry the window-start value; seeding from it is
+            # only valid for the event whose window produced it, and only for
+            # players who were in before the window opened (PRD D10).
+            wom_seed_ok = (data.get("source") == "wom"
+                           and data.get("target_event_id") == event_id
+                           and _seed_allowed(joined_at, event["window_start"]))
             if match["mode"] == "kc":
-                if not _kc_dedupe(redis_conn, event_id, task["id"], player_id, envelope):
+                try:
+                    kill_count = int(data.get("kill_count"))
+                except (TypeError, ValueError):
+                    kill_count = None
+                if kill_count is not None and kill_count > 0:
+                    quantity = _fold_kc_watermark(
+                        redis_conn, event_id, task["id"], player_id,
+                        kill_count, first_credit_offset=1)
+                    if quantity <= 0:
+                        continue
+                else:
+                    # No usable absolute KC: cooldown dedupe as before, and
+                    # note the credit so a later absolute fold subtracts it.
+                    if not _kc_dedupe(redis_conn, event_id, task["id"], player_id, envelope):
+                        continue
+                    try:
+                        fb_key = _kc_fallback_key(event_id, task["id"], player_id)
+                        redis_conn.incr(fb_key)
+                        redis_conn.expire(fb_key, _STATE_KEY_TTL)
+                    except Exception:
+                        pass
+            elif match["mode"] == "kc_abs":
+                quantity = _fold_kc_watermark(
+                    redis_conn, event_id, task["id"], player_id, data.get("kc"),
+                    seed=data.get("kc_start") if wom_seed_ok else None)
+                if quantity <= 0:
                     continue
             elif match["mode"] == "xp":
                 if xp_delta is None:
-                    data = envelope.get("data") or {}
                     xp_delta = _fold_xp_baseline(
                         redis_conn, event_id, player_id,
-                        data.get("skill"), data.get("xp"))
+                        data.get("skill"), data.get("xp"),
+                        seed=data.get("xp_start") if wom_seed_ok else None)
                 if xp_delta <= 0:
                     continue
                 quantity = xp_delta

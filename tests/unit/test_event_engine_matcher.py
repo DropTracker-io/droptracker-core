@@ -544,3 +544,60 @@ class TestSubmissionPolicy:
         env = _env("drop", {"item_name": "Twisted bow", "quantity": 1})
         env["used_api"] = False
         assert engine.handle_envelope(None, _FakeRedis(), state, env) == []
+
+
+# ── WOM reconciler envelopes (kind=wom_kc, source=wom) ───────────────────────
+
+class TestWomKcMatch:
+    def test_wom_kc_matches_precomputed_metric(self):
+        t = _task(type="kc_target", target="Zulrah", target_value=50,
+                  wom_metric="zulrah")
+        m = engine.match_task(t, _env("wom_kc", {"boss_metric": "zulrah", "kc": 250}))
+        assert m == {"mode": "kc_abs", "quantity": 0}
+
+    def test_wom_kc_metric_mismatch(self):
+        t = _task(type="kc_target", target="Zulrah", wom_metric="zulrah")
+        assert engine.match_task(
+            t, _env("wom_kc", {"boss_metric": "vorkath", "kc": 10})) is None
+
+    def test_wom_kc_task_without_metric_stays_plugin_only(self):
+        t = _task(type="kc_target", target="Some Custom Boss")  # no wom_metric
+        assert engine.match_task(
+            t, _env("wom_kc", {"boss_metric": "some_custom_boss"})) is None
+
+    def test_drop_matching_unchanged_for_kc_target(self):
+        t = _task(type="kc_target", target="Zulrah", wom_metric="zulrah")
+        m = engine.match_task(t, _env("drop", {"npc_name": "Zulrah", "kill_count": 12}))
+        assert m == {"mode": "kc", "quantity": 1}
+
+    def test_wom_kc_never_matches_other_task_types(self):
+        assert engine.match_task(
+            _task(type="loot_value"), _env("wom_kc", {"boss_metric": "zulrah"})) is None
+        assert engine.match_task(
+            _task(target="Zulrah"), _env("wom_kc", {"boss_metric": "zulrah"})) is None
+
+
+class TestWomSourcePolicy:
+    def test_api_only_accepts_wom_source(self):
+        env = {"used_api": False, "source": "wom"}
+        assert engine.accepts_submission_source(
+            _event(submission_policy="api_only"), env) is True
+
+    def test_api_only_still_rejects_non_api(self):
+        assert engine.accepts_submission_source(
+            _event(submission_policy="api_only"), {"used_api": False}) is False
+
+    def test_confirm_non_api_auto_for_wom(self):
+        env = {"used_api": False, "source": "wom"}
+        assert engine.completion_status(
+            _event(submission_policy="confirm_non_api"), _task(), env) == "auto"
+
+    def test_confirm_non_api_still_pends_non_api(self):
+        assert engine.completion_status(
+            _event(submission_policy="confirm_non_api"), _task(),
+            {"used_api": False}) == "pending"
+
+    def test_requires_confirmation_still_pends_wom(self):
+        env = {"used_api": True, "source": "wom"}
+        assert engine.completion_status(
+            _event(requires_confirmation=True), _task(), env) == "pending"

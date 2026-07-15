@@ -1,0 +1,1396 @@
+[
+ {
+  "player": {
+   "id": 2188996,
+   "username": "btw fe male",
+   "displayName": "Btw Fe male",
+   "type": "ironman",
+   "build": "main",
+   "status": "active",
+   "country": null,
+   "patron": false,
+   "exp": 213733602,
+   "ehp": 1061.53009,
+   "ehb": 243.49743,
+   "ttm": 721.4199999999998,
+   "tt200m": 19484.14230699797,
+   "registeredAt": "2024-12-29T02:02:35.047Z",
+   "updatedAt": "2026-07-14T13:35:36.693Z",
+   "lastChangedAt": "2026-07-14T13:35:36.693Z",
+   "lastImportedAt": null
+  },
+  "startDate": "2026-07-01T17:33:11.004Z",
+  "endDate": "2026-07-14T13:35:36.693Z",
+  "data": [
+   {
+    "metric": "overall",
+    "gained": 1998817,
+    "start": 211734785,
+    "end": 213733602
+   },
+   {
+    "metric": "attack",
+    "gained": 36923,
+    "start": 13198873,
+    "end": 13235796
+   },
+   {
+    "metric": "defence",
+    "gained": 139482,
+    "start": 6559044,
+    "end": 6698526
+   },
+   {
+    "metric": "strength",
+    "gained": 162315,
+    "start": 14765469,
+    "end": 14927784
+   },
+   {
+    "metric": "hitpoints",
+    "gained": 121221,
+    "start": 20730631,
+    "end": 20851852
+   },
+   {
+    "metric": "ranged",
+    "gained": 24555,
+    "start": 16433825,
+    "end": 16458380
+   },
+   {
+    "metric": "prayer",
+    "gained": 0,
+    "start": 3983303,
+    "end": 3983303
+   },
+   {
+    "metric": "magic",
+    "gained": 8329,
+    "start": 13863060,
+    "end": 13871389
+   },
+   {
+    "metric": "cooking",
+    "gained": 1229501,
+    "start": 7614039,
+    "end": 8843540
+   },
+   {
+    "metric": "woodcutting",
+    "gained": 240,
+    "start": 10896761,
+    "end": 10897001
+   },
+   {
+    "metric": "fletching",
+    "gained": 94,
+    "start": 7338922,
+    "end": 7339016
+   },
+   {
+    "metric": "fishing",
+    "gained": 0,
+    "start": 8429477,
+    "end": 8429477
+   },
+   {
+    "metric": "firemaking",
+    "gained": 0,
+    "start": 13249349,
+    "end": 13249349
+   },
+   {
+    "metric": "crafting",
+    "gained": 452,
+    "start": 8901378,
+    "end": 8901830
+   },
+   {
+    "metric": "smithing",
+    "gained": 5000,
+    "start": 4429692,
+    "end": 4434692
+   },
+   {
+    "metric": "mining",
+    "gained": 0,
+    "start": 9667113,
+    "end": 9667113
+   },
+   {
+    "metric": "herblore",
+    "gained": 18965,
+    "start": 5928910,
+    "end": 5947875
+   },
+   {
+    "metric": "agility",
+    "gained": 180851,
+    "start": 3471572,
+    "end": 3652423
+   },
+   {
+    "metric": "thieving",
+    "gained": 0,
+    "start": 5953121,
+    "end": 5953121
+   },
+   {
+    "metric": "slayer",
+    "gained": 55486,
+    "start": 8605188,
+    "end": 8660674
+   },
+   {
+    "metric": "farming",
+    "gained": 3,
+    "start": 7039561,
+    "end": 7039564
+   },
+   {
+    "metric": "runecrafting",
+    "gained": 0,
+    "start": 3602215,
+    "end": 3602215
+   },
+   {
+    "metric": "hunter",
+    "gained": 0,
+    "start": 5552952,
+    "end": 5552952
+   },
+   {
+    "metric": "construction",
+    "gained": 0,
+    "start": 3079472,
+    "end": 3079472
+   },
+   {
+    "metric": "sailing",
+    "gained": 15400,
+    "start": 8440858,
+    "end": 8456258
+   },
+   {
+    "metric": "bounty_hunter_hunter",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "bounty_hunter_rogue",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "clue_scrolls_all",
+    "gained": 0,
+    "start": 244,
+    "end": 244
+   },
+   {
+    "metric": "clue_scrolls_beginner",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "clue_scrolls_easy",
+    "gained": 0,
+    "start": 17,
+    "end": 17
+   },
+   {
+    "metric": "clue_scrolls_medium",
+    "gained": 0,
+    "start": 59,
+    "end": 59
+   },
+   {
+    "metric": "clue_scrolls_hard",
+    "gained": 0,
+    "start": 124,
+    "end": 124
+   },
+   {
+    "metric": "clue_scrolls_elite",
+    "gained": 0,
+    "start": 36,
+    "end": 36
+   },
+   {
+    "metric": "clue_scrolls_master",
+    "gained": 0,
+    "start": 8,
+    "end": 8
+   },
+   {
+    "metric": "last_man_standing",
+    "gained": 0,
+    "start": 1090,
+    "end": 1090
+   },
+   {
+    "metric": "pvp_arena",
+    "gained": 0,
+    "start": 2504,
+    "end": 2504
+   },
+   {
+    "metric": "soul_wars_zeal",
+    "gained": 0,
+    "start": 156,
+    "end": 156
+   },
+   {
+    "metric": "guardians_of_the_rift",
+    "gained": 0,
+    "start": 301,
+    "end": 301
+   },
+   {
+    "metric": "colosseum_glory",
+    "gained": 0,
+    "start": 31778,
+    "end": 31778
+   },
+   {
+    "metric": "collections_logged",
+    "gained": 2,
+    "start": 520,
+    "end": 522
+   },
+   {
+    "metric": "abyssal_sire",
+    "gained": 0,
+    "start": 614,
+    "end": 614
+   },
+   {
+    "metric": "alchemical_hydra",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "amoxliatl",
+    "gained": 0,
+    "start": 21,
+    "end": 21
+   },
+   {
+    "metric": "araxxor",
+    "gained": 30,
+    "start": 105,
+    "end": 135
+   },
+   {
+    "metric": "artio",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "barrows_chests",
+    "gained": 0,
+    "start": 425,
+    "end": 425
+   },
+   {
+    "metric": "brutus",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "bryophyta",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "callisto",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "calvarion",
+    "gained": 0,
+    "start": 68,
+    "end": 68
+   },
+   {
+    "metric": "cerberus",
+    "gained": 0,
+    "start": 821,
+    "end": 821
+   },
+   {
+    "metric": "chambers_of_xeric",
+    "gained": 0,
+    "start": 15,
+    "end": 15
+   },
+   {
+    "metric": "chambers_of_xeric_challenge_mode",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "chaos_elemental",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "chaos_fanatic",
+    "gained": 0,
+    "start": 11,
+    "end": 11
+   },
+   {
+    "metric": "commander_zilyana",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "corporeal_beast",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "crazy_archaeologist",
+    "gained": 0,
+    "start": 14,
+    "end": 14
+   },
+   {
+    "metric": "dagannoth_prime",
+    "gained": 0,
+    "start": 159,
+    "end": 159
+   },
+   {
+    "metric": "dagannoth_rex",
+    "gained": 0,
+    "start": 361,
+    "end": 361
+   },
+   {
+    "metric": "dagannoth_supreme",
+    "gained": 0,
+    "start": 52,
+    "end": 52
+   },
+   {
+    "metric": "deranged_archaeologist",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "doom_of_mokhaiotl",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "duke_sucellus",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "general_graardor",
+    "gained": 0,
+    "start": 7,
+    "end": 7
+   },
+   {
+    "metric": "giant_mole",
+    "gained": 0,
+    "start": 2,
+    "end": 2
+   },
+   {
+    "metric": "grotesque_guardians",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "hespori",
+    "gained": 0,
+    "start": 66,
+    "end": 66
+   },
+   {
+    "metric": "kalphite_queen",
+    "gained": 0,
+    "start": 4,
+    "end": 4
+   },
+   {
+    "metric": "king_black_dragon",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "kraken",
+    "gained": 0,
+    "start": 119,
+    "end": 119
+   },
+   {
+    "metric": "kreearra",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "kril_tsutsaroth",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "lunar_chests",
+    "gained": 0,
+    "start": 235,
+    "end": 235
+   },
+   {
+    "metric": "maggot_king",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "mimic",
+    "gained": 0,
+    "start": 2,
+    "end": 2
+   },
+   {
+    "metric": "nex",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "nightmare",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "phosanis_nightmare",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "obor",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "phantom_muspah",
+    "gained": 0,
+    "start": 15,
+    "end": 15
+   },
+   {
+    "metric": "sarachnis",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "scorpia",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "scurrius",
+    "gained": 0,
+    "start": 10,
+    "end": 10
+   },
+   {
+    "metric": "shellbane_gryphon",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "skotizo",
+    "gained": 0,
+    "start": 20,
+    "end": 20
+   },
+   {
+    "metric": "sol_heredit",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "spindel",
+    "gained": 0,
+    "start": 100,
+    "end": 100
+   },
+   {
+    "metric": "tempoross",
+    "gained": 0,
+    "start": 700,
+    "end": 700
+   },
+   {
+    "metric": "the_gauntlet",
+    "gained": 0,
+    "start": 11,
+    "end": 11
+   },
+   {
+    "metric": "the_corrupted_gauntlet",
+    "gained": 0,
+    "start": 861,
+    "end": 861
+   },
+   {
+    "metric": "the_hueycoatl",
+    "gained": 0,
+    "start": 106,
+    "end": 106
+   },
+   {
+    "metric": "the_leviathan",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "the_royal_titans",
+    "gained": 0,
+    "start": 564,
+    "end": 564
+   },
+   {
+    "metric": "the_whisperer",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "theatre_of_blood",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "theatre_of_blood_hard_mode",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "thermonuclear_smoke_devil",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "tombs_of_amascut",
+    "gained": 0,
+    "start": 59,
+    "end": 59
+   },
+   {
+    "metric": "tombs_of_amascut_expert",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "tzkal_zuk",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "tztok_jad",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "vardorvis",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "venenatis",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "vetion",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "vorkath",
+    "gained": 0,
+    "start": 14,
+    "end": 14
+   },
+   {
+    "metric": "wintertodt",
+    "gained": 0,
+    "start": 624,
+    "end": 624
+   },
+   {
+    "metric": "yama",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "zalcano",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "zulrah",
+    "gained": 0,
+    "start": 250,
+    "end": 250
+   },
+   {
+    "metric": "ehp",
+    "gained": 7.33591,
+    "start": 1054.1941800000002,
+    "end": 1061.5300900000002
+   },
+   {
+    "metric": "ehb",
+    "gained": 0.78947,
+    "start": 242.70795999999999,
+    "end": 243.49742999999995
+   }
+  ]
+ },
+ {
+  "player": {
+   "id": 399504,
+   "username": "1b exp 1",
+   "displayName": "1b exp 1",
+   "type": "regular",
+   "build": "main",
+   "status": "active",
+   "country": null,
+   "patron": false,
+   "exp": 44989727,
+   "ehp": 199.20423,
+   "ehb": 1.92614,
+   "ttm": 846.8390099999999,
+   "tt200m": 12813.05917576933,
+   "registeredAt": "2021-10-07T14:41:06.862Z",
+   "updatedAt": "2026-07-14T15:30:50.053Z",
+   "lastChangedAt": "2026-07-14T15:30:50.053Z",
+   "lastImportedAt": null
+  },
+  "startDate": "2026-07-01T02:58:46.809Z",
+  "endDate": "2026-07-14T15:30:50.053Z",
+  "data": [
+   {
+    "metric": "overall",
+    "gained": 2405939,
+    "start": 42583788,
+    "end": 44989727
+   },
+   {
+    "metric": "attack",
+    "gained": 545569,
+    "start": 1441024,
+    "end": 1986593
+   },
+   {
+    "metric": "defence",
+    "gained": 139350,
+    "start": 770210,
+    "end": 909560
+   },
+   {
+    "metric": "strength",
+    "gained": 2514,
+    "start": 3264057,
+    "end": 3266571
+   },
+   {
+    "metric": "hitpoints",
+    "gained": 228759,
+    "start": 2060879,
+    "end": 2289638
+   },
+   {
+    "metric": "ranged",
+    "gained": 0,
+    "start": 370510,
+    "end": 370510
+   },
+   {
+    "metric": "prayer",
+    "gained": 10103,
+    "start": 856380,
+    "end": 866483
+   },
+   {
+    "metric": "magic",
+    "gained": 4611,
+    "start": 3497738,
+    "end": 3502349
+   },
+   {
+    "metric": "cooking",
+    "gained": 0,
+    "start": 1005551,
+    "end": 1005551
+   },
+   {
+    "metric": "woodcutting",
+    "gained": 0,
+    "start": 820935,
+    "end": 820935
+   },
+   {
+    "metric": "fletching",
+    "gained": 0,
+    "start": 325617,
+    "end": 325617
+   },
+   {
+    "metric": "fishing",
+    "gained": 0,
+    "start": 804614,
+    "end": 804614
+   },
+   {
+    "metric": "firemaking",
+    "gained": 0,
+    "start": 13131050,
+    "end": 13131050
+   },
+   {
+    "metric": "crafting",
+    "gained": 602,
+    "start": 1017311,
+    "end": 1017913
+   },
+   {
+    "metric": "smithing",
+    "gained": 325,
+    "start": 972388,
+    "end": 972713
+   },
+   {
+    "metric": "mining",
+    "gained": 0,
+    "start": 4554459,
+    "end": 4554459
+   },
+   {
+    "metric": "herblore",
+    "gained": 17010,
+    "start": 575751,
+    "end": 592761
+   },
+   {
+    "metric": "agility",
+    "gained": 172067,
+    "start": 997666,
+    "end": 1169733
+   },
+   {
+    "metric": "thieving",
+    "gained": 1108009,
+    "start": 903621,
+    "end": 2011630
+   },
+   {
+    "metric": "slayer",
+    "gained": 162073,
+    "start": 750066,
+    "end": 912139
+   },
+   {
+    "metric": "farming",
+    "gained": 14937,
+    "start": 796520,
+    "end": 811457
+   },
+   {
+    "metric": "runecrafting",
+    "gained": 10,
+    "start": 1907765,
+    "end": 1907775
+   },
+   {
+    "metric": "hunter",
+    "gained": 0,
+    "start": 1616380,
+    "end": 1616380
+   },
+   {
+    "metric": "construction",
+    "gained": 0,
+    "start": 118294,
+    "end": 118294
+   },
+   {
+    "metric": "sailing",
+    "gained": 0,
+    "start": 25002,
+    "end": 25002
+   },
+   {
+    "metric": "bounty_hunter_hunter",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "bounty_hunter_rogue",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "clue_scrolls_all",
+    "gained": 0,
+    "start": 57,
+    "end": 57
+   },
+   {
+    "metric": "clue_scrolls_beginner",
+    "gained": 0,
+    "start": 17,
+    "end": 17
+   },
+   {
+    "metric": "clue_scrolls_easy",
+    "gained": 0,
+    "start": 35,
+    "end": 35
+   },
+   {
+    "metric": "clue_scrolls_medium",
+    "gained": 0,
+    "start": 3,
+    "end": 3
+   },
+   {
+    "metric": "clue_scrolls_hard",
+    "gained": 0,
+    "start": 2,
+    "end": 2
+   },
+   {
+    "metric": "clue_scrolls_elite",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "clue_scrolls_master",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "last_man_standing",
+    "gained": 0,
+    "start": 436,
+    "end": 436
+   },
+   {
+    "metric": "pvp_arena",
+    "gained": 0,
+    "start": 2500,
+    "end": 2500
+   },
+   {
+    "metric": "soul_wars_zeal",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "guardians_of_the_rift",
+    "gained": 0,
+    "start": 209,
+    "end": 209
+   },
+   {
+    "metric": "colosseum_glory",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "collections_logged",
+    "gained": 4,
+    "start": 233,
+    "end": 237
+   },
+   {
+    "metric": "abyssal_sire",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "alchemical_hydra",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "amoxliatl",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "araxxor",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "artio",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "barrows_chests",
+    "gained": 0,
+    "start": 2,
+    "end": 2
+   },
+   {
+    "metric": "brutus",
+    "gained": 0,
+    "start": 24,
+    "end": 24
+   },
+   {
+    "metric": "bryophyta",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "callisto",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "calvarion",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "cerberus",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "chambers_of_xeric",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "chambers_of_xeric_challenge_mode",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "chaos_elemental",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "chaos_fanatic",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "commander_zilyana",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "corporeal_beast",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "crazy_archaeologist",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "dagannoth_prime",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "dagannoth_rex",
+    "gained": 0,
+    "start": 89,
+    "end": 89
+   },
+   {
+    "metric": "dagannoth_supreme",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "deranged_archaeologist",
+    "gained": 0,
+    "start": 25,
+    "end": 25
+   },
+   {
+    "metric": "doom_of_mokhaiotl",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "duke_sucellus",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "general_graardor",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "giant_mole",
+    "gained": 0,
+    "start": 2,
+    "end": 2
+   },
+   {
+    "metric": "grotesque_guardians",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "hespori",
+    "gained": 0,
+    "start": 5,
+    "end": 5
+   },
+   {
+    "metric": "kalphite_queen",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "king_black_dragon",
+    "gained": 0,
+    "start": 10,
+    "end": 10
+   },
+   {
+    "metric": "kraken",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "kreearra",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "kril_tsutsaroth",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "lunar_chests",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "maggot_king",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "mimic",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "nex",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "nightmare",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "phosanis_nightmare",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "obor",
+    "gained": 0,
+    "start": 1,
+    "end": 1
+   },
+   {
+    "metric": "phantom_muspah",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "sarachnis",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "scorpia",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "scurrius",
+    "gained": 0,
+    "start": 10,
+    "end": 10
+   },
+   {
+    "metric": "shellbane_gryphon",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "skotizo",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "sol_heredit",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "spindel",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "tempoross",
+    "gained": 0,
+    "start": 104,
+    "end": 104
+   },
+   {
+    "metric": "the_gauntlet",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "the_corrupted_gauntlet",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "the_hueycoatl",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "the_leviathan",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "the_royal_titans",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "the_whisperer",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "theatre_of_blood",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "theatre_of_blood_hard_mode",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "thermonuclear_smoke_devil",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "tombs_of_amascut",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "tombs_of_amascut_expert",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "tzkal_zuk",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "tztok_jad",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "vardorvis",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "venenatis",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "vetion",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "vorkath",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "wintertodt",
+    "gained": 0,
+    "start": 584,
+    "end": 584
+   },
+   {
+    "metric": "yama",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "zalcano",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "zulrah",
+    "gained": 0,
+    "start": -1,
+    "end": -1
+   },
+   {
+    "metric": "ehp",
+    "gained": 8.33307,
+    "start": 190.87116000000003,
+    "end": 199.20423
+   },
+   {
+    "metric": "ehb",
+    "gained": 0,
+    "start": 1.92614,
+    "end": 1.92614
+   }
+  ]
+ }
+]
