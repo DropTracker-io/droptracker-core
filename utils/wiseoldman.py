@@ -1,5 +1,6 @@
 import os
 import asyncio
+import functools
 import json
 import logging
 import time
@@ -355,6 +356,47 @@ async def check_group_by_id(wom_group_id: int, *, force_refresh: bool = False):
     finally:
         pass
 
+def _autoclean_scoped_session_async(fn):
+    """Async analogue of ``services.points._autoclean_scoped_session``.
+
+    ``fetch_group_members`` falls back to the module-level *scoped* session
+    (``models.session``) when the caller passes no session. Its reads autobegin
+    a transaction that several code paths never commit or roll back, so the
+    scoped session keeps its connection checked out with an idle read
+    transaction — the 2026-07-15 idle-transaction leak, here in the bot /
+    player-updates / intake processes (webapi already has a request teardown).
+
+    When the caller owns the session (passes ``session_to_use=...``) we touch
+    nothing; cleanup is theirs. When we fell back to the scoped session we
+    ``rollback()`` it in a ``finally``: that ends the idle transaction and
+    returns the connection to the pool. We roll back rather than
+    ``Session.remove()`` on purpose — callers such as
+    ``db.ops._sync_group_from_wom`` share this same scoped session and keep live
+    ORM objects across the call, then read relationships on them afterwards
+    (e.g. ``group.players``); ``remove()`` would detach those objects and raise
+    ``DetachedInstanceError``, while ``rollback()`` releases the connection
+    without detaching. Any writes made above (name corrections, provisioned
+    players) are committed inline before this runs, so the trailing rollback
+    only clears the leftover read transaction.
+    """
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        # ``session_to_use`` is the 2nd positional parameter; the call owns the
+        # scoped session only when no session was supplied by either route.
+        supplied = args[1] if len(args) >= 2 else kwargs.get("session_to_use", None)
+        if supplied is not None:
+            return await fn(*args, **kwargs)
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            try:
+                models.session.rollback()
+            except Exception:
+                pass
+    return wrapper
+
+
+@_autoclean_scoped_session_async
 async def fetch_group_members(
     wom_group_id: int,
     session_to_use = None,

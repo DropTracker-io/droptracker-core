@@ -96,4 +96,13 @@ class ChannelNames(Extension):
                             await channel.edit(name=template_str.replace("{member_count}", str(total_members)))
                     except Exception as e:
                         print("Couldn't edit the channel. e:", e)
+            # Release the scoped session before sleeping so this thread does not
+            # hold an idle read transaction for the full interval — the reads
+            # above (and inside fetch_group_members) otherwise leave the shared
+            # scoped session's connection checked out (2026-07-15 idle-transaction
+            # leak family). Nothing is held across iterations, so remove() is safe.
+            try:
+                session.remove()
+            except Exception:
+                pass
             await asyncio.sleep(600)

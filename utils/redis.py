@@ -103,45 +103,58 @@ def calculate_rank_amongst_groups(target_group_id, player_ids, session_to_use=No
     # Import locally to avoid circular dependencies at import time
     from db import Group, Player, session as _session
 
+    own_scoped_session = session_to_use is None
     if session_to_use:
         db_session = session_to_use
     else:
         db_session = _session
-    groups = db_session.query(Group).all()
-    
+    # This read-only helper otherwise leaves the shared *scoped* session holding
+    # an idle read transaction on the calling thread (bot / player-updates /
+    # intake), the 2026-07-15 leak family. When we fell back to the scoped
+    # session, release its connection in the finally below — rollback() rather
+    # than remove() so a caller sharing this scoped session keeps its live ORM
+    # objects. The helper performs no writes, so nothing is lost.
+    try:
+        groups = db_session.query(Group).all()
 
-    group_totals = {}  # Dictionary to store total loot by group_id
-    partition = datetime.now().year * 100 + datetime.now().month
+        group_totals = {}  # Dictionary to store total loot by group_id
+        partition = datetime.now().year * 100 + datetime.now().month
 
-    for group_object in groups:
-        group_id = group_object.group_id  # Extract the group_id
-        if group_id == 2 or group_id == 0:
-            ## Do not track the global group in ranking listings
-            continue
-        # print("Group ID from database:", group)
-        # Query all players in this group
-        players_in_group = db_session.query(Player.player_id).join(Player.groups).filter(Group.group_id == group_id).all()
+        for group_object in groups:
+            group_id = group_object.group_id  # Extract the group_id
+            if group_id == 2 or group_id == 0:
+                ## Do not track the global group in ranking listings
+                continue
+            # print("Group ID from database:", group)
+            # Query all players in this group
+            players_in_group = db_session.query(Player.player_id).join(Player.groups).filter(Group.group_id == group_id).all()
 
-        # Initialize group total
-        group_totals[group_id] = 0
-
-        # Fetch each player's total loot from Redis
-        try:
-            from services.redis_updates import get_player_list_loot_sum
-            group_month_total = get_player_list_loot_sum([player.player_id for player in players_in_group])
-            group_totals[group_id] = group_month_total
-            #print("Group total for group", group_id, "is", group_month_total)
-        except Exception as e:
-            #print(f"Error getting group total for group {group_id}: {e}")
+            # Initialize group total
             group_totals[group_id] = 0
-    sorted_groups = sorted(group_totals.items(), key=lambda x: x[1], reverse=True)
-    print("Sorted groups:", sorted_groups)
-    total_groups = len(sorted_groups)
-    for group_rank, (group_id, group_total) in enumerate(sorted_groups, start=1):
-        print("Rank:", group_rank, "Group ID:", target_group_id, "Group total:", group_total)
-        if group_id == target_group_id:
-            return group_rank, total_groups
-    return None, total_groups
+
+            # Fetch each player's total loot from Redis
+            try:
+                from services.redis_updates import get_player_list_loot_sum
+                group_month_total = get_player_list_loot_sum([player.player_id for player in players_in_group])
+                group_totals[group_id] = group_month_total
+                #print("Group total for group", group_id, "is", group_month_total)
+            except Exception as e:
+                #print(f"Error getting group total for group {group_id}: {e}")
+                group_totals[group_id] = 0
+        sorted_groups = sorted(group_totals.items(), key=lambda x: x[1], reverse=True)
+        print("Sorted groups:", sorted_groups)
+        total_groups = len(sorted_groups)
+        for group_rank, (group_id, group_total) in enumerate(sorted_groups, start=1):
+            print("Rank:", group_rank, "Group ID:", target_group_id, "Group total:", group_total)
+            if group_id == target_group_id:
+                return group_rank, total_groups
+        return None, total_groups
+    finally:
+        if own_scoped_session:
+            try:
+                _session.rollback()
+            except Exception:
+                pass
 
 
 
