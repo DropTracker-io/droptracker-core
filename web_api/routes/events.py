@@ -60,6 +60,7 @@ from db import (
     EVENT_MODES,
     EVENT_PING_KEYS,
     EVENT_SUBMISSION_POLICIES,
+    EVENT_TASK_DIFFICULTIES,
     EVENT_TASK_TYPES,
     EVENT_TASK_VISIBILITIES,
     EventTaskLibraryItem,
@@ -308,6 +309,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             "points": int(t.points or 0),
             "requires_confirmation": bool(t.requires_confirmation),
             "visibility": t.visibility or "public",
+            "difficulty": getattr(t, "difficulty", None),
             # Raw JSON config (item lists, source NPCs) so participants can
             # see exactly which items/NPCs count toward a task.
             "config": t.config or None,
@@ -1422,6 +1424,10 @@ def save_task_to_library(s, ev: Event, task: EventTask, visibility: str) -> str:
     row.config = config or None
     row.visibility = visibility
     row.active = True
+    # Board-game tier rides onto the preset ("change it if it already
+    # exists" — the designer/task-form difficulty is the source of truth).
+    if getattr(task, "difficulty", None) is not None:
+        row.difficulty = task.difficulty
     return visibility
 
 
@@ -1436,6 +1442,14 @@ async def add_task(event_id: int):
     if not label:
         abort_problem(422, "Invalid label", "Task label is required.")
     visibility = clean_task_visibility(body)
+    # Board-game tier (web44a): tags the task into a difficulty-tile's roll
+    # pool. Optional and harmless on non-board events.
+    difficulty = body.get("difficulty")
+    if difficulty is not None and difficulty not in EVENT_TASK_DIFFICULTIES:
+        abort_problem(
+            422, "Invalid difficulty",
+            f"difficulty must be one of {list(EVENT_TASK_DIFFICULTIES)} or null.",
+        )
 
     def _apply():
         from web_api.routes.event_task_validation import validate_task_payload
@@ -1453,6 +1467,7 @@ async def add_task(event_id: int):
                 points=int(body.get("points") or 0),
                 requires_confirmation=bool(body.get("requires_confirmation")),
                 visibility=visibility,
+                difficulty=difficulty,
                 **normalized,
             )
             s.add(task)

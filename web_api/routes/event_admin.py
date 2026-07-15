@@ -550,6 +550,18 @@ async def update_task(event_id: int, task_id: int):
                 task.points = points
             if "requires_confirmation" in body:
                 task.requires_confirmation = bool(body.get("requires_confirmation"))
+            if "difficulty" in body:
+                # Board-game tier (web44a). Null clears it. Per the product
+                # brief, editing here also updates the task's library copy
+                # ("change it if it already exists") via the save below when
+                # visibility is passed, or directly when it isn't.
+                diff = body.get("difficulty")
+                if diff is not None and diff not in _LIBRARY_DIFFICULTIES:
+                    abort_problem(
+                        422, "Invalid difficulty",
+                        f"difficulty must be one of {list(_LIBRARY_DIFFICULTIES)} or null.",
+                    )
+                task.difficulty = diff
             # Absent key ⇒ leave the task's library copy untouched (the
             # quick-toggles PATCH single fields); when present, re-save the
             # preset with the chosen publicity.
