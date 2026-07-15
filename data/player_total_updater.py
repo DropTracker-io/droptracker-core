@@ -109,92 +109,133 @@ async def index():
 async def health_check_route():
     return {"status": "healthy"}
 
+def _requeue_failed_player(player_id: int) -> None:
+    """Advance a player's date_updated after a failed force-update so it rotates
+    to the BACK of the stale-player queue.
+
+    force_update_player() only advances date_updated on success, so a player
+    whose update keeps failing (e.g. one whose drops query times out) stays at
+    the head of the "date_updated oldest" queue and is retried every ~30s
+    forever — starving the other ~11k stale players and logging a timeout every
+    cycle. Bumping the timestamp here lets the queue make forward progress; the
+    player is retried on the normal 14-day cadence. Uses its own short-lived
+    session so it never touches the (possibly poisoned) update session.
+    """
+    try:
+        with Session() as s:
+            s.query(Player).filter(Player.player_id == player_id).update(
+                {Player.date_updated: datetime.now()}, synchronize_session=False
+            )
+            s.commit()
+    except Exception as e:
+        print(f"Failed to requeue player {player_id} after update failure: {e}")
+
+
 async def update_players():
     """Enhanced update_players with watchdog notifications"""
     global watchdog
-    
+
     while not shutdown_event.is_set():
         print("Player update loop beginning...")
         cycle_start_time = time.time()
-        
+
         try:
-            local_session = Session()
-            
             # Send watchdog heartbeat at start of cycle
             await send_watchdog_heartbeat()
-            
-            players_to_update = local_session.query(Player).filter(
-                Player.date_updated < datetime.now() - timedelta(days=14)
-            ).all()
-            
-            print(f"Found {len(players_to_update)} players to update, limiting to 2 per iteration...")
-            players_to_update = players_to_update[:2]
-            
-            if not players_to_update:
+
+            # Select only the stalest handful of player IDs at the DB (ORDER BY
+            # + LIMIT), instead of materialising every stale Player and slicing
+            # in Python. Ordering by date_updated makes "oldest first" explicit
+            # and, combined with _requeue_failed_player, guarantees the queue
+            # advances even when a given player can't be updated.
+            with Session() as list_session:
+                stale_rows = (
+                    list_session.query(Player.player_id)
+                    .filter(Player.date_updated < datetime.now() - timedelta(days=14))
+                    .order_by(Player.date_updated.asc())
+                    .limit(2)
+                    .all()
+                )
+            player_ids = [row[0] for row in stale_rows]
+
+            print(f"Selected {len(player_ids)} stalest player(s) to update this iteration...")
+
+            if not player_ids:
                 print("No players to update")
-                local_session.close()
                 await asyncio.sleep(30)
                 continue
-            
-            for i, player in enumerate(players_to_update):
+
+            for i, player_id in enumerate(player_ids):
                 try:
                     player_start_time = time.time()
-                    print(f"Updating player {player.player_id} ({i+1}/{len(players_to_update)})")
-                    
+                    print(f"Updating player {player_id} ({i+1}/{len(player_ids)})")
+
                     # Send watchdog heartbeat before starting player update
                     await send_watchdog_heartbeat()
-                    
-                    # Run the player update in a thread to avoid blocking
-                    def update_player_sync():
-                        return redis_updates.force_update_player(
-                            player_id=player.player_id, 
-                            session_to_use=local_session
-                        )
-                    
+
+                    # Run the player update in a thread to avoid blocking, with a
+                    # FRESH session created inside that thread. A session must not
+                    # be shared across executor threads (see npc_totals_loop), and
+                    # a per-player session means one player's failure/timeout can
+                    # never leave a poisoned transaction for the next player.
+                    def update_player_sync(pid=player_id):
+                        with Session() as player_session:
+                            try:
+                                return redis_updates.force_update_player(
+                                    player_id=pid,
+                                    session_to_use=player_session,
+                                )
+                            except Exception:
+                                player_session.rollback()
+                                raise
+
                     # Execute the blocking operation in a thread
                     loop = asyncio.get_event_loop()
                     update_result = await loop.run_in_executor(None, update_player_sync)
-                    
+
                     player_elapsed = time.time() - player_start_time
-                    print(f"Updated player {player.player_id} in {player_elapsed:.2f}s - Result: {update_result}")
-                    
+                    print(f"Updated player {player_id} in {player_elapsed:.2f}s - Result: {update_result}")
+
+                    # A False/failed result means date_updated was NOT advanced;
+                    # rotate the player to the back of the queue so it can't clog
+                    # the head forever. Done off-thread to avoid blocking the loop.
+                    if not update_result:
+                        await loop.run_in_executor(None, _requeue_failed_player, player_id)
+
                     # Send another watchdog heartbeat after player update
                     await send_watchdog_heartbeat()
-                    
+
                     # Small delay between players to allow other operations
-                    if i < len(players_to_update) - 1:
+                    if i < len(player_ids) - 1:
                         await asyncio.sleep(1)
-                        
+
                 except Exception as e:
-                    print(f"Error updating player {player.player_id}: {e}")
+                    print(f"Error updating player {player_id}: {e}")
+                    # Still requeue so a persistently-erroring player doesn't stall the queue.
+                    await asyncio.get_event_loop().run_in_executor(None, _requeue_failed_player, player_id)
                     app_logger.log(
-                        log_type="error", 
-                        data=f"Error updating player {player.player_id}: {e}", 
-                        app_name="player_updates", 
+                        log_type="error",
+                        data=f"Error updating player {player_id}: {e}",
+                        app_name="player_updates",
                         description="update_players"
                     )
                     continue
-                    
+
         except Exception as e:
             print(f"Error updating players: {e}")
-            if 'local_session' in locals():
-                local_session.rollback()
             app_logger.log(
-                log_type="error", 
-                data=f"Error updating players: {e}", 
-                app_name="player_updates", 
+                log_type="error",
+                data=f"Error updating players: {e}",
+                app_name="player_updates",
                 description="update_players"
             )
-        finally:
-            if 'local_session' in locals():
-                local_session.close()
-        
+
         cycle_elapsed = time.time() - cycle_start_time
         print(f"Player update loop finished in {cycle_elapsed:.2f}s")
-        
+
         # Send final watchdog heartbeat for this cycle
         await send_watchdog_heartbeat()
-        
+
         # Wait with periodic heartbeats during sleep
         await sleep_with_watchdog_heartbeats(30)
 

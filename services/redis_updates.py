@@ -581,6 +581,17 @@ class RedisLootTracker:
             
         except Exception as e:
             print(f"Force update failed for player {player_id}: {e}")
+            # Roll the session back before returning. The background updater
+            # reuses one session across a batch of players; if a query here dies
+            # mid-transaction (e.g. the drops SELECT hits pymysql read_timeout)
+            # and we DON'T roll back, the very next player on that session fails
+            # instantly with "Can't reconnect until invalid transaction is rolled
+            # back. Please rollback() fully before proceeding." — the chronic
+            # error pair seen in droptracker-player-updates.
+            try:
+                session_to_use.rollback()
+            except Exception as rollback_error:
+                print(f"Rollback after force-update failure also failed for player {player_id}: {rollback_error}")
             return False
     
     def _apply_split_credits(self, player_id: int, session_to_use) -> None:
