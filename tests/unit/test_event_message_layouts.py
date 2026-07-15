@@ -364,6 +364,34 @@ class TestNotificationContext:
         assert context["cell_list"] == "`3`"
         assert context["cell_plural"] == ""
 
+    def test_cells_prefer_labels_over_idxs(self):
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "cell_idxs": [3, 4], "cell_labels": ["A1", "B2"]})
+        assert context["cell_list"] == "**A1**, **B2**"
+        assert context["cell_plural"] == "s"
+
+    def test_progress_tokens_are_formatted(self):
+        context = ml.notification_context("event_task_progress", {
+            "event_id": 7, "progress": 3_000_000, "target": 10_000_000})
+        assert context["progress"] == "3.00M"
+        assert context["target"] == "10.00M"
+        # The bar itself is computed from the raw numbers, unaffected.
+        assert context["progress_bar"] == "▰▰▰▱▱▱▱▱▱▱"
+
+    def test_contributors_line(self):
+        context = ml.notification_context("event_completion", {
+            "event_id": 7,
+            "contributors": [
+                {"player_name": "Alpha", "quantity": 3},
+                {"player_name": "Beta", "quantity": 12_000_000},
+            ],
+        })
+        assert context["contributors_line"] == "**Alpha** `3`, **Beta** `12.00M`"
+
+    def test_contributors_line_absent_when_empty(self):
+        context = ml.notification_context("event_completion", {"event_id": 7})
+        assert "contributors_line" not in context
+
     def test_raw_unix_timestamps_carried_for_footer(self):
         context = ml.notification_context("event_completion", {
             "event_id": 7, "starts_at": 1700000000, "ends_at": 1700003600})
@@ -410,6 +438,21 @@ class TestTaskIconLayouts:
         spec = ml.render_message_spec(ml.DEFAULT_LAYOUTS["event_completion"], context)
         section = next(b for b in spec["blocks"] if b["type"] == "section")
         assert section["thumbnail"] == "https://x/img/itemdb/4151.png"
+
+    def test_completion_folds_in_contributors_and_tile(self):
+        # The one-message-per-completion fix: contributors + the marked tile
+        # both render inside the single event_completion layout — no separate
+        # event_cell message needed.
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "team_name": "Reds", "task_label": "Whip",
+            "points": 10, "team_score": 30,
+            "contributors": [{"player_name": "Zed", "quantity": 2}],
+            "cell_labels": ["A1"],
+        })
+        spec = ml.render_message_spec(ml.DEFAULT_LAYOUTS["event_completion"], context)
+        joined = " ".join(b.get("content", "") for b in spec["blocks"])
+        assert "**Zed** `2`" in joined
+        assert "Tile marked: **A1**" in joined
 
 
 class TestEventFooterLine:

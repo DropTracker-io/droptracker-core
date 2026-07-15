@@ -18,7 +18,8 @@ global_footer = os.getenv("DISCORD_MESSAGE_FOOTER")
 DROPTRACKER_ICON = "https://www.droptracker.io/img/droptracker-small.gif"
 
 
-def build_event_embed(notification_type: str, data: dict, standings=None) -> Embed:
+def build_event_embed(notification_type: str, data: dict, standings=None,
+                      image_attachment_ref: str = None) -> Embed:
     """Discord embed for an event notification (Task 19).
 
     Content comes from the pure spec builder in
@@ -26,6 +27,11 @@ def build_event_embed(notification_type: str, data: dict, standings=None) -> Emb
     this converts it into an ``interactions.Embed`` in the same visual
     language as the drop embeds (author line, thumbnail, global footer,
     link to https://www.droptracker.io/events/{id}).
+
+    ``image_attachment_ref`` — an ``attachment://filename`` reference for a
+    proof screenshot the sender has already attached to the send — becomes
+    the embed's big image (same treatment as the Components-V2 media gallery
+    the primary render path uses), on top of the small thumbnail above.
     """
     from services.event_notifications import event_embed_spec, event_footer_line
 
@@ -50,6 +56,8 @@ def build_event_embed(notification_type: str, data: dict, standings=None) -> Emb
         embed.add_field(name="​", value=footer_line, inline=False)
     if spec.get("thumbnail"):
         embed.set_thumbnail(url=spec["thumbnail"])
+    if image_attachment_ref:
+        embed.set_image(url=image_attachment_ref)
     embed.set_footer(global_footer)
     return embed
 

@@ -121,6 +121,22 @@ class TestPingRoles:
         assert en.ping_content([]) is None
 
 
+class TestFormatGp:
+    def test_plain_below_threshold(self):
+        assert en.format_gp(0) == "0"
+        assert en.format_gp(5000) == "5,000"
+        assert en.format_gp(100_000) == "100,000"
+
+    def test_abbreviated_above_threshold(self):
+        assert en.format_gp(100_001) == "100.00K"
+        assert en.format_gp(10_000_000) == "10.00M"
+        assert en.format_gp(2_500_000_000) == "2.50B"
+
+    def test_negative_and_non_numeric(self):
+        assert en.format_gp(-10_000_000) == "-10.00M"
+        assert en.format_gp("n/a") == "n/a"
+
+
 # ── embed content specs ──────────────────────────────────────────────────────
 
 def _spec(ntype, data=None, standings=None):
@@ -176,12 +192,45 @@ class TestEmbedSpecs:
             "cell_idxs": [3, 7],
         })
         assert "Get a whip" in spec["title"]
-        assert "**Red**" in spec["description"] and "Alpha One" in spec["description"]
+        assert "**Red**" in spec["description"]
         fields = {f["name"]: f["value"] for f in spec["fields"]}
         assert fields["Points"] == "`+10`"
         assert fields["Team total"] == "`30 pts`"
+        # No ledger-derived contributors were passed — falls back to the
+        # single completer.
+        assert fields["Completed by"] == "`Alpha One`"
         assert "3, 7" in fields["Bingo"]
         assert spec["thumbnail"] == "https://x/proof.png"
+
+    def test_completion_contributors_list(self):
+        spec = _spec("event_completion", {
+            "task_label": "Get a whip", "team_name": "Red",
+            "contributors": [
+                {"player_name": "Alpha One", "quantity": 3},
+                {"player_name": "Beta Two", "quantity": 12_000_000},
+            ],
+            "cell_labels": ["A1"],
+        })
+        fields = {f["name"]: f["value"] for f in spec["fields"]}
+        assert "Completed by" not in fields
+        assert fields["Contributors"] == "`Alpha One` (3), `Beta Two` (12.00M)"
+        assert fields["Bingo"] == "Tile **A1**"
+
+    def test_progress_field_abbreviates_large_targets(self):
+        spec = _spec("event_task_progress", {
+            "task_label": "10M loot value", "team_name": "Red",
+            "progress": 3_000_000, "target": 10_000_000,
+        })
+        fields = {f["name"]: f["value"] for f in spec["fields"]}
+        assert fields["Progress"] == "`3.00M / 10.00M`"
+
+    def test_progress_field_stays_exact_below_threshold(self):
+        spec = _spec("event_task_progress", {
+            "task_label": "5 whips", "team_name": "Red",
+            "progress": 2, "target": 5,
+        })
+        fields = {f["name"]: f["value"] for f in spec["fields"]}
+        assert fields["Progress"] == "`2 / 5`"
 
     def test_completion_zero_points_has_no_points_field(self):
         spec = _spec("event_completion", {"task_label": "Screenshot", "team_name": "Red"})

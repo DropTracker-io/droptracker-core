@@ -1127,12 +1127,19 @@ def reconcile_bingo_bonuses(session, event) -> dict:
 def _complete_bingo_cells(session, event: dict, task: dict, team_id: int,
                           player_id: int, cells: list,
                           player_name: Optional[str] = None) -> list:
-    """Insert web_event_bingo_completions once per (cell, team), enqueue
-    ``event_cell`` notifications and evaluate line/blackout bonuses. Returns
-    the cell dicts that were newly completed."""
+    """Insert web_event_bingo_completions once per (cell, team) and evaluate
+    line/blackout bonuses. Returns the cell dicts that were newly completed.
+
+    A cell only ever completes in lockstep with its task (this is only
+    called from the ``newly_completed`` branch of :func:`apply_ledger_row`),
+    so a standalone ``event_cell`` notification would always be a duplicate
+    of the ``event_completion`` message the caller enqueues right after —
+    the caller folds the newly-completed cells' labels into that one message
+    instead of us enqueuing a second one here.
+    """
     if not cells or not event.get("has_bingo"):
         return []
-    from db.models import EventBingoCompletion, EventTeam
+    from db.models import EventBingoCompletion
 
     newly = []
     cell_ids = [c["id"] for c in cells]
@@ -1149,32 +1156,56 @@ def _complete_bingo_cells(session, event: dict, task: dict, team_id: int,
             cell_id=cell["id"], team_id=team_id, player_id=player_id))
         newly.append(cell)
     if newly:
-        team_name = None
-        if team_id is not None:
-            team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
-            team_name = team.name if team is not None else None
-        for cell in newly:
-            _enqueue_notification(session, "event_cell", event, player_id, {
-                "cell_label": cell.get("label"),
-                "cell_idx": cell["idx"],
-                "team_id": team_id,
-                "team_name": team_name,
-                "task_id": task["id"],
-                "task_label": task.get("label"),
-                "player_name": player_name,
-            })
         evaluate_bingo_bonuses(session, event, team_id,
                                trigger_task_id=task["id"],
                                player_id=player_id, player_name=player_name)
     return newly
 
 
+def _task_contributors(session, task_id, team_id) -> list:
+    """Per-player net quantity contributed to one (task, team), from the
+    applied ledger (``auto``/``confirmed``/``manual``, bonus rows excluded).
+    Powers the ``event_completion`` notification's "who completed it" list —
+    largest contribution first, ties broken by player id for stability."""
+    from db.models import EventCompletion, Player
+
+    rows = (
+        session.query(EventCompletion)
+        .filter(EventCompletion.task_id == task_id,
+                EventCompletion.team_id == team_id,
+                EventCompletion.status.in_(APPLIED_BONUS_STATUSES))
+        .all()
+    )
+    totals: dict = {}
+    for r in rows:
+        if (r.source_type or "") == "bonus" or r.player_id is None:
+            continue
+        totals[r.player_id] = totals.get(r.player_id, 0) + max(int(r.quantity or 1), 1)
+    if not totals:
+        return []
+    names = {
+        p.player_id: p.player_name
+        for p in session.query(Player).filter(Player.player_id.in_(totals.keys())).all()
+    }
+    contributors = [
+        {"player_id": pid, "player_name": names.get(pid) or f"Player {pid}", "quantity": qty}
+        for pid, qty in totals.items()
+    ]
+    contributors.sort(key=lambda c: (-c["quantity"], c["player_id"]))
+    return contributors
+
+
 def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id,
-                            player_name, previous: int, current: int) -> None:
+                            player_name, previous: int, current: int,
+                            proof_url: Optional[str] = None) -> None:
     """Enqueue an ``event_task_progress`` notification when the event's
     message_config asks for one ('all': every increment; 'milestones': only
     when a 25/50/75% threshold was crossed). Completion itself is announced
-    by ``event_completion`` — this never fires for the crossing into 100%."""
+    by ``event_completion`` — this never fires for the crossing into 100%.
+
+    ``proof_url`` is the screenshot (if any) attached to the ledger row that
+    drove this increment, carried through so the sender can attach it to the
+    Discord message the same way a completion's proof does."""
     from services.event_notifications import (
         effective_message_config,
         progress_milestones_crossed,
@@ -1195,6 +1226,7 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
         "player_name": player_name,
         "progress": current,
         "target": target,
+        "proof_url": proof_url,
     }
     if mode == "milestones":
         crossed = progress_milestones_crossed(previous, current, target)
@@ -1273,7 +1305,8 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
             _publish(event["id"], frame)
             _maybe_enqueue_progress(
                 session, event, task, team_id, player_id, player_name,
-                previous_progress, int(progress.progress or 0))
+                previous_progress, int(progress.progress or 0),
+                proof_url=completion.proof_url)
         return result
 
     progress.completed = True
@@ -1361,8 +1394,12 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         "points": points,
         "team_score": team_score,
         "cell_idxs": [c["idx"] for c in new_cells],
+        "cell_labels": [c.get("label") for c in new_cells if c.get("label")],
         "source_type": completion.source_type,
         "proof_url": completion.proof_url,
+        # Everyone who fed this task, not just whoever's submission tipped it
+        # over the line — the completion message folds them all in.
+        "contributors": _task_contributors(session, task["id"], team_id),
     }
     _enqueue_notification(session, "event_completion", event, player_id, notification)
     if lead_changed_to:

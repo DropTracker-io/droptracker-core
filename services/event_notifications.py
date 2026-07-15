@@ -185,6 +185,27 @@ def progress_milestones_crossed(previous: int, current: int, target: int) -> lis
     return crossed
 
 
+def format_gp(value) -> str:
+    """Human-friendly quantity for a task's progress/target/contribution:
+    plain comma-grouped below 100,000 (item counts like "3 / 5" stay exact),
+    abbreviated K/M/B above that ("10000000" -> "10.00M") — matches the
+    site's ``formatGp``/backend's ``format_number`` abbreviation exactly, just
+    gated to only kick in once a value is large enough to need it."""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    abs_value = abs(value)
+    if abs_value <= 100_000:
+        return f"{value:,}"
+    sign = "-" if value < 0 else ""
+    if abs_value >= 1_000_000_000:
+        return f"{sign}{abs_value / 1_000_000_000:.2f}B"
+    if abs_value >= 1_000_000:
+        return f"{sign}{abs_value / 1_000_000:.2f}M"
+    return f"{sign}{abs_value / 1_000:.2f}K"
+
+
 def event_url(event_id) -> str:
     return f"{EVENT_BASE_URL}/{event_id}"
 
@@ -332,14 +353,29 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
     elif notification_type == "event_completion":
         spec["title"] = f"✅ Task complete: {task_label or 'Task'}"
         who = f"**{team}**" if team else "A team"
-        by = f" (by `{player}`)" if player else ""
-        spec["description"] = f"{who} completed **{task_label or 'a task'}**{by}"
+        spec["description"] = f"{who} completed **{task_label or 'a task'}**"
         if points:
             field("Points", f"`+{points}`")
         if data.get("team_score") is not None:
             field("Team total", f"`{int(data['team_score'])} pts`")
+        # Everyone who contributed, not just whoever's submission completed
+        # it — falls back to the single completer when the ledger lookup
+        # came up empty (e.g. a manually-awarded row).
+        contributors = data.get("contributors") or []
+        if contributors:
+            names = ", ".join(
+                f"`{c.get('player_name') or 'Unknown'}` ({format_gp(c.get('quantity') or 0)})"
+                for c in contributors
+            )
+            field("Contributors", names, inline=False)
+        elif player:
+            field("Completed by", f"`{player}`")
+        cell_labels = data.get("cell_labels") or []
         cells = data.get("cell_idxs") or []
-        if cells:
+        if cell_labels:
+            plural = "s" if len(cell_labels) != 1 else ""
+            field("Bingo", f"Tile{plural} " + ", ".join(f"**{c}**" for c in cell_labels), inline=False)
+        elif cells:
             field("Bingo", f"Cell{'s' if len(cells) != 1 else ''} `{', '.join(str(c) for c in cells)}` marked")
         # Proof screenshot if there is one, else the task's item/NPC icon.
         thumb = data.get("completion_icon") or data.get("proof_url")
@@ -361,7 +397,7 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             spec["description"] = f"{who} progressed **{task_label or 'a task'}**{by}"
         if target:
             spec["fields"].append(
-                {"name": "Progress", "value": f"`{current} / {target}`", "inline": True}
+                {"name": "Progress", "value": f"`{format_gp(current)} / {format_gp(target)}`", "inline": True}
             )
         if data.get("task_icon"):
             spec["thumbnail"] = data["task_icon"]

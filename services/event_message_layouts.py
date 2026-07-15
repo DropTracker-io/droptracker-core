@@ -158,10 +158,11 @@ DEFAULT_LAYOUTS = {
                 # task's item/NPC icon (completion_icon, resolved by the sender);
                 # falls back to a plain text block when neither resolves.
                 "type": "section",
-                "content": "**Points** `+{points}`\n**Team total** `{team_score} pts`\n-# by {player_name}",
+                "content": "**Points** `+{points}`\n**Team total** `{team_score} pts`\n"
+                           "**Contributors** {contributors_line}\n-# completed by {player_name}",
                 "thumbnail": "{completion_icon}",
             },
-            {"type": "text", "content": "-# Bingo: cell{cell_plural} {cell_list} marked"},
+            {"type": "text", "content": "-# Tile{cell_plural} marked: {cell_list}"},
         ],
     },
     "event_task_progress": {
@@ -474,16 +475,25 @@ def render_message_spec(
     return {"accent_color": _hex_to_int((layout or {}).get("accent_color")), "blocks": blocks}
 
 
-def build_components(spec: dict, ping_text: Optional[str] = None, extra_rows=None) -> list:
+def build_components(spec: dict, ping_text: Optional[str] = None, extra_rows=None,
+                     image_ref: Optional[str] = None) -> list:
     """Resolved spec -> ``[ContainerComponent]`` ready for ``channel.send``.
 
     ``ping_text`` (role mentions) becomes the first text display — V2
     components cannot carry ``content=``, but mentions inside a text display
     still notify under the send's allowed_mentions. ``extra_rows`` appends
-    interactive rows the sender owns (e.g. the signup button)."""
+    interactive rows the sender owns (e.g. the signup button). ``image_ref``
+    — an ``attachment://filename`` reference for a screenshot the sender has
+    already attached to the send, or a plain URL — renders as a full-size
+    media gallery item after the layout's own blocks, giving completion/
+    progress messages the same prominent screenshot the submission-processing
+    notifications (drop, pb, ...) show, on top of any small task-tile
+    thumbnail a section block already carries."""
     from interactions import ActionRow, Button, ButtonStyle
     from interactions.models import (
         ContainerComponent,
+        MediaGalleryComponent,
+        MediaGalleryItem,
         SectionComponent,
         SeparatorComponent,
         TextDisplayComponent,
@@ -523,6 +533,8 @@ def build_components(spec: dict, ping_text: Optional[str] = None, extra_rows=Non
                 else:
                     row.append(Button(style=ButtonStyle.URL, label=b["label"], url=b["url"]))
             children.append(ActionRow(*row))
+    if image_ref:
+        children.append(MediaGalleryComponent(items=[MediaGalleryItem(media=image_ref)]))
     for row in extra_rows or []:
         children.append(row)
     if not children:
@@ -542,12 +554,14 @@ def render_event_components(
     ping_text: Optional[str] = None,
     extra_rows=None,
     allow_launch: bool = True,
+    image_ref: Optional[str] = None,
 ) -> list:
     """One-stop: load the effective layout, resolve it, build components.
 
     ``allow_launch`` False (the destination is a thread/announcement channel,
     where Discord refuses LAUNCH_ACTIVITY) renders launch buttons as Activity
-    Link URL buttons — a client-side launch that works from those channels."""
+    Link URL buttons — a client-side launch that works from those channels.
+    ``image_ref`` is passed straight through to :func:`build_components`."""
     from services.event_notifications import event_footer_line
 
     layout = load_layout(session, group_id, message_type)
@@ -563,7 +577,7 @@ def render_event_components(
         launch_link=enabled and not allow_launch,
         footer=footer,
     )
-    return build_components(spec, ping_text=ping_text, extra_rows=extra_rows)
+    return build_components(spec, ping_text=ping_text, extra_rows=extra_rows, image_ref=image_ref)
 
 
 # --------------------------------------------------------------------------- #
@@ -573,7 +587,7 @@ def notification_context(notification_type: str, data: dict) -> dict:
     """Flatten one (enriched) notification_queue payload into the token dict
     the layouts substitute from. Values that are None/empty/zero are omitted
     so their lines drop out of the rendered message."""
-    from services.event_notifications import _fmt_ts, event_url
+    from services.event_notifications import _fmt_ts, event_url, format_gp
 
     data = data or {}
     context = {}
@@ -611,22 +625,38 @@ def notification_context(notification_type: str, data: dict) -> dict:
     put("task_icon", data.get("task_icon"))
     put("completion_icon", data.get("completion_icon"))
 
-    # Task progress
+    # Task progress — abbreviated K/M/B above 100,000 (a 10,000,000 GP target
+    # reads as "10.00M") so large loot_value/xp_target tasks stay readable;
+    # the bar itself is computed from the raw numbers before formatting.
     progress, target = data.get("progress"), data.get("target")
     if progress is not None and target:
-        put("progress", int(progress))
-        put("target", int(target))
         put("progress_bar", text_progress_bar(progress, target))
+        put("progress", format_gp(progress))
+        put("target", format_gp(target))
     put("milestone_pct", data.get("milestone_pct"))
 
-    # Bingo cells
+    # Bingo cells — labels are the readable "tile" identity; fall back to the
+    # raw index for callers that only have that (legacy queued rows).
     cell = data.get("cell_label") or (
         f"Cell {data.get('cell_idx')}" if data.get("cell_idx") is not None else None)
     put("cell_label", cell)
+    cell_labels = data.get("cell_labels") or []
     cells = data.get("cell_idxs") or []
-    if cells:
+    if cell_labels:
+        put("cell_list", ", ".join(f"**{c}**" for c in cell_labels))
+        context["cell_plural"] = "s" if len(cell_labels) != 1 else ""
+    elif cells:
         put("cell_list", "`" + ", ".join(str(c) for c in cells) + "`")
         context["cell_plural"] = "s" if len(cells) != 1 else ""
+
+    # Contributors — everyone who fed the task, largest contribution first
+    # (event_completion only; see services.event_engine._task_contributors).
+    contributors = data.get("contributors") or []
+    if contributors:
+        put("contributors_line", ", ".join(
+            f"**{c.get('player_name') or 'Unknown'}** `{format_gp(c.get('quantity') or 0)}`"
+            for c in contributors
+        ))
 
     if notification_type == "event_signup_prompt":
         context["signup_instructions"] = {

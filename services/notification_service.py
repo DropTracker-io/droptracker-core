@@ -1608,6 +1608,7 @@ class NotificationService:
         """
         from db.models import Event, EventTeam
 
+        image_attachment, image_temp_path, image_ref = None, None, None
         try:
             notification_type = notification.notification_type
             event_id = data.get('event_id')
@@ -1666,6 +1667,19 @@ class NotificationService:
                     completion_icon = data.get('proof_url') or task_icon
                     if completion_icon:
                         data['completion_icon'] = completion_icon
+
+            # Real proof screenshot: attach it as a full Discord image, the
+            # same treatment submission-processing notifications (drop, pb,
+            # ...) get — on top of the small task-tile thumbnail above, which
+            # stays icon-only. Progress messages now carry the proof of the
+            # ledger row that drove them (services.event_engine enrichment).
+            if notification_type in ('event_completion', 'event_task_progress'):
+                proof_url = data.get('proof_url')
+                if proof_url:
+                    image_attachment, image_temp_path = await self._resolve_image_attachment(
+                        proof_url, notification.id)
+                    if image_attachment is not None:
+                        image_ref = f"attachment://{image_attachment.file_name}"
 
             standings = None
             if notification_type in ('event_lead_change', 'event_ended'):
@@ -1733,11 +1747,13 @@ class NotificationService:
                     # Threads/announcement channels can't launch the Activity —
                     # render the URL button instead of a dead launch button.
                     allow_launch=channel_supports_launch(channel),
+                    image_ref=image_ref,
                 )
+                send_kwargs = {"files": image_attachment} if image_attachment else {}
                 if allowed:
-                    await channel.send(components=components, allowed_mentions=allowed)
+                    await channel.send(components=components, allowed_mentions=allowed, **send_kwargs)
                 else:
-                    await channel.send(components=components)
+                    await channel.send(components=components, **send_kwargs)
             except interactions.errors.Forbidden:
                 raise
             except Exception as render_error:
@@ -1747,8 +1763,11 @@ class NotificationService:
                                app_name="notification_service",
                                description="send_event_notification")
                 from utils.embeds import build_event_embed
-                embed = build_event_embed(notification_type, data, standings=standings)
+                embed = build_event_embed(notification_type, data, standings=standings,
+                                          image_attachment_ref=image_ref)
                 send_kwargs = {"components": extra_rows} if extra_rows else {}
+                if image_attachment:
+                    send_kwargs["files"] = image_attachment
                 if ping_text:
                     await channel.send(content=ping_text, embed=embed,
                                        allowed_mentions=allowed, **send_kwargs)
@@ -1778,6 +1797,12 @@ class NotificationService:
                            app_name="notification_service",
                            description="send_event_notification")
             raise
+        finally:
+            if image_temp_path:
+                try:
+                    os.remove(image_temp_path)
+                except Exception:
+                    pass
 
     async def send_points_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
         """Send a points earned notification to Discord with session"""
