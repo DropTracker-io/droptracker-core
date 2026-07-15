@@ -30,6 +30,13 @@ from web_api.deps import (
     resolve_group_role,
 )
 from web_api.routes.auth import get_cached_profile
+from services.nitro_attribution import (
+    NITRO_BOOST_CENTS,
+    get_designated_group,
+    pick_group_for_user,
+    set_designated_group,
+    user_group_ids,
+)
 
 me_bp = Blueprint("v1_me", __name__)
 
@@ -309,3 +316,74 @@ async def patch_my_player(player_id: int):
     if settings is None:
         abort_problem(401, "Not authenticated", "User not found for this session.")
     return private_no_store(jsonify(settings))
+
+
+# --------------------------------------------------------------------------- #
+# Nitro-boost group designation — which group a boost on the DropTracker
+# Discord supports when the user belongs to more than one group. See
+# services/nitro_attribution.py.
+# --------------------------------------------------------------------------- #
+def _nitro_payload(s, user_id: int) -> dict:
+    from db import Group
+
+    gids = user_group_ids(s, user_id)
+    names: dict[int, str] = {}
+    if gids:
+        names = dict(
+            s.query(Group.group_id, Group.group_name)
+            .filter(Group.group_id.in_(gids))
+            .all()
+        )
+    return {
+        "per_boost_cents": NITRO_BOOST_CENTS,
+        "designated_group_id": get_designated_group(s, user_id),
+        # What the reconciler would credit right now (designation, else an
+        # owned/admin group, else the lowest group_id).
+        "effective_group_id": pick_group_for_user(s, user_id),
+        "groups": [{"id": gid, "name": names.get(gid) or f"Group {gid}"} for gid in gids],
+    }
+
+
+@me_bp.get("/me/nitro-boost")
+async def get_nitro_boost():
+    user_id = current_user_id()
+
+    def _load():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            if not user:
+                return None
+            return _nitro_payload(s, user_id)
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(401, "Not authenticated", "User not found for this session.")
+    return private_no_store(jsonify(payload))
+
+
+@me_bp.post("/me/nitro-boost")
+async def set_nitro_boost():
+    """Choose which of your groups a Nitro boost you place on the DropTracker
+    Discord supports. Takes effect only while you are actually boosting; a
+    single boost only ever credits one group."""
+    user_id = current_user_id()
+    body = await json_body()
+    group_id = body.get("group_id")
+    if group_id is not None and (isinstance(group_id, bool) or not isinstance(group_id, int)):
+        abort_problem(422, "Invalid value", "'group_id' must be an integer or null.")
+
+    def _apply():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            if not user:
+                return None
+            if group_id is not None and group_id not in user_group_ids(s, user_id):
+                abort_problem(403, "Not a member", "You are not a member of that group.")
+            set_designated_group(s, user_id, group_id)
+            s.commit()
+            return _nitro_payload(s, user_id)
+
+    payload = await asyncio.to_thread(_apply)
+    if payload is None:
+        abort_problem(401, "Not authenticated", "User not found for this session.")
+    return private_no_store(jsonify(payload))

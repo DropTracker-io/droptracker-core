@@ -76,6 +76,8 @@ from db import (
     UserSubscription,
 )
 from db.entitlements import (
+    NITRO_PROVIDER,
+    NON_REVENUE_PROVIDERS,
     effective_group_tiers,
     leg_monthly_cents,
     paid_group_tiers_desc,
@@ -1223,21 +1225,29 @@ async def admin_overview():
             stats.append({
                 "key": "active_subscriptions", "label": "Active subscriptions",
                 "value": _count(
-                    s.query(GroupSubscription).filter(GroupSubscription.status == "active")
+                    s.query(GroupSubscription).filter(
+                        GroupSubscription.status == "active",
+                        # Nitro-boost credit isn't a subscription; keep comps + legacy NULL.
+                        or_(
+                            GroupSubscription.provider.is_(None),
+                            GroupSubscription.provider != NITRO_PROVIDER,
+                        ),
+                    )
                 ),
             })
             # Headline MRR — the full breakdown lives on /admin/subscriptions.
-            # Comped grants (provider == "manual") keep their entitlements but
-            # are not income, so they are excluded from every revenue figure.
+            # Comped grants and Nitro-boost credit (NON_REVENUE_PROVIDERS) keep
+            # their entitlements but are not income, so they are excluded from
+            # every revenue figure.
             try:
                 tiers_by_key = {t.key: t for t in s.query(SubscriptionTier).all()}
                 mrr = sum(
                     leg_monthly_cents(leg, tiers_by_key)
                     for leg in s.query(GroupSubscription).all()
-                    if subscription_is_live(leg) and leg.provider != "manual"
+                    if subscription_is_live(leg) and leg.provider not in NON_REVENUE_PROVIDERS
                 )
                 for u in s.query(UserSubscription).all():
-                    if not subscription_is_live(u) or u.provider == "manual":
+                    if not subscription_is_live(u) or u.provider in NON_REVENUE_PROVIDERS:
                         continue
                     tier = tiers_by_key.get(u.tier_key) if u.tier_key else None
                     amount = u.amount_cents if u.amount_cents else (tier.price_cents if tier else 0)
@@ -1307,10 +1317,10 @@ async def admin_subscriptions_overview():
             live_legs = [leg for leg in legs if subscription_is_live(leg)]
             live_usubs = [u for u in usubs if subscription_is_live(u)]
 
-            # Comped grants (provider == "manual") keep their entitlements but
-            # are not income — exclude them from every revenue metric.
-            paid_legs = [leg for leg in live_legs if leg.provider != "manual"]
-            paid_usubs = [u for u in live_usubs if u.provider != "manual"]
+            # Comped grants and Nitro-boost credit (NON_REVENUE_PROVIDERS) keep
+            # their entitlements but are not income — exclude from every metric.
+            paid_legs = [leg for leg in live_legs if leg.provider not in NON_REVENUE_PROVIDERS]
+            paid_usubs = [u for u in live_usubs if u.provider not in NON_REVENUE_PROVIDERS]
 
             group_mrr = sum(leg_monthly_cents(leg, tiers_by_key) for leg in paid_legs)
             user_mrr = 0

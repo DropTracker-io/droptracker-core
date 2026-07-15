@@ -28,11 +28,13 @@ from sqlalchemy import func
 from db import Group, GroupSubscription, Player, SubscriptionTier, User, UserSubscription
 from db.models.associations import user_group_association
 from db.entitlements import (
+    NITRO_PROVIDER,
     effective_group_subscription,
     effective_group_tiers,
     paid_group_tiers_desc,
     subscription_is_live,
 )
+from services.nitro_attribution import NITRO_BOOST_CENTS
 from web_api import billing
 from web_api.common import abort_problem, db_session, private_no_store, with_cache_headers
 from web_api.entitlements import resolve_group_entitlements, resolve_user_entitlements
@@ -157,6 +159,24 @@ def _serialize_group_sub(
         rows = s.query(User.user_id, User.username).filter(User.user_id.in_(payer_ids)).all()
         names = {uid: name for uid, name in rows}
     payload["legs"] = [_leg_payload(leg, names, viewer_user_id) for leg in resolved["legs"]]
+    # Nitro-boost contribution summary: how many of the group's members boost
+    # the DropTracker Discord and how much monthly pool credit that adds.
+    nitro_leg = next(
+        (
+            leg
+            for leg in resolved["live_legs"]
+            if leg.provider == NITRO_PROVIDER and leg.amount_cents
+        ),
+        None,
+    )
+    if nitro_leg is not None and NITRO_BOOST_CENTS > 0:
+        payload["nitro"] = {
+            "booster_count": int(nitro_leg.amount_cents) // NITRO_BOOST_CENTS,
+            "monthly_cents": int(nitro_leg.amount_cents),
+            "per_boost_cents": NITRO_BOOST_CENTS,
+        }
+    else:
+        payload["nitro"] = None
     if entitlements is not None:
         payload["entitlements"] = entitlements
     return payload

@@ -91,6 +91,7 @@ _STUBS = [
     "services",
     "services.redis_updates",
     "services.points",
+    "services.nitro_attribution",
     "services.submission_status",
     "services.seasonal_state",
     "services.item_totals",

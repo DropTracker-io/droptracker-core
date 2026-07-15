@@ -215,6 +215,14 @@ def all_entitlements_granted(scope: str = "group") -> Dict[str, Any]:
 _ACTIVE_STATUSES = frozenset({"active", "trialing"})
 # Implicit free-plan tier keys, tried in order when a group has no active paid sub.
 _FALLBACK_TIER_KEYS = ("free", "basic")
+
+# Provider of a group leg synthesized from Discord Nitro boosts placed on the
+# main server by a group's members (see services/nitro_attribution.py). It
+# grants pool credit / entitlements but is NOT paid recurring revenue.
+NITRO_PROVIDER = "nitro"
+# Leg providers that grant entitlements but must be excluded from every revenue
+# figure (MRR, lifetime, tier distribution): comped grants and boost credit.
+NON_REVENUE_PROVIDERS = frozenset({"manual", NITRO_PROVIDER})
 # PayPal/manual subs have no provider webhook flipping status when a period
 # lapses (Stripe does), so an "active" row past its period end must stop
 # granting benefits. The grace window absorbs late IPN deliveries/retries.

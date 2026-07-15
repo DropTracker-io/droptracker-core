@@ -13,6 +13,7 @@ from db.models import Group, ItemList, PersonalBestEntry, PlayerPet, Session, Pl
 from data.submissions import adventure_log_processor, clog_processor, ca_processor, pb_processor, drop_processor, pet_processor, experience_processor
 from api.services.metrics import MetricsTracker
 from services.points import award_points_to_player
+from services import nitro_attribution
 from utils.format import convert_to_ms, get_true_boss_name
 from services.ticket_system import Tickets
 from sqlalchemy.exc import OperationalError, DisconnectionError, InterfaceError, InternalError, DBAPIError
@@ -52,6 +53,17 @@ metrics = MetricsTracker()
 watchdog = None
 shutdown_event = asyncio.Event()
 MAIN_WORLD_TYPE = "main"
+
+# --- Nitro boost → group credit reconciler ------------------------------------
+# Coalescing signal: set by boost-status changes on the main guild, consumed
+# (debounced) by _nitro_scheduler, which is started once from on_startup.
+_nitro_dirty = asyncio.Event()
+_nitro_scheduler_started = False
+try:
+    NITRO_RECONCILE_SECONDS = max(300, int(os.getenv("NITRO_RECONCILE_MINUTES", "60")) * 60)
+except (TypeError, ValueError):
+    NITRO_RECONCILE_SECONDS = 3600
+_NITRO_DEBOUNCE_SECONDS = 30
 
 
 def _normalize_world_type(raw_world_type):
@@ -184,25 +196,28 @@ def setup_signal_handlers():
 
 @listen(MemberUpdate)
 async def on_member_update(event: MemberUpdate):
-    if os.getenv("PROCESS_NITRO_BOOSTS") == "true":
-        try:
-            local_session = Session()
-            role_id = os.getenv("PRIMARY_GUILD_NITRO_ROLE_ID")
-            if event.guild_id == os.getenv("DISCORD_GUILD_ID"):
-                previously_boosting = False
-                if event.before.roles != event.after.roles:
-                    for role in event.before.roles:
-                        if role.id == role_id:
-                            previously_boosting = True
-                    for role in event.after.roles:
-                        if role.id == role_id:
-                            if not previously_boosting:
-                                ## This event contains the player's boost role update -- we need to apply points here
-                                await apply_nitro_boost_points(event.before.user.id)
-        except Exception as e:
-            print(f"Error processing member update: {e}")
-        finally:
-            local_session.close()
+    """Nudge the nitro-boost reconciler when a member's boost status changes on
+    the main guild.
+
+    The reconciler (_nitro_scheduler → run_nitro_reconcile) is the source of
+    truth: it recomputes every group's boost credit from the full member list,
+    so this handler only detects a ``premium_since`` transition and signals it.
+    The individual-booster point award (/nitro_user, apply_nitro_boost_points)
+    is a separate, manually-triggered reward and is intentionally left alone.
+    """
+    if not nitro_attribution.process_nitro_boosts_enabled():
+        return
+    try:
+        if str(event.guild_id) != str(nitro_attribution.MAIN_GUILD_ID):
+            return
+        before = getattr(event, "before", None)
+        after = getattr(event, "after", None)
+        before_boost = getattr(before, "premium_since", None) if before else None
+        after_boost = getattr(after, "premium_since", None) if after else None
+        if before_boost != after_boost:
+            _nitro_dirty.set()
+    except Exception as e:
+        print(f"[nitro] member update handling failed: {e}")
 
 @slash_command(name="nitro_user",
                    description="Award nitro boost points to a user")
@@ -236,6 +251,41 @@ async def apply_nitro_boost_points(user_id: int, session_to_use = None):
     award_points_to_player(player_id=user_players[0].player_id, amount=250, source='Nitro Boost Upgrade',expires_in_days=60,session=local_session)
     if not session_to_use:
         local_session.close()
+
+
+async def run_nitro_reconcile():
+    """Enumerate current boosters of the main guild and reconcile per-group
+    nitro credit legs. DB work runs off the event loop."""
+    boosters = await nitro_attribution.fetch_booster_discord_ids(bot.http)
+
+    def _db():
+        with Session() as s:
+            return nitro_attribution.run_reconcile(s, boosters)
+
+    stats = await asyncio.to_thread(_db)
+    print(f"[nitro] reconcile complete: {stats}")
+    return stats
+
+
+async def _nitro_scheduler():
+    """Periodic + event-triggered nitro-boost reconciler. The interval bounds
+    staleness; boost-change events trigger an earlier (debounced) pass."""
+    if not nitro_attribution.process_nitro_boosts_enabled():
+        print("[nitro] PROCESS_NITRO_BOOSTS disabled — reconciler not started.")
+        return
+    await asyncio.sleep(60)  # let the gateway connect + member cache warm
+    while not shutdown_event.is_set():
+        try:
+            await run_nitro_reconcile()
+        except Exception as e:
+            print(f"[nitro] reconcile failed: {e}")
+        try:
+            await asyncio.wait_for(_nitro_dirty.wait(), timeout=NITRO_RECONCILE_SECONDS)
+            await asyncio.sleep(_NITRO_DEBOUNCE_SECONDS)  # coalesce a burst of changes
+        except asyncio.TimeoutError:
+            pass  # periodic tick
+        finally:
+            _nitro_dirty.clear()
 
 
 # Add retry decorator for database operations
@@ -436,6 +486,11 @@ async def on_startup(event: Startup):
         bot.load_extension("services.suggestion_sync")
     except Exception as e:
         print(f"Error loading suggestion sync: {e}")
+    # Start the nitro-boost reconciler once (Startup can re-fire on reconnects).
+    global _nitro_scheduler_started
+    if not _nitro_scheduler_started:
+        _nitro_scheduler_started = True
+        asyncio.create_task(_nitro_scheduler())
     # Then handle database operations with proper session management
     player_count = 0
     local_session = Session()

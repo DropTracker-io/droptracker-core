@@ -74,7 +74,9 @@ class GroupSubscription(Base):
     amount_cents = Column(Integer, nullable=True)
     status = Column(String(16), nullable=False, default="none")
     # none|active|trialing|past_due|canceled|expired
-    provider = Column(String(16), nullable=True)  # patreon|stripe|manual
+    # patreon|stripe|paypal|manual (comped) | nitro (Discord boost credit — not
+    # revenue; see services/nitro_attribution.py + db.entitlements.NITRO_PROVIDER)
+    provider = Column(String(16), nullable=True)
     provider_customer_id = Column(String(120), nullable=True)
     provider_subscription_id = Column(String(120), nullable=True)
     current_period_end = Column(DateTime, nullable=True)
