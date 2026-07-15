@@ -36,11 +36,22 @@ log = logging.getLogger("event_wom_reconciler")
 
 RELEVANT_TASK_TYPES = ("xp_target", "skill_target", "kc_target")
 
-WOM_RECONCILE_SECONDS = int(os.getenv("WOM_RECONCILE_SECONDS", "900"))
+WOM_RECONCILE_SECONDS = int(os.getenv("WOM_RECONCILE_SECONDS", "300"))
 WOM_EVENT_UPDATE_BUDGET = int(os.getenv("WOM_EVENT_UPDATE_BUDGET", "10"))
 WOM_UPDATE_ALL_LEAD_SECONDS = int(os.getenv("WOM_UPDATE_ALL_LEAD_SECONDS", "1800"))
-# Per-player update_player cooldown between freshness passes.
-_PLAYER_UPDATE_COOLDOWN_SECONDS = 6 * 3600
+
+# Continuous freshness rotation: every reconcile cycle, the stalest event
+# participants get a forced WOM update so hiscores-based progress stops
+# depending on organic updates. The per-player refresh interval scales with
+# roster size — updates/minute stays ~= 60/SECONDS_PER_PLAYER regardless of
+# how big the event is — and a per-cycle cap bounds any single cycle's spend
+# on the shared WOM budget (the rest of the app uses the same limiter).
+WOM_EVENT_UPDATE_SECONDS_PER_PLAYER = int(os.getenv("WOM_EVENT_UPDATE_SECONDS_PER_PLAYER", "9"))
+WOM_EVENT_UPDATE_MIN_INTERVAL = int(os.getenv("WOM_EVENT_UPDATE_MIN_INTERVAL", "900"))
+WOM_EVENT_UPDATE_MAX_INTERVAL = int(os.getenv("WOM_EVENT_UPDATE_MAX_INTERVAL", "3600"))
+WOM_EVENT_UPDATE_MAX_PER_CYCLE = int(os.getenv("WOM_EVENT_UPDATE_MAX_PER_CYCLE", "40"))
+# Retry pacing after a failed / rate-skipped update attempt.
+_UPDATE_FAIL_COOLDOWN_SECONDS = 900
 _STATE_KEY_TTL = 60 * 86400
 
 CONFIG_KEY_ENABLED = "event_wom_reconciliation"
@@ -350,7 +361,9 @@ def _emit_for_row(redis_conn, target: ReconcileTarget, row: dict,
 
 
 async def _reconcile_target(redis_conn, target: ReconcileTarget, *,
-                            end_at: datetime, force: bool, stats: dict) -> None:
+                            end_at: datetime, force: bool, stats: dict) -> list:
+    """Fetch + emit for one target. Returns the fetched bulk-gained rows
+    (all groups concatenated) so the freshness rotation can reuse them."""
     from utils.wiseoldman import get_group_bulk_gained
 
     start_at = target.window_start
@@ -359,11 +372,12 @@ async def _reconcile_target(redis_conn, target: ReconcileTarget, *,
         # but never reconcile an unbounded window.
         log.warning("Event %s has no window_start; skipping WOM reconcile",
                     target.event_id)
-        return
+        return []
     if end_at <= start_at:
-        return
+        return []
     clamp_epoch = (int(target.window_end.timestamp())
                    if target.window_end is not None else None)
+    all_rows = []
     for _group_id, wom_gid, _code in target.wom_groups:
         rows = await get_group_bulk_gained(wom_gid, start_at, end_at)
         if rows is None:
@@ -373,29 +387,40 @@ async def _reconcile_target(redis_conn, target: ReconcileTarget, *,
         pushed = 0
         for row in rows:
             if isinstance(row, dict):
+                all_rows.append(row)
                 pushed += _emit_for_row(redis_conn, target, row,
                                         clamp_epoch=clamp_epoch, force=force,
                                         stats=stats)
         stats["envelopes"] += pushed
+    return all_rows
 
 
 def _new_stats() -> dict:
     return {"targets": 0, "groups_fetched": 0, "group_fetch_failures": 0,
             "players_emitted": 0, "players_stale": 0, "players_unmatched": 0,
-            "envelopes": 0}
+            "envelopes": 0, "updates_requested": 0, "update_candidates": 0}
 
 
 async def reconcile_once(state, redis_conn, now: Optional[datetime] = None) -> dict:
-    """One periodic pass over every WOM-enabled active event."""
+    """One periodic pass over every WOM-enabled active event: emit envelopes
+    from the current snapshots, then spend the cycle's update cap forcing the
+    stalest participants to refresh (their gains land next cycle)."""
     now = now or datetime.now()
     stats = _new_stats()
     targets = await plan_targets(state)
     _cache_targets(targets)
+    update_cap = WOM_EVENT_UPDATE_MAX_PER_CYCLE
     for target in targets:
         stats["targets"] += 1
         end_at = min(now, target.window_end) if target.window_end else now
-        await _reconcile_target(redis_conn, target, end_at=end_at, force=False,
-                                stats=stats)
+        rows = await _reconcile_target(redis_conn, target, end_at=end_at,
+                                       force=False, stats=stats)
+        if update_cap > 0:
+            fresh = await _freshness_for_target(redis_conn, target, rows,
+                                                max_updates=update_cap)
+            stats["updates_requested"] += fresh["player_updates"]
+            stats["update_candidates"] += fresh["candidates"]
+            update_cap -= fresh["player_updates"]
     return stats
 
 
@@ -421,18 +446,102 @@ async def final_reconcile(state, redis_conn, event_id: int) -> Optional[dict]:
 # Freshness (key moments only): update-all / budgeted update_player
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _freshness_for_target(redis_conn, target: ReconcileTarget,
-                                *, budget: int) -> dict:
-    from utils.wiseoldman import (
-        UPDATE_ALL_BADCODE_PREFIX,
-        get_group_bulk_hiscores,
-        request_group_update_all,
-        request_player_update,
-    )
+def _update_interval(participant_count: int) -> int:
+    """Per-player WOM refresh interval for a roster of this size.
 
-    out = {"update_all": 0, "player_updates": 0}
-    for _group_id, wom_gid, code in target.wom_groups:
-        if code:
+    Scales linearly so the steady-state update rate is roster-independent
+    (~60/SECONDS_PER_PLAYER calls per minute): a 4-player event refreshes
+    everyone every MIN_INTERVAL; a 400-player event settles near MAX."""
+    interval = max(1, participant_count) * WOM_EVENT_UPDATE_SECONDS_PER_PLAYER
+    return max(WOM_EVENT_UPDATE_MIN_INTERVAL,
+               min(WOM_EVENT_UPDATE_MAX_INTERVAL, interval))
+
+
+def _select_update_candidates(target: ReconcileTarget, rows: list,
+                              now_epoch: int, min_stale: int) -> list:
+    """Participants due a forced WOM update, from this cycle's bulk-gained
+    rows (pure; cooldown filtering happens at request time).
+
+    Participants absent from the rows have NO snapshot inside the event
+    window — maximally stale, they sort first (after the stub-first split).
+    Returns sorted [(prio, updated_epoch, player_id, username)]."""
+    known = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        player_obj = row.get("player") or {}
+        entry = _match_participant(target, player_obj)
+        if entry is None:
+            continue
+        player_id = entry[0]
+        updated = _parse_wom_ts(player_obj.get("updatedAt")) or 0
+        username = player_obj.get("username") or entry[1]
+        prev = known.get(player_id)
+        if prev is None or updated > prev[0]:
+            known[player_id] = (updated, username, entry[3])
+
+    out, seen = [], set()
+    for entry in list(target.participants_by_wom.values()) + \
+            list(target.participants_by_name.values()):
+        player_id, player_name, _joined, is_stub = entry
+        if player_id in seen:
+            continue
+        seen.add(player_id)
+        updated, username, stub = known.get(player_id) or (0, player_name, is_stub)
+        if not username or now_epoch - updated < min_stale:
+            continue
+        out.append((0 if stub else 1, updated, player_id, username))
+    out.sort()
+    return out
+
+
+async def _request_updates(redis_conn, candidates: list, *, max_updates: int,
+                           success_cooldown: int) -> int:
+    """Sequentially force-update up to ``max_updates`` candidates. Sequential
+    means we only ever hold one shared-limiter slot, so the rest of the app's
+    WOM traffic interleaves fairly; three consecutive failures (WOM down or
+    limiter backlogged) abort the batch until next cycle."""
+    from utils.wiseoldman import request_player_update
+
+    updated = 0
+    consecutive_failures = 0
+    for _prio, _seen, player_id, username in candidates:
+        if updated >= max_updates or consecutive_failures >= 3:
+            break
+        cooldown_key = f"wom:eventupd:{player_id}"
+        try:
+            if redis_conn.get(cooldown_key):
+                continue
+        except Exception:
+            pass
+        ok = await request_player_update(username)
+        try:
+            redis_conn.set(cooldown_key, 1, ex=(
+                success_cooldown if ok else _UPDATE_FAIL_COOLDOWN_SECONDS))
+        except Exception:
+            pass
+        if ok:
+            updated += 1
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
+    return updated
+
+
+async def _freshness_for_target(redis_conn, target: ReconcileTarget, rows: list,
+                                *, max_updates: int,
+                                min_stale: Optional[int] = None,
+                                use_update_all: bool = False) -> dict:
+    """One freshness pass: optional group-wide update-all (needs the group's
+    verification code; only touches members >24h stale — WOM's rule), then the
+    per-player rotation from this cycle's bulk-gained rows."""
+    from utils.wiseoldman import UPDATE_ALL_BADCODE_PREFIX, request_group_update_all
+
+    out = {"update_all": 0, "player_updates": 0, "candidates": 0}
+    if use_update_all:
+        for _group_id, wom_gid, code in target.wom_groups:
+            if not code:
+                continue
             try:
                 bad = redis_conn.get(f"{UPDATE_ALL_BADCODE_PREFIX}{wom_gid}")
             except Exception:
@@ -444,47 +553,37 @@ async def _freshness_for_target(redis_conn, target: ReconcileTarget,
                     log.info("WOM update-all queued for group %s (event %s): %s",
                              wom_gid, target.event_id, message)
 
-        # Budgeted per-player top-off: stubs (auto-provisioned, plugin-less)
-        # first, then stalest snapshots. update-all only touches members
-        # outdated >24h, so this also covers the 6-24h band when it ran.
-        if budget <= 0:
-            continue
-        rows = await get_group_bulk_hiscores(wom_gid)
-        if not rows:
-            continue
-        candidates = []
-        now_epoch = int(time.time())
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            entry = _match_participant(target, row.get("player") or {})
-            if entry is None:
-                continue
-            player_id, player_name, _joined, is_stub = entry
-            updated = _parse_wom_ts((row.get("player") or {}).get("updatedAt")) or 0
-            if now_epoch - updated < _PLAYER_UPDATE_COOLDOWN_SECONDS:
-                continue
-            username = (row.get("player") or {}).get("username") or player_name
-            candidates.append((0 if is_stub else 1, updated, player_id, username))
-        candidates.sort()
-        for _prio, _updated, player_id, username in candidates:
-            if budget <= 0:
-                break
-            cooldown_key = f"wom:eventupd:{player_id}"
-            try:
-                if redis_conn.get(cooldown_key):
-                    continue
-            except Exception:
-                pass
-            if await request_player_update(username):
-                out["player_updates"] += 1
-                budget -= 1
-                try:
-                    redis_conn.set(cooldown_key, 1,
-                                   ex=_PLAYER_UPDATE_COOLDOWN_SECONDS)
-                except Exception:
-                    pass
+    if max_updates <= 0:
+        return out
+    participant_count = len({e[0] for e in target.participants_by_wom.values()}
+                            | {e[0] for e in target.participants_by_name.values()})
+    if min_stale is None:
+        min_stale = _update_interval(participant_count)
+    candidates = _select_update_candidates(target, rows, int(time.time()), min_stale)
+    out["candidates"] = len(candidates)
+    # Cooldown slightly under the interval so a player is due again by the
+    # cycle after their snapshot ages past it, not one full cycle later.
+    out["player_updates"] = await _request_updates(
+        redis_conn, candidates, max_updates=max_updates,
+        success_cooldown=max(300, int(min_stale * 0.9)))
     return out
+
+
+async def _fetch_target_rows(target: ReconcileTarget, now: datetime) -> list:
+    """Bulk-gained rows for a target outside the reconcile loop (key-moment
+    passes) — usually a cache hit on the last cycle's fetch."""
+    from utils.wiseoldman import get_group_bulk_gained
+
+    if target.window_start is None:
+        return []
+    end_at = min(now, target.window_end) if target.window_end else now
+    if end_at <= target.window_start:
+        return []
+    rows = []
+    for _group_id, wom_gid, _code in target.wom_groups:
+        fetched = await get_group_bulk_gained(wom_gid, target.window_start, end_at)
+        rows.extend(fetched or [])
+    return rows
 
 
 # plan_targets is a DB round-trip; the key-moment scan runs every consumer
@@ -497,6 +596,30 @@ def _cache_targets(targets: list) -> None:
     global _cached_targets, _cached_targets_at
     _cached_targets = targets
     _cached_targets_at = time.time()
+
+
+# Key-moment freshness passes run as fire-and-forget tasks (an update batch
+# awaits one limiter slot per player — the consumer loop must not stall behind
+# it). The once-per-event Redis flags are set BEFORE scheduling, so a crashed
+# task is skipped rather than double-fired.
+_background_tasks: set = set()
+
+
+def _spawn_freshness(target: ReconcileTarget, redis_conn, now: datetime,
+                     stage: str, **kwargs) -> None:
+    async def _run():
+        try:
+            rows = await _fetch_target_rows(target, now)
+            out = await _freshness_for_target(redis_conn, target, rows, **kwargs)
+            log.info("WOM %s freshness pass for event %s: %s",
+                     stage, target.event_id, out)
+        except Exception:
+            log.exception("WOM %s freshness pass failed for event %s",
+                          stage, target.event_id)
+
+    task = asyncio.create_task(_run())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 async def run_key_moment_updates(state, redis_conn,
@@ -520,16 +643,21 @@ async def run_key_moment_updates(state, redis_conn,
                 started_ago = ((now - target.window_start).total_seconds()
                                if target.window_start else 0)
                 if started_ago < 2 * 3600:
-                    await _freshness_for_target(redis_conn, target,
-                                                budget=WOM_EVENT_UPDATE_BUDGET)
+                    _spawn_freshness(target, redis_conn, now, "activation",
+                                     use_update_all=True,
+                                     max_updates=WOM_EVENT_UPDATE_BUDGET)
             if target.window_end is not None:
                 lead = target.window_end - timedelta(seconds=WOM_UPDATE_ALL_LEAD_SECONDS)
                 if (now >= lead and now < target.window_end
                         and not redis_conn.get(_womupdall_key(target.event_id, "end"))):
                     redis_conn.set(_womupdall_key(target.event_id, "end"),
                                    int(time.time()), ex=_STATE_KEY_TTL)
-                    await _freshness_for_target(redis_conn, target,
-                                                budget=WOM_EVENT_UPDATE_BUDGET)
+                    # Final standings deserve the freshest data: tighter
+                    # staleness bar and a doubled cap for this one pass.
+                    _spawn_freshness(target, redis_conn, now, "pre-end",
+                                     use_update_all=True,
+                                     min_stale=WOM_EVENT_UPDATE_MIN_INTERVAL,
+                                     max_updates=WOM_EVENT_UPDATE_MAX_PER_CYCLE * 2)
         except Exception:
             log.exception("Key-moment freshness pass failed for event %s",
                           target.event_id)

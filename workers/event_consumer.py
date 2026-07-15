@@ -170,6 +170,15 @@ async def run_consumer() -> None:
     last_refresh = 0.0
     last_sweep = 0.0
     last_reconcile = 0.0
+    reconcile_task = None
+
+    async def _run_reconcile(current_state):
+        try:
+            stats = await wom.reconcile_once(current_state, r)
+            if stats.get("targets"):
+                log.info("WOM reconcile: %s", stats)
+        except Exception:
+            log.error("WOM reconcile failed:\n%s", traceback.format_exc())
 
     while True:
         try:
@@ -212,16 +221,16 @@ async def run_consumer() -> None:
                     " (admin bump)" if bumped else "",
                 )
 
-            # WOM reconciliation: periodic bulk-gains pass (WOM outages must
-            # never stall submission draining) + cheap key-moment scan.
+            # WOM reconciliation runs as a BACKGROUND task: the update
+            # rotation inside it awaits one rate-limiter slot per player
+            # (up to ~a minute per cycle), and queue draining must not stall
+            # behind it. Skip a cycle rather than overlap two passes.
             if (time.time() - last_reconcile) >= wom.WOM_RECONCILE_SECONDS:
                 last_reconcile = time.time()
-                try:
-                    stats = await wom.reconcile_once(state, r)
-                    if stats.get("targets"):
-                        log.info("WOM reconcile: %s", stats)
-                except Exception:
-                    log.error("WOM reconcile failed:\n%s", traceback.format_exc())
+                if reconcile_task is None or reconcile_task.done():
+                    reconcile_task = asyncio.create_task(_run_reconcile(state))
+                else:
+                    log.warning("WOM reconcile still running; skipping this cycle")
             try:
                 await wom.run_key_moment_updates(state, r)
             except Exception:

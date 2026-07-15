@@ -207,3 +207,86 @@ class TestMetricMapping:
         # metric (bulk-gained rows carry both families in one list).
         assert womutils.wom_boss_metric("attack") is None
         assert womutils.wom_skill_metric("zulrah") is None
+
+
+class TestUpdateRotation:
+    def test_interval_scales_with_roster(self):
+        assert recon._update_interval(1) == recon.WOM_EVENT_UPDATE_MIN_INTERVAL
+        assert recon._update_interval(4) == recon.WOM_EVENT_UPDATE_MIN_INTERVAL
+        assert recon._update_interval(100) == 100 * recon.WOM_EVENT_UPDATE_SECONDS_PER_PLAYER
+        assert recon._update_interval(1000) == recon.WOM_EVENT_UPDATE_MAX_INTERVAL
+
+    def test_candidates_missing_from_rows_sort_stalest(self):
+        # Player 902 has no snapshot inside the window (absent from rows) —
+        # maximally stale, sorts ahead of 901 who was seen recently.
+        target = _target(participants_by_wom={
+            2188996: (901, "btw fe male", datetime(2026, 6, 30), False),
+            555555: (902, "never updated", datetime(2026, 6, 30), False),
+        })
+        now = recon._parse_wom_ts(ROW_RANKED["player"]["updatedAt"]) + 10_000_000
+        cands = recon._select_update_candidates(target, [ROW_RANKED], now, 3600)
+        assert [c[2] for c in cands] == [902, 901]
+        assert cands[0][3] == "never updated"  # falls back to DT player name
+        assert cands[1][3] == ROW_RANKED["player"]["username"]
+
+    def test_fresh_players_not_candidates(self):
+        target = _target()
+        now = recon._parse_wom_ts(ROW_RANKED["player"]["updatedAt"]) + 60
+        assert recon._select_update_candidates(target, [ROW_RANKED], now, 3600) == []
+
+    def test_stubs_sort_first(self):
+        target = _target(participants_by_wom={
+            2188996: (901, "btw fe male", datetime(2026, 6, 30), False),
+            555555: (902, "wom stub", datetime(2026, 6, 30), True),
+        })
+        now = recon._parse_wom_ts(ROW_RANKED["player"]["updatedAt"]) + 10_000_000
+        cands = recon._select_update_candidates(target, [ROW_RANKED], now, 3600)
+        assert [c[2] for c in cands] == [902, 901]
+        assert cands[0][0] == 0  # stub priority tier
+
+
+class TestRequestUpdates:
+    def _run(self, candidates, results, max_updates=40):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        r = _FakeRedis()
+        mock = AsyncMock(side_effect=results)
+        with patch.object(womutils, "request_player_update", mock):
+            # _request_updates lazily imports from utils.wiseoldman
+            sys.modules["utils.wiseoldman"] = womutils
+            try:
+                n = asyncio.run(recon._request_updates(
+                    r, candidates, max_updates=max_updates, success_cooldown=600))
+            finally:
+                pass
+        return n, r, mock
+
+    def test_respects_cap_and_sets_cooldowns(self):
+        cands = [(1, 0, pid, f"p{pid}") for pid in range(1, 6)]
+        n, r, mock = self._run(cands, [True] * 5, max_updates=3)
+        assert n == 3 and mock.await_count == 3
+        assert r.kv.get("wom:eventupd:1") and r.kv.get("wom:eventupd:3")
+        assert "wom:eventupd:4" not in r.kv
+
+    def test_cooldown_skips_without_spending(self):
+        cands = [(1, 0, 1, "p1"), (1, 0, 2, "p2")]
+        r = _FakeRedis()
+        r.kv["wom:eventupd:1"] = "1"
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        mock = AsyncMock(return_value=True)
+        with patch.object(womutils, "request_player_update", mock):
+            sys.modules["utils.wiseoldman"] = womutils
+            n = asyncio.run(recon._request_updates(
+                r, cands, max_updates=10, success_cooldown=600))
+        assert n == 1 and mock.await_count == 1
+
+    def test_three_consecutive_failures_abort_batch(self):
+        cands = [(1, 0, pid, f"p{pid}") for pid in range(1, 8)]
+        n, _r, mock = self._run(cands, [False, False, False, True, True])
+        assert n == 0 and mock.await_count == 3
+
+    def test_failures_reset_on_success(self):
+        cands = [(1, 0, pid, f"p{pid}") for pid in range(1, 8)]
+        n, _r, mock = self._run(cands, [False, False, True, False, False, True, False])
+        assert n == 2 and mock.await_count == 7

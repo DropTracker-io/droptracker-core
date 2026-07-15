@@ -821,7 +821,10 @@ from wom import routes as _wom_routes
 _BULK_GAINED_ROUTE = _wom_routes.Route("GET", "/groups/{}/bulk-gained")
 _BULK_HISCORES_ROUTE = _wom_routes.Route("GET", "/groups/{}/bulk-hiscores")
 
-WOM_BULK_CACHE_TTL = int(os.getenv("WOM_BULK_CACHE_TTL", "600"))
+# Must stay below the reconcile cycle (WOM_RECONCILE_SECONDS) or polls would
+# read their own cached previous response; it exists to collapse
+# multi-event/same-group fetches and restart bursts.
+WOM_BULK_CACHE_TTL = int(os.getenv("WOM_BULK_CACHE_TTL", "240"))
 _REDIS_BULK_GAINED_PREFIX = "wom:bulkgained:"
 _REDIS_BULK_HISCORES_PREFIX = "wom:bulkhiscores:"
 UPDATE_ALL_BADCODE_PREFIX = "wom:updateall:badcode:"
