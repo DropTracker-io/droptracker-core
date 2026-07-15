@@ -154,13 +154,18 @@ class DatabaseOperations:
                 try:
                     # Convert content type to proper file extension
                     file_extension = get_extension_from_content_type(attachment_type)
-                    if int(value) * int(quantity) < get_xf_option("dt_min_value_for_image"):
-                        pass
-                    else:
-                        download_path, image_url = await download_player_image("drop", item_name, player, attachment_url, file_extension, 0, item_name, npc_name)
-                        if download_path is None or image_url is None:
-                            #print(f"Failed to download image for drop {item_name} from {npc_name} - using empty image_url")
-                            image_url = ""
+                    # Always self-host the screenshot, whatever the drop is
+                    # worth — parity with the API path, which downloads every
+                    # uploaded image at intake. The old dt_min_value_for_image
+                    # gate left low-value non-API drops holding the raw (and
+                    # expiring) Discord CDN URL, which the notification sender
+                    # can't attach — screenshots silently vanished from those
+                    # embeds (reported 2026-07-15).
+                    download_path, image_url = await download_player_image("drop", item_name, player, attachment_url, file_extension, 0, item_name, npc_name)
+                    if download_path is None or image_url is None:
+                        # Download failed — keep the remote URL so the sender's
+                        # remote-fetch fallback still has something to show.
+                        image_url = attachment_url or ""
                 except Exception as e:
                     #print(f"Error downloading player image for {item_name} from {npc_name}: {type(e).__name__}: {e}")
                     import traceback

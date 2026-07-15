@@ -370,6 +370,53 @@ class NotificationService:
             # Best effort cleanup only
             return
 
+    async def _resolve_image_attachment(self, image_url, notification_id) -> tuple["interactions.File | None", "str | None"]:
+        """One image URL -> an attachable ``interactions.File``.
+
+        droptracker.io URLs map straight to their file under static/assets
+        (no HTTP round-trip). Any other http(s) URL — e.g. the Discord CDN
+        URL a low-value non-API drop used to carry — is fetched to a temp
+        file so the screenshot still ships with the embed instead of being
+        silently discarded (the pre-2026-07-15 behavior).
+
+        Returns ``(attachment, temp_path)``; ``temp_path`` is only set for
+        remote fetches and must be deleted by the caller after sending.
+        Best-effort: any failure returns ``(None, None)`` (embed sends
+        without an image, never fails the notification)."""
+        if not image_url or not isinstance(image_url, str):
+            return None, None
+        try:
+            if "droptracker.io" in image_url:
+                local_path = image_url.replace(
+                    "https://www.droptracker.io/img/",
+                    "/store/droptracker/disc/static/assets/img/",
+                )
+                if os.path.exists(local_path):
+                    return interactions.File(local_path), None
+                print(f"Debug - Image file not found at: {local_path}")
+                return None, None
+            if not image_url.startswith(("http://", "https://")):
+                return None, None
+            # Remote (non-hosted) image: fetch to a temp file. 10 MB cap —
+            # plugin screenshots are a few hundred KB.
+            os.makedirs(self._video_notif_dir, exist_ok=True)
+            ext = ".png" if ".png" in image_url.lower() else ".jpg"
+            local_path = os.path.join(self._video_notif_dir, f"notif_img_{notification_id}{ext}")
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session_http:
+                async with session_http.get(image_url) as resp:
+                    if resp.status != 200:
+                        return None, None
+                    data = await resp.content.read(10 * 1024 * 1024 + 1)
+                    if not data or len(data) > 10 * 1024 * 1024:
+                        return None, None
+            with open(local_path, "wb") as f:
+                f.write(data)
+            return interactions.File(local_path), local_path
+        except Exception as e:
+            print(f"Debug - couldn't resolve image attachment: {e}")
+            return None, None
+
     async def _download_video_attachment(self, video_url: str, notification_id: int) -> tuple[interactions.File | None, str | None]:
         """
         Download an MP4 to a temp directory and return an interactions.File attachment.
@@ -2158,8 +2205,11 @@ class NotificationService:
                         image_url = drop.image_url
                 except Exception as e:
                     image_url = None
-            #print(f"Debug - image_url: {image_url}, type: {type(image_url)}")
-            if not image_url or "droptracker.io" not in image_url:
+            # Remote (non-droptracker) URLs are handled too — the resolver
+            # fetches them to a temp file so the screenshot still attaches
+            # (they used to be discarded here, which is why low-value non-API
+            # drops posted imageless embeds).
+            if not image_url:
                 image_url = ""
 
             # Best-effort video URL (may be empty if still processing)
@@ -2187,21 +2237,9 @@ class NotificationService:
                 db_session.commit()
                 return
             
-            # Download image if available
-            attachment = None
-            if image_url:
-                try:
-                    # Convert external URL to local path matching the actual storage structure
-                    local_url = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
-                    if os.path.exists(local_url):
-                        attachment = interactions.File(local_url)
-                    else:
-                        print(f"Debug - Image file not found at: {local_url}")
-                        attachment = None
-                except Exception as e:
-                    print(f"Debug - Couldn't get attachment from path: {e}")
-                    attachment = None
-                    pass
+            # Resolve the screenshot to an attachable file (local for hosted
+            # URLs, temp-download for remote ones — cleaned up after send).
+            attachment, image_temp_path = await self._resolve_image_attachment(image_url, notification.id)
             
             # Replace placeholders in embed
             player = None
@@ -2284,22 +2322,8 @@ class NotificationService:
                 embed = await self.remove_group_field(embed)
             if kill_count is None or int(kill_count) < 1:
                 embed = await self.remove_kc_field(embed)
-            image_url = data.get('image_url', None)
-            if image_url and "cdn.discordapp.com" in image_url:
-                try:
-                    drop = db_session.query(Drop).filter(Drop.drop_id == data.get('drop_id')).first()
-                    if drop:
-                        image_url = drop.image_url
-                except Exception as e:
-                    image_url = None
-            if image_url:
-                try:
-                    local_url = image_url.replace("https://www.droptracker.io/", "/store/droptracker/disc/static/assets/")
-                    attachment = interactions.File(local_url)
-                except Exception as e:
-                    print(f"Debug - Couldn't get attachment from path: {e}")
-                    attachment = None
-                    pass
+            # (The old second attach pass lived here; _resolve_image_attachment
+            # above already covers both hosted and remote URLs.)
             #print("Got the embed...")
             # Prefer attaching MP4 if available (Discord renders as native video)
             video_attachment, video_local_path = (None, None)
@@ -2319,7 +2343,12 @@ class NotificationService:
                         os.remove(video_local_path)
                     except Exception:
                         pass
-            
+                if image_temp_path:
+                    try:
+                        os.remove(image_temp_path)
+                    except Exception:
+                        pass
+
             # Mark as sent
             await self._cleanup_processed_local_video_after_send(db_session, data)
             notification.status = 'sent'
