@@ -316,6 +316,64 @@ def _ensure_whole_clan_teams(session, event) -> int:
     return created
 
 
+def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> int:
+    """Materialize whole-clan rosters (clan_vs_clan): every current member of
+    an ``auto_clan`` team's clan gets a real ``EventTeamMember`` row, so
+    nobody has to sign up — the teams page, join panel and Activity all show
+    the full clan from the moment the event starts.
+
+    The matcher already *credits* clan members roster-lessly
+    (:func:`services.event_engine.load_matcher_state` expands auto_clan teams
+    from ``user_group_association`` on every reload), so this is about
+    visibility and parity: real rows are what every read surface renders.
+    ``joined_at`` is the event start (not "now"), matching the auto-clan
+    credit semantics where the event window is the only cutoff.
+
+    Idempotent and safe to run repeatedly — the sweep calls it every tick for
+    active clan_vs_clan events so players who join a clan mid-event appear on
+    its team automatically. Players already on ANY team in the event (explicit
+    placement, or a member of both clans) are never re-added. Returns the
+    number of members added; caller owns the commit."""
+    if (getattr(event, "mode", None) or "standard") != "clan_vs_clan":
+        return 0
+    from db.models import EventTeam, EventTeamMember
+    from db.models.associations import user_group_association
+
+    teams = session.query(EventTeam).filter(EventTeam.event_id == event.id).all()
+    auto_teams = [t for t in teams if getattr(t, "auto_clan", False) and t.group_id]
+    if not auto_teams:
+        return 0
+    team_ids = [t.id for t in teams]
+    on_event = {
+        pid for (pid,) in session.query(EventTeamMember.player_id)
+        .filter(EventTeamMember.team_id.in_(team_ids))
+        .all()
+    }
+    joined_at = event.activated_at or event.starts_at or now or datetime.now()
+    added = 0
+    for team in auto_teams:
+        # distinct() — user_group_association can hold duplicate rows (the
+        # known NULL-user_id insert race), and one player must map to one row.
+        clan_pids = (
+            session.query(user_group_association.c.player_id)
+            .filter(
+                user_group_association.c.group_id == team.group_id,
+                user_group_association.c.player_id.isnot(None),
+            )
+            .distinct()
+            .all()
+        )
+        for (pid,) in clan_pids:
+            if pid in on_event:
+                continue
+            session.add(EventTeamMember(team_id=team.id, player_id=pid, joined_at=joined_at))
+            on_event.add(pid)
+            added += 1
+    if added:
+        session.flush()
+    return added
+
+
 def activate_event(session, event, *, actor_user_id=None, user=None,
                    now: Optional[datetime] = None) -> None:
     """draft -> active. Validates readiness and tier capacity, stamps
@@ -358,7 +416,10 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
     # clan_vs_clan with no teams set up: seed a whole-clan team per accepted
     # clan so it runs as "anyone in clan A vs anyone in clan B". Must precede
     # grant_free_cells so the freshly-created teams receive their free cells.
+    # Then put every current clan member ON their clan's team — no sign-up
+    # needed; that's the whole point of skipping team setup.
     _ensure_whole_clan_teams(session, event)
+    sync_auto_clan_rosters(session, event, now=now)
 
     # Free cells complete for every team "from activation" (Task 20/21).
     event_engine.grant_free_cells(session, event)
@@ -530,5 +591,19 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
         except LifecycleError as exc:
             session.rollback()
             summary["failed"].append({"id": event_id, "detail": exc.detail})
+
+    # Whole-clan roster top-up: players who joined a participating clan after
+    # a clan_vs_clan event started get their team row on the next tick. No-op
+    # (two cheap queries) for events without auto_clan teams.
+    for event in rows:
+        if event.status != "active" or event.id in due["end"]:
+            continue
+        if (getattr(event, "mode", None) or "standard") != "clan_vs_clan":
+            continue
+        try:
+            if sync_auto_clan_rosters(session, event, now=now):
+                session.commit()
+        except Exception:
+            session.rollback()
 
     return summary
