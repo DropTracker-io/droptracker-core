@@ -26,7 +26,7 @@ import json
 import uuid
 from datetime import datetime
 
-from quart import Blueprint, jsonify, request
+from quart import Blueprint, Response, jsonify, request
 
 from db import (
     EVENT_BOARD_TILE_KINDS,
@@ -316,38 +316,16 @@ def _load_board_event(s, event_id: int, *, for_write: bool):
 
 
 # --------------------------------------------------------------------------- #
-# Routes
+# Tile-write core (shared by the designer autosave PUT and the procedural
+# generator POST — both replace the whole track wholesale).
 # --------------------------------------------------------------------------- #
-@event_board_bp.get("/events/<int:event_id>/board")
-async def get_board(event_id: int):
-    viewer_id = optional_user_id()
-
-    def _read():
-        with db_session() as s:
-            ev = _load_board_event(s, event_id, for_write=False)
-            if _effective_status(ev) == "draft" and not _can_view_draft(s, viewer_id, ev):
-                abort_problem(404, "Event not found", f"No event {event_id}.")
-            return _board_payload(s, ev)
-
-    return private_no_store(jsonify(await asyncio.to_thread(_read)))
-
-
-@event_board_bp.put("/events/<int:event_id>/board")
-async def put_board(event_id: int):
-    """Replace the whole tile layout (the designer's autosave). Body:
-    { background_url?, bg_width?, bg_height?,
-      tiles: [{idx, x, y, label?, difficulty?, task_id?, library_item_id?,
-               tile_kind?}] }
-    Exactly one of difficulty / task_id / library_item_id per tile (or none =
-    rest tile). idx must cover 0..N-1 uniquely."""
-    user_id = current_user_id()
-    body = await json_body()
-    tiles_in = body.get("tiles")
+def _validate_tiles_payload(tiles_in) -> None:
+    """Whitelist-validate a tiles array (idx contiguous 0..N-1, x/y in [0,1],
+    at most one binding per tile, known difficulty/kind). Raises 422."""
     if not isinstance(tiles_in, list):
         abort_problem(422, "Invalid body", "'tiles' must be an array.")
     if len(tiles_in) > _MAX_TILES:
         abort_problem(422, "Too many tiles", f"Boards are capped at {_MAX_TILES} tiles.")
-
     seen_idx = set()
     for cell in tiles_in:
         if not isinstance(cell, dict):
@@ -381,136 +359,178 @@ async def put_board(event_id: int):
         abort_problem(422, "Invalid tiles",
                       "Tile idx values must cover 0..N-1 exactly (a contiguous track).")
 
+
+def _write_board(s, ev, user_id: int, tiles_in: list, body: dict,
+                 *, audit_action: str = "event.board.replace",
+                 audit_after: str | None = None) -> None:
+    """Replace the event's tile track wholesale + upsert the background ref.
+
+    The heart of both the designer's autosave and the procedural generator:
+    resolves task/library bindings, swaps the tiles, GCs orphaned designer
+    pins, and rides the background_url/dimensions in via ``body``. Caller
+    owns the commit + payload build."""
+    # Resolve bindings.
+    event_task_ids = {
+        tid for (tid,) in s.query(EventTask.id)
+        .filter(EventTask.event_id == ev.id).all()
+    }
+    lib_ids = [c["library_item_id"] for c in tiles_in
+               if c.get("library_item_id") is not None]
+    lib_rows = {}
+    if lib_ids:
+        for row in (s.query(EventTaskLibraryItem)
+                    .filter(EventTaskLibraryItem.id.in_(lib_ids),
+                            EventTaskLibraryItem.active.is_(True)).all()):
+            lib_rows[row.id] = row
+        missing = [i for i in lib_ids if i not in lib_rows]
+        if missing:
+            abort_problem(404, "Library preset not found",
+                          f"Library item(s) {missing} not found or inactive.")
+    for cell in tiles_in:
+        tid = cell.get("task_id")
+        if tid is not None and tid not in event_task_ids:
+            abort_problem(422, "Invalid tile",
+                          f"task_id {tid} does not belong to this event.")
+
+    # Record designer-created pinned tasks on the OLD board for GC.
+    old_tiles = (s.query(EventBoardTile)
+                 .filter(EventBoardTile.event_id == ev.id).all())
+    old_pin_ids = set()
+    for t in old_tiles:
+        if t.task_id:
+            task = s.query(EventTask).filter(EventTask.id == t.task_id).first()
+            if task is not None:
+                try:
+                    if json.loads(task.config or "{}").get(_BOARD_PIN_KEY):
+                        old_pin_ids.add(task.id)
+                except (TypeError, ValueError):
+                    pass
+
+    # Replace tiles wholesale (bingo pattern).
+    (s.query(EventBoardTile)
+     .filter(EventBoardTile.event_id == ev.id)
+     .delete(synchronize_session=False))
+
+    kept_task_ids = set()
+    for cell in tiles_in:
+        task_id = cell.get("task_id")
+        lib_id = cell.get("library_item_id")
+        if lib_id is not None:
+            preset = lib_rows[lib_id]
+            cfg = {}
+            if preset.config:
+                try:
+                    parsed = json.loads(preset.config)
+                    if isinstance(parsed, dict):
+                        cfg = parsed
+                except (TypeError, ValueError):
+                    cfg = {}
+            cfg[_BOARD_PIN_KEY] = True
+            task = EventTask(
+                event_id=ev.id, type=preset.type, label=preset.name,
+                target=preset.target, target_value=preset.target_value,
+                points=int(preset.default_points or 0),
+                requires_confirmation=False,
+                config=json.dumps(cfg), visibility="private",
+                difficulty=preset.difficulty,
+            )
+            s.add(task)
+            s.flush()
+            task_id = task.id
+        if task_id is not None:
+            kept_task_ids.add(task_id)
+        s.add(EventBoardTile(
+            event_id=ev.id,
+            idx=cell["idx"],
+            x=float(cell["x"]),
+            y=float(cell["y"]),
+            label=(cell.get("label") or "").strip()[:255] or None,
+            difficulty=cell.get("difficulty"),
+            task_id=task_id,
+            tile_kind=cell.get("tile_kind") or "normal",
+            config=None,
+        ))
+
+    # GC designer-created pins the new board dropped (unless the engine already
+    # wrote ledger rows against them).
+    from db.models import EventCompletion
+
+    for tid in sorted(old_pin_ids - kept_task_ids):
+        used = (s.query(EventCompletion.id)
+                .filter(EventCompletion.task_id == tid).first())
+        if used:
+            continue
+        (s.query(EventProgress)
+         .filter(EventProgress.task_id == tid)
+         .delete(synchronize_session=False))
+        (s.query(EventTask)
+         .filter(EventTask.id == tid, EventTask.event_id == ev.id)
+         .delete(synchronize_session=False))
+
+    # Upsert the config row (background ref rides along with layout).
+    config = (s.query(EventBoardConfig)
+              .filter(EventBoardConfig.event_id == ev.id).first())
+    if config is None:
+        config = EventBoardConfig(event_id=ev.id)
+        s.add(config)
+    if "background_url" in body:
+        bg = body.get("background_url")
+        if bg is not None and (not isinstance(bg, str) or len(bg) > 255):
+            abort_problem(422, "Invalid background",
+                          "'background_url' must be a string (≤255) or null.")
+        config.background_url = bg or None
+    for key in ("bg_width", "bg_height"):
+        if key in body:
+            v = body.get(key)
+            if v is not None and (not isinstance(v, int) or isinstance(v, bool)
+                                  or not (1 <= v <= 20000)):
+                abort_problem(422, "Invalid background",
+                              f"'{key}' must be an integer 1–20000 or null.")
+            setattr(config, key, v)
+
+    s.add(AuditLog(
+        actor_user_id=user_id, group_id=ev.group_id,
+        action=audit_action, target=str(ev.id),
+        after=audit_after if audit_after is not None else f"tiles={len(tiles_in)}",
+    ))
+
+
+# --------------------------------------------------------------------------- #
+# Routes
+# --------------------------------------------------------------------------- #
+@event_board_bp.get("/events/<int:event_id>/board")
+async def get_board(event_id: int):
+    viewer_id = optional_user_id()
+
+    def _read():
+        with db_session() as s:
+            ev = _load_board_event(s, event_id, for_write=False)
+            if _effective_status(ev) == "draft" and not _can_view_draft(s, viewer_id, ev):
+                abort_problem(404, "Event not found", f"No event {event_id}.")
+            return _board_payload(s, ev)
+
+    return private_no_store(jsonify(await asyncio.to_thread(_read)))
+
+
+@event_board_bp.put("/events/<int:event_id>/board")
+async def put_board(event_id: int):
+    """Replace the whole tile layout (the designer's autosave). Body:
+    { background_url?, bg_width?, bg_height?,
+      tiles: [{idx, x, y, label?, difficulty?, task_id?, library_item_id?,
+               tile_kind?}] }
+    Exactly one of difficulty / task_id / library_item_id per tile (or none =
+    rest tile). idx must cover 0..N-1 uniquely."""
+    user_id = current_user_id()
+    body = await json_body()
+    tiles_in = body.get("tiles")
+    _validate_tiles_payload(tiles_in)
+
     def _apply():
         with db_session() as s:
             ev = _load_board_event(s, event_id, for_write=True)
             _assert_event_admin(s, user_id, ev)
             _assert_board_editable(ev)
-
-            # Resolve bindings.
-            event_task_ids = {
-                tid for (tid,) in s.query(EventTask.id)
-                .filter(EventTask.event_id == ev.id).all()
-            }
-            lib_ids = [c["library_item_id"] for c in tiles_in
-                       if c.get("library_item_id") is not None]
-            lib_rows = {}
-            if lib_ids:
-                for row in (s.query(EventTaskLibraryItem)
-                            .filter(EventTaskLibraryItem.id.in_(lib_ids),
-                                    EventTaskLibraryItem.active.is_(True)).all()):
-                    lib_rows[row.id] = row
-                missing = [i for i in lib_ids if i not in lib_rows]
-                if missing:
-                    abort_problem(404, "Library preset not found",
-                                  f"Library item(s) {missing} not found or inactive.")
-            for cell in tiles_in:
-                tid = cell.get("task_id")
-                if tid is not None and tid not in event_task_ids:
-                    abort_problem(422, "Invalid tile",
-                                  f"task_id {tid} does not belong to this event.")
-
-            # Record designer-created pinned tasks on the OLD board for GC.
-            old_tiles = (s.query(EventBoardTile)
-                         .filter(EventBoardTile.event_id == ev.id).all())
-            old_pin_ids = set()
-            for t in old_tiles:
-                if t.task_id:
-                    task = s.query(EventTask).filter(EventTask.id == t.task_id).first()
-                    if task is not None:
-                        try:
-                            if json.loads(task.config or "{}").get(_BOARD_PIN_KEY):
-                                old_pin_ids.add(task.id)
-                        except (TypeError, ValueError):
-                            pass
-
-            # Replace tiles wholesale (bingo pattern).
-            (s.query(EventBoardTile)
-             .filter(EventBoardTile.event_id == ev.id)
-             .delete(synchronize_session=False))
-
-            kept_task_ids = set()
-            for cell in tiles_in:
-                task_id = cell.get("task_id")
-                lib_id = cell.get("library_item_id")
-                if lib_id is not None:
-                    preset = lib_rows[lib_id]
-                    cfg = {}
-                    if preset.config:
-                        try:
-                            parsed = json.loads(preset.config)
-                            if isinstance(parsed, dict):
-                                cfg = parsed
-                        except (TypeError, ValueError):
-                            cfg = {}
-                    cfg[_BOARD_PIN_KEY] = True
-                    task = EventTask(
-                        event_id=ev.id, type=preset.type, label=preset.name,
-                        target=preset.target, target_value=preset.target_value,
-                        points=int(preset.default_points or 0),
-                        requires_confirmation=False,
-                        config=json.dumps(cfg), visibility="private",
-                        difficulty=preset.difficulty,
-                    )
-                    s.add(task)
-                    s.flush()
-                    task_id = task.id
-                if task_id is not None:
-                    kept_task_ids.add(task_id)
-                s.add(EventBoardTile(
-                    event_id=ev.id,
-                    idx=cell["idx"],
-                    x=float(cell["x"]),
-                    y=float(cell["y"]),
-                    label=(cell.get("label") or "").strip()[:255] or None,
-                    difficulty=cell.get("difficulty"),
-                    task_id=task_id,
-                    tile_kind=cell.get("tile_kind") or "normal",
-                    config=None,
-                ))
-
-            # GC designer-created pins the new board dropped (unless the
-            # engine already wrote ledger rows against them).
-            from db.models import EventCompletion
-
-            for tid in sorted(old_pin_ids - kept_task_ids):
-                used = (s.query(EventCompletion.id)
-                        .filter(EventCompletion.task_id == tid).first())
-                if used:
-                    continue
-                (s.query(EventProgress)
-                 .filter(EventProgress.task_id == tid)
-                 .delete(synchronize_session=False))
-                (s.query(EventTask)
-                 .filter(EventTask.id == tid, EventTask.event_id == ev.id)
-                 .delete(synchronize_session=False))
-
-            # Upsert the config row (background ref rides along with layout).
-            config = (s.query(EventBoardConfig)
-                      .filter(EventBoardConfig.event_id == ev.id).first())
-            if config is None:
-                config = EventBoardConfig(event_id=ev.id)
-                s.add(config)
-            if "background_url" in body:
-                bg = body.get("background_url")
-                if bg is not None and (not isinstance(bg, str) or len(bg) > 255):
-                    abort_problem(422, "Invalid background",
-                                  "'background_url' must be a string (≤255) or null.")
-                config.background_url = bg or None
-            for key in ("bg_width", "bg_height"):
-                if key in body:
-                    v = body.get(key)
-                    if v is not None and (not isinstance(v, int) or isinstance(v, bool)
-                                          or not (1 <= v <= 20000)):
-                        abort_problem(422, "Invalid background",
-                                      f"'{key}' must be an integer 1–20000 or null.")
-                    setattr(config, key, v)
-
-            s.add(AuditLog(
-                actor_user_id=user_id, group_id=ev.group_id,
-                action="event.board.replace", target=str(ev.id),
-                after=f"tiles={len(tiles_in)}",
-            ))
+            _write_board(s, ev, user_id, tiles_in, body)
             s.commit()
             return _board_payload(s, ev)
 
@@ -718,6 +738,144 @@ async def roll_board(event_id: int):
     summary = await asyncio.to_thread(_apply)
     _bump(event_id)
     return private_no_store(jsonify(summary))
+
+
+# --------------------------------------------------------------------------- #
+# Procedural generation (web46a)
+# --------------------------------------------------------------------------- #
+@event_board_bp.post("/events/<int:event_id>/board/generate")
+async def generate_board(event_id: int):
+    """Roll a whole procedural board (art + sequential tile track) in one shot.
+
+    Body (all optional): { seed?, regions?, tiles?, style?, title?, subtitle?,
+    watermark? }. The boardgen engine draws a winding start->finish path; each
+    path tile becomes a track tile (idx in order, x/y fractional, difficulty
+    cycling air->water->earth->fire, ends start/finish). The rendered SVG is
+    published to B2 and set as the tile background. Draft-only, event admin —
+    same gate as the designer autosave. Everything stays editable afterward."""
+    user_id = current_user_id()
+    body = await json_body()
+
+    from services.boardgame_generator import (
+        build_board_assets,
+        normalize_params,
+        upload_board_svg,
+    )
+
+    try:
+        params = normalize_params(
+            seed=body.get("seed"),
+            regions=body.get("regions"),
+            tiles=body.get("tiles"),
+            style=body.get("style"),
+            title=body.get("title"),
+            subtitle=body.get("subtitle"),
+            watermark=body.get("watermark"),
+        )
+    except ValueError as e:
+        abort_problem(422, "Invalid generation params", str(e))
+
+    # Gate before spending any CPU / B2 on generation.
+    def _precheck():
+        with db_session() as s:
+            ev = _load_board_event(s, event_id, for_write=True)
+            _assert_event_admin(s, user_id, ev)
+            _assert_board_editable(ev)
+
+    await asyncio.to_thread(_precheck)
+
+    assets = await asyncio.to_thread(build_board_assets, params)
+    _validate_tiles_payload(assets["tiles"])  # defensive: honor the same contract
+
+    try:
+        background_url = await upload_board_svg(
+            assets["svg"], event_id, params.seed)
+    except Exception as e:
+        abort_problem(502, "Board art upload failed", str(e))
+
+    synthetic_bg = {
+        "background_url": background_url,
+        "bg_width": assets["width"],
+        "bg_height": assets["height"],
+    }
+
+    def _apply():
+        with db_session() as s:
+            ev = _load_board_event(s, event_id, for_write=True)
+            _assert_event_admin(s, user_id, ev)
+            _assert_board_editable(ev)
+            _write_board(
+                s, ev, user_id, assets["tiles"], synthetic_bg,
+                audit_action="event.board.generate",
+                audit_after=(f"seed={params.seed} style={params.style} "
+                             f"tiles={len(assets['tiles'])}"),
+            )
+            s.commit()
+            return _board_payload(s, ev)
+
+    payload = await asyncio.to_thread(_apply)
+    payload["generated"] = assets["meta"]
+    _bump(event_id)
+    return private_no_store(jsonify(payload))
+
+
+@event_board_bp.get("/events/<int:event_id>/board.png")
+async def board_png(event_id: int):
+    """Flatten the board's background art to a PNG (Discord attachment /
+    download). Rasterizes the stored SVG background via headless chromium;
+    a raster background (admin-uploaded PNG/JPEG/WebP) is proxied as-is.
+    ?scale=0.25..2 controls output resolution (default 1)."""
+    viewer_id = optional_user_id()
+    raw_scale = (request.args.get("scale") or "").strip()
+    try:
+        scale = float(raw_scale) if raw_scale else 1.0
+    except ValueError:
+        scale = 1.0
+    scale = max(0.25, min(2.0, scale))
+
+    def _read_bg():
+        with db_session() as s:
+            ev = _load_board_event(s, event_id, for_write=False)
+            if _effective_status(ev) == "draft" and not _can_view_draft(s, viewer_id, ev):
+                abort_problem(404, "Event not found", f"No event {event_id}.")
+            config = (s.query(EventBoardConfig)
+                      .filter(EventBoardConfig.event_id == ev.id).first())
+            if not config or not config.background_url:
+                abort_problem(404, "No board art",
+                              "This board has no background image to render.")
+            return config.background_url, config.bg_width, config.bg_height
+
+    background_url, bg_width, bg_height = await asyncio.to_thread(_read_bg)
+
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(background_url)
+            resp.raise_for_status()
+            raw = resp.content
+            content_type = resp.headers.get("content-type", "").lower()
+    except Exception as e:
+        abort_problem(502, "Couldn't fetch board art", str(e))
+
+    is_svg = "svg" in content_type or raw[:256].lstrip().startswith((b"<svg", b"<?xml"))
+    if not is_svg:
+        # Already a raster — hand it straight back (no chromium needed).
+        return Response(raw, content_type=content_type or "image/png", headers={
+            "Content-Disposition": f'inline; filename="board-{event_id}.png"',
+        })
+
+    from services.boardgame_generator import rasterize_svg_to_png
+
+    try:
+        png = await rasterize_svg_to_png(
+            raw.decode("utf-8"), int(bg_width or 1600), int(bg_height or 900),
+            scale=scale)
+    except Exception as e:
+        abort_problem(502, "Board render failed", str(e))
+    return Response(png, content_type="image/png", headers={
+        "Content-Disposition": f'inline; filename="board-{event_id}.png"',
+    })
 
 
 # --------------------------------------------------------------------------- #
