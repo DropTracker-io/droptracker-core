@@ -1138,13 +1138,23 @@ async def main():
                         # the process on exit below. Cancelling bot_task triggers
                         # interactions' astart() finally -> bot.stop() (clean
                         # gateway/HTTP close).
-                        try:
-                            await asyncio.wait_for(
-                                asyncio.gather(bot_task, quart_task, return_exceptions=True),
-                                timeout=15,
+                        #
+                        # Use asyncio.wait (NOT wait_for(gather())): on timeout,
+                        # wait_for CANCELS the inner gather and then awaits that
+                        # cancellation to finish — if a child task (e.g. interactions'
+                        # detached shard task) ignores the cancel, wait_for itself
+                        # hangs and its "timed out" branch never runs. asyncio.wait
+                        # just returns (done, pending) after the deadline and leaves
+                        # stragglers alone; the force-exit in main()'s finally reaps
+                        # them so we never exceed TimeoutStopSec.
+                        _done, still_pending = await asyncio.wait(
+                            {bot_task, quart_task}, timeout=15
+                        )
+                        if still_pending:
+                            print(
+                                f"Timed out waiting for {len(still_pending)} task(s) "
+                                "to cancel; exiting anyway."
                             )
-                        except asyncio.TimeoutError:
-                            print("Timed out waiting for tasks to cancel; exiting anyway.")
                         break
                     
                     # Check if any task failed
@@ -1202,6 +1212,23 @@ async def main():
         raise
     finally:
         print("Cleanup completed")
+        # After main() returns, asyncio.run() runs its own teardown:
+        # _cancel_all_tasks() (gathers every remaining task — a detached
+        # interactions shard task or a hypercorn connection task that ignores
+        # cancellation blocks here) and shutdown_default_executor() (on Python
+        # 3.11 this waits with NO timeout for in-flight run_in_executor/to_thread
+        # DB/network jobs to finish). Either can block for the full
+        # TimeoutStopSec, so systemd SIGKILLs us (status=9/KILL) even though our
+        # own cleanup already finished — exactly the intermittent hang seen in
+        # journalctl. By this point the graceful path has closed the gateway,
+        # drained notifications, and sent STOPPING=1 to systemd, so on a real
+        # shutdown just exit immediately with success and skip that teardown.
+        # (Not on the fatal-error path: leave the exception to propagate so the
+        # process exits non-zero and Restart=on-failure kicks in.)
+        if shutdown_event.is_set():
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(0)
 
 
 
