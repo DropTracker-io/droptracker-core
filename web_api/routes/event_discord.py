@@ -33,12 +33,13 @@ from __future__ import annotations
 import asyncio
 import json
 
-from quart import Blueprint, jsonify
+from quart import Blueprint, jsonify, request
 
 from db import (
     AuditLog,
     Event,
     EventChannel,
+    EventGroup,
     EventGuild,
     Group,
     GroupAdmin,
@@ -63,6 +64,7 @@ from web_api.routes.events import (
     _load_event_or_404,
     _parse_ping_config,
     _sync_event_guilds,
+    participating_group_ids,
 )
 
 event_discord_bp = Blueprint("v1_event_discord", __name__)
@@ -203,21 +205,65 @@ def _assert_can_target_guild(s, user_id: int, guild_id: str) -> None:
     )
 
 
-def _config_payload(s, ev: Event) -> dict:
-    rows = s.query(EventChannel).filter(EventChannel.event_id == ev.id).all()
-    channels = {r.kind: str(r.channel_id) for r in rows if r.channel_id}
-    guild_id = str(ev.discord_guild_id) if ev.discord_guild_id else None
-    guild_name = None
-    if guild_id:
-        for g in _bot_guilds() or []:
-            if str(g.get("id")) == guild_id:
-                guild_name = g.get("name")
-                break
+def _guild_name(guild_id) -> str | None:
+    if not guild_id:
+        return None
+    for g in _bot_guilds() or []:
+        if str(g.get("id")) == str(guild_id):
+            return g.get("name")
+    return None
+
+
+def _admin_participating_group_ids(s, user_id: int, ev: Event) -> set[int]:
+    """Accepted participating clans the user administers (clan_vs_clan)."""
+    user = load_user(s, user_id)
+    mgids = manageable_guild_ids(user_id)
+    return {
+        gid for gid in participating_group_ids(s, ev)
+        if resolve_group_role(s, user_id, gid, mgids, user=user) in ("owner", "admin")
+    }
+
+
+def _is_host_admin(s, user_id: int, ev: Event) -> bool:
+    """Whether the user administers the HOST group (or is superadmin) — the
+    only people who may flip event-wide knobs like per_group_discord."""
+    user = load_user(s, user_id)
+    if is_superadmin(user):
+        return True
+    if not ev.group_id:
+        return False
+    role = resolve_group_role(s, user_id, ev.group_id, manageable_guild_ids(user_id), user=user)
+    return role in ("owner", "admin")
+
+
+def _config_payload(s, ev: Event, group_id: int | None = None) -> dict:
+    """One Discord config scope. ``group_id=None`` is the shared/host scope
+    (the only shape before web48a); a group id is that clan's own per-group
+    scope (Event.per_group_discord)."""
+    rows = (s.query(EventChannel)
+            .filter(EventChannel.event_id == ev.id)
+            .all())
+    channels = {
+        r.kind: str(r.channel_id) for r in rows
+        if r.channel_id and (getattr(r, "group_id", None) or None) == group_id
+    }
+    part = None
+    if group_id is not None:
+        part = (s.query(EventGroup)
+                .filter(EventGroup.event_id == ev.id, EventGroup.group_id == group_id)
+                .first())
+        guild_id = str(part.discord_guild_id) if part and part.discord_guild_id else None
+        messages = _effective_message_config(
+            part.message_config if part and part.message_config
+            else getattr(ev, "message_config", None))
+    else:
+        guild_id = str(ev.discord_guild_id) if ev.discord_guild_id else None
+        messages = _effective_message_config(getattr(ev, "message_config", None))
     # Discord scheduled-event mirror state (web_event_guilds, written back by
     # the bot reconciler) so the UI can show e.g. "couldn't create the Discord
     # event — grant the bot Manage Events" instead of failing silently.
     scheduled_event = None
-    if guild_id:
+    if guild_id and group_id is None:
         row = (
             s.query(EventGuild)
             .filter(EventGuild.event_id == ev.id, EventGuild.guild_id == guild_id)
@@ -231,18 +277,23 @@ def _config_payload(s, ev: Event) -> dict:
             }
     return {
         "guild_id": guild_id,
-        "guild_name": guild_name,
+        "guild_name": _guild_name(guild_id),
         "channels": channels,
         "scheduled_event": scheduled_event,
         # When the mirror goes live (on_activate: nothing while a draft) and
         # which roles each ping key mentions — both edited on this same PUT.
+        # Event-level even in a group scope (pings only fire on the host's
+        # destination; the UI hides them for group scopes).
         "discord_event_policy": getattr(ev, "discord_event_policy", None) or "on_activate",
         "pings": _event_pings(ev),
         # Messaging verbosity + live board knobs, always returned fully
         # merged with the defaults (the UI never needs its own default table).
         # Lazy import: the unit-test conftest stubs `services` (established
         # pattern — see services/event_notifications.py module docstring).
-        "messages": _effective_message_config(getattr(ev, "message_config", None)),
+        "messages": messages,
+        # web48a scope context for the UI.
+        "per_group_discord": bool(getattr(ev, "per_group_discord", False)),
+        "group_id": group_id,
     }
 
 
@@ -389,15 +440,74 @@ async def list_discord_guild_roles(guild_id: str):
 # --------------------------------------------------------------------------- #
 # Per-event config
 # --------------------------------------------------------------------------- #
+def _assert_group_scope(s, user_id: int, ev: Event, group_id: int) -> None:
+    """Gate for a per-group config scope: clan_vs_clan only, the group must be
+    an accepted participant, and the user must administer THAT group (each
+    clan touches only its own destinations). Superadmins pass."""
+    if (getattr(ev, "mode", None) or "standard") != "clan_vs_clan":
+        abort_problem(409, "Not clan-vs-clan",
+                      "Per-group Discord config only exists on clan-vs-clan events.")
+    if group_id not in participating_group_ids(s, ev):
+        abort_problem(404, "Not a participant",
+                      f"Group {group_id} is not an accepted participant of this event.")
+    if is_superadmin(load_user(s, user_id)):
+        return
+    if group_id not in _admin_participating_group_ids(s, user_id, ev):
+        abort_problem(403, "Not your clan",
+                      "You can only configure Discord for a clan you administer.")
+
+
+def _group_scopes(s, ev: Event) -> list:
+    """Participating-clan scope list for the host UI: who's in, whether they
+    have configured their own channels, and their chosen guild."""
+    configured = {
+        gid for (gid,) in
+        s.query(EventChannel.group_id)
+        .filter(EventChannel.event_id == ev.id, EventChannel.group_id.isnot(None))
+        .distinct()
+    }
+    rows = (
+        s.query(EventGroup, Group.group_name)
+        .join(Group, Group.group_id == EventGroup.group_id)
+        .filter(EventGroup.event_id == ev.id, EventGroup.status == "accepted")
+        .order_by(EventGroup.id.asc())
+        .all()
+    )
+    return [
+        {
+            "group_id": g.group_id,
+            "name": name,
+            "role": g.role,
+            "configured": g.group_id in configured,
+            "guild_id": str(g.discord_guild_id) if getattr(g, "discord_guild_id", None) else None,
+        }
+        for g, name in rows
+    ]
+
+
 @event_discord_bp.get("/events/<int:event_id>/discord")
 async def get_event_discord(event_id: int):
+    """One config scope: shared/host by default, or a participating clan's own
+    scope via ``?group_id=`` (web48a per-group discord). The shared scope of a
+    clan-vs-clan event additionally lists the participating-clan scopes and
+    which of them the viewer administers, so the UI can route."""
     user_id = current_user_id()
+    raw_group = (request.args.get("group_id") or "").strip()
+    scope_group_id = int(raw_group) if raw_group.isdigit() else None
 
     def _load():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
+            if scope_group_id is not None:
+                _assert_group_scope(s, user_id, ev, scope_group_id)
+                return _config_payload(s, ev, group_id=scope_group_id)
             _assert_event_admin(s, user_id, ev)
-            return _config_payload(s, ev)
+            payload = _config_payload(s, ev)
+            if (getattr(ev, "mode", None) or "standard") == "clan_vs_clan":
+                payload["groups"] = _group_scopes(s, ev)
+                payload["my_group_ids"] = sorted(_admin_participating_group_ids(s, user_id, ev))
+                payload["is_host_admin"] = _is_host_admin(s, user_id, ev)
+            return payload
 
     payload = await asyncio.to_thread(_load)
     return private_no_store(jsonify(payload))
@@ -412,6 +522,13 @@ async def put_event_discord(event_id: int):
     (a cold cache never blocks saving — manual-id entry must always work)."""
     user_id = current_user_id()
     body = await json_body()
+
+    # Scope: absent/None = the shared/host config; a group id = that clan's
+    # own per-group destinations (web48a).
+    scope_group_id = body.get("group_id")
+    if scope_group_id is not None and (
+            not isinstance(scope_group_id, int) or isinstance(scope_group_id, bool)):
+        abort_problem(422, "Invalid group_id", "'group_id' must be an integer or null.")
 
     guild_id = body.get("guild_id")
     raw_channels = body.get("channels") or {}
@@ -430,6 +547,16 @@ async def put_event_discord(event_id: int):
     ping_config = _parse_ping_config(body.get("pings")) if pings_provided else None
     messages_provided = "messages" in body
     message_config = _parse_message_config(body.get("messages")) if messages_provided else None
+    per_group_provided = "per_group_discord" in body
+    per_group_value = body.get("per_group_discord")
+    if per_group_provided and not isinstance(per_group_value, bool):
+        abort_problem(422, "Invalid per_group_discord",
+                      "'per_group_discord' must be a boolean.")
+    if scope_group_id is not None and (discord_event_policy is not None
+                                       or pings_provided or per_group_provided):
+        abort_problem(422, "Event-level fields in group scope",
+                      "discord_event_policy / pings / per_group_discord are "
+                      "event-level — save them without group_id.")
 
     if guild_id is None:
         if raw_channels:
@@ -477,28 +604,62 @@ async def put_event_discord(event_id: int):
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev)
+            if scope_group_id is not None:
+                _assert_group_scope(s, user_id, ev, scope_group_id)
+            else:
+                _assert_event_admin(s, user_id, ev)
+                if per_group_provided and not _is_host_admin(s, user_id, ev):
+                    abort_problem(403, "Host admins only",
+                                  "Only the host clan's admins can toggle "
+                                  "per-group Discord config.")
+                if per_group_provided and per_group_value and (
+                        (getattr(ev, "mode", None) or "standard") != "clan_vs_clan"):
+                    abort_problem(409, "Not clan-vs-clan",
+                                  "Per-group Discord config only applies to "
+                                  "clan-vs-clan events.")
 
-            before = _config_payload(s, ev)
+            before = _config_payload(s, ev, group_id=scope_group_id)
             # The security boundary: only require guild authority when the
             # target is being set to a NEW guild. Keeping an already-vetted
             # (or superadmin-set) guild while editing channels stays open to
             # co-admins; pointing the event at a different guild does not.
-            if guild_id is not None and str(guild_id) != (
-                str(ev.discord_guild_id) if ev.discord_guild_id else None
-            ):
+            part = None
+            if scope_group_id is not None:
+                part = (s.query(EventGroup)
+                        .filter(EventGroup.event_id == ev.id,
+                                EventGroup.group_id == scope_group_id)
+                        .first())
+                current_guild = (str(part.discord_guild_id)
+                                 if part and part.discord_guild_id else None)
+            else:
+                current_guild = str(ev.discord_guild_id) if ev.discord_guild_id else None
+            if guild_id is not None and str(guild_id) != current_guild:
                 _assert_can_target_guild(s, user_id, guild_id)
-            ev.discord_guild_id = guild_id
-            if discord_event_policy is not None:
-                ev.discord_event_policy = discord_event_policy
-            if pings_provided:
-                ev.ping_config = ping_config
-            if messages_provided:
-                ev.message_config = message_config
+
+            if scope_group_id is not None:
+                if part is None:  # accepted participant always has a row, but be safe
+                    abort_problem(404, "Not a participant",
+                                  f"Group {scope_group_id} has no participant row.")
+                part.discord_guild_id = guild_id
+                if messages_provided:
+                    part.message_config = message_config
+            else:
+                ev.discord_guild_id = guild_id
+                if discord_event_policy is not None:
+                    ev.discord_event_policy = discord_event_policy
+                if pings_provided:
+                    ev.ping_config = ping_config
+                if messages_provided:
+                    ev.message_config = message_config
+                if per_group_provided:
+                    ev.per_group_discord = per_group_value
 
             existing = {
                 row.kind: row
-                for row in s.query(EventChannel).filter(EventChannel.event_id == event_id).all()
+                for row in s.query(EventChannel)
+                .filter(EventChannel.event_id == event_id)
+                .all()
+                if (getattr(row, "group_id", None) or None) == scope_group_id
             }
             for kind, row in existing.items():
                 if kind not in channels:
@@ -514,28 +675,34 @@ async def put_event_discord(event_id: int):
                         row.message_updated_at = None
                     row.channel_id = channel_id
                 else:
-                    s.add(EventChannel(event_id=event_id, kind=kind, channel_id=channel_id))
-            # Keep the Discord scheduled-event mirror in step: a re-pointed
-            # guild retires the old guild's row (delete_pending) and seeds the
-            # new one (pending); clearing the guild retires everything.
-            _sync_event_guilds(s, ev)
+                    s.add(EventChannel(event_id=event_id, kind=kind,
+                                       channel_id=channel_id,
+                                       group_id=scope_group_id))
+            if scope_group_id is None:
+                # Keep the Discord scheduled-event mirror in step: a re-pointed
+                # guild retires the old guild's row (delete_pending) and seeds
+                # the new one (pending); clearing the guild retires everything.
+                _sync_event_guilds(s, ev)
             s.flush()
 
-            after = _config_payload(s, ev)
+            after = _config_payload(s, ev, group_id=scope_group_id)
             s.add(AuditLog(
                 actor_user_id=user_id,
-                group_id=ev.group_id,
+                group_id=scope_group_id if scope_group_id is not None else ev.group_id,
                 action="event.discord.update",
-                target=f"web_events.{event_id}",
+                target=f"web_events.{event_id}" + (
+                    f".group.{scope_group_id}" if scope_group_id is not None else ""),
                 before=json.dumps({
                     "guild_id": before["guild_id"], "channels": before["channels"],
                     "discord_event_policy": before["discord_event_policy"],
                     "pings": before["pings"], "messages": before["messages"],
+                    "per_group_discord": before["per_group_discord"],
                 }),
                 after=json.dumps({
                     "guild_id": after["guild_id"], "channels": after["channels"],
                     "discord_event_policy": after["discord_event_policy"],
                     "pings": after["pings"], "messages": after["messages"],
+                    "per_group_discord": after["per_group_discord"],
                 }),
             ))
             s.commit()

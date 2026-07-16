@@ -273,12 +273,59 @@ def resolve_event_channel(channels_by_kind: dict, notification_type: str) -> Opt
     return str(channel_id) if channel_id else None
 
 
-def load_event_channels(session, event_id: int) -> dict:
-    """{kind: channel_id} for one event (lazy db import — see module docstring)."""
+def load_event_channels(session, event_id: int, group_id=None) -> dict:
+    """{kind: channel_id} for one event (lazy db import — see module docstring).
+
+    ``group_id`` selects a clan's own per-group channel set (web48a,
+    Event.per_group_discord); None returns the shared/host rows (the only
+    shape before web48a). Rows are partitioned — a group NEVER inherits
+    individual kinds from the shared set here; fallback to the whole shared
+    set is the caller's call (see notification_service per-group fan-out)."""
     from db.models import EventChannel
 
-    rows = session.query(EventChannel).filter(EventChannel.event_id == event_id).all()
-    return {r.kind: str(r.channel_id) for r in rows if r.channel_id}
+    query = session.query(EventChannel).filter(EventChannel.event_id == event_id)
+    if group_id is None:
+        query = query.filter(EventChannel.group_id.is_(None))
+    else:
+        query = query.filter(EventChannel.group_id == group_id)
+    return {r.kind: str(r.channel_id) for r in query.all() if r.channel_id}
+
+
+def per_group_discord_enabled(event) -> bool:
+    """Whether this event fans notifications out per participating clan
+    (clan_vs_clan + the per_group_discord flag)."""
+    return bool(getattr(event, "per_group_discord", False)) and (
+        (getattr(event, "mode", None) or "standard") == "clan_vs_clan")
+
+
+def load_group_destinations(session, event) -> list:
+    """Per-clan send destinations for a per-group-discord event: one entry per
+    ACCEPTED participating clan — ``{"group_id", "channels", "message_config"}``
+    where ``channels`` falls back to the event's shared rows when the clan
+    hasn't configured its own, and ``message_config`` is the clan's effective
+    verbosity (its own override or the event's). The caller dedupes by
+    resolved channel id so two clans pointing at the same channel (e.g. both
+    falling back to shared) never double-post."""
+    from db.models import EventGroup
+
+    shared = load_event_channels(session, event.id)
+    groups = (session.query(EventGroup)
+              .filter(EventGroup.event_id == event.id,
+                      EventGroup.status == "accepted")
+              .order_by(EventGroup.id.asc())
+              .all())
+    destinations = []
+    for g in groups:
+        own = load_event_channels(session, event.id, group_id=g.group_id)
+        destinations.append({
+            "group_id": g.group_id,
+            "channels": own or shared,
+            "own_channels": bool(own),
+            "message_config": effective_message_config(
+                g.message_config if g.message_config
+                else getattr(event, "message_config", None)),
+        })
+    return destinations
 
 
 # --------------------------------------------------------------------------- #

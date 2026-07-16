@@ -186,6 +186,18 @@ EVENT_MESSAGE_LAYOUT_TYPES = EVENT_MESSAGE_TOGGLE_KEYS + (
     "event_board",
 )
 
+# Team-leadership roles a roster row may carry (web_event_team_members.role;
+# NULL = plain member). Leaders hold executive authority for their team —
+# today that gates board-game turn actions (roll/shop); co-leaders share it.
+EVENT_TEAM_ROLES = ("leader", "co_leader")
+
+# How a team's leader is chosen (web_events.leadership_config JSON key
+# "selection"):
+# - "admin"    — event admins assign/remove leaders (default).
+# - "election" — team members vote for a teammate; a strict plurality wins.
+#                Admin assignment still works as an override either way.
+EVENT_LEADER_SELECTION_MODES = ("admin", "election")
+
 
 class Event(Base):
     # Namespaced under `web_*` to avoid colliding with the pre-existing legacy
@@ -232,6 +244,15 @@ class Event(Base):
     # "top_n", "show_tasks"}}). NULL = all defaults; merge semantics in
     # services/event_notifications.py effective_message_config().
     message_config = Column(Text, nullable=True)
+    # JSON team-leadership knobs ({"enabled": bool, "co_leaders": bool,
+    # "selection": EVENT_LEADER_SELECTION_MODES}). NULL = disabled. Merge
+    # semantics in services/event_leadership.effective_leadership().
+    leadership_config = Column(Text, nullable=True)
+    # Clan-vs-clan only: each participating clan configures its OWN Discord
+    # channels (web_event_channels.group_id) and verbosity
+    # (web_event_groups.message_config) — notifications fan out to every
+    # accepted clan's destinations instead of the single host-configured set.
+    per_group_discord = Column(Boolean, nullable=False, default=False, server_default="0")
     board_size = Column(Integer, nullable=False, default=5)  # EVENT_BOARD_SIZES
     bonus_line_points = Column(Integer, nullable=False, default=0)
     bonus_blackout_points = Column(Integer, nullable=False, default=0)
@@ -317,6 +338,14 @@ class EventGroup(Base):
     mirror_discord_event = Column(
         Boolean, nullable=False, default=False, server_default="0"
     )
+    # Per-clan messaging verbosity for Event.per_group_discord: same JSON shape
+    # as web_events.message_config (stored fully merged, like the event's).
+    # NULL = inherit the event-level config.
+    message_config = Column(Text, nullable=True)
+    # The guild this clan's per-group channels live in (channel pickers +
+    # validation; sending only needs the channel snowflakes). NULL until the
+    # clan configures per-group Discord.
+    discord_guild_id = Column(String(32), nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
@@ -328,6 +357,33 @@ class EventTeamMember(Base):
     player_id = Column(Integer, ForeignKey("players.player_id"), primary_key=True)
     # Credit cutoff: the engine ignores submissions timestamped earlier (PRD D10).
     joined_at = Column(DateTime, default=func.now(), nullable=False)
+    # EVENT_TEAM_ROLES ("leader"/"co_leader"); NULL = plain member. Only
+    # meaningful when the event's leadership_config enables leadership.
+    role = Column(String(16), nullable=True)
+
+
+class EventLeaderVote(Base):
+    """One team member's vote for who should lead their team (election mode).
+
+    One live vote per (event, voter) — re-voting replaces it. The tally runs
+    after every vote: a candidate with a STRICT plurality of the team's votes
+    becomes leader (services/event_leadership.py); ties leave the current
+    leader in place. Admin assignment always overrides."""
+
+    __tablename__ = "web_event_leader_votes"
+    __table_args__ = (
+        Index("uq_web_evt_leader_vote", "event_id", "voter_player_id", unique=True),
+        Index("idx_web_evt_leader_vote_team", "event_id", "team_id"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    team_id = Column(Integer, ForeignKey("web_event_teams.id"), nullable=False)
+    voter_player_id = Column(Integer, ForeignKey("players.player_id"), nullable=False)
+    candidate_player_id = Column(Integer, ForeignKey("players.player_id"), nullable=False)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class EventSignup(Base):
@@ -469,7 +525,10 @@ class EventChannel(Base):
 
     __tablename__ = "web_event_channels"
     __table_args__ = (
-        Index("uq_web_event_channel", "event_id", "kind", unique=True),
+        # Renamed from uq_web_event_channel (web48a): the old (event_id, kind)
+        # index backs the event_id FK, so the widened index must be CREATED
+        # under a new name before the old one can drop.
+        Index("uq_web_event_channel_grp", "event_id", "kind", "group_id", unique=True),
         {"extend_existing": True},
     )
 
@@ -477,6 +536,11 @@ class EventChannel(Base):
     event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
     kind = Column(String(24), nullable=False)  # EVENT_CHANNEL_KINDS
     channel_id = Column(String(32), nullable=False)
+    # Owning clan for per-group clan-vs-clan configs (Event.per_group_discord):
+    # NULL = the event's shared/host config (the only shape before web48a).
+    # App-layer upserts key on the exact (event_id, kind, group_id) triple —
+    # MySQL unique indexes treat NULLs as distinct, so the index alone can't.
+    group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=True)
     # The persistent bot message living in this channel, when the kind has one
     # (today: the 'leaderboard' kind's live standings board — the lootboard
     # pattern: post once, edit in place, repost if it vanishes). Written back

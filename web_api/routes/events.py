@@ -48,6 +48,7 @@ from db import (
     EventBingoCompletion,
     EventCompletion,
     EventGroup,
+    EventLeaderVote,
     EventPlayerPoints,
     EventProgress,
     EventSignup,
@@ -63,6 +64,7 @@ from db import (
     EVENT_SUBMISSION_POLICIES,
     EVENT_TASK_DIFFICULTIES,
     EVENT_TASK_TYPES,
+    EVENT_TEAM_ROLES,
     EVENT_TASK_VISIBILITIES,
     EventTaskLibraryItem,
     Group,
@@ -180,9 +182,18 @@ def _summary(ev: Event) -> dict:
         "board_size": int(ev.board_size or 5),
         "bonus_line_points": int(ev.bonus_line_points or 0),
         "bonus_blackout_points": int(ev.bonus_blackout_points or 0),
+        "leadership": _leadership(ev),
+        "per_group_discord": bool(getattr(ev, "per_group_discord", False)),
         "activated_at": _ts(ev.activated_at),
         "ended_at": _ts(ev.ended_at),
     }
+
+
+def _leadership(ev: Event) -> dict:
+    """Effective team-leadership config for one event (web48a)."""
+    from web_api.event_leadership import effective_leadership
+
+    return effective_leadership(getattr(ev, "leadership_config", None))
 
 
 def participating_group_ids(s, ev) -> set[int]:
@@ -337,6 +348,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
                 "player_id": m.player_id,
                 "player_name": player_name,
                 "joined_at": _ts(m.joined_at),
+                "role": getattr(m, "role", None),
             })
     teams = []
     for tm in teams_rows:
@@ -375,10 +387,17 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
                         EventSignup.player_id.in_(my_player_ids))
                 .all()
             ]
+        my_roles = [
+            getattr(m, "role", None) for m, _ in member_rows
+            if m.player_id in my_player_ids and getattr(m, "role", None)
+        ]
         viewer = {
             "player_ids_on_event": [pid for pid, _ in on_event],
             "team_id": on_event[0][1] if on_event else None,
             "signed_up_player_ids": signed_up_pids,
+            # Leadership role any of the viewer's players holds on their team
+            # (web48a) — the client-side gate for board roll/shop buttons.
+            "team_role": my_roles[0] if my_roles else None,
         }
 
     bingo = None
@@ -768,12 +787,41 @@ async def get_event_team(event_id: int, team_id: int):
                     "player_id": m.player_id,
                     "player_name": player_name,
                     "joined_at": _ts(m.joined_at),
+                    "role": getattr(m, "role", None),
                     "completions": contrib.get(m.player_id, {}).get("completions", 0),
                     "quantity": contrib.get(m.player_id, {}).get("quantity", 0),
                     "points": round(ppoints.get(m.player_id, 0.0), 2),
                 }
                 for m, player_name in member_rows
             ]
+
+            # Leadership context for the roster UI: the viewer's own player on
+            # THIS team (if any), their role, and their live election vote.
+            viewer_block = None
+            if viewer_id is not None:
+                my_pids = [
+                    pid for (pid,) in
+                    s.query(Player.player_id).filter(Player.user_id == viewer_id).all()
+                ]
+                mine = next((m for m, _ in member_rows if m.player_id in my_pids), None)
+                if mine is not None:
+                    my_vote = (
+                        s.query(EventLeaderVote.candidate_player_id)
+                        .filter(EventLeaderVote.event_id == event_id,
+                                EventLeaderVote.voter_player_id == mine.player_id)
+                        .first()
+                    )
+                    viewer_block = {
+                        "player_id": mine.player_id,
+                        "role": getattr(mine, "role", None),
+                        "vote": my_vote[0] if my_vote else None,
+                        "is_admin": _is_event_admin(s, viewer_id, ev),
+                    }
+                else:
+                    viewer_block = {
+                        "player_id": None, "role": None, "vote": None,
+                        "is_admin": _is_event_admin(s, viewer_id, ev),
+                    }
 
             task_rows = s.query(EventTask).filter(EventTask.event_id == event_id).all()
             prog_by_task = {
@@ -843,6 +891,7 @@ async def get_event_team(event_id: int, team_id: int):
                 "members": members,
                 "tasks": tasks,
                 "activity": activity,
+                "viewer": viewer_block,
             }
 
     payload = await asyncio.to_thread(_load)
@@ -1237,6 +1286,35 @@ async def update_event(event_id: int):
                         f"submission_policy must be one of {list(EVENT_SUBMISSION_POLICIES)}.",
                     )
                 ev.submission_policy = policy
+            if "leadership" in body:
+                from web_api.event_leadership import (
+                    effective_leadership,
+                    normalize_leadership_input,
+                )
+
+                norm = normalize_leadership_input(body.get("leadership") or {})
+                if norm is None:
+                    abort_problem(
+                        422, "Invalid leadership config",
+                        "leadership must be {enabled?: bool, co_leaders?: bool, "
+                        "selection?: 'admin'|'election'}.",
+                    )
+                merged = effective_leadership(getattr(ev, "leadership_config", None))
+                merged.update(norm)
+                ev.leadership_config = json.dumps(merged)
+                if not merged["co_leaders"]:
+                    # Co-leaders switched off: demote existing ones so the
+                    # authority checks and rosters don't keep a dead role.
+                    team_ids = [
+                        tid for (tid,) in s.query(EventTeam.id)
+                        .filter(EventTeam.event_id == ev.id).all()
+                    ]
+                    if team_ids:
+                        (s.query(EventTeamMember)
+                         .filter(EventTeamMember.team_id.in_(team_ids),
+                                 EventTeamMember.role == "co_leader")
+                         .update({EventTeamMember.role: None},
+                                 synchronize_session=False))
             # Bingo bonus config (Task 20, PRD D7): 0 disables a bonus. The
             # board itself is replaced via PUT /events/{id}/bingo.
             for key in ("bonus_line_points", "bonus_blackout_points"):
@@ -2130,6 +2208,12 @@ async def leave_event(event_id: int):
             membership = _event_membership(s, event_id, player_id)
             if membership:
                 s.delete(membership)
+                # A departed member neither votes nor stands in the election.
+                (s.query(EventLeaderVote)
+                 .filter(EventLeaderVote.event_id == event_id,
+                         sa_or(EventLeaderVote.voter_player_id == player_id,
+                               EventLeaderVote.candidate_player_id == player_id))
+                 .delete(synchronize_session=False))
             # Also withdraw a sign-up-pool opt-in. Only signup_pool events ever
             # write signup rows, so other modes stay byte-for-byte (no query).
             signup = None
@@ -2194,6 +2278,13 @@ async def admin_add_member(event_id: int, team_id: int):
                 if existing.team_id == team_id:
                     return  # already on this team — no-op
                 s.delete(existing)  # move: joined_at resets on the new row
+                # Votes don't cross teams: drop the mover's vote and any
+                # votes cast for them on the old team.
+                (s.query(EventLeaderVote)
+                 .filter(EventLeaderVote.event_id == event_id,
+                         sa_or(EventLeaderVote.voter_player_id == player_id,
+                               EventLeaderVote.candidate_player_id == player_id))
+                 .delete(synchronize_session=False))
                 s.flush()
             s.add(EventTeamMember(team_id=team_id, player_id=player_id))
             s.add(
@@ -2241,6 +2332,12 @@ async def admin_remove_member(event_id: int, team_id: int, player_id: int):
             )
             if membership:
                 s.delete(membership)
+                # A departed member neither votes nor stands in the election.
+                (s.query(EventLeaderVote)
+                 .filter(EventLeaderVote.event_id == event_id,
+                         sa_or(EventLeaderVote.voter_player_id == player_id,
+                               EventLeaderVote.candidate_player_id == player_id))
+                 .delete(synchronize_session=False))
                 s.add(
                     AuditLog(
                         actor_user_id=user_id,
@@ -2256,6 +2353,182 @@ async def admin_remove_member(event_id: int, team_id: int, player_id: int):
     await asyncio.to_thread(_apply)
     _bump(event_id)
     return private_no_store(jsonify({"ok": True}))
+
+
+# --------------------------------------------------------------------------- #
+# Team leadership (web48a): leader / co-leader roles + elections
+# --------------------------------------------------------------------------- #
+def _load_team_or_404(s, event_id: int, team_id: int) -> EventTeam:
+    team = (s.query(EventTeam)
+            .filter(EventTeam.id == team_id, EventTeam.event_id == event_id)
+            .first())
+    if not team:
+        abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+    return team
+
+
+@events_bp.put("/events/<int:event_id>/teams/<int:team_id>/leadership")
+async def set_team_leadership(event_id: int, team_id: int):
+    """Assign a team's leader or co-leader. Event admins may assign either
+    role; a team's LEADER may appoint their own co-leader (that's the point
+    of executive authority). One holder per role — assigning demotes the
+    previous holder to plain member."""
+    user_id = current_user_id()
+    body = await json_body()
+    player_id = body.get("player_id")
+    role = body.get("role")
+
+    def _apply():
+        from web_api.event_leadership import set_team_role, team_role_for_user
+
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            config = _leadership(ev)
+            if not config["enabled"]:
+                abort_problem(409, "Leadership disabled",
+                              "This event does not use team leaders.")
+            if role not in EVENT_TEAM_ROLES:
+                abort_problem(422, "Invalid role",
+                              f"role must be one of {list(EVENT_TEAM_ROLES)}.")
+            if role == "co_leader" and not config["co_leaders"]:
+                abort_problem(409, "Co-leaders disabled",
+                              "This event does not use co-leaders.")
+            if not isinstance(player_id, int):
+                abort_problem(422, "Invalid player_id", "'player_id' must be an integer.")
+            _load_team_or_404(s, event_id, team_id)
+            if not _is_event_admin(s, user_id, ev):
+                if not (role == "co_leader"
+                        and team_role_for_user(s, team_id, user_id) == "leader"):
+                    abort_problem(403, "Not allowed",
+                                  "Only event admins (or the team's leader, for a "
+                                  "co-leader) can assign leadership.")
+            if not set_team_role(s, team_id, player_id, role):
+                abort_problem(404, "Not a member",
+                              "That player is not on this team.")
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id,
+                action="event.leadership.assign",
+                target=f"web_events.{event_id}.team.{team_id}",
+                before=None, after=f"{role}:{player_id}",
+            ))
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify({"ok": True}))
+
+
+@events_bp.delete("/events/<int:event_id>/teams/<int:team_id>/leadership/<int:player_id>")
+async def clear_team_leadership(event_id: int, team_id: int, player_id: int):
+    """Remove a leadership role. Event admins always may; a team leader may
+    demote their co-leader; and anyone may step down from a role held by a
+    player they own."""
+    user_id = current_user_id()
+
+    def _apply():
+        from web_api.event_leadership import team_role_for_user
+
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _load_team_or_404(s, event_id, team_id)
+            member = (s.query(EventTeamMember)
+                      .filter(EventTeamMember.team_id == team_id,
+                              EventTeamMember.player_id == player_id)
+                      .first())
+            if member is None or not member.role:
+                abort_problem(404, "No role", "That player holds no leadership role.")
+            owns_player = bool(
+                s.query(Player.player_id)
+                .filter(Player.player_id == player_id, Player.user_id == user_id)
+                .first()
+            )
+            allowed = (
+                _is_event_admin(s, user_id, ev)
+                or owns_player
+                or (member.role == "co_leader"
+                    and team_role_for_user(s, team_id, user_id) == "leader")
+            )
+            if not allowed:
+                abort_problem(403, "Not allowed",
+                              "Only event admins, the team leader (for a co-leader), "
+                              "or the role holder can remove this role.")
+            before = f"{member.role}:{player_id}"
+            member.role = None
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id,
+                action="event.leadership.remove",
+                target=f"web_events.{event_id}.team.{team_id}",
+                before=before, after=None,
+            ))
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify({"ok": True}))
+
+
+@events_bp.post("/events/<int:event_id>/teams/<int:team_id>/leader-vote")
+async def cast_leader_vote(event_id: int, team_id: int):
+    """Cast (or change) the viewer's vote for their team's leader. Election
+    mode only; one live vote per voter; a strict plurality promotes the
+    winner immediately."""
+    user_id = current_user_id()
+    body = await json_body()
+    candidate_id = body.get("candidate_player_id")
+
+    def _apply():
+        from web_api.event_leadership import apply_election
+
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            config = _leadership(ev)
+            if not config["enabled"] or config["selection"] != "election":
+                abort_problem(409, "No election",
+                              "This event does not elect team leaders.")
+            if _effective_status(ev) == "past":
+                abort_problem(409, "Event over", "The event has ended.")
+            _load_team_or_404(s, event_id, team_id)
+            if not isinstance(candidate_id, int):
+                abort_problem(422, "Invalid candidate",
+                              "'candidate_player_id' must be an integer.")
+            my_pids = [
+                pid for (pid,) in
+                s.query(Player.player_id).filter(Player.user_id == user_id).all()
+            ]
+            voter = (s.query(EventTeamMember)
+                     .filter(EventTeamMember.team_id == team_id,
+                             EventTeamMember.player_id.in_(my_pids or [-1]))
+                     .first())
+            if voter is None:
+                abort_problem(403, "Not on this team",
+                              "Only members of the team can vote for its leader.")
+            candidate = (s.query(EventTeamMember)
+                         .filter(EventTeamMember.team_id == team_id,
+                                 EventTeamMember.player_id == candidate_id)
+                         .first())
+            if candidate is None:
+                abort_problem(404, "Not a member",
+                              "The candidate is not on this team.")
+            vote = (s.query(EventLeaderVote)
+                    .filter(EventLeaderVote.event_id == event_id,
+                            EventLeaderVote.voter_player_id == voter.player_id)
+                    .first())
+            if vote is None:
+                s.add(EventLeaderVote(
+                    event_id=event_id, team_id=team_id,
+                    voter_player_id=voter.player_id,
+                    candidate_player_id=candidate_id))
+            else:
+                vote.team_id = team_id
+                vote.candidate_player_id = candidate_id
+            s.flush()
+            leader_id = apply_election(s, event_id, team_id)
+            s.commit()
+            return {"ok": True, "leader_player_id": leader_id}
+
+    payload = await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify(payload))
 
 
 # --------------------------------------------------------------------------- #

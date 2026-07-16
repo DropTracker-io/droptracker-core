@@ -704,6 +704,8 @@ async def roll_board(event_id: int):
             is_member = team_id in my_team_ids
             if not is_member and not admin:
                 abort_problem(403, "Forbidden", "You are not on that team.")
+            _assert_leadership_authority(s, ev, team_id, user_id, admin,
+                                         "trigger the roll")
 
             settings = load_board_settings(s, ev.id)
             if (settings.get("movement") or {}).get("trigger") == "auto" and not admin:
@@ -878,6 +880,22 @@ async def board_png(event_id: int):
     })
 
 
+def _assert_leadership_authority(s, ev, team_id, user_id, is_admin: bool,
+                                 action: str) -> None:
+    """Executive-authority gate (web48a): when the event runs team
+    leadership, turn actions (roll / shop) belong to the team's leader or
+    co-leader. Event admins bypass; leadership disabled = everyone as before."""
+    from web_api.event_leadership import effective_leadership, team_role_for_user
+
+    config = effective_leadership(getattr(ev, "leadership_config", None))
+    if not config["enabled"] or is_admin:
+        return
+    if team_role_for_user(s, team_id, user_id) is None:
+        who = "leader or co-leader" if config["co_leaders"] else "leader"
+        abort_problem(403, "Leaders only",
+                      f"Only your team's {who} can {action} in this event.")
+
+
 # --------------------------------------------------------------------------- #
 # Shop (web45a)
 # --------------------------------------------------------------------------- #
@@ -955,7 +973,9 @@ async def buy_board_item(event_id: int):
             if ev.status != "active":
                 abort_problem(409, "Event not live",
                               "The shop opens while the event is active.")
-            team_id, _m, _a = _resolve_team_for_action(s, ev, user_id, explicit_team)
+            team_id, _m, is_admin = _resolve_team_for_action(s, ev, user_id, explicit_team)
+            _assert_leadership_authority(s, ev, team_id, user_id, is_admin,
+                                         "buy shop items")
             try:
                 result = buy_item(s, ev.id, team_id, shop_item_id, user_id)
             except ShopError as e:
@@ -997,7 +1017,9 @@ async def use_board_item(event_id: int, inventory_id: int):
             if ev.status != "active":
                 abort_problem(409, "Event not live",
                               "Items can only be used while the event is active.")
-            team_id, _m, _a = _resolve_team_for_action(s, ev, user_id, explicit_team)
+            team_id, _m, is_admin = _resolve_team_for_action(s, ev, user_id, explicit_team)
+            _assert_leadership_authority(s, ev, team_id, user_id, is_admin,
+                                         "use items")
             r = RedisClient().client
             try:
                 result = use_item(s, r, ev.id, team_id, inventory_id, user_id,

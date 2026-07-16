@@ -46,14 +46,47 @@ REFRESH_COOLDOWN_SECONDS = 20
 RECENT_END_WINDOW_MINUTES = 15
 
 
-def _board_row(session, event_id: int):
-    from db.models import EventChannel
+def _board_rows(session, event) -> list:
+    """The leaderboard EventChannel rows to keep boards on, each paired with
+    the message_config that governs it: ``[(row, effective_config)]``.
 
-    return (
-        session.query(EventChannel)
-        .filter(EventChannel.event_id == event_id, EventChannel.kind == "leaderboard")
-        .first()
+    Default events: the single shared row (group_id NULL) + event config.
+    Per-group clan-vs-clan (web48a): every leaderboard row — each clan's own
+    row runs under that clan's verbosity override — deduped by channel id so
+    a clan pointing at the host's channel doesn't get a second board."""
+    from db.models import EventChannel, EventGroup
+    from services.event_notifications import (
+        effective_message_config,
+        per_group_discord_enabled,
     )
+
+    event_config = effective_message_config(getattr(event, "message_config", None))
+    query = (session.query(EventChannel)
+             .filter(EventChannel.event_id == event.id,
+                     EventChannel.kind == "leaderboard")
+             .order_by(EventChannel.id.asc()))
+    if not per_group_discord_enabled(event):
+        rows = [r for r in query.all() if getattr(r, "group_id", None) is None]
+        return [(r, event_config) for r in rows]
+
+    group_configs = {
+        g.group_id: effective_message_config(
+            g.message_config if g.message_config
+            else getattr(event, "message_config", None))
+        for g in session.query(EventGroup)
+        .filter(EventGroup.event_id == event.id, EventGroup.status == "accepted")
+        .all()
+    }
+    out, seen = [], set()
+    for r in query.all():
+        gid = getattr(r, "group_id", None)
+        if gid is not None and gid not in group_configs:
+            continue  # declined/removed clan — leave its board alone
+        if not r.channel_id or str(r.channel_id) in seen:
+            continue
+        seen.add(str(r.channel_id))
+        out.append((r, event_config if gid is None else group_configs[gid]))
+    return out
 
 
 def _standings(session, event_id: int, limit: int) -> list:
@@ -151,62 +184,63 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
             load_layout,
             render_message_spec,
         )
-        from services.event_notifications import effective_message_config, event_footer_line
-
-        config = effective_message_config(getattr(event, "message_config", None))
-        if not config["leaderboard"].get("live", True):
-            return False
-        row = _board_row(session, event.id)
-        if row is None or not row.channel_id:
-            return False
-        if (
-            not force
-            and row.message_updated_at is not None
-            and datetime.now() - row.message_updated_at
-            < timedelta(seconds=REFRESH_COOLDOWN_SECONDS)
-        ):
-            return False
-
-        channel = await bot.fetch_channel(channel_id=row.channel_id)
-        if channel is None or not callable(getattr(channel, "send", None)):
-            return False
-
         from services.activity_launch import channel_supports_launch
+        from services.event_notifications import event_footer_line
 
-        top_n = int(config["leaderboard"].get("top_n") or 10)
-        layout = _apply_top_n(load_layout(session, event.group_id, "event_board"), top_n)
-        # Threads/announcement channels can't host a LAUNCH_ACTIVITY callback —
-        # render an Activity Link URL button (client-side launch) instead.
-        enabled, supported = deeplink_enabled(), channel_supports_launch(channel)
-        context = _board_context(session, event, config)
-        spec = render_message_spec(
-            layout,
-            context,
-            standings=_standings(session, event.id, top_n),
-            deep_link=enabled and supported,
-            launch_link=enabled and not supported,
-            footer=event_footer_line(
-                context.get("event_name"),
-                context.get("starts_at_unix"),
-                context.get("ends_at_unix"),
-            ),
-        )
-        components = build_components(spec)
+        wrote = False
+        for row, config in _board_rows(session, event):
+            if not config["leaderboard"].get("live", True):
+                continue
+            if not row.channel_id:
+                continue
+            if (
+                not force
+                and row.message_updated_at is not None
+                and datetime.now() - row.message_updated_at
+                < timedelta(seconds=REFRESH_COOLDOWN_SECONDS)
+            ):
+                continue
 
-        message = None
-        if row.message_id:
-            try:
-                message = await channel.fetch_message(message_id=row.message_id)
-            except Exception:
-                message = None  # deleted / inaccessible — repost below
-        if message is not None:
-            await message.edit(components=components)
-        else:
-            message = await channel.send(components=components)
-            row.message_id = str(message.id)
-        row.message_updated_at = datetime.now()
-        session.commit()
-        return True
+            channel = await bot.fetch_channel(channel_id=row.channel_id)
+            if channel is None or not callable(getattr(channel, "send", None)):
+                continue
+
+            top_n = int(config["leaderboard"].get("top_n") or 10)
+            layout = _apply_top_n(load_layout(session, event.group_id, "event_board"), top_n)
+            # Threads/announcement channels can't host a LAUNCH_ACTIVITY
+            # callback — render an Activity Link URL button (client-side
+            # launch) instead.
+            enabled, supported = deeplink_enabled(), channel_supports_launch(channel)
+            context = _board_context(session, event, config)
+            spec = render_message_spec(
+                layout,
+                context,
+                standings=_standings(session, event.id, top_n),
+                deep_link=enabled and supported,
+                launch_link=enabled and not supported,
+                footer=event_footer_line(
+                    context.get("event_name"),
+                    context.get("starts_at_unix"),
+                    context.get("ends_at_unix"),
+                ),
+            )
+            components = build_components(spec)
+
+            message = None
+            if row.message_id:
+                try:
+                    message = await channel.fetch_message(message_id=row.message_id)
+                except Exception:
+                    message = None  # deleted / inaccessible — repost below
+            if message is not None:
+                await message.edit(components=components)
+            else:
+                message = await channel.send(components=components)
+                row.message_id = str(message.id)
+            row.message_updated_at = datetime.now()
+            session.commit()
+            wrote = True
+        return wrote
     except Exception as e:
         try:
             session.rollback()

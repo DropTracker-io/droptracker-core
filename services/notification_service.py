@@ -1619,22 +1619,54 @@ class NotificationService:
                 db_session.commit()
                 return
 
-            # Verbosity re-check at send time (the engine already gates at
-            # enqueue; this covers rows queued before a config change).
-            message_config = effective_message_config(getattr(event, "message_config", None))
-            if not should_send_event_message(message_config, notification_type):
-                notification.status = 'sent'
-                notification.error_message = 'skipped: muted by event message config'
-                notification.processed_at = datetime.now()
-                db_session.commit()
-                return
+            # Destination resolution. Two shapes (web48a):
+            # - default: ONE channel set + the event's own verbosity config.
+            # - per-group clan-vs-clan (Event.per_group_discord): every
+            #   accepted clan gets its own channels + verbosity; destinations
+            #   dedupe by resolved channel id so clans falling back to the
+            #   shared set never double-post. Role pings only fire on the
+            #   host clan's destination (role ids are guild-specific).
+            from services.event_notifications import (
+                load_group_destinations,
+                per_group_discord_enabled,
+            )
 
-            channels = load_event_channels(db_session, event.id)
-            channel_id = resolve_event_channel(channels, notification_type)
-            if not channel_id:
+            destinations = []  # [{channel_id, ping}]
+            if per_group_discord_enabled(event):
+                seen_channels = set()
+                for dest in load_group_destinations(db_session, event):
+                    if not should_send_event_message(dest["message_config"], notification_type):
+                        continue
+                    cid = resolve_event_channel(dest["channels"], notification_type)
+                    if not cid or cid in seen_channels:
+                        continue
+                    seen_channels.add(cid)
+                    destinations.append({
+                        "channel_id": cid,
+                        "ping": dest["group_id"] == event.group_id,
+                    })
+                skip_reason = ('skipped: no participating clan wants this message'
+                               if not destinations else None)
+            else:
+                # Verbosity re-check at send time (the engine already gates at
+                # enqueue; this covers rows queued before a config change).
+                message_config = effective_message_config(getattr(event, "message_config", None))
+                if not should_send_event_message(message_config, notification_type):
+                    notification.status = 'sent'
+                    notification.error_message = 'skipped: muted by event message config'
+                    notification.processed_at = datetime.now()
+                    db_session.commit()
+                    return
+                channels = load_event_channels(db_session, event.id)
+                channel_id = resolve_event_channel(channels, notification_type)
+                if channel_id:
+                    destinations.append({"channel_id": channel_id, "ping": True})
+                skip_reason = ('skipped: no event channel configured'
+                               if not destinations else None)
+            if skip_reason:
                 # Nothing configured for this kind (or at all) — processed, skipped.
                 notification.status = 'sent'
-                notification.error_message = 'skipped: no event channel configured'
+                notification.error_message = skip_reason
                 notification.processed_at = datetime.now()
                 db_session.commit()
                 return
@@ -1698,13 +1730,6 @@ class NotificationService:
                 else:
                     data['review_url'] = event_url(event.id)
 
-            channel, channel_error = await self._fetch_sendable_channel(channel_id)
-            if channel is None:
-                notification.status = 'failed'
-                notification.error_message = channel_error or f"Channel {channel_id} not found for event {event.id}"
-                db_session.commit()
-                return
-
             # The interactive "Sign up" prompt carries a button that opens the
             # in-Discord signup flow (services/event_signup_discord.py).
             extra_rows = []
@@ -1723,58 +1748,93 @@ class NotificationService:
             # forbids content= alongside components, so mentions render as
             # the container's first text display — they still notify under
             # allowed_mentions.
-            ping_text = ping_content(
+            configured_ping = ping_content(
                 event_ping_role_ids(getattr(event, "ping_config", None), notification_type)
             )
-            allowed = interactions.AllowedMentions(parse=["roles"]) if ping_text else None
 
-            # Preferred path: the group's Components-V2 layout
-            # (services/event_message_layouts.py — group row falls back to the
-            # template group's seeded defaults). Any render failure falls back
-            # to the legacy embed so a bad layout can't silence an event.
-            try:
-                from services.activity_launch import channel_supports_launch
-                from services.event_message_layouts import (
-                    notification_context,
-                    render_event_components,
-                )
+            async def _send_to(channel, ping_text):
+                """One destination: Components-V2 layout, embed fallback."""
+                allowed = interactions.AllowedMentions(parse=["roles"]) if ping_text else None
+                # Preferred path: the group's Components-V2 layout
+                # (services/event_message_layouts.py — group row falls back to
+                # the template group's seeded defaults). Any render failure
+                # falls back to the legacy embed so a bad layout can't silence
+                # an event.
+                try:
+                    from services.activity_launch import channel_supports_launch
+                    from services.event_message_layouts import (
+                        notification_context,
+                        render_event_components,
+                    )
 
-                components = render_event_components(
-                    db_session, event.group_id, notification_type,
-                    notification_context(notification_type, data),
-                    standings=standings, ping_text=ping_text,
-                    extra_rows=extra_rows,
-                    # Threads/announcement channels can't launch the Activity —
-                    # render the URL button instead of a dead launch button.
-                    allow_launch=channel_supports_launch(channel),
-                    image_ref=image_ref,
-                )
-                send_kwargs = {"files": image_attachment} if image_attachment else {}
-                if allowed:
-                    await channel.send(components=components, allowed_mentions=allowed, **send_kwargs)
-                else:
-                    await channel.send(components=components, **send_kwargs)
-            except interactions.errors.Forbidden:
-                raise
-            except Exception as render_error:
-                app_logger.log(log_type="error",
-                               data=f"Component render failed for {notification_type} "
-                                    f"(event {event.id}): {render_error} — falling back to embed",
-                               app_name="notification_service",
-                               description="send_event_notification")
-                from utils.embeds import build_event_embed
-                embed = build_event_embed(notification_type, data, standings=standings,
-                                          image_attachment_ref=image_ref)
-                send_kwargs = {"components": extra_rows} if extra_rows else {}
-                if image_attachment:
-                    send_kwargs["files"] = image_attachment
-                if ping_text:
-                    await channel.send(content=ping_text, embed=embed,
-                                       allowed_mentions=allowed, **send_kwargs)
-                else:
-                    await channel.send(embed=embed, **send_kwargs)
+                    components = render_event_components(
+                        db_session, event.group_id, notification_type,
+                        notification_context(notification_type, data),
+                        standings=standings, ping_text=ping_text,
+                        extra_rows=extra_rows,
+                        # Threads/announcement channels can't launch the
+                        # Activity — render the URL button instead of a dead
+                        # launch button.
+                        allow_launch=channel_supports_launch(channel),
+                        image_ref=image_ref,
+                    )
+                    send_kwargs = {"files": image_attachment} if image_attachment else {}
+                    if allowed:
+                        await channel.send(components=components,
+                                           allowed_mentions=allowed, **send_kwargs)
+                    else:
+                        await channel.send(components=components, **send_kwargs)
+                except interactions.errors.Forbidden:
+                    raise
+                except Exception as render_error:
+                    app_logger.log(log_type="error",
+                                   data=f"Component render failed for {notification_type} "
+                                        f"(event {event.id}): {render_error} — falling back to embed",
+                                   app_name="notification_service",
+                                   description="send_event_notification")
+                    from utils.embeds import build_event_embed
+                    embed = build_event_embed(notification_type, data, standings=standings,
+                                              image_attachment_ref=image_ref)
+                    send_kwargs = {"components": extra_rows} if extra_rows else {}
+                    if image_attachment:
+                        send_kwargs["files"] = image_attachment
+                    if ping_text:
+                        await channel.send(content=ping_text, embed=embed,
+                                           allowed_mentions=allowed, **send_kwargs)
+                    else:
+                        await channel.send(embed=embed, **send_kwargs)
+
+            # Deliver to every destination; per-group events keep going when
+            # one clan's channel is broken (their misconfig must not silence
+            # the other clans). Single-destination events keep the original
+            # semantics: failure marks the row failed / Forbidden propagates.
+            sent_count, dest_errors = 0, []
+            for dest in destinations:
+                channel, channel_error = await self._fetch_sendable_channel(dest["channel_id"])
+                if channel is None:
+                    dest_errors.append(
+                        channel_error or f"Channel {dest['channel_id']} not found for event {event.id}")
+                    continue
+                try:
+                    await _send_to(channel, configured_ping if dest["ping"] else None)
+                    sent_count += 1
+                except interactions.errors.Forbidden:
+                    if len(destinations) == 1:
+                        raise
+                    dest_errors.append(f"forbidden: channel {dest['channel_id']}")
+                except Exception as send_error:
+                    if len(destinations) == 1:
+                        raise
+                    dest_errors.append(f"channel {dest['channel_id']}: {send_error}")
+
+            if sent_count == 0:
+                notification.status = 'failed'
+                notification.error_message = "; ".join(dest_errors)[:500] or "no sendable channel"
+                db_session.commit()
+                return
 
             notification.status = 'sent'
+            notification.error_message = ("; ".join(dest_errors)[:500] or None) if dest_errors else None
             notification.processed_at = datetime.now()
             db_session.commit()
 
