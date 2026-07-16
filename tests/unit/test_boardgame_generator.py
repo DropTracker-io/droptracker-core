@@ -64,7 +64,9 @@ def test_tiles_honor_the_board_endpoint_contract():
     assets = gen.build_board_assets(
         gen.normalize_params(seed=9, regions=11, tiles=100, watermark="DropTracker.io"))
     tiles = assets["tiles"]
-    assert len(tiles) >= 2
+    # The movable-tile count is EXACT: the admin types 100, the board has 100.
+    assert len(tiles) == 100
+    assert assets["meta"]["path_tiles"] == 100
 
     # idx covers 0..N-1 exactly and in order (a contiguous, ordered track).
     assert [t["idx"] for t in tiles] == list(range(len(tiles)))

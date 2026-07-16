@@ -121,7 +121,10 @@ def _clamp_int(value, lo, hi, *, default, name):
 
 
 def _canvas_for(tiles: int) -> tuple[int, int]:
-    factor = (tiles / _BASE_TILES) ** 0.5
+    # Only ever grow past the base canvas: the base fits ~54 movable tiles, and
+    # smaller targets are reached by trimming/padding the road on it. Shrinking
+    # for tiny targets left no room for regions and isn't needed.
+    factor = max(1.0, (tiles / _BASE_TILES) ** 0.5)
     return round(_BASE_W * factor), round(_BASE_H * factor)
 
 
@@ -131,12 +134,28 @@ def _difficulty_for(i: int) -> str:
 
 
 def build_board(p: GenParams) -> Board:
-    """Generate the boardgen Board for these params (pure, seedable)."""
+    """Generate the boardgen Board for these params (pure, seedable).
+
+    ``p.tiles`` is an EXACT movable-tile target: ``target_tiles`` pads/trims the
+    road to that count on the sized canvas, and when the road runs out of
+    reachable room (fragmented pockets / large targets) the canvas is grown a
+    few times until the count is hit — so the generated board always has exactly
+    ``p.tiles`` path tiles, matching what the admin typed."""
     width, height = _canvas_for(p.tiles)
-    return Board.generate(
+    board = Board.generate(
         width=width, height=height, seed=p.seed, style=p.style,
         regions=p.regions, title=p.title, subtitle=p.subtitle,
+        target_tiles=p.tiles,
     )
+    tries = 0
+    while len(board.path) < p.tiles and tries < 10:
+        width, height, tries = round(width * 1.12), round(height * 1.12), tries + 1
+        board = Board.generate(
+            width=width, height=height, seed=p.seed, style=p.style,
+            regions=p.regions, title=p.title, subtitle=p.subtitle,
+            target_tiles=p.tiles,
+        )
+    return board
 
 
 def board_to_tiles(board: Board) -> list[dict]:

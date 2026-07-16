@@ -66,7 +66,7 @@ class Board:
     def generate(cls, *, width=1600, height=900, size=34, orientation="pointy",
                  style="path", seed=None, tour=None, regions=None, min_gap=2,
                  meander=0.55, margin=None, core=1, land=None,
-                 land_density=None, smooth=2, labels=True,
+                 land_density=None, smooth=2, labels=True, target_tiles=None,
                  title="Gielinor Journeys",
                  subtitle="a procedurally generated board") -> "Board":
         if seed is None:
@@ -124,7 +124,7 @@ class Board:
                    _enrich(layout, regions, rng, path_area, amp * scale, size * 3.4))
             path, board.skipped = pathgen.build_path(
                 layout, wps, rng, allowed=path_area, hard=hard,
-                min_gap=min_gap, meander=meander)
+                min_gap=min_gap, meander=meander, target_len=target_tiles)
             if board.skipped == 0:
                 break
         board.path = path                     # always Tutorial -> Varlamore
