@@ -2638,6 +2638,48 @@ async def randomize_signups(event_id: int):
     return private_no_store(jsonify(result))
 
 
+@events_bp.post("/events/<int:event_id>/populate-random")
+async def populate_random_members(event_id: int):
+    """Admin-only scale/testing tool: bulk-fill this event's teams with random
+    ACTIVE members, balanced across teams (clan-aware). Body:
+    ``{ source: "group"|"global", count?: int }``. ``group`` draws from the
+    event's linked group(s); ``global`` draws from every active player (only
+    meaningfully different for global events — group/clan events can only place
+    their own members). Returns a per-team summary. Audit-logged."""
+    user_id = current_user_id()
+    body = await json_body()
+    source = body.get("source")
+    count = body.get("count")
+    if source not in ("group", "global"):
+        abort_problem(422, "Invalid source", "'source' must be 'group' or 'global'.")
+    if count is not None and (not isinstance(count, int) or isinstance(count, bool) or count <= 0):
+        abort_problem(422, "Invalid count", "'count' must be a positive integer.")
+
+    def _apply():
+        from services.event_signup import populate_random, SignupError
+
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            _assert_roster_open(ev)
+            try:
+                result = populate_random(s, ev, source=source, count=count)
+            except SignupError as e:
+                abort_problem(e.status, e.title, e.detail)
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id,
+                action="event.populate_random",
+                target=f"web_events.{event_id}",
+                before=None, after=f"source:{source} added:{result['added']}",
+            ))
+            s.commit()
+            return result
+
+    result = await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify(result))
+
+
 @events_bp.post("/events/<int:event_id>/signup-message")
 async def post_signup_message(event_id: int):
     """Post an interactive "Sign up" button to the event's Discord announcements

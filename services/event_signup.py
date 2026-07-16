@@ -385,6 +385,170 @@ def randomize_pool(session, ev, group_id: Optional[int] = None) -> dict:
     return {"assigned": assigned, "unassigned": unassigned}
 
 
+# ---------------------------------------------------------------------------- #
+# Admin scale/testing tool: random bulk population
+# ---------------------------------------------------------------------------- #
+# "Active" reuses the ONLY player-recency threshold that already exists in the
+# codebase: data/player_total_updater.py marks a Player stale for a WOM refresh
+# once ``Player.date_updated < now - timedelta(days=14)``. The inverse — updated
+# within the last 14 days — is our "active member" definition here. Do not fork
+# this number; if the staleness window there changes, change it here too.
+ACTIVE_MEMBER_WINDOW_DAYS = 14
+
+
+def _plan_distribution(selected_by_bucket: dict, teams_by_bucket: dict,
+                       start_counts: dict) -> list:
+    """Pure placement planner (no DB): assign each selected player to the
+    least-full eligible team in its bucket (ties -> lowest team id), accounting
+    for teams' existing sizes so the result stays balanced. Returns a list of
+    ``(player_id, team_id)``. Players in a bucket with no team are dropped.
+
+    ``selected_by_bucket``: {bucket_key: [player_id, ...]} (already shuffled/capped)
+    ``teams_by_bucket``:    {bucket_key: [team_id, ...]}
+    ``start_counts``:       {team_id: current_member_count}
+    """
+    counts = dict(start_counts)
+    placements: list = []
+    for bucket, pids in selected_by_bucket.items():
+        tids = teams_by_bucket.get(bucket) or []
+        if not tids:
+            continue
+        for pid in pids:
+            tid = min(tids, key=lambda t: (counts.get(t, 0), t))
+            placements.append((pid, tid))
+            counts[tid] = counts.get(tid, 0) + 1
+    return placements
+
+
+def populate_random(session, ev, *, source: str, count: Optional[int] = None) -> dict:
+    """Admin scale/testing tool: bulk-fill this event's teams with randomly
+    chosen ACTIVE members, balanced across teams (clan-aware). Only ADDS players
+    not already on the event — never moves or removes anyone.
+
+    ``source``:
+      • ``"group"``  — draw from the event's linked group(s) (the accepted
+        participants for clan_vs_clan, the single owning group otherwise).
+      • ``"global"`` — draw from every active player. This only differs from
+        ``"group"`` for *global* events (no participating groups); a group or
+        clan event can only ever place its own members (team eligibility), so
+        both sources fall back to the participating-member pool there.
+
+    ``count`` optionally caps how many are added (after shuffling, so it's a
+    random sample). Returns ``{added, source, teams: [{team_id, team_name,
+    added, member_count}]}``. Raises :class:`SignupError`. Caller owns commit.
+    """
+    from datetime import timedelta
+
+    from db.models import EventTeam, EventTeamMember, Player, user_group_association
+
+    if source not in ("group", "global"):
+        raise SignupError(422, "Invalid source", "'source' must be 'group' or 'global'.")
+    if count is not None and (not isinstance(count, int) or isinstance(count, bool) or count <= 0):
+        raise SignupError(422, "Invalid count", "'count' must be a positive integer.")
+
+    teams = (
+        session.query(EventTeam)
+        .filter(EventTeam.event_id == ev.id)
+        .order_by(EventTeam.id.asc())
+        .all()
+    )
+    if not teams:
+        raise SignupError(409, "No teams", "Add at least one team before auto-populating.")
+
+    participating = participating_group_ids(session, ev)
+    if source == "group" and not participating:
+        raise SignupError(
+            409, "No linked group",
+            "This event has no group to draw members from. Use the global source instead.",
+        )
+
+    cutoff = datetime.now() - timedelta(days=ACTIVE_MEMBER_WINDOW_DAYS)
+    clan_vs_clan = _is_clan_vs_clan(ev)
+
+    # Players already on the event are skipped — this tool only adds.
+    placed = {
+        pid for (pid,) in
+        session.query(EventTeamMember.player_id)
+        .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+        .filter(EventTeam.event_id == ev.id)
+        .all()
+    }
+
+    # Candidate pool, bucketed by the clan whose teams they can join (a single
+    # shared None bucket for non-clan events). A group/clan event can only place
+    # its own members, so both sources draw from participating members there;
+    # only a global event (no participating groups) draws the whole player base.
+    cand_buckets: dict = {}
+    if participating:
+        rows = (
+            session.query(user_group_association.c.player_id,
+                          user_group_association.c.group_id)
+            .join(Player, Player.player_id == user_group_association.c.player_id)
+            .filter(user_group_association.c.group_id.in_(participating),
+                    user_group_association.c.player_id.isnot(None),
+                    Player.date_updated >= cutoff)
+            .all()
+        )
+        seen: set = set()
+        for pid, gid in rows:
+            if pid is None or pid in placed or pid in seen:
+                continue
+            seen.add(pid)
+            key = gid if clan_vs_clan else None
+            cand_buckets.setdefault(key, []).append(pid)
+    else:
+        pids = [
+            pid for (pid,) in
+            session.query(Player.player_id)
+            .filter(Player.date_updated >= cutoff)
+            .all()
+            if pid not in placed
+        ]
+        cand_buckets[None] = pids
+
+    teams_by_bucket: dict = {}
+    for t in teams:
+        key = t.group_id if clan_vs_clan else None
+        teams_by_bucket.setdefault(key, []).append(t.id)
+
+    # Drop candidates whose bucket has no team, shuffle globally, then cap.
+    eligible = [
+        (key, pid)
+        for key, pids in cand_buckets.items() if teams_by_bucket.get(key)
+        for pid in pids
+    ]
+    random.shuffle(eligible)
+    if count is not None:
+        eligible = eligible[:count]
+
+    selected_by_bucket: dict = {}
+    for key, pid in eligible:
+        selected_by_bucket.setdefault(key, []).append(pid)
+
+    start_counts = _team_counts(session, [t.id for t in teams])
+    placements = _plan_distribution(selected_by_bucket, teams_by_bucket, start_counts)
+
+    # Reuse the shared placement primitive (delete-any-existing + insert) that
+    # backs the admin roster-add path — no raw inserts, so joined_at (the credit
+    # cutoff) and all membership invariants hold.
+    for pid, tid in placements:
+        _place(session, ev.id, pid, tid)
+
+    per_team_added: dict = {}
+    for _, tid in placements:
+        per_team_added[tid] = per_team_added.get(tid, 0) + 1
+    teams_summary = [
+        {
+            "team_id": t.id,
+            "team_name": t.name,
+            "added": per_team_added.get(t.id, 0),
+            "member_count": start_counts.get(t.id, 0) + per_team_added.get(t.id, 0),
+        }
+        for t in teams
+    ]
+    return {"added": len(placements), "source": source, "teams": teams_summary}
+
+
 def remove_signup(session, ev, player_id: int) -> None:
     """Withdraw a sign-up and any resulting team placement. Caller owns commit."""
     from db.models import EventSignup, EventTeam, EventTeamMember
