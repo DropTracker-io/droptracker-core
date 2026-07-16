@@ -159,6 +159,7 @@ DEFAULT_LAYOUTS = {
                 # falls back to a plain text block when neither resolves.
                 "type": "section",
                 "content": "**Points** `+{points}`\n**Team total** `{team_score} pts`\n"
+                           "**Finished with** {received_line}\n"
                            "**Contributors** {contributors_line}\n-# completed by {player_name}",
                 "thumbnail": "{completion_icon}",
             },
@@ -580,7 +581,9 @@ def notification_context(notification_type: str, data: dict) -> dict:
     """Flatten one (enriched) notification_queue payload into the token dict
     the layouts substitute from. Values that are None/empty/zero are omitted
     so their lines drop out of the rendered message."""
-    from services.event_notifications import _fmt_ts, event_url, format_gp
+    from services.event_notifications import (
+        _fmt_ts, _received_item_text, event_url, format_gp,
+    )
 
     data = data or {}
     context = {}
@@ -627,6 +630,12 @@ def notification_context(notification_type: str, data: dict) -> dict:
         put("progress", format_gp(progress))
         put("target", format_gp(target))
     put("milestone_pct", data.get("milestone_pct"))
+
+    # Verbose completion detail — the item that finished the task + how much of
+    # the requirement it filled (event_completion only; enriched at enqueue
+    # when the event's item_details config is on). Same text as the legacy
+    # embed's "Received" field so both renderers agree.
+    put("received_line", _received_item_text(data))
 
     # Bingo cells — labels are the readable "tile" identity; fall back to the
     # raw index for callers that only have that (legacy queued rows).

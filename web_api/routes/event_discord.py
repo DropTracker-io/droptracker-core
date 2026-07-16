@@ -333,6 +333,9 @@ def _parse_message_config(value) -> str:
             f"messages.task_progress must be one of {list(EVENT_TASK_PROGRESS_MODES)}.",
         )
 
+    if "item_details" in value and not isinstance(value["item_details"], bool):
+        abort_problem(422, "Invalid messages", "'messages.item_details' must be a boolean.")
+
     board = value.get("leaderboard") or {}
     if not isinstance(board, dict):
         abort_problem(422, "Invalid messages", "'messages.leaderboard' must be an object.")

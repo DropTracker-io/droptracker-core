@@ -235,6 +235,19 @@ class TestEmbedSpecs:
         assert "Points" not in {f["name"] for f in spec["fields"]}
         assert spec["thumbnail"] is None
 
+    def test_completion_received_item_field(self):
+        spec = _spec("event_completion", {
+            "task_label": "Collect 100 Dragon bones", "team_name": "Red",
+            "received_item": "Dragon bones", "received_qty": 3,
+            "contributed": 3, "target": 100,
+        })
+        fields = {f["name"]: f["value"] for f in spec["fields"]}
+        assert fields["Received"] == "**3× Dragon bones** (+3 of 100)"
+
+    def test_completion_received_field_absent_for_non_item(self):
+        spec = _spec("event_completion", {"task_label": "T", "team_name": "Red"})
+        assert "Received" not in {f["name"] for f in spec["fields"]}
+
     def test_line_blackout(self):
         line = _spec("event_line", {"team_name": "Red", "bonus_points": 25})
         assert "line" in line["description"]

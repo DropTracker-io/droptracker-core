@@ -1444,6 +1444,21 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         "proof_url": completion.proof_url,
         "contributors": contributors,
     }
+    # Verbose completion detail (item_details config, on by default): name the
+    # item that finished the task, its drop quantity, how much of the
+    # requirement that final drop filled (the progress delta), and the target.
+    # Only item completions carry a matched_target; the sender/layout drop the
+    # line when these are absent, so an off toggle simply omits them here.
+    from services.event_notifications import effective_message_config
+
+    if (completion.matched_target
+            and effective_message_config(event.get("message_config")).get("item_details", True)):
+        notification.update({
+            "received_item": completion.matched_target,
+            "received_qty": int(completion.quantity or 0),
+            "contributed": max(int(progress.progress or 0) - int(previous_progress or 0), 0),
+            "target": completion_threshold(task),
+        })
     _enqueue_notification(session, "event_completion", event, player_id, notification)
     if lead_changed_to:
         _enqueue_notification(session, "event_lead_change", event, player_id, {

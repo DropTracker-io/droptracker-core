@@ -91,6 +91,11 @@ DEFAULT_MESSAGE_TOGGLES = {
 DEFAULT_MESSAGE_CONFIG = {
     "toggles": dict(DEFAULT_MESSAGE_TOGGLES),
     "task_progress": "off",
+    # Verbose completion detail: the item that finished the task, how much of
+    # the requirement it filled, and the requirement target — rendered on the
+    # event_completion message on top of the always-present contributor list.
+    # Default on (additive detail); a group can silence it per event.
+    "item_details": True,
     "leaderboard": {"live": True, "top_n": 10, "show_tasks": True},
 }
 
@@ -107,6 +112,7 @@ def effective_message_config(raw_json) -> dict:
     config = {
         "toggles": dict(DEFAULT_MESSAGE_TOGGLES),
         "task_progress": DEFAULT_MESSAGE_CONFIG["task_progress"],
+        "item_details": DEFAULT_MESSAGE_CONFIG["item_details"],
         "leaderboard": dict(DEFAULT_MESSAGE_CONFIG["leaderboard"]),
     }
     if not raw_json:
@@ -130,6 +136,9 @@ def effective_message_config(raw_json) -> dict:
     mode = data.get("task_progress")
     if mode in TASK_PROGRESS_MODES:
         config["task_progress"] = mode
+
+    if "item_details" in data:
+        config["item_details"] = bool(data["item_details"])
 
     board = data.get("leaderboard")
     if isinstance(board, dict):
@@ -201,6 +210,31 @@ def format_gp(value) -> str:
     if abs_value >= 1_000_000:
         return f"{sign}{abs_value / 1_000_000:.2f}M"
     return f"{sign}{abs_value / 1_000:.2f}K"
+
+
+def _received_item_text(data: dict) -> Optional[str]:
+    """The verbose "what finished the task" line for an ``event_completion``
+    message: ``**3× Dragon bones** (+3 of 100)`` — the item that completed the
+    task, its drop quantity, and how much of the requirement that drop filled
+    (the progress delta) against the requirement target.
+
+    Returns None when the enriching fields aren't present — non-item
+    completions carry no ``received_item``, and the enrichment is omitted at
+    enqueue time when the event's ``item_details`` config is off — so callers
+    can drop the line entirely. Shared by the legacy embed and the V2 layout
+    token so both render identically."""
+    item = (data or {}).get("received_item")
+    if not item:
+        return None
+    qty = int(data.get("received_qty") or 0)
+    label = f"**{qty}× {item}**" if qty and qty != 1 else f"**{item}**"
+    contributed = data.get("contributed")
+    target = data.get("target")
+    if contributed and target:
+        return f"{label} (+{format_gp(contributed)} of {format_gp(target)})"
+    if contributed:
+        return f"{label} (+{format_gp(contributed)})"
+    return label
 
 
 def event_url(event_id) -> str:
@@ -402,6 +436,12 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             field("Points", f"`+{points}`")
         if data.get("team_score") is not None:
             field("Team total", f"`{int(data['team_score'])} pts`")
+        # The item that finished the task + how much of the requirement it
+        # filled (verbose completion detail; item_details config, on by
+        # default). Absent for non-item completions and when the toggle is off.
+        received = _received_item_text(data)
+        if received:
+            field("Received", received, inline=False)
         # Everyone who contributed, not just whoever's submission completed
         # it — falls back to the single completer when the ledger lookup
         # came up empty (e.g. a manually-awarded row).

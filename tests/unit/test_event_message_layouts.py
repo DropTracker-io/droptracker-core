@@ -73,6 +73,13 @@ class TestEffectiveMessageConfig:
         config = en.effective_message_config({"leaderboard": {"live": False}})
         assert config["leaderboard"]["live"] is False
 
+    def test_item_details_defaults_on_and_overrides(self):
+        assert en.effective_message_config(None)["item_details"] is True
+        assert en.effective_message_config({"item_details": False})["item_details"] is False
+        # truthy/falsy values are coerced to bool
+        assert en.effective_message_config({"item_details": 0})["item_details"] is False
+        assert en.effective_message_config('{"item_details": true}')["item_details"] is True
+
 
 class TestShouldSend:
     def test_defaults_send_everything_but_progress(self):
@@ -390,6 +397,31 @@ class TestNotificationContext:
     def test_contributors_line_absent_when_empty(self):
         context = ml.notification_context("event_completion", {"event_id": 7})
         assert "contributors_line" not in context
+
+    def test_received_line_built_from_item_details(self):
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "received_item": "Dragon bones",
+            "received_qty": 3, "contributed": 3, "target": 100,
+        })
+        assert context["received_line"] == "**3× Dragon bones** (+3 of 100)"
+
+    def test_received_line_absent_for_non_item_completion(self):
+        # No received_item (non-item task, or item_details toggled off at
+        # enqueue) -> no token, so the layout's "Finished with" line drops.
+        context = ml.notification_context("event_completion", {"event_id": 7})
+        assert "received_line" not in context
+        spec = ml.render_message_spec(
+            ml.DEFAULT_LAYOUTS["event_completion"],
+            {"team_name": "Red", "task_label": "T", "points": 5, "player_name": "Zed"})
+        rendered = "\n".join(b.get("content", "") for b in spec["blocks"])
+        assert "Finished with" not in rendered
+
+    def test_received_line_singular_drops_multiplier(self):
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "received_item": "Twisted bow",
+            "received_qty": 1, "contributed": 1, "target": 1,
+        })
+        assert context["received_line"] == "**Twisted bow** (+1 of 1)"
 
     def test_raw_unix_timestamps_carried_for_footer(self):
         context = ml.notification_context("event_completion", {
