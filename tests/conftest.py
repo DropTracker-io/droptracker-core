@@ -255,6 +255,34 @@ def mock_group():
 
 
 @pytest.fixture(autouse=True)
+def ensure_event_loop():
+    """Structural order-independence guard for the whole unit suite.
+
+    Any test that calls ``asyncio.run()`` resets the *current* event loop to
+    ``None`` on exit (Python 3.10+). A later SYNC test that drives a coroutine
+    by hand — ``asyncio.get_event_loop().run_until_complete(...)`` — then raises
+    ``RuntimeError: There is no current event loop``, so the same test passes in
+    isolation but fails in full-suite order (the recurring CI flake). This
+    guarantees every test starts with a live current loop; pytest-asyncio owns
+    the loop for ``async def`` tests, so this only backstops the sync ones.
+    """
+    import asyncio
+
+    created = None
+    try:
+        loop = asyncio.get_event_loop_policy().get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError
+    except Exception:
+        created = asyncio.new_event_loop()
+        asyncio.set_event_loop(created)
+    yield
+    # Only clean up a loop we created ourselves — never touch pytest-asyncio's.
+    if created is not None and not created.is_closed():
+        created.close()
+
+
+@pytest.fixture(autouse=True)
 def reset_unique_id_cache():
     """
     Reset the module-level unique_id_cache in common.py before and after each test.

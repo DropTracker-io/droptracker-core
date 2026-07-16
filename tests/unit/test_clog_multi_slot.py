@@ -84,9 +84,11 @@ def _run_processor(item_name, dedup_query_returns_existing):
         stack.enter_context(patch("utils.group_config.is_truthy", return_value=True))
 
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
-            clog.clog_processor(clog_data, external_session=session)
-        )
+        # asyncio.run() is self-contained (own loop, closed on exit) so it does
+        # not depend on ambient loop state left by earlier tests. The conftest
+        # ensure_event_loop guard covers the general case; this removes the
+        # fragile get_event_loop() pattern at its source.
+        asyncio.run(clog.clog_processor(clog_data, external_session=session))
 
     return create_notification, session
 
