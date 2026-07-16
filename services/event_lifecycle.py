@@ -76,9 +76,14 @@ def sweep_due(events, now: datetime) -> dict:
 # Validation / capacity
 # ══════════════════════════════════════════════════════════════════════════════
 
-def activation_blockers(session, event, now: Optional[datetime] = None) -> list:
-    """Human-readable reasons ``event`` cannot activate right now (empty when
-    it can): ``ends_at`` (if set) must be in the future; a bingo event needs a
+def activation_blocker_items(session, event, now: Optional[datetime] = None) -> list:
+    """Structured reasons ``event`` cannot activate right now (empty when it
+    can). Each item is ``{"code", "message", "target"}`` — ``target`` names the
+    manager section a leader fixes it in (``teams`` / ``board`` / ``tasks`` /
+    ``dates``) so the UI can link them straight there. ``activation_blockers``
+    wraps this to the legacy list-of-strings contract.
+
+    Rules: ``ends_at`` (if set) must be in the future; a bingo event needs a
     complete ``board_size²`` board whose bound cells reference this event's
     tasks. Standard/global events need ≥1 team. clan_vs_clan needs ≥2 accepted
     clans; teams are optional there — with none it runs whole-clan vs
@@ -94,7 +99,10 @@ def activation_blockers(session, event, now: Optional[datetime] = None) -> list:
 
     if not is_cvc:
         if team_count < 1:
-            blockers.append("The event needs at least one team.")
+            blockers.append({
+                "code": "no_teams", "target": "teams",
+                "message": "The event needs at least one team.",
+            })
     else:
         from db.models import EventGroup
 
@@ -105,10 +113,11 @@ def activation_blockers(session, event, now: Optional[datetime] = None) -> list:
             .all()
         ]
         if len(accepted) < 2:
-            blockers.append(
-                "A clan-vs-clan event needs at least two accepted clans "
-                "(the host plus an opponent that accepted its invitation)."
-            )
+            blockers.append({
+                "code": "cvc_needs_two_clans", "target": "teams",
+                "message": ("A clan-vs-clan event needs at least two accepted clans "
+                            "(the host plus an opponent that accepted its invitation)."),
+            })
         # Teams are optional: with none, activation seeds one whole-clan team
         # per clan (anyone-vs-anyone). But a half-built roster is ambiguous, so
         # once any team exists every accepted clan must have at least one.
@@ -121,14 +130,18 @@ def activation_blockers(session, event, now: Optional[datetime] = None) -> list:
             }
             clans_without_teams = [g for g in accepted if g not in team_gids]
             if accepted and clans_without_teams:
-                blockers.append(
-                    f"Every accepted clan needs at least one team, or remove all "
-                    f"teams to run whole-clan vs whole-clan — "
-                    f"{len(clans_without_teams)} clan(s) have none yet."
-                )
+                blockers.append({
+                    "code": "cvc_clans_without_teams", "target": "teams",
+                    "message": (f"Every accepted clan needs at least one team, or remove all "
+                                f"teams to run whole-clan vs whole-clan — "
+                                f"{len(clans_without_teams)} clan(s) have none yet."),
+                })
 
     if event.ends_at is not None and event.ends_at <= now:
-        blockers.append("The end date is in the past — move it into the future first.")
+        blockers.append({
+            "code": "end_in_past", "target": "dates",
+            "message": "The end date is in the past — move it into the future first.",
+        })
 
     if event.has_bingo:
         cells = (
@@ -138,12 +151,16 @@ def activation_blockers(session, event, now: Optional[datetime] = None) -> list:
         )
         size = int(event.board_size or 0)
         if not cells:
-            blockers.append("The bingo board has no cells — lay out the board first.")
+            blockers.append({
+                "code": "bingo_no_cells", "target": "board",
+                "message": "The bingo board has no cells — lay out the board first.",
+            })
         elif size * size != len(cells):
-            blockers.append(
-                f"The bingo board is incomplete: a {size}×{size} board needs "
-                f"{size * size} cells, found {len(cells)}."
-            )
+            blockers.append({
+                "code": "bingo_incomplete", "target": "board",
+                "message": (f"The bingo board is incomplete: a {size}×{size} board needs "
+                            f"{size * size} cells, found {len(cells)}."),
+            })
         if cells:
             task_ids = {
                 tid for (tid,) in session.query(EventTask.id)
@@ -154,20 +171,48 @@ def activation_blockers(session, event, now: Optional[datetime] = None) -> list:
                 if c.task_id is not None and c.task_id not in task_ids
             )
             if unbound:
-                blockers.append(
-                    f"Bingo cell(s) {unbound} are bound to tasks that do not "
-                    "belong to this event — rebind or free them in the designer."
-                )
+                blockers.append({
+                    "code": "bingo_unbound_cells", "target": "board",
+                    "message": (f"Bingo cell(s) {unbound} are bound to tasks that do not "
+                                "belong to this event — rebind or free them in the designer."),
+                })
 
     if (getattr(event, "kind", None) or "standard") == "board_game":
-        blockers.extend(_board_game_blockers(session, event))
+        blockers.extend(_board_game_blocker_items(session, event))
     return blockers
 
 
-def _board_game_blockers(session, event) -> list:
+def activation_blockers(session, event, now: Optional[datetime] = None) -> list:
+    """Legacy list-of-strings contract — the human-readable messages from
+    :func:`activation_blocker_items`."""
+    return [b["message"] for b in activation_blocker_items(session, event, now=now)]
+
+
+def readiness_report(session, event, now: Optional[datetime] = None) -> dict:
+    """Pre-flight the activation checks WITHOUT activating (the "check
+    readiness" button). Returns the structured blockers plus schedule context
+    so a leader can confirm the event will auto-activate when its start time is
+    reached, and jump straight to whatever still needs fixing."""
+    now = now or datetime.now()
+    status = getattr(event, "status", None) or "draft"
+    items = activation_blocker_items(session, event, now=now)
+    starts_at = getattr(event, "starts_at", None)
+    return {
+        "status": status,
+        "ready": not items,
+        "blockers": items,
+        "starts_at": int(starts_at.timestamp()) if starts_at else None,
+        # True when a future scheduled start will auto-activate this draft.
+        "auto_start": bool(starts_at is not None and status == "draft"),
+        "already_active": status != "draft",
+    }
+
+
+def _board_game_blocker_items(session, event) -> list:
     """Board-game readiness (web44a): a laid-out track, and a rollable task
     pool covering every difficulty the tiles use (a difficulty-tile with an
-    empty pool would have nothing to draw on landing)."""
+    empty pool would have nothing to draw on landing). Structured items —
+    see :func:`activation_blocker_items`."""
     from db.models import EventBoardTile, EventTask
 
     blockers = []
@@ -178,10 +223,11 @@ def _board_game_blockers(session, event) -> list:
         .all()
     )
     if len(tiles) < 2:
-        blockers.append(
-            "The board needs at least two tiles (a start and a finish) — "
-            "lay out the track in the board designer first."
-        )
+        blockers.append({
+            "code": "board_min_tiles", "target": "board",
+            "message": ("The board needs at least two tiles (a start and a finish) — "
+                        "lay out the track in the board designer first."),
+        })
         return blockers
 
     from services.boardgame_engine import _ROLLABLE_TYPES, _is_board_instance
@@ -201,30 +247,33 @@ def _board_game_blockers(session, event) -> list:
     tile_difficulties = {t.difficulty for t in tiles if t.difficulty}
     uncovered = sorted(d for d in tile_difficulties if d not in pool_difficulties)
     if uncovered and not pool:
-        blockers.append(
-            "The event has no rollable tasks — add tasks (with difficulties) "
-            "so tiles can draw them."
-        )
+        blockers.append({
+            "code": "board_no_tasks", "target": "tasks",
+            "message": ("The event has no rollable tasks — add tasks (with difficulties) "
+                        "so tiles can draw them."),
+        })
     elif uncovered:
         # A missing tier falls back to the any-tier pool, so this is only a
         # blocker when there is nothing at all; otherwise it would be a
         # warning. Keep activation strict: tiers the designer used should
         # exist in the pool.
-        blockers.append(
-            f"No tasks carry the difficulty tier(s) {', '.join(uncovered)} "
-            "used by the board's tiles — add tasks of those tiers (or retier "
-            "the tiles)."
-        )
+        blockers.append({
+            "code": "board_uncovered_tiers", "target": "tasks",
+            "message": (f"No tasks carry the difficulty tier(s) {', '.join(uncovered)} "
+                        "used by the board's tiles — add tasks of those tiers (or retier "
+                        "the tiles)."),
+        })
 
     unbound = sorted(
         t.idx for t in tiles
         if t.task_id is not None and t.task_id not in task_ids
     )
     if unbound:
-        blockers.append(
-            f"Board tile(s) {unbound} pin tasks that do not belong to this "
-            "event — rebind or clear them in the designer."
-        )
+        blockers.append({
+            "code": "board_unbound_pins", "target": "board",
+            "message": (f"Board tile(s) {unbound} pin tasks that do not belong to this "
+                        "event — rebind or clear them in the designer."),
+        })
     return blockers
 
 
@@ -712,6 +761,22 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
         try:
             if sync_auto_clan_rosters(session, event, now=now):
                 session.commit()
+        except Exception:
+            session.rollback()
+
+    # Board-game shop stock refresh (web50a): restock due events on the tick so
+    # shops refresh even when nobody is actively browsing. maybe_refresh_shop is
+    # a cheap no-op (no commit) for non-board / non-refresh events and commits
+    # its own restock when due.
+    for event in rows:
+        if event.status != "active" or event.id in due["end"]:
+            continue
+        if (getattr(event, "kind", None) or "standard") != "board_game":
+            continue
+        try:
+            from services.boardgame_shop import maybe_refresh_shop
+
+            maybe_refresh_shop(session, event.id)
         except Exception:
             session.rollback()
 

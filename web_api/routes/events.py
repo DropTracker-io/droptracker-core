@@ -1363,6 +1363,26 @@ def _run_lifecycle_transition(event_id: int, user_id: int, action: str) -> dict:
         return _detail(s, ev, viewer_id=user_id)
 
 
+@events_bp.get("/events/<int:event_id>/readiness")
+async def event_readiness(event_id: int):
+    """Pre-flight the activation checks WITHOUT activating (event admin). Powers
+    the manager's "Check readiness" button so a leader can confirm the event
+    will be ready when its start time is reached — and, when it isn't, get the
+    structured list of what to fix (each tagged with the section to fix it in).
+    Read-only; safe to poll."""
+    user_id = current_user_id()
+
+    def _check():
+        from services import event_lifecycle
+
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            return event_lifecycle.readiness_report(s, ev)
+
+    return private_no_store(jsonify(await asyncio.to_thread(_check)))
+
+
 @events_bp.post("/events/<int:event_id>/activate")
 async def activate_event(event_id: int):
     """Explicit activation (event admin). Validates readiness (≥1 team, a
