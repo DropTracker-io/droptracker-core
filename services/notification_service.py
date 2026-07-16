@@ -2539,6 +2539,16 @@ class NotificationService:
                 group_rank_str = "`" + str(group_rank) + "`" + "/" + "`" + str(user_count) + "`"
             else:
                 group_rank_str = "`?`"
+
+            ##
+            # Embed may build for items dropped in quantities > 1 if the group has it enabled
+            # in this case, we should specify in the message how many of the item they received
+            # if the item is dropped in a quantity of 1, we do not need to modify the embed
+            # We just use a simple string replacement to insert the quantity into the item name before sending to replace_placeholders
+            if quantity > 1:
+                quantity_text = f"{str(quantity)} `x` {item_name}"
+                item_value = f"`{format_number(total_value)}` ({quantity} `x` {format_number(total_value / quantity)})"
+
             values = {
                 "{item_name}": item_name,
                 "{month_name}": datetime.now().strftime("%B"),
