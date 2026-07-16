@@ -21,6 +21,7 @@ global events where group_id is NULL):
   GET    /api/v1/events/meta/resolve?kind=item|npc&names=a|b -> [{ id, name }]
   POST   /api/v1/events/{id}/teams          { EventTeamInput } -> { id }
   POST   /api/v1/events/{id}/teams/{teamId}/members   { player_id } -> { ok }
+  POST   /api/v1/events/{id}/teams/{teamId}/members/bulk { names } -> { added, skipped }
   DELETE /api/v1/events/{id}/teams/{teamId}/members/{playerId}      -> { ok }
 
 Scores are computed by the submission pipeline (backend-owned), never trusted
@@ -2322,6 +2323,152 @@ async def admin_add_member(event_id: int, team_id: int):
     await asyncio.to_thread(_apply)
     _bump(event_id)
     return private_no_store(jsonify({"ok": True}))
+
+
+MAX_BULK_ADD_NAMES = 200
+
+
+@events_bp.post("/events/<int:event_id>/teams/<int:team_id>/members/bulk")
+async def admin_add_members_bulk(event_id: int, team_id: int):
+    """Admin roster add, list form ("paste your team"): resolves a list of
+    RSNs case-insensitively and places every tracked, eligible player on the
+    team in one call. Unlike the single-add route this never MOVES a player —
+    anyone already placed on a team in this event comes back as skipped, so a
+    pasted list can't silently reshuffle rosters. Per-name outcomes are
+    returned so the UI can show exactly what happened. Audit-logged once."""
+    user_id = current_user_id()
+    body = await json_body()
+    names = body.get("names")
+    if not isinstance(names, list) or not names:
+        abort_problem(422, "Invalid names", "'names' must be a non-empty list of player names.")
+    if len(names) > MAX_BULK_ADD_NAMES:
+        abort_problem(422, "Too many names",
+                      f"At most {MAX_BULK_ADD_NAMES} names per request.")
+    cleaned: list[str] = []
+    seen_keys: set[str] = set()
+    for raw in names:
+        if not isinstance(raw, str):
+            abort_problem(422, "Invalid names", "'names' must contain only strings.")
+        name = raw.strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        cleaned.append(name)
+    if not cleaned:
+        abort_problem(422, "Invalid names", "No usable names in the list.")
+
+    def _apply():
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            _assert_roster_open(ev)
+            team = (
+                s.query(EventTeam)
+                .filter(EventTeam.id == team_id, EventTeam.event_id == event_id)
+                .first()
+            )
+            if not team:
+                abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+
+            # Resolve the whole list in one query; keep the DB's canonical
+            # capitalization for the response.
+            rows = (
+                s.query(Player.player_id, Player.player_name)
+                .filter(func.lower(Player.player_name).in_(list(seen_keys)))
+                .all()
+            )
+            by_key: dict[str, tuple[int, str]] = {}
+            for pid, pname in rows:
+                by_key.setdefault((pname or "").lower(), (pid, pname))
+            resolved_ids = [pid for pid, _ in by_key.values()]
+
+            # Eligibility mirrors admin_add_member: membership of the team's
+            # own clan when the team is clan-bound, else any participating
+            # clan. Global events (no participating groups) accept any
+            # tracked player.
+            gids = participating_group_ids(s, ev)
+            team_gid = getattr(team, "group_id", None)
+            check_gids = {team_gid} if team_gid else gids
+            eligible_ids: set[int] = set(resolved_ids)
+            if check_gids and resolved_ids:
+                eligible_ids = {
+                    pid for (pid,) in (
+                        s.query(user_group_association.c.player_id)
+                        .filter(
+                            user_group_association.c.player_id.in_(resolved_ids),
+                            user_group_association.c.group_id.in_(list(check_gids)),
+                        )
+                        .all()
+                    )
+                }
+
+            # Existing placements anywhere on this event (one team per player).
+            placed: dict[int, int] = {}
+            if resolved_ids:
+                placed = dict(
+                    s.query(EventTeamMember.player_id, EventTeamMember.team_id)
+                    .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+                    .filter(
+                        EventTeam.event_id == event_id,
+                        EventTeamMember.player_id.in_(resolved_ids),
+                    )
+                    .all()
+                )
+
+            added: list[dict] = []
+            skipped: list[dict] = []
+            for name in cleaned:
+                hit = by_key.get(name.lower())
+                if not hit:
+                    skipped.append({"name": name, "reason": "No tracked player by that name."})
+                    continue
+                pid, canonical = hit
+                if pid not in eligible_ids:
+                    skipped.append({
+                        "name": canonical,
+                        "reason": (
+                            "Not a member of the clan this team represents."
+                            if team_gid
+                            else "Not a member of a participating clan."
+                        ),
+                    })
+                    continue
+                prior = placed.get(pid)
+                if prior is not None:
+                    skipped.append({
+                        "name": canonical,
+                        "reason": (
+                            "Already on this team."
+                            if prior == team_id
+                            else "Already on another team in this event."
+                        ),
+                    })
+                    continue
+                s.add(EventTeamMember(team_id=team_id, player_id=pid))
+                placed[pid] = team_id
+                added.append({"id": pid, "name": canonical})
+
+            if added:
+                s.add(
+                    AuditLog(
+                        actor_user_id=user_id,
+                        group_id=ev.group_id,
+                        action="event.member.bulk_add",
+                        target=f"web_events.{event_id}.team.{team_id}",
+                        before=None,
+                        after=f"added:{len(added)}",
+                    )
+                )
+                s.commit()
+            return {"added": added, "skipped": skipped}
+
+    result = await asyncio.to_thread(_apply)
+    if result["added"]:
+        _bump(event_id)
+    return private_no_store(jsonify(result))
 
 
 @events_bp.delete("/events/<int:event_id>/teams/<int:team_id>/members/<int:player_id>")
