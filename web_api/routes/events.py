@@ -91,6 +91,11 @@ from web_api.deps import (
 
 events_bp = Blueprint("v1_events", __name__)
 
+# Group-config key for the standing "Open DropTracker" card's channel.
+# Mirrored (not imported) so the unit-test harness, which stubs the whole
+# ``services`` package, can exercise this module.
+ACTIVITY_LAUNCH_CHANNEL_KEY = "activity_launch_channel"  # == services.activity_launch_core.CHANNEL_KEY
+
 
 def _ts(dt) -> int | None:
     return int(dt.timestamp()) if dt else None
@@ -675,15 +680,28 @@ async def event_by_channel(channel_id: str):
     the app in its channel, and ``sdk.channelId`` tells us which. Prefers the
     active event; falls back to the most recent event pointed at the channel
     (so an ended event's "Final standings" button still lands right).
-    ``{"event_id": null}`` when no event maps to the channel."""
+    ``{"event_id": null}`` when no event maps to the channel — or when the
+    channel hosts a group's standing "Open DropTracker" card
+    (``activity_launch_channel``): launches from there mean "open the app",
+    not "open this channel's event", so the fallback must not fire."""
     channel_id = (channel_id or "").strip()
     if not channel_id.isdigit():
         return with_cache_headers(jsonify({"event_id": None}), max_age=30)
 
     def _load():
-        from db.models import EventChannel
+        from db.models import EventChannel, GroupConfiguration
 
         with db_session() as s:
+            is_launcher_channel = (
+                s.query(GroupConfiguration.group_id)
+                .filter(
+                    GroupConfiguration.config_key == ACTIVITY_LAUNCH_CHANNEL_KEY,
+                    GroupConfiguration.config_value == channel_id,
+                )
+                .first()
+            )
+            if is_launcher_channel:
+                return None
             base = (
                 s.query(EventChannel.event_id)
                 .join(Event, Event.id == EventChannel.event_id)
