@@ -19,9 +19,15 @@ an item of type T is usable iff  turns_completed - last_used_turn(T)
 
 Live handlers — self-targeted (P2): skip_task / reroll_task / boost_coins;
 interference (P3): advance (teleport forward, roadblock-aware, no turn
-consumed), roadblock (tile trap: the next OTHER team to pass stops on it),
-freeze_opponent (target's next N rolls move 0 tiles; blocked by an armed
-shield), shield (absorbs the next offensive effect).
+consumed), roadblock (tile trap: ANY team whose movement crosses it — the
+placer included — stops on it; break_on/stall_turns behavior comes from the
+effect registry, see services/boardgame_effects.py), freeze_opponent
+(target's next N rolls move 0 tiles; blocked by an armed shield), shield
+(absorbs the next offensive effect).
+
+Effect metadata/behavior lives in services.boardgame_effects.EFFECT_REGISTRY;
+handlers here follow the ``_use_<effect>`` naming convention the dispatch
+relies on.
 
 Caller owns the transaction (routes commit); helpers only flush.
 """
@@ -32,6 +38,7 @@ import random
 from datetime import datetime
 from typing import Optional
 
+from services.boardgame_effects import EFFECT_REGISTRY, live_effects
 from services.boardgame_engine import (
     assign_tile_task,
     award_coins,
@@ -51,10 +58,9 @@ class ShopError(Exception):
         self.detail = detail
 
 
-_LIVE_EFFECTS = (
-    "skip_task", "reroll_task", "boost_coins",          # P2 self-targeted
-    "advance", "roadblock", "freeze_opponent", "shield",  # P3 interference
-)
+# Effects with a live handler — sourced from the behavior registry so the
+# catalog flags, inventory flags, and the dispatch can never drift apart.
+_LIVE_EFFECTS = live_effects()
 
 
 def _cfg(raw) -> dict:
@@ -283,7 +289,12 @@ def use_item(session, redis_conn, event_id: int, team_id: int,
             item.effect in disabled_effects:
         raise ShopError(409, "Item disabled",
                         "The event's settings have disabled this item.")
-    if item.effect not in _LIVE_EFFECTS:
+    # Registry-driven dispatch: an implemented effect has a _use_<key>
+    # handler in this module (uniform signature).
+    spec = EFFECT_REGISTRY.get(item.effect)
+    handler = (globals().get(f"_use_{item.effect}")
+               if spec is not None and spec.implemented else None)
+    if handler is None:
         raise ShopError(409, "Not yet usable",
                         "This power-up's effect arrives in a later update.")
 
@@ -310,15 +321,6 @@ def use_item(session, redis_conn, event_id: int, team_id: int,
             f"the next is usable from turn {ready} (you are on {turns}).",
         )
 
-    handler = {
-        "skip_task": _use_skip_task,
-        "reroll_task": _use_reroll_task,
-        "boost_coins": _use_boost_coins,
-        "advance": _use_advance,
-        "roadblock": _use_roadblock,
-        "freeze_opponent": _use_freeze_opponent,
-        "shield": _use_shield,
-    }[item.effect]
     result = handler(session, redis_conn, event_id, team_id, pos, item,
                      settings, rng=rng, target=target)
 
@@ -533,9 +535,16 @@ def _use_advance(session, redis_conn, event_id, team_id, pos, item,
 
 def _use_roadblock(session, redis_conn, event_id, team_id, pos, item,
                    settings, rng=None, target=None) -> dict:
-    """Place a trap on a tile: the next OTHER team whose movement crosses it
-    stops there (the block is consumed when it procs)."""
+    """Place a bulwark on a tile: ANY team whose movement crosses it — the
+    placer included — stops on it. Consumption (break_on pass/land/both) and
+    the turn stall (stall_turns) come from the resolved behavior — registry
+    defaults ← item effect_config ← the event's leader override — snapshotted
+    into the placed effect so mid-event re-tuning never mutates live traps."""
     from db.models import EventBoardEffect
+    from services.boardgame_effects import (
+        load_event_behavior_overrides,
+        resolve_effect_behavior,
+    )
     from services.boardgame_engine import finish_idx, load_tiles
 
     tile_idx = (target or {}).get("target_tile_idx")
@@ -556,13 +565,16 @@ def _use_roadblock(session, redis_conn, event_id, team_id, pos, item,
                 .first())
     if existing is not None:
         raise ShopError(409, "Tile occupied", "That tile is already blocked.")
+    behavior = resolve_effect_behavior(
+        item.effect, item=item,
+        overrides=load_event_behavior_overrides(session, event_id))
     session.add(EventBoardEffect(
         event_id=event_id, source_team_id=team_id,
         target_tile_idx=int(tile_idx), effect_type="roadblock",
-        effect_config=item.effect_config, status="active",
+        effect_config=json.dumps(behavior), status="active",
     ))
     session.flush()
-    return {"roadblock_tile_idx": int(tile_idx)}
+    return {"roadblock_tile_idx": int(tile_idx), "behavior": behavior}
 
 
 def _use_freeze_opponent(session, redis_conn, event_id, team_id, pos, item,

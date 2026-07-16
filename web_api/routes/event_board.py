@@ -78,6 +78,8 @@ _MOVEMENT_TRIGGERS = ("auto", "manual")
 _MANUAL_ROLLERS = ("team", "group_admin", "either")
 _TILE_RENDER_MODES = ("rune", "invisible", "outline")
 _WIN_RULES = ("finish_tile",)  # P1; threshold/time-boxed variants later
+# Tile-bound effect consumption modes (services/boardgame_effects.BREAK_MODES).
+_EFFECT_BREAK_MODES = ("pass", "land", "both")
 
 
 def _clean_int(value, lo, hi, name):
@@ -135,6 +137,9 @@ def _validate_settings_patch(body: dict) -> dict:
         if "outline_width" in render:
             t["outline_width"] = _clean_int(render["outline_width"], 1, 12,
                                             "tile_render.outline_width")
+        if "icon_size" in render:
+            t["icon_size"] = _clean_int(render["icon_size"], 8, 64,
+                                        "tile_render.icon_size")
         if "outline_color" in render:
             color = render["outline_color"]
             if not isinstance(color, str) or len(color) != 7 or not color.startswith("#"):
@@ -194,6 +199,83 @@ def _validate_settings_patch(body: dict) -> dict:
             sh["enabled"] = bool(shop["enabled"])
         if sh:
             out["shop"] = sh
+
+    items = body.get("items")
+    if items is not None:
+        if not isinstance(items, dict):
+            abort_problem(422, "Invalid settings", "'items' must be an object.")
+        it: dict = {}
+        if "enabled_item_ids" in items:
+            ids = items["enabled_item_ids"]
+            if ids is None:
+                it["enabled_item_ids"] = None  # null = the whole active catalog
+            else:
+                if not isinstance(ids, list) or len(ids) > 200 or not all(
+                        isinstance(i, int) and not isinstance(i, bool) and i > 0
+                        for i in ids):
+                    abort_problem(422, "Invalid settings",
+                                  "items.enabled_item_ids must be null or a "
+                                  "list of shop item ids (max 200).")
+                it["enabled_item_ids"] = ids
+        if "disabled_effects" in items:
+            fx = items["disabled_effects"]
+            if not isinstance(fx, list) or len(fx) > 50 or not all(
+                    isinstance(e, str) and 0 < len(e) <= 32 for e in fx):
+                abort_problem(422, "Invalid settings",
+                              "items.disabled_effects must be a list of "
+                              "effect keys (max 50, each ≤32 chars).")
+            it["disabled_effects"] = fx
+        if "behaviors" in items:
+            behaviors = items["behaviors"]
+            if not isinstance(behaviors, dict) or len(behaviors) > 50:
+                abort_problem(422, "Invalid settings",
+                              "items.behaviors must be an object keyed by "
+                              "effect name (max 50 keys).")
+            clean_behaviors: dict = {}
+            for effect_key, b in behaviors.items():
+                # Unknown effect keys ride through (forward-compat with
+                # future registry entries) after the same field checks.
+                if not isinstance(effect_key, str) or not (0 < len(effect_key) <= 32):
+                    abort_problem(422, "Invalid settings",
+                                  "items.behaviors keys must be effect names "
+                                  "(≤32 chars).")
+                if not isinstance(b, dict) or len(b) > 20:
+                    abort_problem(422, "Invalid settings",
+                                  f"items.behaviors.{effect_key} must be an object.")
+                cb: dict = {}
+                for knob, v in b.items():
+                    if not isinstance(knob, str) or not (0 < len(knob) <= 32):
+                        abort_problem(422, "Invalid settings",
+                                      f"items.behaviors.{effect_key} has an "
+                                      "invalid field name.")
+                    if knob == "break_on":
+                        if v not in _EFFECT_BREAK_MODES:
+                            abort_problem(
+                                422, "Invalid settings",
+                                f"items.behaviors.{effect_key}.break_on must "
+                                f"be one of {list(_EFFECT_BREAK_MODES)}.")
+                        cb[knob] = v
+                    elif knob == "stall_turns":
+                        cb[knob] = _clean_int(
+                            v, 0, 3, f"items.behaviors.{effect_key}.stall_turns")
+                    elif knob == "visible_to_all":
+                        cb[knob] = bool(v)
+                    else:
+                        # Forward-compat: unknown knobs pass through when scalar.
+                        if v is not None and not isinstance(v, (str, int, float, bool)):
+                            abort_problem(
+                                422, "Invalid settings",
+                                f"items.behaviors.{effect_key}.{knob} must be "
+                                "a scalar value.")
+                        if isinstance(v, str) and len(v) > 64:
+                            abort_problem(
+                                422, "Invalid settings",
+                                f"items.behaviors.{effect_key}.{knob} is too long.")
+                        cb[knob] = v
+                clean_behaviors[effect_key] = cb
+            it["behaviors"] = clean_behaviors
+        if it:
+            out["items"] = it
 
     win = body.get("win")
     if win is not None:
@@ -271,6 +353,53 @@ def _position_row(s, pos: EventBoardPosition, team: EventTeam) -> dict:
     }
 
 
+def _active_tile_effects(s, event_id: int) -> list:
+    """Active tile-bound effects (web49a) — roadblocks/bulwarks placed on tiles,
+    surfaced in the board payload so they render on the board for *everyone*
+    (per-item ``visible_to_all`` behavior). Icon + name are resolved from the
+    shop catalog by effect type so a future tile-bound item renders for free."""
+    from db.models import BoardgameShopItem, EventBoardEffect
+    from services.boardgame_effects import tile_bound_effects
+
+    kinds = list(tile_bound_effects())
+    if not kinds:
+        return []
+    rows = (s.query(EventBoardEffect)
+            .filter(EventBoardEffect.event_id == event_id,
+                    EventBoardEffect.status == "active",
+                    EventBoardEffect.effect_type.in_(kinds),
+                    EventBoardEffect.target_tile_idx.isnot(None))
+            .all())
+    if not rows:
+        return []
+    meta = {}
+    for it in (s.query(BoardgameShopItem)
+               .filter(BoardgameShopItem.effect.in_(
+                   list({r.effect_type for r in rows})))
+               .order_by(BoardgameShopItem.active.desc(),
+                         BoardgameShopItem.sort)
+               .all()):
+        meta.setdefault(it.effect,
+                        {"icon_item_id": it.icon_item_id, "name": it.name})
+    out = []
+    for r in rows:
+        try:
+            behavior = json.loads(r.effect_config or "{}")
+        except (ValueError, TypeError):
+            behavior = {}
+        m = meta.get(r.effect_type, {})
+        out.append({
+            "id": int(r.id),
+            "effect_type": r.effect_type,
+            "target_tile_idx": int(r.target_tile_idx),
+            "placed_by_team_id": r.source_team_id,
+            "icon_item_id": m.get("icon_item_id"),
+            "name": m.get("name"),
+            "visible_to_all": bool(behavior.get("visible_to_all", True)),
+        })
+    return out
+
+
 def _board_payload(s, ev) -> dict:
     from services.boardgame_engine import board_settings, finish_idx
 
@@ -302,6 +431,7 @@ def _board_payload(s, ev) -> dict:
         "positions": [
             _position_row(s, p, teams.get(p.team_id)) for p in positions
         ],
+        "effects": _active_tile_effects(s, ev.id),
     }
 
 
@@ -719,7 +849,9 @@ async def roll_board(event_id: int):
                    .filter(EventBoardPosition.team_id == team_id).first())
             if pos is None or pos.event_id != ev.id:
                 abort_problem(404, "No board position", "That team has no board state.")
-            if pos.status != "awaiting_roll":
+            # "blocked" attempts go through: perform_roll consumes the
+            # attempt as a stalled turn (roadblock stall, web49a).
+            if pos.status not in ("awaiting_roll", "blocked"):
                 abort_problem(409, "Not ready to roll",
                               "Complete the current task first." if pos.status == "active"
                               else f"The team is '{pos.status}'.")
@@ -845,9 +977,26 @@ async def board_png(event_id: int):
             if not config or not config.background_url:
                 abort_problem(404, "No board art",
                               "This board has no background image to render.")
-            return config.background_url, config.bg_width, config.bg_height
+            # Current live standings (lean — just what the banner draws), spliced
+            # into the SVG at rasterization time. Defensive: no positions/teams
+            # yields an empty list and the stored SVG rasterizes unchanged.
+            teams = {t.id: t for t in s.query(EventTeam)
+                     .filter(EventTeam.event_id == ev.id).all()}
+            positions = (s.query(EventBoardPosition)
+                         .filter(EventBoardPosition.event_id == ev.id).all())
+            standings = []
+            for p in positions:
+                team = teams.get(p.team_id)
+                standings.append({
+                    "team_name": team.name if team else f"Team {p.team_id}",
+                    "color": team.color if team else None,
+                    "tile_idx": int(p.tile_idx or 0),
+                    "status": p.status or "active",
+                })
+            return (config.background_url, config.bg_width, config.bg_height,
+                    standings)
 
-    background_url, bg_width, bg_height = await asyncio.to_thread(_read_bg)
+    background_url, bg_width, bg_height, standings = await asyncio.to_thread(_read_bg)
 
     import httpx
 
@@ -867,11 +1016,28 @@ async def board_png(event_id: int):
             "Content-Disposition": f'inline; filename="board-{event_id}.png"',
         })
 
-    from services.boardgame_generator import rasterize_svg_to_png
+    from services.boardgame_generator import (
+        rasterize_svg_to_png,
+        standings_scroll_svg,
+    )
+
+    svg = raw.decode("utf-8")
+    # Inject the live standings banner at export time (never baked into the
+    # stored generate-time SVG). Guard hard: any failure falls back to the
+    # unmodified board so the PNG always renders.
+    if standings:
+        try:
+            fragment = standings_scroll_svg(
+                standings, int(bg_width or 1600), int(bg_height or 900))
+            close = svg.rfind("</svg>")
+            if fragment and close != -1:
+                svg = svg[:close] + fragment + svg[close:]
+        except Exception:
+            pass
 
     try:
         png = await rasterize_svg_to_png(
-            raw.decode("utf-8"), int(bg_width or 1600), int(bg_height or 900),
+            svg, int(bg_width or 1600), int(bg_height or 900),
             scale=scale)
     except Exception as e:
         abort_problem(502, "Board render failed", str(e))

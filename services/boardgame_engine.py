@@ -48,6 +48,7 @@ DEFAULT_BOARD_SETTINGS = {
         "outline_width": 2,
         "outline_color": "#ffcc33",
         "show_labels": True,
+        "icon_size": 20,         # px — tile icon size on the rendered board (8–64)
     },
     "coins": {
         "enabled": True,
@@ -56,7 +57,20 @@ DEFAULT_BOARD_SETTINGS = {
         "starting": 0,
     },
     "shop": {"enabled": True, "rotation": "static", "rotation_turns": 0},
-    "items": {"enabled_item_ids": None, "disabled_effects": []},  # None = all
+    "items": {
+        "enabled_item_ids": None,   # None = all active catalog items
+        "disabled_effects": [],
+        # Per-effect behavior overrides (the leader layer). Values here MUST
+        # mirror services/boardgame_effects.EFFECT_REGISTRY defaults — they
+        # exist so the merged settings document the web settings UI reads
+        # always carries a complete behavior shape. True layering (registry
+        # ← item effect_config ← leader override) resolves against the RAW
+        # stored overrides via boardgame_effects.load_event_behavior_overrides.
+        "behaviors": {
+            "roadblock": {"break_on": "pass", "stall_turns": 1,
+                          "visible_to_all": True},
+        },
+    },
     "mercy": {"enabled": True, "base_hours": 24, "step_hours": 12},
     "win": {"rule": "finish_tile", "tiebreak": ["coins", "score"]},
 }
@@ -382,23 +396,31 @@ def perform_roll(session, redis_conn, event_id: int, team_id: int,
                  rng: Optional[random.Random] = None,
                  acted_by_user_id=None) -> Optional[dict]:
     """One dice roll: move the piece, resolve the landing, assign the next
-    task. Caller guarantees the team is ``awaiting_roll`` (the web route
-    validates + 409s; the auto path just set it). Returns the roll summary
-    {dice, from, to, won, task_id?, task_label?} or None when the position
-    is missing/ineligible. Caller commits."""
+    task. Caller guarantees the team is ``awaiting_roll`` or ``blocked`` (the
+    web route validates + 409s; the auto path just set it). Returns the roll
+    summary {dice, from, to, won, task_id?, task_label?}, a stall summary
+    {blocked: True, ...} while a tile effect is holding the team (the attempt
+    is consumed, the piece stays put), or None when the position is missing/
+    ineligible. Caller commits."""
     from db.models import EventBoardPosition
 
     pos = (session.query(EventBoardPosition)
            .filter(EventBoardPosition.team_id == team_id).first())
     if pos is None or pos.event_id != event_id:
         return None
-    if pos.status not in ("awaiting_roll",):
+    if pos.status not in ("awaiting_roll", "blocked"):
         return None
 
     settings = settings or load_board_settings(session, event_id)
     tiles = load_tiles(session, event_id)
     if not tiles:
         return None
+
+    if pos.status == "blocked":
+        # A tile effect (roadblock stall) holds the team: this attempt IS
+        # the lost turn — no dice, no movement.
+        return _serve_blocked_turn(session, redis_conn, event_id, team_id,
+                                   pos, tiles, settings, rng=rng)
 
     faces = roll_dice(settings, rng)
     start = int(pos.tile_idx or 0)
@@ -430,8 +452,9 @@ def perform_roll(session, redis_conn, event_id: int, team_id: int,
 
         publish_event_update(event_id, {
             "kind": "board_roll", "event_id": event_id, "team_id": team_id,
-            "dice": faces, "from": start, "to": dest,
+            "dice": faces, "from": start, "to": summary["to"],
             "won": summary["won"], "task_label": summary.get("task_label"),
+            "blocked": bool(summary.get("blocked")),
         })
     except Exception:
         pass
@@ -475,47 +498,109 @@ def _consume_freeze_charge(session, event_id: int, team_id: int) -> bool:
     return True
 
 
-def _first_roadblock(session, event_id: int, team_id: int, path: range):
-    """The nearest active roadblock on ``path`` NOT placed by this team."""
-    from db.models import EventBoardEffect
+def _serve_blocked_turn(session, redis_conn, event_id: int, team_id: int,
+                        pos, tiles: list, settings: dict,
+                        rng: Optional[random.Random] = None) -> dict:
+    """A roll attempt while a tile effect has the team ``blocked``: the
+    attempt itself is the lost turn — ``turns_completed`` ticks, the piece
+    stays put, no dice are thrown. When the counter reaches
+    ``blocked_until_turn`` the block clears and the tile's task is assigned,
+    resuming the normal loop. ``last_roll`` is left alone (the last real
+    dice animation stays valid). Returns a {blocked: True, ...} summary the
+    roll route surfaces as-is."""
+    pos.turns_completed = int(pos.turns_completed or 0) + 1
+    tile_idx = int(pos.tile_idx or 0)
+    summary: dict = {"blocked": True, "from": tile_idx, "to": tile_idx,
+                     "dice": [], "won": False, "turn": pos.turns_completed}
+    until = pos.blocked_until_turn
+    if until is None or pos.turns_completed >= int(until):
+        # Stall served (or corrupt marker — fail open): back to normal play.
+        pos.blocked_until_turn = None
+        by_idx = {int(t.idx): t for t in tiles}
+        instance = assign_tile_task(session, event_id, team_id,
+                                    by_idx.get(tile_idx), pos, settings,
+                                    rng=rng)
+        summary["blocked_cleared"] = True
+        if instance is not None:
+            summary["task_id"] = instance.id
+            summary["task_label"] = instance.label
+            summary["task_difficulty"] = instance.difficulty
+        # New live task = new matcher target.
+        try:
+            from services.event_engine import publish_event_admin_bump
 
-    if not path:
-        return None
-    rows = (session.query(EventBoardEffect)
-            .filter(EventBoardEffect.event_id == event_id,
-                    EventBoardEffect.effect_type == "roadblock",
-                    EventBoardEffect.status == "active",
-                    EventBoardEffect.target_tile_idx.in_(list(path)),
-                    EventBoardEffect.source_team_id != team_id)
-            .all())
-    if not rows:
-        return None
-    return min(rows, key=lambda e: int(e.target_tile_idx))
+            publish_event_admin_bump(redis_conn)
+        except Exception:
+            pass
+    else:
+        summary["stall_remaining"] = int(until) - int(pos.turns_completed)
+    session.flush()
+    try:
+        from services.realtime import publish_event_update
+
+        publish_event_update(event_id, {
+            "kind": "board_blocked", "event_id": event_id, "team_id": team_id,
+            "tile_idx": tile_idx,
+            "cleared": bool(summary.get("blocked_cleared")),
+            "stall_remaining": int(summary.get("stall_remaining", 0)),
+        })
+    except Exception:
+        pass
+    return summary
 
 
 def _move_piece(session, event_id: int, team_id: int, pos, tiles: list,
                 start: int, steps: int, settings: dict,
                 rng: Optional[random.Random] = None) -> dict:
     """Shared movement/landing core (rolls AND the advance power-up):
-    roadblock pass-through, finish clamp, landing task resolution. Mutates
-    ``pos``; caller stamps turn counters/last_roll and flushes."""
+    tile-effect resolution (roadblocks & future traps), finish clamp, landing
+    task resolution. Mutates ``pos``; caller stamps turn counters/last_roll
+    and flushes."""
     fin = finish_idx(tiles)
     by_idx = {int(t.idx): t for t in tiles}
     dest = min(start + max(0, steps), fin)
 
     summary: dict = {"from": start, "to": dest, "won": False}
 
-    # Roadblocks (P3): the nearest one on the path stops the piece ON its
-    # tile and is consumed ("removed when it procs" — legacy Dinh's).
+    # Tile-bound effects (roadblock is the first consumer): the nearest
+    # triggering one on the path may stop the piece, be consumed, and/or
+    # stall the team — all semantics come from the effect's placement-time
+    # behavior snapshot via services.boardgame_effects, never hardcoded
+    # here. NO placer immunity: the placing team hits its own traps.
     if dest > start:
-        block = _first_roadblock(session, event_id, team_id,
-                                 range(start + 1, dest + 1))
-        if block is not None:
-            dest = int(block.target_tile_idx)
-            block.status = "consumed"
+        from services.boardgame_effects import apply_tile_effects_on_path
+
+        hit = apply_tile_effects_on_path(session, event_id, team_id, start, dest)
+        if hit is not None:
+            dest = int(hit["stop_at"])
             summary["to"] = dest
-            summary["roadblock"] = {"tile_idx": dest,
-                                    "placed_by_team_id": block.source_team_id}
+            summary["tile_effect"] = {
+                "effect_type": hit["effect_type"],
+                "tile_idx": int(hit["stop_at"]),
+                "placed_by_team_id": hit["placed_by_team_id"],
+                "stopped": hit["stopped"],
+                "consumed": hit["consumed"],
+                "stall_turns": hit["stall_turns"],
+            }
+            if hit["effect_type"] == "roadblock":
+                summary["roadblock"] = {
+                    "tile_idx": dest,
+                    "placed_by_team_id": hit["placed_by_team_id"],
+                    "consumed": hit["consumed"],
+                }
+            if hit["stopped"] and int(hit["stall_turns"] or 0) > 0:
+                # Lose-a-turn: park the piece with no task; perform_roll
+                # serves the stall (one consumed attempt per stalled turn).
+                pos.tile_idx = dest
+                pos.status = "blocked"
+                pos.blocked_until_turn = (int(pos.turns_completed or 0)
+                                          + int(hit["stall_turns"]))
+                pos.current_task_id = None
+                pos.task_assigned_at = None
+                pos.mercy_deadline = None
+                summary["blocked"] = True
+                summary["blocked_until_turn"] = pos.blocked_until_turn
+                return summary
 
     pos.tile_idx = dest
     if dest >= fin:

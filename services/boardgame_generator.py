@@ -186,6 +186,23 @@ def build_board_assets(p: GenParams) -> dict:
     }
 
 
+def standings_scroll_svg(standings: list | None, width: int, height: int) -> str:
+    """Render just the ``<g class="standings-scroll">…</g>`` fragment for the
+    given live standings, to splice into a stored board SVG at PNG-export time.
+
+    The generate-time background SVG is deliberately standings-free (the web app
+    overlays its own live banner; baking would freeze/duplicate it). The board
+    PNG export injects CURRENT standings here instead. Returns "" when there is
+    nothing to show or on any render error, so the caller can no-op safely."""
+    if not standings:
+        return ""
+    try:
+        from services.boardgen.render import _standings_scroll
+        return _standings_scroll(standings, int(width or 0), int(height or 0))
+    except Exception:
+        return ""
+
+
 async def upload_board_svg(svg: str, event_id: int, seed: int) -> str:
     """Publish the generated SVG to B2 and return its public CDN URL (served as
     the tile-overlay background). Mirrors the board-background upload path."""

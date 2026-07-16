@@ -60,7 +60,8 @@ def _hex(board: Board, tile: Tile, fill: str, **kw) -> str:
 
 
 def render(board: Board, *, watermark: str | None = None,
-           grid_backdrop: bool | None = None) -> Canvas:
+           grid_backdrop: bool | None = None,
+           standings: list | None = None) -> Canvas:
     c = Canvas(board.width, board.height)
     for d in _defs(board):
         c.add_def(d)
@@ -135,6 +136,8 @@ def render(board: Board, *, watermark: str | None = None,
                           rx=4))
     title.add(c.rect(0, 0, board.width, board.height, fill="url(#g-vig)"))
     title.add(_title_scroll(board.title, board.subtitle))
+    if standings:
+        title.add(_standings_scroll(standings, board.width, board.height))
     if watermark:
         title.add(_watermark(board.width, board.height, watermark))
 
@@ -198,6 +201,93 @@ def _title_scroll(title, subtitle) -> str:
     return f'<g class="title-scroll">{body}{roll_l}{roll_r}{t1}{t2}</g>'
 
 
+def _standings_scroll(standings, width, height) -> str:
+    """Bottom-right parchment scroll listing live team standings.
+
+    Mirrors ``_title_scroll``'s look (g-parch fill, b8965a/7c6132 rollers,
+    Georgia serif) but is positioned bottom-right and sized to N rows. Each row
+    shows rank · a team-colour dot · team name · board position (``tile_idx``,
+    or "Finish" when the team has finished). Rows sort by position (furthest
+    first); at most ``MAX_ROWS`` are shown, the rest folded into a "+K more"
+    line. Injected only at PNG-export time — never baked into the stored SVG.
+    """
+    def _pos(p):
+        try:
+            return int(p.get("tile_idx") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _finished(p):
+        return str(p.get("status") or "").lower() in ("finished", "won")
+
+    rows = sorted(standings, key=lambda p: (1 if _finished(p) else 0, _pos(p)),
+                  reverse=True)
+    MAX_ROWS = 12
+    total = len(rows)
+    shown = rows[:MAX_ROWS]
+    overflow = total - len(shown)
+
+    w = 300
+    header_h = 42
+    row_h = 26
+    pad_bottom = 12
+    n_lines = len(shown) + (1 if overflow > 0 else 0)
+    h = header_h + n_lines * row_h + pad_bottom
+
+    x = width - w - 30
+    y = height - h - 24
+
+    body = (f'<rect x="{x+14}" y="{y}" width="{w-28}" height="{h}" rx="6" '
+            f'fill="url(#g-parch)" stroke="#9c7d45" stroke-width="2"/>')
+    roll_l = (f'<rect x="{x}" y="{y-6}" width="16" height="{h+12}" rx="8" '
+              f'fill="#b8965a" stroke="#7c6132" stroke-width="2"/>')
+    roll_r = (f'<rect x="{x+w-16}" y="{y-6}" width="16" height="{h+12}" rx="8" '
+              f'fill="#b8965a" stroke="#7c6132" stroke-width="2"/>')
+    header = (f'<text x="{x+w/2}" y="{y+28}" text-anchor="middle" '
+              f'font-family="{FONT}" font-size="22" font-weight="bold" '
+              f'letter-spacing="1" fill="#3a2c14">STANDINGS</text>')
+    divider = (f'<line x1="{x+24}" y1="{y+header_h-6}" x2="{x+w-24}" '
+               f'y2="{y+header_h-6}" stroke="#9c7d45" stroke-width="1.5" '
+               f'opacity="0.55"/>')
+
+    rank_x = x + 26
+    dot_cx = x + 48
+    name_x = x + 64
+    pos_x = x + w - 26
+
+    parts = [body, roll_l, roll_r, header, divider]
+    for i, p in enumerate(shown):
+        ry = y + header_h + i * row_h
+        base = ry + row_h * 0.68
+        color = p.get("color") or "#b8965a"
+        if not (isinstance(color, str) and color.startswith("#")
+                and len(color) in (4, 7)):
+            color = "#b8965a"
+        name = _esc(_truncate(str(p.get("team_name") or f"Team {i+1}"), 20))
+        pos_label = "Finish" if _finished(p) else str(_pos(p))
+        rank_txt = (f'<text x="{rank_x}" y="{base:.1f}" font-family="{FONT}" '
+                    f'font-size="15" font-weight="bold" fill="#5c4a24">'
+                    f'{i+1}.</text>')
+        dot = (f'<circle cx="{dot_cx}" cy="{ry + row_h/2:.1f}" r="6" '
+               f'fill="{color}" stroke="#3a2c14" stroke-width="1"/>')
+        name_txt = (f'<text x="{name_x}" y="{base:.1f}" font-family="{FONT}" '
+                    f'font-size="15" fill="#3a2c14">{name}</text>')
+        pos_txt = (f'<text x="{pos_x}" y="{base:.1f}" text-anchor="end" '
+                   f'font-family="{FONT}" font-size="14" font-style="italic" '
+                   f'fill="#5c4a24">{_esc(pos_label)}</text>')
+        parts.append(f'{rank_txt}{dot}{name_txt}{pos_txt}')
+
+    if overflow > 0:
+        ry = y + header_h + len(shown) * row_h
+        base = ry + row_h * 0.68
+        parts.append(
+            f'<text x="{x+w/2}" y="{base:.1f}" text-anchor="middle" '
+            f'font-family="{FONT}" font-size="13" font-style="italic" '
+            f'fill="#5c4a24">+{overflow} more</text>')
+
+    return f'<g class="standings-scroll">{"".join(parts)}</g>'
+
+
 def _watermark(w, h, text) -> str:
     marks = []
     step = 230
@@ -215,3 +305,8 @@ def _watermark(w, h, text) -> str:
 def _esc(s: str) -> str:
     import html
     return html.escape(str(s), quote=True)
+
+
+def _truncate(s: str, n: int) -> str:
+    s = str(s)
+    return s if len(s) <= n else s[: max(0, n - 1)].rstrip() + "…"

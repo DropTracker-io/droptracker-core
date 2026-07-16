@@ -98,7 +98,9 @@ EVENT_BOARD_TILE_KINDS = ("start", "normal", "special", "finish")
 # - "active"        — the team has a live task on its current tile.
 # - "awaiting_roll" — task complete; waiting for the dice roll (manual
 #                     trigger mode) before advancing.
-# - "blocked"       — a roadblock/freeze effect is holding the team in place.
+# - "blocked"       — a tile effect (roadblock stall) is holding the team in
+#                     place: roll attempts are consumed without movement until
+#                     turns_completed reaches blocked_until_turn.
 # - "finished"      — reached the finish tile.
 EVENT_BOARD_POSITION_STATUSES = ("active", "awaiting_roll", "blocked", "finished")
 
@@ -110,9 +112,10 @@ EVENT_COIN_REASONS = ("task_reward", "purchase", "refund", "admin", "bonus", "me
 # ``type_cooldown_turns`` turns (turn = completed-task count).
 BOARDGAME_ITEM_TYPES = ("movement", "offensive", "defensive", "economy", "utility")
 
-# Effect handler keys (web_boardgame_shop_items.effect). P2 ships the
-# self-targeted set; the offensive/defensive handlers land in P3 (catalog
-# rows may exist earlier but stay inactive).
+# Effect handler keys (web_boardgame_shop_items.effect). Handlers live in
+# services/boardgame_shop.py (_use_<key>); per-effect metadata + behavior
+# defaults (tile-bound? break_on/stall_turns/visible_to_all) live in
+# services/boardgame_effects.py (EFFECT_REGISTRY).
 BOARDGAME_EFFECTS = (
     "skip_task",        # complete the current task instantly (no coins)
     "reroll_task",      # redraw the current tile's task from its pool
@@ -831,6 +834,10 @@ class EventBoardPosition(Base):
     status = Column(
         String(16), nullable=False, default="active", server_default="active"
     )  # EVENT_BOARD_POSITION_STATUSES
+    # Tile-effect stall (web49a): while status == "blocked", roll attempts are
+    # consumed without movement until turns_completed reaches this target
+    # (services/boardgame_engine._serve_blocked_turn). NULL otherwise.
+    blocked_until_turn = Column(Integer, nullable=True)
     # Last roll, JSON {"dice": [3, 5], "from": 7, "to": 15, "at": unix} — lets
     # the client animate the exact faces and the audit trail reconstruct moves.
     last_roll = Column(Text, nullable=True)
