@@ -474,7 +474,9 @@ class EventCompletion(Base):
     team_id = Column(Integer, ForeignKey("web_event_teams.id"), nullable=True)
     player_id = Column(Integer, ForeignKey("players.player_id"), nullable=True)
     status = Column(String(16), nullable=False)  # EVENT_COMPLETION_STATUSES
-    quantity = Column(Integer, nullable=False, default=1)
+    # BigInteger (P1-7): loot_value tasks fold raw GP here — a large multi-day
+    # event can exceed signed-INT 2.147B and poison every later matching drop.
+    quantity = Column(BigInteger, nullable=False, default=1)
     source_type = Column(String(16), nullable=True)  # drop|pb|clog|ca|experience|manual|bonus
     source_id = Column(BigInteger, nullable=True)
     submission_guid = Column(String(64), nullable=True)
@@ -504,7 +506,8 @@ class EventProgress(Base):
     event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
     task_id = Column(Integer, ForeignKey("web_event_tasks.id"), nullable=False)
     team_id = Column(Integer, ForeignKey("web_event_teams.id"), nullable=False)
-    progress = Column(Integer, nullable=False, default=0)
+    # BigInteger (P1-7): loot_value progress folds raw GP; see EventCompletion.
+    progress = Column(BigInteger, nullable=False, default=0)
     completed = Column(Boolean, nullable=False, default=False)
     completed_at = Column(DateTime, nullable=True)
 

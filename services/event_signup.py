@@ -395,6 +395,11 @@ def randomize_pool(session, ev, group_id: Optional[int] = None) -> dict:
 # this number; if the staleness window there changes, change it here too.
 ACTIVE_MEMBER_WINDOW_DAYS = 14
 
+# Hard ceiling on how many members one populate-random call adds (P1-12) — a
+# scale-testing tool should fill hundreds/low-thousands per call, not the whole
+# player base in a single transaction.
+POPULATE_MAX_ADDED = 2000
+
 
 def _plan_distribution(selected_by_bucket: dict, teams_by_bucket: dict,
                        start_counts: dict) -> list:
@@ -512,14 +517,19 @@ def populate_random(session, ev, *, source: str, count: Optional[int] = None) ->
         teams_by_bucket.setdefault(key, []).append(t.id)
 
     # Drop candidates whose bucket has no team, shuffle globally, then cap.
+    # P1-12: always bound the placement count. Each placement is ~4 statements
+    # (_place = select/delete/flush/insert) inside one transaction; an uncapped
+    # global populate ("fill everyone") would fire tens of thousands and hold
+    # membership locks past the query timeout. The explicit `count` still wins
+    # when smaller.
     eligible = [
         (key, pid)
         for key, pids in cand_buckets.items() if teams_by_bucket.get(key)
         for pid in pids
     ]
     random.shuffle(eligible)
-    if count is not None:
-        eligible = eligible[:count]
+    cap = min(count, POPULATE_MAX_ADDED) if count is not None else POPULATE_MAX_ADDED
+    eligible = eligible[:cap]
 
     selected_by_bucket: dict = {}
     for key, pid in eligible:

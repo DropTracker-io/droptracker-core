@@ -59,6 +59,34 @@ _REDIS_PW = os.getenv("DB_PASS")
 # Cap for the pre-end inline drain — a runaway queue must not stall the loop.
 FINAL_DRAIN_MAX_ENTRIES = 5000
 
+# P1-1: reliable delivery. The main queue is drained with BRPOPLPUSH into an
+# in-flight PROCESSING list so a crash/restart mid-apply doesn't lose the
+# envelope (BRPOP removed it before apply = at-most-once). On success the entry
+# is LREM'd; on a handled exception it is moved to a bounded DEAD list (poison
+# messages don't loop); on startup any orphans left in PROCESSING (from a hard
+# crash) are reclaimed to the queue. Re-apply is safe — the completion ledger's
+# unique (task_id, team_id, submission_guid) makes it idempotent.
+PROCESSING_KEY = "events:submissions:processing"
+DEAD_KEY = "events:submissions:dead"
+DEAD_MAX_ENTRIES = 1000
+
+
+def _reclaim_inflight(r, queue_key: str) -> int:
+    """Move any envelopes stranded in the PROCESSING list (a hard crash between
+    BRPOPLPUSH and the success LREM) back onto the queue for one more attempt.
+    Returns how many were reclaimed."""
+    reclaimed = 0
+    try:
+        while r.rpoplpush(PROCESSING_KEY, queue_key) is not None:
+            reclaimed += 1
+            if reclaimed > 100_000:  # runaway backstop
+                break
+    except Exception:
+        log.error("In-flight reclaim failed:\n%s", traceback.format_exc())
+    if reclaimed:
+        log.warning("Reclaimed %d in-flight event envelope(s) after restart", reclaimed)
+    return reclaimed
+
 
 def _get_redis():
     return _redis.Redis(host="127.0.0.1", port=6379, db=0, password=_REDIS_PW)
@@ -202,6 +230,8 @@ async def run_consumer() -> None:
 
     log.info("Event consumer starting (queue=%s)", QUEUE_KEY)
     r = await asyncio.to_thread(_get_redis)
+    # Recover envelopes left in-flight by a previous crash/restart (P1-1).
+    await asyncio.to_thread(_reclaim_inflight, r, QUEUE_KEY)
     pubsub = r.pubsub(ignore_subscribe_messages=True)
     try:
         pubsub.subscribe(ADMIN_BUMP_CHANNEL)
@@ -290,11 +320,31 @@ async def run_consumer() -> None:
             except Exception:
                 log.error("WOM key-moment pass failed:\n%s", traceback.format_exc())
 
-            result = await asyncio.to_thread(r.brpop, QUEUE_KEY, BRPOP_TIMEOUT)
-            if result is None:
+            # P1-1: atomically move the envelope to the in-flight PROCESSING
+            # list instead of removing it outright, so a crash mid-apply keeps
+            # it for reclaim rather than dropping credit.
+            entry_bytes = await asyncio.to_thread(
+                r.brpoplpush, QUEUE_KEY, PROCESSING_KEY, BRPOP_TIMEOUT)
+            if entry_bytes is None:
                 continue
-            _, entry_bytes = result
-            outcomes = await asyncio.to_thread(_process_entry, r, state, entry_bytes)
+            try:
+                outcomes = await asyncio.to_thread(
+                    _process_entry, r, state, entry_bytes)
+            except Exception:
+                # A handled failure to apply THIS envelope: dead-letter it (out
+                # of PROCESSING, onto a bounded DEAD list) so it neither loops
+                # forever nor silently vanishes, then keep draining.
+                log.error("Failed to apply envelope; dead-lettering:\n%s",
+                          traceback.format_exc())
+                try:
+                    pipe = r.pipeline()
+                    pipe.lrem(PROCESSING_KEY, 1, entry_bytes)
+                    pipe.lpush(DEAD_KEY, entry_bytes)
+                    pipe.ltrim(DEAD_KEY, 0, DEAD_MAX_ENTRIES - 1)
+                    await asyncio.to_thread(pipe.execute)
+                except Exception:
+                    log.error("Dead-letter move failed:\n%s", traceback.format_exc())
+                continue
             for outcome in outcomes:
                 log.info("Applied %s: event=%s task=%s team=%s",
                          outcome.get("kind"), outcome.get("event_id"),
@@ -313,6 +363,8 @@ async def run_consumer() -> None:
                     except Exception:
                         log.error("Auto-end after board win failed:\n%s",
                                   traceback.format_exc())
+            # Applied (or a no-op) — drop it from the in-flight list.
+            await asyncio.to_thread(r.lrem, PROCESSING_KEY, 1, entry_bytes)
         except Exception:
             log.error("Error in event consumer loop:\n%s", traceback.format_exc())
             await asyncio.sleep(1)

@@ -64,6 +64,11 @@ from sqlalchemy.exc import IntegrityError
 # ── Redis keys / channels ─────────────────────────────────────────────────────
 QUEUE_KEY = "events:submissions"           # LPUSH by producers, BRPOP by worker
 ACTIVE_EVENTS_KEY = "events:active"        # set of active event ids (gate)
+# P1-6: the gate carries a TTL refreshed by the consumer every ≤30s
+# (STATE_REFRESH_SECONDS). If the consumer dies, the gate expires within this
+# window and producers stop pushing — otherwise a dead consumer + an active
+# event would LPUSH events:submissions unboundedly (a Redis-memory incident).
+ACTIVE_EVENTS_TTL_SECONDS = 180
 ADMIN_BUMP_CHANNEL = "rt:event-admin"      # pubsub bump on event/task/roster mutations
 
 _STATE_KEY_TTL = 60 * 60 * 24 * 60         # 60 days for xp-baseline / kc-dedupe keys
@@ -698,6 +703,9 @@ def set_active_events(redis_conn, event_ids) -> None:
         ids = [int(i) for i in (event_ids or [])]
         if ids:
             pipe.sadd(ACTIVE_EVENTS_KEY, *ids)
+            # Fail-safe TTL (P1-6): refreshed on every set; a dead consumer
+            # lets it lapse so producers stop enqueuing.
+            pipe.expire(ACTIVE_EVENTS_KEY, ACTIVE_EVENTS_TTL_SECONDS)
         pipe.execute()
     except Exception:
         pass

@@ -253,6 +253,12 @@ def assign_tile_task(session, event_id: int, team_id: int, tile, position,
     rest tile) and stamp the position. Caller flushes/commits."""
     from db.models import EventTask
 
+    # P1-8: landing a new tile invalidates any choose_task candidates banked on
+    # the previous tile — otherwise a team could draw easy candidates, roll onto
+    # a hard tile, then apply the banked easy pick. The legit flow (draw → pick
+    # without rolling) never passes through here, so it's unaffected.
+    position.pending_choice = None
+
     source = None
     if tile is not None and tile.task_id:
         source = session.query(EventTask).filter(EventTask.id == tile.task_id).first()
