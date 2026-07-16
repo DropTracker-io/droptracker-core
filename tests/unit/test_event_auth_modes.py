@@ -36,6 +36,11 @@ class _Q:
     def filter(self, *a, **k):
         return self
 
+    def with_for_update(self, *a, **k):
+        # Row lock is a no-op in the scripted fake (P0-4/P0-5 lock the target
+        # row in the real path); keep the chain fluent.
+        return self
+
     def join(self, *a, **k):
         return self
 

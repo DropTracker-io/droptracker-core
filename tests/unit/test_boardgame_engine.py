@@ -324,6 +324,11 @@ class FakeQuery:
     def __init__(self, rows):
         self.rows = list(rows)
 
+    def with_for_update(self):
+        # Row-lock is a no-op in the fake; perform_roll/award_coins lock the
+        # position/team row (P0-2/P0-3) and this keeps the chain fluent.
+        return self
+
     def filter(self, *conds):
         out = []
         for r in self.rows:

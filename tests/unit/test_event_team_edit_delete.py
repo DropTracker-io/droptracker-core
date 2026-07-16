@@ -134,9 +134,12 @@ class TestUpdateTeam:
 
 class TestDeleteTeam:
     def _script(self, team, *, event=None):
-        # Query order: event, team, then the four child-row bulk deletes
-        # (bingo completions, completions, progress, members).
-        return _S([event or _event()], [team], [], [], [], [])
+        # Query order: event, team, then the child-row bulk deletes — the
+        # original four (bingo completions, completions, progress, members)
+        # plus the P0-5 additions (player points, leader votes, board
+        # positions, team inventory, team cooldowns, coin ledger, effects):
+        # 2 lookups + 11 deletes = 13 queries.
+        return _S([event or _event()], [team], *([[]] * 11))
 
     async def test_delete_clears_children_then_team_and_audits(self, client, monkeypatch):
         team = _team(4, name="Mistake")
@@ -146,7 +149,7 @@ class TestDeleteTeam:
         assert r.status_code == 200
         assert (await r.get_json())["ok"] is True
         assert s.committed
-        # Exactly the six scripted queries were consumed (no more, no fewer).
+        # Exactly the scripted queries were consumed (no more, no fewer).
         assert s._batches == []
         # One audit row for the deletion.
         assert len(s.added) == 1

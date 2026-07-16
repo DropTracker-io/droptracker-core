@@ -49,9 +49,10 @@ def _task(id=5, points=0, label="Kill Zulrah"):
 class TestDeleteTaskCascade:
     async def test_unbound_zero_point_task_minimal_path(self, client, monkeypatch):
         # Query order: event, task, bonus-row scan, cell-id scan (none),
-        # completions bulk delete, progress bulk delete. points=0 ⇒ no
-        # completed-progress scan, no team loads.
-        s = _S([_event()], [_task(points=0)], [], [], [], [])
+        # completions bulk delete, progress bulk delete, then the P0-5 tail:
+        # player-points delete, board-tile unbind, board-position unbind.
+        # points=0 ⇒ no completed-progress scan, no team loads.
+        s = _S([_event()], [_task(points=0)], [], [], [], [], [], [], [])
         _wire(monkeypatch, s)
         r = await client.delete("/api/v1/events/1/tasks/5")
         assert r.status_code == 200
@@ -68,10 +69,12 @@ class TestDeleteTaskCascade:
         bonus = SimpleNamespace(team_id=4, quantity=3)
         # Query order: event, task, completed-progress scan, bonus-row scan,
         # team load, cell-id scan, bingo-completions bulk delete, cell unbind
-        # (bulk update), completions bulk delete, progress bulk delete.
+        # (bulk update), completions bulk delete, progress bulk delete, then the
+        # P0-5 tail: player-points delete, board-tile unbind, board-position
+        # unbind.
         s = _S(
             [_event()], [_task(points=10)], [progress], [bonus], [team],
-            [(7,), (9,)], [], [], [], [],
+            [(7,), (9,)], [], [], [], [], [], [], [],
         )
         _wire(monkeypatch, s)
         r = await client.delete("/api/v1/events/1/tasks/5")
@@ -86,7 +89,8 @@ class TestDeleteTaskCascade:
         team = _team(4)
         team.score = 5
         progress = SimpleNamespace(team_id=4, completed=True)
-        s = _S([_event()], [_task(points=10)], [progress], [], [team], [], [], [])
+        s = _S([_event()], [_task(points=10)], [progress], [], [team], [], [], [],
+               [], [], [])
         _wire(monkeypatch, s)
         r = await client.delete("/api/v1/events/1/tasks/5")
         assert r.status_code == 200

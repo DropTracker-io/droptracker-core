@@ -1790,6 +1790,24 @@ async def delete_task(event_id: int, task_id: int):
             (s.query(EventProgress)
              .filter(EventProgress.task_id == task_id)
              .delete(synchronize_session=False))
+
+            # P0-5: task-keyed children the original cascade predates.
+            # EventPlayerPoints.task_id is NOT NULL (would 500); board tile /
+            # position pointers are nullable — unbind them so a pinned tile
+            # falls back to a rest tile and a team's current-task pointer clears
+            # (the engine reassigns on the next roll).
+            from db import EventBoardPosition, EventBoardTile
+
+            (s.query(EventPlayerPoints)
+             .filter(EventPlayerPoints.task_id == task_id)
+             .delete(synchronize_session=False))
+            (s.query(EventBoardTile)
+             .filter(EventBoardTile.task_id == task_id)
+             .update({EventBoardTile.task_id: None}, synchronize_session=False))
+            (s.query(EventBoardPosition)
+             .filter(EventBoardPosition.current_task_id == task_id)
+             .update({EventBoardPosition.current_task_id: None},
+                     synchronize_session=False))
             s.delete(task)
             s.add(AuditLog(
                 actor_user_id=user_id,
@@ -1950,6 +1968,40 @@ async def delete_team(event_id: int, team_id: int):
             ).delete(synchronize_session=False)
             s.query(EventTeamMember).filter(
                 EventTeamMember.team_id == team_id
+            ).delete(synchronize_session=False)
+
+            # P0-5: points/vote + board-game children whose FKs (web45a–web48a)
+            # postdate the original 4-table cascade. Several are NOT NULL
+            # (board position, inventory, cooldown, coin ledger,
+            # effect.source_team_id), so without these the delete raised an
+            # opaque IntegrityError 500 on every pointed or board-game event —
+            # board positions are seeded at activation, so their teams were
+            # simply undeletable.
+            from db import (
+                EventBoardEffect,
+                EventBoardPosition,
+                EventCoinLedger,
+                EventTeamCooldown,
+                EventTeamInventory,
+            )
+
+            for _child in (
+                EventPlayerPoints,
+                EventLeaderVote,
+                EventBoardPosition,
+                EventTeamInventory,
+                EventTeamCooldown,
+                EventCoinLedger,
+            ):
+                s.query(_child).filter(_child.team_id == team_id).delete(
+                    synchronize_session=False
+                )
+            # Effects reference a team from either side (source_team_id NOT NULL).
+            s.query(EventBoardEffect).filter(
+                sa_or(
+                    EventBoardEffect.source_team_id == team_id,
+                    EventBoardEffect.target_team_id == team_id,
+                )
             ).delete(synchronize_session=False)
             s.delete(team)
             s.add(

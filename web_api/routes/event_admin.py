@@ -133,12 +133,18 @@ def _snapshot(c: EventCompletion) -> str:
     })
 
 
-def _load_completion_or_404(s, event_id: int, completion_id: int) -> EventCompletion:
-    comp = (
-        s.query(EventCompletion)
-        .filter(EventCompletion.id == completion_id, EventCompletion.event_id == event_id)
-        .first()
+def _load_completion_or_404(
+    s, event_id: int, completion_id: int, *, for_update: bool = False
+) -> EventCompletion:
+    q = s.query(EventCompletion).filter(
+        EventCompletion.id == completion_id, EventCompletion.event_id == event_id
     )
+    # P0-4: confirm/reject lock the row so two admins acting concurrently (or a
+    # double-click) serialize — the second re-reads a non-pending status under
+    # the lock and 409s instead of double-applying points/coins/auto-roll.
+    if for_update:
+        q = q.with_for_update()
+    comp = q.first()
     if not comp:
         abort_problem(404, "Completion not found", f"No completion {completion_id} in this event.")
     return comp
@@ -284,7 +290,7 @@ async def confirm_completion(event_id: int, completion_id: int):
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev)
-            comp = _load_completion_or_404(s, event_id, completion_id)
+            comp = _load_completion_or_404(s, event_id, completion_id, for_update=True)
             if comp.status != "pending":
                 abort_problem(
                     409,
@@ -323,7 +329,7 @@ async def reject_completion(event_id: int, completion_id: int):
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev)
-            comp = _load_completion_or_404(s, event_id, completion_id)
+            comp = _load_completion_or_404(s, event_id, completion_id, for_update=True)
             if comp.status != "pending":
                 abort_problem(
                     409,

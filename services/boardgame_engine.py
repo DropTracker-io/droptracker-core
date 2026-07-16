@@ -284,14 +284,32 @@ def assign_tile_task(session, event_id: int, team_id: int, tile, position,
 def award_coins(session, event_id: int, team, delta: int, reason: str,
                 ref_type: Optional[str] = None, ref_id=None,
                 acted_by_user_id=None, note=None) -> int:
-    """Adjust a team's wallet (running balance + audit row). Caller holds the
-    team row (locked by its own query) and commits."""
-    from db.models import EventCoinLedger
+    """Adjust a team's wallet (running balance + audit row) and return the new
+    balance.
 
-    balance = int(team.coins or 0) + int(delta)
-    team.coins = balance
+    P0-3: lock the wallet row (SELECT … FOR UPDATE) before the read-modify-write
+    so it self-serializes. The bare RMW lost updates whenever the serial
+    consumer's task-reward credit (handle_board_completion) raced a webapi
+    purchase (buy_item) — one team got free coins/items and the ledger's
+    balance_after drifted from EventTeam.coins. buy_item already held the row
+    lock, so re-locking there is a no-op; the previously-unlocked consumer/toll
+    credits now serialize. Lock order is position→team everywhere that holds
+    both, so no new deadlock surface."""
+    from db.models import EventCoinLedger, EventTeam
+
+    delta = int(delta)
+    locked = (session.query(EventTeam)
+              .filter(EventTeam.id == team.id)
+              .with_for_update().first())
+    row = locked if locked is not None else team
+    balance = int(row.coins or 0) + delta
+    row.coins = balance
+    # Keep the caller's object consistent if the locked read returned a
+    # different identity (it won't under the ORM identity map, but be safe).
+    if row is not team:
+        team.coins = balance
     session.add(EventCoinLedger(
-        event_id=event_id, team_id=team.id, delta=int(delta), reason=reason,
+        event_id=event_id, team_id=team.id, delta=delta, reason=reason,
         ref_type=ref_type, ref_id=ref_id, balance_after=balance,
         acted_by_user_id=acted_by_user_id, note=note,
     ))
