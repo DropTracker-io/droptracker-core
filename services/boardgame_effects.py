@@ -78,15 +78,31 @@ class EffectSpec:
 EFFECT_REGISTRY: dict[str, EffectSpec] = {spec.key: spec for spec in (
     # -- P2: self-targeted -------------------------------------------------
     EffectSpec("skip_task", "utility"),
-    EffectSpec("reroll_task", "utility"),
+    EffectSpec("reroll_task", "utility", default_behavior={"difficulty_shift": 0}),
     EffectSpec("boost_coins", "economy", default_behavior={"multiplier": 2}),
     # -- P3: movement + interference ---------------------------------------
     EffectSpec("advance", "movement", default_behavior={"dice_sides": 6}),
     EffectSpec("roadblock", "defensive", is_tile_bound=True,
                default_behavior={"break_on": "pass", "stall_turns": 1,
-                                 "visible_to_all": True}),
+                                 "visible_to_all": True,
+                                 "expire_on_placer_move": True}),
     EffectSpec("freeze_opponent", "offensive", default_behavior={"turns": 2}),
     EffectSpec("shield", "defensive"),
+    # -- web50a: shop expansion --------------------------------------------
+    # Movement modifiers (armed self-effects drained in perform_roll).
+    EffectSpec("extra_dice", "movement", default_behavior={"extra_dice": 1}),
+    EffectSpec("choose_roll", "movement"),
+    EffectSpec("reroll_move", "movement"),
+    # Defensive / utility.
+    EffectSpec("ward", "defensive", default_behavior={"blocks": ["offensive"]}),
+    EffectSpec("cleanse", "defensive"),
+    EffectSpec("choose_task", "utility", default_behavior={"candidates": 3}),
+    # Offensive (target-team; call _absorb_defense first).
+    EffectSpec("steal_item", "offensive"),
+    EffectSpec("reroll_opponent_task", "offensive"),
+    EffectSpec("knockback", "offensive", default_behavior={"tiles": 3}),
+    # Economy (armed self-effect drained by the movement core).
+    EffectSpec("coin_toll", "economy", default_behavior={"coins_per_team": 25}),
 )}
 
 
@@ -129,6 +145,11 @@ def sanitize_behavior(effect_key: str, behavior: Optional[dict]) -> dict:
             out["stall_turns"] = int(defaults.get("stall_turns", 0) or 0)
         out["visible_to_all"] = bool(
             out.get("visible_to_all", defaults.get("visible_to_all", True)))
+        # web50a: the placer's own next move expires its expire_on_placer_move
+        # bulwarks (services/boardgame_engine._expire_placer_roadblocks_on_move).
+        out["expire_on_placer_move"] = bool(
+            out.get("expire_on_placer_move",
+                    defaults.get("expire_on_placer_move", True)))
     return out
 
 

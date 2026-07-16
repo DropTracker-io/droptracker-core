@@ -80,6 +80,8 @@ _TILE_RENDER_MODES = ("rune", "invisible", "outline")
 _WIN_RULES = ("finish_tile",)  # P1; threshold/time-boxed variants later
 # Tile-bound effect consumption modes (services/boardgame_effects.BREAK_MODES).
 _EFFECT_BREAK_MODES = ("pass", "land", "both")
+# Per-event shop stock refresh cadence (web50a; DEFAULT_BOARD_SETTINGS.shop).
+_SHOP_REFRESH_MODES = ("none", "turns", "hours")
 
 
 def _clean_int(value, lo, hi, name):
@@ -197,6 +199,14 @@ def _validate_settings_patch(body: dict) -> dict:
         sh: dict = {}
         if "enabled" in shop:
             sh["enabled"] = bool(shop["enabled"])
+        if "refresh_mode" in shop:
+            if shop["refresh_mode"] not in _SHOP_REFRESH_MODES:
+                abort_problem(422, "Invalid settings",
+                              f"shop.refresh_mode must be one of {list(_SHOP_REFRESH_MODES)}.")
+            sh["refresh_mode"] = shop["refresh_mode"]
+        if "refresh_interval" in shop:
+            sh["refresh_interval"] = _clean_int(
+                shop["refresh_interval"], 0, 100000, "shop.refresh_interval")
         if sh:
             out["shop"] = sh
 
@@ -259,6 +269,8 @@ def _validate_settings_patch(body: dict) -> dict:
                         cb[knob] = _clean_int(
                             v, 0, 3, f"items.behaviors.{effect_key}.stall_turns")
                     elif knob == "visible_to_all":
+                        cb[knob] = bool(v)
+                    elif knob == "expire_on_placer_move":
                         cb[knob] = bool(v)
                     else:
                         # Forward-compat: unknown knobs pass through when scalar.
@@ -335,6 +347,12 @@ def _position_row(s, pos: EventBoardPosition, team: EventTeam) -> dict:
             last_roll = json.loads(pos.last_roll)
         except (TypeError, ValueError):
             last_roll = None
+    pending_choice = None
+    if getattr(pos, "pending_choice", None):
+        try:
+            pending_choice = json.loads(pos.pending_choice)
+        except (TypeError, ValueError):
+            pending_choice = None
     return {
         "team_id": pos.team_id,
         "team_name": team.name if team else f"Team {pos.team_id}",
@@ -348,6 +366,7 @@ def _position_row(s, pos: EventBoardPosition, team: EventTeam) -> dict:
         "turns_completed": int(pos.turns_completed or 0),
         "current_task": task,
         "last_roll": last_roll,
+        "pending_choice": pending_choice,
         "mercy_deadline": (int(pos.mercy_deadline.timestamp())
                            if pos.mercy_deadline else None),
     }
@@ -1106,14 +1125,17 @@ async def get_board_shop(event_id: int):
             ev = _load_board_event(s, event_id, for_write=False)
             if _effective_status(ev) == "draft" and not _can_view_draft(s, user_id, ev):
                 abort_problem(404, "Event not found", f"No event {event_id}.")
-            payload = {"items": available_items(s, ev.id)}
-            # Team context is optional — spectators still see the catalog.
+            # Team context is optional — spectators still see the catalog. When
+            # present it drives per-team cap/bought counts in the item list.
+            team_id = None
             try:
                 team_id, _m, _a = _resolve_team_for_action(
                     s, ev, user_id, explicit_team)
-                payload["team"] = team_shop_state(s, ev.id, team_id)
             except Exception:
-                payload["team"] = None
+                team_id = None
+            payload = {"items": available_items(s, ev.id, team_id=team_id)}
+            payload["team"] = (team_shop_state(s, ev.id, team_id)
+                               if team_id is not None else None)
             return payload
 
     return private_no_store(jsonify(await asyncio.to_thread(_read)))
@@ -1168,7 +1190,8 @@ async def use_board_item(event_id: int, inventory_id: int):
             not isinstance(explicit_team, int) or isinstance(explicit_team, bool)):
         abort_problem(422, "Invalid team_id", "'team_id' must be an integer.")
     target = {}
-    for key in ("target_team_id", "target_tile_idx"):
+    # Integer targets: rival team, tile, and choose_roll's forced roll value.
+    for key in ("target_team_id", "target_tile_idx", "value"):
         if body.get(key) is not None:
             if not isinstance(body[key], int) or isinstance(body[key], bool):
                 abort_problem(422, "Invalid target", f"'{key}' must be an integer.")
@@ -1197,9 +1220,209 @@ async def use_board_item(event_id: int, inventory_id: int):
                 action="event.board.item.use", target=str(ev.id),
                 after=f"team={team_id} inv={inventory_id} fx={result.get('effect')}",
             ))
+            # A movement item (advance / reroll_move) that reaches the finish
+            # tile ends the event, mirroring the roll route.
+            if result.get("won"):
+                from services import event_lifecycle
+
+                event_lifecycle.end_event(s, ev)
             s.commit()
             return {"team_id": team_id, **result}
 
     result = await asyncio.to_thread(_apply)
     _bump(event_id)
     return private_no_store(jsonify(result))
+
+
+@event_board_bp.post("/events/<int:event_id>/board/choice")
+async def choose_board_task(event_id: int):
+    """Resolve a pending choose_task pick (web50a): assign the chosen candidate
+    task as the team's live task. Auth mirrors the shop use route (team
+    leader/admin). Body: {choice_index, team_id?}."""
+    user_id = current_user_id()
+    body = await json_body()
+    choice_index = body.get("choice_index")
+    if not isinstance(choice_index, int) or isinstance(choice_index, bool) or choice_index < 0:
+        abort_problem(422, "Invalid choice", "'choice_index' must be a non-negative integer.")
+    explicit_team = body.get("team_id")
+    if explicit_team is not None and (
+            not isinstance(explicit_team, int) or isinstance(explicit_team, bool)):
+        abort_problem(422, "Invalid team_id", "'team_id' must be an integer.")
+
+    def _apply():
+        from services.boardgame_shop import ShopError, apply_task_choice
+        from utils.redis import RedisClient
+
+        with db_session() as s:
+            ev = _load_board_event(s, event_id, for_write=False)
+            if ev.status != "active":
+                abort_problem(409, "Event not live",
+                              "Task choices happen while the event is active.")
+            team_id, _m, is_admin = _resolve_team_for_action(s, ev, user_id, explicit_team)
+            _assert_leadership_authority(s, ev, team_id, user_id, is_admin,
+                                         "make task choices")
+            r = RedisClient().client
+            try:
+                result = apply_task_choice(s, r, ev.id, team_id, choice_index)
+            except ShopError as e:
+                abort_problem(e.status, e.title, e.detail)
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id,
+                action="event.board.task.choose", target=str(ev.id),
+                after=f"team={team_id} choice={choice_index}",
+            ))
+            s.commit()
+            return {"team_id": team_id, **result}
+
+    result = await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify(result))
+
+
+# --------------------------------------------------------------------------- #
+# Per-event shop configuration (web50a): refresh cadence + per-item overrides.
+# --------------------------------------------------------------------------- #
+def _shop_config_payload(s, event_id: int) -> dict:
+    """The leader/admin shop-config surface (web50a) — refresh cadence at the
+    top level plus a row per active catalog item with its per-event overrides
+    (defaulted where no rotation row exists). Shape matches the web
+    `BoardShopConfigSchema`; used by both the GET and the PUT response."""
+    from db.models import BoardgameShopItem, EventShopRotation
+    from services.boardgame_engine import board_settings
+
+    config = (s.query(EventBoardConfig)
+              .filter(EventBoardConfig.event_id == event_id).first())
+    shop = (board_settings(config.settings if config else None).get("shop") or {})
+    rotation = {
+        r.shop_item_id: r
+        for r in s.query(EventShopRotation)
+        .filter(EventShopRotation.event_id == event_id).all()
+    }
+    items = []
+    for item in (s.query(BoardgameShopItem)
+                 .filter(BoardgameShopItem.active.is_(True))
+                 .order_by(BoardgameShopItem.sort, BoardgameShopItem.id).all()):
+        rot = rotation.get(item.id)
+        items.append({
+            "shop_item_id": item.id,
+            "key": item.key,
+            "name": item.name,
+            "effect": item.effect,
+            "item_type": item.item_type,
+            "icon_item_id": item.icon_item_id,
+            "default_cost_coins": int(item.cost_coins or 0),
+            "enabled": bool(rot.enabled) if rot is not None else True,
+            "price_override": rot.price_override if rot is not None else None,
+            "stock_per_refresh": rot.stock_per_refresh if rot is not None else None,
+            "per_team_cap": rot.per_team_cap if rot is not None else None,
+            "stock": rot.stock if rot is not None else None,
+        })
+    return {
+        "refresh_mode": shop.get("refresh_mode") or "none",
+        "refresh_interval": int(shop.get("refresh_interval") or 0),
+        "items": items,
+    }
+
+
+@event_board_bp.get("/events/<int:event_id>/board/shop/config")
+async def get_board_shop_config(event_id: int):
+    """The leader/admin shop-config surface: the event's refresh cadence plus
+    every active catalog item with its per-event overrides (defaulted where no
+    rotation row exists)."""
+    user_id = current_user_id()
+
+    def _read():
+        with db_session() as s:
+            ev = _load_board_event(s, event_id, for_write=True)
+            _assert_event_admin(s, user_id, ev)
+            return _shop_config_payload(s, ev.id)
+
+    return private_no_store(jsonify(await asyncio.to_thread(_read)))
+
+
+def _clean_opt_int(value, name, lo=0, hi=1_000_000):
+    """A nullable non-negative-int override field (null clears it)."""
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or not (lo <= value <= hi):
+        abort_problem(422, "Invalid shop config",
+                      f"'{name}' must be null or an integer {lo}–{hi}.")
+    return value
+
+
+@event_board_bp.put("/events/<int:event_id>/board/shop/config")
+async def put_board_shop_config(event_id: int):
+    """Upsert per-event shop overrides (web50a). Body:
+    {items:[{shop_item_id, enabled?, price_override?, stock_per_refresh?,
+             per_team_cap?}]}. A field omitted is left unchanged; a field set
+    to null clears that override. Refresh cadence is set via the settings
+    PATCH shop branch."""
+    user_id = current_user_id()
+    body = await json_body()
+    items_in = body.get("items")
+    if not isinstance(items_in, list) or len(items_in) > 500:
+        abort_problem(422, "Invalid body", "'items' must be a list (max 500).")
+    cleaned = []
+    for row in items_in:
+        if not isinstance(row, dict):
+            abort_problem(422, "Invalid item", "Each item must be an object.")
+        sid = row.get("shop_item_id")
+        if not isinstance(sid, int) or isinstance(sid, bool) or sid <= 0:
+            abort_problem(422, "Invalid item", "'shop_item_id' must be a positive integer.")
+        entry = {"shop_item_id": sid}
+        if "enabled" in row:
+            if not isinstance(row["enabled"], bool):
+                abort_problem(422, "Invalid item", "'enabled' must be a boolean.")
+            entry["enabled"] = row["enabled"]
+        if "price_override" in row:
+            entry["price_override"] = _clean_opt_int(row["price_override"], "price_override")
+        if "stock_per_refresh" in row:
+            entry["stock_per_refresh"] = _clean_opt_int(
+                row["stock_per_refresh"], "stock_per_refresh")
+        if "per_team_cap" in row:
+            entry["per_team_cap"] = _clean_opt_int(row["per_team_cap"], "per_team_cap")
+        cleaned.append(entry)
+
+    def _apply():
+        from db.models import BoardgameShopItem, EventShopRotation
+
+        with db_session() as s:
+            ev = _load_board_event(s, event_id, for_write=True)
+            _assert_event_admin(s, user_id, ev)
+            valid_ids = {
+                i for (i,) in s.query(BoardgameShopItem.id)
+                .filter(BoardgameShopItem.active.is_(True)).all()
+            }
+            for entry in cleaned:
+                sid = entry["shop_item_id"]
+                if sid not in valid_ids:
+                    abort_problem(404, "Unknown item",
+                                  f"Shop item {sid} is not an active catalog item.")
+                rot = (s.query(EventShopRotation)
+                       .filter(EventShopRotation.event_id == ev.id,
+                               EventShopRotation.shop_item_id == sid).first())
+                if rot is None:
+                    rot = EventShopRotation(event_id=ev.id, shop_item_id=sid)
+                    s.add(rot)
+                if "enabled" in entry:
+                    rot.enabled = entry["enabled"]
+                if "price_override" in entry:
+                    rot.price_override = entry["price_override"]
+                if "per_team_cap" in entry:
+                    rot.per_team_cap = entry["per_team_cap"]
+                if "stock_per_refresh" in entry:
+                    rot.stock_per_refresh = entry["stock_per_refresh"]
+                    # Initialize live stock to the cap so the item starts
+                    # stocked (null = unlimited, clears the cap).
+                    rot.stock = entry["stock_per_refresh"]
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id,
+                action="event.board.shop.config", target=str(ev.id),
+                after=f"items={len(cleaned)}",
+            ))
+            s.commit()
+            return _shop_config_payload(s, ev.id)
+
+    payload = await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify(payload))

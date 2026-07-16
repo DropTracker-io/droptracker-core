@@ -183,7 +183,8 @@ class TestEffectRegistry:
         assert spec.is_tile_bound is True
         assert spec.item_type == "defensive"
         assert spec.default_behavior == {
-            "break_on": "pass", "stall_turns": 1, "visible_to_all": True}
+            "break_on": "pass", "stall_turns": 1, "visible_to_all": True,
+            "expire_on_placer_move": True}
 
     def test_every_registered_effect_is_live(self):
         # All 7 handlers exist today; the registry is the single source.
@@ -203,7 +204,8 @@ class TestEffectRegistry:
 class TestBehaviorResolution:
     def test_registry_defaults_when_nothing_else(self):
         b = fx.resolve_effect_behavior("roadblock")
-        assert b == {"break_on": "pass", "stall_turns": 1, "visible_to_all": True}
+        assert b == {"break_on": "pass", "stall_turns": 1, "visible_to_all": True,
+                     "expire_on_placer_move": True}
 
     def test_item_config_overrides_registry(self):
         item = SimpleNamespace(effect_config='{"stall_turns": 2, "break_on": "land"}')
@@ -216,7 +218,8 @@ class TestBehaviorResolution:
         b = fx.resolve_effect_behavior(
             "roadblock", item=item,
             overrides={"roadblock": {"stall_turns": 0, "break_on": "both"}})
-        assert b == {"break_on": "both", "stall_turns": 0, "visible_to_all": True}
+        assert b == {"break_on": "both", "stall_turns": 0, "visible_to_all": True,
+                     "expire_on_placer_move": True}
 
     def test_settings_document_accepted(self):
         b = fx.resolve_effect_behavior(
@@ -241,7 +244,8 @@ class TestBehaviorResolution:
     def test_legacy_config_backfilled(self):
         # Pre-web49a placements stored only {"stall_turns": 1}.
         b = fx.sanitize_behavior("roadblock", {"stall_turns": 1})
-        assert b == {"break_on": "pass", "stall_turns": 1, "visible_to_all": True}
+        assert b == {"break_on": "pass", "stall_turns": 1, "visible_to_all": True,
+                     "expire_on_placer_move": True}
 
 
 class TestTileTrigger:

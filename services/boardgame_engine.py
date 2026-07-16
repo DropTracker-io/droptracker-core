@@ -56,7 +56,11 @@ DEFAULT_BOARD_SETTINGS = {
         "default": 10,           # tasks with no difficulty
         "starting": 0,
     },
-    "shop": {"enabled": True, "rotation": "static", "rotation_turns": 0},
+    # Shop refresh cadence (web50a): "none" = stock never resets; "turns" =
+    # restock every ``refresh_interval`` global turns; "hours" = every
+    # ``refresh_interval`` hours. Defaults keep the pre-web50a behavior (no
+    # refresh, unlimited stock unless a rotation row caps it).
+    "shop": {"enabled": True, "refresh_mode": "none", "refresh_interval": 0},
     "items": {
         "enabled_item_ids": None,   # None = all active catalog items
         "disabled_effects": [],
@@ -68,7 +72,7 @@ DEFAULT_BOARD_SETTINGS = {
         # stored overrides via boardgame_effects.load_event_behavior_overrides.
         "behaviors": {
             "roadblock": {"break_on": "pass", "stall_turns": 1,
-                          "visible_to_all": True},
+                          "visible_to_all": True, "expire_on_placer_move": True},
         },
     },
     "mercy": {"enabled": True, "base_hours": 24, "step_hours": 12},
@@ -423,6 +427,24 @@ def perform_roll(session, redis_conn, event_id: int, team_id: int,
                                    pos, tiles, settings, rng=rng)
 
     faces = roll_dice(settings, rng)
+
+    # web50a movement modifiers (armed by shop items, drained here):
+    #  - choose_roll forces this roll to an exact value (wins over extra_dice).
+    #  - extra_dice adds N dice to the roll (skipped in fixed_step mode).
+    forced = _consume_choose_roll(session, event_id, team_id)
+    if forced is not None:
+        faces = [int(forced)]
+    else:
+        extra = _consume_extra_dice(session, event_id, team_id)
+        movement = settings.get("movement") or {}
+        if extra > 0 and movement.get("mode") != "fixed_step":
+            try:
+                sides = max(2, min(100, int(movement.get("dice_sides") or 6)))
+            except (TypeError, ValueError):
+                sides = 6
+            faces = list(faces) + [
+                (rng or random).randint(1, sides) for _ in range(extra)]
+
     start = int(pos.tile_idx or 0)
     steps = sum(faces)
 
@@ -498,6 +520,144 @@ def _consume_freeze_charge(session, event_id: int, team_id: int) -> bool:
     return True
 
 
+def _effect_cfg(raw) -> dict:
+    """Parse an EventBoardEffect.effect_config JSON blob (corrupt → {})."""
+    try:
+        data = json.loads(raw) if raw else {}
+        return data if isinstance(data, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _consume_choose_roll(session, event_id: int, team_id: int) -> Optional[int]:
+    """Drain an armed choose_roll (web50a): the forced roll VALUE for this roll,
+    or None when none is armed. Consumes the effect. A corrupt/missing value
+    falls back to a normal roll (the effect is still spent)."""
+    from db.models import EventBoardEffect
+
+    effect = (session.query(EventBoardEffect)
+              .filter(EventBoardEffect.event_id == event_id,
+                      EventBoardEffect.target_team_id == team_id,
+                      EventBoardEffect.effect_type == "choose_roll",
+                      EventBoardEffect.status == "active")
+              .first())
+    if effect is None:
+        return None
+    effect.status = "consumed"
+    session.flush()
+    try:
+        return int(_effect_cfg(effect.effect_config).get("value"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _consume_extra_dice(session, event_id: int, team_id: int) -> int:
+    """Drain an armed extra_dice (web50a): the number of EXTRA dice this roll
+    adds (0 when none armed). Consumes the effect."""
+    from db.models import EventBoardEffect
+
+    effect = (session.query(EventBoardEffect)
+              .filter(EventBoardEffect.event_id == event_id,
+                      EventBoardEffect.target_team_id == team_id,
+                      EventBoardEffect.effect_type == "extra_dice",
+                      EventBoardEffect.status == "active")
+              .first())
+    if effect is None:
+        return 0
+    effect.status = "consumed"
+    session.flush()
+    try:
+        return max(0, min(8, int(_effect_cfg(effect.effect_config).get("extra_dice", 1))))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _apply_coin_toll(session, event_id: int, team_id: int, start: int,
+                     dest: int) -> Optional[dict]:
+    """Drain an armed coin_toll (web50a) for a move over (start, dest]: steal
+    ``coins_per_team`` from every OTHER team standing on a passed-over tile,
+    crediting the mover (both sides get a coin-ledger row; each victim keeps a
+    non-negative balance). Consumed after the move. Returns a summary or None
+    when no toll is armed. Caller (movement core) flushes."""
+    from db.models import EventBoardEffect, EventBoardPosition, EventTeam
+
+    effect = (session.query(EventBoardEffect)
+              .filter(EventBoardEffect.event_id == event_id,
+                      EventBoardEffect.target_team_id == team_id,
+                      EventBoardEffect.effect_type == "coin_toll",
+                      EventBoardEffect.status == "active")
+              .first())
+    if effect is None:
+        return None
+    effect.status = "consumed"
+    try:
+        per_team = max(0, int(_effect_cfg(effect.effect_config).get("coins_per_team", 25)))
+    except (TypeError, ValueError):
+        per_team = 25
+    stolen: list = []
+    total = 0
+    if per_team > 0 and dest > start:
+        passed = set(range(start + 1, dest + 1))
+        victims = [
+            p for p in session.query(EventBoardPosition)
+            .filter(EventBoardPosition.event_id == event_id).all()
+            if p.team_id != team_id and int(p.tile_idx or 0) in passed
+        ]
+        mover = (session.query(EventTeam)
+                 .filter(EventTeam.id == team_id).first()) if victims else None
+        for vp in victims:
+            vteam = (session.query(EventTeam)
+                     .filter(EventTeam.id == vp.team_id).first())
+            if vteam is None:
+                continue
+            amt = min(per_team, max(0, int(vteam.coins or 0)))
+            if amt <= 0:
+                continue
+            award_coins(session, event_id, vteam, -amt, "toll",
+                        ref_type="toll", ref_id=team_id, note="coin_toll")
+            total += amt
+            stolen.append({"team_id": vp.team_id, "coins": amt})
+        if total > 0 and mover is not None:
+            award_coins(session, event_id, mover, total, "toll",
+                        ref_type="toll", ref_id=team_id, note="coin_toll")
+    session.flush()
+    return {"stolen": stolen, "total": total}
+
+
+def _expire_placer_roadblocks_on_move(session, event_id: int, team_id: int) -> list:
+    """When a team moves (web50a), expire its OWN still-active tile-bound
+    effects whose resolved behavior sets ``expire_on_placer_move`` (default
+    true) — so a placing team is not permanently hampered by its own bulwarks.
+    Re-arming a bulwark consumed mid-move by this same move is out of scope (a
+    move never re-arms). Returns the tile idxs expired."""
+    from db.models import EventBoardEffect
+    from services.boardgame_effects import (
+        parse_config,
+        sanitize_behavior,
+        tile_bound_effects,
+    )
+
+    kinds = list(tile_bound_effects())
+    if not kinds:
+        return []
+    rows = (session.query(EventBoardEffect)
+            .filter(EventBoardEffect.event_id == event_id,
+                    EventBoardEffect.source_team_id == team_id,
+                    EventBoardEffect.effect_type.in_(kinds),
+                    EventBoardEffect.status == "active")
+            .all())
+    expired = []
+    for r in rows:
+        behavior = sanitize_behavior(r.effect_type, parse_config(r.effect_config))
+        if behavior.get("expire_on_placer_move", True):
+            r.status = "expired"
+            expired.append(int(r.target_tile_idx)
+                           if r.target_tile_idx is not None else None)
+    if expired:
+        session.flush()
+    return expired
+
+
 def _serve_blocked_turn(session, redis_conn, event_id: int, team_id: int,
                         pos, tiles: list, settings: dict,
                         rng: Optional[random.Random] = None) -> dict:
@@ -567,6 +727,7 @@ def _move_piece(session, event_id: int, team_id: int, pos, tiles: list,
     # stall the team — all semantics come from the effect's placement-time
     # behavior snapshot via services.boardgame_effects, never hardcoded
     # here. NO placer immunity: the placing team hits its own traps.
+    blocked_stall = 0
     if dest > start:
         from services.boardgame_effects import apply_tile_effects_on_path
 
@@ -589,18 +750,33 @@ def _move_piece(session, event_id: int, team_id: int, pos, tiles: list,
                     "consumed": hit["consumed"],
                 }
             if hit["stopped"] and int(hit["stall_turns"] or 0) > 0:
-                # Lose-a-turn: park the piece with no task; perform_roll
-                # serves the stall (one consumed attempt per stalled turn).
-                pos.tile_idx = dest
-                pos.status = "blocked"
-                pos.blocked_until_turn = (int(pos.turns_completed or 0)
-                                          + int(hit["stall_turns"]))
-                pos.current_task_id = None
-                pos.task_assigned_at = None
-                pos.mercy_deadline = None
-                summary["blocked"] = True
-                summary["blocked_until_turn"] = pos.blocked_until_turn
-                return summary
+                blocked_stall = int(hit["stall_turns"])
+
+    # Movement-triggered economics + self-trap expiry (web50a). On any real
+    # advance (rolls AND teleports), over the SAME (start, dest] passed range
+    # the roadblock resolver walks — dest is already clamped to a mid-path
+    # stop: coin_toll tolls every other team on a passed tile, and the mover
+    # expires its own expire_on_placer_move bulwarks.
+    if dest > start:
+        toll = _apply_coin_toll(session, event_id, team_id, start, dest)
+        if toll and toll.get("total"):
+            summary["coin_toll"] = toll
+        expired = _expire_placer_roadblocks_on_move(session, event_id, team_id)
+        if expired:
+            summary["expired_roadblocks"] = expired
+
+    if blocked_stall > 0:
+        # Lose-a-turn: park the piece with no task; perform_roll serves the
+        # stall (one consumed attempt per stalled turn).
+        pos.tile_idx = dest
+        pos.status = "blocked"
+        pos.blocked_until_turn = int(pos.turns_completed or 0) + blocked_stall
+        pos.current_task_id = None
+        pos.task_assigned_at = None
+        pos.mercy_deadline = None
+        summary["blocked"] = True
+        summary["blocked_until_turn"] = pos.blocked_until_turn
+        return summary
 
     pos.tile_idx = dest
     if dest >= fin:

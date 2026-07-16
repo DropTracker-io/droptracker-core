@@ -105,7 +105,9 @@ EVENT_BOARD_TILE_KINDS = ("start", "normal", "special", "finish")
 EVENT_BOARD_POSITION_STATUSES = ("active", "awaiting_roll", "blocked", "finished")
 
 # web_event_coin_ledger.reason values.
-EVENT_COIN_REASONS = ("task_reward", "purchase", "refund", "admin", "bonus", "mercy")
+# "toll" (web50a): a coin_toll transfer between teams (both the victim debit and
+# the mover credit rows use it).
+EVENT_COIN_REASONS = ("task_reward", "purchase", "refund", "admin", "bonus", "mercy", "toll")
 
 # Shop item types (web_boardgame_shop_items.item_type) — the COOLDOWN
 # grouping: a team may only use one item of a type every
@@ -124,6 +126,17 @@ BOARDGAME_EFFECTS = (
     "roadblock",        # place a block on a tile (P3)
     "freeze_opponent",  # target team skips N turns (P3)
     "shield",           # negate the next offensive effect (P3)
+    # -- web50a shop expansion --------------------------------------------
+    "extra_dice",           # next roll adds N dice (movement)
+    "choose_roll",          # next roll is forced to a chosen value (movement)
+    "reroll_move",          # re-roll the team's previous move (movement)
+    "ward",                 # negate specific offensive effect keys (defensive)
+    "cleanse",              # clear the team's active negative effects (defensive)
+    "choose_task",          # pick from N candidate tasks for the tile (utility)
+    "steal_item",           # steal a random owned item from a rival (offensive)
+    "reroll_opponent_task",  # reroll a rival team's current task (offensive)
+    "knockback",            # push a rival team back N tiles (offensive)
+    "coin_toll",            # next roll tolls passed-over rival teams (economy)
 )
 
 # web_event_team_inventory.status lifecycle.
@@ -807,6 +820,12 @@ class EventBoardConfig(Base):
     bg_width = Column(Integer, nullable=True)
     bg_height = Column(Integer, nullable=True)
     settings = Column(Text, nullable=True)  # JSON (§2.5); NULL = all defaults
+    # Shop refresh bookkeeping (web50a): the last time / global turn the per-item
+    # stock was restocked to its stock_per_refresh. NULL = the refresh clock has
+    # not started (settings.shop.refresh_mode == "none" or never observed). See
+    # services/boardgame_shop.maybe_refresh_shop.
+    shop_refreshed_at = Column(DateTime, nullable=True)
+    shop_refreshed_turn = Column(Integer, nullable=True)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
 
@@ -838,6 +857,11 @@ class EventBoardPosition(Base):
     # consumed without movement until turns_completed reaches this target
     # (services/boardgame_engine._serve_blocked_turn). NULL otherwise.
     blocked_until_turn = Column(Integer, nullable=True)
+    # choose_task pending pick (web50a): JSON list of candidate tasks the team
+    # must choose between before its current task is (re)assigned —
+    # [{"index", "label", "task_id", "difficulty"}]. Resolved by
+    # POST /events/{id}/board/choice. NULL when no choice is pending.
+    pending_choice = Column(Text, nullable=True)
     # Last roll, JSON {"dice": [3, 5], "from": 7, "to": 15, "at": unix} — lets
     # the client animate the exact faces and the audit trail reconstruct moves.
     last_roll = Column(Text, nullable=True)
@@ -896,7 +920,16 @@ class EventShopRotation(Base):
     # Turn-window availability (P3 rotation); NULL bounds = always available.
     available_from_turn = Column(Integer, nullable=True)
     available_until_turn = Column(Integer, nullable=True)
-    stock = Column(Integer, nullable=True)  # NULL = unlimited
+    stock = Column(Integer, nullable=True)  # NULL = unlimited (current remaining)
+    # Per-event OVERRIDE semantics (web50a): a row exists only to override the
+    # catalog defaults for this event — an item with NO row is sold at catalog
+    # defaults (enabled, list price, unlimited, uncapped). ``enabled`` False
+    # hides the item; ``stock_per_refresh`` is the stock granted each refresh
+    # (NULL = unlimited, never depletes); ``per_team_cap`` is the max lifetime
+    # purchases one team may make of this item (NULL = uncapped).
+    enabled = Column(Boolean, nullable=False, default=True, server_default="1")
+    stock_per_refresh = Column(Integer, nullable=True)
+    per_team_cap = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
@@ -907,6 +940,9 @@ class EventTeamInventory(Base):
     __tablename__ = "web_event_team_inventory"
     __table_args__ = (
         Index("idx_web_evt_inv_team", "event_id", "team_id", "status"),
+        # Per-team purchase-cap counting (web50a): count copies of one catalog
+        # item a team has bought this event.
+        Index("idx_web_evt_inv_item", "event_id", "team_id", "shop_item_id"),
         {"extend_existing": True},
     )
 
