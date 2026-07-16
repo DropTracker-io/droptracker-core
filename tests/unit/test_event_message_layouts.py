@@ -470,20 +470,63 @@ class TestTaskIconLayouts:
         section = next(b for b in spec["blocks"] if b["type"] == "section")
         assert section["thumbnail"] == "https://x/img/itemdb/4151.png"
 
-    def test_completion_folds_in_contributors_and_tile(self):
-        # The one-message-per-completion fix: contributors + the marked tile
-        # both render inside the single event_completion layout — no separate
-        # event_cell message needed.
+    def test_completion_solo_collapses_to_completed_by(self):
+        # A single contributor is shown as one "Completed by" line, not the
+        # full multi-person "Contributors" breakdown.
         context = ml.notification_context("event_completion", {
             "event_id": 7, "team_name": "Reds", "task_label": "Whip",
             "points": 10, "team_score": 30,
             "contributors": [{"player_name": "Zed", "quantity": 2}],
-            "cell_labels": ["A1"],
         })
+        assert context["completed_by_line"] == "**Completed by** `Zed`"
+        assert "contributors_block" not in context
         spec = ml.render_message_spec(ml.DEFAULT_LAYOUTS["event_completion"], context)
         joined = " ".join(b.get("content", "") for b in spec["blocks"])
-        assert "**Zed** `2`" in joined
-        assert "Tile marked: **A1**" in joined
+        assert "**Completed by** `Zed`" in joined
+        assert "**Team total** `30 pts`" in joined  # non-bingo → running total
+
+    def test_completion_multi_contributors_get_header_on_own_line(self):
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "team_name": "Reds", "task_label": "Whip",
+            "points": 10, "team_score": 30,
+            "contributors": [
+                {"player_name": "Zed", "quantity": 2, "points_share": 6},
+                {"player_name": "Al", "quantity": 1, "points_share": 4},
+            ],
+        })
+        # Header, then the list on the next line (a line break after "Contributors").
+        assert context["contributors_block"] == (
+            "**Contributors**\n**Zed** `2` (+6 pts), **Al** `1` (+4 pts)")
+        assert "completed_by_line" not in context
+
+    def test_completion_bingo_shows_board_standing(self):
+        # Bingo events summarize the board instead of naming the marked tile.
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "team_name": "Reds", "task_label": "Any unique",
+            "points": 100, "team_score": 115,
+            "tiles_completed": 7, "team_rank": 1, "team_count": 6,
+        })
+        assert context["bingo_stats"] == (
+            "**Total tiles completed** `7`\n"
+            "**Total points earned** `115 pts`\n"
+            "**Team position** #1/6 teams")
+        assert "team_total_line" not in context  # bingo → no separate running total
+
+    def test_completion_item_named_task_drops_finished_with(self):
+        # target 1 + label == item -> the "Finished with" line is redundant.
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "team_name": "Reds", "task_label": "Twisted bow",
+            "points": 50, "received_item": "Twisted bow",
+            "received_qty": 1, "contributed": 1, "target": 1,
+        })
+        assert "received_line" not in context
+        # ...but a differently-named task keeps it.
+        keep = ml.notification_context("event_completion", {
+            "event_id": 7, "task_label": "Any Nightmare Unique",
+            "received_item": "Inquisitor's hauberk",
+            "received_qty": 1, "contributed": 1, "target": 1,
+        })
+        assert keep["received_line"] == "**Inquisitor's hauberk** (+1 of 1)"
 
 
 class TestEventFooterLine:

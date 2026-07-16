@@ -187,7 +187,6 @@ class TestEmbedSpecs:
         spec = _spec("event_completion", {
             "task_label": "Get a whip", "team_name": "Red", "player_name": "Alpha One",
             "points": 10, "team_score": 30, "proof_url": "https://x/proof.png",
-            "cell_idxs": [3, 7],
         })
         assert "Get a whip" in spec["title"]
         assert "**Red**" in spec["description"]
@@ -197,7 +196,6 @@ class TestEmbedSpecs:
         # No ledger-derived contributors were passed — falls back to the
         # single completer.
         assert fields["Completed by"] == "`Alpha One`"
-        assert "3, 7" in fields["Bingo"]
         assert spec["thumbnail"] == "https://x/proof.png"
 
     def test_completion_contributors_list(self):
@@ -207,12 +205,39 @@ class TestEmbedSpecs:
                 {"player_name": "Alpha One", "quantity": 3},
                 {"player_name": "Beta Two", "quantity": 12_000_000},
             ],
-            "cell_labels": ["A1"],
         })
         fields = {f["name"]: f["value"] for f in spec["fields"]}
         assert "Completed by" not in fields
         assert fields["Contributors"] == "`Alpha One` (3), `Beta Two` (12.00M)"
-        assert fields["Bingo"] == "Tile **A1**"
+
+    def test_completion_solo_contributor_collapses(self):
+        # A single contributor is shown as "Completed by", not "Contributors".
+        spec = _spec("event_completion", {
+            "task_label": "Get a whip", "team_name": "Red",
+            "contributors": [{"player_name": "Solo", "quantity": 1}],
+        })
+        fields = {f["name"]: f["value"] for f in spec["fields"]}
+        assert fields["Completed by"] == "`Solo`"
+        assert "Contributors" not in fields
+
+    def test_completion_bingo_board_standing(self):
+        spec = _spec("event_completion", {
+            "task_label": "Any unique", "team_name": "Red", "points": 100,
+            "team_score": 115, "tiles_completed": 7, "team_rank": 1, "team_count": 6,
+        })
+        fields = {f["name"]: f["value"] for f in spec["fields"]}
+        assert fields["Total tiles completed"] == "`7`"
+        assert fields["Total points earned"] == "`115 pts`"
+        assert fields["Team position"] == "`#1/6 teams`"
+        assert "Team total" not in fields  # bingo replaces the running total
+
+    def test_completion_item_named_task_omits_received(self):
+        spec = _spec("event_completion", {
+            "task_label": "Twisted bow", "team_name": "Red",
+            "received_item": "Twisted bow", "received_qty": 1,
+            "contributed": 1, "target": 1,
+        })
+        assert "Received" not in {f["name"] for f in spec["fields"]}
 
     def test_progress_field_abbreviates_large_targets(self):
         spec = _spec("event_task_progress", {

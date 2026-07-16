@@ -1467,6 +1467,23 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
             "contributed": max(int(progress.progress or 0) - int(previous_progress or 0), 0),
             "target": completion_threshold(task),
         })
+    # Bingo events summarize the team's board standing on completion (total
+    # tiles done / team position) instead of naming the single tile marked.
+    # Post-completion state: score + new_cells were already flushed above.
+    if event.get("has_bingo") and team_id is not None:
+        from db.models import EventBingoCompletion
+
+        tiles_done = (session.query(EventBingoCompletion)
+                      .filter(EventBingoCompletion.team_id == team_id).count())
+        ranked = (session.query(EventTeam)
+                  .filter(EventTeam.event_id == event["id"])
+                  .order_by(EventTeam.score.desc(), EventTeam.id.asc()).all())
+        rank = next((i + 1 for i, t in enumerate(ranked) if t.id == team_id), None)
+        notification.update({
+            "tiles_completed": tiles_done,
+            "team_rank": rank,
+            "team_count": len(ranked),
+        })
     _enqueue_notification(session, "event_completion", event, player_id, notification)
     if lead_changed_to:
         _enqueue_notification(session, "event_lead_change", event, player_id, {

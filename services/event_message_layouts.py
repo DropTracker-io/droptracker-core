@@ -154,16 +154,22 @@ DEFAULT_LAYOUTS = {
         "blocks": [
             {"type": "text", "content": "### ✅ {team_name} completed **{task_label}**"},
             {
-                # Thumbnail is the proof screenshot when there is one, else the
-                # task's item/NPC icon (completion_icon, resolved by the sender);
-                # falls back to a plain text block when neither resolves.
+                # Thumbnail is the received item's icon (completion_icon,
+                # resolved by the sender), the proof screenshot rides below as
+                # the full image. Each line drops when its token is unresolved:
+                # received_line is suppressed when the task is named after the
+                # item; team_total_line renders for non-bingo events while
+                # bingo events show the {bingo_stats} block instead; the
+                # completed_by / contributors lines are mutually exclusive.
                 "type": "section",
-                "content": "**Points** `+{points}`\n**Team total** `{team_score} pts`\n"
-                           "**Finished with** {received_line}\n"
-                           "**Contributors** {contributors_line}\n-# completed by {player_name}",
+                "content": "**Finished with** {received_line}\n"
+                           "**Points** `+{points}`\n"
+                           "{team_total_line}\n"
+                           "{completed_by_line}\n"
+                           "{contributors_block}",
                 "thumbnail": "{completion_icon}",
             },
-            {"type": "text", "content": "-# Tile{cell_plural} marked: {cell_list}"},
+            {"type": "text", "content": "{bingo_stats}"},
         ],
     },
     "event_task_progress": {
@@ -582,7 +588,8 @@ def notification_context(notification_type: str, data: dict) -> dict:
     the layouts substitute from. Values that are None/empty/zero are omitted
     so their lines drop out of the rendered message."""
     from services.event_notifications import (
-        _fmt_ts, _received_item_text, event_url, format_gp,
+        _completion_item_redundant, _fmt_ts, _received_item_text,
+        event_url, format_gp,
     )
 
     data = data or {}
@@ -633,9 +640,11 @@ def notification_context(notification_type: str, data: dict) -> dict:
 
     # Verbose completion detail — the item that finished the task + how much of
     # the requirement it filled (event_completion only; enriched at enqueue
-    # when the event's item_details config is on). Same text as the legacy
-    # embed's "Received" field so both renderers agree.
-    put("received_line", _received_item_text(data))
+    # when the event's item_details config is on). Suppressed when the task is
+    # essentially named after this one item (the title already says it). Same
+    # text as the legacy embed's "Received" field so both renderers agree.
+    if not _completion_item_redundant(data):
+        put("received_line", _received_item_text(data))
 
     # Bingo cells — labels are the readable "tile" identity; fall back to the
     # raw index for callers that only have that (legacy queued rows).
@@ -654,17 +663,50 @@ def notification_context(notification_type: str, data: dict) -> dict:
     # Contributors — everyone who fed the task, largest contribution first
     # (event_completion only; see services.event_engine._task_contributors).
     contributors = data.get("contributors") or []
+
+    def _contrib(c):
+        line = (f"**{c.get('player_name') or 'Unknown'}** "
+                f"`{format_gp(c.get('quantity') or 0)}`")
+        # Contribution-share points (task points × net share, floats) —
+        # see services.event_engine._award_contribution_points.
+        share = c.get("points_share")
+        if share:
+            line += f" (+{share:g} pts)"
+        return line
+
     if contributors:
-        def _contrib(c):
-            line = (f"**{c.get('player_name') or 'Unknown'}** "
-                    f"`{format_gp(c.get('quantity') or 0)}`")
-            # Contribution-share points (task points × net share, floats) —
-            # see services.event_engine._award_contribution_points.
-            share = c.get("points_share")
-            if share:
-                line += f" (+{share:g} pts)"
-            return line
+        # Raw comma-joined list, kept for custom layouts that reference it.
         put("contributors_line", ", ".join(_contrib(c) for c in contributors))
+    # Presentation for the default layout: one person collapses to a single
+    # "Completed by" line; several get a "Contributors" header with the list on
+    # its own line below (so there's always a line break after the label).
+    if len(contributors) == 1:
+        put("completed_by_line",
+            f"**Completed by** `{contributors[0].get('player_name') or 'Unknown'}`")
+    elif len(contributors) > 1:
+        put("contributors_block",
+            "**Contributors**\n" + ", ".join(_contrib(c) for c in contributors))
+    elif data.get("player_name"):
+        put("completed_by_line", f"**Completed by** `{data['player_name']}`")
+
+    # Team standing block. A bingo completion summarizes the team's board
+    # (total tiles / total points / position); every other kind keeps the
+    # simple running team total. Mutually exclusive so only one line renders.
+    tiles = data.get("tiles_completed")
+    rank, tcount = data.get("team_rank"), data.get("team_count")
+    score = data.get("team_score")
+    if tiles is not None or rank is not None:
+        parts = []
+        if tiles is not None:
+            parts.append(f"**Total tiles completed** `{int(tiles)}`")
+        if score is not None:
+            parts.append(f"**Total points earned** `{int(score)} pts`")
+        if rank and tcount:
+            parts.append(f"**Team position** #{int(rank)}/{int(tcount)} teams")
+        if parts:
+            context["bingo_stats"] = "\n".join(parts)
+    elif score is not None:
+        context["team_total_line"] = f"**Team total** `{int(score)} pts`"
 
     if notification_type == "event_signup_prompt":
         context["signup_instructions"] = {

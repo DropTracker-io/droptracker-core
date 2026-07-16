@@ -237,6 +237,29 @@ def _received_item_text(data: dict) -> Optional[str]:
     return label
 
 
+def _completion_item_redundant(data: dict) -> bool:
+    """True when a completion's received item should NOT get its own "Finished
+    with" line — the task is essentially named after that single item, so the
+    "{team} completed {task}" title already says it. Only fires for a
+    single-item requirement (target <= 1) whose label matches the item name
+    (ignoring surrounding markdown/count decoration like ``##`` or ``**``)."""
+    item = (data or {}).get("received_item")
+    if not item:
+        return False
+    try:
+        target = int(data.get("target") or 0)
+    except (TypeError, ValueError):
+        target = 0
+    if target > 1:
+        return False
+
+    def _n(s):
+        return " ".join(str(s or "").strip().lower().split()).strip("#*• ").strip()
+
+    ni, nl = _n(item), _n(data.get("task_label"))
+    return bool(ni) and bool(nl) and (ni == nl or ni in nl or nl in ni)
+
+
 def event_url(event_id) -> str:
     return f"{EVENT_BASE_URL}/{event_id}"
 
@@ -434,19 +457,19 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         spec["description"] = f"{who} completed **{task_label or 'a task'}**"
         if points:
             field("Points", f"`+{points}`")
-        if data.get("team_score") is not None:
-            field("Team total", f"`{int(data['team_score'])} pts`")
         # The item that finished the task + how much of the requirement it
-        # filled (verbose completion detail; item_details config, on by
-        # default). Absent for non-item completions and when the toggle is off.
-        received = _received_item_text(data)
-        if received:
-            field("Received", received, inline=False)
-        # Everyone who contributed, not just whoever's submission completed
-        # it — falls back to the single completer when the ledger lookup
-        # came up empty (e.g. a manually-awarded row).
+        # filled (item_details config, on by default). Skipped when the task is
+        # named after that one item (title already says it), for non-item
+        # completions, and when the toggle is off.
+        if not _completion_item_redundant(data):
+            received = _received_item_text(data)
+            if received:
+                field("Received", received, inline=False)
+        # Who did it: a single person collapses to "Completed by"; several get
+        # the full "Contributors" breakdown. Falls back to the completer when
+        # the ledger lookup came up empty (e.g. a manually-awarded row).
         contributors = data.get("contributors") or []
-        if contributors:
+        if len(contributors) > 1:
             def _contrib(c):
                 line = (f"`{c.get('player_name') or 'Unknown'}` "
                         f"({format_gp(c.get('quantity') or 0)})")
@@ -454,18 +477,25 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
                 if share:
                     line += f" +{share:g} pts"
                 return line
-            names = ", ".join(_contrib(c) for c in contributors)
-            field("Contributors", names, inline=False)
-        elif player:
-            field("Completed by", f"`{player}`")
-        cell_labels = data.get("cell_labels") or []
-        cells = data.get("cell_idxs") or []
-        if cell_labels:
-            plural = "s" if len(cell_labels) != 1 else ""
-            field("Bingo", f"Tile{plural} " + ", ".join(f"**{c}**" for c in cell_labels), inline=False)
-        elif cells:
-            field("Bingo", f"Cell{'s' if len(cells) != 1 else ''} `{', '.join(str(c) for c in cells)}` marked")
-        # Proof screenshot if there is one, else the task's item/NPC icon.
+            field("Contributors", ", ".join(_contrib(c) for c in contributors), inline=False)
+        else:
+            solo = (contributors[0].get("player_name") if contributors else None) or player
+            if solo:
+                field("Completed by", f"`{solo}`")
+        # Team standing. Bingo events summarize the board (tiles done / total
+        # points / position); every other kind shows the running team total.
+        tiles = data.get("tiles_completed")
+        rank, tcount = data.get("team_rank"), data.get("team_count")
+        if tiles is not None or rank is not None:
+            if tiles is not None:
+                field("Total tiles completed", f"`{int(tiles)}`")
+            if data.get("team_score") is not None:
+                field("Total points earned", f"`{int(data['team_score'])} pts`")
+            if rank and tcount:
+                field("Team position", f"`#{int(rank)}/{int(tcount)} teams`")
+        elif data.get("team_score") is not None:
+            field("Team total", f"`{int(data['team_score'])} pts`")
+        # Item icon (resolved by the sender), else the proof screenshot.
         thumb = data.get("completion_icon") or data.get("proof_url")
         if thumb:
             spec["thumbnail"] = thumb
