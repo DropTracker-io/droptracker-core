@@ -408,8 +408,14 @@ def perform_roll(session, redis_conn, event_id: int, team_id: int,
     ineligible. Caller commits."""
     from db.models import EventBoardPosition
 
+    # Lock the position row for the whole roll so two members clicking Roll
+    # within the same instant serialize: the second waits, then re-reads a
+    # status that is no longer awaiting_roll/blocked and no-ops (P0-2). Without
+    # this both rolls double-apply — doubled turns, orphaned instance tasks,
+    # roadblocks/tolls consumed twice.
     pos = (session.query(EventBoardPosition)
-           .filter(EventBoardPosition.team_id == team_id).first())
+           .filter(EventBoardPosition.team_id == team_id)
+           .with_for_update().first())
     if pos is None or pos.event_id != event_id:
         return None
     if pos.status not in ("awaiting_roll", "blocked"):
@@ -486,7 +492,7 @@ def perform_roll(session, redis_conn, event_id: int, team_id: int,
     try:
         from services.event_engine import publish_event_admin_bump
 
-        publish_event_admin_bump(redis_conn)
+        publish_event_admin_bump(event_id)
     except Exception:
         pass
     return summary
@@ -689,7 +695,7 @@ def _serve_blocked_turn(session, redis_conn, event_id: int, team_id: int,
         try:
             from services.event_engine import publish_event_admin_bump
 
-            publish_event_admin_bump(redis_conn)
+            publish_event_admin_bump(event_id)
         except Exception:
             pass
     else:

@@ -673,7 +673,7 @@ def _reroll_current_task(session, redis_conn, event_id, team_id, pos, settings,
     try:
         from services.event_engine import publish_event_admin_bump
 
-        publish_event_admin_bump(redis_conn)
+        publish_event_admin_bump(event_id)
     except Exception:
         pass
     return instance
@@ -754,7 +754,7 @@ def _use_advance(session, redis_conn, event_id, team_id, pos, item,
     try:
         from services.event_engine import publish_event_admin_bump
 
-        publish_event_admin_bump(redis_conn)
+        publish_event_admin_bump(event_id)
     except Exception:
         pass
     try:
@@ -1052,7 +1052,7 @@ def _use_reroll_move(session, redis_conn, event_id, team_id, pos, item,
     try:
         from services.event_engine import publish_event_admin_bump
 
-        publish_event_admin_bump(redis_conn)
+        publish_event_admin_bump(event_id)
     except Exception:
         pass
     try:
@@ -1119,7 +1119,7 @@ def _use_cleanse(session, redis_conn, event_id, team_id, pos, item,
         try:
             from services.event_engine import publish_event_admin_bump
 
-            publish_event_admin_bump(redis_conn)
+            publish_event_admin_bump(event_id)
         except Exception:
             pass
     return {"cleansed": cleared, "unblocked": unblocked}
@@ -1249,7 +1249,7 @@ def apply_task_choice(session, redis_conn, event_id: int, team_id: int,
     try:
         from services.event_engine import publish_event_admin_bump
 
-        publish_event_admin_bump(redis_conn)
+        publish_event_admin_bump(event_id)
     except Exception:
         pass
     try:
@@ -1346,7 +1346,7 @@ def _use_knockback(session, redis_conn, event_id, team_id, pos, item,
     try:
         from services.event_engine import publish_event_admin_bump
 
-        publish_event_admin_bump(redis_conn)
+        publish_event_admin_bump(event_id)
     except Exception:
         pass
     try:
