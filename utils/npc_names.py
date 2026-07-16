@@ -46,7 +46,32 @@ def strip_the(slug: str) -> str:
 NPC_ALIASES = {
     "crystalline-hunllef": "gauntlet",           # The Gauntlet
     "corrupted-hunllef": "corrupted-gauntlet",   # The Corrupted Gauntlet
+    # The Royal Titans is a duo encounter; the individual titans are tracked
+    # under the single encounter "Royal Titans".
+    "branda-the-fire-queen": "royal-titans",
+    "eldric-the-ice-king": "royal-titans",
 }
+
+#: Multi-boss encounters where the plugin/source may name the individual boss
+#: NPC that was killed, but we track everything under one encounter row. Unlike
+#: the slug ``NPC_ALIASES`` above (which only helps when there is NO exact
+#: npc_list row), these members DO have their own npc_list rows, so the rewrite
+#: must happen up front — before the exact-name lookup — to land drops on the
+#: encounter's npc_id and display name. Keyed/valued by display name.
+ENCOUNTER_NAME_ALIASES = {
+    "Branda the Fire Queen": "Royal Titans",
+    "Eldric the Ice King": "Royal Titans",
+}
+
+
+def canonical_encounter_name(npc_name: str | None) -> str | None:
+    """Rewrite an individual encounter-member boss name to its encounter name.
+
+    Returns ``npc_name`` unchanged when it isn't a known encounter member.
+    """
+    if not npc_name:
+        return npc_name
+    return ENCOUNTER_NAME_ALIASES.get(str(npc_name).strip(), npc_name)
 
 
 def npc_match_key(name_or_slug: str | None) -> str:

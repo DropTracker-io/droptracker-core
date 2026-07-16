@@ -32,7 +32,12 @@ class SemanticAPI:
         "Reward casket (hard)": "Clue Scroll (Hard)",
         "Reward casket (elite)": "Clue Scroll (Elite)",
         "Reward casket (master)": "Clue Scroll (Master)",
-        "Reward Chest (The Gauntlet)": "Corrupted Gauntlet"
+        "Reward Chest (The Gauntlet)": "Corrupted Gauntlet",
+        # The Royal Titans is a duo encounter; the plugin reports the source as
+        # the combined "Royal Titans", but the wiki lists each titan's loot
+        # under its individual name. Both map to our "Royal Titans".
+        "Branda the Fire Queen": "Royal Titans",
+        "Eldric the Ice King": "Royal Titans",
     }
     
     def __init__(self, client):
@@ -180,49 +185,84 @@ class SemanticAPI:
             if item_name.strip() == "Black tourmaline core" and npc_name.strip() == "Dusk":
                 return True
             
-            # Create reverse mapping for alternative names
+            # Build db-name -> {wiki page_name, …}. A single submitted NPC can
+            # correspond to several wiki drop-source pages: the "Royal Titans"
+            # encounter's loot is split across "Branda the Fire Queen" and
+            # "Eldric the Ice King"; Chambers of Xeric loot is under "Ancient
+            # chest"; etc. The previous dict collapsed many-to-one, so only the
+            # last alias for a given NPC ever matched.
             reverse_alt_names = {}
-            for semantic_name, db_names in self.ALT_NAMES.items():
-                if isinstance(db_names, list):
-                    for db_name in db_names:
-                        reverse_alt_names[db_name] = semantic_name
-                else:
-                    reverse_alt_names[db_names] = semantic_name
-            
-            # Get the semantic name if it exists in our mapping
-            semantic_name = reverse_alt_names.get(npc_name, npc_name)
-            if semantic_name != npc_name:
-                print(f"Using semantic name: {semantic_name} for {npc_name}")
-            
+            for wiki_name, db_names in self.ALT_NAMES.items():
+                names = db_names if isinstance(db_names, list) else [db_names]
+                for db_name in names:
+                    reverse_alt_names.setdefault(db_name, set()).add(wiki_name)
+
+            # Acceptable wiki drop-source names for this NPC: the submitted name
+            # itself plus any aliased wiki page names.
+            acceptable = {npc_name} | reverse_alt_names.get(npc_name, set())
+            acceptable_norm = {a.lower().strip() for a in acceptable}
+            if acceptable_norm != {npc_name.lower().strip()}:
+                print(f"Accepting drop sources {sorted(acceptable)} for {npc_name}")
+
             # Query the dropsline bucket to find NPCs that drop this item
             query = (
                 "bucket('dropsline')"
                 ".select('page_name')"
                 f".where('item_name', {self._bucket_quote(item_name)}).run()"
             )
-            
+
             result = await self._bucket_query(query)
-            bucket_data = result.get('bucket', [])
-            
+
+            # FAIL-OPEN on anything inconclusive. This check exists to block
+            # spoofed high-value submissions, and a spoof can only be proven
+            # POSITIVELY — the wiki lists real drop sources for the item and
+            # this NPC isn't among them. Every other outcome (wiki
+            # unavailable/rate-limited, malformed query, or the item simply
+            # not indexed in `dropsline`) is *inconclusive* and must NOT be
+            # treated as a spoof, or we silently reject legitimate drops.
+            # `_bucket_query` returns a dict WITHOUT a 'bucket' key on transport
+            # or API error (a successful query always includes 'bucket', even
+            # when the list is empty), which lets us tell "the wiki couldn't
+            # answer" apart from "the item has no drop sources".
+            if 'bucket' not in result:
+                print(f"Dropsline lookup unavailable for {item_name!r}; allowing (fail-open)")
+                return True
+
+            bucket_data = result['bucket']
+            if not bucket_data:
+                # The wiki has no drop-source rows for this item at all (new
+                # item, name variant that didn't match, or a wiki gap). Absence
+                # of data is not proof of a spoof — allow.
+                print(f"No dropsline data for {item_name!r}; allowing (fail-open)")
+                return True
+
             # Check if any of the returned NPCs match our target NPC
             for drop_entry in bucket_data:
                 dropped_from = drop_entry.get('page_name', '')
-                
+
                 # Remove any subpage references (e.g., "NPC name#Normal")
                 if "#" in dropped_from:
                     dropped_from = dropped_from.split("#")[0]
-                
-                # Check if this drop source matches our NPC name
-                if dropped_from.lower() == semantic_name.lower():
+
+                # Check if this drop source matches our NPC name (or an alias).
+                if dropped_from.lower().strip() in acceptable_norm:
                     print(f"Drop found & valid for {item_name} from {dropped_from}")
                     return True
-            
-            print(f"No valid drop found for {item_name} from {semantic_name}")
+
+            # Confident negative: the item HAS known drop sources and this NPC
+            # is not one of them. This is the only case we reject.
+            sources = sorted({e.get('page_name', '') for e in bucket_data})
+            print(f"No valid drop found for {item_name} from {npc_name} "
+                  f"(wiki sources: {sources})")
             return False
-            
+
         except Exception as e:
-            print(f"Error checking drop for {item_name} from {npc_name}: {e}")
-            return False
+            # Any unexpected error (network, parsing, …) is inconclusive — the
+            # caller's high-value verification also fails open, but we return
+            # True here directly so callers that treat this as a plain bool
+            # (scripts, tests) don't misread an error as a confident "no".
+            print(f"Error checking drop for {item_name} from {npc_name}: {e}; allowing (fail-open)")
+            return True
     
     async def find_related_drops(self, item_name: str, npc_name: str) -> Dict[str, Any]:
         """

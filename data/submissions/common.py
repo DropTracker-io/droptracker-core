@@ -423,16 +423,54 @@ def select_session_and_flag(external_session):
 
 
 async def ensure_item_for_drop(session, item_id, item_name):
-    """Ensure an item exists by id or name. Mirrors drop processor behavior."""
+    """Ensure an item exists by id or name. Mirrors drop processor behavior.
 
-    item = None
-    if item_id is not None:
-        item = session.query(ItemList).filter(ItemList.item_id == item_id).first()
-    if not item and item_name is not None:
-        # Manual submissions carry only a name (the plugin always sends an
-        # id), so fall back to the same name -> ItemList resolution the clog
-        # and pet processors use: exact-name row first, then a wiki lookup
-        # that mints the row with the item's real game id.
+    The RuneLite plugin always sends a numeric ``item_id`` straight from the
+    game cache — it is authoritative. When that id isn't in ``items`` yet we
+    mint the row directly from the (id, name) the plugin gave us. Previously
+    this path fell through to a *name-based* wiki lookup, which returned None
+    (and thus rejected the whole drop, never adding the item) for any new or
+    renamed item whose wiki name didn't exactly match. Only when no usable id
+    is present — manual website submissions carry a name only — do we fall
+    back to the name -> ItemList wiki resolution.
+    """
+
+    try:
+        iid = int(item_id) if item_id is not None else None
+    except (TypeError, ValueError):
+        iid = None
+
+    if iid is not None and iid > 0:
+        item = session.query(ItemList).filter(ItemList.item_id == iid).first()
+        if item:
+            # Self-heal a known item whose icon was never fetched.
+            await _ensure_item_icon(iid)
+            return item
+        # New item id from the plugin: trust it and create the row directly.
+        name = str(item_name).strip() if item_name else None
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        try:
+            item = ItemList(item_id=iid, item_name=name, noted=0, stackable=0, stacked=0)
+            session.add(item)
+            session.commit()
+        except Exception:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            # A concurrent request may have inserted it; re-read before giving up.
+            item = session.query(ItemList).filter(ItemList.item_id == iid).first()
+            if not item:
+                return None
+        await _ensure_item_icon(iid)
+        return item
+
+    if item_name is not None:
+        # No usable id (manual submissions): resolve the name via the wiki,
+        # minting the row with the item's real game id.
         # Release any open transaction before awaiting external API calls.
         # Otherwise the Session can keep a pooled DB connection checked out
         # while waiting on network I/O.
@@ -441,10 +479,23 @@ async def ensure_item_for_drop(session, item_id, item_name):
         except Exception:
             pass
         try:
-            item = await ensure_item_by_name(session, item_name)
+            return await ensure_item_by_name(session, item_name)
         except Exception:
             return None
-    return item
+    return None
+
+
+async def _ensure_item_icon(item_id) -> None:
+    """Best-effort: download the item's icon if it isn't cached yet.
+
+    Never raises — a missing icon degrades to the placeholder on the website,
+    it must not fail ingest.
+    """
+    try:
+        from utils.item_images import ensure_item_image
+        await ensure_item_image(item_id)
+    except Exception:
+        pass
 
 
 async def screenshot_required(session, group_id) -> bool:
@@ -745,6 +796,13 @@ async def ensure_npc_id_for_player(session, npc_name, player_id, player_name, us
 
     if not npc_name:
         return None, None
+    # Consolidate multi-boss encounters up front (e.g. "Branda the Fire Queen"
+    # / "Eldric the Ice King" -> "Royal Titans") so drops land on the single
+    # encounter's npc row and display name, and so the >1M wiki verification
+    # sees the encounter name. Must run before the cache/exact-name lookups,
+    # which would otherwise resolve the individual titans' own npc_list rows.
+    from utils.npc_names import canonical_encounter_name
+    npc_name = canonical_encounter_name(npc_name)
     if npc_name in npc_list:
         return npc_list[npc_name], npc_name
     if ("doom of mokhaiotl" in npc_name.lower()) and ("(level" in npc_name.lower()):
@@ -901,6 +959,7 @@ async def ensure_item_by_name(session, item_name):
             item = ItemList(item_name=item_name, item_id=item_id, noted=0, stackable=0, stacked=0)
             session.add(item)
             session.commit()
+            await _ensure_item_icon(item_id)
             return item
     except Exception:
         return None

@@ -942,6 +942,34 @@ def center_image(image, width, height):
     return centered_image
 
 
+def _ensure_public_dir(path: str) -> None:
+    """makedirs(path) and make it writable by every DropTracker service account.
+
+    The lootboard tree under static/assets/img/clans is written by two different
+    Unix users: the board generators and Discord bots run as `user`, while the
+    web API spawns the custom-timeframe generator (timeframe_board_cli.py) as
+    `debian`. A directory created 0755 by one account can't be written by the
+    other, so the timeframe board failed for any group whose asset dirs were
+    first created by the bots (the vast majority — the `clans/` parent is already
+    0777, the established convention here). We chmod every component from `path`
+    up to (but not including) `clans/` to 0777 so either account can write.
+    Best-effort: chmod on a dir owned by the *other* account raises EPERM, but in
+    that case it was already made 0777 when that account created it.
+    """
+    os.makedirs(path, exist_ok=True)
+    idx = path.find("/clans/")
+    if idx == -1:
+        return
+    clans_root = path[: idx + len("/clans")]
+    cur = path
+    while cur.startswith(clans_root + os.sep):
+        try:
+            os.chmod(cur, 0o777)
+        except OSError:
+            pass  # not the owner — already 0777 from whoever created it
+        cur = os.path.dirname(cur)
+
+
 def save_image(image, server_id, partition):
     """
     Save the generated lootboard image
@@ -956,7 +984,7 @@ def save_image(image, server_id, partition):
             - Timeframe with NPC filter: YYYYMMDDHHMM-YYYYMMDDHHMM-npcXXX
     """
     base_path = f"/store/droptracker/disc/static/assets/img/clans/{server_id}/lb"
-    os.makedirs(base_path, exist_ok=True)
+    _ensure_public_dir(base_path)
     
     partition_str = str(partition)
     
@@ -994,7 +1022,7 @@ def save_image(image, server_id, partition):
             
             # Create timeframes directory
             timeframe_dir = f"{base_path}/timeframes"
-            os.makedirs(timeframe_dir, exist_ok=True)
+            _ensure_public_dir(timeframe_dir)
             
             # Create a readable filename
             # Format: YYYY-MM-DD_HHMM_to_YYYY-MM-DD_HHMM[_npcXXX].png
@@ -1025,7 +1053,7 @@ def save_image(image, server_id, partition):
             
             # Create directory structure: /clans/{server_id}/lb/{month_name}/
             month_dir = f"{base_path}/{month_name}"
-            os.makedirs(month_dir, exist_ok=True)
+            _ensure_public_dir(month_dir)
             
             # Save as {day}.png in the month directory
             file_path = f"{month_dir}/{day}.png"
@@ -1067,7 +1095,7 @@ def save_image(image, server_id, partition):
         
         # Create directory structure
         month_dir = f"{base_path}/{month_name}"
-        os.makedirs(month_dir, exist_ok=True)
+        _ensure_public_dir(month_dir)
         
         # Save as monthly summary (e.g., "monthly.png" or "{year}_monthly.png")
         file_path = f"{month_dir}/{year}_monthly.png"

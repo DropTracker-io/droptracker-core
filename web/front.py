@@ -9,7 +9,7 @@ from types import TracebackType
 import interactions
 import markdown
 from utils.format import get_sorted_doc_files, convert_from_ms, parse_authed_users, human_readable_time_difference
-from db.models import session, NpcList
+from db.models import Session, NpcList
 
 from quart import Blueprint, jsonify, redirect, render_template, request, session as sesh, send_from_directory, url_for
 from quart_jwt_extended import (
@@ -55,13 +55,34 @@ def create_frontend(bot: interactions.Client):
     async def serve_img(filename):
         ## Check if the file exists
         if not os.path.exists(os.path.join('static/assets/img', filename)):
+            # Item icons: recover a missing itemdb/{id}.png on demand from the
+            # RuneLite cache, the same way the lootboard generator does. Without
+            # this the website perpetually renders newly-tracked items as the
+            # placeholder GIF until (if ever) a board render happens to fetch
+            # the icon. Mirrors the NPC-backup recovery below.
+            if filename.startswith('itemdb/') and filename.endswith('.png'):
+                item_id = filename[len('itemdb/'):-len('.png')]
+                try:
+                    from utils.item_images import ensure_item_image
+                    if await ensure_item_image(item_id):
+                        return await send_from_directory('static/assets/img', filename)
+                except Exception as e:
+                    print(f"On-demand item icon fetch failed for {filename}: {e}")
             if ".png" in filename or ".jpeg" in filename or ".jpg" in filename or ".gif" in filename:
-                target = filename.replace(".png", "")
-                target = filename.replace(".jpeg", "")
-                target = filename.replace(".jpg", "")
-                target = filename.replace(".gif", "")
+                # Strip the directory prefix and extension to recover the bare
+                # npc id (e.g. "npcdb/12345.png" -> "12345"). Each step must
+                # chain off the previous result — the original code reassigned
+                # from `filename` every line, so only the last replace applied
+                # and the extension was never stripped, leaving target as
+                # "12345.png" which never matched an integer npc_id.
                 target = filename.replace("npcdb/", "")
-                npc = session.query(NpcList).filter(NpcList.npc_id == target).first()
+                target = target.replace(".png", "").replace(".jpeg", "").replace(".jpg", "").replace(".gif", "")
+                # Short-lived session: this route runs inside the core bot, and
+                # a read on the module-global scoped session left an idle
+                # transaction open until some unrelated commit (observed live
+                # 2026-07-16 growing past 2 minutes after one missing-image hit).
+                with Session() as img_session:
+                    npc = img_session.query(NpcList).filter(NpcList.npc_id == target).first()
                 ## Add the file to the missing file log
                 ## Check if the file exists in the backup path
                 if npc:
