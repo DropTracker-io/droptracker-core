@@ -67,6 +67,7 @@ from db import (
     EVENT_TASK_TYPES,
     EVENT_TEAM_ROLES,
     EVENT_TASK_VISIBILITIES,
+    EVENT_VISIBILITIES,
     EventTaskLibraryItem,
     Group,
     GroupAdmin,
@@ -172,6 +173,7 @@ def _summary(ev: Event) -> dict:
         "name": ev.name,
         "description": ev.description or None,
         "status": _effective_status(ev),
+        "visibility": getattr(ev, "visibility", None) or "public",
         "starts_at": _ts(ev.starts_at),
         "ends_at": _ts(ev.ends_at),
         "has_bingo": bool(ev.has_bingo),
@@ -256,12 +258,22 @@ def _member_group_ids(s, viewer_id) -> set[int]:
     return gids
 
 
-def _can_view_draft(s, viewer_id, ev: Event) -> bool:
-    """Draft visibility: event admins, plus MEMBERS of any participating
-    group — the pre-publication landing page. Members get the event page
-    (and its sign-up panel) as soon as the event exists, so a "the event is
-    coming, sign up!" Discord link works before activation; everyone else
-    still sees a 404."""
+def _is_restricted(ev: Event) -> bool:
+    """Whether ``ev`` is hidden from the general public — either it's still a
+    draft (pre-publication) or an admin marked it ``private`` (permanent). Both
+    limit the audience to the same set: event admins + participating-group
+    members (see :func:`_can_view_restricted`)."""
+    if _effective_status(ev) == "draft":
+        return True
+    return (getattr(ev, "visibility", None) or "public") == "private"
+
+
+def _can_view_restricted(s, viewer_id, ev: Event) -> bool:
+    """Audience for a restricted event (draft OR private): event admins, plus
+    MEMBERS of any participating group. Members get the event page (and its
+    sign-up panel) as soon as the event exists — so a "the event is coming,
+    sign up!" Discord link works before activation, and a private event stays
+    visible to the clan running it. Everyone else sees a 404."""
     if _is_event_admin(s, viewer_id, ev):
         return True
     if viewer_id is None:
@@ -591,18 +603,19 @@ async def list_events():
             out = []
             for ev in events:
                 eff = _effective_status(ev)
-                is_draft = eff == "draft"
-                if is_draft and not viewer_is_superadmin and (
+                # Restricted = draft (pre-publication) OR private (permanent):
+                # both are limited to admins + participating-group members.
+                if _is_restricted(ev) and not viewer_is_superadmin and (
                         not ev.group_id or ev.group_id not in admin_groups):
                     if not (member_groups & participating_group_ids(s, ev)):
-                        # clan-vs-clan drafts are also visible to admins of any
-                        # accepted participant (mode check first: standard
-                        # events take the fast `continue` with no extra
+                        # clan-vs-clan restricted events are also visible to
+                        # admins of any accepted participant (mode check first:
+                        # standard events take the fast `continue` with no extra
                         # queries; guild-derived admins aren't in member_groups).
                         if not ((getattr(ev, "mode", None) or "standard") == "clan_vs_clan"
                                 and viewer_id is not None
                                 and _is_event_admin(s, viewer_id, ev)):
-                            continue  # drafts hidden from outsiders
+                            continue  # hidden from outsiders
                 if status and eff != status:
                     continue
                 out.append(_summary(ev))
@@ -695,10 +708,10 @@ async def get_event(event_id: int):
             ev = s.query(Event).filter(Event.id == event_id).first()
             if not ev:
                 return None
-            if _effective_status(ev) == "draft":
-                # Drafts: event admins + members of participating groups
-                # (pre-publication landing page).
-                if not _can_view_draft(s, viewer_id, ev):
+            if _is_restricted(ev):
+                # Drafts (pre-publication) and private events: event admins +
+                # members of participating groups only. Everyone else 404s.
+                if not _can_view_restricted(s, viewer_id, ev):
                     return None
             return _detail(s, ev, viewer_id=viewer_id)
 
@@ -729,7 +742,7 @@ async def get_event_team(event_id: int, team_id: int):
             ev = s.query(Event).filter(Event.id == event_id).first()
             if not ev:
                 return None
-            if _effective_status(ev) == "draft" and not _can_view_draft(s, viewer_id, ev):
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
                 return None
             all_teams = (
                 s.query(EventTeam)
@@ -922,7 +935,7 @@ async def get_task_breakdown(event_id: int, task_id: int):
             ev = s.query(Event).filter(Event.id == event_id).first()
             if not ev:
                 return None
-            if _effective_status(ev) == "draft" and not _can_view_draft(s, viewer_id, ev):
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
                 return None
             task = (
                 s.query(EventTask)
@@ -1083,6 +1096,12 @@ async def create_event():
     mode = body.get("mode") or "standard"
     if mode not in EVENT_MODES:
         abort_problem(422, "Invalid mode", f"mode must be one of {list(EVENT_MODES)}.")
+    visibility = body.get("visibility") or "public"
+    if visibility not in EVENT_VISIBILITIES:
+        abort_problem(
+            422, "Invalid visibility",
+            f"visibility must be one of {list(EVENT_VISIBILITIES)}.",
+        )
     # Game format (web43a) — orthogonal to mode. Which kinds THIS user may
     # create is gated inside _apply() (needs a session + superadmin check).
     kind = body.get("kind") or "standard"
@@ -1143,6 +1162,7 @@ async def create_event():
                 name=name,
                 description=(body.get("description") or None),
                 status="draft",
+                visibility=visibility,
                 starts_at=_dt(body.get("starts_at")),
                 ends_at=_dt(body.get("ends_at")),
                 has_bingo=False,
@@ -1202,6 +1222,14 @@ async def update_event(event_id: int):
                 ev.name = name
             if "description" in body:
                 ev.description = body.get("description") or None
+            if "visibility" in body:
+                vis = body.get("visibility") or "public"
+                if vis not in EVENT_VISIBILITIES:
+                    abort_problem(
+                        422, "Invalid visibility",
+                        f"visibility must be one of {list(EVENT_VISIBILITIES)}.",
+                    )
+                ev.visibility = vis
             if "starts_at" in body:
                 ev.starts_at = _dt(body.get("starts_at"))
             if "ends_at" in body:
@@ -1338,6 +1366,182 @@ async def update_event(event_id: int):
     payload = await asyncio.to_thread(_apply)
     _bump(event_id)
     return private_no_store(jsonify(payload))
+
+
+def _enqueue_orphan_scheduled_events(s, event_id: int) -> None:
+    """Before dropping an event's ``web_event_guilds`` rows, hand any live
+    Discord scheduled events to the bot's teardown queue (the Web API never
+    talks to Discord). Best-effort: a Redis hiccup must not block the delete —
+    a stray Discord scheduled event is recoverable; a half-deleted event is
+    not."""
+    try:
+        from services.event_scheduled_events import (
+            ORPHAN_SCHED_EVENTS_KEY,
+            orphan_scheduled_event_payloads,
+        )
+        from utils.redis import redis_client
+
+        for payload in orphan_scheduled_event_payloads(s, event_id):
+            redis_client.rpush(ORPHAN_SCHED_EVENTS_KEY, json.dumps(payload))
+    except Exception:
+        pass
+
+
+def _cascade_delete_event(s, ev: Event) -> None:
+    """Delete ``ev`` and every row scoped to it — children first, since no ORM
+    cascade is configured on these FKs (mirrors the per-team cascade in
+    ``delete_team``, widened to the whole event). Order matters: board-game
+    effects reference inventory rows; everything team/task/cell-scoped is
+    removed before the teams/tasks/cells themselves; event templates keep only
+    a nullable provenance pointer, which we null out."""
+    from db import (
+        EventBoardConfig,
+        EventBoardEffect,
+        EventBoardPosition,
+        EventBoardTile,
+        EventChannel,
+        EventCoinLedger,
+        EventGuild,
+        EventShopRotation,
+        EventTeamCooldown,
+        EventTeamInventory,
+        EventTemplate,
+    )
+
+    event_id = ev.id
+    team_ids = [
+        tid for (tid,) in s.query(EventTeam.id).filter(EventTeam.event_id == event_id).all()
+    ]
+    cell_ids = [
+        cid
+        for (cid,) in s.query(EventBingoCell.id).filter(EventBingoCell.event_id == event_id).all()
+    ]
+
+    def _wipe(model, *conds) -> None:
+        s.query(model).filter(*conds).delete(synchronize_session=False)
+
+    # Board-game economy (web44a–web50a). Effects reference inventory rows, so
+    # they must go first; the rest are plain event_id children.
+    _wipe(EventBoardEffect, EventBoardEffect.event_id == event_id)
+    _wipe(EventCoinLedger, EventCoinLedger.event_id == event_id)
+    _wipe(EventTeamCooldown, EventTeamCooldown.event_id == event_id)
+    _wipe(EventTeamInventory, EventTeamInventory.event_id == event_id)
+    _wipe(EventShopRotation, EventShopRotation.event_id == event_id)
+    _wipe(EventBoardPosition, EventBoardPosition.event_id == event_id)
+    _wipe(EventBoardConfig, EventBoardConfig.event_id == event_id)
+    _wipe(EventBoardTile, EventBoardTile.event_id == event_id)
+
+    # Points / progress / completion ledger.
+    _wipe(EventPlayerPoints, EventPlayerPoints.event_id == event_id)
+    _wipe(EventProgress, EventProgress.event_id == event_id)
+    _wipe(EventCompletion, EventCompletion.event_id == event_id)
+
+    # Bingo completions hang off cells (no event_id), so scope them by cell.
+    if cell_ids:
+        _wipe(EventBingoCompletion, EventBingoCompletion.cell_id.in_(cell_ids))
+    _wipe(EventBingoCell, EventBingoCell.event_id == event_id)
+
+    # Rosters / votes / signups. Team members hang off teams (no event_id).
+    _wipe(EventLeaderVote, EventLeaderVote.event_id == event_id)
+    _wipe(EventSignup, EventSignup.event_id == event_id)
+    if team_ids:
+        _wipe(EventTeamMember, EventTeamMember.team_id.in_(team_ids))
+
+    # Discord destination + scheduled-event mirror rows (the real Discord
+    # scheduled events were already queued for teardown by the caller).
+    _wipe(EventChannel, EventChannel.event_id == event_id)
+    _wipe(EventGuild, EventGuild.event_id == event_id)
+
+    # The tasks + teams those children referenced, then the participants.
+    _wipe(EventTask, EventTask.event_id == event_id)
+    _wipe(EventTeam, EventTeam.event_id == event_id)
+    _wipe(EventGroup, EventGroup.event_id == event_id)
+
+    # Templates keep a nullable provenance pointer (ondelete SET NULL). Null it
+    # explicitly so the delete never trips the FK even if the live constraint
+    # wasn't created with SET NULL — templates outlive the events they came
+    # from.
+    s.query(EventTemplate).filter(EventTemplate.source_event_id == event_id).update(
+        {EventTemplate.source_event_id: None}, synchronize_session=False
+    )
+
+    s.delete(ev)
+
+
+@events_bp.delete("/events/<int:event_id>")
+async def delete_event(event_id: int):
+    """Permanently delete an event and everything scoped to it — tasks, teams,
+    rosters, progress/completion ledger, bingo + board-game state, sign-ups and
+    Discord config rows. Event admins (group owner/admin, or superadmin for
+    global events) only; audit-logged.
+
+    Guardrails: a *live* event must be ended first (409) so its Discord
+    scheduled events, standings board and active-matching state wind down in
+    order; and the caller must echo the event's exact name in ``confirm_name``
+    (422 otherwise) — the explicit confirmation that keeps a misfired request
+    from erasing real history. Drafts and ended events are fair game (the point
+    is to keep abandoned drafts from cluttering the history)."""
+    user_id = current_user_id()
+    body = await json_body()
+    confirm = body.get("confirm_name")
+
+    def _apply():
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            if _effective_status(ev) == "active":
+                abort_problem(
+                    409,
+                    "Event is live",
+                    "End the event before deleting it — a running event can't "
+                    "be deleted.",
+                )
+            # Explicit confirmation: the caller must echo the event name
+            # (case/whitespace-insensitive), matching the UI's type-to-confirm.
+            want = " ".join((ev.name or "").strip().lower().split())
+            got = (
+                " ".join(confirm.strip().lower().split())
+                if isinstance(confirm, str)
+                else ""
+            )
+            if not got or got != want:
+                abort_problem(
+                    422,
+                    "Confirmation required",
+                    "Type the event's exact name to confirm deletion.",
+                )
+
+            group_id = ev.group_id
+            name = ev.name
+            eff = _effective_status(ev)
+
+            # Hand any live Discord scheduled events to the bot for teardown
+            # before we drop the rows that describe them.
+            _enqueue_orphan_scheduled_events(s, event_id)
+            _cascade_delete_event(s, ev)
+            s.add(
+                AuditLog(
+                    actor_user_id=user_id,
+                    group_id=group_id,
+                    action="event.delete",
+                    target=f"web_events.{event_id}",
+                    before=f"name:{name} status:{eff}",
+                    after=None,
+                )
+            )
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    # Forget it in Redis: drop from the active-matching set and nudge the
+    # consumer to refresh its matcher state (both best-effort no-ops on error).
+    try:
+        from services.event_lifecycle import _mark_active_in_redis
+
+        _mark_active_in_redis(event_id, False)
+    except Exception:
+        pass
+    _bump(event_id)
+    return jsonify({"ok": True})
 
 
 # --------------------------------------------------------------------------- #

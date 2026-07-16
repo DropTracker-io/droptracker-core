@@ -3,7 +3,7 @@
   "info": {
     "title": "DropTracker Web API",
     "version": "1.0.0",
-    "description": "Versioned, browser-oriented JSON API consumed by the Next.js BFF. Separate from the RuneLite intake API. See FRONTEND_PLAN.md §6."
+    "description": "Versioned, browser-oriented JSON API consumed by the Next.js BFF. Separate from the RuneLite intake API. See FRONTEND_PLAN.md \u00a76."
   },
   "servers": [
     {
@@ -188,6 +188,70 @@
             "$ref": "#/components/responses/Error"
           },
           "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "deleteEvent",
+        "summary": "Delete a draft or ended event (event admin / superadmin)",
+        "description": "Permanently deletes the event and every row scoped to it (tasks, teams, rosters, progress/completion ledger, bingo + board-game state, sign-ups and Discord config). A live event must be ended first (409). The caller must echo the event's exact name in `confirm_name` (422 otherwise).",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "confirm_name"
+                ],
+                "properties": {
+                  "confirm_name": {
+                    "type": "string",
+                    "description": "Must exactly match the event's name (explicit confirmation)."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
             "$ref": "#/components/responses/Error"
           },
           "422": {
@@ -748,7 +812,8 @@
           "submission_policy",
           "board_size",
           "bonus_line_points",
-          "bonus_blackout_points"
+          "bonus_blackout_points",
+          "visibility"
         ],
         "properties": {
           "id": {
@@ -773,6 +838,15 @@
               "active",
               "past"
             ]
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "public",
+            "description": "Event audience: 'public' (anyone) or 'private' (only participating-group members + event admins see it, at any status)."
           },
           "starts_at": {
             "type": "integer",
@@ -810,7 +884,7 @@
               "api_only"
             ],
             "default": "all",
-            "description": "Which submissions the completion engine accepts: 'all' — everything counts; 'confirm_non_api' — non-plugin submissions land as pending completions needing admin confirmation; 'api_only' — submissions without the plugin API flag are ignored."
+            "description": "Which submissions the completion engine accepts: 'all' \u2014 everything counts; 'confirm_non_api' \u2014 non-plugin submissions land as pending completions needing admin confirmation; 'api_only' \u2014 submissions without the plugin API flag are ignored."
           },
           "board_size": {
             "type": "integer",
@@ -1050,7 +1124,7 @@
         "properties": {
           "size": {
             "type": "integer",
-            "description": "Board is size × size."
+            "description": "Board is size \u00d7 size."
           },
           "cells": {
             "type": "array",
@@ -1185,6 +1259,15 @@
           },
           "bonus_blackout_points": {
             "type": "integer"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "public",
+            "description": "Event audience: 'public' (anyone) or 'private' (only participating-group members + event admins see it, at any status)."
           }
         }
       },
@@ -1238,6 +1321,15 @@
           },
           "bonus_blackout_points": {
             "type": "integer"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "private"
+            ],
+            "default": "public",
+            "description": "Event audience: 'public' (anyone) or 'private' (only participating-group members + event admins see it, at any status)."
           }
         }
       },
@@ -1832,7 +1924,7 @@
           },
           "created_ts": {
             "type": "integer",
-            "description": "Groups only — unix seconds the group was created."
+            "description": "Groups only \u2014 unix seconds the group was created."
           },
           "total_loot": {
             "$ref": "#/components/schemas/Money"

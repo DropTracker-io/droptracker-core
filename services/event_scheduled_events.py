@@ -34,6 +34,40 @@ DEFAULT_EVENT_DURATION = timedelta(hours=2)
 # The "location" shown on the Discord event: the event's page on the site.
 EVENT_LOCATION_TMPL = "https://www.droptracker.io/events/{event_id}"
 
+# Redis list of Discord scheduled events orphaned by a *hard event delete*.
+# The normal end-of-life path (end_event) marks web_event_guilds rows
+# ``delete_pending`` and the bot reconciler deletes the Discord event, then
+# drops the row. A full delete removes those rows outright (FK), so the bot
+# would never see them — instead the Web API pushes each live scheduled event
+# here as ``{"guild_id","scheduled_event_id"}`` JSON, and the reconciler drains
+# the list and deletes them best-effort. Decouples Discord teardown from the DB
+# rows so the event can be hard-deleted immediately.
+ORPHAN_SCHED_EVENTS_KEY = "events:sched:orphans"
+
+
+def orphan_scheduled_event_payloads(session, event_id) -> list:
+    """The ``{"guild_id","scheduled_event_id"}`` dicts for every
+    ``web_event_guilds`` row of ``event_id`` that still carries a live Discord
+    scheduled event — the Web API enqueues these on ``ORPHAN_SCHED_EVENTS_KEY``
+    before hard-deleting the rows, so the bot can delete the real Discord events
+    afterward. Empty list when nothing was ever mirrored (the common case for a
+    draft with the default ``on_activate`` policy)."""
+    from db.models import EventGuild
+
+    rows = (
+        session.query(EventGuild.guild_id, EventGuild.discord_scheduled_event_id)
+        .filter(
+            EventGuild.event_id == event_id,
+            EventGuild.discord_scheduled_event_id.isnot(None),
+        )
+        .all()
+    )
+    return [
+        {"guild_id": str(gid), "scheduled_event_id": str(sid)}
+        for gid, sid in rows
+        if gid and sid
+    ]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Pure desired-state logic (no I/O — unit-tested in isolation)

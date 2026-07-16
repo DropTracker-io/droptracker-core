@@ -620,6 +620,41 @@ async def activity_launch_cards():
         print(f"Couldn't reconcile activity launch cards: {e}")
 
 
+async def _drain_orphan_scheduled_events(limit: int = 50) -> None:
+    """Delete Discord scheduled events orphaned by a *hard event delete*.
+
+    The normal end-of-life path marks web_event_guilds rows `delete_pending`
+    and the reconciler below deletes the Discord event, then drops the row. A
+    full event delete (web_api) removes those rows outright (FK), so the
+    reconciler never sees them — instead the Web API pushes each live scheduled
+    event onto ORPHAN_SCHED_EVENTS_KEY. Drain it here and delete the real
+    Discord events best-effort. Bounded per tick so a backlog can't starve the
+    reconcile pass; failures are isolated per entry (an already-deleted event or
+    a kicked-from-guild bot just means nothing to clean up)."""
+    import json as _json
+
+    from services.event_scheduled_events import ORPHAN_SCHED_EVENTS_KEY
+
+    for _ in range(limit):
+        raw = redis_client.lpop(ORPHAN_SCHED_EVENTS_KEY)
+        if not raw:
+            break
+        try:
+            data = _json.loads(raw.decode() if isinstance(raw, (bytes, bytearray)) else raw)
+            guild_id = data.get("guild_id")
+            sched_id = data.get("scheduled_event_id")
+            if not guild_id or not sched_id:
+                continue
+            guild = await fetch_guild_cached(guild_id)
+            if not guild:
+                continue  # bot not in the guild → nothing left to delete
+            se = await guild.fetch_scheduled_event(sched_id, force=True)
+            if se:
+                await se.delete(reason="DropTracker event deleted")
+        except Exception as e:
+            print(f"Couldn't tear down orphaned scheduled event: {e}")
+
+
 @Task.create(IntervalTrigger(seconds=30))
 async def reconcile_event_scheduled_events():
     """Mirror web_event_guilds desired state onto real Discord scheduled
@@ -642,6 +677,10 @@ async def reconcile_event_scheduled_events():
         schedulable,
     )
     from services.event_notifications import load_event_channels
+
+    # First clear any scheduled events orphaned by a hard event delete (their
+    # web_event_guilds rows are already gone, so they won't appear below).
+    await _drain_orphan_scheduled_events()
 
     db_session = Session()
     try:

@@ -177,6 +177,7 @@ class TestCreateEventMode:
         # `in` checks always fail — restore the real values for these tests.
         monkeypatch.setattr(evr, "EVENT_MODES", ("standard", "clan_vs_clan"))
         monkeypatch.setattr(evr, "EVENT_KINDS", ("standard", "bingo", "board_game"))
+        monkeypatch.setattr(evr, "EVENT_VISIBILITIES", ("public", "private"))
         monkeypatch.setattr(
             evr, "EVENT_FORMATION_MODES", ("self_join", "auto_assign", "admin_assign")
         )

@@ -15,9 +15,9 @@
                                                  admins rolling on behalf)
 
 Auth mirrors the bingo board: writes require the event admin gate; reads are
-public once the event is visible (drafts: participants/admins only via
-events._can_view_draft). The board layout locks when the event starts —
-settings stay live-tunable by design.
+public once the event is visible (restricted events — drafts or private:
+participants/admins only via events._can_view_restricted). The board layout
+locks when the event starts — settings stay live-tunable by design.
 """
 from __future__ import annotations
 
@@ -54,9 +54,10 @@ from web_api.routes.event_admin import _assert_board_editable
 from web_api.routes.events import (
     _assert_event_admin,
     _bump,
-    _can_view_draft,
+    _can_view_restricted,
     _effective_status,
     _is_event_admin,
+    _is_restricted,
 )
 
 event_board_bp = Blueprint("v1_event_board", __name__)
@@ -654,7 +655,7 @@ async def get_board(event_id: int):
     def _read():
         with db_session() as s:
             ev = _load_board_event(s, event_id, for_write=False)
-            if _effective_status(ev) == "draft" and not _can_view_draft(s, viewer_id, ev):
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             return _board_payload(s, ev)
 
@@ -989,7 +990,7 @@ async def board_png(event_id: int):
     def _read_bg():
         with db_session() as s:
             ev = _load_board_event(s, event_id, for_write=False)
-            if _effective_status(ev) == "draft" and not _can_view_draft(s, viewer_id, ev):
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             config = (s.query(EventBoardConfig)
                       .filter(EventBoardConfig.event_id == ev.id).first())
@@ -1123,7 +1124,7 @@ async def get_board_shop(event_id: int):
 
         with db_session() as s:
             ev = _load_board_event(s, event_id, for_write=False)
-            if _effective_status(ev) == "draft" and not _can_view_draft(s, user_id, ev):
+            if _is_restricted(ev) and not _can_view_restricted(s, user_id, ev):
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             # Team context is optional — spectators still see the catalog. When
             # present it drives per-team cap/bought counts in the item list.

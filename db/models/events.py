@@ -59,6 +59,14 @@ EVENT_SELF_SIGNUP_MODES = ("self_join", "auto_assign", "signup_pool")
 # group's own picker (saved for their future events).
 EVENT_TASK_VISIBILITIES = ("public", "private")
 
+# Event-level audience (web_events.visibility): "public" — anyone can see the
+# event on the site/Activity/lists (the default, unchanged behaviour);
+# "private" — only members of the participating group(s) and event admins ever
+# see it, at ANY lifecycle status (the same audience a pre-publication draft is
+# limited to, but permanent). Distinct from EVENT_TASK_VISIBILITIES, which is
+# only about task-library reuse.
+EVENT_VISIBILITIES = ("public", "private")
+
 # Event ownership shape (web_events.mode): "standard" (one owning group, or
 # global when group_id is NULL) vs "clan_vs_clan" (a host group plus invited
 # opponent groups, tracked in web_event_groups).
@@ -231,6 +239,12 @@ class Event(Base):
     name = Column(String(120), nullable=False)
     description = Column(Text, nullable=True)
     status = Column(String(16), nullable=False, default="active")  # draft|active|past
+    # EVENT_VISIBILITIES. "private" hides the event from the public site/lists —
+    # only participating-group members + event admins ever see it, at any
+    # status (same audience as a pre-publication draft, but permanent).
+    visibility = Column(
+        String(16), nullable=False, default="public", server_default="public"
+    )
     starts_at = Column(DateTime, nullable=True)
     ends_at = Column(DateTime, nullable=True)
     has_bingo = Column(Boolean, nullable=False, default=False)
