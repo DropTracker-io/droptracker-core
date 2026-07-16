@@ -5,7 +5,13 @@ import github
 import schedule
 import time
 from github import Github
-from db.models import GroupConfiguration, Webhook, NewWebhook, Session, WebhookPendingDeletion, session as db_sesh
+# NOTE: never import the module-global scoped session here. This module runs in
+# long-lived processes (player-updates' github loop, in both the asyncio main
+# thread and to_thread workers); a read on the scoped session autobegins a
+# transaction that nothing ever commits, which held an idle InnoDB transaction
+# (and its metadata locks) open for the entire service lifetime — 20h+ in the
+# 2026-07-16 incident. Use short-lived `with Session()` blocks instead.
+from db.models import GroupConfiguration, Webhook, NewWebhook, Session, WebhookPendingDeletion
 from dotenv import load_dotenv
 from interactions import IntervalTrigger, Task
 import json
@@ -53,9 +59,12 @@ class GithubPagesUpdater:
             list of encrypted webhooks
         """
         try:
-            webhooks = db_sesh.query(Webhook).limit(limit).all()  # Grab limited number of webhooks
-            
-            main_urls = [w.webhook_url for w in webhooks if w.webhook_url]
+            with Session() as s:
+                main_urls = [
+                    w.webhook_url
+                    for w in s.query(Webhook).limit(limit).all()
+                    if w.webhook_url
+                ]
             main_encrypted = []
             
             # Try to encrypt each webhook, skipping any that fail
@@ -159,7 +168,8 @@ class GithubPagesUpdater:
     async def update_github_pages(self, watchdog=None):
         global total_hooks, updates
 
-        ex_hooks = db_sesh.query(Webhook).count()
+        with Session() as s:
+            ex_hooks = s.query(Webhook).count()
         
         print("Loading initial total webhook data & sending update...")
         total_hooks = ex_hooks
@@ -257,10 +267,11 @@ class GithubPagesUpdater:
                 files_to_update.append((self.new_file, core_json_content))
 
         # Store encrypted webhooks in the database
-        db_sesh.query(NewWebhook).delete()
-        for webhook_hash in encrypted_webhooks:
-            db_sesh.add(NewWebhook(webhook_hash=webhook_hash))
-        db_sesh.commit()
+        with Session() as s:
+            s.query(NewWebhook).delete()
+            for webhook_hash in encrypted_webhooks:
+                s.add(NewWebhook(webhook_hash=webhook_hash))
+            s.commit()
 
         # Also create a date-based backup file with second chunk if available
         if len(webhook_chunks) > 1:

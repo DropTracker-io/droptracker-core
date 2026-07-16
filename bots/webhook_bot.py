@@ -274,16 +274,24 @@ async def nitro_user_cmd(ctx: SlashContext):
 
 
 async def apply_nitro_boost_points(user_id: int, session_to_use = None):
-    if not session_to_use:
-        local_session = Session()
-    else:
-        local_session = session_to_use
-    user = local_session.query(User).filter(User.discord_id == user_id).first()
-    user_players = local_session.query(Player).filter(Player.user_id == user.user_id).all()
-    print(f"Awarding nitro boost to {user_players[0].player_name}...")
-    award_points_to_player(player_id=user_players[0].player_id, amount=250, source='Nitro Boost Upgrade',expires_in_days=60,session=local_session)
-    if not session_to_use:
-        local_session.close()
+    # close() in a finally: an exception here used to leak the session — and a
+    # leaked session keeps its connection checked out with an open transaction
+    # that pool reset can never rescue.
+    local_session = session_to_use if session_to_use else Session()
+    try:
+        user = local_session.query(User).filter(User.discord_id == user_id).first()
+        if not user:
+            print(f"Nitro boost: no user found for discord id {user_id}, skipping award")
+            return
+        user_players = local_session.query(Player).filter(Player.user_id == user.user_id).all()
+        if not user_players:
+            print(f"Nitro boost: user {user.user_id} has no players, skipping award")
+            return
+        print(f"Awarding nitro boost to {user_players[0].player_name}...")
+        award_points_to_player(player_id=user_players[0].player_id, amount=250, source='Nitro Boost Upgrade',expires_in_days=60,session=local_session)
+    finally:
+        if not session_to_use:
+            local_session.close()
 
 
 async def run_nitro_reconcile():
@@ -436,6 +444,20 @@ async def process_submission_with_session(submission_type, embed_data):
     finally:
         # Always close the session
         session.close()
+        # Also release the module-global scoped session: helpers deep in the
+        # processor chain (db.ops, utils.embeds, ...) fall back to it for
+        # reads, which autobegins a transaction this handler never ends. Left
+        # alone, that idle transaction (and its metadata locks) survives until
+        # the next unrelated commit on this thread — or forever (same failure
+        # mode as the 2026-07-16 player-updates 20h idle-trx incident).
+        # remove() closes the thread-local session and rolls back any open
+        # read transaction; the next fallback use transparently gets a fresh
+        # one, so per-cycle cleanup here is safe.
+        try:
+            from db.models import session as _scoped_session
+            _scoped_session.remove()
+        except Exception:
+            pass
 
 @interactions.listen(MessageCreate)
 async def on_message_create(event: MessageCreate):

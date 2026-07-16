@@ -15,7 +15,12 @@ import logging
 from monitor.sdnotifier import SystemdWatchdog
 
 from sqlalchemy import func
-from db.models import Group, LBUpdate, session, Player, User, Drop, Session
+# Do NOT import the module-global scoped `session` here: any read on it
+# autobegins a transaction that this long-lived service never commits, holding
+# an idle InnoDB transaction (and its metadata locks) open for the whole
+# service lifetime (2026-07-16: 20h idle trx blocked an ALTER on web_events).
+# Every query in this process must use a short-lived `with Session()` block.
+from db.models import Group, LBUpdate, Player, User, Drop, Session
 from services import redis_updates
 # from db.update_player_total import update_player_in_redis
 #from db.update_player_total import update_player_in_redis
@@ -456,9 +461,9 @@ async def setup_background_tasks():
 
 async def get_all_groups(session_to_use = None):
     if session_to_use is not None:
-        session = session_to_use
-    groups = session.query(Group).all()
-    return groups
+        return session_to_use.query(Group).all()
+    with Session() as s:
+        return s.query(Group).all()
 
 @app.after_serving
 async def cleanup_background_tasks():
