@@ -646,10 +646,16 @@ def notification_context(notification_type: str, data: dict) -> dict:
     # (event_completion only; see services.event_engine._task_contributors).
     contributors = data.get("contributors") or []
     if contributors:
-        put("contributors_line", ", ".join(
-            f"**{c.get('player_name') or 'Unknown'}** `{format_gp(c.get('quantity') or 0)}`"
-            for c in contributors
-        ))
+        def _contrib(c):
+            line = (f"**{c.get('player_name') or 'Unknown'}** "
+                    f"`{format_gp(c.get('quantity') or 0)}`")
+            # Contribution-share points (task points × net share, floats) —
+            # see services.event_engine._award_contribution_points.
+            share = c.get("points_share")
+            if share:
+                line += f" (+{share:g} pts)"
+            return line
+        put("contributors_line", ", ".join(_contrib(c) for c in contributors))
 
     if notification_type == "event_signup_prompt":
         context["signup_instructions"] = {

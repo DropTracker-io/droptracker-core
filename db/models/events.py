@@ -437,6 +437,33 @@ class EventProgress(Base):
     completed_at = Column(DateTime, nullable=True)
 
 
+class EventPlayerPoints(Base):
+    """Per-player contribution points, one row per (task, team, player).
+
+    Written when a task completes: the task's points are split across the
+    applied-ledger contributors by their net quantity share (a 5-point task
+    done 50/50 awards 2.5 each — hence FLOAT). The integer team score stays
+    the competitive source of truth; this is the stat that lets end-of-event
+    player points correlate with actual contribution. Rows are rewritten
+    (or deleted) when a revoke changes the task's completion state — see
+    services.event_engine._award_contribution_points."""
+
+    __tablename__ = "web_event_player_points"
+    __table_args__ = (
+        Index("uq_web_evt_player_points", "task_id", "team_id", "player_id", unique=True),
+        Index("idx_web_evt_player_points_event", "event_id", "player_id"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    task_id = Column(Integer, ForeignKey("web_event_tasks.id"), nullable=False)
+    team_id = Column(Integer, ForeignKey("web_event_teams.id"), nullable=True)
+    player_id = Column(Integer, ForeignKey("players.player_id"), nullable=False)
+    points = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
 class EventChannel(Base):
     """Per-event Discord destination (PRD D8)."""
 

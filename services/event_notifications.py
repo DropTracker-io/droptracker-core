@@ -360,10 +360,14 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         # came up empty (e.g. a manually-awarded row).
         contributors = data.get("contributors") or []
         if contributors:
-            names = ", ".join(
-                f"`{c.get('player_name') or 'Unknown'}` ({format_gp(c.get('quantity') or 0)})"
-                for c in contributors
-            )
+            def _contrib(c):
+                line = (f"`{c.get('player_name') or 'Unknown'}` "
+                        f"({format_gp(c.get('quantity') or 0)})")
+                share = c.get("points_share")  # task points × net share
+                if share:
+                    line += f" +{share:g} pts"
+                return line
+            names = ", ".join(_contrib(c) for c in contributors)
             field("Contributors", names, inline=False)
         elif player:
             field("Completed by", f"`{player}`")

@@ -1195,6 +1195,35 @@ def _task_contributors(session, task_id, team_id) -> list:
     return contributors
 
 
+def _award_contribution_points(session, event: dict, task: dict, team_id,
+                               contributors: list, points: int) -> None:
+    """Split a completed task's points across its contributors by net share
+    (``points × quantity / total_quantity``, floats) and persist one
+    ``EventPlayerPoints`` row per player. Idempotent rewrite: existing rows
+    for the (task, team) are replaced, so re-application after a revoke
+    redistributes cleanly. Mutates each contributor dict with its
+    ``points_share`` so the completion notification can show it."""
+    from db.models import EventPlayerPoints
+
+    (session.query(EventPlayerPoints)
+     .filter(EventPlayerPoints.task_id == task["id"],
+             EventPlayerPoints.team_id == team_id)
+     .delete(synchronize_session=False))
+    if not points or not contributors:
+        return
+    total = sum(max(int(c.get("quantity") or 0), 0) for c in contributors)
+    if total <= 0:
+        return
+    for c in contributors:
+        share = round(points * max(int(c.get("quantity") or 0), 0) / total, 2)
+        if share <= 0:
+            continue
+        c["points_share"] = share
+        session.add(EventPlayerPoints(
+            event_id=event["id"], task_id=task["id"], team_id=team_id,
+            player_id=c["player_id"], points=share))
+
+
 def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id,
                             player_name, previous: int, current: int,
                             proof_url: Optional[str] = None) -> None:
@@ -1236,14 +1265,22 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
     _enqueue_notification(session, "event_task_progress", event, player_id, payload)
 
 
-def _current_leader(session, event_id: int):
-    """(team_id, score) of the current points leader, or None."""
+def _current_leader(session, event_id: int, strict: bool = False):
+    """(team_id, score) of the current points leader, or None.
+
+    ``strict=True`` returns None on a shared top score — a team that merely
+    TIES the leader has not taken the lead (the id-order tiebreak used to
+    crown them and fire a bogus lead-change embed)."""
     from db.models import EventTeam
-    row = (session.query(EventTeam)
-           .filter(EventTeam.event_id == event_id)
-           .order_by(EventTeam.score.desc(), EventTeam.id.asc())
-           .first())
-    return (row.id, int(row.score or 0)) if row else None
+    rows = (session.query(EventTeam)
+            .filter(EventTeam.event_id == event_id)
+            .order_by(EventTeam.score.desc(), EventTeam.id.asc())
+            .limit(2).all())
+    if not rows:
+        return None
+    if strict and len(rows) > 1 and int(rows[0].score or 0) == int(rows[1].score or 0):
+        return None
+    return (rows[0].id, int(rows[0].score or 0))
 
 
 def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
@@ -1317,16 +1354,18 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
     points = int(task.get("points") or 0)
     lead_changed_to = None
     if points and team_id is not None:
-        previous_leader = _current_leader(session, event["id"])
+        # Strict leaders only: a tie has no leader, so tying the top score
+        # never announces a lead change, while later breaking that tie does.
+        previous_leader = _current_leader(session, event["id"], strict=True)
         team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
         if team is not None:
             team.score = int(team.score or 0) + points
             team_score = team.score
             session.flush()
-            new_leader = _current_leader(session, event["id"])
-            if (previous_leader and new_leader
-                    and new_leader[0] != previous_leader[0]
-                    and new_leader[0] == team_id):
+            new_leader = _current_leader(session, event["id"], strict=True)
+            if (new_leader is not None and new_leader[0] == team_id
+                    and (previous_leader is None
+                         or previous_leader[0] != team_id)):
                 lead_changed_to = new_leader
     result["points"] = points
     if team_score is not None:
@@ -1385,6 +1424,12 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
             "cell_label": cell.get("label"),
         })
 
+    # Everyone who fed this task, not just whoever's submission tipped it
+    # over the line — the completion message folds them all in, and the
+    # task's points are split across them by net contribution share.
+    contributors = _task_contributors(session, task["id"], team_id)
+    _award_contribution_points(session, event, task, team_id, contributors, points)
+
     notification = {
         "task_id": task["id"],
         "task_label": task.get("label"),
@@ -1397,9 +1442,7 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         "cell_labels": [c.get("label") for c in new_cells if c.get("label")],
         "source_type": completion.source_type,
         "proof_url": completion.proof_url,
-        # Everyone who fed this task, not just whoever's submission tipped it
-        # over the line — the completion message folds them all in.
-        "contributors": _task_contributors(session, task["id"], team_id),
+        "contributors": contributors,
     }
     _enqueue_notification(session, "event_completion", event, player_id, notification)
     if lead_changed_to:
@@ -1412,14 +1455,47 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
     return result
 
 
+def _row_advances_progress(session, task: dict, team_id, candidate) -> bool:
+    """Would this (unsaved) ledger row move the (task, team) rollup at all?
+
+    Only item-list kinds with per-item/per-group needs can say "no": once a
+    listed item is already satisfied, another copy of it is dead weight. For
+    plain count/kc/xp folds every row advances progress until the threshold
+    (the completed gate in :func:`record_match` handles the rest)."""
+    kind = _list_kind(task)
+    if kind in ("all_of", "assembly"):
+        helper = _distinct_item_progress
+    elif kind == "groups":
+        helper = _grouped_item_progress
+    elif kind == "any_path":
+        helper = _anypath_item_progress
+    else:
+        return True
+    return (helper(session, task, team_id, include=candidate)
+            > helper(session, task, team_id))
+
+
 def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
                  player_id: int, quantity: int, envelope: dict,
                  cells: Optional[list] = None,
                  matched_target: Optional[str] = None) -> Optional[dict]:
     """Insert the ledger row for a match (idempotent on
     (task, team, submission_guid)); apply effects unless it needs
-    confirmation. Returns a result dict, or None on duplicate replay."""
-    from db.models import EventCompletion
+    confirmation. Returns a result dict, or None on duplicate replay.
+
+    Rows that can no longer contribute are NOT recorded: once the (task,
+    team) rollup is completed — or the specific matched item is already
+    satisfied — another qualifying submission would only spam popups and
+    pollute the contribution metrics, so it is dropped here, before the
+    ledger insert / pending-review enqueue."""
+    from db.models import EventCompletion, EventProgress
+
+    progress_row = (session.query(EventProgress)
+                    .filter(EventProgress.task_id == task["id"],
+                            EventProgress.team_id == team_id)
+                    .first())
+    if progress_row is not None and progress_row.completed:
+        return None
 
     data = envelope.get("data") or {}
     status = completion_status(event, task, envelope)
@@ -1438,6 +1514,8 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
         proof_url=str(proof)[:255] if proof else None,
         matched_target=matched_target,
     )
+    if not _row_advances_progress(session, task, team_id, completion):
+        return None  # matched item already satisfied — contributes nothing
     try:
         with session.begin_nested():
             session.add(completion)
@@ -1722,6 +1800,19 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
         if team is not None:
             team.score = int(team.score or 0) + (points if now_completed else -points)
             team_score = team.score
+
+    # Keep per-player contribution points honest: still complete → shares are
+    # redistributed over the surviving ledger; no longer complete → deleted.
+    if now_completed:
+        _award_contribution_points(
+            session, event, task, team_id,
+            _task_contributors(session, task["id"], team_id), points)
+    elif was_completed:
+        from db.models import EventPlayerPoints
+        (session.query(EventPlayerPoints)
+         .filter(EventPlayerPoints.task_id == task["id"],
+                 EventPlayerPoints.team_id == team_id)
+         .delete(synchronize_session=False))
 
     if was_completed and not now_completed and event.get("has_bingo") and team_id is not None:
         cell_ids = [

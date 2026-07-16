@@ -48,6 +48,7 @@ from db import (
     EventBingoCompletion,
     EventCompletion,
     EventGroup,
+    EventPlayerPoints,
     EventProgress,
     EventSignup,
     EventTask,
@@ -748,6 +749,20 @@ async def get_event_team(event_id: int, team_id: int):
                 row["completions"] += 1
                 row["quantity"] += int(c.quantity or 1)
 
+            # Contribution points: each completed task's points split across
+            # its contributors by net share (web_event_player_points, floats).
+            ppoints = {
+                pid: float(total or 0)
+                for pid, total in (
+                    s.query(EventPlayerPoints.player_id,
+                            func.sum(EventPlayerPoints.points))
+                    .filter(EventPlayerPoints.event_id == event_id,
+                            EventPlayerPoints.team_id == team_id)
+                    .group_by(EventPlayerPoints.player_id)
+                    .all()
+                )
+            }
+
             members = [
                 {
                     "player_id": m.player_id,
@@ -755,6 +770,7 @@ async def get_event_team(event_id: int, team_id: int):
                     "joined_at": _ts(m.joined_at),
                     "completions": contrib.get(m.player_id, {}).get("completions", 0),
                     "quantity": contrib.get(m.player_id, {}).get("quantity", 0),
+                    "points": round(ppoints.get(m.player_id, 0.0), 2),
                 }
                 for m, player_name in member_rows
             ]

@@ -32,8 +32,8 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from db.models import (  # noqa: E402
     Event, EventBingoCell, EventBingoCompletion, EventCompletion,
-    EventProgress, EventTask, EventTeam, EventTeamMember, NotificationQueue,
-    Player,
+    EventPlayerPoints, EventProgress, EventTask, EventTeam, EventTeamMember,
+    NotificationQueue, Player,
 )
 from services import event_engine  # noqa: E402
 
@@ -162,6 +162,20 @@ def main():
             EventBingoCompletion.team_id == team_a.id).all()
         assert len(cells_done) == 1, "bingo cell completed once"
         assert len(notifications(session, "event_completion", pid)) == 1
+        # Contribution points: sole contributor gets the full 10 as a float.
+        ppoints = session.query(EventPlayerPoints).filter(
+            EventPlayerPoints.task_id == t_item.id,
+            EventPlayerPoints.team_id == team_a.id).all()
+        assert len(ppoints) == 1 and ppoints[0].player_id == pid
+        assert abs(float(ppoints[0].points) - 10.0) < 1e-9, ppoints[0].points
+
+        # 2b. post-completion whip: dropped entirely — no ledger row, no
+        # popup, no contribution pollution.
+        res = handle(env("drop", {"item_name": "Abyssal whip", "quantity": 1,
+                                  "npc_name": "Abyssal demon", "kill_count": 7},
+                         player_id=pid, ts=ts_now))
+        assert res == [], "completed task must not keep recording"
+        assert len(ledger(t_item)) == 2, "no post-completion ledger rows"
 
         # 3. replay same guid = idempotent no-op
         res = handle(env("drop", {"item_name": "Abyssal whip", "quantity": 1,
@@ -213,9 +227,11 @@ def main():
         assert [x["kind"] for x in res] == ["completion"], res
         session.refresh(team_a)
         assert team_a.score == 20
+        pb_rows = len(ledger(t_pb))
         res = handle(env("pb", {"npc_name": "Zulrah", "time_ms": 58_000,
                                 "team_size": 1}, player_id=pid, ts=ts_now))
-        assert [x["kind"] for x in res] == ["progress"], "no re-completion"
+        assert res == [], "completed task must not keep recording"
+        assert len(ledger(t_pb)) == pb_rows, "no post-completion ledger rows"
         session.refresh(team_a)
         assert team_a.score == 20, "completed task must not re-score"
         res = handle(env("pb", {"npc_name": "Zulrah", "time_ms": 61_000,
