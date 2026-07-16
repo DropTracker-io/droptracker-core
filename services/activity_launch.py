@@ -108,13 +108,13 @@ def build_launch_card(supports_launch: bool = True):
         cta = (
             "Tap **Open DropTracker** to launch the app. Follow live bingo "
             "boards, browse the leaderboards, and sign up for events without "
-            "leaving Discord.\n-# Discord opens apps from threads via a link "
+            "leaving Discord.\n-# Discord opens apps from your DMs via a link "
             "— you may see a launch prompt first."
         )
         button = Button(
             label="Open DropTracker",
             style=ButtonStyle.URL,
-            url=core.activity_link_url(),
+            url=core.activity_link_url(event_id=None),
         )
 
     logo = UnfurledMediaItem(url="https://www.droptracker.io/img/droptracker-small.gif")
