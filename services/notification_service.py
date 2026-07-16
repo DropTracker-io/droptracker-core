@@ -1598,6 +1598,36 @@ class NotificationService:
                            description="resolve_task_icon")
         return None
 
+    def _resolve_item_icon_url(self, db_session, item_name) -> str | None:
+        """Icon URL for a specific received item (``EventCompletion.matched_target``)
+        — the item the completing drop delivered. Resolves the item name to its
+        game id and returns ``itemdb/{id}.png`` when that asset exists on disk,
+        else None. Used as the completion message's section thumbnail so the
+        card shows the item that was received (the proof screenshot rides below
+        as the full image). Never raises."""
+        if not item_name:
+            return None
+        try:
+            from sqlalchemy import func
+            from db import ItemList
+            from web_api.task_tiles import icon_asset_path
+
+            key = " ".join(str(item_name).strip().lower().split())
+            iid = (db_session.query(func.min(ItemList.item_id))
+                   .filter(ItemList.item_name == item_name, ItemList.noted.is_(False))
+                   .scalar())
+            if iid is None:
+                return None
+            rel = icon_asset_path({"type": "item", "id": iid})
+            if rel and os.path.exists(os.path.join(STATIC_IMG_DIR, rel)):
+                return f"{IMG_BASE}/{rel}"
+        except Exception as e:
+            app_logger.log(log_type="warning",
+                           data=f"item icon resolution failed for {item_name!r}: {e}",
+                           app_name="notification_service",
+                           description="resolve_item_icon")
+        return None
+
     async def send_event_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
         """Send one event notification to its per-event Discord destination.
 
@@ -1696,7 +1726,14 @@ class NotificationService:
                 if task_icon:
                     data['task_icon'] = task_icon
                 if notification_type == 'event_completion':
-                    completion_icon = data.get('proof_url') or task_icon
+                    # Section thumbnail = the item that was received (falls back
+                    # to the task tile when there's no resolvable item). The
+                    # proof screenshot is NOT the thumbnail — it rides below as
+                    # the full image (image_ref), so it isn't shown twice.
+                    completion_icon = (
+                        self._resolve_item_icon_url(db_session, data.get('received_item'))
+                        or task_icon
+                    )
                     if completion_icon:
                         data['completion_icon'] = completion_icon
 
