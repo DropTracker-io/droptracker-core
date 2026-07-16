@@ -272,6 +272,14 @@ class HallOfFame(Extension):
                 raise
             except Exception:
                 log.exception("HOF cycle %d: uncaught exception (loop continues)", cycle)
+            finally:
+                # End the read transaction the cycle's trailing queries left
+                # autobegun on the shared session — otherwise it sits idle in
+                # innodb_trx (holding its snapshot + metadata locks) for the
+                # whole inter-cycle sleep. The next read simply begins a fresh
+                # transaction.
+                async with self._work_lock:
+                    self._safe_rollback()
             await asyncio.sleep(_CYCLE_SLEEP_SECONDS)
 
     async def _run_cycle(self, cycle: int) -> CycleStats:
@@ -475,6 +483,11 @@ class HallOfFame(Extension):
                         log.exception(
                             "HOF: refresh failed for group %d boss '%s'", group_id, display_name,
                         )
+                # _resolve_refresh_targets (and any refresh that ended in a
+                # read) left an open transaction on the shared session; end it
+                # so it doesn't idle until the next signal arrives.
+                async with self._work_lock:
+                    self._safe_rollback()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1573,6 +1586,10 @@ class HallOfFame(Extension):
             except Exception:
                 self._safe_rollback()
                 log.exception("HOF: guild-join reconcile failed for group %d", group_id)
+        # End whatever read transaction this handler left open on the shared
+        # session (the group lookup alone opens one even when targets is empty).
+        async with self._work_lock:
+            self._safe_rollback()
 
     # ------------------------------------------------------------------ #
     # Boss-select interaction (ephemeral leaderboards)
@@ -1624,3 +1641,7 @@ class HallOfFame(Extension):
                 )
             except Exception:
                 pass
+        finally:
+            # Pure-read handler: end the transaction it autobegan so it can't
+            # idle in innodb_trx until the next sweep cycle.
+            self._safe_rollback()

@@ -67,6 +67,11 @@ def setup_signal_handlers():
 async def on_startup(event: Startup):
     print("Hall of Fame bot started.")
     total_groups = 0
+    # close() in a finally: this session used to be leaked (reads only, never
+    # committed/closed), which left its autobegun InnoDB transaction open for
+    # the entire life of the process — same idle-transaction class as the
+    # 2026-07-16 player-updates incident.
+    local_session = None
     try:
         local_session = Session()
         # Count exactly the groups the reconciliation loop will actually process:
@@ -92,6 +97,9 @@ async def on_startup(event: Startup):
     except Exception as e:
         # Presence count is cosmetic — never let it stop the service from loading.
         print("Error getting groups to update:", e)
+    finally:
+        if local_session is not None:
+            local_session.close()
     bot.load_extension("services.hall_of_fame")
     try:
         await bot.change_presence(status=interactions.Status.ONLINE,

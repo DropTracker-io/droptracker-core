@@ -909,19 +909,24 @@ async def cache_guild_channels():
     Redis TTL as a staleness guard if the bot goes down; this task refreshes
     it every 5 minutes while running.
     """
+    # close() in a finally: this session used to be leaked every run, keeping
+    # a connection checked out with an idle read transaction that pool reset
+    # can never rescue.
+    db_session = Session()
     try:
-        session = Session()
         guild_ids = {
             str(g[0])
-            for g in session.query(Group.guild_id).filter(Group.guild_id != None).distinct().all()  # noqa: E711
+            for g in db_session.query(Group.guild_id).filter(Group.guild_id != None).distinct().all()  # noqa: E711
         }
         guild_ids |= {
             str(g[0])
-            for g in session.query(Event.discord_guild_id).filter(Event.discord_guild_id != None).distinct().all()  # noqa: E711
+            for g in db_session.query(Event.discord_guild_id).filter(Event.discord_guild_id != None).distinct().all()  # noqa: E711
         }
     except Exception as e:
         print(f"Couldn't load guild ids for channel cache: {e}")
         return
+    finally:
+        db_session.close()
 
     cached = 0
     for guild_id in guild_ids:

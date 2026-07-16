@@ -347,39 +347,43 @@ class DatabaseOperations:
             based on the group's embed settings stored in the database.
         """
         try:
-            stored_embed = session.query(GroupEmbed).filter(GroupEmbed.group_id == group_id, 
-                                                            GroupEmbed.embed_type == embed_type).first()
-            if not stored_embed:
-                #print("No embed found for group", group_id, "and embed_type", embed_type)
-                stored_embed = session.query(GroupEmbed).filter(GroupEmbed.group_id == 1,
+            # Short-lived session: this is a pure read, and on the module-global
+            # scoped session its autobegun transaction was never ended — in the
+            # core bot it sat idle in innodb_trx between lootboard cycles.
+            with Session() as db_session:
+                stored_embed = db_session.query(GroupEmbed).filter(GroupEmbed.group_id == group_id,
                                                                 GroupEmbed.embed_type == embed_type).first()
-            if stored_embed:
-                embed = Embed(title=stored_embed.title, 
-                              description=stored_embed.description,
-                              color=stored_embed.color)
-                current_time = datetime.now()
-                if stored_embed.timestamp:
-                    embed.timestamp = current_time.timestamp()
-                
-                embed.set_thumbnail(url=stored_embed.thumbnail)
-                embed.set_footer(global_footer)
-                fields = session.query(EmbField).filter(EmbField.embed_id == stored_embed.embed_id).all()
-                current_time = datetime.now()
-                refresh_time = current_time + timedelta(minutes=10)
-                refresh_unix = int(refresh_time.timestamp())
-                if fields:
-                    for field in fields:
-                        field_name = str(field.field_name)
-                        field_value = str(field.field_value)
-                        field_name.replace("{next_refresh}", f"<t:{refresh_unix}:R>")
-                        field_value.replace("{next_refresh}", f"<t:{refresh_unix}:R>")
-                        embed.add_field(name=field_name,
-                                        value=field.field_value,
-                                        inline=field.inline)
-                return embed
-            else:
-                print("No embed found")
-                return None
+                if not stored_embed:
+                    #print("No embed found for group", group_id, "and embed_type", embed_type)
+                    stored_embed = db_session.query(GroupEmbed).filter(GroupEmbed.group_id == 1,
+                                                                    GroupEmbed.embed_type == embed_type).first()
+                if stored_embed:
+                    embed = Embed(title=stored_embed.title,
+                                  description=stored_embed.description,
+                                  color=stored_embed.color)
+                    current_time = datetime.now()
+                    if stored_embed.timestamp:
+                        embed.timestamp = current_time.timestamp()
+
+                    embed.set_thumbnail(url=stored_embed.thumbnail)
+                    embed.set_footer(global_footer)
+                    fields = db_session.query(EmbField).filter(EmbField.embed_id == stored_embed.embed_id).all()
+                    current_time = datetime.now()
+                    refresh_time = current_time + timedelta(minutes=10)
+                    refresh_unix = int(refresh_time.timestamp())
+                    if fields:
+                        for field in fields:
+                            field_name = str(field.field_name)
+                            field_value = str(field.field_value)
+                            field_name.replace("{next_refresh}", f"<t:{refresh_unix}:R>")
+                            field_value.replace("{next_refresh}", f"<t:{refresh_unix}:R>")
+                            embed.add_field(name=field_name,
+                                            value=field.field_value,
+                                            inline=field.inline)
+                    return embed
+                else:
+                    print("No embed found")
+                    return None
         except Exception as e:
             app_logger.log(log_type="error", data=f"An error occurred trying to create a {embed_type} embed for group {group_id}: {e}", app_name="core", description="get_group_embed")
     
@@ -679,23 +683,26 @@ def get_formatted_name(player_name:str, group_id: int, existing_session = None):
     Note:
         This method handles pinging in Discord based on the user's settings.
     """
-    # Determine which session to use
+    # Use the caller's session when given; otherwise a short-lived one. The old
+    # fallback was the module-global scoped session, whose read transaction
+    # nothing ever ended (lifetime idle-transaction class, cc38b09).
     use_existing_session = existing_session is not None
-    if use_existing_session:
-        db_session = existing_session
-    else:
-        db_session = session
-    player = db_session.query(Player).filter(Player.player_name == player_name).first()
-    formatted_name = f"[{player.player_name}](https://www.droptracker.io/players/{player.player_id}/view)"
-    url_name = formatted_name
-    if player.user:
-        user: User = db_session.query(User).filter(User.user_id == player.user.user_id).first()
-        if user and not user.never_ping:
-            if group_id == 2 and user.global_ping:
-                formatted_name = f"<@{user.discord_id}> ({url_name})"
-            elif group_id != 2 and user.group_ping:
-                formatted_name = f"<@{user.discord_id}> ({url_name})"
-    return formatted_name
+    db_session = existing_session if use_existing_session else Session()
+    try:
+        player = db_session.query(Player).filter(Player.player_name == player_name).first()
+        formatted_name = f"[{player.player_name}](https://www.droptracker.io/players/{player.player_id}/view)"
+        url_name = formatted_name
+        if player.user:
+            user: User = db_session.query(User).filter(User.user_id == player.user.user_id).first()
+            if user and not user.never_ping:
+                if group_id == 2 and user.global_ping:
+                    formatted_name = f"<@{user.discord_id}> ({url_name})"
+                elif group_id != 2 and user.group_ping:
+                    formatted_name = f"<@{user.discord_id}> ({url_name})"
+        return formatted_name
+    finally:
+        if not use_existing_session:
+            db_session.close()
     
 
 async def notify_group(bot: interactions.Client, type: str, group: Group, member: Player):
@@ -859,9 +866,15 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
 
 
 def _sync_global_group():
-    """Ensure every player is a member of the global group (group_id=2)."""
+    """Ensure every player is a member of the global group (group_id=2).
+
+    Always ends the transaction it (auto)begins on the shared session: this is
+    the last step of every WOM membership sync, and the no-change path used to
+    return with an open read transaction that idled until the next sync.
+    """
     global_group = session.query(Group).filter(Group.group_id == 2).first()
     if not global_group:
+        session.rollback()
         return
     existing_player_ids = {row.player_id for row in session.query(
         user_group_association.c.player_id
@@ -875,6 +888,10 @@ def _sync_global_group():
             session.commit()
         except Exception as e:
             session.rollback()
+    else:
+        # Nothing to write — end the read-only transaction instead of leaving
+        # it idle on the scoped session.
+        session.rollback()
 
 
 async def update_group_members(bot: interactions.Client, forced_id: int = None):
@@ -927,15 +944,19 @@ async def update_group_members(bot: interactions.Client, forced_id: int = None):
 
 
 async def associate_player_ids(player_wom_ids, before_date: datetime = None, session_to_use = None):
-    # Query the database for all players' WOM IDs and Player IDs
-    if session_to_use is not None:
-        db_session = session_to_use
-    else:
-        db_session = session
-    if before_date:
-        all_players = db_session.query(Player.wom_id, Player.player_id).filter(Player.date_added < before_date).all()
-    else:
-        all_players = db_session.query(Player.wom_id, Player.player_id).all()
+    # Query the database for all players' WOM IDs and Player IDs.
+    # Short-lived fallback session: the module-global scoped session left this
+    # pure read's transaction open forever (lifetime idle-transaction class).
+    own_session = session_to_use is None
+    db_session = Session() if own_session else session_to_use
+    try:
+        if before_date:
+            all_players = db_session.query(Player.wom_id, Player.player_id).filter(Player.date_added < before_date).all()
+        else:
+            all_players = db_session.query(Player.wom_id, Player.player_id).all()
+    finally:
+        if own_session:
+            db_session.close()
     if player_wom_ids is None:
         return []
     all_players = [player for player in all_players if player.player_id != None and player.wom_id != None]
@@ -947,8 +968,6 @@ async def associate_player_ids(player_wom_ids, before_date: datetime = None, ses
 
     return matched_ids
 
-event_session = None
-
 def get_point_divisor():
     """
     Fetch the points divisor from XenForo options. Uses a safe, parameterized
@@ -958,10 +977,13 @@ def get_point_divisor():
 
 def get_xf_option(option_id: str):
     ## Assumes that the option will be stored under the standard table
-    result = session.execute(
-        text("SELECT option_value FROM xenforo.xf_option WHERE option_id = :option_id LIMIT 1"),
-        {"option_id": option_id}
-    ).scalar()
+    # Short-lived session: a read on the module-global scoped session would
+    # leave its autobegun transaction open until some unrelated commit.
+    with Session() as db_session:
+        result = db_session.execute(
+            text("SELECT option_value FROM xenforo.xf_option WHERE option_id = :option_id LIMIT 1"),
+            {"option_id": option_id}
+        ).scalar()
     if result is None:
         print(f"No option found for {option_id}, using default of 1000000")
         return 1000000
@@ -1060,13 +1082,17 @@ async def sync_group_from_wom_with_stats(wom_id: int) -> dict:
             last_sync = datetime.fromisoformat(cooldown_cfg.config_value)
             elapsed = (datetime.utcnow() - last_sync).total_seconds()
             if elapsed < _WOM_SYNC_COOLDOWN_SECONDS:
-                return {
+                result = {
                     "on_cooldown": True,
                     "cooldown_remaining_seconds": int(_WOM_SYNC_COOLDOWN_SECONDS - elapsed),
                     "group_name": group.group_name,
                     "group_id": group.group_id,
                     "wom_id": wom_id,
                 }
+                # Pure-read early exit — end the transaction the lookups above
+                # autobegan on the scoped session.
+                session.rollback()
+                return result
         except (ValueError, TypeError):
             pass  # Malformed timestamp — treat as no cooldown
 
@@ -1108,7 +1134,7 @@ async def sync_group_from_wom_with_stats(wom_id: int) -> dict:
     session.refresh(group)
     total_members = group.get_player_count()
 
-    return {
+    result = {
         "on_cooldown": False,
         "group_name": group.group_name,
         "group_id": group.group_id,
@@ -1119,9 +1145,7 @@ async def sync_group_from_wom_with_stats(wom_id: int) -> dict:
         "skipped_removals": stats.get("skipped_removals", False),
         "duration_seconds": round(duration, 2),
     }
-
-
-async def get_ev_session():
-    if event_session is None:
-        event_session = Session()
-    return event_session
+    # The refresh/count above re-opened a read transaction after the final
+    # commit; end it so it can't idle on the scoped session.
+    session.rollback()
+    return result

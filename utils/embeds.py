@@ -4,7 +4,11 @@ import os
 import time
 
 from sqlalchemy import text
-from db import (models, Group, GroupConfiguration, GroupPersonalBestMessage, NpcList, PersonalBestEntry, Player, session)
+# NOTE: deliberately no module-global `session` import here. Every function in
+# this module is (at most) a read-plus-one-commit, and reads on the scoped
+# session left their autobegun transaction idling in innodb_trx until some
+# unrelated commit on the same thread (2026-07-16 idle-transaction class).
+from db import (models, Group, GroupConfiguration, GroupPersonalBestMessage, NpcList, PersonalBestEntry, Player, Session)
 from utils.redis import redis_client, calculate_global_overall_rank, calculate_rank_amongst_groups
 from utils.format import convert_from_ms, format_number
 import interactions
@@ -62,15 +66,20 @@ def build_event_embed(notification_type: str, data: dict, standings=None,
     return embed
 
 async def get_global_drop_embed(item_name, item_id, player_id, quantity, value, npc_id):
-    player = session.query(Player).filter(Player.player_id == player_id).first()
-    groups = [group for group in player.groups if group.group_id != 2]
-    top_group = None
-    top_group_total = 0
-    for group in groups:
-        group_total = group.get_current_total()
-        if group_total > top_group_total:
-            top_group_total = group_total
-            top_group = group
+    with Session() as db_session:
+        player = db_session.query(Player).filter(Player.player_id == player_id).first()
+        groups = [group for group in player.groups if group.group_id != 2]
+        top_group = None
+        top_group_total = 0
+        for group in groups:
+            group_total = group.get_current_total()
+            if group_total > top_group_total:
+                top_group_total = group_total
+                top_group = group
+        player_name = player.player_name
+        top_group_name = top_group.group_name if top_group else None
+        top_group_id = top_group.group_id if top_group else None
+        top_group_icon = top_group.icon_url if top_group else None
     formatted_item_name = item_name.replace(" ", "_")
     wiki_url = f"https://oldschool.runescape.wiki/w/{formatted_item_name}"
     embed = Embed(title=f"{item_name}",
@@ -84,22 +93,31 @@ async def get_global_drop_embed(item_name, item_id, player_id, quantity, value, 
     player_total = redis_client.client.get(player_total_key)
     player_total_form = format_number(player_total)
     global_rank, ranked_global = calculate_global_overall_rank(player_id)
-    embed.add_field(name="Player Stats", value=f"{current_month_string} Total: `{player_total_form}`\n" + 
+    embed.add_field(name="Player Stats", value=f"{current_month_string} Total: `{player_total_form}`\n" +
                     f"Global Rank: `{global_rank}`/`{ranked_global}`")
-    if top_group:
-        group_to_group_rank, total_groups = calculate_rank_amongst_groups(top_group.group_id, [])
-        embed.add_field(name=f"{top_group.group_name} Stats", value=f"{current_month} Total: `{format_number(top_group_total)}`\n" + 
+    if top_group_id is not None:
+        group_to_group_rank, total_groups = calculate_rank_amongst_groups(top_group_id, [])
+        embed.add_field(name=f"{top_group_name} Stats", value=f"{current_month} Total: `{format_number(top_group_total)}`\n" +
                         f"Group Rank: `{group_to_group_rank}`/`{total_groups}`")
-        icon_url = "https://www.droptracker.io/img/droptracker-small.gif" if top_group.icon_url is None else top_group.icon_url
+        icon_url = "https://www.droptracker.io/img/droptracker-small.gif" if top_group_icon is None else top_group_icon
     else:
         icon_url = "https://www.droptracker.io/img/droptracker-small.gif"
-    embed.set_author(name=f"{player.player_name}",icon_url=icon_url)
+    embed.set_author(name=f"{player_name}",icon_url=icon_url)
     embed.set_thumbnail(url=f"https://www.droptracker.io/img/itemdb/{item_id}.png")
     embed.set_footer(global_footer)
     return embed
 
-async def create_boss_pb_embed(group_id, boss_name, max_entries):
-    npc_id = session.query(NpcList.npc_id).filter(NpcList.npc_name == boss_name).first()
+async def create_boss_pb_embed(group_id, boss_name, max_entries, db_session=None):
+    """Session-owning entry point: uses the caller's session when given,
+    otherwise a short-lived one that is closed on exit."""
+    if db_session is not None:
+        return await _create_boss_pb_embed(db_session, group_id, boss_name, max_entries)
+    with Session() as db_session:
+        return await _create_boss_pb_embed(db_session, group_id, boss_name, max_entries)
+
+
+async def _create_boss_pb_embed(db_session, group_id, boss_name, max_entries):
+    npc_id = db_session.query(NpcList.npc_id).filter(NpcList.npc_name == boss_name).first()
     npc_id = npc_id[0] if npc_id else None
     embed = Embed(
         title=f"🏆 {boss_name} Leaderboards 🏆",
@@ -110,11 +128,11 @@ async def create_boss_pb_embed(group_id, boss_name, max_entries):
     
     # Get player IDs in the group
     query = """SELECT player_id FROM user_group_association WHERE group_id = :group_id"""
-    player_ids_result = session.execute(text(query), {"group_id": group_id}).fetchall()
+    player_ids_result = db_session.execute(text(query), {"group_id": group_id}).fetchall()
     player_ids = [pid[0] for pid in player_ids_result]
     
     # Get all personal bests for these players and this NPC
-    all_pbs = session.query(PersonalBestEntry).filter(
+    all_pbs = db_session.query(PersonalBestEntry).filter(
         PersonalBestEntry.player_id.in_(player_ids),
         PersonalBestEntry.npc_id == npc_id
     ).all()
@@ -153,12 +171,12 @@ async def create_boss_pb_embed(group_id, boss_name, max_entries):
         fastest_time_str = convert_from_ms(fastest_overall.personal_best)
         
         # Get player info
-        player = session.query(Player).filter(Player.player_id == fastest_overall.player_id).first()
+        player = db_session.query(Player).filter(Player.player_id == fastest_overall.player_id).first()
         if player:
             discord_id = None
             if player.user_id:
                 discord_id_query = """SELECT discord_id FROM users WHERE user_id = :user_id"""
-                discord_id_result = session.execute(text(discord_id_query), {"user_id": player.user_id}).first()
+                discord_id_result = db_session.execute(text(discord_id_query), {"user_id": player.user_id}).first()
                 if discord_id_result:
                     discord_id = discord_id_result[0]
             if int(group_id) != 2:
@@ -180,8 +198,8 @@ async def create_boss_pb_embed(group_id, boss_name, max_entries):
             team_size_text = f"{int(team_size_display)}-man"
         except:
             team_size_text = team_size_display
-    most_looted_player_id, most_looted_total = await get_current_top_rank_at_npc(npc_id, group_id)
-    most_looted_player = session.query(Player).filter(Player.player_id == most_looted_player_id).first()
+    most_looted_player_id, most_looted_total = await get_current_top_rank_at_npc(npc_id, group_id, db_session=db_session)
+    most_looted_player = db_session.query(Player).filter(Player.player_id == most_looted_player_id).first()
     if most_looted_player:
         if most_looted_player.user and group_id != 2:
             most_looted_discord_id = most_looted_player.user.discord_id
@@ -210,12 +228,12 @@ async def create_boss_pb_embed(group_id, boss_name, max_entries):
             
         value = "━━━━━━━━━━━━━━━━\n"
         for i, pb in enumerate(team_size_entries):
-            player = session.query(Player).filter(Player.player_id == pb.player_id).first()
+            player = db_session.query(Player).filter(Player.player_id == pb.player_id).first()
             if player:
                 discord_id = None
                 if player.user_id:
                     discord_id_query = """SELECT discord_id FROM users WHERE user_id = :user_id"""
-                    discord_id_result = session.execute(text(discord_id_query), {"user_id": player.user_id}).first()
+                    discord_id_result = db_session.execute(text(discord_id_query), {"user_id": player.user_id}).first()
                     if discord_id_result:
                         discord_id = discord_id_result[0]
                 
@@ -328,12 +346,13 @@ def sort_team_sizes(team_sizes):
     
     return result
 
-async def get_current_top_rank_at_npc(npc_id, group_id):
-    npc = session.query(NpcList).filter(NpcList.npc_id == npc_id).first()
-    npc_name = npc.npc_name if npc else f"Unknown NPC ({npc_id})"
-    group = session.query(Group).filter(Group.group_id == group_id).first()
+async def get_current_top_rank_at_npc(npc_id, group_id, db_session=None):
     query = """SELECT player_id FROM user_group_association WHERE group_id = :group_id"""
-    player_ids_result = session.execute(text(query), {"group_id": group_id}).fetchall()
+    if db_session is not None:
+        player_ids_result = db_session.execute(text(query), {"group_id": group_id}).fetchall()
+    else:
+        with Session() as fresh_session:
+            player_ids_result = fresh_session.execute(text(query), {"group_id": group_id}).fetchall()
     player_ids = [pid[0] for pid in player_ids_result]
     player_totals = {}
     partition = datetime.now().year * 100 + datetime.now().month
@@ -359,14 +378,21 @@ async def update_boss_pb_embed(bot: interactions.Client, group_id, npc_id, from_
     ## Returns a tuple of two booleans:
     ## - Whether the embed refresh was successfully processed
     ## - Whether or not we should wait for a rate limit before continuing if we have more to process.
-    group = session.query(Group).filter(Group.group_id == group_id).first()
-    npc = session.query(NpcList).filter(NpcList.npc_id == npc_id).first()
+    # Session-owning wrapper: the old module-global-session version left its
+    # read transaction open on every early-return/exception path.
+    with Session() as db_session:
+        return await _update_boss_pb_embed(db_session, bot, group_id, npc_id, from_submission)
+
+
+async def _update_boss_pb_embed(db_session, bot: interactions.Client, group_id, npc_id, from_submission: bool = False):
+    group = db_session.query(Group).filter(Group.group_id == group_id).first()
+    npc = db_session.query(NpcList).filter(NpcList.npc_id == npc_id).first()
     npc_name = npc.npc_name if npc else f"Unknown NPC ({npc_id})"
-    existing_message = session.query(GroupPersonalBestMessage).filter(
-        GroupPersonalBestMessage.group_id == group.group_id, 
+    existing_message = db_session.query(GroupPersonalBestMessage).filter(
+        GroupPersonalBestMessage.group_id == group.group_id,
         GroupPersonalBestMessage.boss_name == npc_name
     ).first()
-    max_entries = session.query(GroupConfiguration.config_value).filter(
+    max_entries = db_session.query(GroupConfiguration.config_value).filter(
         GroupConfiguration.group_id == group.group_id,
         GroupConfiguration.config_key == 'number_of_pbs_to_display'
     ).first()
@@ -382,7 +408,7 @@ async def update_boss_pb_embed(bot: interactions.Client, group_id, npc_id, from_
             existing_message_obj = await channel.fetch_message(existing_message_id)
             
             if existing_message_obj:
-                pb_embed: Embed = await create_boss_pb_embed(group.group_id, npc_name, max_entries)
+                pb_embed: Embed = await create_boss_pb_embed(group.group_id, npc_name, max_entries, db_session=db_session)
                 existing_embed = existing_message_obj.embeds[0]
                 has_refresh = False
                 for field in existing_embed.fields:
@@ -406,7 +432,7 @@ async def update_boss_pb_embed(bot: interactions.Client, group_id, npc_id, from_
                         pb_embed.add_field(name="Last updated:", value=refresh_value, inline=False)
                 await existing_message_obj.edit(embed=pb_embed)
                 existing_message.date_updated = datetime.now()
-                session.commit()
+                db_session.commit()
                 
                 # Increment message count and handle rate limits
                 return True, True
