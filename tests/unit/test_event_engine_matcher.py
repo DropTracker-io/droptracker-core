@@ -546,6 +546,42 @@ class TestSubmissionPolicy:
         assert engine.handle_envelope(None, _FakeRedis(), state, env) == []
 
 
+# ── bingo events only track tasks bound to a board tile ──────────────────────
+
+class TestBingoBoardScoping:
+    """A bingo event's task list may hold more tasks than the board has tiles
+    (e.g. leftovers picked at creation but never placed). Those unbound tasks
+    must not track completion — otherwise they fire completion messages while
+    no tile is marked. Matching is restricted to cell-bound tasks; session=None
+    proves the unbound task is skipped before any DB work."""
+
+    def test_unbound_task_in_bingo_event_is_skipped(self):
+        state = engine.MatcherState(
+            events={10: _event(has_bingo=True)},
+            tasks_by_event={10: [_task(id=1, target="Twisted bow")]},
+            cells_by_task={},  # no cell bound to task 1 → off the board
+            participants={5: [(10, 77, None)]},
+        )
+        env = _env("drop", {"item_name": "Twisted bow", "quantity": 1})
+        assert engine.handle_envelope(None, _FakeRedis(), state, env) == []
+
+    def test_standard_event_still_tracks_unbound_tasks(self):
+        # has_bingo False → the bingo restriction never applies, so a task with
+        # no cell binding still matches (reaching record_match, which needs a
+        # real session — hence the AttributeError, proving the match was NOT
+        # skipped by the bingo gate).
+        state = engine.MatcherState(
+            events={10: _event(has_bingo=False)},
+            tasks_by_event={10: [_task(id=1, target="Twisted bow")]},
+            cells_by_task={},
+            participants={5: [(10, 77, None)]},
+        )
+        env = _env("drop", {"item_name": "Twisted bow", "quantity": 1})
+        import pytest
+        with pytest.raises(AttributeError):
+            engine.handle_envelope(None, _FakeRedis(), state, env)
+
+
 # ── WOM reconciler envelopes (kind=wom_kc, source=wom) ───────────────────────
 
 class TestWomKcMatch:

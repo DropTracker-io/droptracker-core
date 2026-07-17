@@ -119,15 +119,30 @@ def main():
         session.add_all([team_a, team_b])
         session.flush()
         session.add(EventTeamMember(team_id=team_a.id, player_id=pid, joined_at=joined))
+        # Every task under test is bound to its own board tile: a bingo event
+        # only tracks completion for cell-bound tasks.
         cell = EventBingoCell(event_id=ev.id, idx=0, label="2 whips", task_id=t_item.id)
-        session.add(cell)
+        session.add_all([
+            cell,
+            EventBingoCell(event_id=ev.id, idx=1, label="d pick", task_id=t_pending.id),
+            EventBingoCell(event_id=ev.id, idx=2, label="2 zulrah kc", task_id=t_kc.id),
+            EventBingoCell(event_id=ev.id, idx=3, label="sub-60s zulrah", task_id=t_pb.id),
+            EventBingoCell(event_id=ev.id, idx=4, label="1k slayer xp", task_id=t_xp.id),
+            EventBingoCell(event_id=ev.id, idx=5, label="90 agility", task_id=t_skill.id),
+        ])
+        # A 7th task picked at creation but never placed on the board — a bingo
+        # event must NOT track its completion (no tile would ever be marked).
+        t_offboard = EventTask(event_id=ev.id, type="item_collection", label="offboard bow",
+                               target="Twisted bow", target_value=1, points=99)
+        session.add(t_offboard)
         session.flush()
 
         state = event_engine.load_matcher_state(session)
         assert ev.id in state.events, "active event loaded"
         assert pid in state.participants, "roster loaded"
-        assert len(state.tasks_by_event[ev.id]) == 6
+        assert len(state.tasks_by_event[ev.id]) == 7
         assert state.cells_by_task[t_item.id][0]["idx"] == 0
+        assert t_offboard.id not in state.cells_by_task, "off-board task has no cell"
 
         def handle(e):
             return event_engine.handle_envelope(session, r, state, e)
@@ -176,6 +191,14 @@ def main():
                          player_id=pid, ts=ts_now))
         assert res == [], "completed task must not keep recording"
         assert len(ledger(t_item)) == 2, "no post-completion ledger rows"
+
+        # 2c. off-board task: a bingo task with no cell binding must not track.
+        # A qualifying drop for it produces nothing — no ledger, no progress.
+        res = handle(env("drop", {"item_name": "Twisted bow", "quantity": 1},
+                         player_id=pid, ts=ts_now))
+        assert res == [], "off-board bingo tasks must not track completion"
+        assert ledger(t_offboard) == [], "off-board task must not record a ledger row"
+        assert prog(t_offboard) is None, "off-board task must not fold progress"
 
         # 3. replay same guid = idempotent no-op
         res = handle(env("drop", {"item_name": "Abyssal whip", "quantity": 1,

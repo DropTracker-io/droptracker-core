@@ -1630,9 +1630,20 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict) ->
             if board_task_id is None:
                 continue
 
+        # Bingo events: only tasks bound to a board tile are "active". A task
+        # that sits in the event's task list but isn't placed on any cell
+        # marks no tile when it completes, so tracking it just fires completion
+        # popups with nothing on the board to show for them (the reported
+        # confusion: "completion messages but none of the tiles were marked").
+        # Restrict matching to cell-bound tasks. Board-game events have their
+        # own current-tile filter above and are excluded here.
+        bingo_board = event.get("has_bingo") and event.get("kind") != "board_game"
+
         xp_delta = None  # baseline folded at most once per (event, envelope)
         for task in state.tasks_by_event.get(event_id, []):
             if board_task_id is not None and task["id"] != board_task_id:
+                continue
+            if bingo_board and task["id"] not in state.cells_by_task:
                 continue
             match = match_task(task, envelope)
             if match is None:
