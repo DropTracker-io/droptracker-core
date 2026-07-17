@@ -16,7 +16,7 @@ global events where group_id is NULL):
   POST   /api/v1/events/{id}/end                               -> EventDetail  (Task 21)
   POST   /api/v1/events/{id}/tasks          { EventTaskInput } -> { id }
   DELETE /api/v1/events/{id}/tasks/{taskId}                    -> { ok }
-  GET    /api/v1/events/meta/items?q=       -> [{ id, name }]  (task-form autocomplete)
+  GET    /api/v1/events/meta/items?q=       -> [{ id, name, tracked }]  (task-form autocomplete)
   GET    /api/v1/events/meta/npcs?q=        -> [{ id, name }]
   GET    /api/v1/events/meta/resolve?kind=item|npc&names=a|b -> [{ id, name }]
   POST   /api/v1/events/{id}/teams          { EventTeamInput } -> { id }
@@ -2077,28 +2077,62 @@ async def list_event_kinds():
     return private_no_store(jsonify(await asyncio.to_thread(_read)))
 
 
+# A name only counts as "receivable" once this many drop-rollup rows exist
+# across its item ids — a single misreported drop (e.g. the one historical
+# charged "Scythe of vitur" row) must not resurrect an untrackable variant.
+RECEIVABLE_MIN_ROWS = 3
+_SEARCH_CANDIDATE_NAMES = 40
+
+
 @events_bp.get("/events/meta/items")
 async def search_items():
-    """Item-name autocomplete for the task form (session required)."""
+    """Item-name autocomplete for the task form (session required).
+
+    Tasks match drops by exact item name, so offering catalog-only variants
+    (charged weapons, ornamented kits, …) creates tasks no drop can ever
+    complete. Results are therefore restricted to names actually seen in the
+    drop history (``player_item_hourly_totals``). If nothing matching the
+    query has ever dropped — e.g. a brand-new boss item — the raw catalog
+    matches are returned instead, flagged ``tracked: false`` so the picker
+    can warn the configurator."""
     current_user_id()
     q = (request.args.get("q") or "").strip()
     if len(q) < 2:
         return jsonify([])
 
     def _search():
-        from db import ItemList
+        from db import ItemList, PlayerItemHourlyTotals
 
         with db_session() as s:
-            # Stack/noted variants share a name — collapse to one row per name.
-            rows = (
-                s.query(func.min(ItemList.item_id), ItemList.item_name)
+            # Stack/noted variants share a name — collapse to one row per name,
+            # keeping every id so the receivable probe covers all variants.
+            candidates = (
+                s.query(ItemList.item_name,
+                        func.min(ItemList.item_id),
+                        func.group_concat(ItemList.item_id))
                 .filter(ItemList.item_name.ilike(f"%{q}%"), ItemList.noted.is_(False))
                 .group_by(ItemList.item_name)
                 .order_by(func.length(ItemList.item_name), ItemList.item_name)
-                .limit(15)
+                .limit(_SEARCH_CANDIDATE_NAMES)
                 .all()
             )
-            return [{"id": i, "name": n} for i, n in rows]
+            tracked, untracked = [], []
+            for name, min_id, ids_csv in candidates:
+                ids = [int(x) for x in str(ids_csv or min_id).split(",")]
+                # Indexed probe, LIMIT'd so common items never scan rollups.
+                seen = (
+                    s.query(PlayerItemHourlyTotals.item_id)
+                    .filter(PlayerItemHourlyTotals.item_id.in_(ids))
+                    .limit(RECEIVABLE_MIN_ROWS)
+                    .all()
+                )
+                bucket = tracked if len(seen) >= RECEIVABLE_MIN_ROWS else untracked
+                bucket.append({"id": min_id, "name": name})
+                if len(tracked) >= 15:
+                    break
+            if tracked:
+                return [{**e, "tracked": True} for e in tracked[:15]]
+            return [{**e, "tracked": False} for e in untracked[:15]]
 
     return jsonify(await asyncio.to_thread(_search))
 
