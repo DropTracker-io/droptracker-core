@@ -128,7 +128,21 @@ async def _ensure_role(guild, row, team) -> None:
         await role.edit(**edits)  # Role.edit takes no audit reason in 5.x
 
 
-async def _ensure_channel(bot, guild, row, team, config) -> None:
+def _channel_intro(event, team) -> str:
+    """The team channel/thread intro line, tailored to the event's format —
+    a bingo event must not advertise dice rolls it will never send."""
+    kind = getattr(event, "kind", None) or "standard"
+    if getattr(event, "has_bingo", False):
+        what = "tile completions, task progress and lead changes"
+    elif kind == "board_game":
+        what = "roll prompts, dice results, task progress and lead changes"
+    else:
+        what = "task progress, completions and lead changes"
+    return (f"Team channel for **{team.name}** — {what} land here, and the "
+            f"pinned board post below tracks your live progress.")
+
+
+async def _ensure_channel(bot, guild, row, team, config, event) -> None:
     """Create/rename the team channel: a thread in the configured forum, or a
     private text channel visible to the team role (public when roles are off).
     Writes row.channel_id / row.channel_kind back."""
@@ -160,11 +174,7 @@ async def _ensure_channel(bot, guild, row, team, config) -> None:
             if forum is None or not hasattr(forum, "create_post"):
                 raise RuntimeError(
                     f"forum channel {forum_id} not found or not a forum")
-            post = await forum.create_post(
-                name,
-                f"Team thread for **{team.name}** — task progress, lead "
-                f"changes and roll prompts land here.",
-            )
+            post = await forum.create_post(name, _channel_intro(event, team))
             row.channel_id = str(post.id)
             row.channel_kind = "thread"
         elif getattr(channel, "name", None) != name:
@@ -350,7 +360,8 @@ async def reconcile_event_team_discord_once(bot, session_factory, redis_client) 
                         await _delete_discord_objects(bot, row.guild_id, row.role_id, None)
                         row.role_id = None
                     if flags["channel"]:
-                        await _ensure_channel(bot, guild, row, team, scope["config"])
+                        await _ensure_channel(bot, guild, row, team,
+                                              scope["config"], event)
                     elif row.channel_id:
                         await _delete_discord_objects(bot, None, None, row.channel_id)
                         row.channel_id = None
@@ -360,6 +371,12 @@ async def reconcile_event_team_discord_once(bot, session_factory, redis_client) 
                     row.last_error = None
                     row.members_dirty = True
                     session.commit()
+                    try:
+                        from services.event_team_discord import TEAM_BOARD_DIRTY_KEY
+
+                        redis_client.sadd(TEAM_BOARD_DIRTY_KEY, str(row.event_id))
+                    except Exception:
+                        pass
 
                 if row.members_dirty:
                     desired = _desired_member_ids(session, row.team_id)
@@ -372,6 +389,206 @@ async def reconcile_event_team_discord_once(bot, session_factory, redis_client) 
                     row.sync_status = "failed"
                     row.last_error = str(exc)[:255]
                     session.commit()
+                except Exception:
+                    session.rollback()
+    finally:
+        session.close()
+
+
+# --------------------------------------------------------------------------- #
+# Team-channel primary board posts (web54a)
+# --------------------------------------------------------------------------- #
+# Screenshot budget per refresher tick: renders are headless-chromium runs, so
+# a burst of changes across many teams converges over a few ticks instead of
+# stalling the bot's event loop. Rows skipped on budget stay flagged dirty.
+BOARD_POST_RENDER_BUDGET = 6
+# How many dirty event ids one tick drains from Redis.
+BOARD_DIRTY_SPOP_LIMIT = 10
+
+
+def _team_post_payload(session, event, row, team, channel, png):
+    """(components, file) for one team's primary board post: header, the
+    live team-filtered board image, a pointer at the event's standings
+    channel, and interactive/site links."""
+    import io
+
+    import interactions
+
+    from services.activity_launch import channel_supports_launch
+    from services.event_message_layouts import (
+        build_components,
+        deeplink_enabled,
+        render_message_spec,
+    )
+    from services.event_notifications import (
+        event_footer_line,
+        event_url,
+        load_event_channels,
+    )
+
+    channels = load_event_channels(session, event.id, group_id=row.group_id) \
+        if row.group_id is not None else load_event_channels(session, event.id)
+    if row.group_id is not None and not channels:
+        # web48a semantics: a clan without its own channel set falls back to
+        # the event's shared destinations.
+        channels = load_event_channels(session, event.id)
+    standings_channel = channels.get("leaderboard") or channels.get("announcements")
+    if standings_channel and str(standings_channel) == str(row.channel_id):
+        standings_channel = None  # don't point the line at this very channel
+
+    context = {
+        "event_id": event.id,
+        "event_name": event.name,
+        "event_url": event_url(event.id),
+        "team_name": team.name,
+        "standings_line": (f"\U0001F4CA Live standings & announcements: "
+                           f"<#{standings_channel}>" if standings_channel else None),
+    }
+    layout = {"blocks": [
+        {"type": "text", "content": "## {team_name} — {event_name}"},
+        {"type": "text",
+         "content": "-# Your team's live board — it updates automatically "
+                    "as progress lands."},
+        {"type": "text", "content": "{standings_line}"},
+        {"type": "buttons", "buttons": [
+            {"label": "\U0001F4F2 Open interactive event", "launch": True},
+            {"label": "\U0001F310 View on the site", "url": "{event_url}"},
+        ]},
+    ]}
+    enabled, supported = deeplink_enabled(), channel_supports_launch(channel)
+    starts = int(event.starts_at.timestamp()) if event.starts_at else None
+    ends = int(event.ends_at.timestamp()) if event.ends_at else None
+    spec = render_message_spec(
+        layout, context,
+        deep_link=enabled and supported,
+        launch_link=enabled and not supported,
+        footer=event_footer_line(event.name, starts, ends),
+    )
+    board_file, image_ref = None, None
+    if png:
+        filename = f"team-board-{event.id}-{row.team_id}.png"
+        board_file = interactions.File(io.BytesIO(png), file_name=filename)
+        image_ref = f"attachment://{filename}"
+    return build_components(spec, image_ref=image_ref), board_file
+
+
+async def _refresh_one_board_post(bot, session, event, row):
+    """Post/edit one team channel's primary board post. Returns
+    ``(wrote, rendered)`` — whether a Discord write happened, and whether a
+    real screenshot ran (the tick budget counts the latter)."""
+    from db.models import EventTeam
+    from services.event_board_image import board_image_with_hash
+
+    team = session.query(EventTeam).filter(EventTeam.id == row.team_id).first()
+    if team is None:
+        return False, False
+    png, state_hash, rendered = await board_image_with_hash(
+        session, event, team_id=row.team_id)
+    if state_hash is None:
+        return False, rendered  # no visual board (standard event) / render failure
+    if row.board_message_id and row.board_state_hash == state_hash:
+        return False, rendered  # unchanged — no edit
+    channel = await bot.fetch_channel(int(row.channel_id))
+    if channel is None or not callable(getattr(channel, "send", None)):
+        return False, rendered
+
+    components, board_file = _team_post_payload(
+        session, event, row, team, channel, png)
+
+    message = None
+    if row.board_message_id:
+        try:
+            message = await channel.fetch_message(message_id=row.board_message_id)
+        except Exception:
+            message = None  # deleted / inaccessible — repost below
+    if message is not None:
+        # attachments=[] drops the previous upload so files don't accumulate.
+        if board_file is not None:
+            await message.edit(components=components, files=board_file,
+                               attachments=[])
+        else:
+            await message.edit(components=components, attachments=[])
+    else:
+        if board_file is not None:
+            message = await channel.send(components=components, files=board_file)
+        else:
+            message = await channel.send(components=components)
+        row.board_message_id = str(message.id)
+        try:
+            await message.pin()
+        except Exception:
+            pass  # pinning is a nicety; missing Manage Messages must not fail the post
+    row.board_state_hash = state_hash
+    row.board_updated_at = datetime.now()
+    return True, rendered
+
+
+async def refresh_team_board_posts_once(bot, session_factory, redis_client,
+                                        render_budget: int = BOARD_POST_RENDER_BUDGET
+                                        ) -> None:
+    """One refresher tick (bots/main.py, ~60s): drain the dirty-event set the
+    engine feeds on every event frame, re-check those events' team posts, and
+    edit only the ones whose team-filtered board actually changed
+    (``board_state_hash``). Also catches up rows that never got their primary
+    post (fresh provisioning, or a post that failed once)."""
+    from db.models import Event, EventTeamDiscord
+    from services.event_team_discord import TEAM_BOARD_DIRTY_KEY
+
+    event_ids: set = set()
+    try:
+        for _ in range(BOARD_DIRTY_SPOP_LIMIT):
+            raw = redis_client.spop(TEAM_BOARD_DIRTY_KEY)
+            if not raw:
+                break
+            try:
+                event_ids.add(int(raw.decode() if isinstance(raw, (bytes, bytearray)) else raw))
+            except (TypeError, ValueError):
+                continue
+    except Exception:
+        pass
+
+    session = session_factory()
+    try:
+        # First-post catch-up (no dirty flag needed): synced channels with no
+        # primary post yet.
+        try:
+            for (eid,) in (session.query(EventTeamDiscord.event_id)
+                           .filter(EventTeamDiscord.sync_status == "synced",
+                                   EventTeamDiscord.channel_id.isnot(None),
+                                   EventTeamDiscord.board_message_id.is_(None))
+                           .distinct().limit(5).all()):
+                event_ids.add(int(eid))
+        except Exception:
+            session.rollback()
+        if not event_ids:
+            return
+
+        rendered = 0
+        for event_id in sorted(event_ids):
+            event = session.query(Event).filter(Event.id == event_id).first()
+            if event is None:
+                continue
+            rows = (session.query(EventTeamDiscord)
+                    .filter(EventTeamDiscord.event_id == event_id,
+                            EventTeamDiscord.sync_status == "synced",
+                            EventTeamDiscord.channel_id.isnot(None))
+                    .order_by(EventTeamDiscord.id.asc())
+                    .all())
+            for row in rows:
+                if rendered >= render_budget:
+                    # Out of screenshot budget — keep the event flagged and
+                    # finish next tick (hash skips make redone rows cheap).
+                    try:
+                        redis_client.sadd(TEAM_BOARD_DIRTY_KEY, str(event_id))
+                    except Exception:
+                        pass
+                    return
+                try:
+                    wrote, did_render = await _refresh_one_board_post(
+                        bot, session, event, row)
+                    rendered += 1 if did_render else 0
+                    if wrote:
+                        session.commit()
                 except Exception:
                     session.rollback()
     finally:

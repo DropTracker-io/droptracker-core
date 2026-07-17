@@ -935,6 +935,17 @@ def _publish(event_id: int, data: dict) -> None:
         publish_event_update(event_id, data)
     except Exception:
         pass
+    # Team-channel board posts (web54a): any event frame means the board may
+    # look different — flag the event so the bot's refresher re-checks its
+    # team posts (one cheap SADD; the refresher's per-team state hashes do
+    # the precise "did MY view change?" filtering).
+    try:
+        from services.event_team_discord import TEAM_BOARD_DIRTY_KEY
+        from utils.redis import redis_client
+
+        redis_client.sadd(TEAM_BOARD_DIRTY_KEY, str(event_id))
+    except Exception:
+        pass
 
 
 def _enqueue_notification(session, notification_type: str, event: dict,

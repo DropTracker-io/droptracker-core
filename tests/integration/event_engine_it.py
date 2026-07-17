@@ -94,7 +94,12 @@ def main():
                    starts_at=now - timedelta(days=1), ends_at=now + timedelta(days=1),
                    has_bingo=True, formation_mode="admin_assign",
                    requires_confirmation=False, board_size=5,
-                   bonus_line_points=0, bonus_blackout_points=0)
+                   bonus_line_points=0, bonus_blackout_points=0,
+                   # Pin the auto-apply policy: the ORM default became
+                   # confirm_non_api (5d7933c) and these envelopes carry no
+                   # used_api flag — the pending path is covered separately
+                   # via t_pending's requires_confirmation.
+                   submission_policy="all")
         session.add(ev)
         session.flush()
         event_id = ev.id

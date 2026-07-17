@@ -34,6 +34,13 @@ from typing import Optional
 # and the reconciler drains it best-effort (the events:sched:orphans pattern).
 ORPHAN_TEAM_DISCORD_KEY = "events:team_discord:orphans"
 
+# Redis SET of event ids whose board may have visually changed (web54a):
+# ``event_engine._publish`` SADDs on every event frame; the bot's team-board
+# refresher SPOPs and re-checks only those events' team posts (each row's
+# ``board_state_hash`` then filters to boards that actually changed, so a
+# noisy event doesn't re-screenshot unchanged team views).
+TEAM_BOARD_DIRTY_KEY = "events:team_board:dirty"
+
 # Natural-end grace: roles/channels of a 'delete_48h' event stay usable this
 # long after the event ends (wrap-up pings), then the reconciler tears them
 # down. A hard delete ignores this and tears down immediately.

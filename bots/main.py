@@ -549,6 +549,7 @@ async def create_tasks():
     activity_launch_cards.start()
     reconcile_event_scheduled_events.start()
     reconcile_event_team_discord.start()
+    event_team_board_posts.start()
     event_board_updates.start()
     badge_cycle.start()
     # Lootboard POSTING is user-visible and must stay with the interval tasks
@@ -671,6 +672,21 @@ async def reconcile_event_team_discord():
         await reconcile_event_team_discord_once(bot, Session, redis_client)
     except Exception as e:
         print(f"Couldn't reconcile event team discord: {e}")
+
+
+@Task.create(IntervalTrigger(seconds=60))
+async def event_team_board_posts():
+    """Team-channel primary board posts (web54a): keep each team channel's
+    pinned, team-filtered board image current. Change-driven — the engine
+    flags events on Redis (events:team_board:dirty) and per-row state hashes
+    skip unchanged views, so a quiet event costs one Redis read; a busy one
+    is capped by a per-tick screenshot budget."""
+    try:
+        from services.event_team_discord_bot import refresh_team_board_posts_once
+
+        await refresh_team_board_posts_once(bot, Session, redis_client)
+    except Exception as e:
+        print(f"Couldn't refresh team board posts: {e}")
 
 
 @Task.create(IntervalTrigger(seconds=30))

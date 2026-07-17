@@ -45,15 +45,15 @@ def test_standard_event_has_no_visual_board():
 def test_dispatch_recognizes_bingo_and_board_game(monkeypatch):
     calls = {}
     monkeypatch.setattr(m, "_bingo_signature",
-                        lambda s, e: {"kind": "bingo", "x": 1})
+                        lambda s, e, team_id=None: {"kind": "bingo", "x": 1})
     monkeypatch.setattr(m, "_board_game_signature",
-                        lambda s, e: {"kind": "board_game", "y": 2})
+                        lambda s, e, team_id=None: {"kind": "board_game", "y": 2})
     bingo = m._collect_render_inputs(object(), _event(has_bingo=True, kind="bingo"))
     board = m._collect_render_inputs(object(), _event(has_bingo=False, kind="board_game"))
     assert bingo["kind"] == "bingo" and bingo["hash_src"]["x"] == 1
     assert board["kind"] == "board_game" and board["hash_src"]["y"] == 2
     # A signature of None (e.g. bingo flag but no cells yet) → no visual board.
-    monkeypatch.setattr(m, "_bingo_signature", lambda s, e: None)
+    monkeypatch.setattr(m, "_bingo_signature", lambda s, e, team_id=None: None)
     assert m._collect_render_inputs(object(), _event(has_bingo=True)) is None
 
 
@@ -93,3 +93,27 @@ def test_token_helpers(monkeypatch):
     assert m._board_image_token() == ""
     monkeypatch.setenv("BOARD_IMAGE_TOKEN", "abc")
     assert m._board_image_token() == "abc"
+
+
+# --------------------------------------------------------------------------- #
+# Team-scoped renders (web54a team-channel posts)
+# --------------------------------------------------------------------------- #
+def test_page_url_carries_team_param(monkeypatch):
+    monkeypatch.setenv("BOARD_IMAGE_TOKEN", "sekret")
+    url = m.board_image_page_url(7)
+    assert "&team=" not in url
+    team_url = m.board_image_page_url(7, team_id=3)
+    assert team_url.startswith(url)
+    assert team_url.endswith("&team=3")
+
+
+def test_dispatch_passes_team_to_bingo_signature(monkeypatch):
+    seen = {}
+
+    def fake_bingo(s, e, team_id=None):
+        seen["team"] = team_id
+        return {"kind": "bingo"}
+
+    monkeypatch.setattr(m, "_bingo_signature", fake_bingo)
+    m._collect_render_inputs(object(), _event(has_bingo=True), team_id=42)
+    assert seen["team"] == 42

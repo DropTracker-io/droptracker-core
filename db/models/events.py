@@ -751,6 +751,14 @@ class EventTeamDiscord(Base):
     # membership; the bot's diff baseline for roster sync.
     member_state = Column(Text, nullable=True)
     members_dirty = Column(Boolean, nullable=False, default=True, server_default="1")
+    # The team channel's primary board post (web54a): the bot's own message
+    # holding the team-filtered live board image + quick links, posted once and
+    # edited in place (the lootboard / event_board pattern). board_state_hash
+    # is the last rendered state signature — the refresher skips rows whose
+    # board hasn't visually changed.
+    board_message_id = Column(String(32), nullable=True)
+    board_state_hash = Column(String(64), nullable=True)
+    board_updated_at = Column(DateTime, nullable=True)
     # Natural-end grace deadline (retention 'delete_48h'): the bot tears the
     # role/channel down once now > delete_after. NULL = no scheduled teardown
     # (either still live, or an immediate delete_pending from a team removal).
