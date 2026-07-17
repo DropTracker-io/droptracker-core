@@ -958,13 +958,17 @@ def _enqueue_notification(session, notification_type: str, event: dict,
     # representative player; the in-game audience is resolved from rosters)
     # and the Discord mute gate below — a player's in-game notifications are
     # independent of the event's Discord verbosity config. Best-effort.
-    try:
-        from services.plugin_notifications import fan_out_event_notification
-        fan_out_event_notification(session, notification_type, event, data)
-    except ImportError:
-        pass  # unit-test stubs
-    except Exception as plugin_notify_err:
-        print(f"plugin inbox fan-out failed for {notification_type}: {plugin_notify_err}")
+    # event_task_progress is excluded: its Discord enqueue is itself gated on
+    # message_config, so _maybe_enqueue_progress fans it out directly on every
+    # increment instead.
+    if notification_type != "event_task_progress":
+        try:
+            from services.plugin_notifications import fan_out_event_notification
+            fan_out_event_notification(session, notification_type, event, data)
+        except ImportError:
+            pass  # unit-test stubs
+        except Exception as plugin_notify_err:
+            print(f"plugin inbox fan-out failed for {notification_type}: {plugin_notify_err}")
     if player_id is None:
         # Manual awards carry no player and notification_queue.player_id is
         # NOT NULL — those announce via the admin action itself (Task 19).
@@ -1320,7 +1324,8 @@ def _award_contribution_points(session, event: dict, task: dict, team_id,
 
 def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id,
                             player_name, previous: int, current: int,
-                            proof_url: Optional[str] = None) -> None:
+                            proof_url: Optional[str] = None,
+                            matched_target: Optional[str] = None) -> None:
     """Enqueue an ``event_task_progress`` notification when the event's
     message_config asks for one ('all': every increment; 'milestones': only
     when a 25/50/75% threshold was crossed). Completion itself is announced
@@ -1328,7 +1333,12 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
 
     ``proof_url`` is the screenshot (if any) attached to the ledger row that
     drove this increment, carried through so the sender can attach it to the
-    Discord message the same way a completion's proof does."""
+    Discord message the same way a completion's proof does.
+
+    The in-game plugin inbox is fanned out here on EVERY increment, before
+    the Discord verbosity gates — the plugin has its own client-side progress
+    toggle, and the HUD advances off these envelopes between state refreshes.
+    """
     from services.event_notifications import (
         effective_message_config,
         progress_milestones_crossed,
@@ -1336,6 +1346,37 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
 
     if current <= previous:
         return
+
+    target_threshold = completion_threshold(task)
+    base_payload = {
+        "task_id": task["id"],
+        "task_label": task.get("label"),
+        "team_id": team_id,
+        "player_id": player_id,
+        "player_name": player_name,
+        "progress": current,
+        "target": target_threshold,
+        "proof_url": proof_url,
+    }
+    crossed_pcts = progress_milestones_crossed(previous, current, target_threshold)
+    if crossed_pcts:
+        base_payload["milestone_pct"] = max(crossed_pcts)
+    try:
+        from services.plugin_notifications import (
+            fan_out_event_notification,
+            resolve_item_icon_id,
+        )
+        plugin_payload = dict(base_payload)
+        if matched_target:
+            icon_item_id = resolve_item_icon_id(session, matched_target)
+            if icon_item_id:
+                plugin_payload["icon_item_id"] = icon_item_id
+        fan_out_event_notification(session, "event_task_progress", event, plugin_payload)
+    except ImportError:
+        pass  # unit-test stubs
+    except Exception as plugin_notify_err:
+        print(f"plugin progress fan-out failed: {plugin_notify_err}")
+
     config = effective_message_config(event.get("message_config"))
     mode = config.get("task_progress", "off")
     if not config["toggles"].get("event_task_progress", True):
@@ -1356,23 +1397,9 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
     effective = mode if _ORDER[mode] >= _ORDER[team_mode] else team_mode
     if effective == "off":
         return
-    target = completion_threshold(task)
-    payload = {
-        "task_id": task["id"],
-        "task_label": task.get("label"),
-        "team_id": team_id,
-        "player_id": player_id,
-        "player_name": player_name,
-        "progress": current,
-        "target": target,
-        "proof_url": proof_url,
-    }
-    crossed = progress_milestones_crossed(previous, current, target)
-    if crossed:
-        payload["milestone_pct"] = max(crossed)
-    if effective == "milestones" and not crossed:
+    if effective == "milestones" and not crossed_pcts:
         return
-    _enqueue_notification(session, "event_task_progress", event, player_id, payload)
+    _enqueue_notification(session, "event_task_progress", event, player_id, base_payload)
 
 
 def _current_leader(session, event_id: int, strict: bool = False):
@@ -1418,6 +1445,17 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         session.add(progress)
     already_completed = bool(progress.completed)
     previous_progress = int(progress.progress or 0)
+    if player_id is not None and not already_completed:
+        # HUD focus (docs/EVENT_PLUGIN_NOTIFICATIONS_PLAN.md): this player's
+        # own submission just advanced this task — remember it as what they
+        # are working toward. Best-effort Redis stamp.
+        try:
+            from services.plugin_notifications import stamp_player_focus
+            stamp_player_focus(player_id, event["id"], task["id"])
+        except ImportError:
+            pass  # unit-test stubs
+        except Exception:
+            pass
     if _list_kind(task) in ("all_of", "assembly"):
         # Distinct-item semantics: recompute from the applied ledger instead
         # of folding quantity (which let one big stack complete the set).
@@ -1453,7 +1491,8 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
             _maybe_enqueue_progress(
                 session, event, task, team_id, player_id, player_name,
                 previous_progress, int(progress.progress or 0),
-                proof_url=completion.proof_url)
+                proof_url=completion.proof_url,
+                matched_target=completion.matched_target)
         return result
 
     progress.completed = True
@@ -1566,6 +1605,19 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         "proof_url": completion.proof_url,
         "contributors": contributors,
     }
+    # In-game rendering (plugin inbox): the finishing item's game id, so the
+    # client can draw the sprite locally. Independent of the item_details
+    # verbosity toggle below — an icon is not "verbose detail".
+    if completion.matched_target:
+        try:
+            from services.plugin_notifications import resolve_item_icon_id
+            icon_item_id = resolve_item_icon_id(session, completion.matched_target)
+            if icon_item_id:
+                notification["icon_item_id"] = icon_item_id
+        except ImportError:
+            pass  # unit-test stubs
+        except Exception:
+            pass
     # Verbose completion detail (item_details config, on by default): name the
     # item that finished the task, its drop quantity, how much of the
     # requirement that final drop filled (the progress delta), and the target.

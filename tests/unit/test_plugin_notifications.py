@@ -210,6 +210,90 @@ class TestFanOutEarlyOuts:
             ExplodingSession(), "event_completion", {"id": 1}, {"team_id": 5}) == 0
 
 
+class TestFocusStamp:
+    def test_stamp_and_read(self, monkeypatch):
+        store = {}
+
+        class FakeStampRedis:
+            def setex(self, key, ttl, value):
+                store[key] = (ttl, value)
+
+            def get(self, key):
+                entry = store.get(key)
+                return entry[1].encode() if entry else None
+
+        monkeypatch.setattr(pn, "_redis", lambda: FakeStampRedis())
+        pn.stamp_player_focus(7, 19, 512)
+        key = pn.FOCUS_KEY_TEMPLATE.format(player_id=7, event_id=19)
+        assert store[key] == (pn.FOCUS_TTL_SECONDS, "512")
+        assert pn._stamped_focus_task_id(7, 19) == 512
+        assert pn._stamped_focus_task_id(7, 20) is None
+
+    def test_stamp_ignores_missing_args(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(pn, "_redis", lambda: called.append(1))
+        pn.stamp_player_focus(None, 19, 512)
+        pn.stamp_player_focus(7, None, 512)
+        pn.stamp_player_focus(7, 19, None)
+        assert called == []
+
+
+class TestPickFocusTask:
+    TASKS = [
+        {"id": 1, "label": "A", "type": "item_target", "target_value": 10},
+        {"id": 2, "label": "B", "type": "item_target", "target_value": 4},
+        {"id": 3, "label": "C", "type": "pb_target", "target_value": None},
+    ]
+
+    def test_stamped_wins_while_incomplete(self):
+        task, source = pn.pick_focus_task(
+            self.TASKS, {2: {"progress": 3, "completed": False}}, stamped_task_id=1)
+        assert (task["id"], source) == (1, "inferred")
+
+    def test_completed_stamp_falls_through(self):
+        progress = {1: {"progress": 10, "completed": True},
+                    2: {"progress": 3, "completed": False}}
+        task, source = pn.pick_focus_task(self.TASKS, progress, stamped_task_id=1)
+        assert (task["id"], source) == (2, "team_progress")
+
+    def test_unknown_stamp_falls_through(self):
+        task, source = pn.pick_focus_task(
+            self.TASKS, {2: {"progress": 1, "completed": False}}, stamped_task_id=999)
+        assert (task["id"], source) == (2, "team_progress")
+
+    def test_most_progressed_by_ratio_not_raw(self):
+        # 3/4 (75%) beats 5/10 (50%) despite the smaller raw progress.
+        progress = {1: {"progress": 5, "completed": False},
+                    2: {"progress": 3, "completed": False}}
+        task, source = pn.pick_focus_task(self.TASKS, progress)
+        assert (task["id"], source) == (2, "team_progress")
+
+    def test_pb_target_needs_one(self):
+        task, _ = pn.pick_focus_task(
+            self.TASKS, {3: {"progress": 0, "completed": False},
+                         1: {"progress": 9, "completed": False}})
+        assert task["id"] == 1  # 9/10 beats pb 0/1
+
+    def test_no_progress_gives_first_incomplete(self):
+        task, source = pn.pick_focus_task(self.TASKS, {})
+        assert (task["id"], source) == (1, "first_task")
+
+    def test_all_completed_gives_none(self):
+        progress = {t["id"]: {"progress": 99, "completed": True} for t in self.TASKS}
+        task, source = pn.pick_focus_task(self.TASKS, progress)
+        assert (task, source) == (None, None)
+
+    def test_ratio_tie_prefers_lower_id(self):
+        tasks = [
+            {"id": 5, "label": "X", "type": "item_target", "target_value": 10},
+            {"id": 4, "label": "Y", "type": "item_target", "target_value": 10},
+        ]
+        progress = {5: {"progress": 5, "completed": False},
+                    4: {"progress": 5, "completed": False}}
+        task, _ = pn.pick_focus_task(tasks, progress)
+        assert task["id"] == 4
+
+
 class TestTypeRegistryConsistency:
     def test_audience_types_are_known_queue_types(self):
         for t in pn.AUDIENCE_FOR_TYPE:

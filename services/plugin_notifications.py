@@ -42,6 +42,19 @@ DRAIN_BATCH_LIMIT = 25
 # Free-form notice text is capped defensively; the plugin caps again on render.
 NOTICE_MAX_CHARS = 500
 
+# "What is this player working toward" stamp (P0.5): written at apply time
+# when the player's own submission advances an incomplete task; read by
+# /event_state to headline the HUD. A few hours is long enough to survive a
+# session, short enough to fall back to team progress when they move on.
+FOCUS_KEY_TEMPLATE = "plugin:focus:{player_id}:{event_id}"
+FOCUS_TTL_SECONDS = 6 * 3600
+
+# Public /img host (same values notification_service uses for Discord
+# thumbnails) — used for focus-task icon URLs when the icon is not an item
+# (NPC/skill icons have no client-side sprite).
+IMG_BASE = "https://www.droptracker.io/img"
+STATIC_IMG_DIR = "/store/droptracker/disc/static/assets/img"
+
 AUDIENCE_TEAM = "team"
 AUDIENCE_EVENT = "event"
 
@@ -157,6 +170,287 @@ def push_submission_notice(player_id, message) -> bool:
         return False
     data = {"message": str(message)[:NOTICE_MAX_CHARS]}
     return push_to_inbox(player_id, build_envelope("submission_notice", data))
+
+
+def stamp_player_focus(player_id, event_id, task_id) -> None:
+    """Record the task this player's own submission just advanced. Best-effort."""
+    if not player_id or not event_id or not task_id:
+        return
+    try:
+        key = FOCUS_KEY_TEMPLATE.format(player_id=int(player_id),
+                                        event_id=int(event_id))
+        _redis().setex(key, FOCUS_TTL_SECONDS, str(int(task_id)))
+    except Exception:
+        pass
+
+
+def _stamped_focus_task_id(player_id, event_id):
+    try:
+        raw = _redis().get(FOCUS_KEY_TEMPLATE.format(
+            player_id=int(player_id), event_id=int(event_id)))
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        return int(raw)
+    except Exception:
+        return None
+
+
+def resolve_item_icon_id(session, item_name):
+    """Game item id for an item name (un-noted, lowest id), or None. The
+    client renders the sprite locally via ItemManager — no image fetch."""
+    if not item_name:
+        return None
+    try:
+        from sqlalchemy import func
+
+        from db.models import ItemList
+
+        iid = (session.query(func.min(ItemList.item_id))
+               .filter(ItemList.item_name == str(item_name),
+                       ItemList.noted.is_(False))
+               .scalar())
+        return int(iid) if iid is not None else None
+    except Exception:
+        return None
+
+
+def pick_focus_task(tasks, progress_by_task, stamped_task_id=None):
+    """Choose the task to headline the HUD. Pure logic (unit-tested).
+
+    ``tasks``: list of {"id", "label", "type", "target_value"} dicts.
+    ``progress_by_task``: {task_id: {"progress": int, "completed": bool}}.
+
+    Order: the stamped (player-inferred) task while it is still incomplete;
+    else the most-progressed incomplete task (completion ratio, ties to the
+    lower id); else the first task with no progress at all; else None (team
+    finished everything). Returns (task_dict, source) or (None, None).
+    """
+    by_id = {t["id"]: t for t in tasks}
+
+    def _completed(task_id):
+        return bool((progress_by_task.get(task_id) or {}).get("completed"))
+
+    if stamped_task_id is not None and stamped_task_id in by_id \
+            and not _completed(stamped_task_id):
+        return by_id[stamped_task_id], "inferred"
+
+    best = None
+    best_ratio = 0.0
+    for task in tasks:
+        state = progress_by_task.get(task["id"]) or {}
+        if state.get("completed"):
+            continue
+        progress = int(state.get("progress") or 0)
+        if progress <= 0:
+            continue
+        need = max(int(task.get("target_value") or 0), 1)
+        if task.get("type") in ("pb_target", "skill_target"):
+            need = 1
+        ratio = progress / need
+        if best is None or ratio > best_ratio \
+                or (ratio == best_ratio and task["id"] < best["id"]):
+            best = task
+            best_ratio = ratio
+    if best is not None:
+        return best, "team_progress"
+
+    for task in tasks:
+        if not _completed(task["id"]):
+            return task, "first_task"
+    return None, None
+
+
+def _task_icon(session, task_row):
+    """(icon_item_id, icon_url) for an event task, via the site's task-tile
+    derivation (the same source Discord thumbnails use). Prefers an item id
+    (client renders the sprite locally); falls back to an /img URL for
+    NPC/skill icons whose asset exists on disk. (None, None) when nothing
+    resolves. Never raises."""
+    import os
+
+    try:
+        from sqlalchemy import func
+
+        from db.models import ItemList, NpcList
+        from web_api.task_tiles import (
+            build_tile,
+            icon_asset_path,
+            spec_names,
+            tile_spec,
+        )
+
+        spec = tile_spec({
+            "id": task_row.id, "type": task_row.type, "label": task_row.label,
+            "target": task_row.target, "target_value": task_row.target_value,
+            "config": task_row.config,
+        })
+        item_names, npc_names = spec_names(spec)
+        item_ids: dict = {}
+        if item_names:
+            for iid, name in (
+                session.query(func.min(ItemList.item_id), ItemList.item_name)
+                .filter(ItemList.item_name.in_(item_names), ItemList.noted.is_(False))
+                .group_by(ItemList.item_name)
+                .all()
+            ):
+                item_ids[" ".join(name.strip().lower().split())] = iid
+        npc_ids: dict = {}
+        if npc_names:
+            for nid, name in (
+                session.query(func.min(NpcList.npc_id), NpcList.npc_name)
+                .filter(NpcList.npc_name.in_(npc_names))
+                .group_by(NpcList.npc_name)
+                .all()
+            ):
+                npc_ids[" ".join(name.strip().lower().split())] = nid
+        tile = build_tile(spec, item_ids, npc_ids)
+        for icon in tile.get("icons") or []:
+            if icon.get("type") == "item" and icon.get("id"):
+                return int(icon["id"]), None
+        for icon in tile.get("icons") or []:
+            rel = icon_asset_path(icon)
+            if rel and os.path.exists(os.path.join(STATIC_IMG_DIR, rel)):
+                return None, f"{IMG_BASE}/{rel}"
+    except Exception:
+        pass
+    return None, None
+
+
+def compose_event_state(session, player_id) -> dict:
+    """The plugin's HUD/Events-tab state: one entry per active event the
+    player is rostered in. All composition happens here so the client stays a
+    dumb renderer of typed fields."""
+    from db.models import Event, EventProgress, EventTask, EventTeam, EventTeamMember
+
+    rows = (
+        session.query(EventTeamMember, EventTeam, Event)
+        .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+        .join(Event, Event.id == EventTeam.event_id)
+        .filter(EventTeamMember.player_id == int(player_id),
+                Event.status == "active")
+        .order_by(Event.activated_at.desc(), Event.id.desc())
+        .all()
+    )
+
+    entries = []
+    for _member, team, event in rows:
+        teams = (
+            session.query(EventTeam)
+            .filter(EventTeam.event_id == event.id)
+            .order_by(EventTeam.score.desc(), EventTeam.id.asc())
+            .all()
+        )
+        standings = []
+        team_rank = None
+        for idx, t in enumerate(teams, start=1):
+            if t.id == team.id:
+                team_rank = idx
+            standings.append({
+                "team_id": t.id,
+                "name": t.name,
+                "score": int(t.score or 0),
+                "rank": idx,
+                "color": t.color,
+            })
+
+        task_rows = (
+            session.query(EventTask)
+            .filter(EventTask.event_id == event.id)
+            .order_by(EventTask.id.asc())
+            .all()
+        )
+        progress_rows = (
+            session.query(EventProgress)
+            .filter(EventProgress.event_id == event.id,
+                    EventProgress.team_id == team.id)
+            .all()
+        )
+        progress_by_task = {
+            p.task_id: {"progress": int(p.progress or 0),
+                        "completed": bool(p.completed)}
+            for p in progress_rows
+        }
+        tasks_total = len(task_rows)
+        tasks_completed = sum(1 for p in progress_rows if p.completed)
+
+        board_status = None
+        focus_row = None
+        focus_source = None
+        if event.kind == "board_game":
+            # Board game: the team's current tile task IS the focus.
+            from db.models import EventBoardPosition
+
+            position = (
+                session.query(EventBoardPosition)
+                .filter(EventBoardPosition.event_id == event.id,
+                        EventBoardPosition.team_id == team.id)
+                .first()
+            )
+            if position is not None:
+                board_status = position.status
+                if position.current_task_id:
+                    focus_row = (
+                        session.query(EventTask)
+                        .filter(EventTask.id == position.current_task_id)
+                        .first()
+                    )
+                    focus_source = "board"
+        if focus_row is None:
+            task_dicts = [
+                {"id": t.id, "label": t.label, "type": t.type,
+                 "target_value": t.target_value}
+                for t in task_rows
+            ]
+            stamped = _stamped_focus_task_id(player_id, event.id)
+            picked, focus_source = pick_focus_task(
+                task_dicts, progress_by_task, stamped)
+            if picked is not None:
+                focus_row = next(
+                    (t for t in task_rows if t.id == picked["id"]), None)
+
+        focus_task = None
+        if focus_row is not None:
+            state = progress_by_task.get(focus_row.id) or {}
+            need = 1 if focus_row.type in ("pb_target", "skill_target") \
+                else max(int(focus_row.target_value or 0), 1)
+            icon_item_id, icon_url = _task_icon(session, focus_row)
+            focus_task = {
+                "id": focus_row.id,
+                "label": focus_row.label,
+                "have": int(state.get("progress") or 0),
+                "need": need,
+                "icon_item_id": icon_item_id,
+                "icon_url": icon_url,
+                "source": focus_source,
+            }
+
+        entries.append({
+            "event": {"id": event.id, "name": event.name, "kind": event.kind,
+                      "has_bingo": bool(event.has_bingo),
+                      "ends_at": event.ends_at.isoformat() if event.ends_at else None},
+            "team": {
+                "id": team.id,
+                "name": team.name,
+                "color": team.color,
+                "icon_item_id": team.piece_item_id,
+                "icon_url": team.piece_icon_url,
+                "score": int(team.score or 0),
+                "rank": team_rank,
+                "team_count": len(teams),
+            },
+            "focus_task": focus_task,
+            "board_status": board_status,
+            "tasks_completed": tasks_completed,
+            "tasks_total": tasks_total,
+            "board": {
+                "available": bool(event.has_bingo or event.kind == "board_game"),
+                "team_id": team.id,
+            },
+            "standings": standings,
+        })
+    return {"events": entries}
 
 
 def player_has_active_event(session, player_id) -> bool:
