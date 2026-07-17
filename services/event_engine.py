@@ -943,7 +943,8 @@ def _publish(event_id: int, data: dict) -> None:
         from services.event_team_discord import TEAM_BOARD_DIRTY_KEY
         from utils.redis import redis_client
 
-        redis_client.sadd(TEAM_BOARD_DIRTY_KEY, str(event_id))
+        # .client: the raw redis handle — the wrapper exposes no set ops.
+        redis_client.client.sadd(TEAM_BOARD_DIRTY_KEY, str(event_id))
     except Exception:
         pass
 

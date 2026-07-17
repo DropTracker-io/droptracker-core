@@ -401,7 +401,7 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                     try:
                         from services.event_team_discord import TEAM_BOARD_DIRTY_KEY
 
-                        redis_client.sadd(TEAM_BOARD_DIRTY_KEY, str(row.event_id))
+                        redis_client.client.sadd(TEAM_BOARD_DIRTY_KEY, str(row.event_id))
                     except Exception:
                         pass
 
@@ -581,15 +581,17 @@ async def _board_post_pass(bot, session_factory, redis_client,
     event_ids: set = set()
     try:
         for _ in range(BOARD_DIRTY_SPOP_LIMIT):
-            raw = redis_client.spop(TEAM_BOARD_DIRTY_KEY)
+            # .client: raw redis — the wrapper has no set ops (an AttributeError
+            # in here once no-oped the whole refresher silently).
+            raw = redis_client.client.spop(TEAM_BOARD_DIRTY_KEY)
             if not raw:
                 break
             try:
                 event_ids.add(int(raw.decode() if isinstance(raw, (bytes, bytearray)) else raw))
             except (TypeError, ValueError):
                 continue
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[team-board] dirty-set drain failed: {exc}")
 
     session = session_factory()
     try:
@@ -623,7 +625,7 @@ async def _board_post_pass(bot, session_factory, redis_client,
                     # Out of screenshot budget — keep the event flagged and
                     # finish next tick (hash skips make redone rows cheap).
                     try:
-                        redis_client.sadd(TEAM_BOARD_DIRTY_KEY, str(event_id))
+                        redis_client.client.sadd(TEAM_BOARD_DIRTY_KEY, str(event_id))
                     except Exception:
                         pass
                     return
@@ -633,7 +635,9 @@ async def _board_post_pass(bot, session_factory, redis_client,
                     rendered += 1 if did_render else 0
                     if wrote:
                         session.commit()
-                except Exception:
+                except Exception as exc:
                     session.rollback()
+                    print(f"[team-board] post refresh failed "
+                          f"(event {event_id}, team {row.team_id}): {exc}")
     finally:
         session.close()
