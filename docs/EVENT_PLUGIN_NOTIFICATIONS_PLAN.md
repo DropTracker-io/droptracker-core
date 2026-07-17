@@ -1,210 +1,236 @@
-# Event → Plugin In-Game Notifications — Design Plan
+# Event → Plugin In-Game Notifications & Event HUD — Design Plan
 
-Status: DRAFT (investigated 2026-07-17, not yet approved for build)
-Scope: disc (intake API + notification service), web (per-type preference UI), plugin (polling, rendering, config)
+Status: P0 DEPLOYED 2026-07-17 (disc 045beb9 + web55a migration; api/events/webhook-consumer restarted).
+       Client direction expanded same day (HUD + Events tab); P0.5/P1/P2 below not started.
+Scope: disc (intake API + event engine + notification fan-out), web (per-type preference UI),
+       plugin (polling, rendering, config, HUD overlay, Events side-panel tab)
 
 ## Goal
 
-Event participants who have the API enabled receive close-to-real-time in-game
-feedback (chat message and/or mini popup) when something event-relevant happens —
-e.g. a teammate's drop completes or progresses one of their team's tasks.
+Event participants who have the API enabled get close-to-real-time in-game
+feedback and status for their events:
+
+1. **Notifications** — chat messages / small text pop-ups when something
+   event-relevant happens (teammate completes or progresses a task, lead
+   changes, board turn ready, ...).
+2. **Enhanced Display (HUD)** — a movable, persistent overlay showing the
+   player's current event at a glance: task being worked toward (+item icon),
+   team name/color (+icon), progress, placement.
+3. **Events side-panel tab** — richer standing info in the existing plugin
+   side panel: the player's active events, team placements, and an openable
+   server-rendered board view with a team switcher.
 
 ## Non-goals
 
-- No persistent connections in v1 (SSE/WebSocket is a possible v2 upgrade; the
-  design below is transport-agnostic so it stays additive).
-- No server-driven rendering. The API never sends markup, format strings, or
+- No persistent connections in v1 (SSE/WebSocket is a possible later upgrade;
+  everything below is transport-agnostic, so that stays additive).
+- No server-driven rendering. The API sends typed data (and image URLs
+  restricted to our domains); it never sends markup, format strings, or
   anything the client "executes". See Safety Contract.
+- No client-side board rendering. Boards are server-rendered images (the
+  plugin already displays server-generated lootboard PNGs with a pop-out
+  dialog — `PanelElements.loadLootboardForGroup` / `showLootboardForGroup`).
 
-## Current-state facts this design builds on
-
-- The event engine already enqueues typed, display-ready rows into the
-  `notification_queue` table (`services/event_engine.py` `_enqueue_notification`,
-  ~:952): `event_completion`, `event_task_progress`, `event_lead_change`,
-  board-game turn prompts, etc. Single consumer today: `services/
-  notification_service.py` (core bot) → Discord.
-- Plugin↔server is pure HTTP polling. The plugin polls batch `POST /check` every
-  10s (ActivityPanel Swing timer) and `GET /panel_data` on a 60s TTL.
-- The old `/webhook` response `notice`/`rank_update` chat channel is dead since
-  the queue-mode flip (acceptor returns `Queued`; consumer drops notices). This
-  plan restores that functionality as a side effect.
-- Identity = `player_name` + `acc_hash` (no token). The notification channel
-  inherits this trust level; content is non-sensitive.
-- `GroupConfig.track_xp_events` is the precedent for the server telling the
-  plugin to change polling behavior during events.
-
-## Architecture (v1: per-player inbox + polling)
+## Architecture
 
 ```
-event_engine → notification_queue (existing, unchanged)
-                     │
-        notification_service (existing consumer)
-                     ├── Discord sinks (existing, unchanged)
-                     └── NEW plugin sink:
-                         resolve team roster → filter by web prefs +
-                         API-user status → RPUSH plugin:notify:{player_id}
-                                                     │
-plugin (10s poll while event active) ← GET /notifications (intake API, Quart)
+event_engine → notification_queue (existing)
+     │  └── plugin fan-out (P0, live): roster resolve + pref filter
+     │        → RPUSH plugin:notify:{player_id}   (cap 50, TTL 24h)
+     │  └── focus stamp (P0.5): plugin:focus:{player_id}:{event_id} = task_id
+     │
+webhook_consumer → submission_notice → same inbox (P0, live)
+     │
+plugin (10s poll while active_event) ─ GET /notifications  → drain inbox (P0, live)
+                                     ─ GET /event_state    → HUD/tab state (P0.5)
+                                     ─ GET /events/{id}/board.png?team_id= (P0.5)
 ```
 
-### Redis inbox
+### Delivered in P0 (live since 2026-07-17)
 
-- Key: `plugin:notify:{player_id}` (LIST). `LTRIM` to 50, TTL 24h refreshed on
-  push. Drained with LPOP batch on read (at-most-once is acceptable for
-  ephemeral toasts; a missed one is visible on the event page anyway).
-- Fan-out happens in the plugin sink, not in the event engine — the
-  `notification_queue` row carries only the *acting* player; the sink expands to
-  the full team roster (same roster resolution the Discord path already uses)
-  and writes one inbox entry per recipient that passes filters.
+- `services/plugin_notifications.py` — typed-envelope per-player Redis inbox,
+  team/event audience fan-out (dedicated read session so a failed read can
+  never poison the event-apply transaction), web-pref filtering (fail-open),
+  drain.
+- Engine hook in `_enqueue_notification` ahead of the Discord
+  `message_config` mute gate — in-game notifications are independent of the
+  event's Discord verbosity.
+- `GET /notifications` (intake API): drains the inbox; identity =
+  `player_name` + `acc_hash`, hash-first (same trust model as `/load_config`);
+  response also carries `active_event`.
+- `/panel_data` group configs carry `"active_event"` (analogue of
+  `track_xp_events`) so the plugin only polls during live events.
+- `webhook_consumer` delivers processor `notice` text as `submission_notice`
+  entries — restores the in-game chat channel queue mode silenced.
+- `player_notification_prefs` table (web55a) for the P1 website prefs.
 
-### New endpoint (intake API, `api/routes/`)
+## State endpoint (P0.5): GET /event_state
 
-`GET /notifications?player_name=<name>&acc_hash=<hash>`
-
-- Resolves player exactly like existing endpoints (`ensure_player_and_auth`
-  semantics — hash must match the stored `Player.account_hash`).
-- Response: `{"notifications": [ ... ]}` (drained), plus `"active_event": bool`
-  so the plugin can stop polling when the event ends without waiting for the
-  next `/panel_data` refresh.
-- Rate-limited like `/check`. Cheap: one Redis LPOP pipeline, no MySQL on the
-  hot path.
-
-### Plugin activation signal
-
-`/panel_data` group-config payload gains `"active_event": true` (exact analogue
-of `track_xp_events`) whenever the player is on a roster of a live event. The
-plugin polls `/notifications` on its existing 10s timer only while this is true
-(and `useApi` + the client master toggle are on).
-
-## Safety contract (no code from server to client)
-
-The API sends **typed data only**. Every notification is:
+The HUD and Events tab need *state* (what is my task/standing right now), not
+just notification deltas — a login mid-event must populate instantly. Same
+auth as `/notifications`. Response:
 
 ```json
 {
-  "id": "1752770000-42",
-  "type": "event_task_completion",
-  "ts": 1752770000,
-  "event": {"id": 12, "name": "Summer Bingo"},
-  "data": {
-    "task": "Obtain 3 Bandos hilts",
-    "team": "Team Alpha",
-    "acting_player": "SomeTeammate",
-    "item": "Bandos hilt",
-    "points": 5,
-    "progress": "3/3"
-  }
+  "events": [
+    {
+      "event": {"id": 19, "name": "Summer Bingo", "kind": "bingo"},
+      "team": {"id": 38, "name": "Team Alpha", "color": "#cc4444",
+               "icon_url": null, "score": 120, "rank": 2, "team_count": 4},
+      "focus_task": {"id": 512, "label": "Obtain 3 Bandos hilts",
+                     "icon_item_id": 11804, "have": 2, "need": 3,
+                     "source": "inferred"},
+      "board": {"image_url": "https://api.droptracker.io/events/19/board.png?team_id=38&...",
+                "available": true},
+      "standings": [{"team_id": 38, "name": "Team Alpha", "score": 120, "rank": 2}, ...]
+    }
+  ]
 }
 ```
 
-Client-side rules (plugin):
+All composition logic is server-side so the client stays a dumb renderer:
 
-- A hardcoded registry maps `type` → renderer (an `EnumMap`). **Unknown `type`
-  values are dropped silently** — forward compatibility without ever rendering
-  unrecognized content.
-- Each renderer composes its display text **locally** from the typed fields
-  ("[DropTracker] Team Alpha completed: Obtain 3 Bandos hilts (+5 pts)").
-  The server never supplies a full display string for these.
-- All string fields pass the existing `sanitize()` (tag-strip) before use, and
-  are length-capped.
-- The one legacy exception: `type: "submission_notice"` (restoring the dead
-  `notice` channel) carries server text; it is rendered as plain sanitized text
-  in chat only, gated by the existing `receiveInGameMessages` config, exactly
-  as the old code path did.
+- **`focus_task` (what the player is working toward).** Primary: an
+  *inferred focus* — at apply time, when a player's own submission advances a
+  task, stamp `plugin:focus:{player_id}:{event_id}` = task_id (Redis, TTL a
+  few hours). The engine already knows the matched task at that moment, so
+  this costs one SETEX on an existing code path — no extra matching work.
+  Fallback when no stamp exists: the team's most-progressed incomplete task.
+  `source` says which ("inferred" | "team_progress"). A later refinement can
+  infer from non-matching activity too (e.g. the NPC of recent drops vs task
+  sources) — deliberately deferred; the stamp covers the common case free.
+- **Board-game events**: `focus_task` is the current tile's task; `board`
+  carries the existing server-rendered board image.
+- **`standings`**: teams ordered by score (the same ranking the engine
+  already computes for completion payloads).
+- Multi-event: one array entry per active event the player is rostered in.
+  Which one the HUD shows is a client concern (pinned event, below).
 
-## Notification types (v1 set)
+**Board image route.** `GET /events/{id}/board.png?team_id=&player_name=&acc_hash=`
+on the intake API: validates the caller is rostered in the event, then serves
+the existing board render (same generator the team-channel board posts use),
+cached by board state hash. `image_url` in the payload always points at our
+API host.
 
-| type                    | default | controlled where        | typical audience        |
-|-------------------------|---------|-------------------------|-------------------------|
-| event_task_completion   | on      | website pref            | whole team              |
-| event_task_progress     | on      | **client toggle only**  | whole team              |
-| event_lead_change       | on      | website pref            | all participants        |
-| event_board_turn        | on      | website pref            | whole team (board game) |
-| event_started / event_ended | on  | website pref            | all participants        |
-| submission_notice       | on      | client (`receiveInGameMessages`, existing) | submitting player only |
+## Safety contract (no code from server to client)
 
-`event_task_progress` is the one type controlled on the client instead of the
-website (it's the highest-volume type, so the mute switch belongs where the
-noise is felt — in game). It is always delivered to the inbox for API users;
-the plugin filters it at render time. It does NOT appear in the website prefs
-(no option exists in two places).
+Unchanged from P0, extended for images:
+
+- Typed envelopes only: `{id, type, ts, event?, data}`; hardcoded client
+  registry maps `type` → renderer; unknown types dropped silently (forward
+  compatible). Renderers compose display text locally from typed fields.
+  `submission_notice` (server text) renders as sanitized plain chat only.
+- **Icons**: task icons are sent as `icon_item_id` ints — the client renders
+  the sprite locally via RuneLite's `ItemManager` (zero remote fetches).
+  Team/event icons are `icon_url` strings; the client renders them only if
+  the URL parses and its host is an allow-listed DropTracker domain
+  (`droptracker.io` / `www.` / `api.`), decodes via `ImageIO.read` (returns
+  null for non-image bytes — HTML/error pages can never render), and caps
+  dimensions/bytes. This is the exact pattern the hub-approved plugin already
+  ships for lootboard PNGs (`PanelElements.loadLootboardForGroup`).
+
+## Notification types (unchanged from P0)
+
+| type                    | default | controlled where        | audience        |
+|-------------------------|---------|-------------------------|-----------------|
+| event_task_completion   | on      | website pref            | whole team      |
+| event_task_progress     | on      | **client toggle only**  | whole team      |
+| event_lead_change       | on      | website pref            | all participants|
+| event_board_turn / roll_prompt | on | website pref          | whole team      |
+| event_started / event_ended | on  | website pref            | all participants|
+| submission_notice       | on      | client (`receiveInGameMessages`) | submitter |
+
+P0.5 payload enrichment: completion/progress fan-out gains `icon_item_id`
+(the task icon the Discord embeds already resolve) so pop-ups/HUD can show
+the item sprite.
+
+## Multi-event & stacking rules
+
+- **Pinned event (HUD).** The HUD shows ONE event at a time. The Events tab
+  has a "show on HUD" picker; default = most recently activated event the
+  player is in. Stored client-side (config), no server round-trip.
+- **Batch grouping.** The plugin processes each poll's envelopes as one
+  batch, grouped by `event.id`: at most one pop-up per event per batch
+  (summarizing N items: "2 tasks progressed — Bandos hilt, Zamorak hilt");
+  chat lines collapse beyond 3 per event per batch ("…and 2 more").
+- **One drop, many tasks.** The server intentionally enqueues one envelope
+  per (task, event) — cross-event and multi-task credit are distinct facts.
+  Deduplication is presentation-side via the batch grouping above.
+- **State refresh.** At most one `/event_state` refetch per poll batch that
+  contained event-scoped types (debounced) — never per envelope.
+- **Seen-id guard.** Client keeps a small LRU of processed envelope ids for
+  the session; replays (e.g. a retried poll) render once.
+- Known server-side limitation (accepted): a revoke → re-completion can
+  produce a second notification for the "same" completion. Arguably correct —
+  it did re-complete.
 
 ## Configuration split (no duplicated options)
 
 **Plugin config (client, coarse — client always wins):**
 
-1. `eventNotifications` (toggle, default on; only functions with `useApi`) —
-   master on/off for all event notification types.
-2. `eventNotificationStyle` (enum: `CHAT`, `POPUP`, `CHAT_AND_POPUP`) — one
-   style choice applied to every event notification.
-3. `eventTaskProgressNotifications` (toggle, default on) — render teammate
-   task-progress notifications (the high-volume type; see table below).
+1. `eventNotifications` (master toggle, default on; requires `useApi`).
+2. `eventDisplayMode` (enum, intuitive names):
+   - `CHAT` — "Chat messages only"
+   - `POPUP` — "Chat + text pop-ups"
+   - `ENHANCED` — "Enhanced display (HUD + pop-ups)"
+3. `eventTaskProgressNotifications` (toggle, default on) — the high-volume
+   type stays client-muted (never a website pref).
+4. `eventHudDetail` (enum: `COMPACT` — task + progress bar; `DETAILED` —
+   adds team name/rank and icons). Only meaningful in `ENHANCED`.
 
-Nothing else client-side. Existing `receiveInGameMessages` keeps governing
-submission confirmations (unchanged meaning).
+(The pinned-event choice is panel UI state persisted via config, not a
+settings-panel option.)
 
-**Website (fine-grained, per player):**
+**Website (fine-grained, per player):** per-type toggles for every type
+EXCEPT `event_task_progress`, on the existing player settings surface —
+enforced server-side at delivery, so a disabled type never enters the inbox.
 
-- Per-type on/off toggles for every type EXCEPT `event_task_progress`
-  (client-owned; table above defines defaults), on the existing player
-  settings surface.
-- Stored server-side; enforced at **enqueue time** in the plugin sink, so
-  disabled types never even enter the inbox.
+## Client surfaces (P2)
 
-**Precedence model:** website prefs decide *what is delivered*; client config
-decides *whether and how anything renders*. Client master toggle off ⇒ plugin
-doesn't poll at all. No setting exists in both places.
+- **Text pop-up**: lightweight toast overlay (top-center, fade ~6s, max 3
+  stacked, batch-grouped per event).
+- **Enhanced Display HUD**: a RuneLite `OverlayPanel` (movable/snappable for
+  free via the overlay system — no custom drag code). Medium footprint:
+  roughly infobox-row height ×2. Compact: task icon + label + progress bar.
+  Detailed: + team color accent, team name, rank ("2nd of 4"). Data comes
+  from `/event_state`, refreshed per the stacking rules; progress also
+  advances optimistically from received envelopes between refreshes.
+- **Events side-panel tab**: added to the existing Home | Activity | Player |
+  Group panel. Lists each active event: name, team, rank, focus task,
+  standings list, "show on HUD" picker, and a board thumbnail that opens the
+  existing pop-out image dialog (reuse the lootboard dialog machinery) with a
+  team dropdown that swaps the fetched `board.png?team_id=`.
 
-## Popup rendering (plugin)
-
-- `CHAT`: existing `ChatMessageUtil` path.
-- `POPUP`: lightweight overlay toast (custom `Overlay`, top-center, fade after
-  ~6s, stacked max 3) — an in-client "mini pop-up", not the OS-level RuneLite
-  `Notifier`.
+Hub-review posture: no new permission surface — same API host, same
+remote-image pattern already shipped for lootboards, sprites via ItemManager,
+overlays via the standard overlay system. The biggest new client code is the
+HUD panel and the Events tab layout, both plain Swing/overlay code.
 
 ## Extensibility (adding future notification types)
 
-The channel is deliberately generic — nothing about the envelope, inbox,
-endpoint, or transport is event-specific. Adding a new notification type
-(event-related or not: group announcements, system notices, moderation
-outcomes, ...) touches exactly three places and requires **no changes to the
-transport, endpoint, inbox schema, or existing renderers**:
-
-1. **Server producer**: push an entry with the new `type` string and its typed
-   `data` fields into the recipient's inbox (via the shared push helper).
-2. **Web pref row** (optional): register the type in the per-type preference
-   list so users can opt out; unregistered types follow their hardcoded
-   default.
-3. **Plugin renderer**: add one entry to the client's type→renderer registry
-   in a plugin release.
-
-Ordering between 1 and 3 is safe in both directions: plugins that don't yet
-know a type drop it silently (server can ship first), and renderers for types
-the server never sends are inert (plugin can ship first). The envelope
-(`id`/`type`/`ts`/`data`) is versionless by design — new needs are expressed as
-new types, never by mutating existing ones.
+Unchanged: new needs are new `type` strings + typed fields; unaware plugins
+drop them; renderers for unsent types are inert. The state endpoint is
+likewise additive — new keys in `event_state` entries are ignored by older
+clients. Never mutate existing types/fields.
 
 ## Server prefs storage
 
-Per-user JSON or columns keyed by `player_id` (implementation detail for build
-phase; candidates: extend existing player-settings storage used by the web
-settings page). Sink reads with a short-TTL in-process cache to keep the
-notification loop cheap.
+`player_notification_prefs` (live): one row per player, `prefs` JSON object
+mapping type → bool; absent row/keys = enabled. Sink reads with a short-TTL
+in-process cache if volume ever warrants (not needed at current scale).
 
-## v2 (optional, additive)
+## Build phases
 
-SSE endpoint on the intake API (Quart natively supports streaming; model on
-`web_api/routes/realtime.py`), authenticated by name+hash, subscribed to the
-same inbox via `rt:player:{id}` pub/sub mirroring. Drops latency from ~10s to
-sub-second without changing the contract, filters, or config model.
-
-## Build phases (when approved)
-
-- P0 disc: plugin sink in notification_service (roster fan-out + pref filter +
-  inbox), `GET /notifications`, `active_event` flag in `/panel_data`,
-  `submission_notice` enqueue from webhook_consumer (restores dead channel).
-- P1 web: per-type notification preferences UI on player settings + API route.
-- P2 plugin: config additions, poll loop, type registry + renderers, toast
-  overlay. (Plugin-hub release rides the next pin bump.)
-- P3: defaults tuning after first live event; consider SSE if latency feedback
-  warrants.
+- **P0 — DONE, DEPLOYED 2026-07-17**: inbox, fan-out, `GET /notifications`,
+  `active_event` flag, `submission_notice` restore, prefs table.
+- **P0.5 disc**: `GET /event_state` (+ focus stamp at apply time, standings
+  composition, board image route with roster auth), `icon_item_id` in
+  completion/progress fan-out payloads.
+- **P1 web**: per-type notification prefs UI on player settings + API route
+  (reads/writes `player_notification_prefs`).
+- **P2 plugin**: config (master, display mode, progress toggle, HUD detail),
+  poll loop + batch grouping + seen-id LRU, type→renderer registry, toast
+  overlay, HUD `OverlayPanel`, Events side-panel tab (standings + pinned
+  picker + board pop-out). Ships on the next hub pin bump.
+- **P3**: defaults tuning after first live event; SSE upgrade if ~10s polling
+  feels slow; NPC-activity-based focus inference refinement.
