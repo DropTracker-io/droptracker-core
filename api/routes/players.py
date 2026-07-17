@@ -396,6 +396,16 @@ def _group_configs_for(player_name, acc_hash, db_session):
     except Exception as e:
         print(f"Exception checking active xp events in load_config: {e}")
 
+    # Whether ANY live event is tracking this player (not just XP tasks): the
+    # plugin's signal to start polling GET /notifications for in-game event
+    # notifications (docs/EVENT_PLUGIN_NOTIFICATIONS_PLAN.md).
+    event_active = False
+    try:
+        from services.plugin_notifications import player_has_active_event
+        event_active = player_has_active_event(db_session, player.player_id)
+    except Exception as e:
+        print(f"Exception checking active events in load_config: {e}")
+
     group_configs = []
     def get_config_value(current_group_configs, key: str):
         for group_config in current_group_configs:
@@ -431,7 +441,8 @@ def _group_configs_for(player_name, acc_hash, db_session):
                             "minimum_level": get_config_value(current_group_configs, "level_minimum_for_notifications"),
                             "send_stacked_items": get_config_value(current_group_configs, "send_stacks_of_items"),
                             "minimum_ca_tier": get_config_value(current_group_configs, "min_ca_tier_to_notify"),
-                            "track_xp_events": xp_events_active})
+                            "track_xp_events": xp_events_active,
+                            "active_event": event_active})
     return group_configs
 
 

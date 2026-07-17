@@ -21,6 +21,7 @@ from .group_configuration import GroupConfiguration
 from .group_notification import GroupNotification
 from .notified_submission import NotifiedSubmission
 from .notification_queue import NotificationQueue
+from .player_notification_prefs import PlayerNotificationPrefs
 from .embed import GroupEmbed, Field
 from .guild_meta import Guild, GroupWomAssociation, GroupPersonalBestMessage, LBUpdate
 from .webhooks import Webhook, BackupWebhook, WebhookPendingDeletion, NewWebhook
@@ -164,6 +165,7 @@ __all__ = [
     "GroupNotification",
     "NotifiedSubmission",
     "NotificationQueue",
+    "PlayerNotificationPrefs",
     "GroupEmbed",
     "Field",
     "Guild",

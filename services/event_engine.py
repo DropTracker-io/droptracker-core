@@ -953,6 +953,18 @@ def _enqueue_notification(session, notification_type: str, event: dict,
                           player_id: int, data: dict) -> None:
     """Insert a notification_queue row (create_notification pattern —
     data/submissions/common.py). Sending is Task 19; we only enqueue."""
+    # In-game plugin inbox fan-out (docs/EVENT_PLUGIN_NOTIFICATIONS_PLAN.md):
+    # deliberately ahead of both the player_id guard (event-wide types carry a
+    # representative player; the in-game audience is resolved from rosters)
+    # and the Discord mute gate below — a player's in-game notifications are
+    # independent of the event's Discord verbosity config. Best-effort.
+    try:
+        from services.plugin_notifications import fan_out_event_notification
+        fan_out_event_notification(session, notification_type, event, data)
+    except ImportError:
+        pass  # unit-test stubs
+    except Exception as plugin_notify_err:
+        print(f"plugin inbox fan-out failed for {notification_type}: {plugin_notify_err}")
     if player_id is None:
         # Manual awards carry no player and notification_queue.player_id is
         # NOT NULL — those announce via the admin action itself (Task 19).

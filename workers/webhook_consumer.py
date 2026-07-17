@@ -39,6 +39,41 @@ class _TempFileUpload:
         self.content_type = content_type
 
 
+def _push_plugin_notice(db_session, processed_data, response) -> None:
+    """Deliver the processor's `notice` to the player's plugin inbox.
+
+    Queue mode acknowledges /webhook before processing, so the response
+    `notice` field the plugin used to render as in-game chat never reaches it.
+    This restores that channel via the notification inbox
+    (services/plugin_notifications, type "submission_notice"). Best-effort.
+    """
+    try:
+        notice = getattr(response, "notice", None) if response else None
+        if not notice:
+            return
+        acc_hash = processed_data.get("acc_hash")
+        if not acc_hash:
+            return
+        from db.models import Player
+        from services.plugin_notifications import push_submission_notice
+
+        player = (
+            db_session.query(Player)
+            .filter(Player.account_hash == str(acc_hash))
+            .first()
+        )
+        if player:
+            push_submission_notice(player.player_id, notice)
+    except Exception as e:
+        # A failed read leaves the shared session with a pending rollback;
+        # clear it so the next entry in the batch isn't poisoned.
+        try:
+            db_session.rollback()
+        except Exception:
+            pass
+        log.debug("plugin notice push failed: %s", e)
+
+
 async def _process_entry(entry_bytes: bytes) -> None:
     from api.core import get_db_session, reset_db_connections
     from api.routes.webhook import (
@@ -121,6 +156,7 @@ async def _process_entry(entry_bytes: bytes) -> None:
                     response = await _dispatch_seasonal_submission(norm_type, processed_data, db_session)
                     db_session.commit()
                     _mark_submission_outcome(processed_data, norm_type, response)
+                    _push_plugin_notice(db_session, processed_data, response)
                     continue
                 elif world_type != "main":
                     continue
@@ -164,6 +200,7 @@ async def _process_entry(entry_bytes: bytes) -> None:
 
                 db_session.commit()
                 _mark_submission_outcome(processed_data, norm_type, response)
+                _push_plugin_notice(db_session, processed_data, response)
             except Exception:
                 db_session.rollback()
                 raise
