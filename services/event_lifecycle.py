@@ -337,6 +337,25 @@ def final_standings(session, event_id: int, limit: int = 5) -> list:
     return [{"team_id": t.id, "name": t.name, "score": int(t.score or 0)} for t in rows]
 
 
+def _pot_advertise_line(session, event, team_count, *, ended=False, winner=None):
+    """The one-line prize-pot advertisement for a lifecycle announcement, or
+    None when the pot is off / not advertised (so the token-drop rule drops the
+    line). web52a."""
+    try:
+        from web_api.event_prizes import pot_line, pot_summary
+        from services.event_notifications import format_gp
+
+        pot = pot_summary(session, event, team_count=team_count)
+        if not (pot["enabled"] and pot["advertise"]):
+            return None
+        return pot_line(
+            format_gp(pot["total"]), pot["distribution"], pot["top_n"],
+            ended=ended, winner=winner,
+        )
+    except Exception:
+        return None
+
+
 def _representative_player_id(session, event_id: int) -> Optional[int]:
     """A player id to hang lifecycle notification_queue rows on
     (``notification_queue.player_id`` is NOT NULL; the event sender never uses
@@ -587,15 +606,20 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
         session.query(EventTeam).filter(EventTeam.event_id == event.id).count()
     )
     ev_dict = event_engine._event_to_dict(event)
+    started_extra = {
+        "description": event.description or None,
+        "starts_at": _ts(event.starts_at),
+        "ends_at": _ts(event.ends_at),
+        "team_count": team_count,
+    }
+    # Prize pot (web52a): advertise the opening pot on the start announcement.
+    _pot_line = _pot_advertise_line(session, event, team_count)
+    if _pot_line:
+        started_extra["pot_started_line"] = _pot_line
     event_engine._enqueue_notification(
         session, "event_started", ev_dict,
         _representative_player_id(session, event.id),
-        {
-            "description": event.description or None,
-            "starts_at": _ts(event.starts_at),
-            "ends_at": _ts(event.ends_at),
-            "team_count": team_count,
-        },
+        started_extra,
     )
     _audit(session, actor_user_id, event, "event.activate", before, {
         "status": "active",
@@ -643,10 +667,16 @@ def end_event(session, event, *, actor_user_id=None,
 
     standings = final_standings(session, event.id, limit=5)
     ev_dict = event_engine._event_to_dict(event)
+    ended_extra = {"standings": standings, "ended_at": _ts(event.ended_at)}
+    # Prize pot (web52a): "🏆 {winner} takes the {pot} pot" (or a split line).
+    winner_name = standings[0].get("name") if standings else None
+    _pot_line = _pot_advertise_line(session, event, None, ended=True, winner=winner_name)
+    if _pot_line:
+        ended_extra["pot_result_line"] = _pot_line
     event_engine._enqueue_notification(
         session, "event_ended", ev_dict,
         _representative_player_id(session, event.id),
-        {"standings": standings, "ended_at": _ts(event.ended_at)},
+        ended_extra,
     )
     _audit(session, actor_user_id, event, "event.end", before, {
         "status": "past",

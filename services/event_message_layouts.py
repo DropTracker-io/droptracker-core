@@ -123,6 +123,9 @@ DEFAULT_LAYOUTS = {
                 "type": "text",
                 "content": "**Started** {starts_at}\n**Ends** {ends_at}\n**Teams** `{team_count}`",
             },
+            # Prize pot (web52a): a single pre-composed line, so the whole block
+            # drops via the token-drop rule when the pot is off / not advertised.
+            {"type": "text", "content": "{pot_started_line}"},
             {"type": "separator"},
             {
                 "type": "buttons",
@@ -139,6 +142,8 @@ DEFAULT_LAYOUTS = {
             {"type": "text", "content": "## \U0001F3C6 {event_name} has ended!"},
             {"type": "separator"},
             {"type": "standings", "limit": 5, "title": "**Final standings**"},
+            # Prize pot result (web52a) — "🏆 {winner} takes the {pot} pot" etc.
+            {"type": "text", "content": "{pot_result_line}"},
             {"type": "separator"},
             {
                 "type": "buttons",
@@ -258,6 +263,21 @@ DEFAULT_LAYOUTS = {
             },
         ],
     },
+    "event_pot": {
+        "accent_color": "#FFD700",
+        "blocks": [
+            {"type": "text", "content": "## \U0001F4B0 {event_name} — Prize Pot"},
+            {"type": "text", "content": "{pot_announce_line}"},
+            {"type": "text", "content": "{pot_contributors_block}"},
+            {
+                "type": "buttons",
+                "buttons": [
+                    {"label": "\U0001F4F2 Open the event", "launch": True},
+                    {"label": "Buy in / donate", "url": "{event_url}"},
+                ],
+            },
+        ],
+    },
     "event_signup_prompt": {
         "accent_color": "#5865F2",
         "blocks": [
@@ -279,6 +299,9 @@ DEFAULT_LAYOUTS = {
             {"type": "standings", "limit": 10, "title": "**Standings**"},
             {"type": "separator"},
             {"type": "text", "content": "{tasks_summary}"},
+            # Prize pot (web52a): one pre-composed token, so the block drops
+            # cleanly when the pot is off / not advertised. Read fresh each sweep.
+            {"type": "text", "content": "{pot_line}"},
             {"type": "text", "content": "-# Updated {updated_ts} • refreshes automatically"},
             {
                 "type": "buttons",
@@ -622,6 +645,13 @@ def notification_context(notification_type: str, data: dict) -> dict:
     put("proof_url", data.get("proof_url"))
     put("review_url", data.get("review_url"))
     put("reason", data.get("reason"))
+    # Prize pot (web52a): pre-composed single-token lines for the lifecycle
+    # announcements, set by the sender only when the pot is advertised — so the
+    # {pot_started_line}/{pot_result_line} blocks drop out otherwise.
+    put("pot_started_line", data.get("pot_started_line"))
+    put("pot_result_line", data.get("pot_result_line"))
+    put("pot_announce_line", data.get("pot_announce_line"))
+    put("pot_contributors_block", data.get("pot_contributors_block"))
     # Task-tile icon (the item/NPC/skill the task targets) for completion /
     # progress messages; completion_icon prefers a real proof screenshot and
     # falls back to the task icon. Both resolved by the sender.
@@ -678,14 +708,17 @@ def notification_context(notification_type: str, data: dict) -> dict:
         # Raw comma-joined list, kept for custom layouts that reference it.
         put("contributors_line", ", ".join(_contrib(c) for c in contributors))
     # Presentation for the default layout: one person collapses to a single
-    # "Completed by" line; several get a "Contributors" header with the list on
-    # its own line below (so there's always a line break after the label).
+    # "Completed by" line; several get a "Contributors" header with one
+    # contributor per line (ranked by contribution, medals for the top three)
+    # so the breakdown reads like a table instead of a run-on comma list.
     if len(contributors) == 1:
         put("completed_by_line",
             f"**Completed by** `{contributors[0].get('player_name') or 'Unknown'}`")
     elif len(contributors) > 1:
-        put("contributors_block",
-            "**Contributors**\n" + ", ".join(_contrib(c) for c in contributors))
+        medals = ("\U0001F947", "\U0001F948", "\U0001F949")  # 🥇 🥈 🥉
+        rows = [f"{medals[i] if i < len(medals) else '•'} {_contrib(c)}"
+                for i, c in enumerate(contributors)]
+        put("contributors_block", "**Contributors**\n" + "\n".join(rows))
     elif data.get("player_name"):
         put("completed_by_line", f"**Completed by** `{data['player_name']}`")
 

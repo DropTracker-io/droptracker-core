@@ -299,7 +299,7 @@ class TestDefaultLayouts:
             "event_task_progress", "event_line",
             "event_blackout", "event_lead_change", "event_pending",
             "event_activation_failed", "event_signup_prompt", "event_board",
-            "event_board_turn",
+            "event_board_turn", "event_pot",
         }
         assert set(ml.DEFAULT_LAYOUTS) == expected
 
@@ -494,9 +494,11 @@ class TestTaskIconLayouts:
                 {"player_name": "Al", "quantity": 1, "points_share": 4},
             ],
         })
-        # Header, then the list on the next line (a line break after "Contributors").
+        # Header, then one contributor per line (ranked, medals for the top 3).
         assert context["contributors_block"] == (
-            "**Contributors**\n**Zed** `2` (+6 pts), **Al** `1` (+4 pts)")
+            "**Contributors**\n"
+            "\U0001F947 **Zed** `2` (+6 pts)\n"
+            "\U0001F948 **Al** `1` (+4 pts)")
         assert "completed_by_line" not in context
 
     def test_completion_bingo_shows_board_standing(self):

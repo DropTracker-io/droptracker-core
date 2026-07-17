@@ -34,6 +34,9 @@ KIND_FOR_TYPE = {
     # Interactive "Sign up" prompt (posted on demand by an admin) — carries a
     # button the notification sender attaches (services/notification_service).
     "event_signup_prompt": "announcements",
+    # Prize pot (web52a): the manual "advertise the pot now" post (admin action,
+    # no toggle — always sends). Renders a plain text pot line via its layout.
+    "event_pot": "announcements",
     # Partial task progress (opt-in via message_config.task_progress —
     # 'milestones' or 'all'; default off).
     "event_task_progress": "completions",
@@ -57,6 +60,7 @@ _COLORS = {
     "event_pending": 0xE67E22,
     "event_activation_failed": 0xED4245,
     "event_signup_prompt": 0x5865F2,  # Discord blurple — a call to action
+    "event_pot": 0xFFD700,  # gold — the prize pot
     "event_task_progress": 0x3498DB,  # informational blue — progress, not victory
     "event_board_turn": 0xF1C40F,  # dice gold — movement on the board
 }
@@ -477,7 +481,12 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
                 if share:
                     line += f" +{share:g} pts"
                 return line
-            field("Contributors", ", ".join(_contrib(c) for c in contributors), inline=False)
+            # One contributor per line, ranked by contribution (medals for the
+            # top three) so the breakdown reads like a table, not a comma list.
+            medals = ("\U0001F947", "\U0001F948", "\U0001F949")  # 🥇 🥈 🥉
+            rows = [f"{medals[i] if i < len(medals) else '•'} {_contrib(c)}"
+                    for i, c in enumerate(contributors)]
+            field("Contributors", "\n".join(rows), inline=False)
         else:
             solo = (contributors[0].get("player_name") if contributors else None) or player
             if solo:

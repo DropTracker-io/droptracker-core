@@ -23,7 +23,7 @@ ALL_TYPES = (
     "event_started", "event_ended", "event_completion",
     "event_line", "event_blackout", "event_lead_change", "event_pending",
     "event_activation_failed", "event_signup_prompt", "event_task_progress",
-    "event_board_turn",
+    "event_board_turn", "event_pot",
 )
 
 
@@ -41,6 +41,7 @@ class TestKindMapping:
             "event_pending": "admin",
             "event_activation_failed": "admin",
             "event_signup_prompt": "announcements",
+            "event_pot": "announcements",
             "event_task_progress": "completions",
             "event_board_turn": "completions",
         }
@@ -208,7 +209,8 @@ class TestEmbedSpecs:
         })
         fields = {f["name"]: f["value"] for f in spec["fields"]}
         assert "Completed by" not in fields
-        assert fields["Contributors"] == "`Alpha One` (3), `Beta Two` (12.00M)"
+        assert fields["Contributors"] == (
+            "\U0001F947 `Alpha One` (3)\n\U0001F948 `Beta Two` (12.00M)")
 
     def test_completion_solo_contributor_collapses(self):
         # A single contributor is shown as "Completed by", not "Contributors".

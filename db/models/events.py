@@ -208,6 +208,9 @@ EVENT_MESSAGE_TOGGLE_KEYS = (
 EVENT_MESSAGE_LAYOUT_TYPES = EVENT_MESSAGE_TOGGLE_KEYS + (
     "event_signup_prompt",
     "event_board",
+    # Prize pot (web52a) — the manual "advertise the pot now" post. Admin
+    # action, no verbosity toggle (absent from EVENT_MESSAGE_TOGGLE_KEYS).
+    "event_pot",
 )
 
 # Team-leadership roles a roster row may carry (web_event_team_members.role;
@@ -221,6 +224,22 @@ EVENT_TEAM_ROLES = ("leader", "co_leader")
 # - "election" — team members vote for a teammate; a strict plurality wins.
 #                Admin assignment still works as an override either way.
 EVENT_LEADER_SELECTION_MODES = ("admin", "election")
+
+# Prize-pot ledger (web52a): per-participant GP buy-ins + donations, summed into
+# an advertised pot. The tool tracks/advertises GP only — payouts are traded
+# in-game by the clan (like split-tracking); nothing here moves real GP or
+# EventTeam.score.
+# web_event_buyins.kind — a stake to enter vs. an extra/standalone gift (a
+# donation may come from a non-participant, e.g. a leader sweetening the pot).
+EVENT_BUYIN_KINDS = ("buyin", "donation")
+# web_event_buyins.status — only "paid" rows count toward the pot. The admin
+# "tick" flips pledged->paid; donations default paid; "void" = soft-removed
+# (kept for audit, so re-enabling restores the pot).
+EVENT_BUYIN_STATUSES = ("pledged", "paid", "void")
+# web_events.prize_config "distribution" — who is *advertised* as taking the
+# pot (advisory display + optional Discord line, NOT an automated transfer):
+# first place only, the top N teams, or a custom percentage split by place.
+EVENT_PRIZE_DISTRIBUTIONS = ("first_only", "top_n", "custom_split")
 
 
 class Event(Base):
@@ -286,6 +305,13 @@ class Event(Base):
     board_size = Column(Integer, nullable=False, default=5)  # EVENT_BOARD_SIZES
     bonus_line_points = Column(Integer, nullable=False, default=0)
     bonus_blackout_points = Column(Integer, nullable=False, default=0)
+    # Prize pot (web52a): master toggle + JSON knobs. buyins_enabled is a cheap
+    # scalar every "show the pot?" check reads (and gates the confirm-on-disable
+    # guard); prize_config merges through web_api.event_prizes
+    # .effective_prize_config() (default_buyin, distribution, advertise,
+    # show_contributors, allow_leader_mark). NULL = all defaults. See EventBuyin.
+    buyins_enabled = Column(Boolean, nullable=False, default=False, server_default="0")
+    prize_config = Column(Text, nullable=True)
     activated_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
@@ -503,6 +529,49 @@ class EventCompletion(Base):
     note = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class EventBuyin(Base):
+    """Prize-pot ledger (web52a): one row per participant buy-in or donation.
+
+    A **buy-in** is a participant's stake to enter (``kind='buyin'``) with an
+    expected ``amount`` and a paid tick (``status`` pledged->paid); a
+    **donation** is extra/standalone GP (``kind='donation'``, defaults
+    ``paid``, may come from a non-participant). The advertised prize pot is
+    ``SUM(amount) WHERE status='paid'``.
+
+    A deliberate sibling of :class:`EventCompletion`, NOT part of it: pot GP
+    must never move ``EventTeam.score`` (the competitive source of truth), so
+    it stays entirely off the ``apply_completion`` fold path. ``amount`` is
+    BigInteger — a large pot exceeds signed-INT 2.147B (the same lesson as
+    ``EventCompletion.quantity``, P1-7)."""
+
+    __tablename__ = "web_event_buyins"
+    __table_args__ = (
+        Index("idx_web_evt_buyin_event", "event_id", "status"),
+        Index("idx_web_evt_buyin_team", "event_id", "team_id"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    # The team this contribution credits; NULL = pot-wide / unassigned donation.
+    team_id = Column(Integer, ForeignKey("web_event_teams.id"), nullable=True)
+    # The RSN who paid/donated; NULL for a free-text external donor (a non-roster
+    # sponsor topping up the pot).
+    player_id = Column(Integer, ForeignKey("players.player_id"), nullable=True)
+    # Display snapshot, or the free-text donor name when there is no player_id.
+    rsn = Column(String(24), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)  # discord user, if resolvable
+    kind = Column(String(16), nullable=False, default="buyin")  # EVENT_BUYIN_KINDS
+    amount = Column(BigInteger, nullable=False, default=0)  # GP — BigInteger (see docstring)
+    status = Column(String(16), nullable=False, default="pledged")  # EVENT_BUYIN_STATUSES
+    note = Column(String(255), nullable=True)
+    # Admin/leader who last recorded or ticked this row.
+    acted_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+    paid_at = Column(DateTime, nullable=True)  # stamped when status -> paid
 
 
 class EventProgress(Base):

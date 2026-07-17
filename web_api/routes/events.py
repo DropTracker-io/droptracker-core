@@ -74,7 +74,7 @@ from db import (
     Player,
     user_group_association,
 )
-from web_api.common import abort_problem, db_session, private_no_store, with_cache_headers
+from web_api.common import abort_problem, db_session, money, private_no_store, with_cache_headers
 from web_api.task_tiles import build_tile, spec_names, tile_spec
 from web_api.deps import (
     assert_group_admin,
@@ -86,6 +86,7 @@ from web_api.deps import (
     load_user,
     manageable_guild_ids,
     optional_user_id,
+    render_token_authorized,
     resolve_group_role,
 )
 
@@ -383,6 +384,25 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             "member_count": len(members),
             "members": members,
         })
+
+    # Prize pot (web52a): the headline figure + per-team paid totals, folded
+    # into the detail read so the standings banner updates live on the existing
+    # event-detail SSE refresh (no second fetch). The full contributor list is
+    # the on-demand GET /events/{id}/pot. Function-local import mirrors
+    # ``_leadership`` (the unit-test conftest stubs services; this stays in
+    # web_api). Short-circuits cheaply when the pot is disabled.
+    from web_api.event_prizes import pot_summary
+
+    pot = pot_summary(s, ev, team_count=len(teams_rows))
+    for t in teams:
+        t["pot_total"] = money(pot["per_team"].get(t["id"], 0))
+    base["prize_pot"] = {
+        "enabled": pot["enabled"],
+        "total": money(pot["total"]),
+        "advertise": pot["advertise"],
+        "distribution": pot["distribution"],
+        "top_n": pot["top_n"],
+    }
 
     # Viewer block (Task 16): which of the signed-in user's players are on
     # this event, and on which team.
@@ -720,13 +740,17 @@ async def event_by_channel(channel_id: str):
 @events_bp.get("/events/<int:event_id>")
 async def get_event(event_id: int):
     viewer_id = optional_user_id()
+    # Internal board-image render bypass: the chrome-less /board-image page reads
+    # any event (incl. private/draft) with the shared token so the Discord
+    # screenshot never regresses vs. the old direct-DB path.
+    render_bypass = render_token_authorized()
 
     def _load():
         with db_session() as s:
             ev = s.query(Event).filter(Event.id == event_id).first()
             if not ev:
                 return None
-            if _is_restricted(ev):
+            if _is_restricted(ev) and not render_bypass:
                 # Drafts (pre-publication) and private events: event admins +
                 # members of participating groups only. Everyone else 404s.
                 if not _can_view_restricted(s, viewer_id, ev):
@@ -1362,6 +1386,60 @@ async def update_event(event_id: int):
                                  EventTeamMember.role == "co_leader")
                          .update({EventTeamMember.role: None},
                                  synchronize_session=False))
+            if "buyins_enabled" in body or "prize_config" in body:
+                # Prize pot (web52a): master toggle + JSON knobs, merged like
+                # the leadership config above.
+                from db import EventBuyin
+                from web_api.event_prizes import (
+                    effective_prize_config,
+                    normalize_prize_input,
+                )
+
+                if "buyins_enabled" in body:
+                    enabled = bool(body.get("buyins_enabled"))
+                    if bool(getattr(ev, "buyins_enabled", False)) and not enabled:
+                        # Confirm-on-disable: disabling hides the pot but keeps
+                        # the records (re-enabling restores it), so any recorded
+                        # buy-in/donation gates the toggle behind an explicit
+                        # confirm_disable_buyins flag — the DELETE confirm_name
+                        # idiom applied to the pot toggle. The 409 carries
+                        # {count, total} so the client can render the confirm.
+                        stats = (
+                            s.query(
+                                func.count(EventBuyin.id),
+                                func.coalesce(func.sum(EventBuyin.amount), 0),
+                            )
+                            .filter(EventBuyin.event_id == ev.id,
+                                    EventBuyin.status != "void")
+                            .first()
+                        )
+                        count = int(stats[0] or 0)
+                        total = int(stats[1] or 0)
+                        if count > 0 and not bool(body.get("confirm_disable_buyins")):
+                            abort_problem(
+                                409, "Buy-ins present",
+                                f"This event has {count} recorded buy-ins/donations "
+                                f"totalling {total:,} GP — disabling hides the pot but "
+                                "keeps the records. Re-send with confirm_disable_buyins "
+                                "to continue.",
+                                type_="buyins-present",
+                                extra={"count": count, "total": total},
+                            )
+                    ev.buyins_enabled = enabled
+                if "prize_config" in body:
+                    norm = normalize_prize_input(body.get("prize_config") or {})
+                    if norm is None:
+                        abort_problem(
+                            422, "Invalid prize config",
+                            "prize_config must be {default_buyin?: int>=0, "
+                            "distribution?: 'first_only'|'top_n'|'custom_split', "
+                            "top_n?: int>=1, splits?: [positive ints summing to 100], "
+                            "advertise?: bool, show_contributors?: bool, "
+                            "allow_leader_mark?: bool}.",
+                        )
+                    merged = effective_prize_config(getattr(ev, "prize_config", None))
+                    merged.update(norm)
+                    ev.prize_config = json.dumps(merged)
             # Bingo bonus config (Task 20, PRD D7): 0 disables a bonus. The
             # board itself is replaced via PUT /events/{id}/bingo.
             for key in ("bonus_line_points", "bonus_blackout_points"):
@@ -1417,6 +1495,7 @@ def _cascade_delete_event(s, ev: Event) -> None:
         EventBoardEffect,
         EventBoardPosition,
         EventBoardTile,
+        EventBuyin,
         EventChannel,
         EventCoinLedger,
         EventGuild,
@@ -1449,10 +1528,11 @@ def _cascade_delete_event(s, ev: Event) -> None:
     _wipe(EventBoardConfig, EventBoardConfig.event_id == event_id)
     _wipe(EventBoardTile, EventBoardTile.event_id == event_id)
 
-    # Points / progress / completion ledger.
+    # Points / progress / completion ledger + prize-pot ledger (web52a).
     _wipe(EventPlayerPoints, EventPlayerPoints.event_id == event_id)
     _wipe(EventProgress, EventProgress.event_id == event_id)
     _wipe(EventCompletion, EventCompletion.event_id == event_id)
+    _wipe(EventBuyin, EventBuyin.event_id == event_id)
 
     # Bingo completions hang off cells (no event_id), so scope them by cell.
     if cell_ids:

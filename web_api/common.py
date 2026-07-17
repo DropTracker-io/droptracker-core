@@ -342,10 +342,22 @@ def canonical_slug_for(s, kind: str, entity_id: int, name: Optional[str]) -> Opt
 # --------------------------------------------------------------------------- #
 # RFC-7807 problem responses (FRONTEND_PLAN.md §6.5 error envelope).
 # --------------------------------------------------------------------------- #
-def problem(status: int, title: str, detail: Optional[str] = None):
-    body = {"type": "about:blank", "title": title, "status": status}
+def problem(
+    status: int,
+    title: str,
+    detail: Optional[str] = None,
+    *,
+    type_: str = "about:blank",
+    extra: Optional[dict] = None,
+):
+    body = {"type": type_, "title": title, "status": status}
     if detail:
         body["detail"] = detail
+    if extra:
+        # Machine-readable members (RFC-7807 allows extension members) — e.g.
+        # the buy-in confirm-on-disable 409 carries {count, total} so the
+        # frontend can render the confirm dialog without a second read.
+        body.update(extra)
     resp = jsonify(body)
     resp.status_code = status
     resp.headers["content-type"] = "application/problem+json"
@@ -360,18 +372,35 @@ class ProblemException(Exception):
     without threading a response object back up the call stack.
     """
 
-    def __init__(self, status: int, title: str, detail: Optional[str] = None):
+    def __init__(
+        self,
+        status: int,
+        title: str,
+        detail: Optional[str] = None,
+        *,
+        type_: str = "about:blank",
+        extra: Optional[dict] = None,
+    ):
         super().__init__(title)
         self.status = status
         self.title = title
         self.detail = detail
+        self.type_ = type_
+        self.extra = extra
 
     def to_response(self):
-        return problem(self.status, self.title, self.detail)
+        return problem(self.status, self.title, self.detail, type_=self.type_, extra=self.extra)
 
 
-def abort_problem(status: int, title: str, detail: Optional[str] = None):
-    raise ProblemException(status, title, detail)
+def abort_problem(
+    status: int,
+    title: str,
+    detail: Optional[str] = None,
+    *,
+    type_: str = "about:blank",
+    extra: Optional[dict] = None,
+):
+    raise ProblemException(status, title, detail, type_=type_, extra=extra)
 
 
 # --------------------------------------------------------------------------- #

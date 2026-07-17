@@ -158,6 +158,19 @@ def _board_context(session, event, config: dict) -> dict:
         summary = _tasks_summary(session, event)
         if summary:
             context["tasks_summary"] = summary
+
+    # Prize pot (web52a): a running headline on the board, gated on
+    # buyins_enabled AND prize_config.advertise. Read fresh here so a config or
+    # buy-in change surfaces on the next 2-min sweep with no pub/sub. The line
+    # drops via the token-drop rule when pot_line is unset.
+    from web_api.event_prizes import pot_line, pot_summary
+    from services.event_notifications import format_gp
+
+    pot = pot_summary(session, event, team_count=team_count)
+    if pot["enabled"] and pot["advertise"]:
+        context["pot_line"] = pot_line(
+            format_gp(pot["total"]), pot["distribution"], pot["top_n"],
+        )
     return context
 
 
@@ -188,6 +201,12 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
         from services.event_notifications import event_footer_line
 
         wrote = False
+        # The live board image (bingo grid / board-game overlay), rendered once
+        # per sweep and reused across every leaderboard row. Computed lazily so
+        # an all-muted event never renders; None (no visual board, or any
+        # failure) just omits the image and keeps the text board. board_image_png
+        # is itself Redis-cached on a state hash, so an unchanged board is cheap.
+        board_img, board_img_computed = None, False
         for row, config in _board_rows(session, event):
             if not config["leaderboard"].get("live", True):
                 continue
@@ -224,7 +243,28 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
                     context.get("ends_at_unix"),
                 ),
             )
-            components = build_components(spec)
+            if not board_img_computed:
+                board_img_computed = True
+                try:
+                    from services.event_board_image import board_image_png
+                    board_img = await board_image_png(session, event)
+                except Exception:
+                    board_img = None  # never let board art block the standings
+            # Attach the board as a FILE and reference it as attachment:// —
+            # Components-V2 media galleries render attachments reliably where
+            # external URLs spin forever. The bytes come from the Redis cache,
+            # so re-attaching on every edit costs no re-render; attachments=[]
+            # on edit drops the previous upload so files don't accumulate.
+            board_file, image_ref = None, None
+            if board_img:
+                import io
+                import interactions
+
+                filename = f"event-board-{event.id}.png"
+                board_file = interactions.File(io.BytesIO(board_img),
+                                               file_name=filename)
+                image_ref = f"attachment://{filename}"
+            components = build_components(spec, image_ref=image_ref)
 
             message = None
             if row.message_id:
@@ -233,9 +273,19 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
                 except Exception:
                     message = None  # deleted / inaccessible — repost below
             if message is not None:
-                await message.edit(components=components)
+                if board_file is not None:
+                    await message.edit(components=components,
+                                       files=board_file, attachments=[])
+                else:
+                    # Render failed/none: also clear any stale attachment so a
+                    # gallery-less body doesn't ride with an orphaned file.
+                    await message.edit(components=components, attachments=[])
             else:
-                message = await channel.send(components=components)
+                if board_file is not None:
+                    message = await channel.send(components=components,
+                                                 files=board_file)
+                else:
+                    message = await channel.send(components=components)
                 row.message_id = str(message.id)
             row.message_updated_at = datetime.now()
             session.commit()
