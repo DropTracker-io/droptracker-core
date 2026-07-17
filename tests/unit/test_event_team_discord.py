@@ -94,9 +94,9 @@ class TestTeamFlags:
         assert toggles["event_completion"] is True
         assert toggles["event_board_roll_prompt"] is True  # team-channel default ON
 
-    def test_task_progress_defaults_all(self):
+    def test_task_progress_static_default_milestones(self):
         config = etd.effective_team_discord_config(None)
-        assert etd.team_task_progress_mode(config, 1) == "all"
+        assert etd.team_task_progress_mode(config, 1) == "milestones"
         config = etd.effective_team_discord_config(
             '{"teams": {"1": {"task_progress": "off"}}}')
         assert etd.team_task_progress_mode(config, 1) == "off"
@@ -130,3 +130,76 @@ class TestTeamScopedTypes:
         # Every type load_team_destinations can route must have a default.
         for t in etd.TEAM_SCOPED_TYPES + ("event_lead_change",):
             assert t in etd.DEFAULT_TEAM_MESSAGE_TOGGLES
+
+
+# ── inherited defaults (event verbosity is the team baseline) ────────────────
+
+class TestInheritedDefaults:
+    def _event_cfg(self, **over):
+        base = {
+            "toggles": {
+                "event_completion": True,
+                "event_task_progress": True,
+                "event_line": False,
+                "event_blackout": True,
+                "event_lead_change": False,
+                "event_board_turn": True,
+                # The group left roll prompts at their main-channel default
+                # (off) — teams must NOT inherit that (team-channel-native).
+                "event_board_roll_prompt": False,
+            },
+            "task_progress": "milestones",
+        }
+        base.update(over)
+        return base
+
+    def test_group_verbosity_becomes_team_baseline(self):
+        inherited = etd.inherited_team_defaults(self._event_cfg())
+        assert inherited["toggles"]["event_line"] is False
+        assert inherited["toggles"]["event_lead_change"] is False
+        assert inherited["toggles"]["event_completion"] is True
+        assert inherited["task_progress"] == "milestones"
+
+    def test_roll_prompt_never_inherited(self):
+        inherited = etd.inherited_team_defaults(self._event_cfg())
+        assert inherited["toggles"]["event_board_roll_prompt"] is True
+
+    def test_none_config_falls_back_to_static_defaults(self):
+        inherited = etd.inherited_team_defaults(None)
+        assert inherited["toggles"] == etd.DEFAULT_TEAM_MESSAGE_TOGGLES
+        assert inherited["task_progress"] == etd.DEFAULT_TEAM_TASK_PROGRESS
+
+    def test_explicit_team_choice_beats_inheritance(self):
+        inherited = etd.inherited_team_defaults(self._event_cfg())
+        config = etd.effective_team_discord_config(
+            '{"teams": {"5": {"toggles": {"event_line": true},'
+            ' "task_progress": "all"}}}')
+        toggles = etd.team_message_toggles(config, 5, inherited=inherited)
+        assert toggles["event_line"] is True          # explicit override
+        assert toggles["event_lead_change"] is False  # still inherited
+        assert etd.team_task_progress_mode(config, 5, inherited=inherited) == "all"
+        # A different team keeps the inherited baseline untouched.
+        assert etd.team_task_progress_mode(config, 6, inherited=inherited) == "milestones"
+
+
+# ── per-type @TeamRole pings ─────────────────────────────────────────────────
+
+class TestTeamMessagePings:
+    def test_defaults_quiet_for_noisy_types(self):
+        config = etd.effective_team_discord_config(None)
+        pings = etd.team_message_pings(config, 1)
+        assert pings["event_task_progress"] is False
+        assert pings["event_board_turn"] is False
+        assert pings["event_completion"] is True
+        assert pings["event_board_roll_prompt"] is True
+
+    def test_explicit_ping_choice_wins_and_unknown_keys_dropped(self):
+        config = etd.effective_team_discord_config(
+            '{"teams": {"5": {"pings": {"event_task_progress": true,'
+            ' "bogus_type": true}}}}')
+        pings = etd.team_message_pings(config, 5)
+        assert pings["event_task_progress"] is True
+        assert "bogus_type" not in pings
+
+    def test_every_toggle_type_has_a_ping_default(self):
+        assert set(etd.DEFAULT_TEAM_MESSAGE_PINGS) == set(etd.DEFAULT_TEAM_MESSAGE_TOGGLES)

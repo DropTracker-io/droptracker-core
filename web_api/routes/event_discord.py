@@ -748,19 +748,38 @@ def _team_discord_scope_row(s, ev: Event, scope_group_id):
     return part, (str(part.discord_guild_id) if part.discord_guild_id else None)
 
 
+def _explicit_team_keys(config: dict, team_id) -> dict:
+    """Which notification knobs a team has explicitly set (vs inherited):
+    ``{"toggles": [keys], "pings": [keys], "task_progress": bool}``."""
+    entry = (config.get("teams") or {}).get(str(team_id)) or {}
+    return {
+        "toggles": sorted((entry.get("toggles") or {}).keys()),
+        "pings": sorted((entry.get("pings") or {}).keys()),
+        "task_progress": "task_progress" in entry,
+    }
+
+
 def _team_discord_payload(s, ev: Event, scope_group_id=None) -> dict:
     """One team-discord config scope + live per-team provisioning state."""
+    from services.event_notifications import effective_message_config
     from services.event_team_discord import (
-        DEFAULT_TEAM_MESSAGE_TOGGLES,
-        DEFAULT_TEAM_TASK_PROGRESS,
+        DEFAULT_TEAM_MESSAGE_PINGS,
         effective_team_discord_config,
+        inherited_team_defaults,
         team_flags,
+        team_message_pings,
         team_message_toggles,
         team_task_progress_mode,
     )
 
     owner, guild_id = _team_discord_scope_row(s, ev, scope_group_id)
     config = effective_team_discord_config(getattr(owner, "team_discord_config", None))
+    # Team defaults inherit the scope's configured verbosity (a clan's own
+    # override in a per-group scope, else the event's) until a team explicitly
+    # changes a knob.
+    scope_messages = (getattr(owner, "message_config", None)
+                      or getattr(ev, "message_config", None))
+    inherited = inherited_team_defaults(effective_message_config(scope_messages))
 
     teams_q = s.query(EventTeam).filter(EventTeam.event_id == ev.id)
     if scope_group_id is not None:
@@ -784,8 +803,13 @@ def _team_discord_payload(s, ev: Event, scope_group_id=None) -> dict:
             "name": t.name,
             "role_enabled": flags["role"],
             "channel_enabled": flags["channel"],
-            "toggles": team_message_toggles(config, t.id),
-            "task_progress": team_task_progress_mode(config, t.id),
+            "toggles": team_message_toggles(config, t.id, inherited=inherited),
+            "pings": team_message_pings(config, t.id),
+            "task_progress": team_task_progress_mode(config, t.id,
+                                                     inherited=inherited),
+            # Which knobs this team has explicitly set (everything else is
+            # inherited — the UI labels those "event default").
+            "explicit": _explicit_team_keys(config, t.id),
             "role_id": str(row.role_id) if row and row.role_id else None,
             "channel_id": str(row.channel_id) if row and row.channel_id else None,
             "channel_kind": row.channel_kind if row else None,
@@ -802,8 +826,10 @@ def _team_discord_payload(s, ev: Event, scope_group_id=None) -> dict:
         "retention": config["retention"],
         "captain_config": config["captain_config"],
         "teams": team_states,
-        "default_toggles": dict(DEFAULT_TEAM_MESSAGE_TOGGLES),
-        "default_task_progress": DEFAULT_TEAM_TASK_PROGRESS,
+        # The scope's inherited baseline — what an untouched team gets.
+        "default_toggles": dict(inherited["toggles"]),
+        "default_pings": dict(DEFAULT_TEAM_MESSAGE_PINGS),
+        "default_task_progress": inherited["task_progress"],
     }
 
 
@@ -986,14 +1012,119 @@ def _is_team_captain(s, user_id: int, event_id: int, team_id: int) -> bool:
     return row is not None
 
 
+def _team_notification_owners(s, ev: Event, team) -> list:
+    """Config owners covering this team: the event itself, plus (clan-vs-clan)
+    the clan's own participant row when it runs its own team-discord scope.
+    Captain edits write to every owner so the choice applies wherever the
+    team's channel lives; reads prefer the most specific (last)."""
+    owners = [_team_discord_scope_row(s, ev, None)[0]]
+    if team.group_id:
+        part = (s.query(EventGroup)
+                .filter(EventGroup.event_id == ev.id,
+                        EventGroup.group_id == team.group_id,
+                        EventGroup.team_discord_config.isnot(None))
+                .first())
+        if part is not None:
+            owners.append(part)
+    return owners
+
+
+def _assert_team_notifications_access(s, user_id: int, ev: Event, team,
+                                      owners: list) -> None:
+    """Event admins always; otherwise the team's captain, when leadership is
+    on and no covering scope disabled captain_config."""
+    from services.event_team_discord import effective_team_discord_config
+
+    try:
+        _assert_event_admin(s, user_id, ev)
+        return
+    except Exception:
+        pass
+    from services.event_leadership import effective_leadership
+
+    leadership = effective_leadership(getattr(ev, "leadership_config", None))
+    if not leadership.get("enabled"):
+        abort_problem(403, "Admins only",
+                      "Team leadership is disabled on this event — "
+                      "only event admins can tune team notifications.")
+    captain_allowed = any(
+        effective_team_discord_config(
+            getattr(o, "team_discord_config", None)
+        ).get("captain_config", True)
+        for o in owners
+    )
+    if not captain_allowed:
+        abort_problem(403, "Admins only",
+                      "Captain configuration is disabled for this event.")
+    if not _is_team_captain(s, user_id, ev.id, team.id):
+        abort_problem(403, "Not your team",
+                      "Only this team's leader or co-leader can tune "
+                      "its notifications.")
+
+
+def _team_notifications_state(ev: Event, team_id: int, owners: list) -> dict:
+    """Effective notification state for one team's channel — inherited scope
+    baseline overlaid with the team's explicit choices, plus which knobs are
+    explicit (the UI labels the rest "event default")."""
+    from services.event_notifications import effective_message_config
+    from services.event_team_discord import (
+        effective_team_discord_config,
+        inherited_team_defaults,
+        team_message_pings,
+        team_message_toggles,
+        team_task_progress_mode,
+    )
+
+    owner = owners[-1]  # most specific scope (the clan's own, when present)
+    config = effective_team_discord_config(
+        getattr(owner, "team_discord_config", None))
+    scope_messages = (getattr(owner, "message_config", None)
+                      or getattr(ev, "message_config", None))
+    inherited = inherited_team_defaults(effective_message_config(scope_messages))
+    return {
+        "team_id": team_id,
+        "toggles": team_message_toggles(config, team_id, inherited=inherited),
+        "pings": team_message_pings(config, team_id),
+        "task_progress": team_task_progress_mode(config, team_id,
+                                                 inherited=inherited),
+        "explicit": _explicit_team_keys(config, team_id),
+        "inherited": inherited,
+    }
+
+
+@event_discord_bp.get("/events/<int:event_id>/teams/<int:team_id>/notifications")
+async def get_team_notifications(event_id: int, team_id: int):
+    """Current effective notification state for one team's channel — what the
+    captain modal seeds from (same access rules as the PUT)."""
+    user_id = current_user_id()
+
+    def _load():
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            team = (s.query(EventTeam)
+                    .filter(EventTeam.id == team_id, EventTeam.event_id == event_id)
+                    .first())
+            if not team:
+                abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+            owners = _team_notification_owners(s, ev, team)
+            _assert_team_notifications_access(s, user_id, ev, team, owners)
+            return _team_notifications_state(ev, team_id, owners)
+
+    payload = await asyncio.to_thread(_load)
+    return private_no_store(jsonify(payload))
+
+
 @event_discord_bp.put("/events/<int:event_id>/teams/<int:team_id>/notifications")
 async def put_team_notifications(event_id: int, team_id: int):
     """A team captain (leadership feature, when the scope allows
-    ``captain_config``) — or any event admin — tunes which notifications the
-    team's auto-created Discord channel receives: ``{toggles: {type: bool},
-    task_progress: 'off'|'milestones'|'all'}``. Saved into every config scope
-    that covers the team, so the choice applies wherever the channel lives."""
+    ``captain_config``) — or any event admin — tunes the team's channel:
+    ``{toggles: {type: bool}, pings: {type: bool}, task_progress:
+    'off'|'milestones'|'all'}``. ``toggles`` = post it at all; ``pings`` =
+    mention @TeamRole when it posts. Saved into every config scope that covers
+    the team, so the choice applies wherever the channel lives. Untouched
+    knobs keep inheriting the event's configured verbosity."""
     from services.event_team_discord import (
+        DEFAULT_TEAM_MESSAGE_PINGS,
         DEFAULT_TEAM_MESSAGE_TOGGLES,
         effective_team_discord_config,
     )
@@ -1012,6 +1143,18 @@ async def put_team_notifications(event_id: int, team_id: int):
                               f"{sorted(DEFAULT_TEAM_MESSAGE_TOGGLES)}.")
             if not isinstance(val, bool):
                 abort_problem(422, "Invalid toggle", f"toggles.{key} must be a boolean.")
+    pings = body.get("pings")
+    if pings is not None:
+        if not isinstance(pings, dict):
+            abort_problem(422, "Invalid pings", "'pings' must be an object.")
+        for key, val in pings.items():
+            if key not in DEFAULT_TEAM_MESSAGE_PINGS:
+                abort_problem(422, "Unknown ping toggle",
+                              f"'{key}' is not one of "
+                              f"{sorted(DEFAULT_TEAM_MESSAGE_PINGS)}.")
+            if not isinstance(val, bool):
+                abort_problem(422, "Invalid ping toggle",
+                              f"pings.{key} must be a boolean.")
     task_progress = body.get("task_progress")
     if task_progress is not None and task_progress not in EVENT_TASK_PROGRESS_MODES:
         abort_problem(422, "Invalid task progress mode",
@@ -1026,43 +1169,8 @@ async def put_team_notifications(event_id: int, team_id: int):
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
 
-            # Admins always may; captains only when leadership is enabled and
-            # no covering scope has switched captain_config off.
-            is_admin = True
-            try:
-                _assert_event_admin(s, user_id, ev)
-            except Exception:
-                is_admin = False
-            owners = [_team_discord_scope_row(s, ev, None)[0]]
-            if team.group_id:
-                part = (s.query(EventGroup)
-                        .filter(EventGroup.event_id == ev.id,
-                                EventGroup.group_id == team.group_id,
-                                EventGroup.team_discord_config.isnot(None))
-                        .first())
-                if part is not None:
-                    owners.append(part)
-            if not is_admin:
-                from services.event_leadership import effective_leadership
-
-                leadership = effective_leadership(getattr(ev, "leadership_config", None))
-                if not leadership.get("enabled"):
-                    abort_problem(403, "Admins only",
-                                  "Team leadership is disabled on this event — "
-                                  "only event admins can tune team notifications.")
-                captain_allowed = any(
-                    effective_team_discord_config(
-                        getattr(o, "team_discord_config", None)
-                    ).get("captain_config", True)
-                    for o in owners
-                )
-                if not captain_allowed:
-                    abort_problem(403, "Admins only",
-                                  "Captain configuration is disabled for this event.")
-                if not _is_team_captain(s, user_id, event_id, team_id):
-                    abort_problem(403, "Not your team",
-                                  "Only this team's leader or co-leader can tune "
-                                  "its notifications.")
+            owners = _team_notification_owners(s, ev, team)
+            _assert_team_notifications_access(s, user_id, ev, team, owners)
 
             for owner in owners:
                 current = effective_team_discord_config(
@@ -1073,6 +1181,10 @@ async def put_team_notifications(event_id: int, team_id: int):
                     merged_toggles = dict(entry.get("toggles") or {})
                     merged_toggles.update(toggles)
                     entry["toggles"] = merged_toggles
+                if pings is not None:
+                    merged_pings = dict(entry.get("pings") or {})
+                    merged_pings.update(pings)
+                    entry["pings"] = merged_pings
                 if task_progress is not None:
                     entry["task_progress"] = task_progress
                 current["teams"] = teams_cfg
@@ -1084,22 +1196,11 @@ async def put_team_notifications(event_id: int, team_id: int):
                 action="event.team_discord.notifications",
                 target=f"web_events.{event_id}.team.{team_id}",
                 before=None,
-                after=json.dumps({"toggles": toggles, "task_progress": task_progress}),
+                after=json.dumps({"toggles": toggles, "pings": pings,
+                                  "task_progress": task_progress}),
             ))
             s.commit()
-
-            from services.event_team_discord import (
-                team_message_toggles,
-                team_task_progress_mode,
-            )
-
-            config = effective_team_discord_config(
-                getattr(owners[0], "team_discord_config", None))
-            return {
-                "team_id": team_id,
-                "toggles": team_message_toggles(config, team_id),
-                "task_progress": team_task_progress_mode(config, team_id),
-            }
+            return _team_notifications_state(ev, team_id, owners)
 
     payload = await asyncio.to_thread(_apply)
     return private_no_store(jsonify(payload))

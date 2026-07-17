@@ -49,9 +49,16 @@ END_GRACE = timedelta(hours=48)
 # Message types a team channel can receive, with per-team defaults (editable
 # by the team captain when leadership is enabled + captain_config is on, else
 # by event admins). All team-scoped except event_lead_change, which posts to
-# EVERY team channel (each team cares who leads). event_board_roll_prompt is
-# team-channel-first: its main-channel default is off
-# (services/event_notifications.DEFAULT_MESSAGE_TOGGLES).
+# EVERY team channel (each team cares who leads).
+#
+# These static defaults are only the LAST fallback: a team's effective
+# toggles/verbosity INHERIT from the scope's configured event verbosity
+# (web_events.message_config / the clan's web48a override) until the team
+# explicitly changes a knob — see :func:`inherited_team_defaults`. The one
+# exception is event_board_roll_prompt: it is team-channel-native (its
+# event-level toggle exists only as an opt-in mirror for main channels, and
+# defaults OFF there), so inheriting it would silence roll prompts everywhere
+# — it stays ON for team channels unless the team turns it off.
 DEFAULT_TEAM_MESSAGE_TOGGLES = {
     "event_completion": True,
     "event_task_progress": True,
@@ -62,10 +69,29 @@ DEFAULT_TEAM_MESSAGE_TOGGLES = {
     "event_board_roll_prompt": True,
 }
 
-# Progress verbosity for team channels ('off'|'milestones'|'all'). Default
-# 'all': a team channel only ever carries its own team's progress, so the
-# noise argument that keeps the event-level default at 'off' doesn't apply.
-DEFAULT_TEAM_TASK_PROGRESS = "all"
+# Types the roll-prompt exception applies to (never inherited from the event
+# config; see above).
+_NEVER_INHERITED_TOGGLES = ("event_board_roll_prompt",)
+
+# Which team-channel messages mention @TeamRole. Send-toggles say "post it";
+# these say "ping for it". Defaults keep pings for the actionable/celebratory
+# moments and stay quiet for the high-frequency ones (progress ticks, dice
+# results) — the anti-spam half of the captain-notifications feature.
+DEFAULT_TEAM_MESSAGE_PINGS = {
+    "event_completion": True,
+    "event_task_progress": False,
+    "event_line": True,
+    "event_blackout": True,
+    "event_lead_change": True,
+    "event_board_turn": False,
+    "event_board_roll_prompt": True,
+}
+
+# Progress verbosity for team channels ('off'|'milestones'|'all') when the
+# scope has NO event verbosity to inherit (never in practice — the effective
+# event config always carries a mode). 'milestones' keeps a fast-KC task to
+# three posts.
+DEFAULT_TEAM_TASK_PROGRESS = "milestones"
 
 DEFAULT_TEAM_DISCORD_CONFIG = {
     "channels_enabled": False,
@@ -79,8 +105,8 @@ DEFAULT_TEAM_DISCORD_CONFIG = {
     # notification toggles; off = event admins only.
     "captain_config": True,
     # Per-team overrides: {"<team_id>": {"role": bool, "channel": bool,
-    # "toggles": {...}, "task_progress": mode}}. Absent team = both on +
-    # default toggles.
+    # "toggles": {...}, "pings": {...}, "task_progress": mode}}. Absent team =
+    # both on + inherited defaults.
     "teams": {},
 }
 
@@ -129,6 +155,12 @@ def effective_team_discord_config(raw_json) -> dict:
                     k: bool(v) for k, v in toggles.items()
                     if k in DEFAULT_TEAM_MESSAGE_TOGGLES and isinstance(v, bool)
                 }
+            pings = entry.get("pings")
+            if isinstance(pings, dict):
+                clean["pings"] = {
+                    k: bool(v) for k, v in pings.items()
+                    if k in DEFAULT_TEAM_MESSAGE_PINGS and isinstance(v, bool)
+                }
             if entry.get("task_progress") in ("off", "milestones", "all"):
                 clean["task_progress"] = entry["task_progress"]
             if clean:
@@ -151,17 +183,53 @@ def team_flags(config: dict, team_id) -> dict:
     }
 
 
-def team_message_toggles(config: dict, team_id) -> dict:
-    """Effective notification toggles for one team's channel."""
-    entry = (config.get("teams") or {}).get(str(team_id)) or {}
+def inherited_team_defaults(message_config) -> dict:
+    """Team-channel notification baseline derived from a scope's effective
+    event verbosity (``services.event_notifications.effective_message_config``
+    output): ``{"toggles": {...}, "task_progress": mode}``.
+
+    The group's configured verbosity IS the team default — a type the group
+    muted stays muted in team channels, and the group's task-progress mode
+    carries over — until the team explicitly overrides a knob. Types in
+    :data:`_NEVER_INHERITED_TOGGLES` keep their team-native default."""
     toggles = dict(DEFAULT_TEAM_MESSAGE_TOGGLES)
+    mode = DEFAULT_TEAM_TASK_PROGRESS
+    if isinstance(message_config, dict):
+        event_toggles = message_config.get("toggles") or {}
+        for key in toggles:
+            if key in _NEVER_INHERITED_TOGGLES:
+                continue
+            if isinstance(event_toggles.get(key), bool):
+                toggles[key] = event_toggles[key]
+        if message_config.get("task_progress") in ("off", "milestones", "all"):
+            mode = message_config["task_progress"]
+    return {"toggles": toggles, "task_progress": mode}
+
+
+def team_message_toggles(config: dict, team_id, inherited=None) -> dict:
+    """Effective notification toggles for one team's channel: the inherited
+    scope baseline (:func:`inherited_team_defaults`; static defaults when
+    None) overlaid with the team's explicit choices."""
+    entry = (config.get("teams") or {}).get(str(team_id)) or {}
+    toggles = dict((inherited or {}).get("toggles") or DEFAULT_TEAM_MESSAGE_TOGGLES)
     toggles.update(entry.get("toggles") or {})
     return toggles
 
 
-def team_task_progress_mode(config: dict, team_id) -> str:
+def team_message_pings(config: dict, team_id) -> dict:
+    """Which of this team's channel messages mention @TeamRole. Pings are a
+    team-channel-only concept (the event config has nothing to inherit), so
+    the baseline is always :data:`DEFAULT_TEAM_MESSAGE_PINGS`."""
     entry = (config.get("teams") or {}).get(str(team_id)) or {}
-    return entry.get("task_progress", DEFAULT_TEAM_TASK_PROGRESS)
+    pings = dict(DEFAULT_TEAM_MESSAGE_PINGS)
+    pings.update(entry.get("pings") or {})
+    return pings
+
+
+def team_task_progress_mode(config: dict, team_id, inherited=None) -> str:
+    entry = (config.get("teams") or {}).get(str(team_id)) or {}
+    fallback = (inherited or {}).get("task_progress") or DEFAULT_TEAM_TASK_PROGRESS
+    return entry.get("task_progress", fallback)
 
 
 def channel_name_for_team(name: str) -> str:
@@ -198,6 +266,8 @@ def team_discord_scopes(session, event) -> list:
             "group_id": None,
             "guild_id": str(event.discord_guild_id),
             "config": config,
+            # Raw event verbosity — the inheritance source for team defaults.
+            "message_config": getattr(event, "message_config", None),
         })
     if (getattr(event, "mode", None) or "standard") == "clan_vs_clan":
         from db.models import EventGroup
@@ -215,6 +285,10 @@ def team_discord_scopes(session, event) -> list:
                     "group_id": g.group_id,
                     "guild_id": str(g.discord_guild_id),
                     "config": gconfig,
+                    # The clan's own verbosity override, else the event's
+                    # (web48a semantics).
+                    "message_config": (g.message_config
+                                       or getattr(event, "message_config", None)),
                 })
     return scopes
 
@@ -366,6 +440,17 @@ TEAM_SCOPED_TYPES = (
 )
 
 
+def scope_inherited_defaults(scope: dict) -> dict:
+    """:func:`inherited_team_defaults` for one :func:`team_discord_scopes`
+    entry (lazy service import — unit-test stub convention)."""
+    try:
+        from services.event_notifications import effective_message_config
+    except ImportError:  # unit-test stubs
+        return inherited_team_defaults(None)
+    return inherited_team_defaults(
+        effective_message_config(scope.get("message_config")))
+
+
 def team_channel_interest(session, event_id: int, notification_type: str,
                           team_id=None) -> bool:
     """Enqueue-side gate helper: could ANY team channel want this message?
@@ -404,10 +489,13 @@ def team_progress_interest(session, event_id: int, team_id) -> str:
     order = {"off": 0, "milestones": 1, "all": 2}
     best = "off"
     for scope in team_discord_scopes(session, event):
-        if not team_message_toggles(scope["config"], team_id).get(
+        inherited = scope_inherited_defaults(scope)
+        if not team_message_toggles(scope["config"], team_id,
+                                    inherited=inherited).get(
                 "event_task_progress", True):
             continue
-        mode = team_task_progress_mode(scope["config"], team_id)
+        mode = team_task_progress_mode(scope["config"], team_id,
+                                       inherited=inherited)
         if order[mode] > order[best]:
             best = mode
     return best
@@ -440,25 +528,32 @@ def load_team_destinations(session, event, notification_type: str,
     if not rows:
         return []
 
-    configs = {
-        scope["group_id"]: scope["config"]
+    scopes_by_group = {
+        scope["group_id"]: scope
         for scope in team_discord_scopes(session, event)
     }
     out = []
     for row in rows:
-        config = configs.get(row.group_id)
-        if config is None:
+        scope = scopes_by_group.get(row.group_id)
+        if scope is None:
             continue  # scope disabled since the row was created
-        toggles = team_message_toggles(config, row.team_id)
+        config = scope["config"]
+        inherited = scope_inherited_defaults(scope)
+        toggles = team_message_toggles(config, row.team_id, inherited=inherited)
         if not toggles.get(notification_type, True):
             continue
         if notification_type == "event_task_progress":
-            mode = team_task_progress_mode(config, row.team_id)
+            mode = team_task_progress_mode(config, row.team_id,
+                                           inherited=inherited)
             if mode == "off" or (mode == "milestones" and not milestone):
                 continue
+        pings = team_message_pings(config, row.team_id)
         out.append({
             "channel_id": str(row.channel_id),
             "role_id": str(row.role_id) if row.role_id else None,
             "team_id": row.team_id,
+            # Whether this message should mention @TeamRole (per-type,
+            # captain-tunable; send-toggle already passed above).
+            "ping": bool(pings.get(notification_type, True)),
         })
     return out

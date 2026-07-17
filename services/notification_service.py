@@ -1722,7 +1722,11 @@ class NotificationService:
                 destinations.append({
                     "channel_id": td["channel_id"],
                     "ping": False,
-                    "team_role": td.get("role_id"),
+                    # Mention @TeamRole only when the team's per-type ping
+                    # config says so (captain-tunable; default: no pings for
+                    # progress ticks / dice results).
+                    "team_role": (td.get("role_id")
+                                  if td.get("ping", True) else None),
                 })
             skip_reason = skip_reason if not destinations else None
             if skip_reason:
