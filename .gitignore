@@ -90,3 +90,6 @@ utils/osrs_api/semantic.py
 # local quarantine of pre-cleanup files (safe to delete)
 .trash-*/
 docs/EVENT_BUYINS_POT_PLAN.md
+
+# agent DM notifier (local tooling, keep out of the public repo)
+scripts/notify_dm.py

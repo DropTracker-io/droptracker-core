@@ -100,7 +100,25 @@ def _bingo_signature(session, event) -> Optional[dict]:
         "tasks": sorted((t.id, t.label, t.type, t.target, t.target_value)
                         for t in tasks),
         "teams": [(t.id, t.name, t.color) for t in teams],
+        # Pending-review overlay (web53a): amber tiles change the picture too,
+        # so pending (task, team) pairs must bust the cache.
+        "pending": _pending_pairs(session, event),
     }
+
+
+def _pending_pairs(session, event) -> list:
+    from db.models import EventCompletion
+
+    return sorted(
+        (tid, team_id)
+        for tid, team_id in session.query(
+            EventCompletion.task_id, EventCompletion.team_id)
+        .filter(EventCompletion.event_id == event.id,
+                EventCompletion.status == "pending")
+        .distinct()
+        .all()
+        if team_id is not None
+    )
 
 
 def _board_game_signature(session, event) -> Optional[dict]:
