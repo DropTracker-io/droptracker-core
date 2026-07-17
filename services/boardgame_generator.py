@@ -241,16 +241,28 @@ def _rasterize_sync(svg: str, width: int, height: int, *, scale: float) -> bytes
     with tempfile.TemporaryDirectory() as tmp:
         src = os.path.join(tmp, "board.svg")
         out = os.path.join(tmp, "board.png")
+        profile = os.path.join(tmp, "profile")
         with open(src, "w", encoding="utf-8") as fh:
             fh.write(svg)
         cmd = [
             _CHROMIUM, "--headless", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage",
+            # Keep the whole profile inside the temp dir so chromium never
+            # touches the caller's real HOME (see the env override below).
+            f"--user-data-dir={profile}",
             "--hide-scrollbars", "--default-background-color=00000000",
             f"--force-device-scale-factor={scale:g}",
             f"--window-size={w},{h}",
             f"--screenshot={out}", src,
         ]
-        proc = subprocess.run(cmd, capture_output=True, timeout=60)
+        # Headless chromium needs a WRITABLE $HOME for its profile + crashpad
+        # database; without it the crashpad handler aborts with "--database is
+        # required" and no screenshot is produced. The core bot runs under
+        # systemd ProtectHome=true, so the inherited HOME is inaccessible —
+        # point HOME at the private temp dir (writable under PrivateTmp) so the
+        # rasterizer works from any service, not just the webapi's user.
+        env = {**os.environ, "HOME": tmp}
+        proc = subprocess.run(cmd, capture_output=True, timeout=60, env=env)
         if not os.path.exists(out):
             raise RuntimeError(
                 "chromium failed to rasterize the board: "

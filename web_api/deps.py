@@ -75,6 +75,23 @@ def optional_user_id() -> Optional[int]:
     return int(claims["sub"]) if claims else None
 
 
+def render_token_authorized() -> bool:
+    """True when the request carries the internal board-image render token
+    (``X-Board-Image-Token`` == ``BOARD_IMAGE_TOKEN``).
+
+    Lets the chrome-less ``/board-image/{id}`` render page (which the Discord bot
+    screenshots) read ANY event — including private/draft — bypassing the viewer
+    visibility gate, without a user session. Read-only; only the event-detail and
+    board reads honor it. Disabled (always False) when the env token is unset."""
+    import hmac
+
+    expected = os.environ.get("BOARD_IMAGE_TOKEN", "")
+    if not expected:
+        return False
+    provided = request.headers.get("X-Board-Image-Token", "")
+    return bool(provided) and hmac.compare_digest(provided, expected)
+
+
 # --------------------------------------------------------------------------- #
 # Discord guild (MANAGE_GUILD) cache — populated at login (Task 02).
 # --------------------------------------------------------------------------- #

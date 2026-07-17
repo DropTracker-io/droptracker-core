@@ -1759,6 +1759,30 @@ class NotificationService:
                         .limit(limit).all())
                 standings = [{"name": t.name, "score": int(t.score or 0)} for t in rows]
 
+            # Board image on the lifecycle announcements (start/end): the whole
+            # bingo grid or board-game board, so players see it without leaving
+            # Discord. Attached as a FILE and referenced attachment:// —
+            # Components-V2 media galleries render attachments reliably where
+            # external URLs spin forever. Written to a temp file (not BytesIO)
+            # so the per-destination sends can each reopen it; the existing
+            # finally-cleanup removes it. None — a standard task-list event, or
+            # any render failure — just omits it (fail-open).
+            if notification_type in ('event_started', 'event_ended') and image_ref is None:
+                try:
+                    from services.event_board_image import board_image_png
+                    board_png = await board_image_png(db_session, event)
+                    if board_png:
+                        import tempfile
+                        fd, board_path = tempfile.mkstemp(
+                            prefix=f"event-board-{event.id}-", suffix=".png")
+                        with os.fdopen(fd, "wb") as fh:
+                            fh.write(board_png)
+                        image_attachment = interactions.File(board_path)
+                        image_temp_path = board_path
+                        image_ref = f"attachment://{os.path.basename(board_path)}"
+                except Exception:
+                    pass  # board art must never block the announcement
+
             if notification_type == 'event_pending' and not data.get('review_url'):
                 # Deep-link to the Review tab (the group event manager page);
                 # global events review from the public event page.

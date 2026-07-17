@@ -49,6 +49,7 @@ from web_api.deps import (
     json_body,
     load_user,
     optional_user_id,
+    render_token_authorized,
 )
 from web_api.routes.event_admin import _assert_board_editable
 from web_api.routes.events import (
@@ -651,11 +652,14 @@ def _write_board(s, ev, user_id: int, tiles_in: list, body: dict,
 @event_board_bp.get("/events/<int:event_id>/board")
 async def get_board(event_id: int):
     viewer_id = optional_user_id()
+    # Internal board-image render bypass (see events.get_event / deps).
+    render_bypass = render_token_authorized()
 
     def _read():
         with db_session() as s:
             ev = _load_board_event(s, event_id, for_write=False)
-            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+            if (_is_restricted(ev) and not render_bypass
+                    and not _can_view_restricted(s, viewer_id, ev)):
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             return _board_payload(s, ev)
 
@@ -975,92 +979,42 @@ async def generate_board(event_id: int):
 
 @event_board_bp.get("/events/<int:event_id>/board.png")
 async def board_png(event_id: int):
-    """Flatten the board's background art to a PNG (Discord attachment /
-    download). Rasterizes the stored SVG background via headless chromium;
-    a raster background (admin-uploaded PNG/JPEG/WebP) is proxied as-is.
-    ?scale=0.25..2 controls output resolution (default 1)."""
+    """The full live event board as a PNG (download / preview) — a 1:1 headless
+    screenshot of the real web board (``/board-image/{id}``): the bingo grid with
+    per-team completion state, or the board-game track with tiles, pieces and
+    standings. 404 for standard task-list events (no visual board). ``?scale``
+    (1..3) controls the device pixel ratio (default 2)."""
     viewer_id = optional_user_id()
     raw_scale = (request.args.get("scale") or "").strip()
     try:
-        scale = float(raw_scale) if raw_scale else 1.0
+        scale = float(raw_scale) if raw_scale else 2.0
     except ValueError:
-        scale = 1.0
-    scale = max(0.25, min(2.0, scale))
+        scale = 2.0
+    scale = max(1.0, min(3.0, scale))
 
-    def _read_bg():
-        with db_session() as s:
-            ev = _load_board_event(s, event_id, for_write=False)
-            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
-                abort_problem(404, "Event not found", f"No event {event_id}.")
-            config = (s.query(EventBoardConfig)
-                      .filter(EventBoardConfig.event_id == ev.id).first())
-            if not config or not config.background_url:
-                abort_problem(404, "No board art",
-                              "This board has no background image to render.")
-            # Current live standings (lean — just what the banner draws), spliced
-            # into the SVG at rasterization time. Defensive: no positions/teams
-            # yields an empty list and the stored SVG rasterizes unchanged.
-            teams = {t.id: t for t in s.query(EventTeam)
-                     .filter(EventTeam.event_id == ev.id).all()}
-            positions = (s.query(EventBoardPosition)
-                         .filter(EventBoardPosition.event_id == ev.id).all())
-            standings = []
-            for p in positions:
-                team = teams.get(p.team_id)
-                standings.append({
-                    "team_name": team.name if team else f"Team {p.team_id}",
-                    "color": team.color if team else None,
-                    "tile_idx": int(p.tile_idx or 0),
-                    "status": p.status or "active",
-                })
-            return (config.background_url, config.bg_width, config.bg_height,
-                    standings)
-
-    background_url, bg_width, bg_height, standings = await asyncio.to_thread(_read_bg)
-
-    import httpx
-
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(background_url)
-            resp.raise_for_status()
-            raw = resp.content
-            content_type = resp.headers.get("content-type", "").lower()
-    except Exception as e:
-        abort_problem(502, "Couldn't fetch board art", str(e))
-
-    is_svg = "svg" in content_type or raw[:256].lstrip().startswith((b"<svg", b"<?xml"))
-    if not is_svg:
-        # Already a raster — hand it straight back (no chromium needed).
-        return Response(raw, content_type=content_type or "image/png", headers={
-            "Content-Disposition": f'inline; filename="board-{event_id}.png"',
-        })
-
-    from services.boardgame_generator import (
-        rasterize_svg_to_png,
-        standings_scroll_svg,
+    from services.event_board_image import (
+        _collect_render_inputs,
+        screenshot_event_board,
     )
 
-    svg = raw.decode("utf-8")
-    # Inject the live standings banner at export time (never baked into the
-    # stored generate-time SVG). Guard hard: any failure falls back to the
-    # unmodified board so the PNG always renders.
-    if standings:
-        try:
-            fragment = standings_scroll_svg(
-                standings, int(bg_width or 1600), int(bg_height or 900))
-            close = svg.rfind("</svg>")
-            if fragment and close != -1:
-                svg = svg[:close] + fragment + svg[close:]
-        except Exception:
-            pass
+    def _gate():
+        # Viewer-visibility gate + visual-board check off the event loop; the
+        # screenshot itself needs only the event id (no session).
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                abort_problem(404, "Event not found", f"No event {event_id}.")
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                abort_problem(404, "Event not found", f"No event {event_id}.")
+            if _collect_render_inputs(s, ev) is None:
+                abort_problem(404, "No visual board",
+                              "This event has no bingo or board-game board to render.")
 
-    try:
-        png = await rasterize_svg_to_png(
-            svg, int(bg_width or 1600), int(bg_height or 900),
-            scale=scale)
-    except Exception as e:
-        abort_problem(502, "Board render failed", str(e))
+    await asyncio.to_thread(_gate)
+    png = await screenshot_event_board(event_id, scale=scale)
+    if png is None:
+        abort_problem(502, "Board render failed",
+                      "The board image could not be generated.")
     return Response(png, content_type="image/png", headers={
         "Content-Disposition": f'inline; filename="board-{event_id}.png"',
     })
