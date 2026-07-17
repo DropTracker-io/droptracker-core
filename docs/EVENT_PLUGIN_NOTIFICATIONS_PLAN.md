@@ -1,7 +1,12 @@
 # Event → Plugin In-Game Notifications & Event HUD — Design Plan
 
-Status: P0 DEPLOYED 2026-07-17 (disc 045beb9 + web55a migration; api/events/webhook-consumer restarted).
-       Client direction expanded same day (HUD + Events tab); P0.5/P1/P2 below not started.
+Status: ALL PHASES BUILT 2026-07-17.
+       P0 DEPLOYED (disc 045beb9 + web55a; api/events/webhook-consumer restarted).
+       P0.5 DEPLOYED (disc f3f7365: /event_state, focus stamp, board.png, icons).
+       P1 BUILT (disc 4c5bbc0 webapi routes DEPLOYED; web f582015 UI awaits next
+       site deploy via `systemctl restart droptracker-node`).
+       P2 BUILT on plugin branch `event-notifications` (e8993f8, off remove-lwgjl)
+       — hub release rides the next plugin pin bump.
 Scope: disc (intake API + event engine + notification fan-out), web (per-type preference UI),
        plugin (polling, rendering, config, HUD overlay, Events side-panel tab)
 
@@ -223,14 +228,17 @@ in-process cache if volume ever warrants (not needed at current scale).
 
 - **P0 — DONE, DEPLOYED 2026-07-17**: inbox, fan-out, `GET /notifications`,
   `active_event` flag, `submission_notice` restore, prefs table.
-- **P0.5 disc**: `GET /event_state` (+ focus stamp at apply time, standings
-  composition, board image route with roster auth), `icon_item_id` in
-  completion/progress fan-out payloads.
-- **P1 web**: per-type notification prefs UI on player settings + API route
-  (reads/writes `player_notification_prefs`).
-- **P2 plugin**: config (master, display mode, progress toggle, HUD detail),
-  poll loop + batch grouping + seen-id LRU, type→renderer registry, toast
-  overlay, HUD `OverlayPanel`, Events side-panel tab (standings + pinned
-  picker + board pop-out). Ships on the next hub pin bump.
+- **P0.5 — DONE, DEPLOYED 2026-07-17**: `GET /event_state` (+ focus stamp at
+  apply time, standings composition, board image route with roster auth),
+  `icon_item_id` in completion/progress fan-out payloads, uniform team_name
+  envelope enrichment.
+- **P1 — DONE 2026-07-17**: webapi routes deployed; the settings-page UI is
+  committed (web f582015) and goes live on the next site deploy.
+- **P2 — DONE 2026-07-17** on plugin branch `event-notifications` (e8993f8):
+  config (master, display mode, progress toggle, HUD detail), poll loop +
+  batch grouping + seen-id LRU, type→renderer registry, toast overlay, HUD
+  `OverlayPanel`, Events side-panel tab (standings + pinned picker + board
+  pop-out via the lootboard dialog machinery), wire-format tests pinning the
+  live JSON. Ships on the next hub pin bump.
 - **P3**: defaults tuning after first live event; SSE upgrade if ~10s polling
   feels slow; NPC-activity-based focus inference refinement.
