@@ -563,6 +563,18 @@ def fan_out_event_notification(session, notification_type: str, event: dict,
                 return 0
             disabled = _players_with_type_disabled(
                 read_session, notification_type, player_ids)
+            # Uniform enrichment: every envelope that names a team carries its
+            # name, so client renderers never need a lookup (lead changes and
+            # completions only carry team_id upstream).
+            if (data or {}).get("team_id") is not None and not (data or {}).get("team_name"):
+                from db.models.events import EventTeam
+
+                team_row = (read_session.query(EventTeam.name)
+                            .filter(EventTeam.id == int(data["team_id"]))
+                            .first())
+                if team_row:
+                    data = dict(data)
+                    data["team_name"] = team_row[0]
         finally:
             try:
                 read_session.rollback()
