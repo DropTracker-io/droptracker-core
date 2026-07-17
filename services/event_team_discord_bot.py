@@ -250,54 +250,64 @@ async def _sync_members(bot, guild, row, desired: set) -> bool:
         except Exception:
             thread = None
 
-    async def _quiet(coro) -> bool:
-        """Run one member operation; absent-from-guild (404) and
-        permission-refused (403) are EXPECTED for rosters that include people
-        outside the server — swallow them without a log so they never reach
-        Sentry. Anything else (network, 5xx) just means 'not applied'."""
+    async def _attempt(coro) -> str:
+        """One member operation -> 'ok' | 'absent' | 'error'. Absent-from-guild
+        (404) and permission-refused (403) are EXPECTED for rosters that
+        include people outside the server — swallowed without a log so they
+        never reach Sentry, and marked handled. Anything ELSE (network blip,
+        5xx, gateway trouble) is transient: the id must NOT be marked handled,
+        or a member silently loses their role forever — exactly what happened
+        when the first sync ran during the 2026-07-17 pool outage."""
         from interactions.client import errors as ix_errors
 
         try:
             await coro
-            return True
+            return "ok"
         except (ix_errors.NotFound, ix_errors.Forbidden):
-            return False
+            return "absent"
         except Exception:
-            return False
+            return "error"
 
     guild_id = int(row.guild_id)
     role_id = int(row.role_id) if row.role_id else None
+    had_errors = False
 
     for uid in to_add:
         if ops >= MEMBER_OPS_LIMIT:
             break
-        applied = False
+        results = []
         if role_id is not None:
             # Direct PUT — no member fetch (a fetch-per-id storm across a big
             # roster once rate-limited the bot into a heartbeat drop).
-            applied = await _quiet(bot.http.add_guild_member_role(
-                guild_id, int(uid), role_id, reason=PROVISION_REASON)) or applied
+            results.append(await _attempt(bot.http.add_guild_member_role(
+                guild_id, int(uid), role_id, reason=PROVISION_REASON)))
         if thread is not None:
-            applied = await _quiet(thread.add_member(int(uid))) or applied
-        # Not in the guild (or both surfaces refused): count as handled so one
-        # unlinked/absent player can't wedge the diff forever. They get picked
-        # up on the next members_dirty pass after they join.
+            results.append(await _attempt(thread.add_member(int(uid))))
+        ops += 1  # every attempted id consumes rate budget, success or not
+        if "error" in results:
+            had_errors = True
+            continue  # transient — retry on the next members_dirty pass
+        # Applied, or definitively absent from the guild: handled either way
+        # (absent members get picked up on the next dirty pass after joining).
         state.add(uid)
-        ops += 1 if applied else 0
 
     for uid in to_remove:
         if ops >= MEMBER_OPS_LIMIT:
             break
+        results = []
         if role_id is not None:
-            await _quiet(bot.http.remove_guild_member_role(
-                guild_id, int(uid), role_id, reason=TEARDOWN_REASON))
+            results.append(await _attempt(bot.http.remove_guild_member_role(
+                guild_id, int(uid), role_id, reason=TEARDOWN_REASON)))
         if thread is not None:
-            await _quiet(thread.remove_member(int(uid)))
-        state.discard(uid)
+            results.append(await _attempt(thread.remove_member(int(uid))))
         ops += 1
+        if "error" in results:
+            had_errors = True
+            continue  # keep in state; retried next pass
+        state.discard(uid)
 
     row.member_state = json.dumps(sorted(state))
-    return state == desired
+    return state == desired and not had_errors
 
 
 async def reconcile_event_team_discord_once(bot, session_factory, redis_client) -> None:
