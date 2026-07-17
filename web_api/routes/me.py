@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from quart import Blueprint, jsonify
 
@@ -382,6 +383,139 @@ async def set_nitro_boost():
             set_designated_group(s, user_id, group_id)
             s.commit()
             return _nitro_payload(s, user_id)
+
+    payload = await asyncio.to_thread(_apply)
+    if payload is None:
+        abort_problem(401, "Not authenticated", "User not found for this session.")
+    return private_no_store(jsonify(payload))
+
+
+# --------------------------------------------------------------------------- #
+# In-game event notification prefs (docs/EVENT_PLUGIN_NOTIFICATIONS_PLAN.md).
+# Per-player (RSN) toggles enforced server-side at inbox-delivery time; the
+# plugin's own config gates rendering. event_task_progress is deliberately
+# absent — it is a client-side toggle only (never a website pref).
+# --------------------------------------------------------------------------- #
+_EVENT_PREF_LABELS = {
+    "event_completion": "Task completions",
+    "event_line": "Bingo line completions",
+    "event_blackout": "Bingo blackouts",
+    "event_board_turn": "Board rolls & moves",
+    "event_board_roll_prompt": "Roll-the-dice prompts",
+    "event_lead_change": "Lead changes",
+    "event_started": "Event started",
+    "event_ended": "Event ended",
+}
+
+
+def _event_pref_types() -> tuple:
+    # Single source of truth for the allowed keys; lazy so unit-test stubs of
+    # the services package never break module import.
+    from services.plugin_notifications import WEB_PREF_TYPES
+
+    return WEB_PREF_TYPES
+
+
+def _prefs_map(row, types) -> dict:
+    """Stored row -> {type: enabled}. Only explicit ``false`` disables; absent
+    row/keys mean enabled (matches delivery-time semantics)."""
+    disabled = set()
+    if row is not None:
+        try:
+            raw = json.loads(row.prefs or "{}")
+            disabled = {k for k, v in raw.items() if v is False}
+        except (TypeError, ValueError):
+            disabled = set()
+    return {t: (t not in disabled) for t in types}
+
+
+def _notification_prefs_payload(s, user: User) -> dict:
+    from db import PlayerNotificationPrefs
+
+    types = _event_pref_types()
+    players = (
+        s.query(Player)
+        .filter(Player.user_id == user.user_id)
+        .order_by(Player.player_name.asc())
+        .all()
+    )
+    rows = {}
+    if players:
+        ids = [p.player_id for p in players]
+        rows = {
+            r.player_id: r
+            for r in s.query(PlayerNotificationPrefs)
+            .filter(PlayerNotificationPrefs.player_id.in_(ids))
+            .all()
+        }
+    return {
+        "types": [{"key": t, "label": _EVENT_PREF_LABELS.get(t, t)} for t in types],
+        "players": [
+            {"id": p.player_id, "name": p.player_name,
+             "prefs": _prefs_map(rows.get(p.player_id), types)}
+            for p in players
+        ],
+    }
+
+
+@me_bp.get("/me/notification-prefs")
+async def get_notification_prefs():
+    user_id = current_user_id()
+
+    def _load():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            return _notification_prefs_payload(s, user) if user else None
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(401, "Not authenticated", "User not found for this session.")
+    return private_no_store(jsonify(payload))
+
+
+@me_bp.put("/me/players/<int:player_id>/notification-prefs")
+async def put_player_notification_prefs(player_id: int):
+    """Replace one linked account's in-game notification prefs. Body:
+    {"prefs": {type: bool, ...}} — unknown types 422; only ``false`` values
+    are persisted (absent = enabled, so future types default on)."""
+    user_id = current_user_id()
+    body = await json_body()
+    prefs = body.get("prefs")
+    if not isinstance(prefs, dict):
+        abort_problem(422, "Invalid value", "'prefs' must be an object of type -> boolean.")
+    types = _event_pref_types()
+    for key, value in prefs.items():
+        if key not in types:
+            abort_problem(422, "Unknown type", f"'{key}' is not a configurable notification type.")
+        if not isinstance(value, bool):
+            abort_problem(422, "Invalid value", f"'{key}' must be a boolean.")
+
+    def _apply():
+        from db import PlayerNotificationPrefs
+
+        with db_session() as s:
+            user = load_user(s, user_id)
+            if not user:
+                return None
+            player = (
+                s.query(Player)
+                .filter(Player.player_id == player_id, Player.user_id == user.user_id)
+                .first()
+            )
+            if not player:
+                abort_problem(404, "Player not found", "That account is not linked to you.")
+            disabled = {k: False for k, v in prefs.items() if v is False}
+            row = (
+                s.query(PlayerNotificationPrefs)
+                .filter(PlayerNotificationPrefs.player_id == player_id)
+                .first()
+            )
+            if row is None:
+                row = PlayerNotificationPrefs(player_id=player_id, prefs="{}")
+                s.add(row)
+            row.prefs = json.dumps(disabled)
+            s.commit()
+            return _notification_prefs_payload(s, user)
 
     payload = await asyncio.to_thread(_apply)
     if payload is None:
