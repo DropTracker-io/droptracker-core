@@ -42,6 +42,11 @@ KIND_FOR_TYPE = {
     "event_task_progress": "completions",
     # Board game (web44a): a team's dice roll + move + next task.
     "event_board_turn": "completions",
+    # Board game (web53a): "your task is done — roll the dice". Team-channel
+    # first: the main-channel toggle defaults OFF (a whole-event channel does
+    # not need every team's roll nag), the per-team channel default is ON
+    # (services/event_team_discord.DEFAULT_TEAM_MESSAGE_TOGGLES).
+    "event_board_roll_prompt": "completions",
 }
 
 EVENT_NOTIFICATION_TYPES = tuple(KIND_FOR_TYPE)
@@ -63,6 +68,7 @@ _COLORS = {
     "event_pot": 0xFFD700,  # gold — the prize pot
     "event_task_progress": 0x3498DB,  # informational blue — progress, not victory
     "event_board_turn": 0xF1C40F,  # dice gold — movement on the board
+    "event_board_roll_prompt": 0xF1C40F,  # same dice family — a nudge to roll
 }
 
 
@@ -90,6 +96,7 @@ DEFAULT_MESSAGE_TOGGLES = {
     "event_pending": True,
     "event_activation_failed": True,
     "event_board_turn": True,
+    "event_board_roll_prompt": False,  # team-channel first; opt-in for main channels
 }
 
 DEFAULT_MESSAGE_CONFIG = {
@@ -555,6 +562,18 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             field("Wallet", f"`{int(data['coin_balance'])} coins`")
         if data.get("turn") is not None:
             field("Turn", f"`#{int(data['turn'])}`")
+
+    elif notification_type == "event_board_roll_prompt":
+        spec["title"] = f"\U0001F3B2 {team or 'Your team'} can roll!"
+        spec["description"] = (
+            f"**{team or 'Your team'}** finished **{task_label or 'its task'}**"
+            f"{f' (thanks {player})' if player else ''} — time to roll the dice "
+            f"and move on."
+        )
+        if data.get("coins_awarded"):
+            field("Coins", f"`+{int(data['coins_awarded'])}`")
+        if data.get("coin_balance") is not None:
+            field("Wallet", f"`{int(data['coin_balance'])} coins`")
 
     elif notification_type == "event_line":
         spec["title"] = "\U0001F4CF Line bonus!"

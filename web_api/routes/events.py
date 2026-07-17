@@ -516,6 +516,81 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
         for p in s.query(EventProgress).filter(EventProgress.event_id == ev.id).all()
     ]
 
+    # Pending-review overlay (web53a): which (task, team) pairs hold pending
+    # ledger rows, and whether confirming them would finish the task — the
+    # board tints those tiles amber ("done, awaiting review") and marks
+    # partial pends. Zero extra work when nothing is pending.
+    pending_pairs = (
+        s.query(EventCompletion.task_id, EventCompletion.team_id)
+        .filter(EventCompletion.event_id == ev.id,
+                EventCompletion.status == "pending")
+        .distinct()
+        .all()
+    )
+    if pending_pairs:
+        try:
+            from services.event_engine import pending_projection
+        except ImportError:  # unit-test stubs
+            pending_pairs = []
+        task_dicts = {}
+        for t in tasks:
+            config = t.get("config")
+            if isinstance(config, str):
+                try:
+                    config = json.loads(config)
+                except (ValueError, TypeError):
+                    config = None
+            task_dicts[t["id"]] = {
+                "id": t["id"], "target_value": t["target_value"], "config": config,
+            }
+        overlay: dict[tuple[int, int], dict] = {}
+        for task_id, pteam_id in pending_pairs or ():
+            td = task_dicts.get(task_id)
+            if td is None or pteam_id is None:
+                continue
+            proj = pending_projection(s, td, pteam_id)
+            if proj:
+                overlay[(task_id, pteam_id)] = proj
+
+        seen_progress = set()
+        for entry in base["progress"]:
+            seen_progress.add((entry["task_id"], entry["team_id"]))
+            proj = overlay.get((entry["task_id"], entry["team_id"]))
+            if proj and not entry["completed"]:
+                entry["pending"] = proj["pending_count"]
+                entry["pending_complete"] = proj["pending_complete"]
+        for (task_id, pteam_id), proj in overlay.items():
+            if (task_id, pteam_id) in seen_progress:
+                continue
+            # Pending rows with no rollup row yet (nothing confirmed): still
+            # surface them so a fully-pending tile can tint.
+            base["progress"].append({
+                "task_id": task_id,
+                "team_id": pteam_id,
+                "progress": proj["applied"],
+                "completed": False,
+                "completed_at": None,
+                "pending": proj["pending_count"],
+                "pending_complete": proj["pending_complete"],
+            })
+        if bingo:
+            for cell in bingo["cells"]:
+                done_teams = {
+                    c.get("team_id") for c in cell.get("completions") or []
+                }
+                pending_teams, partial = [], []
+                for (task_id, pteam_id), proj in overlay.items():
+                    if task_id != cell.get("task_id") or pteam_id in done_teams:
+                        continue
+                    if proj["pending_complete"]:
+                        pending_teams.append(pteam_id)
+                    else:
+                        partial.append(pteam_id)
+                if pending_teams:
+                    cell["pending_teams"] = sorted(pending_teams)
+                if partial:
+                    cell["pending_partial_teams"] = sorted(partial)
+
     base["tasks"] = tasks
     base["teams"] = teams
     base["bingo"] = bingo
@@ -1036,6 +1111,15 @@ async def get_task_breakdown(event_id: int, task_id: int):
                 .order_by(EventCompletion.id.desc())
                 .all()
             )
+            pending_rows = (
+                s.query(EventCompletion)
+                .filter(EventCompletion.event_id == event_id,
+                        EventCompletion.task_id == task_id,
+                        EventCompletion.team_id == team.id,
+                        EventCompletion.status == "pending")
+                .order_by(EventCompletion.id.desc())
+                .all()
+            )
             progress_row = (
                 s.query(EventProgress)
                 .filter(EventProgress.task_id == task_id, EventProgress.team_id == team.id)
@@ -1053,6 +1137,7 @@ async def get_task_breakdown(event_id: int, task_id: int):
             return build_task_breakdown(
                 task_dict, task_dict.get("tile"), rows, progress_row,
                 {"id": team.id, "name": team.name}, player_names, _ts,
+                pending_rows=pending_rows,
             )
 
     payload = await asyncio.to_thread(_load)
@@ -1483,6 +1568,68 @@ def _enqueue_orphan_scheduled_events(s, event_id: int) -> None:
         pass
 
 
+def _enqueue_orphan_team_discord(s, event_id: int, team_id: int | None = None) -> None:
+    """Before FK-wiping ``web_event_team_discord`` rows (event hard delete, or
+    a single team's delete), hand any live auto-created roles/channels to the
+    bot's teardown queue (web53a). Best-effort, same contract as
+    :func:`_enqueue_orphan_scheduled_events`."""
+    try:
+        from services.event_team_discord import (
+            enqueue_team_discord_orphans,
+            orphan_team_discord_payloads,
+        )
+        from utils.redis import redis_client
+
+        enqueue_team_discord_orphans(
+            redis_client, orphan_team_discord_payloads(s, event_id, team_id))
+    except Exception:
+        pass
+
+
+def _sync_team_discord(s, ev: Event) -> None:
+    """Re-materialize the desired ``web_event_team_discord`` rows (web53a).
+    ImportError-guarded like every web_api -> services lazy import (the
+    unit-test conftest stubs ``services``); real failures still surface."""
+    try:
+        from services.event_team_discord import sync_event_team_discord
+    except ImportError:
+        return
+    sync_event_team_discord(s, ev)
+
+
+def _mark_team_discord_dirty(s, event_id: int, team_id: int | None = None) -> None:
+    """Roster changed: flag the team's Discord rows for a membership re-sync
+    on the bot's next tick (web53a). Same ImportError guard as above."""
+    try:
+        from services.event_team_discord import mark_team_members_dirty
+    except ImportError:
+        return
+    mark_team_members_dirty(s, event_id, team_id)
+
+
+def _drop_team_discord_rows(s, event_id: int, team_id: int) -> None:
+    """Team hard delete: queue live role/channel teardown for the bot, then
+    drop the rows themselves (their team FK is about to go away)."""
+    try:
+        from db import EventTeamDiscord
+        from services.event_team_discord import (
+            enqueue_team_discord_orphans,
+            orphan_team_discord_payloads,
+        )
+    except ImportError:
+        return
+    try:
+        from utils.redis import redis_client
+
+        enqueue_team_discord_orphans(
+            redis_client, orphan_team_discord_payloads(s, event_id, team_id))
+    except Exception:
+        pass  # teardown loss is tolerable; the row wipe below is not
+    s.query(EventTeamDiscord).filter(
+        EventTeamDiscord.team_id == team_id
+    ).delete(synchronize_session=False)
+
+
 def _cascade_delete_event(s, ev: Event) -> None:
     """Delete ``ev`` and every row scoped to it — children first, since no ORM
     cascade is configured on these FKs (mirrors the per-team cascade in
@@ -1546,9 +1693,14 @@ def _cascade_delete_event(s, ev: Event) -> None:
         _wipe(EventTeamMember, EventTeamMember.team_id.in_(team_ids))
 
     # Discord destination + scheduled-event mirror rows (the real Discord
-    # scheduled events were already queued for teardown by the caller).
+    # scheduled events were already queued for teardown by the caller), plus
+    # the per-team role/channel rows (web53a — real roles/channels likewise
+    # already queued on the orphan list by the caller).
+    from db import EventTeamDiscord
+
     _wipe(EventChannel, EventChannel.event_id == event_id)
     _wipe(EventGuild, EventGuild.event_id == event_id)
+    _wipe(EventTeamDiscord, EventTeamDiscord.event_id == event_id)
 
     # The tasks + teams those children referenced, then the participants.
     _wipe(EventTask, EventTask.event_id == event_id)
@@ -1613,9 +1765,11 @@ async def delete_event(event_id: int):
             name = ev.name
             eff = _effective_status(ev)
 
-            # Hand any live Discord scheduled events to the bot for teardown
-            # before we drop the rows that describe them.
+            # Hand any live Discord scheduled events + auto-created team
+            # roles/channels to the bot for teardown before we drop the rows
+            # that describe them.
             _enqueue_orphan_scheduled_events(s, event_id)
+            _enqueue_orphan_team_discord(s, event_id)
             _cascade_delete_event(s, ev)
             s.add(
                 AuditLog(
@@ -2153,6 +2307,10 @@ async def add_team(event_id: int):
                                   "That clan has not accepted this event.")
             team = EventTeam(event_id=event_id, name=name, score=0, group_id=team_group_id)
             s.add(team)
+            s.flush()
+            # Per-team Discord (web53a): seed the new team's desired rows when
+            # the feature is configured (no-op otherwise).
+            _sync_team_discord(s, ev)
             s.commit()
             return team.id
 
@@ -2215,6 +2373,10 @@ async def update_team(event_id: int, team_id: int):
                      "piece_item_id": getattr(team, "piece_item_id", None)}
             if before == after:
                 return  # no-op
+            if before["name"] != after["name"] or before["color"] != after["color"]:
+                # Re-pend the team's Discord rows so the bot renames/recolors
+                # the auto-created role + channel (web53a; no-op when off).
+                _sync_team_discord(s, ev)
             s.add(
                 AuditLog(
                     actor_user_id=user_id,
@@ -2254,6 +2416,11 @@ async def delete_team(event_id: int, team_id: int):
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
             team_name = team.name
+
+            # Per-team Discord (web53a): the rows are about to be FK-wiped —
+            # queue any live role/channel for bot teardown first, then drop
+            # the rows with the other children below.
+            _drop_team_discord_rows(s, event_id, team_id)
 
             # No ORM cascade is configured on these FKs, so clear the children
             # first — EventProgress.team_id is NOT NULL, so a dangling row would
@@ -2557,6 +2724,8 @@ async def join_event(event_id: int):
 
             # joined_at (default now()) is the credit cutoff (PRD D10).
             s.add(EventTeamMember(team_id=team.id, player_id=player_id))
+            # Per-team Discord (web53a): let the bot pick up the roster change.
+            _mark_team_discord_dirty(s, event_id, team.id)
             s.commit()
             return team.id
 
@@ -2597,6 +2766,8 @@ async def leave_event(event_id: int):
                 if signup:
                     s.delete(signup)
             if membership or signup:
+                if membership:
+                    _mark_team_discord_dirty(s, event_id, membership.team_id)
                 s.commit()
 
     await asyncio.to_thread(_apply)
@@ -2672,6 +2843,7 @@ async def admin_add_member(event_id: int, team_id: int):
                     after=f"team:{team_id}",
                 )
             )
+            _mark_team_discord_dirty(s, event_id, team_id)
             s.commit()
 
     await asyncio.to_thread(_apply)
@@ -2816,6 +2988,7 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
                         after=f"added:{len(added)}",
                     )
                 )
+                _mark_team_discord_dirty(s, event_id, team_id)
                 s.commit()
             return {"added": added, "skipped": skipped}
 
@@ -2869,6 +3042,7 @@ async def admin_remove_member(event_id: int, team_id: int, player_id: int):
                         after=None,
                     )
                 )
+                _mark_team_discord_dirty(s, event_id, team_id)
                 s.commit()
 
     await asyncio.to_thread(_apply)
@@ -3099,6 +3273,7 @@ async def assign_signup(event_id: int):
                 target=f"web_events.{event_id}.player.{player_id}",
                 before=None, after=f"team:{team_id}",
             ))
+            _mark_team_discord_dirty(s, event_id, team_id)
             s.commit()
 
     await asyncio.to_thread(_apply)
@@ -3131,6 +3306,7 @@ async def randomize_signups(event_id: int):
                 target=f"web_events.{event_id}",
                 before=None, after=f"assigned:{result['assigned']}",
             ))
+            _mark_team_discord_dirty(s, event_id)
             s.commit()
             return result
 
@@ -3173,6 +3349,7 @@ async def populate_random_members(event_id: int):
                 target=f"web_events.{event_id}",
                 before=None, after=f"source:{source} added:{result['added']}",
             ))
+            _mark_team_discord_dirty(s, event_id)
             s.commit()
             return result
 

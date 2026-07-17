@@ -539,6 +539,15 @@ def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> in
             added += 1
     if added:
         session.flush()
+    if added or removed:
+        # Keep the auto-created team roles/threads (web53a) in step with the
+        # reconciled roster on the bot's next tick.
+        try:
+            from services.event_team_discord import mark_team_members_dirty
+
+            mark_team_members_dirty(session, event.id)
+        except ImportError:  # unit-test stubs
+            pass
     return added + removed
 
 
@@ -580,6 +589,16 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
     from services.event_scheduled_events import sync_event_guilds
 
     sync_event_guilds(session, event)
+
+    # Per-team Discord roles/channels (web53a): make sure every team has its
+    # desired rows at start (config PUTs already sync eagerly; this catches
+    # teams added after the config was saved).
+    try:
+        from services.event_team_discord import sync_event_team_discord
+    except ImportError:  # unit-test stubs
+        sync_event_team_discord = None
+    if sync_event_team_discord is not None:
+        sync_event_team_discord(session, event)
 
     # clan_vs_clan with no teams set up: seed a whole-clan team per accepted
     # clan so it runs as "anyone in clan A vs anyone in clan B". Must precede
@@ -664,6 +683,16 @@ def end_event(session, event, *, actor_user_id=None,
     session.query(EventGuild).filter(EventGuild.event_id == event.id).update(
         {EventGuild.sync_status: "delete_pending"}, synchronize_session=False,
     )
+
+    # Team roles/channels (web53a): apply each scope's retention — 'keep'
+    # releases them as-is, 'delete_48h' schedules teardown after the grace
+    # window so wrap-up pings still work.
+    try:
+        from services.event_team_discord import retire_event_team_discord
+    except ImportError:  # unit-test stubs
+        retire_event_team_discord = None
+    if retire_event_team_discord is not None:
+        retire_event_team_discord(session, event, now=now)
 
     standings = final_standings(session, event.id, limit=5)
     ev_dict = event_engine._event_to_dict(event)

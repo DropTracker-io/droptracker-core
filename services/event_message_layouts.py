@@ -230,6 +230,19 @@ DEFAULT_LAYOUTS = {
             },
         ],
     },
+    "event_board_roll_prompt": {
+        "accent_color": "#F1C40F",
+        "blocks": [
+            {"type": "text", "content": "### \U0001F3B2 {team_name} can roll!"},
+            {
+                "type": "text",
+                "content": "**{task_label}** is done{roll_thanks_line} — roll the "
+                           "dice to move on.\n"
+                           "**Coins** `+{coins_awarded}` (wallet `{coin_balance}`)",
+            },
+            _EVENT_BUTTON,
+        ],
+    },
     "event_pending": {
         "accent_color": "#E67E22",
         "blocks": [
@@ -740,6 +753,23 @@ def notification_context(notification_type: str, data: dict) -> dict:
             context["bingo_stats"] = "\n".join(parts)
     elif score is not None:
         context["team_total_line"] = f"**Team total** `{int(score)} pts`"
+
+    # Board game (web44a/web53a): dice + movement + wallet tokens for the
+    # event_board_turn / event_board_roll_prompt layouts. Explicit context
+    # assignment where 0 is a legitimate value (tile 0, an empty wallet) —
+    # put() would drop it and take the whole line with it.
+    dice = data.get("dice") or []
+    put("dice_str", data.get("dice_str")
+        or (" + ".join(str(d) for d in dice) if dice else None))
+    for key in ("tile_from", "tile_to", "turn", "coin_balance"):
+        if data.get(key) is not None:
+            context[key] = data[key]
+    put("next_task_label", data.get("next_task_label"))
+    put("coins_awarded", data.get("coins_awarded"))
+    if notification_type == "event_board_roll_prompt" and data.get("player_name"):
+        context["roll_thanks_line"] = f" (thanks **{data['player_name']}**)"
+    elif notification_type == "event_board_roll_prompt":
+        context["roll_thanks_line"] = ""
 
     if notification_type == "event_signup_prompt":
         context["signup_instructions"] = {

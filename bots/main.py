@@ -548,6 +548,7 @@ async def create_tasks():
     drain_discord_outbox.start()
     activity_launch_cards.start()
     reconcile_event_scheduled_events.start()
+    reconcile_event_team_discord.start()
     event_board_updates.start()
     badge_cycle.start()
     # Lootboard POSTING is user-visible and must stay with the interval tasks
@@ -653,6 +654,23 @@ async def _drain_orphan_scheduled_events(limit: int = 50) -> None:
                 await se.delete(reason="DropTracker event deleted")
         except Exception as e:
             print(f"Couldn't tear down orphaned scheduled event: {e}")
+
+
+@Task.create(IntervalTrigger(seconds=30))
+async def reconcile_event_team_discord():
+    """Per-team Discord roles/channels (web53a): drain the hard-delete orphan
+    queue, then make Discord match the ``web_event_team_discord`` desired
+    rows — create/rename team roles + channels (or forum threads), sync
+    role/thread membership with the roster, and tear down retired rows
+    (immediately, or after the 48h natural-end grace). All the real logic
+    lives in services/event_team_discord_bot.py; failures are isolated per
+    row there."""
+    try:
+        from services.event_team_discord_bot import reconcile_event_team_discord_once
+
+        await reconcile_event_team_discord_once(bot, Session, redis_client)
+    except Exception as e:
+        print(f"Couldn't reconcile event team discord: {e}")
 
 
 @Task.create(IntervalTrigger(seconds=30))

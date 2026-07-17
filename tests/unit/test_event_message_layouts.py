@@ -299,7 +299,7 @@ class TestDefaultLayouts:
             "event_task_progress", "event_line",
             "event_blackout", "event_lead_change", "event_pending",
             "event_activation_failed", "event_signup_prompt", "event_board",
-            "event_board_turn", "event_pot",
+            "event_board_turn", "event_pot", "event_board_roll_prompt",
         }
         assert set(ml.DEFAULT_LAYOUTS) == expected
 
@@ -326,6 +326,15 @@ class TestDefaultLayouts:
                                         "starts_at": 1700000000},
             "event_signup_prompt": {"event_id": 7, "event_name": "E",
                                     "formation_mode": "self_join", "ends_at": 1700003600},
+            "event_board_turn": {"event_id": 7, "event_name": "E", "team_name": "Reds",
+                                 "dice": [3, 4], "dice_str": "3 + 4", "tile_from": 0,
+                                 "tile_to": 7, "turn": 2, "next_task_label": "Get a whip",
+                                 "coins_awarded": 5, "coin_balance": 12,
+                                 "player_name": "Zed"},
+            "event_board_roll_prompt": {"event_id": 7, "event_name": "E",
+                                        "team_name": "Reds", "task_label": "Get a whip",
+                                        "player_name": "Zed", "coins_awarded": 5,
+                                        "coin_balance": 12},
         }
         standings = [{"name": "Reds", "score": 30}, {"name": "Blues", "score": 20}]
         for message_type, data in payloads.items():

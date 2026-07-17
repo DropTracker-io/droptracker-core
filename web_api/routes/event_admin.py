@@ -282,6 +282,38 @@ async def list_completions(event_id: int):
 # --------------------------------------------------------------------------- #
 # Confirm / reject (verification queue)
 # --------------------------------------------------------------------------- #
+def _publish_pending_update(s, ev, comp) -> None:
+    """After a confirm/reject, push a fresh ``kind: "pending"`` SSE frame so
+    the board's amber tint updates (or clears) live (web53a). Best-effort —
+    a realtime hiccup must never fail the admin action."""
+    try:
+        from services.event_engine import _publish, pending_projection
+
+        task = s.query(EventTask).filter(EventTask.id == comp.task_id).first()
+        if task is None or comp.team_id is None:
+            return
+        config = task.config
+        if isinstance(config, str):
+            try:
+                config = json.loads(config)
+            except (ValueError, TypeError):
+                config = None
+        proj = pending_projection(
+            s, {"id": task.id, "target_value": task.target_value,
+                "config": config}, comp.team_id)
+        frame = {
+            "kind": "pending", "event_id": ev.id, "task_id": comp.task_id,
+            "team_id": comp.team_id,
+            "pending": proj["pending_count"] if proj else 0,
+            "pending_complete": bool(proj and proj["pending_complete"]),
+        }
+        if proj:
+            frame["progress"] = proj["applied"]
+        _publish(ev.id, frame)
+    except Exception:
+        pass
+
+
 @event_admin_bp.post("/events/<int:event_id>/completions/<int:completion_id>/confirm")
 async def confirm_completion(event_id: int, completion_id: int):
     user_id = current_user_id()
@@ -313,6 +345,7 @@ async def confirm_completion(event_id: int, completion_id: int):
                 after=_snapshot(comp),
             ))
             s.commit()
+            _publish_pending_update(s, ev, comp)
 
     await asyncio.to_thread(_apply)
     _bump(event_id)
@@ -351,6 +384,7 @@ async def reject_completion(event_id: int, completion_id: int):
                 after=_snapshot(comp),
             ))
             s.commit()
+            _publish_pending_update(s, ev, comp)
 
     await asyncio.to_thread(_apply)
     return private_no_store(jsonify({"ok": True}))

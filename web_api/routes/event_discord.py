@@ -41,12 +41,18 @@ from db import (
     EventChannel,
     EventGroup,
     EventGuild,
+    EventTeam,
+    EventTeamDiscord,
+    EventTeamMember,
     Group,
     GroupAdmin,
+    Player,
     EVENT_CHANNEL_KINDS,
     EVENT_DISCORD_POLICIES,
     EVENT_MESSAGE_TOGGLE_KEYS,
     EVENT_TASK_PROGRESS_MODES,
+    EVENT_TEAM_DISCORD_RETENTIONS,
+    EVENT_TEAM_ROLES,
 )
 from web_api.common import abort_problem, db_session, private_no_store, _rc
 from web_api.deps import (
@@ -686,6 +692,14 @@ async def put_event_discord(event_id: int):
                 # guild retires the old guild's row (delete_pending) and seeds
                 # the new one (pending); clearing the guild retires everything.
                 _sync_event_guilds(s, ev)
+            # Per-team Discord rows follow the (possibly re-pointed) guild in
+            # either scope (web53a; no-op when the feature is off).
+            try:
+                from services.event_team_discord import sync_event_team_discord
+
+                sync_event_team_discord(s, ev)
+            except ImportError:  # unit-test stubs
+                pass
             s.flush()
 
             after = _config_payload(s, ev, group_id=scope_group_id)
@@ -713,4 +727,379 @@ async def put_event_discord(event_id: int):
 
     payload = await asyncio.to_thread(_apply)
     _bump(event_id)
+    return private_no_store(jsonify(payload))
+
+
+# --------------------------------------------------------------------------- #
+# Per-team Discord channels & roles (web53a)
+# --------------------------------------------------------------------------- #
+def _team_discord_scope_row(s, ev: Event, scope_group_id):
+    """(config_owner, guild_id) for one scope: the Event itself (shared/host)
+    or the clan's EventGroup participant row."""
+    if scope_group_id is None:
+        return ev, (str(ev.discord_guild_id) if ev.discord_guild_id else None)
+    part = (s.query(EventGroup)
+            .filter(EventGroup.event_id == ev.id,
+                    EventGroup.group_id == scope_group_id)
+            .first())
+    if part is None:
+        abort_problem(404, "Not a participant",
+                      f"Group {scope_group_id} has no participant row.")
+    return part, (str(part.discord_guild_id) if part.discord_guild_id else None)
+
+
+def _team_discord_payload(s, ev: Event, scope_group_id=None) -> dict:
+    """One team-discord config scope + live per-team provisioning state."""
+    from services.event_team_discord import (
+        DEFAULT_TEAM_MESSAGE_TOGGLES,
+        DEFAULT_TEAM_TASK_PROGRESS,
+        effective_team_discord_config,
+        team_flags,
+        team_message_toggles,
+        team_task_progress_mode,
+    )
+
+    owner, guild_id = _team_discord_scope_row(s, ev, scope_group_id)
+    config = effective_team_discord_config(getattr(owner, "team_discord_config", None))
+
+    teams_q = s.query(EventTeam).filter(EventTeam.event_id == ev.id)
+    if scope_group_id is not None:
+        teams_q = teams_q.filter(EventTeam.group_id == scope_group_id)
+    teams = teams_q.order_by(EventTeam.id.asc()).all()
+
+    rows = {}
+    if guild_id:
+        for r in (s.query(EventTeamDiscord)
+                  .filter(EventTeamDiscord.event_id == ev.id,
+                          EventTeamDiscord.guild_id == guild_id)
+                  .all()):
+            rows[r.team_id] = r
+
+    team_states = []
+    for t in teams:
+        flags = team_flags(config, t.id)
+        row = rows.get(t.id)
+        team_states.append({
+            "team_id": t.id,
+            "name": t.name,
+            "role_enabled": flags["role"],
+            "channel_enabled": flags["channel"],
+            "toggles": team_message_toggles(config, t.id),
+            "task_progress": team_task_progress_mode(config, t.id),
+            "role_id": str(row.role_id) if row and row.role_id else None,
+            "channel_id": str(row.channel_id) if row and row.channel_id else None,
+            "channel_kind": row.channel_kind if row else None,
+            "sync_status": row.sync_status if row else None,
+            "last_error": (row.last_error if row and row.sync_status == "failed"
+                           else None),
+        })
+    return {
+        "group_id": scope_group_id,
+        "guild_id": guild_id,
+        "channels_enabled": config["channels_enabled"],
+        "roles_enabled": config["roles_enabled"],
+        "forum_channel_id": config["forum_channel_id"],
+        "retention": config["retention"],
+        "captain_config": config["captain_config"],
+        "teams": team_states,
+        "default_toggles": dict(DEFAULT_TEAM_MESSAGE_TOGGLES),
+        "default_task_progress": DEFAULT_TEAM_TASK_PROGRESS,
+    }
+
+
+@event_discord_bp.get("/events/<int:event_id>/team-discord")
+async def get_event_team_discord(event_id: int):
+    """Per-team Discord provisioning config + live state for one scope
+    (shared/host by default, a participating clan's own via ``?group_id=``)."""
+    user_id = current_user_id()
+    raw_group = (request.args.get("group_id") or "").strip()
+    scope_group_id = int(raw_group) if raw_group.isdigit() else None
+
+    def _load():
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            if scope_group_id is not None:
+                _assert_group_scope(s, user_id, ev, scope_group_id)
+            else:
+                _assert_event_admin(s, user_id, ev)
+            return _team_discord_payload(s, ev, scope_group_id)
+
+    payload = await asyncio.to_thread(_load)
+    return private_no_store(jsonify(payload))
+
+
+@event_discord_bp.put("/events/<int:event_id>/team-discord")
+async def put_event_team_discord(event_id: int):
+    """Replace one scope's team-discord config. Body mirrors the effective
+    config shape: ``{group_id?, channels_enabled, roles_enabled,
+    forum_channel_id, retention, captain_config, teams: {"<team_id>":
+    {"role", "channel"}}}``. Saving immediately (re)materializes the desired
+    ``web_event_team_discord`` rows — the bot provisions within ~30s."""
+    from services.event_team_discord import (
+        effective_team_discord_config,
+        sync_event_team_discord,
+    )
+
+    user_id = current_user_id()
+    body = await json_body()
+
+    scope_group_id = body.get("group_id")
+    if scope_group_id is not None and (
+            not isinstance(scope_group_id, int) or isinstance(scope_group_id, bool)):
+        abort_problem(422, "Invalid group_id", "'group_id' must be an integer or null.")
+
+    for key in ("channels_enabled", "roles_enabled", "captain_config"):
+        if key in body and not isinstance(body[key], bool):
+            abort_problem(422, "Invalid config", f"'{key}' must be a boolean.")
+    retention = body.get("retention")
+    if retention is not None and retention not in EVENT_TEAM_DISCORD_RETENTIONS:
+        abort_problem(422, "Invalid retention",
+                      f"retention must be one of {list(EVENT_TEAM_DISCORD_RETENTIONS)}.")
+    forum_channel_id = body.get("forum_channel_id")
+    if forum_channel_id not in (None, ""):
+        forum_channel_id = _clean_snowflake(forum_channel_id, "forum_channel_id")
+    else:
+        forum_channel_id = None
+    raw_teams = body.get("teams")
+    if raw_teams is not None and not isinstance(raw_teams, dict):
+        abort_problem(422, "Invalid teams",
+                      "'teams' must be an object of team id -> {role, channel}.")
+
+    def _apply():
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            if scope_group_id is not None:
+                _assert_group_scope(s, user_id, ev, scope_group_id)
+            else:
+                _assert_event_admin(s, user_id, ev)
+            owner, guild_id = _team_discord_scope_row(s, ev, scope_group_id)
+
+            enabling = bool(body.get("channels_enabled") or body.get("roles_enabled"))
+            if enabling and not guild_id:
+                abort_problem(
+                    422, "No Discord server",
+                    "Point the event at a Discord server first (the Server & "
+                    "channels section) — team roles and channels are created "
+                    "inside it.")
+
+            # Forum target must actually be a forum channel of that guild —
+            # validated against the bot cache when it's warm (a cold cache
+            # never blocks saving; the bot fails the row with a clear error
+            # if the id turns out not to be a forum).
+            if forum_channel_id and guild_id:
+                cached = _guild_channels(guild_id)
+                if cached is not None:
+                    known = {str(c.get("id")): c for c in cached}
+                    entry = known.get(forum_channel_id)
+                    if entry is None:
+                        _request_channel_refresh(guild_id)
+                        abort_problem(
+                            422, "Channel not in guild",
+                            "The forum channel isn't in the bot's list of this "
+                            "server's channels. If you just created it, wait a "
+                            "moment and save again; otherwise check the id.")
+                    if entry.get("type") != "forum":
+                        abort_problem(
+                            422, "Not a forum channel",
+                            "Team threads need a FORUM channel target — pick a "
+                            "forum, or leave it empty to create text channels.")
+                else:
+                    _request_channel_refresh(guild_id)
+
+            # Only known team ids, only this scope's teams (clan scopes may
+            # not toggle another clan's teams).
+            valid_q = s.query(EventTeam.id).filter(EventTeam.event_id == ev.id)
+            if scope_group_id is not None:
+                valid_q = valid_q.filter(EventTeam.group_id == scope_group_id)
+            valid_ids = {str(tid) for (tid,) in valid_q.all()}
+            teams_clean = {}
+            for tid, entry in (raw_teams or {}).items():
+                if str(tid) not in valid_ids:
+                    abort_problem(422, "Unknown team",
+                                  f"Team {tid} is not part of this scope.")
+                if not isinstance(entry, dict):
+                    abort_problem(422, "Invalid teams",
+                                  f"teams.{tid} must be an object.")
+                clean = {}
+                for key in ("role", "channel"):
+                    if key in entry:
+                        if not isinstance(entry[key], bool):
+                            abort_problem(422, "Invalid teams",
+                                          f"teams.{tid}.{key} must be a boolean.")
+                        clean[key] = entry[key]
+                if clean:
+                    teams_clean[str(tid)] = clean
+
+            before = _team_discord_payload(s, ev, scope_group_id)
+
+            # Merge onto the current stored config: absent top-level keys keep
+            # their value; per-team entries merge key-wise (captain-saved
+            # notification toggles survive an admin save and vice versa).
+            current = effective_team_discord_config(
+                getattr(owner, "team_discord_config", None))
+            merged = dict(current)
+            for key in ("channels_enabled", "roles_enabled", "captain_config"):
+                if key in body:
+                    merged[key] = bool(body[key])
+            if "forum_channel_id" in body:
+                merged["forum_channel_id"] = forum_channel_id
+            if retention is not None:
+                merged["retention"] = retention
+            merged_teams = {k: dict(v) for k, v in current.get("teams", {}).items()}
+            for tid, entry in teams_clean.items():
+                merged_teams.setdefault(tid, {}).update(entry)
+            merged["teams"] = merged_teams
+            owner.team_discord_config = json.dumps(merged)
+
+            sync_event_team_discord(s, ev)
+            s.flush()
+            after = _team_discord_payload(s, ev, scope_group_id)
+            s.add(AuditLog(
+                actor_user_id=user_id,
+                group_id=scope_group_id if scope_group_id is not None else ev.group_id,
+                action="event.team_discord.update",
+                target=f"web_events.{event_id}" + (
+                    f".group.{scope_group_id}" if scope_group_id is not None else ""),
+                before=json.dumps({k: before[k] for k in (
+                    "channels_enabled", "roles_enabled", "forum_channel_id",
+                    "retention", "captain_config")}),
+                after=json.dumps({k: after[k] for k in (
+                    "channels_enabled", "roles_enabled", "forum_channel_id",
+                    "retention", "captain_config")}),
+            ))
+            s.commit()
+            return after
+
+    payload = await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify(payload))
+
+
+def _is_team_captain(s, user_id: int, event_id: int, team_id: int) -> bool:
+    """Whether the user owns a player holding leader/co_leader on this team."""
+    row = (s.query(EventTeamMember.player_id)
+           .join(Player, Player.player_id == EventTeamMember.player_id)
+           .filter(EventTeamMember.team_id == team_id,
+                   EventTeamMember.role.in_(EVENT_TEAM_ROLES),
+                   Player.user_id == user_id)
+           .first())
+    return row is not None
+
+
+@event_discord_bp.put("/events/<int:event_id>/teams/<int:team_id>/notifications")
+async def put_team_notifications(event_id: int, team_id: int):
+    """A team captain (leadership feature, when the scope allows
+    ``captain_config``) — or any event admin — tunes which notifications the
+    team's auto-created Discord channel receives: ``{toggles: {type: bool},
+    task_progress: 'off'|'milestones'|'all'}``. Saved into every config scope
+    that covers the team, so the choice applies wherever the channel lives."""
+    from services.event_team_discord import (
+        DEFAULT_TEAM_MESSAGE_TOGGLES,
+        effective_team_discord_config,
+    )
+
+    user_id = current_user_id()
+    body = await json_body()
+
+    toggles = body.get("toggles")
+    if toggles is not None:
+        if not isinstance(toggles, dict):
+            abort_problem(422, "Invalid toggles", "'toggles' must be an object.")
+        for key, val in toggles.items():
+            if key not in DEFAULT_TEAM_MESSAGE_TOGGLES:
+                abort_problem(422, "Unknown toggle",
+                              f"'{key}' is not one of "
+                              f"{sorted(DEFAULT_TEAM_MESSAGE_TOGGLES)}.")
+            if not isinstance(val, bool):
+                abort_problem(422, "Invalid toggle", f"toggles.{key} must be a boolean.")
+    task_progress = body.get("task_progress")
+    if task_progress is not None and task_progress not in EVENT_TASK_PROGRESS_MODES:
+        abort_problem(422, "Invalid task progress mode",
+                      f"task_progress must be one of {list(EVENT_TASK_PROGRESS_MODES)}.")
+
+    def _apply():
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            team = (s.query(EventTeam)
+                    .filter(EventTeam.id == team_id, EventTeam.event_id == event_id)
+                    .first())
+            if not team:
+                abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+
+            # Admins always may; captains only when leadership is enabled and
+            # no covering scope has switched captain_config off.
+            is_admin = True
+            try:
+                _assert_event_admin(s, user_id, ev)
+            except Exception:
+                is_admin = False
+            owners = [_team_discord_scope_row(s, ev, None)[0]]
+            if team.group_id:
+                part = (s.query(EventGroup)
+                        .filter(EventGroup.event_id == ev.id,
+                                EventGroup.group_id == team.group_id,
+                                EventGroup.team_discord_config.isnot(None))
+                        .first())
+                if part is not None:
+                    owners.append(part)
+            if not is_admin:
+                from services.event_leadership import effective_leadership
+
+                leadership = effective_leadership(getattr(ev, "leadership_config", None))
+                if not leadership.get("enabled"):
+                    abort_problem(403, "Admins only",
+                                  "Team leadership is disabled on this event — "
+                                  "only event admins can tune team notifications.")
+                captain_allowed = any(
+                    effective_team_discord_config(
+                        getattr(o, "team_discord_config", None)
+                    ).get("captain_config", True)
+                    for o in owners
+                )
+                if not captain_allowed:
+                    abort_problem(403, "Admins only",
+                                  "Captain configuration is disabled for this event.")
+                if not _is_team_captain(s, user_id, event_id, team_id):
+                    abort_problem(403, "Not your team",
+                                  "Only this team's leader or co-leader can tune "
+                                  "its notifications.")
+
+            for owner in owners:
+                current = effective_team_discord_config(
+                    getattr(owner, "team_discord_config", None))
+                teams_cfg = {k: dict(v) for k, v in current.get("teams", {}).items()}
+                entry = teams_cfg.setdefault(str(team_id), {})
+                if toggles is not None:
+                    merged_toggles = dict(entry.get("toggles") or {})
+                    merged_toggles.update(toggles)
+                    entry["toggles"] = merged_toggles
+                if task_progress is not None:
+                    entry["task_progress"] = task_progress
+                current["teams"] = teams_cfg
+                owner.team_discord_config = json.dumps(current)
+
+            s.add(AuditLog(
+                actor_user_id=user_id,
+                group_id=ev.group_id,
+                action="event.team_discord.notifications",
+                target=f"web_events.{event_id}.team.{team_id}",
+                before=None,
+                after=json.dumps({"toggles": toggles, "task_progress": task_progress}),
+            ))
+            s.commit()
+
+            from services.event_team_discord import (
+                team_message_toggles,
+                team_task_progress_mode,
+            )
+
+            config = effective_team_discord_config(
+                getattr(owners[0], "team_discord_config", None))
+            return {
+                "team_id": team_id,
+                "toggles": team_message_toggles(config, team_id),
+                "task_progress": team_task_progress_mode(config, team_id),
+            }
+
+    payload = await asyncio.to_thread(_apply)
     return private_no_store(jsonify(payload))

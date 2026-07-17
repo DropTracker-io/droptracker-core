@@ -1661,11 +1661,26 @@ class NotificationService:
                 per_group_discord_enabled,
             )
 
-            destinations = []  # [{channel_id, ping}]
+            # Since web53a the queue may hold rows the event-level config has
+            # muted (enqueued for a per-team channel), and 'milestones'-mode
+            # filtering moved here from the enqueue side — each destination
+            # applies its own verbosity.
+            milestone = bool(data.get('milestone_pct'))
+
+            def _wants(message_config) -> bool:
+                if not should_send_event_message(message_config, notification_type):
+                    return False
+                if (notification_type == 'event_task_progress'
+                        and message_config.get('task_progress') == 'milestones'
+                        and not milestone):
+                    return False
+                return True
+
+            destinations = []  # [{channel_id, ping, team_role?}]
             if per_group_discord_enabled(event):
                 seen_channels = set()
                 for dest in load_group_destinations(db_session, event):
-                    if not should_send_event_message(dest["message_config"], notification_type):
+                    if not _wants(dest["message_config"]):
                         continue
                     cid = resolve_event_channel(dest["channels"], notification_type)
                     if not cid or cid in seen_channels:
@@ -1675,24 +1690,41 @@ class NotificationService:
                         "channel_id": cid,
                         "ping": dest["group_id"] == event.group_id,
                     })
-                skip_reason = ('skipped: no participating clan wants this message'
-                               if not destinations else None)
+                skip_reason = 'skipped: no participating clan wants this message'
             else:
                 # Verbosity re-check at send time (the engine already gates at
                 # enqueue; this covers rows queued before a config change).
                 message_config = effective_message_config(getattr(event, "message_config", None))
-                if not should_send_event_message(message_config, notification_type):
-                    notification.status = 'sent'
-                    notification.error_message = 'skipped: muted by event message config'
-                    notification.processed_at = datetime.now()
-                    db_session.commit()
-                    return
-                channels = load_event_channels(db_session, event.id)
-                channel_id = resolve_event_channel(channels, notification_type)
-                if channel_id:
-                    destinations.append({"channel_id": channel_id, "ping": True})
-                skip_reason = ('skipped: no event channel configured'
-                               if not destinations else None)
+                if _wants(message_config):
+                    channels = load_event_channels(db_session, event.id)
+                    channel_id = resolve_event_channel(channels, notification_type)
+                    if channel_id:
+                        destinations.append({"channel_id": channel_id, "ping": True})
+                skip_reason = 'skipped: no event channel configured (or muted)'
+
+            # Per-team Discord channels (web53a) — additive destinations with
+            # the team's auto-created role as the ping. Deduped against the
+            # event/clan channels so a team channel doubling as e.g. the
+            # completions channel never double-posts.
+            try:
+                from services.event_team_discord import load_team_destinations
+
+                team_dests = load_team_destinations(
+                    db_session, event, notification_type,
+                    data.get('team_id'), milestone=milestone)
+            except Exception:
+                team_dests = []
+            seen_ids = {d["channel_id"] for d in destinations}
+            for td in team_dests:
+                if td["channel_id"] in seen_ids:
+                    continue
+                seen_ids.add(td["channel_id"])
+                destinations.append({
+                    "channel_id": td["channel_id"],
+                    "ping": False,
+                    "team_role": td.get("role_id"),
+                })
+            skip_reason = skip_reason if not destinations else None
             if skip_reason:
                 # Nothing configured for this kind (or at all) — processed, skipped.
                 notification.status = 'sent'
@@ -1877,7 +1909,14 @@ class NotificationService:
                         channel_error or f"Channel {dest['channel_id']} not found for event {event.id}")
                     continue
                 try:
-                    await _send_to(channel, configured_ping if dest["ping"] else None)
+                    if dest["ping"]:
+                        dest_ping = configured_ping
+                    elif dest.get("team_role"):
+                        # Team channel: mention the team's auto-created role.
+                        dest_ping = f"<@&{dest['team_role']}>"
+                    else:
+                        dest_ping = None
+                    await _send_to(channel, dest_ping)
                     sent_count += 1
                 except interactions.errors.Forbidden:
                     if len(destinations) == 1:

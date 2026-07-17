@@ -419,6 +419,58 @@ def _anypath_progress_from_rows(rows, config: dict, threshold: int) -> int:
     return min(best, threshold)
 
 
+def pending_projection(session, task: dict, team_id) -> Optional[dict]:
+    """What a (task, team) would look like if its ``pending`` ledger rows were
+    all confirmed (web53a pending-review board highlight; pure read).
+
+    Returns ``{"applied", "projected", "pending_count", "pending_complete"}``
+    — or None when the pair has no pending rows at all (the overwhelmingly
+    common case; callers skip the overlay entirely). Mirrors the recompute
+    rules in ``_apply``/``apply_revocation`` per config kind so the projection
+    can never disagree with what confirming would actually produce.
+    """
+    from db.models import EventCompletion
+
+    rows = list(
+        session.query(EventCompletion)
+        .filter(EventCompletion.task_id == task["id"],
+                EventCompletion.team_id == team_id,
+                EventCompletion.status.in_(("auto", "confirmed", "manual", "pending")))
+        .all()
+    )
+    pending_rows = [r for r in rows if r.status == "pending"]
+    if not pending_rows:
+        return None
+    applied_rows = [r for r in rows if r.status != "pending"]
+    threshold = completion_threshold(task)
+    kind = _list_kind(task)
+    if kind in ("all_of", "assembly"):
+        applied = _distinct_progress_from_rows(applied_rows, threshold)
+        projected = _distinct_progress_from_rows(rows, threshold)
+    elif kind == "groups":
+        config = task.get("config") or {}
+        applied = _grouped_progress_from_rows(applied_rows, config, threshold)
+        projected = _grouped_progress_from_rows(rows, config, threshold)
+    elif kind == "any_path":
+        config = task.get("config") or {}
+        applied = _anypath_progress_from_rows(applied_rows, config, threshold)
+        projected = _anypath_progress_from_rows(rows, config, threshold)
+    else:
+        def _fold(subset):
+            return sum(
+                max(int(r.quantity or 1), 1) for r in subset
+                if (getattr(r, "source_type", None) or "") != "bonus"
+            )
+        applied = _fold(applied_rows)
+        projected = applied + _fold(pending_rows)
+    return {
+        "applied": applied,
+        "projected": projected,
+        "pending_count": len(pending_rows),
+        "pending_complete": projected >= threshold,
+    }
+
+
 def match_task(task: dict, envelope: dict) -> Optional[dict]:
     """Match one envelope against one task dict (pure; no I/O).
 
@@ -905,7 +957,17 @@ def _enqueue_notification(session, notification_type: str, event: dict,
     if not should_send_event_message(
         effective_message_config(event.get("message_config")), notification_type
     ):
-        return
+        # Muted at the event level — but a per-team Discord channel (web53a)
+        # may still want it. Coarse interest check here (any live row for the
+        # team); the sender does the precise per-destination toggle filtering.
+        try:
+            from services.event_team_discord import team_channel_interest
+        except ImportError:  # unit-test stubs
+            return
+        if not team_channel_interest(
+            session, event["id"], notification_type, data.get("team_id")
+        ):
+            return
     from db.models.notification_queue import NotificationQueue
     payload = dict(data)
     payload["event_id"] = event["id"]
@@ -1252,7 +1314,23 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
         return
     config = effective_message_config(event.get("message_config"))
     mode = config.get("task_progress", "off")
-    if mode == "off" or not config["toggles"].get("event_task_progress", True):
+    if not config["toggles"].get("event_task_progress", True):
+        mode = "off"
+    # Per-team Discord channels (web53a) carry their own progress verbosity
+    # (default 'all') — enqueue at the most verbose mode ANY audience wants;
+    # the sender filters per destination (a 'milestones' main channel skips
+    # rows without milestone_pct).
+    team_mode = "off"
+    if team_id is not None:
+        try:
+            from services.event_team_discord import team_progress_interest
+
+            team_mode = team_progress_interest(session, event["id"], team_id)
+        except Exception:
+            team_mode = "off"
+    _ORDER = {"off": 0, "milestones": 1, "all": 2}
+    effective = mode if _ORDER[mode] >= _ORDER[team_mode] else team_mode
+    if effective == "off":
         return
     target = completion_threshold(task)
     payload = {
@@ -1265,11 +1343,11 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
         "target": target,
         "proof_url": proof_url,
     }
-    if mode == "milestones":
-        crossed = progress_milestones_crossed(previous, current, target)
-        if not crossed:
-            return
+    crossed = progress_milestones_crossed(previous, current, target)
+    if crossed:
         payload["milestone_pct"] = max(crossed)
+    if effective == "milestones" and not crossed:
+        return
     _enqueue_notification(session, "event_task_progress", event, player_id, payload)
 
 
@@ -1418,6 +1496,18 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
                 "next_task_label": roll.get("task_label") or "—",
                 "coins_awarded": board.get("coins_awarded") or 0,
                 "coin_balance": board.get("coin_balance") or 0,
+            })
+        else:
+            # Manual-trigger mode: the team is now awaiting_roll — nudge them
+            # to roll (web53a). Main-channel default is OFF; this primarily
+            # feeds the per-team Discord channels.
+            _enqueue_notification(session, "event_board_roll_prompt", event, player_id, {
+                "team_id": team_id,
+                "player_name": player_name,
+                "task_id": task["id"],
+                "task_label": task.get("label"),
+                "coins_awarded": board.get("coins_awarded") or 0,
+                "coin_balance": board.get("coin_balance"),
             })
 
     frame = dict(result)
@@ -1571,6 +1661,16 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
         }
         if player_name:
             frame["player_name"] = player_name
+        # Projection (web53a): lets the board tint the tile amber live — the
+        # flushed row above is visible to the query.
+        try:
+            proj = pending_projection(session, task, team_id)
+            if proj:
+                frame["pending"] = proj["pending_count"]
+                frame["pending_complete"] = proj["pending_complete"]
+                frame["progress"] = proj["applied"]
+        except Exception:
+            pass
         _publish(event["id"], frame)
         _enqueue_notification(session, "event_pending", event, player_id, {
             "task_id": task["id"],

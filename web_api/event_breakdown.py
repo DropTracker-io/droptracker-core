@@ -173,12 +173,19 @@ def _contributors(rows, player_names: dict, ts) -> list[dict]:
 
 
 def build_task_breakdown(task: dict, tile: dict | None, rows, progress_row,
-                         team: dict, player_names: dict, ts) -> dict:
+                         team: dict, player_names: dict, ts,
+                         pending_rows=None) -> dict:
     """Assemble the full per-(task, team) breakdown payload.
 
     ``rows`` are the applied ``EventCompletion`` rows for this (task, team)
     (status in auto/confirmed/manual); ``progress_row`` is the authoritative
     ``EventProgress`` rollup (or None); ``ts`` converts a datetime to an epoch.
+
+    ``pending_rows`` (web53a) are the team's pending-review ledger rows: when
+    present, the breakdown is built a second time with them folded in and the
+    two are diffed, annotating every item/group/meter whose state the pending
+    rows would change (``pending`` quantities, ``pending_satisfied`` flags)
+    plus top-level ``pending_count``/``pending_complete``.
     """
     from services.event_engine import (
         _config_item_entries,
@@ -306,4 +313,67 @@ def build_task_breakdown(task: dict, tile: dict | None, rows, progress_row,
         }
 
     out["contributors"] = _contributors(rows, player_names, ts)
+
+    if pending_rows:
+        _annotate_pending(out, task, tile, rows, pending_rows, team,
+                          player_names, ts, config, kind, target_val, prog,
+                          completed)
     return out
+
+
+def _annotate_pending(out: dict, task: dict, tile, rows, pending_rows, team,
+                      player_names, ts, config, kind, target_val: int,
+                      prog: int, completed: bool) -> None:
+    """Fold the pending rows into a projected breakdown and diff it onto
+    ``out`` (see :func:`build_task_breakdown`)."""
+    from types import SimpleNamespace
+
+    from services.event_engine import (
+        _anypath_progress_from_rows,
+        _distinct_progress_from_rows,
+        _grouped_progress_from_rows,
+    )
+
+    combined = list(rows) + list(pending_rows)
+    if kind in ("all_of", "assembly"):
+        proj_val = _distinct_progress_from_rows(combined, target_val)
+    elif kind == "groups":
+        proj_val = _grouped_progress_from_rows(combined, config, target_val)
+    elif kind == "any_path":
+        proj_val = _anypath_progress_from_rows(combined, config, target_val)
+    else:
+        proj_val = prog + sum(
+            max(int(getattr(r, "quantity", 1) or 1), 1) for r in pending_rows
+            if (getattr(r, "source_type", None) or "") != _BONUS
+        )
+    projected = build_task_breakdown(
+        task, tile, combined,
+        SimpleNamespace(progress=proj_val, completed=False),
+        team, player_names, ts,
+    )
+
+    def _diff_group(base_g: dict, proj_g: dict) -> None:
+        if proj_g.get("satisfied") and not base_g.get("satisfied"):
+            base_g["pending_satisfied"] = True
+        for base_it, proj_it in zip(base_g.get("items") or [],
+                                    proj_g.get("items") or []):
+            delta = int(proj_it.get("obtained") or 0) - int(base_it.get("obtained") or 0)
+            if delta > 0:
+                base_it["pending"] = delta
+            if proj_it.get("satisfied") and not base_it.get("satisfied"):
+                base_it["pending_satisfied"] = True
+
+    for base_g, proj_g in zip(out.get("groups") or [], projected.get("groups") or []):
+        _diff_group(base_g, proj_g)
+    for base_p, proj_p in zip(out.get("paths") or [], projected.get("paths") or []):
+        for base_g, proj_g in zip(base_p.get("groups") or [],
+                                  proj_p.get("groups") or []):
+            _diff_group(base_g, proj_g)
+    if out.get("meter") and projected.get("meter"):
+        delta = (int(projected["meter"].get("progress") or 0)
+                 - int(out["meter"].get("progress") or 0))
+        if delta > 0:
+            out["meter"]["pending"] = delta
+
+    out["pending_count"] = len(pending_rows)
+    out["pending_complete"] = (not completed) and proj_val >= target_val

@@ -201,6 +201,10 @@ EVENT_MESSAGE_TOGGLE_KEYS = (
     "event_activation_failed",
     # Board game (web44a): a team rolled + moved (+ the next task drawn).
     "event_board_turn",
+    # Board game (web53a): "task done — roll the dice" nudge. Default OFF for
+    # the event's main channels (team channels carry it by default instead —
+    # services/event_team_discord.DEFAULT_TEAM_MESSAGE_TOGGLES).
+    "event_board_roll_prompt",
 )
 
 # Message types that have a component-layout row in web_event_message_layouts:
@@ -240,6 +244,17 @@ EVENT_BUYIN_STATUSES = ("pledged", "paid", "void")
 # pot (advisory display + optional Discord line, NOT an automated transfer):
 # first place only, the top N teams, or a custom percentage split by place.
 EVENT_PRIZE_DISTRIBUTIONS = ("first_only", "top_n", "custom_split")
+
+# Per-team Discord provisioning (web53a) — what happens to the auto-created
+# team roles/channels when the event ends NATURALLY: torn down after a ~48h
+# grace window (pings stay usable for post-event wrap-up), or kept forever.
+# A hard event delete always tears down immediately (orphan queue), and this
+# never applies to drafts. See services/event_team_discord.py.
+EVENT_TEAM_DISCORD_RETENTIONS = ("delete_48h", "keep")
+
+# web_event_team_discord.channel_kind — a normal guild text channel vs. a
+# thread auto-created inside the configured forum channel.
+EVENT_TEAM_CHANNEL_KINDS = ("text", "thread")
 
 
 class Event(Base):
@@ -312,6 +327,13 @@ class Event(Base):
     # show_contributors, allow_leader_mark). NULL = all defaults. See EventBuyin.
     buyins_enabled = Column(Boolean, nullable=False, default=False, server_default="0")
     prize_config = Column(Text, nullable=True)
+    # Per-team Discord provisioning (web53a): JSON knobs merged through
+    # services.event_team_discord.effective_team_discord_config()
+    # ({"channels_enabled", "roles_enabled", "forum_channel_id", "retention",
+    # "captain_config", "teams": {team_id: {"role", "channel", "toggles"}}}).
+    # NULL = feature off. Desired state materializes into
+    # web_event_team_discord rows; only the core bot touches Discord.
+    team_discord_config = Column(Text, nullable=True)
     activated_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
@@ -402,6 +424,12 @@ class EventGroup(Base):
     # validation; sending only needs the channel snowflakes). NULL until the
     # clan configures per-group Discord.
     discord_guild_id = Column(String(32), nullable=True)
+    # Per-team Discord provisioning for THIS clan's guild (web53a, clan-vs-clan
+    # only): same JSON shape as web_events.team_discord_config, scoped to this
+    # clan's own teams + its discord_guild_id. NULL = this clan hasn't enabled
+    # it (there is deliberately no inheritance from the event-level config —
+    # nothing gets created in a clan's server unasked).
+    team_discord_config = Column(Text, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
@@ -673,6 +701,59 @@ class EventGuild(Base):
     guild_id = Column(String(32), nullable=False)  # snowflake
     discord_scheduled_event_id = Column(String(32), nullable=True)  # written back by the bot
     sync_status = Column(String(16), nullable=False, default="pending")  # pending|synced|delete_pending|failed
+    synced_at = Column(DateTime, nullable=True)
+    last_error = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+class EventTeamDiscord(Base):
+    """Per-(team, guild) Discord provisioning state (web53a).
+
+    The desired-state sibling of :class:`EventGuild`, for auto-created team
+    roles and team channels/threads. The Web API only ever writes *desired*
+    rows here (``services/event_team_discord.py``: config PUT, activation,
+    roster/team mutations, end-of-life retirement) and never talks to
+    Discord; the core bot's ``reconcile_event_team_discord`` task is the only
+    place that creates/renames/deletes the real role + channel and writes
+    back ``role_id``/``channel_id``. Idempotent: a row that already carries
+    an id is edited, never re-created.
+
+    One row per guild keeps clan-vs-clan sane: role/channel ids are
+    guild-specific, and each participating clan provisions only its own teams
+    into its own server. ``member_state`` is the JSON list of Discord user
+    ids the bot last applied — roster mutations just flip ``members_dirty``
+    and the bot diffs against it (no per-change Discord calls from the API).
+    """
+
+    __tablename__ = "web_event_team_discord"
+    __table_args__ = (
+        Index("uq_web_evt_team_discord", "team_id", "guild_id", unique=True),
+        Index("idx_web_evt_team_discord_event", "event_id", "sync_status"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    team_id = Column(Integer, ForeignKey("web_event_teams.id"), nullable=False)
+    guild_id = Column(String(32), nullable=False)  # snowflake
+    # Which config scope provisioned this row: NULL = the event-level config
+    # (web_events.team_discord_config); a group id = that clan's own config
+    # (web_event_groups.team_discord_config, clan-vs-clan).
+    group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=True)
+    # Written back by the bot. channel_id is a text channel or a forum thread
+    # depending on channel_kind (EVENT_TEAM_CHANNEL_KINDS).
+    role_id = Column(String(32), nullable=True)
+    channel_id = Column(String(32), nullable=True)
+    channel_kind = Column(String(16), nullable=True)
+    sync_status = Column(String(16), nullable=False, default="pending")  # pending|synced|delete_pending|failed
+    # JSON list of Discord user ids currently carrying the role / thread
+    # membership; the bot's diff baseline for roster sync.
+    member_state = Column(Text, nullable=True)
+    members_dirty = Column(Boolean, nullable=False, default=True, server_default="1")
+    # Natural-end grace deadline (retention 'delete_48h'): the bot tears the
+    # role/channel down once now > delete_after. NULL = no scheduled teardown
+    # (either still live, or an immediate delete_pending from a team removal).
+    delete_after = Column(DateTime, nullable=True)
     synced_at = Column(DateTime, nullable=True)
     last_error = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
