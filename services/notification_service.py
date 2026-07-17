@@ -2445,8 +2445,18 @@ class NotificationService:
             else:
                 npc_id = 1
             value = data.get('value')
-            quantity = data.get('quantity')
-            total_value = data.get('total_value')
+            # quantity/total_value arrive as strings from the RuneLite plugin
+            # payload (the drop producer forwards them verbatim), so coerce to
+            # numbers before the `> 1` compare and the division below — the
+            # dm_drop path already does the same for total_value.
+            try:
+                quantity = int(data.get('quantity') or 1)
+            except (TypeError, ValueError):
+                quantity = 1
+            try:
+                total_value = int(data.get('total_value') or 0)
+            except (TypeError, ValueError):
+                total_value = 0
             image_url = data.get('image_url', None)
             if image_url is None or image_url == "":
                 try:
@@ -2541,13 +2551,15 @@ class NotificationService:
                 group_rank_str = "`?`"
 
             ##
-            # Embed may build for items dropped in quantities > 1 if the group has it enabled
-            # in this case, we should specify in the message how many of the item they received
-            # if the item is dropped in a quantity of 1, we do not need to modify the embed
-            # We just use a simple string replacement to insert the quantity into the item name before sending to replace_placeholders
+            # Drops received in quantities > 1 spell the stack out in the value
+            # placeholder: "`total` (N x `each`)". The item NAME stays clean —
+            # replace_placeholders derives the wiki URL from {item_name}, so
+            # prefixing "N x" there would break the link.
             if quantity > 1:
-                quantity_text = f"{str(quantity)} `x` {item_name}"
-                item_value = f"`{format_number(total_value)}` ({quantity} `x` {format_number(total_value / quantity)})"
+                each = format_number(total_value // quantity)
+                item_value_text = f"`{format_number(total_value)}` ({quantity} x `{each}`)"
+            else:
+                item_value_text = "`" + format_number(total_value) + "`"
 
             values = {
                 "{item_name}": item_name,
@@ -2563,7 +2575,7 @@ class NotificationService:
                 "{npc_id}": str(npc_id),
                 "{npc_name}": npc_name,
                 "{kill_count}": str(kill_count),
-                "{item_value}": "`" + format_number(total_value) + "`",
+                "{item_value}": item_value_text,
                 "{quantity}": "`" + str(quantity) + "`",
                 "{total_value}": "`" + str(total_value) + "`",
                 "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
