@@ -102,10 +102,11 @@ async def get_true_item_value(item_name, provided_value: int = 0, item_id=None):
         fallback = override.get("fallback_value") or 0
         return fallback if fallback else provided_value
 
-    # No override: when the client reports 0 gp, try to recover the real GE price
-    # so that notification thresholds and point awards aren't silently skipped.
-    if provided_value == 0:
-        return await _lookup_and_cache_ge_price(item_name, item_id)
+    # The client-supplied value is spoofable, so prefer the server GE price for
+    # any priceable item; fall back to the client value only when unpriceable.
+    server_price = await _lookup_and_cache_ge_price(item_name, item_id)
+    if server_price:
+        return server_price
     return provided_value
 
 async def get_mapping():

@@ -29,6 +29,7 @@ from .common import (
     SEASONAL_WORLD_TYPE,
     SeasonalDrop,
 )
+from utils.valuation_guard import sanitize_quantity, exceeds_value_sanity_limit
 
 
 redis_client = RedisClient()
@@ -223,7 +224,9 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         value = drop_data["value"]
         item_id = drop_data.get("item_id", drop_data.get("id", None))
         item_name = drop_data.get("item_name", drop_data.get("item", None))
-        quantity = drop_data["quantity"]
+        quantity = sanitize_quantity(drop_data.get("quantity"))
+        if quantity is None:
+            return SubmissionResponse(success=False, message="Invalid drop quantity")
         auth_key = drop_data.get("auth_key", None)
         player_name = drop_data.get("player_name", drop_data.get("player", None))
         account_hash = drop_data["acc_hash"]
@@ -345,6 +348,17 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         debug_print(
             f"Drop value calculated - Raw: {raw_drop_value}, Total: {drop_value} ({quantity}x)"
         )
+
+        # Reject implausible totals (spoofed quantity on a valuable item).
+        if exceeds_value_sanity_limit(raw_drop_value, quantity):
+            print(
+                f"[DropGuard] Rejected implausible drop total: {item_name} "
+                f"unit={raw_drop_value} x qty={quantity} from {player_name}"
+            )
+            return SubmissionResponse(
+                success=False,
+                message="Drop value exceeds the plausible maximum and was rejected",
+            )
 
         if drop_value > 1000000:
             debug_print(f"High value drop detected, verifying item/NPC combination...")
