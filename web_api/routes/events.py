@@ -1213,7 +1213,8 @@ async def create_event():
     join_code = (join_code or "").strip()
     if len(join_code) > 32:
         abort_problem(422, "Invalid join code", "join_code must be at most 32 characters.")
-    submission_policy = body.get("submission_policy") or "all"
+    # Default: non-plugin (manual) submissions need admin review (2026-07-17).
+    submission_policy = body.get("submission_policy") or "confirm_non_api"
     if submission_policy not in EVENT_SUBMISSION_POLICIES:
         abort_problem(
             422,
@@ -1434,7 +1435,8 @@ async def update_event(event_id: int):
                 # Event-level force: all completions queue for review (PRD D3).
                 ev.requires_confirmation = bool(body.get("requires_confirmation"))
             if "submission_policy" in body:
-                policy = body.get("submission_policy") or "all"
+                # null = reset to the default (manual submissions need review).
+                policy = body.get("submission_policy") or "confirm_non_api"
                 if policy not in EVENT_SUBMISSION_POLICIES:
                     abort_problem(
                         422,

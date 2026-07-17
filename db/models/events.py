@@ -155,8 +155,9 @@ BOARDGAME_EFFECT_STATUSES = ("active", "consumed", "expired")
 
 # Which intake paths may drive automatic task progress (web_events.submission_policy):
 # - "all"             — every processed submission counts (API + webhook fallback).
-# - "confirm_non_api" — non-API submissions count but always land as pending
-#                       ledger rows needing admin confirmation.
+# - "confirm_non_api" — non-plugin (manual) submissions count but always land
+#                       as pending ledger rows needing admin confirmation.
+#                       DEFAULT for new events (2026-07-17).
 # - "api_only"        — submissions without the plugin API flag are ignored.
 EVENT_SUBMISSION_POLICIES = ("all", "confirm_non_api", "api_only")
 
@@ -285,7 +286,7 @@ class Event(Base):
     # --- schema v2 (Task 15) ---
     formation_mode = Column(String(16), nullable=False, default="admin_assign")  # EVENT_FORMATION_MODES
     requires_confirmation = Column(Boolean, nullable=False, default=False)  # event-level force (PRD D3)
-    submission_policy = Column(String(16), nullable=False, default="all")  # EVENT_SUBMISSION_POLICIES
+    submission_policy = Column(String(16), nullable=False, default="confirm_non_api")  # EVENT_SUBMISSION_POLICIES
     join_code = Column(String(32), nullable=True)  # optional self-join code; never in public reads
     discord_guild_id = Column(String(32), nullable=True)  # snowflake; any guild the bot is in (PRD D8)
     # EVENT_MODES. clan_vs_clan keeps group_id = the HOST group, so group

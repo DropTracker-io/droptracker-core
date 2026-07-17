@@ -234,7 +234,11 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                     "source_id": getattr(clog_entry, "log_id", None),
                 },
                 world_type=world_type, player_name=player_name,
-                used_api=used_api,
+                # The envelope's used_api means "came from the plugin" to the
+                # events engine (submission_policy gating) — manual web
+                # submissions must read as non-plugin even though the intake
+                # route stamps used_api=True on the row (mirrors drop.py).
+                used_api=used_api and clog_data.get("intake_source") != "manual",
             )
         except Exception:
             pass

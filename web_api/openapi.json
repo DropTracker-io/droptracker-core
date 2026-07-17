@@ -883,7 +883,7 @@
               "confirm_non_api",
               "api_only"
             ],
-            "default": "all",
+            "default": "confirm_non_api",
             "description": "Which submissions the completion engine accepts: 'all' \u2014 everything counts; 'confirm_non_api' \u2014 non-plugin submissions land as pending completions needing admin confirmation; 'api_only' \u2014 submissions without the plugin API flag are ignored."
           },
           "board_size": {

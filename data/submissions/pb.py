@@ -269,7 +269,10 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                     "source_id": getattr(pb_entry, "id", None),
                 },
                 world_type=world_type, player_name=player_name,
-                used_api=used_api,
+                # Manual web submissions must read as non-plugin to the events
+                # engine even though the intake route stamps used_api=True on
+                # the row (mirrors drop.py).
+                used_api=used_api and pb_data.get("intake_source") != "manual",
             )
     except Exception:
         pass
