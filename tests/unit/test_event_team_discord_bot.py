@@ -54,3 +54,47 @@ class TestParseColor:
     def test_garbage_none(self):
         assert bot_mod._parse_color("red") is None
         assert bot_mod._parse_color(None) is None
+
+
+class TestExpectedMemberErrorFilter:
+    """The bots/main.py logging filter — re-implemented check against the
+    exact record shapes interactions emits (kept in sync by string contract)."""
+
+    def _filter(self):
+        import logging
+
+        class F(logging.Filter):
+            def filter(self, record):
+                try:
+                    msg = record.getMessage()
+                except Exception:
+                    return True
+                if "/members/" not in msg and "/thread-members/" not in msg:
+                    return True
+                stripped = msg.rstrip()
+                return not (stripped.endswith(": 403") or stripped.endswith(": 404"))
+
+        return F()
+
+    def _record(self, msg):
+        import logging
+
+        return logging.LogRecord("interactions", logging.ERROR, __file__, 1,
+                                 msg, None, None)
+
+    def test_member_404_dropped(self):
+        f = self._filter()
+        assert not f.filter(self._record(
+            "GET::https://discord.com/api/v10/guilds/1/members/2: 404"))
+        assert not f.filter(self._record(
+            "PUT::https://discord.com/api/v10/guilds/1/members/2/roles/3: 403"))
+        assert not f.filter(self._record(
+            "PUT::https://discord.com/api/v10/channels/9/thread-members/2: 404"))
+
+    def test_other_errors_kept(self):
+        f = self._filter()
+        assert f.filter(self._record(
+            "GET::https://discord.com/api/v10/guilds/1/members/2: 500"))
+        assert f.filter(self._record(
+            "POST::https://discord.com/api/v10/channels/9/messages: 403"))
+        assert f.filter(self._record("some unrelated error"))

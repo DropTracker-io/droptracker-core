@@ -18,6 +18,7 @@ back to ``pending``. Sessions are opened per tick and always closed
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 
@@ -32,7 +33,16 @@ PROVISION_REASON = "DropTracker event team setup"
 ROW_LIMIT = 15
 # Per-row cap on member add/remove operations per tick; large rosters converge
 # over consecutive ticks (members_dirty stays set until the diff is empty).
-MEMBER_OPS_LIMIT = 40
+# Kept modest: the role add/remove bucket is ~5/s, and a big burst of REST
+# calls once starved the gateway heartbeat long enough to drop the shard.
+MEMBER_OPS_LIMIT = 25
+
+# interactions' interval Tasks have NO overlap guard — a slow pass (rate-limited
+# member sync, chromium renders) must not stack a second instance on top of
+# itself, which is exactly what exhausted the DB pool on 2026-07-17. Ticks that
+# find the lock held just skip; the next tick resumes where the flags left off.
+_RECONCILE_LOCK = asyncio.Lock()
+_BOARD_POST_LOCK = asyncio.Lock()
 
 
 def _parse_color(value):
@@ -239,32 +249,37 @@ async def _sync_members(bot, guild, row, desired: set) -> bool:
             thread = await bot.fetch_channel(int(row.channel_id))
         except Exception:
             thread = None
-    role = None
-    if row.role_id:
+
+    async def _quiet(coro) -> bool:
+        """Run one member operation; absent-from-guild (404) and
+        permission-refused (403) are EXPECTED for rosters that include people
+        outside the server — swallow them without a log so they never reach
+        Sentry. Anything else (network, 5xx) just means 'not applied'."""
+        from interactions.client import errors as ix_errors
+
         try:
-            role = await guild.fetch_role(int(row.role_id))
+            await coro
+            return True
+        except (ix_errors.NotFound, ix_errors.Forbidden):
+            return False
         except Exception:
-            role = None
+            return False
+
+    guild_id = int(row.guild_id)
+    role_id = int(row.role_id) if row.role_id else None
 
     for uid in to_add:
         if ops >= MEMBER_OPS_LIMIT:
             break
         applied = False
-        if role is not None:
-            try:
-                member = await guild.fetch_member(int(uid))
-                if member is not None:
-                    await member.add_role(role, reason=PROVISION_REASON)
-                    applied = True
-            except Exception:
-                pass
+        if role_id is not None:
+            # Direct PUT — no member fetch (a fetch-per-id storm across a big
+            # roster once rate-limited the bot into a heartbeat drop).
+            applied = await _quiet(bot.http.add_guild_member_role(
+                guild_id, int(uid), role_id, reason=PROVISION_REASON)) or applied
         if thread is not None:
-            try:
-                await thread.add_member(int(uid))
-                applied = True
-            except Exception:
-                pass
-        # Not in the guild (or both surfaces failed): count as handled so one
+            applied = await _quiet(thread.add_member(int(uid))) or applied
+        # Not in the guild (or both surfaces refused): count as handled so one
         # unlinked/absent player can't wedge the diff forever. They get picked
         # up on the next members_dirty pass after they join.
         state.add(uid)
@@ -273,18 +288,11 @@ async def _sync_members(bot, guild, row, desired: set) -> bool:
     for uid in to_remove:
         if ops >= MEMBER_OPS_LIMIT:
             break
-        if role is not None:
-            try:
-                member = await guild.fetch_member(int(uid))
-                if member is not None:
-                    await member.remove_role(role, reason=PROVISION_REASON)
-            except Exception:
-                pass
+        if role_id is not None:
+            await _quiet(bot.http.remove_guild_member_role(
+                guild_id, int(uid), role_id, reason=TEARDOWN_REASON))
         if thread is not None:
-            try:
-                await thread.remove_member(int(uid))
-            except Exception:
-                pass
+            await _quiet(thread.remove_member(int(uid)))
         state.discard(uid)
         ops += 1
 
@@ -293,7 +301,16 @@ async def _sync_members(bot, guild, row, desired: set) -> bool:
 
 
 async def reconcile_event_team_discord_once(bot, session_factory, redis_client) -> None:
-    """One reconcile pass (called from the bots/main.py interval task)."""
+    """One reconcile pass (called from the bots/main.py interval task).
+    Skips entirely when the previous pass is still running (see
+    ``_RECONCILE_LOCK``)."""
+    if _RECONCILE_LOCK.locked():
+        return
+    async with _RECONCILE_LOCK:
+        await _reconcile_pass(bot, session_factory, redis_client)
+
+
+async def _reconcile_pass(bot, session_factory, redis_client) -> None:
     from db.models import Event, EventTeam, EventTeamDiscord
     from services.event_team_discord import team_discord_scopes, team_flags
 
@@ -380,6 +397,11 @@ async def reconcile_event_team_discord_once(bot, session_factory, redis_client) 
 
                 if row.members_dirty:
                     desired = _desired_member_ids(session, row.team_id)
+                    # End the read transaction BEFORE the (rate-limited) REST
+                    # phase — holding it open across minutes of member calls
+                    # is the idle-in-transaction pathology that starved the
+                    # pool on 2026-07-17. The write-back below starts fresh.
+                    session.commit()
                     converged = await _sync_members(bot, guild, row, desired)
                     row.members_dirty = not converged
                     session.commit()
@@ -482,6 +504,9 @@ async def _refresh_one_board_post(bot, session, event, row):
     team = session.query(EventTeam).filter(EventTeam.id == row.team_id).first()
     if team is None:
         return False, False
+    # Release the read transaction before the slow parts (chromium render,
+    # Discord upload) — same idle-in-transaction hygiene as the reconciler.
+    session.commit()
     png, state_hash, rendered = await board_image_with_hash(
         session, event, team_id=row.team_id)
     if state_hash is None:
@@ -530,7 +555,16 @@ async def refresh_team_board_posts_once(bot, session_factory, redis_client,
     engine feeds on every event frame, re-check those events' team posts, and
     edit only the ones whose team-filtered board actually changed
     (``board_state_hash``). Also catches up rows that never got their primary
-    post (fresh provisioning, or a post that failed once)."""
+    post (fresh provisioning, or a post that failed once). Skips entirely
+    while the previous tick is still running (chromium renders are slow)."""
+    if _BOARD_POST_LOCK.locked():
+        return
+    async with _BOARD_POST_LOCK:
+        await _board_post_pass(bot, session_factory, redis_client, render_budget)
+
+
+async def _board_post_pass(bot, session_factory, redis_client,
+                           render_budget: int) -> None:
     from db.models import Event, EventTeamDiscord
     from services.event_team_discord import TEAM_BOARD_DIRTY_KEY
 

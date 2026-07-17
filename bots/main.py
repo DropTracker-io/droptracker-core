@@ -91,6 +91,29 @@ load_dotenv()
 from utils.sentry import init_sentry
 init_sentry("droptracker-core")
 
+# interactions' HTTP client logs every failed request at ERROR before raising —
+# including the fully EXPECTED 403/404s when a team-discord roster includes
+# people who aren't in the guild (web53a member sync probes them by id). Our
+# own code already handles those quietly; drop the library's records for member
+# endpoints so they never reach the journal or Sentry. Real failures (5xx,
+# non-member endpoints, permission errors elsewhere) still log.
+import logging as _logging
+
+
+class _ExpectedMemberErrorFilter(_logging.Filter):
+    def filter(self, record: _logging.LogRecord) -> bool:  # True = keep
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        if "/members/" not in msg and "/thread-members/" not in msg:
+            return True
+        stripped = msg.rstrip()
+        return not (stripped.endswith(": 403") or stripped.endswith(": 404"))
+
+
+_logging.getLogger("interactions").addFilter(_ExpectedMemberErrorFilter())
+
 next_sync_time = datetime.now() + timedelta(minutes=5)
 
 # Hypercorn configuration
