@@ -174,6 +174,30 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
         except Exception as e:
             debug_print(f"Ticker pet publish failed: {e}")
 
+        # Event engine hook: gated, fire-and-forget LPUSH; new pets only.
+        # Feeds pet_collection tasks (specific pet / category / any pet).
+        # Never fails the submission.
+        try:
+            from services.event_engine import queue_submission
+            queue_submission(
+                "pet", player_id, unique_id,
+                {
+                    "pet_name": pet_name,
+                    "item_id": pet_item_id,
+                    "item_name": pet_name,
+                    "npc_name": npc_name,
+                    "killcount": killcount,
+                    "source_id": getattr(new_pet, "id", None),
+                },
+                world_type=world_type, player_name=player_name,
+                # used_api means "came from the plugin" to the events engine
+                # (submission_policy gating). A manual website submission is not
+                # plugin traffic even though intake stamps used_api=True.
+                used_api=used_api and pet_data.get("intake_source") != "manual",
+            )
+        except Exception:
+            pass
+
     should_notify = is_new_pet or (duplicate and not is_new_pet)
     if should_notify:
         debug_print(f"Creating notifications for pet submission")

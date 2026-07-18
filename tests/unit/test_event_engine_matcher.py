@@ -637,3 +637,48 @@ class TestWomSourcePolicy:
         env = {"used_api": True, "source": "wom"}
         assert engine.completion_status(
             _event(requires_confirmation=True), _task(), env) == "pending"
+
+
+# ── pet_collection ────────────────────────────────────────────────────────────
+
+class TestPetCollection:
+    def test_specific_pet_match(self):
+        t = _task(type="pet_collection", target="Baby mole", target_value=1)
+        m = engine.match_task(t, _env("pet", {"pet_name": "Baby mole"}))
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "Baby mole"}
+
+    def test_specific_pet_case_insensitive(self):
+        t = _task(type="pet_collection", target="baby MOLE")
+        m = engine.match_task(t, _env("pet", {"pet_name": "Baby mole"}))
+        assert m["mode"] == "count" and m["quantity"] == 1
+
+    def test_specific_pet_mismatch(self):
+        t = _task(type="pet_collection", target="Baby mole")
+        assert engine.match_task(t, _env("pet", {"pet_name": "Beaver"})) is None
+
+    def test_category_boss(self):
+        t = _task(type="pet_collection", target=None, config={"categories": ["boss"]})
+        assert engine.match_task(t, _env("pet", {"pet_name": "Baby mole"})) is not None
+        assert engine.match_task(t, _env("pet", {"pet_name": "Beaver"})) is None
+
+    def test_category_skilling(self):
+        t = _task(type="pet_collection", target=None, config={"categories": ["skilling"]})
+        assert engine.match_task(t, _env("pet", {"pet_name": "Beaver"})) is not None
+
+    def test_any_pet_matches_and_excludes_misc(self):
+        t = _task(type="pet_collection", target=None, config={})
+        assert engine.match_task(t, _env("pet", {"pet_name": "Vorki"})) is not None
+        # misc pets are opt-in — never counted by a bare "any pet" task.
+        assert engine.match_task(t, _env("pet", {"pet_name": "Chompy chick"})) is None
+
+    def test_misc_pet_counts_when_categorized(self):
+        t = _task(type="pet_collection", target=None, config={"categories": ["misc"]})
+        assert engine.match_task(t, _env("pet", {"pet_name": "Chompy chick"})) is not None
+
+    def test_wrong_kind_no_match(self):
+        t = _task(type="pet_collection", target="Baby mole")
+        assert engine.match_task(t, _env("drop", {"item_name": "Baby mole"})) is None
+
+    def test_missing_pet_name(self):
+        t = _task(type="pet_collection", target=None, config={})
+        assert engine.match_task(t, _env("pet", {})) is None

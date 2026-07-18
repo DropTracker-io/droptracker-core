@@ -235,3 +235,53 @@ def test_any_path_rejects_unknown_items():
             ]},
         })
     assert exc.value.status == 422
+
+
+# ── pet_collection ────────────────────────────────────────────────────────────
+# Pet names resolve against the real utils.osrs_pets taxonomy (a pure leaf
+# module — not stubbed), so these use genuine in-game pet names.
+
+def test_pet_specific_canonicalizes_and_defaults_quantity():
+    out = _validate({"type": "pet_collection", "target": "baby mole"})
+    assert out["target"] == "Baby mole"
+    assert out["target_value"] == 1
+    assert out["config"] is None
+
+
+def test_pet_specific_unknown_rejected():
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "pet_collection", "target": "Not a pet"})
+    assert exc.value.status == 422
+
+
+def test_pet_any_has_no_target_or_config():
+    out = _validate({"type": "pet_collection"})
+    assert out["target"] is None
+    assert out["config"] is None
+    assert out["target_value"] == 1
+
+
+def test_pet_any_honors_count():
+    out = _validate({"type": "pet_collection", "target_value": 5})
+    assert out["target_value"] == 5
+
+
+def test_pet_category_normalized():
+    out = _validate({
+        "type": "pet_collection",
+        "config": {"categories": ["boss", "boss", "skilling"]},
+    })
+    assert _cfg(out) == {"categories": ["boss", "skilling"]}
+    assert out["target"] is None
+
+
+def test_pet_category_unknown_key_rejected():
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "pet_collection", "config": {"categories": ["dinosaur"]}})
+    assert exc.value.status == 422
+
+
+def test_pet_category_empty_list_rejected():
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "pet_collection", "config": {"categories": []}})
+    assert exc.value.status == 422

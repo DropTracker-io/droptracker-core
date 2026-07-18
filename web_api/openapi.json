@@ -932,6 +932,7 @@
               "pb_target",
               "skill_target",
               "loot_value",
+              "pet_collection",
               "custom"
             ]
           },

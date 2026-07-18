@@ -304,6 +304,41 @@ def validate_task_payload(s, body: dict) -> dict:
         target = ""
         config = {"source_npcs": sources} if sources else None
 
+    elif ttype == "pet_collection":
+        from utils.osrs_pets import canonical_pet_name, pet_categories
+        if target:
+            # Specific pet: must be a catalogued pet (misc included). The
+            # matcher compares by name, so we snap it to the canonical spelling.
+            canonical = canonical_pet_name(target)
+            if not canonical:
+                abort_problem(
+                    422, "Unknown pet",
+                    f"'{target or '(empty)'}' is not a known OSRS pet.",
+                )
+            target = canonical
+            tv = _require_target_value(tv if tv is not None else 1, what="Quantity")
+            config = None
+        else:
+            # Category / any-pet: validate the requested category keys, if any.
+            categories = (config or {}).get("categories")
+            if categories is not None:
+                if not isinstance(categories, list) or not categories:
+                    abort_problem(422, "Invalid config",
+                                  "'categories' must be a non-empty array of pet categories.")
+                known = set(pet_categories())
+                bad = sorted({c for c in categories if c not in known})
+                if bad:
+                    abort_problem(
+                        422, "Invalid config",
+                        f"Unknown pet categor{'y' if len(bad) == 1 else 'ies'}: "
+                        f"{', '.join(bad)}. Valid: {sorted(known)}.",
+                    )
+                config = {"categories": sorted(set(categories))}
+            else:
+                config = None  # bare "any pet" (misc excluded)
+            target = ""
+            tv = _require_target_value(tv if tv is not None else 1, what="Number of pets")
+
     elif ttype in ("ehp_target", "ehb_target"):
         tv = _require_target_value(tv, what="Target " + ttype[:3].upper())
         config = None

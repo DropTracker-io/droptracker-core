@@ -34,6 +34,9 @@ EVENT_TASK_TYPES = (
     "pb_target",
     "skill_target",
     "loot_value",
+    # Pet acquisition — a specific pet by name, or "any pet" / a pet category
+    # (boss/skilling/raids/…) resolved via utils.osrs_pets. See event_engine.
+    "pet_collection",
     # Manual-confirmation-only tasks (no automated evaluation).
     "custom",
 )

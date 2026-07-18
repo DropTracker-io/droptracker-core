@@ -15,7 +15,7 @@ the web_api confirmation flow (Task 18) share one implementation:
 
 Envelope (v1)::
 
-    { "v": 1, "kind": "drop|pb|clog|ca|experience",
+    { "v": 1, "kind": "drop|pb|clog|ca|experience|pet",
       "guid": "...", "player_id": 123, "player_name": "...",
       "ts": 1751600000, "used_api": true, "data": { ...type-specific... } }
 
@@ -41,6 +41,12 @@ v1 evaluation semantics (task doc table):
   join (per-player baseline in Redis ``events:{eid}:xpbase:{pid}:{skill}``).
 - ``skill_target`` — experience report for the target skill with
   level ≥ target_value; completes on first match.
+- ``pet_collection`` — pet submission (``kind == "pet"``). A ``target`` names
+  one specific pet; otherwise ``config.categories`` (a list like
+  ``["boss"]``) gates by pet category via :mod:`utils.osrs_pets`, and an
+  absent/empty list means "any pet" (the default set, misc excluded).
+  Progress unit = 1 per new pet; ``target_value`` is the count to collect
+  (default 1 → completes on the first qualifying pet).
 - ``ehp_target``/``ehb_target``/``custom`` — not auto-evaluated (Task 18
   manual/confirmation only).
 
@@ -75,7 +81,7 @@ _STATE_KEY_TTL = 60 * 60 * 24 * 60         # 60 days for xp-baseline / kc-dedupe
 
 # Task types the engine can evaluate automatically (v1).
 AUTO_TASK_TYPES = ("item_collection", "kc_target", "pb_target", "xp_target", "skill_target",
-                   "loot_value")
+                   "loot_value", "pet_collection")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -581,6 +587,26 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
         if target_level <= 0 or level < target_level:
             return None
         return {"mode": "first", "quantity": 1}
+
+    if task_type == "pet_collection":
+        if kind != "pet":
+            return None
+        pet_name = data.get("pet_name") or data.get("item_name")
+        if not pet_name:
+            return None
+        target = task.get("target")
+        if target:
+            # Specific pet: exact name match (any category, incl. misc).
+            if _norm(pet_name) != _norm(target):
+                return None
+        else:
+            # Category / any-pet: membership resolved from the live taxonomy.
+            from utils.osrs_pets import pet_matches
+            categories = (task.get("config") or {}).get("categories")
+            if not pet_matches(pet_name, categories):
+                return None
+        return {"mode": "count", "quantity": 1,
+                "matched_target": str(pet_name).strip()[:120] or None}
 
     # ehp_target / ehb_target / custom: manual-confirmation only (Task 18).
     return None
