@@ -554,7 +554,7 @@ def user_entitlements(user_id: int) -> Dict[str, Any]:
 
 
 def user_has_entitlement(user_id: Optional[int], key: str) -> bool:
-    if not user_id:
+    if user_id is None:
         return False
     try:
         return bool(user_entitlements(user_id).get(key))

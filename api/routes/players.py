@@ -212,7 +212,7 @@ async def player_search():
         response_data = {
             "player_name": player.player_name,
             "droptracker_player_id": player.player_id,
-            "registered": True if player.user_id else False,
+            "registered": player.user_id is not None,
             "total_loot": format_number(player_loot),
             "global_rank": player_rank,
             "top_npc": top_npc_data,

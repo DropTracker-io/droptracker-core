@@ -41,7 +41,7 @@ PAGE_SIZE = 20
 
 
 def _author_name(s, user_id):
-    if not user_id:
+    if user_id is None:
         return "Staff"
     profile = get_cached_profile(user_id)
     if profile.get("display_name"):

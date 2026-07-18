@@ -166,7 +166,7 @@ def _has_premium_for_uploads(player, db_session) -> Group:
 def _user_grants_video_uploads(player) -> bool:
     """Personal supporter path: the player's linked user carries the
     user-level ``video_submissions`` entitlement, independent of any group."""
-    if not player.user_id:
+    if player.user_id is None:
         return False
     try:
         return user_has_entitlement(player.user_id, "video_submissions")

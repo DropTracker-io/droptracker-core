@@ -2621,7 +2621,7 @@ async def admin_revoke_badge(player_id: int, award_id: int):
 
 
 def _invalidate_badge_user_entitlements(user_id) -> None:
-    if not user_id:
+    if user_id is None:
         return
     try:
         from db.entitlements import invalidate_user_entitlement_cache
