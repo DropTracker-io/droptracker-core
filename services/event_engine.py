@@ -257,6 +257,22 @@ def completion_threshold(task: dict) -> int:
         return 1
 
 
+# Continuous-metric task types whose plugin progress fan-out is stepped: every
+# XP drop / loot stack is an increment, so per-increment envelopes would spam
+# every teammate's game chat. Discrete tasks (items, KC) stay per-increment.
+PLUGIN_PROGRESS_STEP_TASK_TYPES = ("xp_target", "loot_value")
+PLUGIN_PROGRESS_STEP_PCT = 10
+
+
+def _plugin_progress_step_crossed(previous: int, current: int, threshold: int) -> bool:
+    """True when previous→current crosses a PLUGIN_PROGRESS_STEP_PCT boundary
+    of the threshold (integer math: which 10%-bucket each value sits in)."""
+    if threshold <= 0:
+        return True
+    steps = 100 // PLUGIN_PROGRESS_STEP_PCT
+    return (current * steps) // threshold > (previous * steps) // threshold
+
+
 def _list_kind(task: dict) -> Optional[str]:
     """Item-list config kind (any_of/all_of/point_collection/assembly/groups/any_path), if any."""
     config = task.get("config") or {}
@@ -1349,9 +1365,13 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
     drove this increment, carried through so the sender can attach it to the
     Discord message the same way a completion's proof does.
 
-    The in-game plugin inbox is fanned out here on EVERY increment, before
+    The in-game plugin inbox is fanned out here on every increment, before
     the Discord verbosity gates — the plugin has its own client-side progress
     toggle, and the HUD advances off these envelopes between state refreshes.
+    Exception: continuous-metric tasks (xp_target/loot_value), where every
+    XP drop or loot stack is an increment — those only fan out when a
+    {PLUGIN_PROGRESS_STEP_PCT}% step of the target was crossed, so a 10M-XP
+    task pings its teams ~10 times total instead of per kill.
     """
     from services.event_notifications import (
         effective_message_config,
@@ -1375,21 +1395,28 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
     crossed_pcts = progress_milestones_crossed(previous, current, target_threshold)
     if crossed_pcts:
         base_payload["milestone_pct"] = max(crossed_pcts)
-    try:
-        from services.plugin_notifications import (
-            fan_out_event_notification,
-            resolve_item_icon_id,
-        )
-        plugin_payload = dict(base_payload)
-        if matched_target:
-            icon_item_id = resolve_item_icon_id(session, matched_target)
-            if icon_item_id:
-                plugin_payload["icon_item_id"] = icon_item_id
-        fan_out_event_notification(session, "event_task_progress", event, plugin_payload)
-    except ImportError:
-        pass  # unit-test stubs
-    except Exception as plugin_notify_err:
-        print(f"plugin progress fan-out failed: {plugin_notify_err}")
+    send_plugin = True
+    if task.get("type") in PLUGIN_PROGRESS_STEP_TASK_TYPES:
+        send_plugin = _plugin_progress_step_crossed(previous, current, target_threshold)
+    if send_plugin:
+        try:
+            from services.plugin_notifications import (
+                fan_out_event_notification,
+                resolve_item_icon_id,
+            )
+            plugin_payload = dict(base_payload)
+            if matched_target:
+                # Name + sprite of the drop behind this increment, so the
+                # client can say "received X, progressing Y" with an icon.
+                plugin_payload["received_item"] = matched_target
+                icon_item_id = resolve_item_icon_id(session, matched_target)
+                if icon_item_id:
+                    plugin_payload["icon_item_id"] = icon_item_id
+            fan_out_event_notification(session, "event_task_progress", event, plugin_payload)
+        except ImportError:
+            pass  # unit-test stubs
+        except Exception as plugin_notify_err:
+            print(f"plugin progress fan-out failed: {plugin_notify_err}")
 
     config = effective_message_config(event.get("message_config"))
     mode = config.get("task_progress", "off")

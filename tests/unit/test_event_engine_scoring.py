@@ -317,3 +317,27 @@ class TestLineBonusCoalescing:
         blackout_data = dict(enqueued)["event_blackout"]
         assert blackout_data["bonus_points"] == 25
         assert team.score == 105
+
+
+class TestPluginProgressStep:
+    """10%-step gate for continuous-metric (xp/gp) plugin progress fan-out."""
+
+    def test_crossing_a_decile_fires(self):
+        # 900k -> 1.1M of 10M crosses the 10% boundary at 1M.
+        assert engine._plugin_progress_step_crossed(900_000, 1_100_000, 10_000_000)
+
+    def test_within_a_decile_is_silent(self):
+        assert not engine._plugin_progress_step_crossed(1_100_000, 1_900_000, 10_000_000)
+
+    def test_first_increment_from_zero_is_silent_until_ten_pct(self):
+        assert not engine._plugin_progress_step_crossed(0, 999_999, 10_000_000)
+        assert engine._plugin_progress_step_crossed(0, 1_000_000, 10_000_000)
+
+    def test_multi_decile_jump_fires_once(self):
+        assert engine._plugin_progress_step_crossed(0, 5_000_000, 10_000_000)
+
+    def test_degenerate_threshold_always_fires(self):
+        assert engine._plugin_progress_step_crossed(3, 4, 0)
+
+    def test_only_continuous_types_are_stepped(self):
+        assert set(engine.PLUGIN_PROGRESS_STEP_TASK_TYPES) == {"xp_target", "loot_value"}
