@@ -63,6 +63,12 @@ STATIC_IMG_DIR = "/store/droptracker/disc/static/assets/img"
 AUDIENCE_TEAM = "team"
 AUDIENCE_EVENT = "event"
 
+# /event_state per-entry list caps: the plugin renders a task picker and a
+# roster inline in a 225px side panel — bound the payload, don't paginate.
+TASKS_LIMIT = 60
+REQUIREMENTS_LIMIT = 12
+MEMBERS_LIMIT = 60
+
 # Which notification_queue event types are delivered in-game, and to whom.
 # Types absent here (event_pending, event_activation_failed,
 # event_signup_prompt, event_pot) are Discord admin/announcement concerns
@@ -324,6 +330,251 @@ def _task_icon(session, task_row):
     return None, None
 
 
+def _requirement_entries(config: dict) -> list:
+    """Ordered, de-duplicated item requirements from an item_collection
+    config, keeping per-item ``quantity`` and ``points`` (the fields
+    ``web_api.task_tiles._config_items`` drops). Pure."""
+    out: list = []
+    seen: set = set()
+
+    def _add(entry) -> None:
+        if isinstance(entry, str):
+            name, qty, pts = entry, None, None
+        elif isinstance(entry, dict):
+            name = entry.get("item_name") or entry.get("name")
+            qty = entry.get("quantity")
+            pts = entry.get("points")
+        else:
+            return
+        key = " ".join(str(name or "").strip().lower().split())
+        if not key or key in seen:
+            return
+        seen.add(key)
+        row = {"name": str(name).strip()}
+        try:
+            if qty is not None and int(qty) > 1:
+                row["quantity"] = int(qty)
+        except (TypeError, ValueError):
+            pass
+        try:
+            if pts is not None:
+                row["points"] = int(float(pts))
+        except (TypeError, ValueError):
+            pass
+        out.append(row)
+
+    for it in config.get("items") or []:
+        _add(it)
+    for it in config.get("any_of") or []:
+        _add(it)
+    for group in config.get("groups") or []:
+        if isinstance(group, dict):
+            for it in group.get("items") or []:
+                _add(it)
+    for path in config.get("paths") or []:
+        if isinstance(path, dict):
+            for group in path.get("groups") or []:
+                if isinstance(group, dict):
+                    for it in group.get("items") or []:
+                        _add(it)
+    return out
+
+
+def _norm_name(value) -> str:
+    """Case/whitespace-insensitive item-name key (mirrors event_engine._norm)."""
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def mark_obtained_requirements(requirements: list, config: dict,
+                               collected_names: set) -> list:
+    """Annotate requirement entries with ``"obtained": True`` when the team
+    has already banked that item AND re-receiving it can no longer advance
+    the task — the plugin strikes those lines through in task tooltips.
+
+    Eligible kinds: ``all_of``/``assembly`` (every listed item counts once),
+    and ``groups`` for items inside all_of-mode groups. ``any_of``
+    re-receives still fold into progress and ``point_collection`` items are
+    re-earnable for points, so those are never annotated. ``collected_names``
+    is a set of normalized ``EventCompletion.matched_target`` values.
+    Mutates and returns ``requirements``. Pure.
+    """
+    if not requirements or not collected_names:
+        return requirements
+    kind = (config.get("kind") if isinstance(config, dict) else None) or "any_of"
+    if kind in ("all_of", "assembly"):
+        eligible = None  # every listed item
+    elif kind == "groups":
+        eligible = set()
+        for group in (config.get("groups") or []):
+            if not isinstance(group, dict):
+                continue
+            mode = group.get("mode") if group.get("mode") in ("all_of", "any_of") else "all_of"
+            if mode != "all_of":
+                continue
+            for it in group.get("items") or []:
+                name = it if isinstance(it, str) \
+                    else (it or {}).get("item_name") or (it or {}).get("name")
+                key = _norm_name(name)
+                if key:
+                    eligible.add(key)
+    else:
+        return requirements
+    for req in requirements:
+        key = _norm_name(req.get("name"))
+        if key in collected_names and (eligible is None or key in eligible):
+            req["obtained"] = True
+    return requirements
+
+
+def describe_task(task: dict) -> tuple:
+    """(description, requirements) explaining one event task to the plugin.
+
+    ``task``: {"type", "label", "target", "target_value", "config"} (the
+    EventTask columns). The sentence is composed server-side so every client
+    renders identical wording; ``requirements`` is the capped per-item list
+    ([{"name", "quantity"?, "points"?}]) for item-list tasks, else []. Pure.
+    """
+    from web_api.task_tiles import _fmt_num, _fmt_time, _parse_config
+
+    task_type = task.get("type")
+    target = (task.get("target") or "").strip()
+    tv = task.get("target_value")
+    config = _parse_config(task.get("config"))
+
+    if task_type == "item_collection":
+        reqs = _requirement_entries(config)
+        total = len(reqs)
+        capped = reqs[:REQUIREMENTS_LIMIT]
+        extra = f" (+{total - len(capped)} more)" if total > len(capped) else ""
+        if not reqs:
+            if target and isinstance(tv, int) and tv > 1:
+                return f"Obtain {tv}× {target}.", []
+            if target:
+                return f"Obtain {target}.", []
+            return None, []
+        kind = config.get("kind") or "any_of"
+        if kind == "point_collection":
+            desc = (f"Earn {_fmt_num(tv)} points. Each listed item awards "
+                    f"its own point value{extra}.")
+        elif kind == "all_of":
+            desc = f"Collect every one of the {total} listed items{extra}."
+        elif kind == "assembly":
+            desc = f"Assemble the complete set: {total} pieces{extra}."
+        elif kind == "groups":
+            desc = f"Complete every listed item requirement{extra}."
+        elif kind == "any_path":
+            desc = f"Complete any one of the listed item paths{extra}."
+        elif isinstance(tv, int) and tv > 1:
+            desc = f"Collect any {tv} of the {total} listed items{extra}."
+        else:
+            desc = f"Collect any one of the {total} listed items{extra}."
+        return desc, capped
+
+    if task_type == "kc_target":
+        return (f"Reach {_fmt_num(tv)} kills at {target or 'the target boss'}.", [])
+    if task_type == "pb_target":
+        return (f"Beat a personal best of {_fmt_time(tv)} at "
+                f"{target or 'the target boss'}.", [])
+    if task_type == "xp_target":
+        skill = target.capitalize() if target else "the target skill"
+        return f"Gain {_fmt_num(tv)} {skill} XP as a team.", []
+    if task_type == "skill_target":
+        skill = target.capitalize() if target else "the target skill"
+        return f"Reach level {tv} {skill} on one account.", []
+    if task_type == "loot_value":
+        sources = [str(n).strip() for n in (config.get("source_npcs") or []) if str(n).strip()]
+        if target and target not in sources:
+            sources.append(target)
+        scope = f" from {', '.join(sources[:6])}" if sources else ""
+        return f"Loot {_fmt_num(tv)} GP worth of drops{scope}.", []
+    if task_type == "ehp_target":
+        return f"Gain {_fmt_num(tv)} EHP (efficient hours played).", []
+    if task_type == "ehb_target":
+        return f"Gain {_fmt_num(tv)} EHB (efficient hours bossed).", []
+    return None, []
+
+
+def _batch_task_tiles(session, task_rows) -> dict:
+    """{task_id: {"icon_item_id", "icon_url", "badge", "value"}} for a whole
+    event's tasks, resolving item/NPC names in two bulk queries (the per-task
+    variant of this is :func:`_task_icon`; a 30-task bingo board must not run
+    60 lookups per /event_state). Never raises."""
+    import os
+
+    tiles: dict = {}
+    try:
+        from sqlalchemy import func
+
+        from db.models import ItemList, NpcList
+        from web_api.task_tiles import (
+            build_tile,
+            icon_asset_path,
+            spec_names,
+            tile_spec,
+        )
+
+        specs = {}
+        item_names: set = set()
+        npc_names: set = set()
+        for task_row in task_rows:
+            try:
+                spec = tile_spec({
+                    "id": task_row.id, "type": task_row.type,
+                    "label": task_row.label, "target": task_row.target,
+                    "target_value": task_row.target_value,
+                    "config": task_row.config,
+                })
+            except Exception:
+                continue
+            specs[task_row.id] = spec
+            items, npcs = spec_names(spec)
+            item_names |= items
+            npc_names |= npcs
+
+        item_ids: dict = {}
+        if item_names:
+            for iid, name in (
+                session.query(func.min(ItemList.item_id), ItemList.item_name)
+                .filter(ItemList.item_name.in_(item_names), ItemList.noted.is_(False))
+                .group_by(ItemList.item_name)
+                .all()
+            ):
+                item_ids[" ".join(name.strip().lower().split())] = iid
+        npc_ids: dict = {}
+        if npc_names:
+            for nid, name in (
+                session.query(func.min(NpcList.npc_id), NpcList.npc_name)
+                .filter(NpcList.npc_name.in_(npc_names))
+                .group_by(NpcList.npc_name)
+                .all()
+            ):
+                npc_ids[" ".join(name.strip().lower().split())] = nid
+
+        for task_id, spec in specs.items():
+            tile = build_tile(spec, item_ids, npc_ids)
+            icon_item_id = None
+            icon_url = None
+            for icon in tile.get("icons") or []:
+                if icon.get("type") == "item" and icon.get("id"):
+                    icon_item_id = int(icon["id"])
+                    break
+            if icon_item_id is None:
+                for icon in tile.get("icons") or []:
+                    rel = icon_asset_path(icon)
+                    if rel and os.path.exists(os.path.join(STATIC_IMG_DIR, rel)):
+                        icon_url = f"{IMG_BASE}/{rel}"
+                        break
+            tiles[task_id] = {
+                "icon_item_id": icon_item_id,
+                "icon_url": icon_url,
+                "badge": tile.get("badge"),
+                "value": tile.get("value"),
+            }
+    except Exception as e:
+        print(f"[plugin_notifications] batch tile resolve failed: {e}")
+    return tiles
+
+
 def compose_event_state(session, player_id) -> dict:
     """The plugin's HUD/Events-tab state: one entry per active event the
     player is rostered in. All composition happens here so the client stays a
@@ -380,6 +631,7 @@ def compose_event_state(session, player_id) -> dict:
         }
         tasks_total = len(task_rows)
         tasks_completed = sum(1 for p in progress_rows if p.completed)
+        tiles = _batch_task_tiles(session, task_rows)
 
         board_status = None
         focus_row = None
@@ -421,7 +673,12 @@ def compose_event_state(session, player_id) -> dict:
             state = progress_by_task.get(focus_row.id) or {}
             need = 1 if focus_row.type in ("pb_target", "skill_target") \
                 else max(int(focus_row.target_value or 0), 1)
-            icon_item_id, icon_url = _task_icon(session, focus_row)
+            focus_tile = tiles.get(focus_row.id)
+            if focus_tile is not None:
+                icon_item_id = focus_tile.get("icon_item_id")
+                icon_url = focus_tile.get("icon_url")
+            else:
+                icon_item_id, icon_url = _task_icon(session, focus_row)
             focus_task = {
                 "id": focus_row.id,
                 "label": focus_row.label,
@@ -431,6 +688,107 @@ def compose_event_state(session, player_id) -> dict:
                 "icon_url": icon_url,
                 "source": focus_source,
             }
+
+        # Which listed items the team has already banked, per task — drives
+        # the struck-through requirement lines in plugin tooltips. One bulk
+        # query; bonus rows carry no matched_target so the NULL filter drops
+        # them.
+        collected_by_task: dict = {}
+        try:
+            from db.models import EventCompletion
+
+            listed_ids = [t.id for t in task_rows[:TASKS_LIMIT]]
+            if listed_ids:
+                credited = (
+                    session.query(EventCompletion.task_id,
+                                  EventCompletion.matched_target)
+                    .filter(EventCompletion.task_id.in_(listed_ids),
+                            EventCompletion.team_id == team.id,
+                            EventCompletion.status.in_(("auto", "confirmed", "manual")),
+                            EventCompletion.matched_target.isnot(None))
+                    .all()
+                )
+                for credited_task_id, credited_target in credited:
+                    collected_by_task.setdefault(credited_task_id, set()).add(
+                        _norm_name(credited_target))
+        except Exception as e:
+            print(f"[plugin_notifications] credited-item lookup failed: {e}")
+
+        # The full task list: powers the plugin's task picker (click a task to
+        # track it on the HUD instead of the server's focus pick), tooltips
+        # explaining each task's requirements, and per-task progress rows.
+        tasks_payload = []
+        for task_row in task_rows[:TASKS_LIMIT]:
+            state = progress_by_task.get(task_row.id) or {}
+            need = 1 if task_row.type in ("pb_target", "skill_target") \
+                else max(int(task_row.target_value or 0), 1)
+            try:
+                description, requirements = describe_task({
+                    "type": task_row.type, "label": task_row.label,
+                    "target": task_row.target,
+                    "target_value": task_row.target_value,
+                    "config": task_row.config,
+                })
+            except Exception:
+                description, requirements = None, []
+            try:
+                raw_config = task_row.config
+                if isinstance(raw_config, dict):
+                    task_config = raw_config
+                elif raw_config:
+                    task_config = json.loads(raw_config)
+                else:
+                    task_config = {}
+                if not isinstance(task_config, dict):
+                    task_config = {}
+                mark_obtained_requirements(
+                    requirements, task_config,
+                    collected_by_task.get(task_row.id) or set())
+            except Exception:
+                pass
+            tile = tiles.get(task_row.id) or {}
+            tasks_payload.append({
+                "id": task_row.id,
+                "label": task_row.label,
+                "type": task_row.type,
+                "points": int(task_row.points or 0),
+                "have": int(state.get("progress") or 0),
+                "need": need,
+                "completed": bool(state.get("completed")),
+                "icon_item_id": tile.get("icon_item_id"),
+                "icon_url": tile.get("icon_url"),
+                "badge": tile.get("badge"),
+                "value": tile.get("value"),
+                "description": description,
+                "requirements": requirements,
+            })
+
+        # Own-team roster for the Events tab (names only; capped, with the
+        # real total so the client can render "… and N more").
+        members = []
+        members_total = 0
+        try:
+            from db.models import Player
+
+            members_total = (
+                session.query(EventTeamMember.player_id)
+                .filter(EventTeamMember.team_id == team.id)
+                .count()
+            )
+            member_rows = (
+                session.query(EventTeamMember.player_id, Player.player_name)
+                .outerjoin(Player, Player.player_id == EventTeamMember.player_id)
+                .filter(EventTeamMember.team_id == team.id)
+                .order_by(Player.player_name.asc())
+                .limit(MEMBERS_LIMIT)
+                .all()
+            )
+            members = [
+                {"player_id": pid, "name": name or f"Player {pid}"}
+                for pid, name in member_rows
+            ]
+        except Exception as e:
+            print(f"[plugin_notifications] roster lookup failed: {e}")
 
         entries.append({
             "event": {"id": event.id, "name": event.name, "kind": event.kind,
@@ -450,6 +808,9 @@ def compose_event_state(session, player_id) -> dict:
             "board_status": board_status,
             "tasks_completed": tasks_completed,
             "tasks_total": tasks_total,
+            "tasks": tasks_payload,
+            "members": members,
+            "members_total": members_total,
             "board": {
                 "available": bool(event.has_bingo or event.kind == "board_game"),
                 "team_id": team.id,

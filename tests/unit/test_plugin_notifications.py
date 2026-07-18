@@ -323,3 +323,119 @@ class TestTypeRegistryConsistency:
     def test_audiences_valid(self):
         for aud in pn.AUDIENCE_FOR_TYPE.values():
             assert aud in (pn.AUDIENCE_TEAM, pn.AUDIENCE_EVENT)
+
+
+class TestDescribeTask:
+    """describe_task / _requirement_entries — the /event_state task
+    explanations the plugin shows as tooltips (pure)."""
+
+    def test_point_collection_keeps_per_item_points(self):
+        desc, reqs = pn.describe_task({
+            "type": "item_collection", "label": "Point hunt",
+            "target": None, "target_value": 50,
+            "config": json.dumps({"kind": "point_collection", "items": [
+                {"item_name": "Twisted bow", "points": 25},
+                {"item_name": "Dragon claws", "points": 10, "quantity": 2},
+            ]}),
+        })
+        assert "50 points" in desc
+        assert reqs == [
+            {"name": "Twisted bow", "points": 25},
+            {"name": "Dragon claws", "quantity": 2, "points": 10},
+        ]
+
+    def test_any_of_counts_and_caps(self):
+        items = [{"item_name": f"Item {i}"} for i in range(20)]
+        desc, reqs = pn.describe_task({
+            "type": "item_collection", "label": "Any 3",
+            "target": None, "target_value": 3,
+            "config": json.dumps({"kind": "any_of", "items": items}),
+        })
+        assert "any 3 of the 20 listed items" in desc
+        assert len(reqs) == pn.REQUIREMENTS_LIMIT
+        assert "(+8 more)" in desc
+
+    def test_single_target_collection(self):
+        desc, reqs = pn.describe_task({
+            "type": "item_collection", "label": "3x hilt",
+            "target": "Bandos hilt", "target_value": 3, "config": None,
+        })
+        assert desc == "Obtain 3× Bandos hilt."
+        assert reqs == []
+
+    def test_scalar_types(self):
+        desc, _ = pn.describe_task({"type": "kc_target", "label": "x",
+                                    "target": "Zulrah", "target_value": 250,
+                                    "config": None})
+        assert desc == "Reach 250 kills at Zulrah."
+        desc, _ = pn.describe_task({"type": "xp_target", "label": "x",
+                                    "target": "magic", "target_value": 10_000_000,
+                                    "config": None})
+        assert desc == "Gain 10.00M Magic XP as a team."
+        desc, _ = pn.describe_task({"type": "pb_target", "label": "x",
+                                    "target": "Gauntlet", "target_value": 105,
+                                    "config": None})
+        assert desc == "Beat a personal best of 1:45 at Gauntlet."
+
+    def test_loot_value_scoped_and_unscoped(self):
+        desc, _ = pn.describe_task({"type": "loot_value", "label": "x",
+                                    "target": None, "target_value": 100_000_000,
+                                    "config": None})
+        assert desc == "Loot 100.00M GP worth of drops."
+        desc, _ = pn.describe_task({
+            "type": "loot_value", "label": "x", "target": "Vorkath",
+            "target_value": 5_000_000,
+            "config": json.dumps({"source_npcs": ["Zulrah"]}),
+        })
+        assert "from Zulrah, Vorkath" in desc
+
+    def test_unknown_type_gives_none(self):
+        desc, reqs = pn.describe_task({"type": "custom", "label": "Mystery",
+                                       "target": None, "target_value": None,
+                                       "config": None})
+        assert desc is None
+        assert reqs == []
+
+
+class TestMarkObtainedRequirements:
+    """mark_obtained_requirements — struck-through tooltip lines for items
+    the team has banked and can no longer usefully re-receive (pure)."""
+
+    def _reqs(self):
+        return [{"name": "Coins"}, {"name": "Bones"}, {"name": "Bronze axe"}]
+
+    def test_all_of_marks_collected_items_only(self):
+        reqs = pn.mark_obtained_requirements(
+            self._reqs(), {"kind": "all_of"}, {"coins", "bronze axe"})
+        assert reqs[0].get("obtained") is True
+        assert "obtained" not in reqs[1]
+        assert reqs[2].get("obtained") is True
+
+    def test_assembly_matches_case_insensitively(self):
+        reqs = pn.mark_obtained_requirements(
+            [{"name": "Dragon  Claws"}], {"kind": "assembly"}, {"dragon claws"})
+        assert reqs[0].get("obtained") is True
+
+    def test_point_collection_never_marked(self):
+        reqs = pn.mark_obtained_requirements(
+            self._reqs(), {"kind": "point_collection"}, {"coins", "bones"})
+        assert all("obtained" not in r for r in reqs)
+
+    def test_any_of_never_marked(self):
+        reqs = pn.mark_obtained_requirements(
+            self._reqs(), {"kind": "any_of"}, {"coins"})
+        assert all("obtained" not in r for r in reqs)
+
+    def test_groups_marks_only_all_of_mode_groups(self):
+        config = {"kind": "groups", "groups": [
+            {"mode": "all_of", "items": [{"item_name": "Coins"}]},
+            {"mode": "any_of", "need": 2, "items": [{"item_name": "Bones"}]},
+        ]}
+        reqs = pn.mark_obtained_requirements(
+            [{"name": "Coins"}, {"name": "Bones"}], config, {"coins", "bones"})
+        assert reqs[0].get("obtained") is True
+        assert "obtained" not in reqs[1]
+
+    def test_empty_collected_is_noop(self):
+        reqs = pn.mark_obtained_requirements(self._reqs(), {"kind": "all_of"}, set())
+        assert all("obtained" not in r for r in reqs)
