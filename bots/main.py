@@ -283,6 +283,7 @@ async def on_startup(event: Startup):
     bot.load_extension("services.user_context")
     bot.load_extension("services.group_poll")
     bot.load_extension("services.activity_launch")
+    bot.load_extension("services.news_optin")
     print("Loaded services.")
     print("Set bot to ready")
     await asyncio.sleep(1)
