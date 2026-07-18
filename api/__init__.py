@@ -100,16 +100,19 @@ def create_app() -> Quart:
     @app.before_serving
     async def _start_monitor():
         app.loop_lag_task = asyncio.create_task(_monitor_event_loop())
+        from api import notify_wake
+        app.notify_wake_task = asyncio.create_task(notify_wake.run_listener())
 
     @app.after_serving
     async def _stop_monitor():
-        task = getattr(app, "loop_lag_task", None)
-        if task:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        for attr in ("loop_lag_task", "notify_wake_task"):
+            task = getattr(app, attr, None)
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     return app
 

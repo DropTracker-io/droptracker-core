@@ -3,6 +3,10 @@
 - GET /notifications — drains the per-player Redis inbox written by
   services/plugin_notifications (event fan-out + submission notices) and
   reports whether the player is in a live event so the plugin keeps polling.
+  ``?wait=N`` (0..25s, optional) long-polls: an empty inbox holds the request
+  until an inbox push wakes it via api/notify_wake or the window expires.
+  Responses to wait-requests carry ``long_poll: true`` so the plugin can
+  detect servers that predate the param and fall back to fixed-interval polls.
 - GET /event_state — the Enhanced Display HUD / Events-tab state (focus task,
   standings, team info) for every active event the player is rostered in.
 - GET /events/<id>/board.png — the server-rendered board (bingo grid /
@@ -25,6 +29,19 @@ from db import Player
 # stubs the services package (same rule as web_api routes).
 
 notifications_bp = Blueprint("notifications", __name__)
+
+# Longest inbox hold for GET /notifications?wait=N. Must stay comfortably
+# under the nginx proxy_read_timeout for the API host (default 60s).
+MAX_NOTIFICATIONS_WAIT_SECONDS = 25
+
+
+def parse_wait_seconds(raw) -> int:
+    """Clamp the optional ``wait`` query param to [0, MAX]; garbage means 0."""
+    try:
+        wait = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(wait, MAX_NOTIFICATIONS_WAIT_SECONDS))
 
 
 def _resolve_player_id(db_session, player_name, acc_hash):
@@ -73,8 +90,49 @@ async def get_notifications():
         return jsonify({"error": "Player not found"}), 404
 
     player_id, active_event = resolved
-    notifications = await asyncio.to_thread(drain_inbox, player_id)
-    return jsonify({"notifications": notifications, "active_event": active_event}), 200
+    wait_seconds = parse_wait_seconds(request.args.get("wait"))
+
+    if wait_seconds <= 0:
+        notifications = await asyncio.to_thread(drain_inbox, player_id)
+        return jsonify({"notifications": notifications, "active_event": active_event}), 200
+
+    from api import notify_wake
+
+    # Register before the first drain so a push that lands between the drain
+    # and the wait still wakes us (the event is simply already set).
+    waiter = notify_wake.register(player_id)
+    try:
+        notifications = await asyncio.to_thread(drain_inbox, player_id)
+        if not notifications:
+            try:
+                await asyncio.wait_for(waiter.wait(), timeout=wait_seconds)
+            except asyncio.TimeoutError:
+                pass
+            notifications = await asyncio.to_thread(drain_inbox, player_id)
+    finally:
+        notify_wake.unregister(player_id, waiter)
+
+    if notifications and not active_event:
+        # An event may have gone live mid-hold (e.g. the wake was its
+        # event_started envelope); re-check so the plugin flips active now
+        # instead of one idle-recheck later.
+        def _recheck():
+            db_session = get_db_session()
+            try:
+                return player_has_active_event(db_session, player_id)
+            except Exception as e:
+                print(f"/notifications active-event recheck failed: {e}")
+                return False
+            finally:
+                db_session.close()
+
+        active_event = await asyncio.to_thread(_recheck)
+
+    return jsonify({
+        "notifications": notifications,
+        "active_event": active_event,
+        "long_poll": True,
+    }), 200
 
 
 @notifications_bp.get("/event_state")

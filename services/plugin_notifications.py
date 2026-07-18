@@ -39,6 +39,11 @@ INBOX_KEY_TEMPLATE = "plugin:notify:{player_id}"
 INBOX_CAP = 50
 INBOX_TTL_SECONDS = 24 * 3600
 DRAIN_BATCH_LIMIT = 25
+# Long-poll wake channel: every inbox push publishes the player_id here so a
+# held ``GET /notifications?wait=N`` returns immediately instead of waiting
+# out its poll timer. Mirrored as a literal in api/notify_wake.py (the API
+# process must not import services.* at module scope — test conftest stubs it).
+WAKE_CHANNEL = "plugin:notify:wake"
 # Free-form notice text is capped defensively; the plugin caps again on render.
 NOTICE_MAX_CHARS = 500
 
@@ -130,6 +135,7 @@ def push_to_inbox(player_id, envelope: dict) -> bool:
         pipe.rpush(key, serialized)
         pipe.ltrim(key, -INBOX_CAP, -1)
         pipe.expire(key, INBOX_TTL_SECONDS)
+        pipe.publish(WAKE_CHANNEL, str(int(player_id)))
         pipe.execute()
         return True
     except Exception as e:

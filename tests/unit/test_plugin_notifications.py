@@ -48,6 +48,9 @@ class FakePipeline:
     def lrange(self, key, start, end):
         self.ops.append(("lrange", key, start, end))
 
+    def publish(self, channel, message):
+        self.ops.append(("publish", channel, message))
+
     def execute(self):
         results = []
         for op in self.ops:
@@ -64,6 +67,9 @@ class FakePipeline:
                 results.append(True)
             elif name == "lrange":
                 results.append(list(_slice(lst, op[2], op[3])))
+            elif name == "publish":
+                self.store.setdefault("_published", []).append((op[1], op[2]))
+                results.append(1)
         self.ops = []
         return results
 
@@ -124,6 +130,11 @@ class TestInbox:
         drained = pn.drain_inbox(42)
         assert [e["data"]["n"] for e in drained] == [0, 1, 2]
         assert pn.drain_inbox(42) == []
+
+    def test_push_publishes_longpoll_wake(self, monkeypatch):
+        fake = _use_fake_redis(monkeypatch)
+        pn.push_to_inbox(42, pn.build_envelope("event_completion", {}))
+        assert fake.store["_published"] == [(pn.WAKE_CHANNEL, "42")]
 
     def test_drain_respects_limit_and_keeps_rest(self, monkeypatch):
         _use_fake_redis(monkeypatch)
