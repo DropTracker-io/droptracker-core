@@ -56,7 +56,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy.exc import IntegrityError
@@ -1114,6 +1114,7 @@ def evaluate_bingo_bonuses(session, event: dict, team_id: int,
     team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
     team_name = team.name if team is not None else None
     results = []
+    line_notes = []
     for note in new_notes:
         points = blackout_pts if note == BLACKOUT_NOTE else line_pts
         session.add(EventCompletion(
@@ -1130,17 +1131,30 @@ def evaluate_bingo_bonuses(session, event: dict, team_id: int,
         if player_name:
             frame["player_name"] = player_name
         _publish(event["id"], frame)
-        _enqueue_notification(
-            session,
-            "event_blackout" if note == BLACKOUT_NOTE else "event_line",
-            event, player_id, {
+        if note == BLACKOUT_NOTE:
+            _enqueue_notification(session, "event_blackout", event, player_id, {
                 "team_id": team_id,
                 "team_name": team_name,
                 "bonus_points": points,
                 "line": note,
                 "team_score": int(team.score or 0) if team is not None else None,
             })
+        else:
+            line_notes.append(note)
         results.append({"note": note, "points": points})
+    # One cell can finish several lines at once (row + column + diagonal);
+    # per-line notifications rendered as indistinguishable "completed a full
+    # line" triplets, so all lines earned in one evaluation share a single
+    # message that names them (renderers turn the notes into labels).
+    if line_notes:
+        _enqueue_notification(session, "event_line", event, player_id, {
+            "team_id": team_id,
+            "team_name": team_name,
+            "bonus_points": line_pts * len(line_notes),
+            "line": line_notes[0],
+            "lines": line_notes,
+            "team_score": int(team.score or 0) if team is not None else None,
+        })
     session.flush()
     return results
 
@@ -1605,6 +1619,10 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         "proof_url": completion.proof_url,
         "contributors": contributors,
     }
+    if _list_kind(task) == "point_collection":
+        # Ledger quantities on this task are point credits, not item counts —
+        # renderers must not read them as "2× Bandos chestplate".
+        notification["points_based"] = True
     # In-game rendering (plugin inbox): the finishing item's game id, so the
     # client can draw the sprite locally. Independent of the item_details
     # verbosity toggle below — an icon is not "verbose detail".
@@ -1681,6 +1699,59 @@ def _row_advances_progress(session, task: dict, team_id, candidate) -> bool:
             > helper(session, task, team_id))
 
 
+# One physical acquisition can reach the queue twice: the drop submission and
+# the collection-log submission it unlocks (separate guids, seconds apart), and
+# both kinds match item_collection tasks — crediting the same item twice.
+# Rows within this window are treated as echoes of the same acquisition.
+CLOG_ECHO_WINDOW_SECONDS = 600
+
+
+def _dedupe_clog_echo(session, task: dict, team_id, player_id,
+                      kind, matched_target, quantity):
+    """Cross-kind (drop <-> clog) dedupe for one item_collection acquisition.
+
+    Returns the quantity to credit, or None to drop the row entirely.
+
+    - An incoming ``clog`` row is skipped when a ledger row from the paired
+      ``drop`` already credited the same (task, team, player, item) inside
+      :data:`CLOG_ECHO_WINDOW_SECONDS` — the clog is the "new collection log
+      slot" echo of that drop.
+    - An incoming ``drop`` row (the rarer reverse ordering) is reduced by
+      what its clog echo already credited, so stackable quantities still land
+      (a 500-scales drop after its 1-unit clog credits the remaining 499);
+      nothing left means the drop was fully pre-credited — skip.
+
+    ``pending`` echoes count too: the acquisition is already represented in
+    the ledger awaiting review, and confirming it later must not double-pay.
+    """
+    if task.get("type") != "item_collection" or not matched_target:
+        return quantity
+    if kind not in ("drop", "clog"):
+        return quantity
+    from db.models import EventCompletion
+
+    other = "drop" if kind == "clog" else "clog"
+    cutoff = datetime.now() - timedelta(seconds=CLOG_ECHO_WINDOW_SECONDS)
+    echoes = (
+        session.query(EventCompletion)
+        .filter(EventCompletion.task_id == task["id"],
+                EventCompletion.team_id == team_id,
+                EventCompletion.player_id == player_id,
+                EventCompletion.source_type == other,
+                EventCompletion.status.in_(("auto", "confirmed", "manual", "pending")),
+                EventCompletion.created_at >= cutoff)
+        .all()
+    )
+    matched = [r for r in echoes if _norm(r.matched_target) == _norm(matched_target)]
+    if not matched:
+        return quantity
+    if kind == "clog":
+        return None
+    remaining = int(quantity or 0) - sum(
+        max(int(r.quantity or 1), 1) for r in matched)
+    return remaining if remaining > 0 else None
+
+
 def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
                  player_id: int, quantity: int, envelope: dict,
                  cells: Optional[list] = None,
@@ -1701,6 +1772,11 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
                             EventProgress.team_id == team_id)
                     .first())
     if progress_row is not None and progress_row.completed:
+        return None
+
+    quantity = _dedupe_clog_echo(session, task, team_id, player_id,
+                                 envelope.get("kind"), matched_target, quantity)
+    if quantity is None:
         return None
 
     data = envelope.get("data") or {}

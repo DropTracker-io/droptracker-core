@@ -229,6 +229,12 @@ def _received_item_text(data: dict) -> Optional[str]:
     task, its drop quantity, and how much of the requirement that drop filled
     (the progress delta) against the requirement target.
 
+    ``points_based`` payloads (point_collection tasks) store point credits in
+    the ledger quantities, not item counts — the multiplier would read as "2×
+    Bandos chestplate" when the item was one chestplate worth 2 points. Those
+    render the bare item name with the points it earned:
+    ``**Bandos chestplate** (+2 of 10 pts)``.
+
     Returns None when the enriching fields aren't present — non-item
     completions carry no ``received_item``, and the enrichment is omitted at
     enqueue time when the event's ``item_details`` config is off — so callers
@@ -237,15 +243,63 @@ def _received_item_text(data: dict) -> Optional[str]:
     item = (data or {}).get("received_item")
     if not item:
         return None
+    points_based = bool(data.get("points_based"))
     qty = int(data.get("received_qty") or 0)
-    label = f"**{qty}× {item}**" if qty and qty != 1 else f"**{item}**"
+    label = (f"**{qty}× {item}**" if qty and qty != 1 and not points_based
+             else f"**{item}**")
+    unit = " pts" if points_based else ""
     contributed = data.get("contributed")
     target = data.get("target")
     if contributed and target:
-        return f"{label} (+{format_gp(contributed)} of {format_gp(target)})"
+        return f"{label} (+{format_gp(contributed)} of {format_gp(target)}{unit})"
     if contributed:
-        return f"{label} (+{format_gp(contributed)})"
+        return f"{label} (+{format_gp(contributed)}{unit})"
     return label
+
+
+def line_label(note) -> str:
+    """Human label for one bonus-line note (``line:r0`` → ``Row 1``,
+    ``line:c2`` → ``Column 3``, ``line:d0``/``line:d1`` → the diagonals,
+    ``blackout`` → ``Blackout``). Falls back to the raw note so an unknown
+    shape still renders something."""
+    key = str(note or "").strip()
+    if key.startswith("line:"):
+        key = key[5:]
+    if len(key) >= 2 and key[0] in ("r", "c") and key[1:].isdigit():
+        kind = "Row" if key[0] == "r" else "Column"
+        return f"{kind} {int(key[1:]) + 1}"
+    if key == "d0":
+        return "Diagonal ↘"
+    if key == "d1":
+        return "Diagonal ↙"
+    if key == "blackout":
+        return "Blackout"
+    return str(note or "").strip()
+
+
+def line_bonus_lines(data: dict) -> list:
+    """The bonus-line notes carried by one ``event_line`` payload — the
+    coalesced ``lines`` list when present, else the legacy single ``line``.
+    [] when the payload predates line identification entirely."""
+    lines = (data or {}).get("lines")
+    if isinstance(lines, list) and lines:
+        return [str(n) for n in lines if n]
+    single = (data or {}).get("line")
+    return [str(single)] if single else []
+
+
+def line_bonus_summary(data: dict) -> str:
+    """The "completed …" clause of a line-bonus message, naming the line(s):
+    ``completed a full line — **Row 2**`` or ``completed **3** full lines at
+    once — **Row 1**, **Column 4**, **Diagonal ↘**``. Payloads without line
+    identity keep the old wording so nothing renders blank."""
+    labels = [line_label(n) for n in line_bonus_lines(data)]
+    if not labels:
+        return "completed a full line"
+    if len(labels) == 1:
+        return f"completed a full line — **{labels[0]}**"
+    joined = ", ".join(f"**{label}**" for label in labels)
+    return f"completed **{len(labels)}** full lines at once — {joined}"
 
 
 def _completion_item_redundant(data: dict) -> bool:
@@ -481,19 +535,28 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         # the ledger lookup came up empty (e.g. a manually-awarded row).
         contributors = data.get("contributors") or []
         if len(contributors) > 1:
+            # point_collection ledgers count points, not items — label them.
+            unit = " pts" if data.get("points_based") else ""
+
             def _contrib(c):
                 line = (f"`{c.get('player_name') or 'Unknown'}` "
-                        f"({format_gp(c.get('quantity') or 0)})")
+                        f"({format_gp(c.get('quantity') or 0)}{unit})")
                 share = c.get("points_share")  # task points × net share
                 if share:
                     line += f" +{share:g} pts"
                 return line
-            # One contributor per line, ranked by contribution (medals for the
-            # top three) so the breakdown reads like a table, not a comma list.
-            medals = ("\U0001F947", "\U0001F948", "\U0001F949")  # 🥇 🥈 🥉
-            rows = [f"{medals[i] if i < len(medals) else '•'} {_contrib(c)}"
-                    for i, c in enumerate(contributors)]
-            field("Contributors", "\n".join(rows), inline=False)
+            if len(contributors) <= 5:
+                # One contributor per line, ranked by contribution (medals for
+                # the top three) so the breakdown reads like a table.
+                medals = ("\U0001F947", "\U0001F948", "\U0001F949")  # 🥇 🥈 🥉
+                rows = [f"{medals[i] if i < len(medals) else '•'} {_contrib(c)}"
+                        for i, c in enumerate(contributors)]
+                field("Contributors", "\n".join(rows), inline=False)
+            else:
+                # A big pile of contributors reads better as a compact list
+                # than a six-plus-row table.
+                field("Contributors", ", ".join(_contrib(c) for c in contributors),
+                      inline=False)
         else:
             solo = (contributors[0].get("player_name") if contributors else None) or player
             if solo:
@@ -577,7 +640,7 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
 
     elif notification_type == "event_line":
         spec["title"] = "\U0001F4CF Line bonus!"
-        spec["description"] = f"**{team or 'A team'}** completed a full line"
+        spec["description"] = f"**{team or 'A team'}** {line_bonus_summary(data)}"
         bonus = int(data.get("bonus_points") or points or 0)
         if bonus:
             field("Bonus", f"`+{bonus} pts`")

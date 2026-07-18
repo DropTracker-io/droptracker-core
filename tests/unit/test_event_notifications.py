@@ -321,3 +321,114 @@ class TestEmbedSpecs:
         spec = _spec("event_something_new")
         assert spec["title"] == "Summer Bingo"
         assert "https://www.droptracker.io/events/42" in (spec["description"] or "")
+
+
+class TestLineLabels:
+    def test_row_column_labels_are_one_indexed(self):
+        assert en.line_label("line:r0") == "Row 1"
+        assert en.line_label("line:r3") == "Row 4"
+        assert en.line_label("line:c1") == "Column 2"
+        assert en.line_label("line:c11") == "Column 12"
+
+    def test_diagonals_and_blackout(self):
+        assert en.line_label("line:d0") == "Diagonal ↘"
+        assert en.line_label("line:d1") == "Diagonal ↙"
+        assert en.line_label("blackout") == "Blackout"
+
+    def test_unknown_shapes_fall_back_to_the_raw_note(self):
+        assert en.line_label("line:zz") == "line:zz"
+        assert en.line_label(None) == ""
+
+    def test_lines_list_wins_over_legacy_single(self):
+        assert en.line_bonus_lines({"lines": ["line:r0", "line:c2"],
+                                    "line": "line:r0"}) == ["line:r0", "line:c2"]
+        assert en.line_bonus_lines({"line": "line:r0"}) == ["line:r0"]
+        assert en.line_bonus_lines({}) == []
+
+    def test_summary_single_names_the_line(self):
+        text = en.line_bonus_summary({"lines": ["line:r1"]})
+        assert text == "completed a full line — **Row 2**"
+
+    def test_summary_multi_counts_and_names(self):
+        text = en.line_bonus_summary({"lines": ["line:r0", "line:c0", "line:d0"]})
+        assert text.startswith("completed **3** full lines at once — ")
+        assert "**Row 1**" in text and "**Column 1**" in text and "**Diagonal ↘**" in text
+
+    def test_summary_legacy_payload_keeps_old_wording(self):
+        assert en.line_bonus_summary({}) == "completed a full line"
+
+
+class TestCoalescedLineSpec:
+    def test_multi_line_spec_names_every_line(self):
+        spec = _spec("event_line", {
+            "team_name": "Red", "bonus_points": 20,
+            "lines": ["line:r0", "line:c4"],
+        })
+        assert "**2** full lines at once" in spec["description"]
+        assert "**Row 1**" in spec["description"]
+        assert "**Column 5**" in spec["description"]
+        assert {f["name"]: f["value"] for f in spec["fields"]}["Bonus"] == "`+20 pts`"
+
+    def test_single_line_spec_names_the_line(self):
+        spec = _spec("event_line", {
+            "team_name": "Red", "bonus_points": 10, "line": "line:d1",
+        })
+        assert "**Diagonal ↙**" in spec["description"]
+
+
+class TestPointsBasedReceived:
+    def test_point_task_shows_item_name_and_points(self):
+        # A single Bandos chestplate worth 2 points toward "10 Godwars
+        # Points" must NOT render as "2× Bandos chestplate".
+        spec = _spec("event_completion", {
+            "task_label": "10 Godwars Points", "team_name": "Green",
+            "points_based": True, "received_item": "Bandos chestplate",
+            "received_qty": 2, "contributed": 2, "target": 10,
+        })
+        fields = {f["name"]: f["value"] for f in spec["fields"]}
+        assert fields["Received"] == "**Bandos chestplate** (+2 of 10 pts)"
+
+    def test_item_count_tasks_keep_the_multiplier(self):
+        spec = _spec("event_completion", {
+            "task_label": "Collect 100 Dragon bones", "team_name": "Green",
+            "received_item": "Dragon bones",
+            "received_qty": 3, "contributed": 3, "target": 100,
+        })
+        fields = {f["name"]: f["value"] for f in spec["fields"]}
+        assert fields["Received"] == "**3× Dragon bones** (+3 of 100)"
+
+    def test_points_based_contributor_quantities_are_labelled(self):
+        spec = _spec("event_completion", {
+            "task_label": "10 Godwars Points", "team_name": "Green",
+            "points_based": True,
+            "contributors": [
+                {"player_name": "Iron_Slora", "quantity": 8},
+                {"player_name": "Last Paul", "quantity": 2},
+            ],
+        })
+        contrib = {f["name"]: f["value"] for f in spec["fields"]}["Contributors"]
+        assert "(8 pts)" in contrib and "(2 pts)" in contrib
+
+
+class TestContributorListStyles:
+    def _contributors(self, n):
+        return [{"player_name": f"P{i}", "quantity": n - i} for i in range(n)]
+
+    def test_five_or_fewer_get_one_row_each(self):
+        spec = _spec("event_completion", {
+            "task_label": "T", "team_name": "Red",
+            "contributors": self._contributors(5),
+        })
+        contrib = {f["name"]: f["value"] for f in spec["fields"]}["Contributors"]
+        assert contrib.count("\n") == 4  # five rows
+        assert contrib.startswith("\U0001F947 ")
+
+    def test_more_than_five_fall_back_to_the_compact_list(self):
+        spec = _spec("event_completion", {
+            "task_label": "T", "team_name": "Red",
+            "contributors": self._contributors(6),
+        })
+        contrib = {f["name"]: f["value"] for f in spec["fields"]}["Contributors"]
+        assert "\n" not in contrib
+        assert contrib.count("`P") == 6
+        assert "\U0001F947" not in contrib

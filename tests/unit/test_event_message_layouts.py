@@ -567,3 +567,84 @@ class TestProgressBar:
         assert ml.text_progress_bar(10, 10) == "▰" * 10
         assert ml.text_progress_bar(99, 10) == "▰" * 10  # clamped
         assert ml.text_progress_bar(5, 0) == ""
+
+
+class TestLineSummaryToken:
+    def test_event_line_context_names_the_lines(self):
+        context = ml.notification_context("event_line", {
+            "event_id": 7, "team_name": "Reds", "bonus_points": 20,
+            "lines": ["line:r1", "line:c0"],
+        })
+        assert context["line_summary"] == (
+            "completed **2** full lines at once — **Row 2**, **Column 1**")
+
+    def test_event_line_single(self):
+        context = ml.notification_context("event_line", {
+            "event_id": 7, "team_name": "Reds", "bonus_points": 10,
+            "line": "line:d0",
+        })
+        assert context["line_summary"] == "completed a full line — **Diagonal ↘**"
+
+    def test_legacy_payload_still_resolves_the_title_line(self):
+        # No line identity at all — the token must still substitute so the
+        # layout's title line never drops.
+        context = ml.notification_context("event_line", {
+            "event_id": 7, "team_name": "Reds", "bonus_points": 10})
+        assert context["line_summary"] == "completed a full line"
+        layout = ml.DEFAULT_LAYOUTS["event_line"]
+        spec = ml.render_message_spec(layout, context)
+        texts = [b["content"] for b in spec["blocks"] if b["type"] == "text"]
+        assert any("Line bonus! **Reds** completed a full line" in t for t in texts)
+
+    def test_rendered_default_layout_names_lines(self):
+        context = ml.notification_context("event_line", {
+            "event_id": 7, "team_name": "Reds", "bonus_points": 20,
+            "lines": ["line:r0", "line:c2"],
+        })
+        spec = ml.render_message_spec(ml.DEFAULT_LAYOUTS["event_line"], context)
+        texts = "\n".join(b["content"] for b in spec["blocks"] if b["type"] == "text")
+        assert "**Row 1**" in texts and "**Column 3**" in texts
+        assert "`+20 pts`" in texts
+
+
+class TestPointsBasedTokens:
+    def test_received_line_shows_points_not_a_multiplier(self):
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "task_label": "10 Godwars Points",
+            "points_based": True, "received_item": "Bandos chestplate",
+            "received_qty": 2, "contributed": 2, "target": 10,
+        })
+        assert context["received_line"] == "**Bandos chestplate** (+2 of 10 pts)"
+
+    def test_points_based_contributor_quantities_are_labelled(self):
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "points_based": True,
+            "contributors": [
+                {"player_name": "Iron_Slora", "quantity": 8},
+                {"player_name": "Last Paul", "quantity": 2},
+            ],
+        })
+        assert "`8 pts`" in context["contributors_block"]
+        assert "`2 pts`" in context["contributors_block"]
+
+
+class TestContributorBlockStyles:
+    def _contributors(self, n):
+        return [{"player_name": f"P{i}", "quantity": n - i} for i in range(n)]
+
+    def test_five_or_fewer_one_per_line(self):
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "contributors": self._contributors(5)})
+        block = context["contributors_block"]
+        # Header + five contributor rows.
+        assert block.count("\n") == 5
+        assert "\U0001F947" in block
+
+    def test_more_than_five_collapse_to_the_compact_list(self):
+        context = ml.notification_context("event_completion", {
+            "event_id": 7, "contributors": self._contributors(6)})
+        block = context["contributors_block"]
+        # Header line, then ONE comma-joined line.
+        assert block.count("\n") == 1
+        assert block.split("\n", 1)[1].count("**P") == 6
+        assert "\U0001F947" not in block

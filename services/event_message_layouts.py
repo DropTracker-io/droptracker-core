@@ -196,7 +196,10 @@ DEFAULT_LAYOUTS = {
     "event_line": {
         "accent_color": "#9B59B6",
         "blocks": [
-            {"type": "text", "content": "### \U0001F4CF Line bonus! **{team_name}** completed a full line"},
+            # line_summary names the line(s): "completed a full line — **Row
+            # 2**", or the coalesced "completed **2** full lines at once — …"
+            # when one cell finished several lines in the same evaluation.
+            {"type": "text", "content": "### \U0001F4CF Line bonus! **{team_name}** {line_summary}"},
             {"type": "text", "content": "**Bonus** `+{bonus_points} pts`"},
         ],
     },
@@ -625,7 +628,7 @@ def notification_context(notification_type: str, data: dict) -> dict:
     so their lines drop out of the rendered message."""
     from services.event_notifications import (
         _completion_item_redundant, _fmt_ts, _received_item_text,
-        event_url, format_gp,
+        event_url, format_gp, line_bonus_summary,
     )
 
     data = data or {}
@@ -648,6 +651,10 @@ def notification_context(notification_type: str, data: dict) -> dict:
     if data.get("team_score") is not None:
         put("team_score", int(data["team_score"]))
     put("bonus_points", int(data.get("bonus_points") or data.get("points") or 0))
+    if notification_type == "event_line":
+        # Always resolvable (falls back to "completed a full line" on legacy
+        # payloads without line identity) so the title line never drops.
+        context["line_summary"] = line_bonus_summary(data)
     put("starts_at", _fmt_ts(data.get("starts_at")))
     put("ends_at", _fmt_ts(data.get("ends_at")))
     # Raw unix seconds for the universal footer line (event_footer_line);
@@ -706,10 +713,12 @@ def notification_context(notification_type: str, data: dict) -> dict:
     # Contributors — everyone who fed the task, largest contribution first
     # (event_completion only; see services.event_engine._task_contributors).
     contributors = data.get("contributors") or []
+    # point_collection ledgers count points, not items — label the quantities.
+    contrib_unit = " pts" if data.get("points_based") else ""
 
     def _contrib(c):
         line = (f"**{c.get('player_name') or 'Unknown'}** "
-                f"`{format_gp(c.get('quantity') or 0)}`")
+                f"`{format_gp(c.get('quantity') or 0)}{contrib_unit}`")
         # Contribution-share points (task points × net share, floats) —
         # see services.event_engine._award_contribution_points.
         share = c.get("points_share")
@@ -721,17 +730,21 @@ def notification_context(notification_type: str, data: dict) -> dict:
         # Raw comma-joined list, kept for custom layouts that reference it.
         put("contributors_line", ", ".join(_contrib(c) for c in contributors))
     # Presentation for the default layout: one person collapses to a single
-    # "Completed by" line; several get a "Contributors" header with one
+    # "Completed by" line; up to five get a "Contributors" header with one
     # contributor per line (ranked by contribution, medals for the top three)
-    # so the breakdown reads like a table instead of a run-on comma list.
+    # so the breakdown reads like a table; a bigger pile falls back to the
+    # compact comma list so the message doesn't turn into a wall of rows.
     if len(contributors) == 1:
         put("completed_by_line",
             f"**Completed by** `{contributors[0].get('player_name') or 'Unknown'}`")
-    elif len(contributors) > 1:
+    elif 1 < len(contributors) <= 5:
         medals = ("\U0001F947", "\U0001F948", "\U0001F949")  # 🥇 🥈 🥉
         rows = [f"{medals[i] if i < len(medals) else '•'} {_contrib(c)}"
                 for i, c in enumerate(contributors)]
         put("contributors_block", "**Contributors**\n" + "\n".join(rows))
+    elif len(contributors) > 5:
+        put("contributors_block",
+            "**Contributors**\n" + ", ".join(_contrib(c) for c in contributors))
     elif data.get("player_name"):
         put("completed_by_line", f"**Completed by** `{data['player_name']}`")
 
