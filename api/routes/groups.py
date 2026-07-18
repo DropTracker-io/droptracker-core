@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from typing import List
 import asyncio
+import hmac
 import time
 import threading
 import copy
@@ -679,12 +680,17 @@ async def group_wom_sync(group_id: int):
         if not api_key:
             return jsonify({"success": False, "error": "API key required"}), 401
 
-        key_cfg = db_session.query(GroupConfiguration).filter(
+        # Match against every stored export_api_key row (historical dupes) —
+        # same semantics as api/routes/group_export.py.
+        key_rows = db_session.query(GroupConfiguration).filter(
             GroupConfiguration.group_id == group_id,
             GroupConfiguration.config_key == "export_api_key",
-        ).first()
-
-        if not key_cfg or str(key_cfg.config_value).strip() != str(api_key).strip():
+        ).all()
+        stored_keys = [
+            str(row.config_value).strip() for row in key_rows
+            if row.config_value and str(row.config_value).strip() not in ("", "0")
+        ]
+        if not any(hmac.compare_digest(stored, str(api_key).strip()) for stored in stored_keys):
             return jsonify({"success": False, "error": "Invalid API key"}), 403
 
         # --- Perform sync ---

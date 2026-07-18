@@ -93,17 +93,20 @@ def _authenticate_group(db_session, group_id: int):
     if not api_key:
         return None, (jsonify({"success": False, "error": "API key required"}), 401)
 
-    key_cfg = db_session.query(GroupConfiguration).filter(
+    # A group can have more than one export_api_key row (historical dupes);
+    # the dashboard may surface either, so accept a match against any of them.
+    key_rows = db_session.query(GroupConfiguration).filter(
         GroupConfiguration.group_id == group_id,
         GroupConfiguration.config_key == "export_api_key",
-    ).first()
+    ).all()
 
-    stored = str(key_cfg.config_value).strip() if key_cfg and key_cfg.config_value else ""
-    # "0" is the pre-generation placeholder value, never a valid key.
-    if not stored or stored == "0" or not hmac.compare_digest(stored, api_key):
-        return None, (jsonify({"success": False, "error": "Invalid API key"}), 403)
+    for key_cfg in key_rows:
+        stored = str(key_cfg.config_value).strip() if key_cfg.config_value else ""
+        # "0" is the pre-generation placeholder value, never a valid key.
+        if stored and stored != "0" and hmac.compare_digest(stored, api_key):
+            return group, None
 
-    return group, None
+    return None, (jsonify({"success": False, "error": "Invalid API key"}), 403)
 
 
 def parse_time(value: str):
