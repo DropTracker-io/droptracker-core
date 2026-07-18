@@ -90,3 +90,4 @@ utils/osrs_api/semantic.py
 # local quarantine of pre-cleanup files (safe to delete)
 .trash-*/
 docs/EVENT_BUYINS_POT_PLAN.md
+scripts/.event_task_stats_cache.json

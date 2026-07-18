@@ -1,30 +1,45 @@
-"""Deterministically generate item-set event tasks from drop-rate + kill-time data.
+"""Deterministically generate item-collection event tasks, game-wide, from
+drop-rate + kill-time data. No AI involved.
 
-No AI involved: a curated CANDIDATES catalog (which OSRS sets exist and how to
-frame them) is combined with live DB data to compute expected completion hours
-per task, bucket into air/water/earth/fire, scale default_points, and drop
-anything whose expected time exceeds --max-hours. Output matches the schema-v2
-EventTaskLibraryItem shape (see games/events/task_store/generated_item_sets.pilot.json).
+Pipeline:
+1. DISCOVER active NPCs: top --top-npcs by distinct players in data.drops over
+   --activity-days (or an explicit --npc list). Activity gating is the main
+   "makes sense" filter — tasks are only minted for content players actually
+   do, which also guarantees kill-time data exists.
+2. MINT candidates per NPC from xenforo.dt_npc_loot (rarity * rolls = per-kill
+   probability, clamped to a notability window):
+     - exact:    each of the NPC's rarest drops (deduped across NPCs);
+     - any_of:   "any unique from X" when the NPC has 2+ notable drops;
+     - assembly: item-name families ("Bandos ...", "Inquisitor's ...") with
+                 2+ pieces on the same NPC become "assemble the set" tasks.
+   NPCs whose stored rarity is conditional on a unique roll (raids, DT2) are
+   skipped rather than mis-rated.
+3. Overlay CURATED candidates for mechanics the loot table can't express
+   (Barrows reward potential, GWD room cycles, Moons of Peril bad-luck
+   protection, Dagannoth trio rotation). Curated wins on identical item sets.
+4. SCORE each candidate: expected solo hours from drop math (exact
+   inclusion-exclusion for "collect all") x per-NPC kill cycle, sourced from
+   catalog override, else avg stored PB (data.personal_best, ms) *
+   --pb-inflation, else avg gap between a player's consecutive distinct drop
+   timestamps (collapses 2x drops from one death), else skipped.
+5. FILTER to --max-hours, bucket into air/water/earth/fire (band edges scale
+   with the cap), scale default_points, and optionally --count select a
+   tier-balanced, NPC-diverse subset.
 
-Data sources, in priority order per NPC:
-- drop rates: xenforo.dt_npc_loot (rarity * rolls = per-kill probability), with
-  per-piece overrides in the catalog for mechanics the table can't express
-  (GWD room cycles incl. minions, Barrows reward potential, Moons of Peril
-  bad-luck protection, conditional raid rates);
-- time per kill: catalog cycle_seconds override, else avg stored PB
-  (data.personal_best, milliseconds) * --pb-inflation, else the average gap
-  between a player's consecutive distinct drop timestamps (collapses 2x drops
-  from one death, gaps clamped 20-300s), else a catalog fallback_cycle.
+Output matches the schema-v2 EventTaskLibraryItem shape; _reasoning/_npc/_meta
+keys are review aids to strip at import.
 
 Run:  cd /store/droptracker/disc && venv/bin/python -m scripts.generate_item_set_tasks --dry-run
-      venv/bin/python -m scripts.generate_item_set_tasks --max-hours 15
-The gap query scans 90 days of drops for several NPCs; expect ~1-2 minutes.
+      venv/bin/python -m scripts.generate_item_set_tasks --count 25
+      venv/bin/python -m scripts.generate_item_set_tasks --npc Zulrah --npc Vorkath --dry-run
+The discovery + drop-gap scans read months of data.drops; expect minutes.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import date
 
@@ -41,53 +56,98 @@ SOURCE = "generated_v1"
 
 # Difficulty bands as fractions of --max-hours, calibrated so the default 15h
 # cap reproduces: air <2h, water 2-5h, earth 5-9h, fire 9-15h.
-BAND_FRACTIONS = {"air": 2 / 15, "water": 5 / 15, "earth": 9 / 15, "fire": 1.0}
+TIER_ORDER = ("air", "water", "earth", "fire")
+# Absolute upper edges in expected solo hours. Difficulty is INDEPENDENT of the
+# --max-hours exclusion cap: a task's tier never changes when you raise/lower
+# the cap, and raising the cap simply lets more hard content through, all of it
+# landing in fire (>= earth edge). Fire is open-ended up to the cap.
+TIER_EDGES_HOURS = {"air": 2.0, "water": 5.0, "earth": 9.0}  # fire = >= 9h
 POINT_FLOORS = {"air": 10, "water": 20, "earth": 30, "fire": 50}
 POINT_CEILS = {"air": 15, "water": 28, "earth": 42, "fire": 65}
 
+# Notability window for auto-minted drops: commoner than 1/20 isn't a task,
+# rarer than 1/50k is table noise (e.g. 1/1M cross-drop minion rows).
+MIN_NOTABLE_P = 1 / 50000
+MAX_NOTABLE_P = 1 / 20
+# An item is task-worthy if its unit GE value clears --min-value, OR it is
+# genuinely rare AND has strictly zero observed value — i.e. untradeable
+# (clue scrolls, dark totem pieces, wildy keys). Rare-but-cheap tradeables
+# (seeds, key halves, firelighter-grade filler, rare stack-size rows of
+# commons) carry a nonzero price and are junk tasks despite their rarity.
+RARE_NOTABLE_P = 1 / 50
+ITEM_BLACKLIST = {"Coins", "Message"}
+# Junk/meta drops that are never a meaningful "obtain X" task even when they
+# come from a real boss (clue scrolls & scroll boxes are gated on doing the
+# clue, not the kill; caskets/firelighters are filler).
+ITEM_BLACKLIST_SUBSTRINGS = ("firelighter", "clue scroll", "scroll box",
+                             "reward casket", "champion scroll")
+# Tasks quicker than this are filler even for air tier.
+MIN_TASK_HOURS = 0.1
+# Per-NPC caps keep auto output reviewable.
+MAX_EXACT_PER_NPC = 4
+MAX_ANY_OF_ITEMS = 20
+MAX_FAMILY_PIECES = 8
+
 # ---------------------------------------------------------------------------
-# Per-NPC kill-cycle configuration. "pb": use avg personal best * inflation;
-# "gap": use inter-drop gaps from data.drops; cycle_seconds: fixed override
-# (used where neither source applies, e.g. chest-based content).
+# Per-NPC kill-cycle overrides for content where neither PBs nor drop gaps
+# give a sane number (chests/instanced runs); plus fallbacks for thin data.
+# Anything not listed resolves PB -> gap automatically.
 # ---------------------------------------------------------------------------
 CONTEXTS: dict[str, dict] = {
     "Barrows": {"cycle_seconds": 300},
     "Lunar Chest": {"cycle_seconds": 330},
-    "General Graardor": {"gap": True, "fallback_cycle": 150},
-    "Kree'arra": {"gap": True, "fallback_cycle": 150},
-    "Commander Zilyana": {"gap": True, "fallback_cycle": 150},
-    "K'ril Tsutsaroth": {"gap": True, "fallback_cycle": 150},
-    "Dagannoth Rex": {"gap": True, "fallback_cycle": 140},
-    "Dagannoth Prime": {"gap": True, "fallback_cycle": 140},
-    "Dagannoth Supreme": {"gap": True, "fallback_cycle": 140},
-    "Zulrah": {"pb": True, "fallback_cycle": 110},
-    "Phantom Muspah": {"pb": True, "fallback_cycle": 220},
-    "The Nightmare": {"pb": True, "fallback_cycle": 520},
-    # Wilderness bosses: no PBs, drop volume too thin for gaps; ~40/hr incl.
-    # banking/travel (outside-knowledge estimate).
     "Chaos Fanatic": {"cycle_seconds": 90},
     "Crazy archaeologist": {"cycle_seconds": 90},
     "Scorpia": {"cycle_seconds": 90},
+    "General Graardor": {"fallback_cycle": 150},
+    "Kree'arra": {"fallback_cycle": 150},
+    "Commander Zilyana": {"fallback_cycle": 150},
+    "K'ril Tsutsaroth": {"fallback_cycle": 150},
+    "Dagannoth Rex": {"fallback_cycle": 140},
+    "Dagannoth Prime": {"fallback_cycle": 140},
+    "Dagannoth Supreme": {"fallback_cycle": 140},
 }
 
 # NPCs whose dt_npc_loot rarity is CONDITIONAL on hitting a unique table
-# (within-purple odds), not an absolute per-kill rate. Pieces sourced from
-# these require an explicit "rate" override or they are skipped with a warning.
-CONDITIONAL_RATE_NPCS = {
+# (within-purple odds), not an absolute per-kill rate. For these, per-item
+# rates are derived EMPIRICALLY from our own drops: distinct
+# (player, timestamp) events approximate completions (2x drops from one kill
+# share a timestamp), and item events / completions is the true
+# per-completion probability observed across the player base.
+EMPIRICAL_RATE_NPCS = {
     "Chambers of Xeric", "Chambers of Xeric Challenge Mode",
-    "Tombs of Amascut", "Tombs of Amascut: Expert Mode",
-    "Theatre of Blood", "Theatre of Blood: Hard Mode",
+    "Tombs of Amascut", "Tombs of Amascut: Entry Mode",
+    "Tombs of Amascut: Expert Mode",
+    "Theatre of Blood", "Theatre of Blood: Entry Mode",
+    "Theatre of Blood: Hard Mode",
     "The Whisperer", "The Leviathan", "Duke Sucellus", "Vardorvis",
+}
+# Minimum observed drops of an item before its empirical rate is trusted.
+EMPIRICAL_MIN_EVENTS = 5
+
+# "Sources" that are not kill content: the loot is gated on first obtaining and
+# then completing the activity, so the casket/reward drop rate massively
+# understates real time-to-obtain (a master clue's 3rd age is not a ~57h task —
+# it's hundreds of hours once you count acquiring and running the clues). These
+# are dropped from discovery entirely; add more at runtime with --exclude-npc.
+NON_KILL_SOURCE_PREFIXES = ("Clue Scroll", "Reward Casket", "Scroll box")
+
+# First words too generic to define an item family (metal/junk prefixes).
+# Value/rarity notability runs first, so this only needs to catch words that
+# group unrelated NOTABLE items (e.g. two expensive dragon items aren't a set).
+FAMILY_STOPWORDS = {
+    "rune", "dragon", "black", "white", "adamant", "mithril", "steel", "iron",
+    "bronze", "uncut", "grimy", "clue", "crystal", "ancient", "broken",
+    "looting", "blighted", "super", "prayer", "magic", "mystic",
 }
 
 # ---------------------------------------------------------------------------
-# Candidate catalog. Every piece is {"item", "npc"} with optional "rate"
-# (per-attempt probability override) and, for kind="exact", "quantity".
-# kinds: exact | any_of | assembly | groups | any_path.
-# "concurrent": pieces share one attempt stream (co-located NPCs killed in
-# rotation, e.g. Dagannoth Kings) instead of being farmed sequentially.
-# "expected_attempts" + "attempt_npc": bypass rate math entirely (mechanics
-# with pity timers the drop table can't express).
+# Curated candidates: ONLY mechanics the loot table can't express. Pieces are
+# {"item", "npc"} with optional "rate" (per-attempt probability override) and,
+# for kind="exact", "quantity". kinds: exact | any_of | assembly | groups |
+# any_path. "concurrent": pieces share one attempt stream (co-located NPCs
+# killed in rotation). "expected_attempts" + "attempt_npc": bypass rate math
+# (pity timers etc.).
 # ---------------------------------------------------------------------------
 _BARROWS_PIECES = [
     ("Dharok's helm", "Dharok's platebody", "Dharok's platelegs", "Dharok's greataxe"),
@@ -104,7 +164,7 @@ _BARROWS_PIECE_RATE = 1 - (1 - 1 / 408) ** 7
 # GWD room cycle: shard chance = boss 1/762 + 3 minions * 1/1524 per cycle.
 _GWD_SHARD_RATE = 1 / 762 + 3 / 1524
 
-CANDIDATES: list[dict] = [
+CURATED: list[dict] = [
     {
         "name": "Barrows Beginnings",
         "description": "Obtain any single Barrows unique from the Barrows chest.",
@@ -134,17 +194,6 @@ CANDIDATES: list[dict] = [
         "notes": "Rate models a full room cycle (boss + 3 minions).",
     },
     {
-        "name": "Hilt of a God",
-        "description": "Obtain any Godsword hilt from a God Wars Dungeon general.",
-        "kind": "any_of",
-        "pieces": [
-            {"item": "Bandos hilt", "npc": "General Graardor"},
-            {"item": "Armadyl hilt", "npc": "Kree'arra"},
-            {"item": "Zamorak hilt", "npc": "K'ril Tsutsaroth"},
-            {"item": "Saradomin hilt", "npc": "Commander Zilyana"},
-        ],
-    },
-    {
         "name": "The Complete Godsword",
         "description": "Obtain all three Godsword shards and any one hilt.",
         "kind": "groups",
@@ -160,56 +209,6 @@ CANDIDATES: list[dict] = [
                  {"item": "Saradomin hilt", "npc": "Commander Zilyana"},
              ]},
         ],
-    },
-    {
-        "name": "Graardor's Wardrobe",
-        "description": "Obtain any one piece of Bandos armour from General Graardor.",
-        "kind": "any_of",
-        "pieces": [{"item": it, "npc": "General Graardor"}
-                   for it in ("Bandos chestplate", "Bandos tassets", "Bandos boots")],
-    },
-    {
-        "name": "Bandos Battlegear",
-        "description": "Assemble the full Bandos armour set: chestplate, tassets and boots.",
-        "kind": "assembly",
-        "pieces": [{"item": it, "npc": "General Graardor"}
-                   for it in ("Bandos chestplate", "Bandos tassets", "Bandos boots")],
-    },
-    {
-        "name": "Kree's Couture",
-        "description": "Obtain any one piece of Armadyl armour from Kree'arra.",
-        "kind": "any_of",
-        "pieces": [{"item": it, "npc": "Kree'arra"}
-                   for it in ("Armadyl helmet", "Armadyl chestplate", "Armadyl chainskirt")],
-    },
-    {
-        "name": "Armadyl Regalia",
-        "description": "Assemble the full Armadyl armour set: helmet, chestplate and chainskirt.",
-        "kind": "assembly",
-        "pieces": [{"item": it, "npc": "Kree'arra"}
-                   for it in ("Armadyl helmet", "Armadyl chestplate", "Armadyl chainskirt")],
-    },
-    {
-        "name": "Zulrah's Gift",
-        "description": "Obtain any unique from Zulrah: Tanzanite fang, Magic fang, "
-                       "Serpentine visage or Uncut onyx.",
-        "kind": "any_of",
-        "pieces": [{"item": it, "npc": "Zulrah"}
-                   for it in ("Tanzanite fang", "Magic fang", "Serpentine visage", "Uncut onyx")],
-    },
-    {
-        "name": "Tanzanite Fang",
-        "description": "Obtain a Tanzanite fang from Zulrah.",
-        "kind": "exact",
-        "pieces": [{"item": "Tanzanite fang", "npc": "Zulrah"}],
-    },
-    {
-        "name": "Toxic Trio",
-        "description": "Obtain Zulrah's three weapon uniques: Tanzanite fang, "
-                       "Magic fang and Serpentine visage.",
-        "kind": "assembly",
-        "pieces": [{"item": it, "npc": "Zulrah"}
-                   for it in ("Tanzanite fang", "Magic fang", "Serpentine visage")],
     },
     {
         "name": "A Ring for Every Finger",
@@ -236,24 +235,6 @@ CANDIDATES: list[dict] = [
             {"item": "Seers ring", "npc": "Dagannoth Prime"},
             {"item": "Archers ring", "npc": "Dagannoth Supreme"},
         ],
-    },
-    {
-        "name": "Venator Shard",
-        "description": "Obtain a Venator shard from the Phantom Muspah.",
-        "kind": "exact",
-        "pieces": [{"item": "Venator shard", "npc": "Phantom Muspah"}],
-    },
-    {
-        "name": "Venator Bow",
-        "description": "Obtain all five Venator shards from the Phantom Muspah.",
-        "kind": "exact",
-        "pieces": [{"item": "Venator shard", "npc": "Phantom Muspah", "quantity": 5}],
-    },
-    {
-        "name": "Ancient Icon",
-        "description": "Obtain an Ancient icon from the Phantom Muspah.",
-        "kind": "exact",
-        "pieces": [{"item": "Ancient icon", "npc": "Phantom Muspah"}],
     },
     {
         "name": "Child of the Moons",
@@ -295,20 +276,6 @@ CANDIDATES: list[dict] = [
         "notes": "LOW CONFIDENCE: shared bad-luck protection; ~140 chests estimated.",
     },
     {
-        "name": "Shard of the Wilderness",
-        "description": "Obtain any Odium or Malediction ward shard from a "
-                       "Wilderness boss.",
-        "kind": "any_of",
-        "pieces": [
-            {"item": "Odium shard 1", "npc": "Chaos Fanatic"},
-            {"item": "Malediction shard 1", "npc": "Chaos Fanatic"},
-            {"item": "Odium shard 2", "npc": "Crazy archaeologist"},
-            {"item": "Malediction shard 2", "npc": "Crazy archaeologist"},
-            {"item": "Odium shard 3", "npc": "Scorpia"},
-            {"item": "Malediction shard 3", "npc": "Scorpia"},
-        ],
-    },
-    {
         "name": "Ward of Odium",
         "description": "Obtain all three Odium ward shards from the Wilderness bosses.",
         "kind": "assembly",
@@ -317,28 +284,6 @@ CANDIDATES: list[dict] = [
             {"item": "Odium shard 2", "npc": "Crazy archaeologist"},
             {"item": "Odium shard 3", "npc": "Scorpia"},
         ],
-    },
-    {
-        "name": "Inquisitor's Relic",
-        "description": "Obtain any piece of Inquisitor's armour from the Nightmare.",
-        "kind": "any_of",
-        "pieces": [{"item": it, "npc": "The Nightmare"} for it in
-                   ("Inquisitor's great helm", "Inquisitor's hauberk",
-                    "Inquisitor's plateskirt")],
-    },
-    {
-        "name": "The Full Inquisition",
-        "description": "Assemble the complete Inquisitor's set including the mace.",
-        "kind": "assembly",
-        "pieces": [{"item": it, "npc": "The Nightmare"} for it in
-                   ("Inquisitor's great helm", "Inquisitor's hauberk",
-                    "Inquisitor's plateskirt", "Inquisitor's mace")],
-    },
-    {
-        "name": "Nightmare Staff",
-        "description": "Obtain a Nightmare staff from the Nightmare.",
-        "kind": "exact",
-        "pieces": [{"item": "Nightmare staff", "npc": "The Nightmare"}],
     },
 ]
 
@@ -364,72 +309,262 @@ def expected_attempts_all(ps: list[float]) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Flat-file stats cache
+# ---------------------------------------------------------------------------
+CACHE_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             ".event_task_stats_cache.json")
+
+
+class StatsCache:
+    """JSON flat-file memo for the expensive drops-table computations (kill
+    cycles, empirical rates, discovery, item values). Entries carry the date
+    they were computed and expire after ttl_days — drop-rate/kill-time stats
+    drift slowly, so re-deriving them on every run is pure waste. A stored
+    empty/zero value means "queried before, no data" and is honored so known
+    dead ends aren't re-scanned either."""
+
+    def __init__(self, path: str | None, ttl_days: float,
+                 read_enabled: bool = True):
+        self.path, self.ttl, self.read_enabled = path, ttl_days, read_enabled
+        self.data: dict = {}
+        self.dirty = False
+        if path and os.path.exists(path):
+            try:
+                with open(path) as f:
+                    self.data = json.load(f)
+            except (ValueError, OSError):
+                self.data = {}
+
+    def get(self, section: str, key: str):
+        """None = not cached (or expired/refreshing); anything else is a hit."""
+        if not self.read_enabled:
+            return None
+        entry = self.data.get(section, {}).get(str(key))
+        if not isinstance(entry, dict) or "at" not in entry:
+            return None
+        try:
+            age = (date.today() - date.fromisoformat(entry["at"])).days
+        except ValueError:
+            return None
+        if age > self.ttl:
+            return None
+        return entry.get("v")
+
+    def put(self, section: str, key: str, value) -> None:
+        if self.path is None:
+            return
+        self.data.setdefault(section, {})[str(key)] = {
+            "at": date.today().isoformat(), "v": value}
+        self.dirty = True
+
+    def save(self) -> None:
+        if self.path is None or not self.dirty:
+            return
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.data, f)
+        os.replace(tmp, self.path)
+        self.dirty = False
+
+
+def _split_cached(cache: StatsCache, section: str, keys: list[str]):
+    """(hits dict, miss keys) for a batch of cache lookups."""
+    hits, misses = {}, []
+    for key in keys:
+        value = cache.get(section, key)
+        if value is None:
+            misses.append(key)
+        else:
+            hits[key] = value
+    return hits, misses
+
+
+# ---------------------------------------------------------------------------
 # DB lookups
 # ---------------------------------------------------------------------------
-def _catalog_items(cand: dict) -> list[dict]:
-    if cand["kind"] == "groups":
-        return [p for g in cand["groups"] for p in g["pieces"]]
-    if cand["kind"] == "any_path":
-        return [p for path in cand["paths"] for g in path["groups"] for p in g["pieces"]]
-    return cand["pieces"]
+def discover_active_npcs(conn, days: int, top: int,
+                         cache: StatsCache) -> list[tuple[str, int]]:
+    """(npc_name, distinct_players) for the top NPCs by total GP dropped in
+    the window. Ranking by value keeps the list boss-shaped — ranking by
+    player count surfaces trash mobs everyone kills incidentally (Man, Imp).
+    Uses the pre-aggregated player_npc_hourly_totals table (partition =
+    YYYYMM) — the same scan over raw data.drops times out."""
+    today = date.today()
+    months_back = max((days + 29) // 30 - 1, 0)
+    year, month = today.year, today.month - months_back
+    while month < 1:
+        year, month = year - 1, month + 12
+    part_lo = year * 100 + month
+    cached = cache.get("discovery", f"{part_lo}:{top}")
+    if cached is not None:
+        return [(name, int(players)) for name, players in cached]
+    print(f"Discovering active NPCs (~{days}d window)...", file=sys.stderr)
+    rows = conn.execute(text(
+        "SELECT n.npc_name, COUNT(DISTINCT t.player_id) AS players, "
+        "       SUM(t.total_value) AS gp "
+        "FROM data.player_npc_hourly_totals t "
+        "JOIN xenforo.dt_npc n ON n.npc_id = t.npc_id "
+        "WHERE t.`partition` >= :part_lo "
+        "GROUP BY n.npc_name ORDER BY gp DESC LIMIT :top"
+    ), {"part_lo": part_lo, "top": top})
+    out = [(name, int(players)) for name, players, _gp in rows]
+    cache.put("discovery", f"{part_lo}:{top}", out)
+    return out
 
 
-def resolve_items(session, names: set[str]) -> set[str]:
-    """Return the subset of names that exist verbatim in data.items."""
-    found: set[str] = set()
-    chunk = list(names)
-    rows = session.execute(
-        text("SELECT DISTINCT item_name FROM data.items WHERE item_name IN :names"),
-        {"names": chunk},
-    )
-    for (name,) in rows:
-        found.add(name)
-    return found
+def fetch_notable_loot(conn, npc_names: list[str], cache: StatsCache,
+                       ) -> dict[str, list[tuple[str, float, bool]]]:
+    """npc_name -> [(item_name, per-kill probability, stackable)], rarest
+    first, within the rarity window. Item names come from data.items via the
+    join, so they are import-safe by construction."""
+    hits, misses = _split_cached(cache, "loot", npc_names)
+    out = {npc: [tuple(e) for e in entries] for npc, entries in hits.items()}
+    if misses:
+        rows = conn.execute(text(
+            "SELECT n.npc_name, i.item_name, MAX(l.rarity * l.rolls) AS p, "
+            "       MAX(i.stackable) AS stackable "
+            "FROM xenforo.dt_npc_loot l "
+            "JOIN xenforo.dt_npc n ON n.npc_id = l.npc_id "
+            "JOIN data.items i ON i.item_id = l.item_id "
+            "WHERE n.npc_name IN :npcs AND l.noted = 0 "
+            "GROUP BY n.npc_name, i.item_name "
+            "HAVING p >= :lo AND p <= :hi"
+        ), {"npcs": misses, "lo": MIN_NOTABLE_P, "hi": MAX_NOTABLE_P})
+        fresh: dict[str, list] = {npc: [] for npc in misses}
+        for npc, item, p, stackable in rows:
+            fresh[npc].append((item, float(p), bool(stackable)))
+        for npc, entries in fresh.items():
+            entries.sort(key=lambda t: t[1])
+            cache.put("loot", npc, entries)
+            out[npc] = entries
+    return {npc: entries for npc, entries in out.items() if entries}
 
 
-def fetch_rates(session, pairs: set[tuple[str, str]]) -> dict[tuple[str, str], float]:
-    """(npc_name, item_name) -> per-kill probability (rarity * rolls)."""
+def fetch_item_values(conn, item_names: set[str],
+                      cache: StatsCache) -> dict[str, float]:
+    """item_name -> per-unit GE value from each item's most recent recorded
+    drop (data.drops.value is unit price). Pure index lookups — averaging over
+    a date window scans millions of rows for common items and times out.
+    Items never dropped are absent (treated as valueless)."""
+    hits, misses = _split_cached(cache, "item_value", sorted(item_names))
+    known = {name: float(v) for name, v in hits.items() if v}
+    if not misses:
+        return known
+    item_names = set(misses)
+    print(f"Fetching latest unit values for {len(item_names)} items...",
+          file=sys.stderr)
+    id_rows = conn.execute(
+        text("SELECT item_id, item_name FROM data.items WHERE item_name IN :names"),
+        {"names": sorted(item_names)}).fetchall()
+    id_to_name = {int(iid): name for iid, name in id_rows}
+    out: dict[str, float] = {}
+    if id_to_name:
+        latest = conn.execute(text(
+            "SELECT item_id, MAX(drop_id) FROM data.drops "
+            "WHERE item_id IN :ids GROUP BY item_id"
+        ), {"ids": sorted(id_to_name)}).fetchall()
+        drop_ids = [int(did) for _, did in latest if did is not None]
+        if drop_ids:
+            rows = conn.execute(text(
+                "SELECT item_id, value FROM data.drops WHERE drop_id IN :ids"
+            ), {"ids": drop_ids})
+            for iid, value in rows:
+                if value is None:
+                    continue
+                name = id_to_name.get(int(iid))
+                if name is not None:
+                    out[name] = max(out.get(name, 0.0), float(value))
+    for name in item_names:
+        cache.put("item_value", name, out.get(name, 0.0))
+    return known | out
+
+
+def fetch_rates(conn, pairs: set[tuple[str, str]]) -> dict[tuple[str, str], float]:
+    """(npc_name, item_name) -> per-kill probability, for curated pieces."""
     out: dict[tuple[str, str], float] = {}
     if not pairs:
         return out
-    npcs = sorted({n for n, _ in pairs})
-    items = sorted({i for _, i in pairs})
-    rows = session.execute(text(
+    rows = conn.execute(text(
         "SELECT n.npc_name, i.item_name, MAX(l.rarity * l.rolls) "
         "FROM xenforo.dt_npc_loot l "
         "JOIN xenforo.dt_npc n ON n.npc_id = l.npc_id "
         "JOIN data.items i ON i.item_id = l.item_id "
         "WHERE n.npc_name IN :npcs AND i.item_name IN :items "
         "GROUP BY n.npc_name, i.item_name"
-    ), {"npcs": npcs, "items": items})
+    ), {"npcs": sorted({n for n, _ in pairs}),
+        "items": sorted({i for _, i in pairs})})
     for npc, item, p in rows:
         if (npc, item) in pairs:
             out[(npc, item)] = float(p)
     return out
 
 
-def fetch_pb_cycles(session, npcs: list[str], inflation: float,
-                    min_samples: int = 50) -> dict[str, float]:
-    if not npcs:
-        return {}
-    rows = session.execute(text(
-        "SELECT n.npc_name, COUNT(*), AVG(pb.personal_best) / 1000 "
-        "FROM data.personal_best pb "
-        "JOIN xenforo.dt_npc n ON n.npc_id = pb.npc_id "
-        "WHERE n.npc_name IN :npcs GROUP BY n.npc_name"
-    ), {"npcs": npcs})
-    return {npc: float(avg) * inflation
-            for npc, count, avg in rows if count >= min_samples and avg}
+def resolve_items(conn, names: set[str]) -> set[str]:
+    """Subset of names that exist verbatim in data.items (curated pieces only;
+    discovered pieces are DB-sourced already)."""
+    if not names:
+        return set()
+    rows = conn.execute(
+        text("SELECT DISTINCT item_name FROM data.items WHERE item_name IN :names"),
+        {"names": sorted(names)},
+    )
+    return {name for (name,) in rows}
 
 
-def fetch_gap_cycles(session, npcs: list[str], days: int,
+def fetch_pb_cycles(conn, npcs: list[str], inflation: float, cache: StatsCache,
+                    min_samples: int = 30) -> dict[str, float]:
+    """Raw average-PB seconds are cached; inflation applies on the way out so
+    changing --pb-inflation never invalidates the cache. 0 = no usable PBs."""
+    hits, misses = _split_cached(cache, "pb_cycle", npcs)
+    out = {npc: float(sec) * inflation for npc, sec in hits.items() if sec}
+    if misses:
+        print(f"Fetching PB averages for {len(misses)} NPCs...", file=sys.stderr)
+        rows = conn.execute(text(
+            "SELECT n.npc_name, COUNT(*), AVG(pb.personal_best) / 1000 "
+            "FROM data.personal_best pb "
+            "JOIN xenforo.dt_npc n ON n.npc_id = pb.npc_id "
+            "WHERE n.npc_name IN :npcs GROUP BY n.npc_name"
+        ), {"npcs": misses})
+        fresh = {npc: 0.0 for npc in misses}
+        for npc, count, avg in rows:
+            if count >= min_samples and avg:
+                fresh[npc] = float(avg)
+        for npc, sec in fresh.items():
+            cache.put("pb_cycle", npc, sec)
+            if sec:
+                out[npc] = sec * inflation
+    return out
+
+
+def fetch_gap_cycles(conn, npcs: list[str], days: int, cache: StatsCache,
                      min_samples: int = 300) -> dict[str, float]:
     """Avg seconds between a player's consecutive distinct drop timestamps.
     DISTINCT (player_id, date_added) collapses 2x drops from a single death;
-    gaps clamped to 20-300s to exclude breaks between sessions."""
-    if not npcs:
-        return {}
-    rows = session.execute(text(
+    gaps clamped to 20-300s to exclude breaks between sessions. Heaviest
+    query in the script — cached per (npc, window), 0 = insufficient data."""
+    hits, misses = _split_cached(cache, "gap_cycle",
+                                 [f"{npc}:{days}" for npc in npcs])
+    out = {key.rsplit(":", 1)[0]: float(sec) for key, sec in hits.items() if sec}
+    miss_npcs = [key.rsplit(":", 1)[0] for key in misses]
+    if miss_npcs:
+        print(f"Estimating kill cycles from drop gaps for {len(miss_npcs)} NPCs "
+              f"(can take minutes)...", file=sys.stderr)
+        rows = _run_gap_query(conn, miss_npcs, days)
+        if rows is not None:  # None = query failed; don't cache dead ends
+            fresh = {npc: 0.0 for npc in miss_npcs}
+            for npc, count, avg in rows:
+                if count >= min_samples and avg:
+                    fresh[npc] = float(avg)
+            for npc, sec in fresh.items():
+                cache.put("gap_cycle", f"{npc}:{days}", sec)
+                if sec:
+                    out[npc] = sec
+    return out
+
+
+def _run_gap_query(conn, npcs: list[str], days: int):
+    try:
+        return conn.execute(text(
         "WITH k AS ( "
         "  SELECT DISTINCT n.npc_name, d.player_id, d.date_added "
         "  FROM data.drops d JOIN xenforo.dt_npc n ON n.npc_id = d.npc_id "
@@ -440,10 +575,162 @@ def fetch_gap_cycles(session, npcs: list[str], days: int,
         "    LAG(date_added) OVER (PARTITION BY npc_name, player_id ORDER BY date_added), "
         "    date_added) AS gap "
         "  FROM k) "
-        "SELECT npc_name, COUNT(*), AVG(gap) FROM g "
-        "WHERE gap BETWEEN 20 AND 300 GROUP BY npc_name"
-    ), {"npcs": npcs, "days": days})
-    return {npc: float(avg) for npc, count, avg in rows if count >= min_samples and avg}
+            "SELECT npc_name, COUNT(*), AVG(gap) FROM g "
+            "WHERE gap BETWEEN 20 AND 300 GROUP BY npc_name"
+        ), {"npcs": npcs, "days": days}).fetchall()
+    except Exception as exc:  # degrade to fallback cycles, not a dead run
+        print(f"WARNING: drop-gap estimation failed ({exc.__class__.__name__}); "
+              f"relying on PBs/fallback cycles.", file=sys.stderr)
+        return None
+
+
+def fetch_empirical(conn, npcs: list[str], days: int, cache: StatsCache,
+                    ) -> dict[str, dict]:
+    """npc -> {"completions": int, "items": {item_name: observed events}} from
+    our own drops. Distinct (player_id, date_added) events approximate
+    completions (all loot from one kill/chest shares a timestamp — the same
+    collapse used for 2x drops); item events / completions is then the true
+    per-completion drop probability actually observed across the player base.
+    This is how conditional-rarity content (raids, DT2) gets absolute rates
+    without trusting dt_npc_loot or the wiki. Raw counts are cached so
+    EMPIRICAL_MIN_EVENTS changes don't invalidate entries."""
+    hits, misses = _split_cached(cache, "empirical",
+                                 [f"{npc}:{days}" for npc in npcs])
+    out = {key.rsplit(":", 1)[0]: rec for key, rec in hits.items()}
+    miss_npcs = [key.rsplit(":", 1)[0] for key in misses]
+    if not miss_npcs:
+        return out
+    print(f"Deriving empirical drop rates for {len(miss_npcs)} NPCs "
+          f"({days}d of drops — can take minutes)...", file=sys.stderr)
+    try:
+        comp_rows = conn.execute(text(
+            "SELECT n.npc_name, COUNT(DISTINCT d.player_id, d.date_added) "
+            "FROM data.drops d JOIN xenforo.dt_npc n ON n.npc_id = d.npc_id "
+            "WHERE n.npc_name IN :npcs "
+            "  AND d.date_added > NOW() - INTERVAL :days DAY "
+            "GROUP BY n.npc_name"
+        ), {"npcs": miss_npcs, "days": days}).fetchall()
+        item_rows = conn.execute(text(
+            "SELECT n.npc_name, i.item_name, "
+            "       COUNT(DISTINCT d.player_id, d.date_added) AS events "
+            "FROM data.drops d "
+            "JOIN xenforo.dt_npc n ON n.npc_id = d.npc_id "
+            "JOIN data.items i ON i.item_id = d.item_id "
+            "WHERE n.npc_name IN :npcs "
+            "  AND d.date_added > NOW() - INTERVAL :days DAY "
+            "GROUP BY n.npc_name, i.item_name HAVING events >= 3"
+        ), {"npcs": miss_npcs, "days": days}).fetchall()
+    except Exception as exc:
+        print(f"WARNING: empirical rate derivation failed "
+              f"({exc.__class__.__name__}); those NPCs are skipped this run.",
+              file=sys.stderr)
+        return out
+    fresh = {npc: {"completions": 0, "items": {}} for npc in miss_npcs}
+    for npc, completions in comp_rows:
+        fresh[npc]["completions"] = int(completions)
+    for npc, item, events in item_rows:
+        fresh[npc]["items"][item] = int(events)
+    for npc, rec in fresh.items():
+        cache.put("empirical", f"{npc}:{days}", rec)
+        out[npc] = rec
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Auto-minting
+# ---------------------------------------------------------------------------
+def _family_key(item_name: str) -> str | None:
+    """Grouping key for set detection: possessive first token ("Dharok's")
+    always counts; otherwise the first word unless it's a generic prefix."""
+    first = item_name.split()[0]
+    if first.endswith("'s"):
+        return first
+    if first.lower() in FAMILY_STOPWORDS or len(item_name.split()) < 2:
+        return None
+    return first
+
+
+def _is_notable(item: str, p: float,
+                values: dict[str, float], min_value: float) -> bool:
+    """Task-worthiness: valuable, or rare and untradeable (zero value)."""
+    if item in ITEM_BLACKLIST or any(
+            s in item.lower() for s in ITEM_BLACKLIST_SUBSTRINGS):
+        return False
+    value = values.get(item, 0.0)
+    if value >= min_value:
+        return True
+    return p <= RARE_NOTABLE_P and value <= 0
+
+
+def mint_candidates(loot: dict[str, list[tuple[str, float, bool]]],
+                    values: dict[str, float], min_value: float) -> list[dict]:
+    """Turn per-NPC notable loot into candidate tasks (exact / any_of /
+    assembly). Deterministic templates; curated overlay handles the rest."""
+    notable: dict[str, list[tuple[str, float]]] = {}
+    for npc, items in loot.items():
+        keep = [(it, p) for it, p, _stackable in items
+                if _is_notable(it, p, values, min_value)]
+        if keep:
+            notable[npc] = keep
+
+    candidates: list[dict] = []
+    # Exact tasks dedupe across NPCs: keep the most obtainable source.
+    best_exact: dict[str, tuple[float, str]] = {}
+    for npc, items in notable.items():
+        for item, p in items:
+            cur = best_exact.get(item)
+            if cur is None or p > cur[0]:
+                best_exact[item] = (p, npc)
+    for item, (p, npc) in sorted(best_exact.items()):
+        candidates.append({
+            "name": item,
+            "description": f"Obtain 1x {item} from {npc}.",
+            "kind": "exact", "auto": True,
+            "pieces": [{"item": item, "npc": npc, "rate": p}],
+        })
+
+    for npc, items in sorted(notable.items()):
+        # "Any unique" pools take only the genuinely rare drops — including
+        # merely-valuable commons (seeds etc.) collapses these to trivial.
+        rares = [(it, p) for it, p in items if p <= RARE_NOTABLE_P][:MAX_ANY_OF_ITEMS]
+        if len(rares) >= 2:
+            shown = ", ".join(it for it, _ in rares[:8])
+            more = f" (+{len(rares) - 8} more)" if len(rares) > 8 else ""
+            candidates.append({
+                "name": f"Any {npc} Unique",
+                "description": f"Obtain any notable drop from {npc}: {shown}{more}.",
+                "kind": "any_of", "auto": True,
+                "pieces": [{"item": it, "npc": npc, "rate": p} for it, p in rares],
+            })
+        families: dict[str, list[tuple[str, float]]] = {}
+        for item, p in items:
+            key = _family_key(item)
+            if key:
+                families.setdefault(key, []).append((item, p))
+        for key, pieces in sorted(families.items()):
+            if not 2 <= len(pieces) <= MAX_FAMILY_PIECES:
+                continue
+            names = [it for it, _ in pieces]
+            candidates.append({
+                "name": f"The {key.rstrip('s').rstrip(chr(39))} Collection"
+                        if key.endswith("'s") else f"The {key} Collection",
+                "description": f"Assemble from {npc}: " + ", ".join(names) + ".",
+                "kind": "assembly", "auto": True,
+                "pieces": [{"item": it, "npc": npc, "rate": p} for it, p in pieces],
+            })
+    return candidates
+
+
+def _signature(cand: dict) -> tuple:
+    return (cand["kind"], frozenset(p["item"] for p in _catalog_items(cand)))
+
+
+def _catalog_items(cand: dict) -> list[dict]:
+    if cand["kind"] == "groups":
+        return [p for g in cand["groups"] for p in g["pieces"]]
+    if cand["kind"] == "any_path":
+        return [p for path in cand["paths"] for g in path["groups"] for p in g["pieces"]]
+    return cand["pieces"]
 
 
 # ---------------------------------------------------------------------------
@@ -456,14 +743,10 @@ class SkipCandidate(Exception):
 def _piece_rate(piece: dict, rates: dict) -> float:
     if "rate" in piece:
         return piece["rate"]
-    if piece["npc"] in CONDITIONAL_RATE_NPCS:
-        raise SkipCandidate(
-            f"{piece['npc']} rarity is conditional on a unique roll; "
-            f"'{piece['item']}' needs an explicit rate override")
     p = rates.get((piece["npc"], piece["item"]))
     if p is None:
         raise SkipCandidate(
-            f"no dt_npc_loot rate for {piece['item']} @ {piece['npc']}")
+            f"no drop rate known for {piece['item']} @ {piece['npc']}")
     return p
 
 
@@ -486,7 +769,6 @@ def _eval_pieces(cand_pieces: list[dict], kind: str, concurrent: bool,
             attempts = expected_attempts_all(ps)
         return attempts * cycle / 3600, (
             f"concurrent: {attempts:.0f} rotations x {cycle:.0f}s")
-    # Sequential: partition by NPC.
     by_npc: dict[str, list[dict]] = {}
     for p in cand_pieces:
         by_npc.setdefault(p["npc"], []).append(p)
@@ -494,10 +776,11 @@ def _eval_pieces(cand_pieces: list[dict], kind: str, concurrent: bool,
         best = None
         for npc, pieces in by_npc.items():
             cycle = _cycle_for(npc, cycles)
-            hours = (1.0 / sum(_piece_rate(p, rates) for p in pieces)) * cycle / 3600
+            rate_sum = sum(_piece_rate(p, rates) for p in pieces)
+            hours = (1.0 / rate_sum) * cycle / 3600
             if best is None or hours < best[0]:
-                best = (hours, f"best source {npc}: 1/{sum(_piece_rate(p, rates) for p in pieces):.5f} "
-                               f"per kill x {cycle:.0f}s")
+                best = (hours,
+                        f"best source {npc}: {rate_sum:.5f} per kill x {cycle:.0f}s")
         return best
     hours, parts = 0.0, []
     for npc, pieces in by_npc.items():
@@ -544,8 +827,8 @@ def eval_candidate(cand: dict, rates: dict, cycles: dict) -> tuple[float, str]:
     if kind in ("any_of", "assembly"):
         return _eval_pieces(cand["pieces"], kind, concurrent, rates, cycles)
     if kind == "groups":
-        pieces = _groups_to_pieces(cand["groups"], rates)
-        return _eval_pieces(pieces, "assembly", concurrent, rates, cycles)
+        return _eval_pieces(_groups_to_pieces(cand["groups"], rates),
+                            "assembly", concurrent, rates, cycles)
     if kind == "any_path":
         best = None
         for path in cand["paths"]:
@@ -561,17 +844,29 @@ def eval_candidate(cand: dict, rates: dict, cycles: dict) -> tuple[float, str]:
 # Task assembly
 # ---------------------------------------------------------------------------
 def bucket(hours: float, max_hours: float) -> str | None:
-    for tier in ("air", "water", "earth", "fire"):
-        if hours < BAND_FRACTIONS[tier] * max_hours or (
-                tier == "fire" and hours <= max_hours):
-            return tier
-    return None
+    """Absolute-hour tier, or None if over the exclusion cap. Tier is
+    independent of max_hours — the cap only decides in/out, not which tier."""
+    if hours > max_hours:
+        return None
+    if hours < TIER_EDGES_HOURS["air"]:
+        return "air"
+    if hours < TIER_EDGES_HOURS["water"]:
+        return "water"
+    if hours < TIER_EDGES_HOURS["earth"]:
+        return "earth"
+    return "fire"
 
 
 def scale_points(tier: str, hours: float, max_hours: float) -> int:
-    tiers = list(BAND_FRACTIONS)
-    lo = BAND_FRACTIONS[tiers[tiers.index(tier) - 1]] * max_hours if tier != "air" else 0.0
-    hi = BAND_FRACTIONS[tier] * max_hours
+    edges = TIER_EDGES_HOURS
+    if tier == "air":
+        lo, hi = 0.0, edges["air"]
+    elif tier == "water":
+        lo, hi = edges["air"], edges["water"]
+    elif tier == "earth":
+        lo, hi = edges["water"], edges["earth"]
+    else:  # fire is open-ended; scale up to the cap (min 1h span)
+        lo, hi = edges["earth"], max(max_hours, edges["earth"] + 1)
     frac = min(max((hours - lo) / (hi - lo), 0.0), 1.0)
     return round(POINT_FLOORS[tier] + frac * (POINT_CEILS[tier] - POINT_FLOORS[tier]))
 
@@ -628,57 +923,169 @@ def build_task(cand: dict, tier: str, hours: float, note: str,
         "config": build_config(cand),
         "source": SOURCE,
         "visibility": "public",
+        "_npc": _catalog_items(cand)[0]["npc"],
+        "_auto": bool(cand.get("auto")),
         "_reasoning": reasoning,
     }
+
+
+def select_balanced(tasks: list[dict], count: int) -> tuple[list[dict], list[dict]]:
+    """Pick `count` tasks round-robin across tiers, rarest tier first
+    (fire, earth, water, air). Within a tier, prefer NPCs not already
+    represented so a small selection spans the game. Deterministic."""
+    by_tier: dict[str, list[dict]] = {t: [] for t in TIER_ORDER}
+    for task in tasks:
+        by_tier[task["difficulty"]].append(task)
+    order = ["fire", "earth", "water", "air"]
+    chosen: set[int] = set()
+    npc_used: dict[str, int] = {}
+    total = min(count, len(tasks))
+    while len(chosen) < total:
+        progressed = False
+        for tier in order:
+            if len(chosen) >= total:
+                break
+            pool = [t for t in by_tier[tier] if id(t) not in chosen]
+            if not pool:
+                continue
+            pick = min(pool, key=lambda t: npc_used.get(t["_npc"], 0))
+            chosen.add(id(pick))
+            npc_used[pick["_npc"]] = npc_used.get(pick["_npc"], 0) + 1
+            progressed = True
+        if not progressed:
+            break
+    selected = [t for t in tasks if id(t) in chosen]
+    left_out = [t for t in tasks if id(t) not in chosen]
+    return selected, left_out
 
 
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
-def generate(session, target_max_hours: float = 15.0, pb_inflation: float = 1.4,
-             gap_days: int = 90) -> tuple[list[dict], dict]:
-    """Returns (tasks, meta). meta carries excluded/skipped/unresolved lists."""
-    all_pieces = [p for c in CANDIDATES for p in _catalog_items(c)]
-    names = {p["item"] for p in all_pieces}
-    found = resolve_items(session, names)
-    unresolved = sorted(names - found)
+def generate(conn, target_max_hours: float = 15.0, pb_inflation: float = 1.4,
+             gap_days: int = 90, activity_days: int = 90, top_npcs: int = 25,
+             only_npcs: list[str] | None = None, min_value: float = 50000,
+             empirical_days: int = 120, exclude_npcs: list[str] | None = None,
+             cache: StatsCache | None = None,
+             target_count: int | None = None) -> tuple[list[dict], dict]:
+    """Returns (tasks, meta). meta carries excluded/skipped/discovery info."""
+    if cache is None:
+        cache = StatsCache(None, 0)  # disabled: no reads, no writes
+    exclude = set(exclude_npcs or [])
 
-    rate_pairs = {(p["npc"], p["item"]) for p in all_pieces
-                  if "rate" not in p and p["item"] in found}
-    rates = fetch_rates(session, rate_pairs)
+    def _excluded(name: str) -> bool:
+        return name in exclude or name.startswith(NON_KILL_SOURCE_PREFIXES)
 
+    if only_npcs:
+        # Explicit --npc is honored as-is except for --exclude-npc overrides;
+        # the non-kill prefixes still apply so a stray clue name is skipped.
+        active = [(n, 0) for n in only_npcs if not _excluded(n)]
+    else:
+        # Over-fetch so excluded sources (clues etc.) don't consume top slots.
+        discovered = discover_active_npcs(conn, activity_days, top_npcs + 15, cache)
+        active = [(n, p) for n, p in discovered if not _excluded(n)][:top_npcs]
+    skipped_npcs: list[dict] = []
+    table_npcs = [n for n, _ in active if n not in EMPIRICAL_RATE_NPCS]
+    empirical_npcs = [n for n, _ in active if n in EMPIRICAL_RATE_NPCS]
+
+    loot = fetch_notable_loot(conn, table_npcs, cache)
+    empirical = fetch_empirical(conn, empirical_npcs, empirical_days, cache)
+    empirical_summary: dict[str, int] = {}
+    for npc, rec in empirical.items():
+        completions = rec.get("completions") or 0
+        empirical_summary[npc] = completions
+        if completions < 100:
+            skipped_npcs.append({"npc": npc, "reason":
+                                 f"only {completions} completions observed "
+                                 f"in {empirical_days}d — too few for rates"})
+            continue
+        entries = [
+            (item, events / completions, False)
+            for item, events in rec.get("items", {}).items()
+            if events >= EMPIRICAL_MIN_EVENTS
+            and MIN_NOTABLE_P <= events / completions <= MAX_NOTABLE_P
+        ]
+        if entries:
+            loot[npc] = sorted(entries, key=lambda t: t[1])
+    values = fetch_item_values(
+        conn, {it for items in loot.values() for it, _, _ in items}, cache)
+    candidates = mint_candidates(loot, values, min_value)
+
+    # Curated overlay: curated entries win on identical (kind, item-set).
+    curated_ok: list[dict] = []
+    curated_names = {p["item"] for c in CURATED for p in _catalog_items(c)}
+    found = resolve_items(conn, curated_names)
+    for cand in CURATED:
+        missing = [p["item"] for p in _catalog_items(cand) if p["item"] not in found]
+        if missing:
+            skipped_npcs.append({"npc": cand["name"],
+                                 "reason": f"unresolved items: {missing}"})
+            continue
+        curated_ok.append(cand)
+    curated_sigs = {_signature(c) for c in curated_ok}
+    candidates = curated_ok + [c for c in candidates
+                               if _signature(c) not in curated_sigs]
+
+    # Rates for curated pieces without overrides: empirical where available,
+    # dt_npc_loot otherwise.
+    empirical_rates = {(npc, item): entry[1]
+                       for npc in empirical_summary
+                       for entry in loot.get(npc, [])
+                       for item in [entry[0]]}
+    rate_pairs = {(p["npc"], p["item"]) for c in candidates
+                  for p in _catalog_items(c)
+                  if "rate" not in p and (p["npc"], p["item"]) not in empirical_rates}
+    rates = {**fetch_rates(conn, rate_pairs), **empirical_rates}
+
+    # Kill cycles: overrides, then PBs, then drop gaps for the remainder.
+    need_cycle = sorted({p["npc"] for c in candidates for p in _catalog_items(c)}
+                        | {c["attempt_npc"] for c in candidates
+                           if "expected_attempts" in c})
     cycles: dict[str, float] = {}
-    pb_npcs = [n for n, c in CONTEXTS.items() if c.get("pb")]
-    gap_npcs = [n for n, c in CONTEXTS.items() if c.get("gap")]
-    cycles.update(fetch_pb_cycles(session, pb_npcs, pb_inflation))
-    cycles.update(fetch_gap_cycles(session, gap_npcs, gap_days))
-    cycle_sources = {n: ("pb" if n in pb_npcs and n in cycles else
-                         "gap" if n in gap_npcs and n in cycles else None)
-                     for n in CONTEXTS}
-    for npc, ctx in CONTEXTS.items():
-        if "cycle_seconds" in ctx:
-            cycles[npc] = ctx["cycle_seconds"]
+    cycle_sources: dict[str, str] = {}
+    for npc in need_cycle:
+        if "cycle_seconds" in CONTEXTS.get(npc, {}):
+            cycles[npc] = CONTEXTS[npc]["cycle_seconds"]
             cycle_sources[npc] = "override"
-        elif npc not in cycles and "fallback_cycle" in ctx:
-            cycles[npc] = ctx["fallback_cycle"]
+    pb = fetch_pb_cycles(conn, [n for n in need_cycle if n not in cycles],
+                         pb_inflation, cache)
+    for npc, sec in pb.items():
+        cycles[npc], cycle_sources[npc] = sec, "pb"
+    gap = fetch_gap_cycles(conn, [n for n in need_cycle if n not in cycles],
+                           gap_days, cache)
+    for npc, sec in gap.items():
+        cycles[npc], cycle_sources[npc] = sec, "gap"
+    for npc in need_cycle:
+        if npc not in cycles and "fallback_cycle" in CONTEXTS.get(npc, {}):
+            cycles[npc] = CONTEXTS[npc]["fallback_cycle"]
             cycle_sources[npc] = "fallback"
 
-    tasks, excluded, skipped = [], [], []
-    for cand in CANDIDATES:
-        if any(p["item"] in unresolved for p in _catalog_items(cand)):
-            skipped.append({"name": cand["name"], "reason": "unresolved item name(s)"})
-            continue
+    tasks, excluded, skipped, too_quick = [], [], [], 0
+    seen_names: set[str] = set()
+    for cand in candidates:
         try:
             hours, note = eval_candidate(cand, rates, cycles)
         except SkipCandidate as exc:
             skipped.append({"name": cand["name"], "reason": str(exc)})
+            continue
+        if hours < MIN_TASK_HOURS:
+            too_quick += 1
             continue
         tier = bucket(hours, target_max_hours)
         if tier is None:
             excluded.append({"name": cand["name"], "est_hours": round(hours, 1),
                              "math": note})
             continue
+        name = cand["name"]
+        if name.lower() in seen_names:  # library upserts case-insensitively
+            name = cand["name"] + f" ({_catalog_items(cand)[0]['npc']})"
+            cand = {**cand, "name": name}
+        seen_names.add(name.lower())
         tasks.append(build_task(cand, tier, hours, note, target_max_hours))
+
+    left_out: list[dict] = []
+    if target_count is not None and target_count < len(tasks):
+        tasks, left_out = select_balanced(tasks, target_count)
 
     meta = {
         "source": SOURCE,
@@ -686,12 +1093,19 @@ def generate(session, target_max_hours: float = 15.0, pb_inflation: float = 1.4,
         "generator": "scripts/generate_item_set_tasks.py",
         "target_max_hours": target_max_hours,
         "difficulty_bands_hours": {
-            t: round(BAND_FRACTIONS[t] * target_max_hours, 1) for t in BAND_FRACTIONS},
+            "air": f"<{TIER_EDGES_HOURS['air']}", "water": f"<{TIER_EDGES_HOURS['water']}",
+            "earth": f"<{TIER_EDGES_HOURS['earth']}",
+            "fire": f"{TIER_EDGES_HOURS['earth']}-{target_max_hours}"},
+        "discovered_npcs": [{"npc": n, "players": p} for n, p in active],
+        "empirical_completions": empirical_summary,
+        "empirical_days": empirical_days,
         "kill_cycles_seconds": {n: round(cycles[n]) for n in sorted(cycles)},
         "kill_cycle_sources": cycle_sources,
         "excluded_over_cap": sorted(excluded, key=lambda e: -e["est_hours"]),
-        "skipped": skipped,
-        "unresolved_items": unresolved,
+        "skipped": skipped + skipped_npcs,
+        "dropped_as_filler_under_min_hours": too_quick,
+        "eligible_not_selected": [
+            {"name": t["name"], "difficulty": t["difficulty"]} for t in left_out],
     }
     return tasks, meta
 
@@ -700,6 +1114,33 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--max-hours", type=float, default=15.0,
                     help="expected-hours cap; tasks above this are excluded (default 15)")
+    ap.add_argument("--count", type=int, default=None,
+                    help="target number of tasks: tier-balanced, NPC-diverse "
+                         "selection from everything that fits under --max-hours")
+    ap.add_argument("--top-npcs", type=int, default=25,
+                    help="how many most-active NPCs to mint tasks from (default 25)")
+    ap.add_argument("--activity-days", type=int, default=90,
+                    help="activity window for NPC discovery (default 90)")
+    ap.add_argument("--npc", action="append", default=None, metavar="NAME",
+                    help="skip discovery and mint only for these NPCs (repeatable)")
+    ap.add_argument("--exclude-npc", action="append", default=None, metavar="NAME",
+                    help="exclude these NPCs from discovery (repeatable); clue "
+                         "scrolls and reward caskets are always excluded")
+    ap.add_argument("--min-value", type=float, default=50000,
+                    help="unit GE value for an item to be notable regardless of "
+                         "rarity (default 50k); rarer than 1/50 qualifies anyway")
+    ap.add_argument("--empirical-days", type=int, default=120,
+                    help="drops window for empirical per-completion rates on "
+                         "conditional-rarity NPCs like raids (default 120)")
+    ap.add_argument("--cache-file", default=CACHE_DEFAULT,
+                    help="flat-file stats cache path (default "
+                         "scripts/.event_task_stats_cache.json)")
+    ap.add_argument("--cache-ttl-days", type=float, default=7,
+                    help="age at which cached stats expire (default 7)")
+    ap.add_argument("--refresh", action="store_true",
+                    help="ignore cached stats this run (recompute + rewrite)")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="disable the stats cache entirely (no reads or writes)")
     ap.add_argument("--pb-inflation", type=float, default=1.4,
                     help="PB -> real cycle multiplier for banking/downtime (default 1.4)")
     ap.add_argument("--gap-days", type=int, default=90,
@@ -711,7 +1152,7 @@ def main() -> int:
     args = ap.parse_args()
 
     # Dedicated engine: the shared base.py engine caps read_timeout at 30s,
-    # which the gap-estimator scan (minutes over 90 days of drops) exceeds.
+    # which the discovery/gap scans (minutes over months of drops) exceed.
     from sqlalchemy import create_engine
     from sqlalchemy.pool import NullPool
     from db.models.base import DB_USER, DB_PASS
@@ -720,30 +1161,47 @@ def main() -> int:
         poolclass=NullPool,
         connect_args={"connect_timeout": 10, "read_timeout": 600, "charset": "utf8mb4"},
     )
-    print("Estimating kill cycles (the drop-gap scan can take a few minutes)...",
-          file=sys.stderr)
-    with engine.connect() as conn:
-        tasks, meta = generate(conn, target_max_hours=args.max_hours,
-                               pb_inflation=args.pb_inflation, gap_days=args.gap_days)
+    cache = StatsCache(None if args.no_cache else args.cache_file,
+                       args.cache_ttl_days, read_enabled=not args.refresh)
+    try:
+        with engine.connect() as conn:
+            tasks, meta = generate(
+                conn, target_max_hours=args.max_hours,
+                pb_inflation=args.pb_inflation, gap_days=args.gap_days,
+                activity_days=args.activity_days, top_npcs=args.top_npcs,
+                only_npcs=args.npc, min_value=args.min_value,
+                empirical_days=args.empirical_days, exclude_npcs=args.exclude_npc,
+                cache=cache, target_count=args.count)
+    finally:
+        cache.save()
 
     by_tier: dict[str, int] = {}
     for t in tasks:
         by_tier[t["difficulty"]] = by_tier.get(t["difficulty"], 0) + 1
     print(f"Generated {len(tasks)} tasks (cap {args.max_hours}h): "
-          + ", ".join(f"{t}={by_tier.get(t, 0)}" for t in BAND_FRACTIONS))
+          + ", ".join(f"{t}={by_tier.get(t, 0)}" for t in TIER_ORDER))
     for t in tasks:
-        print(f"  [{t['difficulty']:>5}] {t['default_points']:>3}pts  "
+        origin = "auto" if t["_auto"] else "curated"
+        print(f"  [{t['difficulty']:>5}] {t['default_points']:>3}pts {origin:>7}  "
               f"{t['name']}: {t['_reasoning']}")
     if meta["excluded_over_cap"]:
-        print(f"\nExcluded over {args.max_hours}h cap:")
-        for e in meta["excluded_over_cap"]:
-            print(f"  {e['est_hours']:>7.1f}h  {e['name']} ({e['math']})")
+        print(f"\nExcluded over {args.max_hours}h cap: "
+              + "; ".join(f"{e['name']} ({e['est_hours']}h)"
+                          for e in meta["excluded_over_cap"]))
     if meta["skipped"]:
         print("\nSkipped:")
         for s in meta["skipped"]:
-            print(f"  {s['name']}: {s['reason']}")
-    if meta["unresolved_items"]:
-        print("\nUnresolved item names: " + ", ".join(meta["unresolved_items"]))
+            print(f"  {s.get('name') or s.get('npc')}: {s['reason']}")
+    if meta["dropped_as_filler_under_min_hours"]:
+        print(f"\nDropped {meta['dropped_as_filler_under_min_hours']} candidates "
+              f"under {MIN_TASK_HOURS}h as filler.")
+    if meta["eligible_not_selected"]:
+        print(f"\nEligible but not selected (--count {args.count}): "
+              + ", ".join(f"{t['name']} [{t['difficulty']}]"
+                          for t in meta["eligible_not_selected"]))
+    if args.count is not None and len(tasks) < args.count:
+        print(f"\nNOTE: only {len(tasks)} tasks fit under the {args.max_hours}h cap; "
+              f"raise --top-npcs or --max-hours for more.")
 
     if args.dry_run:
         print("\n(dry run: nothing written)")
