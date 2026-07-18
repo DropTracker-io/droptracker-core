@@ -67,6 +67,7 @@ droptracker/
 │   │   ├── players.py      # /top_players, /player_search, /player, etc.
 │   │   ├── groups.py       # /top_groups, /group_search, /groups/…
 │   │   ├── group_create.py # /groups/create (web wizard flow)
+│   │   ├── group_export.py # /groups/<id>/export/… (key-authed group data API)
 │   │   ├── video.py        # /presigned_upload_url, /video/…
 │   │   ├── utils.py        # /debug_logs, /check, /metrics
 │   │   ├── health.py       # /ping, /health
@@ -201,6 +202,11 @@ droptracker/
 - `POST /groups/create` — Create group (server-to-server, `XF_KEY` auth)
 - `GET /groups/guild-status/<guild_id>` — Discord guild registration check
 - `POST /generate-timeframe-board` — Generate scoped lootboard image
+
+**Group export (key-authed, `export_api_key` group config; see `docs/GROUP_EXPORT_API.md`):**
+- `GET /groups/<id>/export/top-players` — Windowed loot leaderboard (optional NPC filter, per-player item breakdowns)
+- `GET /groups/<id>/export/drops` — Raw drop records (paginated, filters)
+- `GET /groups/<id>/export/members` — Member list
 
 **Video:**
 - `GET /presigned_upload_url` — B2 presigned PUT URL
