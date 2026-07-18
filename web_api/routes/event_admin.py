@@ -677,6 +677,39 @@ def _is_auto_created(task: EventTask) -> bool:
         return False
 
 
+def _task_identity(type_, label, target, target_value, points,
+                   requires_confirmation, config) -> tuple:
+    """Content identity of a task row for board-save reuse.
+
+    A library pick / inline new task whose every field matches an existing
+    task row (the ``bingo_auto`` marker aside) binds that row instead of
+    cloning it. Config comparison is key-order/whitespace-insensitive and
+    label/target follow the DB's case-insensitive collation."""
+    canonical_config = None
+    if config:
+        if isinstance(config, dict):
+            parsed = dict(config)
+        else:
+            try:
+                parsed = json.loads(config)
+            except (TypeError, ValueError):
+                parsed = None
+        if isinstance(parsed, dict):
+            parsed.pop(_BINGO_AUTO_KEY, None)
+            canonical_config = json.dumps(parsed, sort_keys=True) if parsed else None
+        else:
+            canonical_config = str(config)
+    return (
+        type_,
+        (label or "").strip()[:255].lower(),
+        ((target or "").strip().lower() or None),
+        target_value,
+        int(points or 0),
+        bool(requires_confirmation),
+        canonical_config,
+    )
+
+
 def _clean_cell_points(cell: dict):
     points = cell.get("points")
     if points is None:
@@ -746,10 +779,11 @@ def _validate_board_body(body: dict) -> tuple[int, list[dict]]:
 async def put_bingo_board(event_id: int):
     """Replace the event's whole bingo board (designer save, Task 20).
 
-    Creates tasks for library picks / inline new tasks, deletes auto-created
-    tasks the new board no longer references, sets has_bingo/board_size, and
-    — when the event is already live (implicit lifecycle) — grants free cells
-    to every team immediately.
+    Creates tasks for library picks / inline new tasks — binding an existing
+    identical task row instead of inserting a clone next to it — deletes
+    auto-created tasks the new board no longer references, sets
+    has_bingo/board_size, and — when the event is already live (implicit
+    lifecycle) — grants free cells to every team immediately.
     """
     user_id = current_user_id()
     body = await json_body()
@@ -783,20 +817,39 @@ async def put_bingo_board(event_id: int):
 
             # Existing tasks referenced directly must belong to this event.
             ref_ids = {c["task_id"] for c in cells_in if c.get("task_id") is not None}
-            existing_tasks = {}
-            if ref_ids:
-                existing_tasks = {
-                    t.id: t
-                    for t in s.query(EventTask).filter(
-                        EventTask.id.in_(ref_ids), EventTask.event_id == event_id
-                    ).all()
-                }
-                missing = ref_ids - set(existing_tasks)
-                if missing:
-                    abort_problem(
-                        404, "Task not found",
-                        f"No task(s) {sorted(missing)} in this event.",
-                    )
+            event_tasks = s.query(EventTask).filter(
+                EventTask.event_id == event_id).all()
+            existing_tasks = {t.id: t for t in event_tasks if t.id in ref_ids}
+            missing = ref_ids - set(existing_tasks)
+            if missing:
+                abort_problem(
+                    404, "Task not found",
+                    f"No task(s) {sorted(missing)} in this event.",
+                )
+
+            # Library picks / inline new tasks bind an existing identical task
+            # row instead of inserting a clone — cloning left the original
+            # orphaned in the task list forever (the engine only matches
+            # cell-bound tasks on bingo events). Tasks referenced by task_id
+            # cells stay reserved for those cells, and each row binds at most
+            # one cell per save.
+            reuse_pool: dict[tuple, list] = {}
+            for t in event_tasks:
+                if t.id in ref_ids:
+                    continue
+                reuse_pool.setdefault(_task_identity(
+                    t.type, t.label, t.target, t.target_value,
+                    t.points, t.requires_confirmation, t.config,
+                ), []).append(t)
+            for candidates in reuse_pool.values():
+                # Hand-added originals before designer clones, oldest first,
+                # so re-saving an already-polluted board binds the original
+                # and lets the garbage collector below drop the clone.
+                candidates.sort(key=lambda t: (_is_auto_created(t), t.id))
+
+            def _claim_identical(identity: tuple):
+                candidates = reuse_pool.get(identity)
+                return candidates.pop(0) if candidates else None
 
             # Tear down the old board (pre-start boards have no earned
             # completions; free-cell grants are simply re-granted below).
@@ -829,18 +882,25 @@ async def put_bingo_board(event_id: int):
                 elif cell.get("library_item_id") is not None:
                     preset = presets[cell["library_item_id"]]
                     points = _clean_cell_points(cell)
-                    task = EventTask(
-                        event_id=event_id,
-                        type=preset.type,
-                        label=preset.name,
-                        target=preset.target,
-                        target_value=preset.target_value,
-                        points=points if points is not None else int(preset.default_points or 0),
-                        requires_confirmation=False,
-                        config=_merged_auto_config(preset.config),
-                    )
-                    s.add(task)
-                    s.flush()
+                    if points is None:
+                        points = int(preset.default_points or 0)
+                    task = _claim_identical(_task_identity(
+                        preset.type, preset.name, preset.target,
+                        preset.target_value, points, False, preset.config,
+                    ))
+                    if task is None:
+                        task = EventTask(
+                            event_id=event_id,
+                            type=preset.type,
+                            label=preset.name,
+                            target=preset.target,
+                            target_value=preset.target_value,
+                            points=points,
+                            requires_confirmation=False,
+                            config=_merged_auto_config(preset.config),
+                        )
+                        s.add(task)
+                        s.flush()
                     task_id = task.id
                     label = label or preset.name
                 elif cell.get("new_task") is not None:
@@ -850,20 +910,26 @@ async def put_bingo_board(event_id: int):
                         abort_problem(422, "Invalid points", "new_task.points must be a non-negative integer.")
                     visibility = clean_task_visibility(nt)
                     normalized = validate_task_payload(s, nt)
-                    task = EventTask(
-                        event_id=event_id,
-                        type=nt["type"],
-                        label=nt["label"].strip()[:255],
-                        target=normalized["target"],
-                        target_value=normalized["target_value"],
-                        points=points,
-                        requires_confirmation=bool(nt.get("requires_confirmation")),
-                        visibility=visibility,
-                        config=_merged_auto_config(normalized["config"]),
-                    )
-                    s.add(task)
-                    task.visibility = save_task_to_library(s, ev, task, visibility)
-                    s.flush()
+                    task = _claim_identical(_task_identity(
+                        nt["type"], nt["label"], normalized["target"],
+                        normalized["target_value"], points,
+                        bool(nt.get("requires_confirmation")), normalized["config"],
+                    ))
+                    if task is None:
+                        task = EventTask(
+                            event_id=event_id,
+                            type=nt["type"],
+                            label=nt["label"].strip()[:255],
+                            target=normalized["target"],
+                            target_value=normalized["target_value"],
+                            points=points,
+                            requires_confirmation=bool(nt.get("requires_confirmation")),
+                            visibility=visibility,
+                            config=_merged_auto_config(normalized["config"]),
+                        )
+                        s.add(task)
+                        task.visibility = save_task_to_library(s, ev, task, visibility)
+                        s.flush()
                     task_id = task.id
                     label = label or task.label
                 else:
