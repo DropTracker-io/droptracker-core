@@ -507,6 +507,15 @@ def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> in
             .all()
         }
 
+    # G7: players in more than one auto-clan team's clan are ambiguous — never
+    # auto-enrol them (an admin adds them to a specific team explicitly). The
+    # leave pass below is left untouched, so a manual placement still stands.
+    _clan_seen: dict = {}
+    for members in clan_members.values():
+        for pid in members:
+            _clan_seen[pid] = _clan_seen.get(pid, 0) + 1
+    multi_clan = {pid for pid, n in _clan_seen.items() if n > 1}
+
     auto_team_ids = [t.id for t in auto_teams]
     removed = 0
     # Leave first: drop rows on an auto_clan team whose player is no longer in
@@ -532,7 +541,7 @@ def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> in
     added = 0
     for team in auto_teams:
         for pid in clan_members[team.id]:
-            if pid in on_event:
+            if pid in on_event or pid in multi_clan:
                 continue
             session.add(EventTeamMember(team_id=team.id, player_id=pid, joined_at=joined_at))
             on_event.add(pid)
@@ -607,6 +616,10 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
     # needed; that's the whole point of skipping team setup.
     _ensure_whole_clan_teams(session, event)
     sync_auto_clan_rosters(session, event, now=now)
+    # G7: tell admins (once) which players were left off the whole-clan teams
+    # because they belong to more than one participating clan — each needs a
+    # manual add to a specific team.
+    _notify_multi_clan_skipped(session, event)
 
     # Free cells complete for every team "from activation" (Task 20/21).
     event_engine.grant_free_cells(session, event)
@@ -725,6 +738,55 @@ def end_event(session, event, *, actor_user_id=None,
 # ══════════════════════════════════════════════════════════════════════════════
 # Scheduler sweep (worker tick)
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _notify_multi_clan_skipped(session, event) -> None:
+    """One-time admin-channel notice (G7): the players NOT auto-enrolled onto a
+    whole-clan team because they belong to more than one of the event's
+    participating clans. An admin resolves each with an explicit team add
+    (POST .../members/bulk). No-op unless the event seeded ≥2 auto-clan teams
+    and at least one member is multi-clan."""
+    if (getattr(event, "mode", None) or "standard") != "clan_vs_clan":
+        return
+    from db.models import EventTeam, Player
+    from db.models.associations import user_group_association
+    from services import event_engine
+
+    auto_gids = {
+        t.group_id for t in
+        session.query(EventTeam)
+        .filter(EventTeam.event_id == event.id, EventTeam.auto_clan.is_(True))
+        .all()
+        if t.group_id
+    }
+    if len(auto_gids) < 2:
+        return  # no whole-clan contest → nothing was auto-enrolled to skip
+    counts: dict = {}
+    for gid in auto_gids:
+        for (pid,) in (
+            session.query(user_group_association.c.player_id)
+            .filter(user_group_association.c.group_id == gid,
+                    user_group_association.c.player_id.isnot(None))
+            .distinct()
+            .all()
+        ):
+            counts[pid] = counts.get(pid, 0) + 1
+    skipped = sorted(pid for pid, n in counts.items() if n > 1)
+    if not skipped:
+        return
+    names = [
+        name for (name,) in
+        session.query(Player.player_name)
+        .filter(Player.player_id.in_(skipped))
+        .order_by(Player.player_name.asc())
+        .all()
+    ]
+    display = ", ".join(f"`{n}`" for n in names) if names else f"{len(skipped)} player(s)"
+    event_engine._enqueue_notification(
+        session, "event_multi_clan_skipped", event_engine._event_to_dict(event),
+        skipped[0],
+        {"skipped_players": display, "skipped_count": len(skipped)},
+    )
+
 
 def _notify_activation_failure(session, redis_conn, event, detail: str) -> None:
     """Enqueue an admin-channel ``event_activation_failed`` notification —

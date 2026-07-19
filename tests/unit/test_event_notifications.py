@@ -22,7 +22,8 @@ _spec.loader.exec_module(en)
 ALL_TYPES = (
     "event_started", "event_ended", "event_completion",
     "event_line", "event_blackout", "event_lead_change", "event_pending",
-    "event_activation_failed", "event_signup_prompt", "event_task_progress",
+    "event_activation_failed", "event_multi_clan_skipped",
+    "event_signup_prompt", "event_task_progress",
     "event_board_turn", "event_pot", "event_board_roll_prompt",
 )
 
@@ -40,6 +41,7 @@ class TestKindMapping:
             "event_lead_change": "leaderboard",
             "event_pending": "admin",
             "event_activation_failed": "admin",
+            "event_multi_clan_skipped": "admin",
             "event_signup_prompt": "announcements",
             "event_pot": "announcements",
             "event_task_progress": "completions",

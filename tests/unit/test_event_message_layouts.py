@@ -298,7 +298,8 @@ class TestDefaultLayouts:
             "event_started", "event_ended", "event_completion",
             "event_task_progress", "event_line",
             "event_blackout", "event_lead_change", "event_pending",
-            "event_activation_failed", "event_signup_prompt", "event_board",
+            "event_activation_failed", "event_multi_clan_skipped",
+            "event_signup_prompt", "event_board",
             "event_board_turn", "event_pot", "event_board_roll_prompt",
         }
         assert set(ml.DEFAULT_LAYOUTS) == expected
@@ -324,6 +325,9 @@ class TestDefaultLayouts:
                               "team_name": "Reds", "review_url": "https://x/review"},
             "event_activation_failed": {"event_id": 7, "event_name": "E", "reason": "no tasks",
                                         "starts_at": 1700000000},
+            "event_multi_clan_skipped": {"event_id": 7, "event_name": "E",
+                                         "skipped_players": "`Zed`, `Bob`",
+                                         "skipped_count": 2},
             "event_signup_prompt": {"event_id": 7, "event_name": "E",
                                     "formation_mode": "self_join", "ends_at": 1700003600},
             "event_board_turn": {"event_id": 7, "event_name": "E", "team_name": "Reds",

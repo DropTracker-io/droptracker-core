@@ -773,8 +773,10 @@ def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
     # current member of the represented clan, so it runs "anyone in clan A vs
     # anyone in clan B". Recomputed each reload, so members who join the clan
     # mid-event start counting automatically. joined_at is None — the event
-    # window is the only credit cutoff. One team per (event, player): a player
-    # in both clans lands on whichever auto team is seen first.
+    # window is the only credit cutoff. One team per (event, player). G7: a
+    # player who belongs to MORE THAN ONE of an event's participating clans is
+    # ambiguous (which side are they on?) — they are excluded from every auto
+    # team for that event and must be placed on a team explicitly by an admin.
     auto_teams = [t for t in teams if getattr(t, "auto_clan", False) and t.group_id]
     if auto_teams:
         from db.models.associations import user_group_association
@@ -791,12 +793,29 @@ def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
             )
             .all()
         )
+        # Sets, not lists: the known NULL-user_id insert race can duplicate
+        # association rows, and a doubled row must not read as "two clans".
         members_by_gid: dict = {}
         for gid, pid in rows:
-            members_by_gid.setdefault(gid, []).append(pid)
+            members_by_gid.setdefault(gid, set()).add(pid)
+        # Per-event multi-clan exclusions — computed per event because the same
+        # player may legitimately anchor different clans across different events.
+        gids_by_event: dict = {}
+        for t in auto_teams:
+            gids_by_event.setdefault(team_event[t.id], set()).add(t.group_id)
+        multi_clan_by_event: dict = {}
+        for ev_id, ev_gids in gids_by_event.items():
+            counts: dict = {}
+            for gid in ev_gids:
+                for pid in members_by_gid.get(gid, ()):
+                    counts[pid] = counts.get(pid, 0) + 1
+            multi_clan_by_event[ev_id] = {pid for pid, n in counts.items() if n > 1}
         for t in auto_teams:
             event_id = team_event[t.id]
+            excluded = multi_clan_by_event.get(event_id, ())
             for pid in members_by_gid.get(t.group_id, ()):  # noqa: E501
+                if pid in excluded:
+                    continue  # multi-clan member: never auto-credited (G7)
                 existing = state.participants.setdefault(pid, [])
                 if any(e == event_id for (e, _tid, _j) in existing):
                     continue  # already mapped to a team for this event

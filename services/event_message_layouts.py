@@ -279,6 +279,21 @@ DEFAULT_LAYOUTS = {
             },
         ],
     },
+    "event_multi_clan_skipped": {
+        "accent_color": "#FAA61A",
+        "blocks": [
+            {"type": "text", "content": "## ⚠️ {skipped_count} player(s) need a team"},
+            {
+                "type": "text",
+                "content": "These players are in more than one clan competing in **{event_name}**, so they weren't auto-added to a whole-clan team:\n{skipped_players}",
+            },
+            {"type": "text", "content": "Add each to a specific team to include them."},
+            {
+                "type": "buttons",
+                "buttons": [{"label": "Manage teams", "url": "{event_url}"}],
+            },
+        ],
+    },
     "event_pot": {
         "accent_color": "#FFD700",
         "blocks": [
@@ -665,6 +680,8 @@ def notification_context(notification_type: str, data: dict) -> dict:
     put("proof_url", data.get("proof_url"))
     put("review_url", data.get("review_url"))
     put("reason", data.get("reason"))
+    put("skipped_players", data.get("skipped_players"))
+    put("skipped_count", data.get("skipped_count"))
     # Prize pot (web52a): pre-composed single-token lines for the lifecycle
     # announcements, set by the sender only when the pot is advertised — so the
     # {pot_started_line}/{pot_result_line} blocks drop out otherwise.

@@ -76,6 +76,54 @@ class TestPerformSignupGuards:
         assert exc.value.status == 403
 
 
+class TestMultiClanGuard:
+    """G7: a player in more than one participating clan can't self/auto sign up."""
+
+    def test_standard_event_is_noop_no_db(self):
+        # Standard events short-circuit before any membership query (session=None
+        # would blow up if it were touched).
+        sus.assert_single_participating_clan(None, _ev(mode="standard"), 3)
+        assert sus.participating_clans_for_player(None, _ev(mode="standard"), 3) == set()
+
+    def test_intersection_is_the_players_participating_clans(self, monkeypatch):
+        monkeypatch.setattr(sus, "player_group_ids", lambda s, pid: {20, 99})
+        monkeypatch.setattr(sus, "participating_group_ids", lambda s, ev: {10, 20})
+        assert sus.participating_clans_for_player(
+            None, _ev(mode="clan_vs_clan"), 3
+        ) == {20}
+
+    def test_single_clan_is_allowed(self, monkeypatch):
+        monkeypatch.setattr(sus, "player_group_ids", lambda s, pid: {20})
+        monkeypatch.setattr(sus, "participating_group_ids", lambda s, ev: {10, 20})
+        sus.assert_single_participating_clan(None, _ev(mode="clan_vs_clan"), 3)  # no raise
+
+    def test_multi_clan_blocks_409(self, monkeypatch):
+        monkeypatch.setattr(sus, "player_group_ids", lambda s, pid: {10, 20})
+        monkeypatch.setattr(sus, "participating_group_ids", lambda s, ev: {10, 20, 30})
+        with pytest.raises(sus.SignupError) as exc:
+            sus.assert_single_participating_clan(None, _ev(mode="clan_vs_clan"), 3)
+        assert exc.value.status == 409
+
+    def test_signup_group_picks_the_single_clan(self, monkeypatch):
+        monkeypatch.setattr(sus, "player_group_ids", lambda s, pid: {20, 99})
+        monkeypatch.setattr(sus, "participating_group_ids", lambda s, ev: {10, 20})
+        assert sus.signup_group_for_player(None, _ev(mode="clan_vs_clan"), 3) == 20
+
+    def test_perform_signup_blocks_multi_clan_before_recording(self, monkeypatch):
+        import types
+        fake = types.ModuleType("db.models")
+        fake.EVENT_SELF_SIGNUP_MODES = ("self_join", "auto_assign", "signup_pool")
+        monkeypatch.setitem(sys.modules, "db.models", fake)
+        # Get past eligibility so the multi-clan guard is what fires.
+        monkeypatch.setattr(sus, "assert_player_eligible", lambda s, ev, pid: None)
+        monkeypatch.setattr(sus, "player_group_ids", lambda s, pid: {10, 20})
+        monkeypatch.setattr(sus, "participating_group_ids", lambda s, ev: {10, 20})
+        player = SimpleNamespace(player_id=3)
+        with pytest.raises(sus.SignupError) as exc:
+            sus.perform_signup(None, _ev(mode="clan_vs_clan"), player, 7)
+        assert exc.value.status == 409
+
+
 class TestSignupError:
     def test_carries_problem_fields(self):
         e = sus.SignupError(422, "Nope", "because")

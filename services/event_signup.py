@@ -90,12 +90,42 @@ def assert_player_eligible(session, ev, player_id: int) -> None:
                           "That account is not a member of a participating clan.")
 
 
+# The message a player sees when they can't be auto-signed-up because they
+# belong to several clans competing in the SAME event (G7). The only resolution
+# is a manual admin add to a specific team, so we tell them exactly that.
+MULTI_CLAN_SIGNUP_MESSAGE = (
+    "You're a member of more than one clan taking part in this event, so we "
+    "can't add you to a team automatically — we don't know which side you're "
+    "on. Ask a leader of the clan you want to play for to add you to one of "
+    "their teams."
+)
+
+
+def participating_clans_for_player(session, ev, player_id: int) -> set:
+    """The participating clans (clan_vs_clan) this player belongs to. Empty for
+    standard/global events. More than one is the ambiguous case handled by
+    :func:`assert_single_participating_clan`."""
+    if not _is_clan_vs_clan(ev):
+        return set()
+    return player_group_ids(session, player_id) & participating_group_ids(session, ev)
+
+
+def assert_single_participating_clan(session, ev, player_id: int) -> None:
+    """Block self/auto sign-up for a player in MULTIPLE participating clans
+    (clan_vs_clan, G7): the system can't infer which side they're on, so an
+    admin must place them explicitly. No-op for standard/global events and for a
+    player in exactly one participating clan (zero is caught by eligibility)."""
+    if len(participating_clans_for_player(session, ev, player_id)) > 1:
+        raise SignupError(409, "Multiple clans", MULTI_CLAN_SIGNUP_MESSAGE)
+
+
 def signup_group_for_player(session, ev, player_id: int) -> Optional[int]:
     """Which group a player signs up *under*: their participating clan for
-    clan_vs_clan, else the event's group (None for global)."""
+    clan_vs_clan, else the event's group (None for global). Assumes the caller
+    has already ruled out multi-clan ambiguity (see
+    :func:`assert_single_participating_clan`)."""
     if _is_clan_vs_clan(ev):
-        overlap = player_group_ids(session, player_id) & participating_group_ids(session, ev)
-        return next(iter(overlap), None)
+        return next(iter(participating_clans_for_player(session, ev, player_id)), None)
     return ev.group_id
 
 
@@ -175,6 +205,10 @@ def perform_signup(session, ev, player, user_id: int, team_id: Optional[int] = N
             raise SignupError(403, "Join code required", "The join code is missing or wrong.")
 
     assert_player_eligible(session, ev, player.player_id)
+    # G7: a player in several participating clans can't be auto-placed — which
+    # side would they be on? Block every self sign-up mode (pool included) and
+    # route them to a manual admin add to a specific team.
+    assert_single_participating_clan(session, ev, player.player_id)
 
     # One RSN per user per event: if a DIFFERENT account of the user already
     # entered, refuse. The same account re-signing up falls through to an
