@@ -1,0 +1,2552 @@
+{
+ "version": 1,
+ "event": {
+  "description": "Obtain drops across the game to receive the most points before the event concludes!",
+  "formation_mode": "admin_assign",
+  "requires_confirmation": false,
+  "submission_policy": "all",
+  "has_bingo": false,
+  "board_size": 5,
+  "bonus_line_points": 0,
+  "bonus_blackout_points": 0,
+  "mode": "standard",
+  "kind": "loot_sweep"
+ },
+ "tasks": [
+  {
+   "type": "loot_sweep",
+   "label": "Barrows Brothers",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 40,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Ahrim",
+      "npcs": [
+       "Ahrim the Blighted"
+      ],
+      "bonus_points": 4,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Ahrim's hood",
+        "points": 2
+       },
+       {
+        "item_name": "Ahrim's robetop",
+        "points": 2
+       },
+       {
+        "item_name": "Ahrim's robeskirt",
+        "points": 2
+       },
+       {
+        "item_name": "Staff",
+        "points": 2
+       }
+      ]
+     },
+     {
+      "label": "Dharok",
+      "npcs": [
+       "Dharok the Wretched"
+      ],
+      "bonus_points": 4,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Dharok's helm",
+        "points": 2
+       },
+       {
+        "item_name": "Dharok's platebody",
+        "points": 2
+       },
+       {
+        "item_name": "Dharok's platelegs",
+        "points": 2
+       },
+       {
+        "item_name": "Dharok's greataxe",
+        "points": 2
+       }
+      ]
+     },
+     {
+      "label": "Guthan",
+      "npcs": [
+       "Guthan the Infested"
+      ],
+      "bonus_points": 4,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Guthan's helm",
+        "points": 2
+       },
+       {
+        "item_name": "Guthan's platebody",
+        "points": 2
+       },
+       {
+        "item_name": "Guthan's chainskirt",
+        "points": 2
+       },
+       {
+        "item_name": "Guthan's warspear",
+        "points": 2
+       }
+      ]
+     },
+     {
+      "label": "Karil",
+      "npcs": [
+       "Karil the Tainted"
+      ],
+      "bonus_points": 4,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Coif",
+        "points": 2
+       },
+       {
+        "item_name": "Karil's leathertop",
+        "points": 2
+       },
+       {
+        "item_name": "Karil's leatherskirt",
+        "points": 2
+       },
+       {
+        "item_name": "Crossbow",
+        "points": 2
+       }
+      ]
+     },
+     {
+      "label": "Torag",
+      "npcs": [
+       "Torag the Corrupted"
+      ],
+      "bonus_points": 4,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Torag's helm",
+        "points": 2
+       },
+       {
+        "item_name": "Torag's platebody",
+        "points": 2
+       },
+       {
+        "item_name": "Torag's platelegs",
+        "points": 2
+       },
+       {
+        "item_name": "Hammer",
+        "points": 2
+       }
+      ]
+     },
+     {
+      "label": "Verac",
+      "npcs": [
+       "Verac the Defiled"
+      ],
+      "bonus_points": 4,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Verac's helm",
+        "points": 2
+       },
+       {
+        "item_name": "Verac's brassard",
+        "points": 2
+       },
+       {
+        "item_name": "Verac's plateskirt",
+        "points": 2
+       },
+       {
+        "item_name": "Verac's flail",
+        "points": 2
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Dagannoth Kings",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 20,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Dagannoth Supreme",
+      "npcs": [
+       "Dagannoth Supreme"
+      ],
+      "bonus_points": 4,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Seercull",
+        "points": 2
+       },
+       {
+        "item_name": "Archer helm",
+        "points": 2
+       },
+       {
+        "item_name": "Spined body",
+        "points": 2
+       },
+       {
+        "item_name": "Spined chaps",
+        "points": 2
+       },
+       {
+        "item_name": "Archers ring",
+        "points": 2
+       }
+      ]
+     },
+     {
+      "label": "Dagannoth Rex",
+      "npcs": [
+       "Dagannoth Rex"
+      ],
+      "bonus_points": 4,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Rock-shell plate",
+        "points": 2
+       },
+       {
+        "item_name": "Rock-shell legs",
+        "points": 2
+       },
+       {
+        "item_name": "Berserker ring",
+        "points": 2
+       },
+       {
+        "item_name": "Warrior ring",
+        "points": 2
+       }
+      ]
+     },
+     {
+      "label": "Dagannoth Prime",
+      "npcs": [
+       "Dagannoth Prime"
+      ],
+      "bonus_points": 4,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Mud battlestaff",
+        "points": 2
+       },
+       {
+        "item_name": "Farseer helm",
+        "points": 2
+       },
+       {
+        "item_name": "Skeletal top",
+        "points": 2
+       },
+       {
+        "item_name": "Skeletal bottoms",
+        "points": 2
+       },
+       {
+        "item_name": "Seers ring",
+        "points": 2
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Moons of Peril",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 20,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Eclipse Moon",
+      "npcs": [
+       "Eclipse Moon"
+      ],
+      "bonus_points": 4,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Eclipse atlatl",
+        "points": 1,
+        "awards_per_tier": 4
+       }
+      ]
+     },
+     {
+      "label": "Blood Moon",
+      "npcs": [
+       "Blood Moon"
+      ],
+      "bonus_points": 4,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Dual macuahuitl",
+        "points": 1,
+        "awards_per_tier": 4
+       }
+      ]
+     },
+     {
+      "label": "Blue Moon",
+      "npcs": [
+       "Blue Moon"
+      ],
+      "bonus_points": 4,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Blue moon spear",
+        "points": 1,
+        "awards_per_tier": 4
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Kree'arra",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Kree'arra",
+      "npcs": [
+       "Kree'arra"
+      ],
+      "bonus_points": 40,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Armadyl helmet",
+        "points": 9
+       },
+       {
+        "item_name": "Armadyl chestplate",
+        "points": 9
+       },
+       {
+        "item_name": "Armadyl chainskirt",
+        "points": 9
+       },
+       {
+        "item_name": "Armadyl hilt",
+        "points": 13
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "General Graardor",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "General Graardor",
+      "npcs": [
+       "General Graardor"
+      ],
+      "bonus_points": 40,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Bandos chestplate",
+        "points": 7
+       },
+       {
+        "item_name": "Bandos tassets",
+        "points": 7
+       },
+       {
+        "item_name": "Bandos boots",
+        "points": 7
+       },
+       {
+        "item_name": "Bandos hilt",
+        "points": 9
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Commander Zilyana",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Commander Zilyana",
+      "npcs": [
+       "Commander Zilyana"
+      ],
+      "bonus_points": 40,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Saradomin sword",
+        "points": 2
+       },
+       {
+        "item_name": "Saradomin's light",
+        "points": 5
+       },
+       {
+        "item_name": "Armadyl crossbow",
+        "points": 9
+       },
+       {
+        "item_name": "Saradomin hilt",
+        "points": 9
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "K'ril Tsutsaroth",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "K'ril Tsutsaroth",
+      "npcs": [
+       "K'ril Tsutsaroth"
+      ],
+      "bonus_points": 40,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Steam battlestaff",
+        "points": 2
+       },
+       {
+        "item_name": "Zamorakian spear",
+        "points": 2
+       },
+       {
+        "item_name": "Staff of the dead",
+        "points": 7
+       },
+       {
+        "item_name": "Zamorak hilt",
+        "points": 7
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Nex",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Nex",
+      "npcs": [
+       "Nex"
+      ],
+      "bonus_points": 60,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Zaryte vambraces",
+        "points": 15
+       },
+       {
+        "item_name": "Nihil horn",
+        "points": 20
+       },
+       {
+        "item_name": "Ancient hilt",
+        "points": 40
+       },
+       {
+        "item_name": "Torva full helm (damaged)",
+        "points": 20,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Torva platebody (damaged)",
+        "points": 20,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Torva platelegs (damaged)",
+        "points": 20,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Wilderness wards",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Wilderness wards",
+      "npcs": [],
+      "bonus_points": 20,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Odium shard 1",
+        "points": 3
+       },
+       {
+        "item_name": "Odium shard 2",
+        "points": 3
+       },
+       {
+        "item_name": "Odium shard 3",
+        "points": 3
+       },
+       {
+        "item_name": "Malediction shard 1",
+        "points": 3
+       },
+       {
+        "item_name": "Malediction shard 2",
+        "points": 3
+       },
+       {
+        "item_name": "Malediction shard 3",
+        "points": 3
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Chaos Elemental",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Chaos Elemental",
+      "npcs": [
+       "Chaos Elemental"
+      ],
+      "bonus_points": 20,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Dragon 2h sword",
+        "points": 2
+       },
+       {
+        "item_name": "Dragon pickaxe",
+        "points": 4
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Venenatis / Spindel",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Venenatis / Spindel",
+      "npcs": [
+       "Venenatis",
+       "Spindel"
+      ],
+      "bonus_points": 40,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Fangs of venenatis",
+        "points": 4
+       },
+       {
+        "item_name": "Dragon 2h sword",
+        "points": 5
+       },
+       {
+        "item_name": "Dragon pickaxe",
+        "points": 5
+       },
+       {
+        "item_name": "Voidwaker gem",
+        "points": 7
+       },
+       {
+        "item_name": "Treasonous ring",
+        "points": 10
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Callisto / Artio",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Callisto / Artio",
+      "npcs": [
+       "Callisto",
+       "Artio"
+      ],
+      "bonus_points": 40,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Claws of callisto",
+        "points": 4
+       },
+       {
+        "item_name": "Dragon 2h sword",
+        "points": 5
+       },
+       {
+        "item_name": "Dragon pickaxe",
+        "points": 5
+       },
+       {
+        "item_name": "Voidwaker hilt",
+        "points": 7
+       },
+       {
+        "item_name": "Tyrannical ring",
+        "points": 10
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Vet'ion / Calvar'ion",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Vet'ion / Calvar'ion",
+      "npcs": [
+       "Vet'ion",
+       "Calvar'ion"
+      ],
+      "bonus_points": 40,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Skull of vet'ion",
+        "points": 6
+       },
+       {
+        "item_name": "Dragon 2h sword",
+        "points": 8
+       },
+       {
+        "item_name": "Dragon pickaxe",
+        "points": 8
+       },
+       {
+        "item_name": "Voidwaker blade",
+        "points": 12
+       },
+       {
+        "item_name": "Ring of the gods",
+        "points": 16
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "King Black Dragon",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "King Black Dragon",
+      "npcs": [
+       "King Black Dragon"
+      ],
+      "bonus_points": 50,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Kbd heads",
+        "points": 1
+       },
+       {
+        "item_name": "Dragon pickaxe",
+        "points": 12
+       },
+       {
+        "item_name": "Draconic visage",
+        "points": 40
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Revenant Caves (pvm)",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Revenant Caves (pvm)",
+      "npcs": [],
+      "bonus_points": 60,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Bracelet of ethereum",
+        "points": 1
+       },
+       {
+        "item_name": "Ancient crystal",
+        "points": 10
+       },
+       {
+        "item_name": "Amulet of avarice",
+        "points": 10
+       },
+       {
+        "item_name": "Thammaron's sceptre",
+        "points": 20
+       },
+       {
+        "item_name": "Craw's bow",
+        "points": 20
+       },
+       {
+        "item_name": "Viggora's chainmace",
+        "points": 20
+       },
+       {
+        "item_name": "Ancient emblem",
+        "points": 1,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Ancient totem",
+        "points": 2,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Ancient statuette",
+        "points": 4,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Ancient medallion",
+        "points": 8,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Ancient effigy",
+        "points": 8,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Ancient relic",
+        "points": 8,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Sarachnis",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Sarachnis",
+      "npcs": [
+       "Sarachnis"
+      ],
+      "bonus_points": 10,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Giant egg sac",
+        "points": 1
+       },
+       {
+        "item_name": "Dragon med helm",
+        "points": 2
+       },
+       {
+        "item_name": "Sarachnis cudgel",
+        "points": 5
+       },
+       {
+        "item_name": "Jar of eyes",
+        "points": 25,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Demonic Gorillas",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Demonic Gorillas",
+      "npcs": [
+       "Demonic gorilla"
+      ],
+      "bonus_points": 40,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Zenyte shard",
+        "points": 6
+       },
+       {
+        "item_name": "Ballista limbs",
+        "points": 10
+       },
+       {
+        "item_name": "Ballista spring",
+        "points": 10
+       },
+       {
+        "item_name": "Light frame",
+        "points": 15
+       },
+       {
+        "item_name": "Heavy frame",
+        "points": 30
+       },
+       {
+        "item_name": "Monkey tail",
+        "points": 30
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Zulrah",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Zulrah",
+      "npcs": [
+       "Zulrah"
+      ],
+      "bonus_points": 20,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Tanzanite fang",
+        "points": 12
+       },
+       {
+        "item_name": "Magic fang",
+        "points": 12
+       },
+       {
+        "item_name": "Serpentine visage",
+        "points": 12
+       },
+       {
+        "item_name": "Uncut onyx",
+        "points": 12
+       },
+       {
+        "item_name": "Jar of swamp",
+        "points": 40,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Vorkath",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Vorkath",
+      "npcs": [
+       "Vorkath"
+      ],
+      "bonus_points": 40,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Dragonbone necklace",
+        "points": 30
+       },
+       {
+        "item_name": "Draconic visage",
+        "points": 80,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Skeletal visage",
+        "points": 80,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Jar of decay",
+        "points": 80,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Vardorvis",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Vardorvis",
+      "npcs": [
+       "Vardorvis"
+      ],
+      "bonus_points": 50,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Awakener's orb",
+        "points": 3
+       },
+       {
+        "item_name": "Blood quartz",
+        "points": 8
+       },
+       {
+        "item_name": "Chromium ingot",
+        "points": 12
+       },
+       {
+        "item_name": "Ultor vestige",
+        "points": 36
+       },
+       {
+        "item_name": "Executioner's axe head",
+        "points": 36
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Duke Sucellus",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Duke Sucellus",
+      "npcs": [
+       "Duke Sucellus"
+      ],
+      "bonus_points": 50,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Awakener's orb",
+        "points": 2
+       },
+       {
+        "item_name": "Ice quartz",
+        "points": 8
+       },
+       {
+        "item_name": "Chromium ingot",
+        "points": 10
+       },
+       {
+        "item_name": "Magus vestige",
+        "points": 30
+       },
+       {
+        "item_name": "Eye of the duke",
+        "points": 30
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "The Whisperer",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "The Whisperer",
+      "npcs": [
+       "The Whisperer"
+      ],
+      "bonus_points": 50,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Awakener's orb",
+        "points": 2
+       },
+       {
+        "item_name": "Chromium ingot",
+        "points": 8
+       },
+       {
+        "item_name": "Shadow quartz",
+        "points": 10
+       },
+       {
+        "item_name": "Bellator vestige",
+        "points": 24
+       },
+       {
+        "item_name": "Siren's staff",
+        "points": 24
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "The Leviathan",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "The Leviathan",
+      "npcs": [
+       "The Leviathan"
+      ],
+      "bonus_points": 50,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Awakener's orb",
+        "points": 2
+       },
+       {
+        "item_name": "Smoke quartz",
+        "points": 8
+       },
+       {
+        "item_name": "Chromium ingot",
+        "points": 10
+       },
+       {
+        "item_name": "Venator vestige",
+        "points": 30
+       },
+       {
+        "item_name": "Leviathan's lure",
+        "points": 30
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Virtus set",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Virtus set",
+      "npcs": [],
+      "bonus_points": 20,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Virtus mask",
+        "points": 10
+       },
+       {
+        "item_name": "Virtus robe top",
+        "points": 10
+       },
+       {
+        "item_name": "Virtus robe bottom",
+        "points": 10
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Obsidian armour set",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Obsidian armour set",
+      "npcs": [],
+      "bonus_points": 20,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Obsidian cape",
+        "points": 2
+       },
+       {
+        "item_name": "Toktz-ket-xil",
+        "points": 4
+       },
+       {
+        "item_name": "Obsidian helmet",
+        "points": 10
+       },
+       {
+        "item_name": "Obsidian platebody",
+        "points": 10
+       },
+       {
+        "item_name": "Obsidian platelegs",
+        "points": 10
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Phantom Muspah",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Phantom Muspah",
+      "npcs": [
+       "Phantom Muspah"
+      ],
+      "bonus_points": 20,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Frozen cache",
+        "points": 1,
+        "awards_per_tier": 2
+       },
+       {
+        "item_name": "Ancient icon",
+        "points": 2,
+        "awards_per_tier": 2
+       },
+       {
+        "item_name": "Venator shard",
+        "points": 4
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Kalphite Queen",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Kalphite Queen",
+      "npcs": [
+       "Kalphite Queen"
+      ],
+      "bonus_points": 30,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Kq head",
+        "points": 3
+       },
+       {
+        "item_name": "Dragon chainbody",
+        "points": 3
+       },
+       {
+        "item_name": "Dragon pickaxe",
+        "points": 5
+       },
+       {
+        "item_name": "Dragon 2h sword",
+        "points": 5
+       },
+       {
+        "item_name": "Jar of sand",
+        "points": 40,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Hueycoatl",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Hueycoatl",
+      "npcs": [
+       "The Hueycoatl"
+      ],
+      "bonus_points": 30,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Hueycoatl hide",
+        "points": 2,
+        "awards_per_tier": 3
+       },
+       {
+        "item_name": "Tome of earth (empty)",
+        "points": 5
+       },
+       {
+        "item_name": "Dragon hunter wand",
+        "points": 15
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Nightmare",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Nightmare",
+      "npcs": [
+       "The Nightmare"
+      ],
+      "bonus_points": 100,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Nightmare staff",
+        "points": 15
+       },
+       {
+        "item_name": "Inquisitor's mace",
+        "points": 35
+       },
+       {
+        "item_name": "Inquisitor's great helm",
+        "points": 20
+       },
+       {
+        "item_name": "Inquisitor's hauberk",
+        "points": 20
+       },
+       {
+        "item_name": "Inquisitor's plateskirt",
+        "points": 20
+       },
+       {
+        "item_name": "Harmonised orb",
+        "points": 50,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Eldritch orb",
+        "points": 50,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Volatile orb",
+        "points": 50,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Jar of dreams",
+        "points": 100,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Amoxliatl",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Amoxliatl",
+      "npcs": [
+       "Amoxliatl"
+      ],
+      "bonus_points": 20,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Glacial temotli",
+        "points": 4,
+        "awards_per_tier": 2
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Grotesque Guardians",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Grotesque Guardians",
+      "npcs": [
+       "Dusk"
+      ],
+      "bonus_points": 40,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Granite maul",
+        "points": 3
+       },
+       {
+        "item_name": "Granite gloves",
+        "points": 6
+       },
+       {
+        "item_name": "Granite ring",
+        "points": 6
+       },
+       {
+        "item_name": "Granite hammer",
+        "points": 9
+       },
+       {
+        "item_name": "Black tourmaline core",
+        "points": 12
+       },
+       {
+        "item_name": "Jar of stone",
+        "points": 70,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Abyssal Sire",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Abyssal Sire",
+      "npcs": [
+       "Abyssal Sire"
+      ],
+      "bonus_points": 40,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Unsired",
+        "points": 4,
+        "awards_per_tier": 5
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Kraken (boss)",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Kraken (boss)",
+      "npcs": [
+       "Kraken"
+      ],
+      "bonus_points": 20,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Kraken tentacle",
+        "points": 4,
+        "awards_per_tier": 2
+       },
+       {
+        "item_name": "Trident of the seas",
+        "points": 5,
+        "awards_per_tier": 2
+       },
+       {
+        "item_name": "Jar of dirt",
+        "points": 10,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Cerberus",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Cerberus",
+      "npcs": [
+       "Cerberus"
+      ],
+      "bonus_points": 30,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Smouldering stone",
+        "points": 8
+       },
+       {
+        "item_name": "Primordial crystal",
+        "points": 8
+       },
+       {
+        "item_name": "Pegasian boots",
+        "points": 8
+       },
+       {
+        "item_name": "Eternal crystal",
+        "points": 8
+       },
+       {
+        "item_name": "Jar of souls",
+        "points": 30,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Araxxor",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Araxxor",
+      "npcs": [
+       "Araxxor"
+      ],
+      "bonus_points": 30,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Noxious halberd",
+        "points": 4,
+        "awards_per_tier": 3
+       },
+       {
+        "item_name": "Araxyte head",
+        "points": 5
+       },
+       {
+        "item_name": "Araxyte fang",
+        "points": 12
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Thermonuclear Devil",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Thermonuclear Devil",
+      "npcs": [
+       "Thermonuclear smoke devil"
+      ],
+      "bonus_points": 30,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Ancient staff",
+        "points": 1
+       },
+       {
+        "item_name": "Occult necklace",
+        "points": 3
+       },
+       {
+        "item_name": "Smoke battlestaff",
+        "points": 4
+       },
+       {
+        "item_name": "Dragon chainbody",
+        "points": 16
+       },
+       {
+        "item_name": "Jar of smoke",
+        "points": 16,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Alchemical Hydra",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Alchemical Hydra",
+      "npcs": [
+       "Alchemical Hydra"
+      ],
+      "bonus_points": 60,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Brimstone ring",
+        "points": 4,
+        "awards_per_tier": 3
+       },
+       {
+        "item_name": "Hydra tail",
+        "points": 16
+       },
+       {
+        "item_name": "Hydra leather",
+        "points": 16
+       },
+       {
+        "item_name": "Hydra's claw",
+        "points": 30
+       },
+       {
+        "item_name": "Jar of chemicals",
+        "points": 30,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Gauntlet",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Gauntlet",
+      "npcs": [
+       "Crystalline Hunllef"
+      ],
+      "bonus_points": 50,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Crystal weapon seed",
+        "points": 6
+       },
+       {
+        "item_name": "Crystal armour seed",
+        "points": 6
+       },
+       {
+        "item_name": "Enhanced crystal weapon seed",
+        "points": 50
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Scurrius",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Scurrius",
+      "npcs": [
+       "Scurrius"
+      ],
+      "bonus_points": 10,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Spine",
+        "points": 1,
+        "awards_per_tier": 5
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Fortis Colosseum",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Fortis Colosseum",
+      "npcs": [
+       "Fortis Colosseum"
+      ],
+      "bonus_points": 30,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Echo crystal",
+        "points": 3
+       },
+       {
+        "item_name": "Sunfire fanatic helm",
+        "points": 5,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Sunfire fanatic cuirass",
+        "points": 5,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Sunfire fanatic chausses",
+        "points": 5,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Tonalztics of ralos",
+        "points": 18
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Elder Chaos Druid",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Elder Chaos Druid",
+      "npcs": [
+       "Elder Chaos druid"
+      ],
+      "bonus_points": 10,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Elder chaos hood",
+        "points": 3
+       },
+       {
+        "item_name": "Elder chaos top",
+        "points": 3
+       },
+       {
+        "item_name": "Elder chaos robe",
+        "points": 3
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Tormented Demon",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Tormented Demon",
+      "npcs": [
+       "Tormented Demon"
+      ],
+      "bonus_points": 10,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Tormented synapse",
+        "points": 4,
+        "awards_per_tier": 2
+       },
+       {
+        "item_name": "Burning claw",
+        "points": 4,
+        "awards_per_tier": 2
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Chambers of Xeric",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Chambers of Xeric",
+      "npcs": [
+       "Chambers of Xeric"
+      ],
+      "bonus_points": 80,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Arcane prayer scroll",
+        "points": 4
+       },
+       {
+        "item_name": "Dexterous prayer scroll",
+        "points": 4
+       },
+       {
+        "item_name": "Twisted buckler",
+        "points": 12
+       },
+       {
+        "item_name": "Dragon hunter crossbow",
+        "points": 12
+       },
+       {
+        "item_name": "Dinh's bulwark",
+        "points": 20,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Dragon claws",
+        "points": 20,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Ancestral hat",
+        "points": 20,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Ancestral robe top",
+        "points": 20,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Ancestral robe bottom",
+        "points": 20,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Elder maul",
+        "points": 40,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Kodai insignia",
+        "points": 40,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Twisted bow",
+        "points": 40,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Theater of Blood",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Theater of Blood",
+      "npcs": [],
+      "bonus_points": 70,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Avernic defender hilt",
+        "points": 8
+       },
+       {
+        "item_name": "Sanguinesti staff",
+        "points": 25
+       },
+       {
+        "item_name": "Ghrazi rapier",
+        "points": 25
+       },
+       {
+        "item_name": "Scythe of vitur",
+        "points": 50
+       },
+       {
+        "item_name": "Justiciar faceguard",
+        "points": 15,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Justiciar chestguard",
+        "points": 15,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Justiciar legguards",
+        "points": 15,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Tombs of Amascut",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Tombs of Amascut",
+      "npcs": [
+       "Tombs of Amascut"
+      ],
+      "bonus_points": 60,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Lightbearer",
+        "points": 8
+       },
+       {
+        "item_name": "Osmumten's fang",
+        "points": 8
+       },
+       {
+        "item_name": "Elidinis' ward",
+        "points": 25
+       },
+       {
+        "item_name": "Tumeken's shadow",
+        "points": 50
+       },
+       {
+        "item_name": "Masori mask",
+        "points": 15,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Masori body",
+        "points": 15,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Masori chaps",
+        "points": 15,
+        "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Slayer non-Boss",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Slayer non-Boss",
+      "npcs": [],
+      "bonus_points": 80,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Dragon boots",
+        "points": 1
+       },
+       {
+        "item_name": "Brine sabre",
+        "points": 2
+       },
+       {
+        "item_name": "Sulphur blades",
+        "points": 2
+       },
+       {
+        "item_name": "Warped sceptre",
+        "points": 2
+       },
+       {
+        "item_name": "Black mask",
+        "points": 2
+       },
+       {
+        "item_name": "Abyssal whip",
+        "points": 4
+       },
+       {
+        "item_name": "Dark bow",
+        "points": 6
+       },
+       {
+        "item_name": "Leaf-bladed battleaxe",
+        "points": 6
+       },
+       {
+        "item_name": "Blood shard",
+        "points": 10
+       },
+       {
+        "item_name": "Drake's claw",
+        "points": 10
+       },
+       {
+        "item_name": "Drake's tooth",
+        "points": 10
+       },
+       {
+        "item_name": "Aranea boots",
+        "points": 15
+       },
+       {
+        "item_name": "Basilisk jaw",
+        "points": 20
+       },
+       {
+        "item_name": "Wyvern visage",
+        "points": 100
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Miscellaneous I",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Miscellaneous I",
+      "npcs": [],
+      "bonus_points": 80,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Broken zombie axe",
+        "points": 2
+       },
+       {
+        "item_name": "Dragon limbs",
+        "points": 18
+       },
+       {
+        "item_name": "Dragon warhammer",
+        "points": 25
+       },
+       {
+        "item_name": "Dust battlestaff",
+        "points": 50
+       },
+       {
+        "item_name": "Dragon metal lump",
+        "points": 50
+       },
+       {
+        "item_name": "Imbued heart",
+        "points": 100
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Miscellaneous II",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Miscellaneous II",
+      "npcs": [],
+      "bonus_points": 80,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Long bone",
+        "points": 1
+       },
+       {
+        "item_name": "Granite legs",
+        "points": 10
+       },
+       {
+        "item_name": "Curved bone",
+        "points": 12
+       },
+       {
+        "item_name": "Enhanced crystal teleport seed",
+        "points": 12
+       },
+       {
+        "item_name": "Mist battlestaff",
+        "points": 50
+       },
+       {
+        "item_name": "Dragon metal slice",
+        "points": 50
+       },
+       {
+        "item_name": "Eternal gem",
+        "points": 100
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ],
+ "teams": [],
+ "bingo": null
+}
