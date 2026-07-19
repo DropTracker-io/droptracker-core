@@ -289,6 +289,13 @@ def _validated_ls_item(s, raw, *, default_apt: int, unknown: list, seen: dict,
     else:
         abort_problem(422, "Invalid config", "Each Loot Sweep item must be a name or object.")
     source = entry.get("source") if entry.get("source") in ("drop", "pet") else "drop"
+    # A "virtual" entry's name is a custom label ("Any ancestral piece"), not a
+    # droppable item — its real items live entirely in match_names. Requested
+    # explicitly, or inferred when a non-pet name doesn't resolve but aliases
+    # are supplied.
+    want_virtual = bool(entry.get("virtual"))
+    virtual = False
+    item_id = None
     if source == "pet":
         # A pet scores from a `pet` submission by name — validate against the
         # pet taxonomy, not the item DB; the item id (for the icon) is best
@@ -302,8 +309,14 @@ def _validated_ls_item(s, raw, *, default_apt: int, unknown: list, seen: dict,
     else:
         canonical, item_id = _canonical_item_with_id(s, name)
         if not canonical:
-            unknown.append(str(name).strip() or "(empty)")
-            return None
+            # Allow it as a custom label ONLY if it will be backed by match_names
+            # (checked after alias resolution below); otherwise it's a typo.
+            label = str(name).strip()
+            if (want_virtual or entry.get("match_names")) and label:
+                canonical, item_id, virtual = label[:80], None, True
+            else:
+                unknown.append(label or "(empty)")
+                return None
     key = canonical.lower()
     if key in seen:
         abort_problem(422, "Invalid config",
@@ -361,6 +374,13 @@ def _validated_ls_item(s, raw, *, default_apt: int, unknown: list, seen: dict,
         aliases.append(acanon)
     if aliases:
         item["match_names"] = aliases
+    # A virtual (custom-label) entry is nothing without its real items.
+    if virtual and not aliases:
+        abort_problem(422, "Invalid config",
+                      f"'{canonical}' isn't an item — add the real items it stands for "
+                      f"under 'also counts as'.")
+    if virtual:
+        item["virtual"] = True
     # Receipts (any mix of this entry's names) the group demands before the
     # entry counts as collected — "any 3 ancestral pieces". Default 1.
     required = _clamp_int(entry.get("required"), default=1, lo=1, hi=LOOT_SWEEP_MAX_REQUIRED)

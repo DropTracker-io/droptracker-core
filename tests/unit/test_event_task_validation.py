@@ -403,3 +403,30 @@ def test_loot_sweep_group_rejects_external_image(_stub_ls):
             {"npcs": ["Kree'arra"], "image_url": "https://evil.example/x.png",
              "items": [{"item_name": "Armadyl helmet"}]}]}})
     assert exc.value.status == 422
+
+
+def test_loot_sweep_virtual_label_backed_by_pieces(_stub_ls):
+    out = _validate({"type": "loot_sweep", "config": {"groups": [
+        {"npcs": ["Kree'arra"], "bonus_points": 10,
+         "items": [{"item_name": "Any armadyl piece", "virtual": True, "required": 2,
+                    "match_names": ["Armadyl helmet", "Armadyl chestplate"]}]}]}})
+    it = _cfg(out)["groups"][0]["items"][0]
+    assert it["virtual"] is True and it["required"] == 2
+    assert "item_id" not in it  # the label is not a real item
+    assert it["match_names"] == ["Armadyl helmet", "Armadyl chestplate"]
+
+
+def test_loot_sweep_virtual_without_pieces_rejected(_stub_ls):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "loot_sweep", "config": {"groups": [
+            {"npcs": ["Kree'arra"],
+             "items": [{"item_name": "Any armadyl piece", "virtual": True}]}]}})
+    assert exc.value.status == 422
+
+
+def test_loot_sweep_unknown_name_still_rejected_without_virtual(_stub_ls):
+    # A typo'd name with no aliases and no virtual flag is still an error.
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "loot_sweep", "config": {"groups": [
+            {"npcs": ["Kree'arra"], "items": [{"item_name": "Armadyl helmutt"}]}]}})
+    assert exc.value.status == 422 and "item" in exc.value.title.lower()

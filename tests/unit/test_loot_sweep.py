@@ -249,6 +249,31 @@ class TestMatchNamesAndRequired:
         assert item["count"] == 2 and item["points"] == 9
         assert b["groups"][0]["awarded"] == 1  # both entries collected → bonus
 
+    def test_virtual_label_pools_pieces_without_own_key(self):
+        cfg = ls.LootSweepConfig({"decay_percent": 20, "groups": [{
+            "npcs": ["Great Olm"],
+            "bonus_points": 25,
+            "items": [
+                {"item_name": "Any ancestral piece", "virtual": True, "points": 3,
+                 "required": 3,
+                 "match_names": ["Ancestral hat", "Ancestral robe top",
+                                 "Ancestral robe bottom"]},
+            ],
+        }]})
+        item = cfg.groups[0].items[0]
+        assert item.virtual is True
+        # The label is NOT a credit key — only the three real pieces are.
+        assert "any ancestral piece" not in item.match_keys
+        assert set(item.match_keys) == {
+            "ancestral hat", "ancestral robe top", "ancestral robe bottom"}
+        idx = cfg.matcher_index()
+        assert "any ancestral piece" not in idx and "ancestral hat" in idx
+        # A drop of the label name itself credits nothing; real pieces pool.
+        assert ls.score_counts({"any ancestral piece": 5}, cfg)["total"] == 0
+        b = ls.score_counts({"ancestral hat": 2, "ancestral robe top": 1}, cfg)
+        assert b["groups"][0]["items"][0]["count"] == 3
+        assert b["groups"][0]["completions"] == 1  # required 3 met
+
     def test_required_gates_group_completion(self):
         cfg = ls.LootSweepConfig({"decay_percent": 20, "groups": [{
             "npcs": ["Great Olm"],

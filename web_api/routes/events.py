@@ -1220,6 +1220,30 @@ async def get_loot_sweep_board(event_id: int):
                                    .filter(NpcList.npc_name.in_(list(all_npcs))).all()):
                     npc_id_by_name.setdefault(nname, nid)
 
+            # Resolve match_name -> item id so a pooled/virtual entry can show a
+            # cluster of the real pieces it stands for (the label itself has no
+            # icon). Item names are case-insensitive in the DB collation.
+            from db import ItemList
+            all_aliases = {a for _t, cfg in cfgs for g in cfg.groups
+                           for it in g.items for a in it.match_names}
+            item_id_by_name: dict = {}
+            if all_aliases:
+                for iid, iname in (s.query(ItemList.item_id, ItemList.item_name)
+                                   .filter(ItemList.item_name.in_(list(all_aliases))).all()):
+                    item_id_by_name.setdefault(_norm(iname), iid)
+
+            def _icon_ids(it) -> list:
+                # Ordered, de-duped icons: primary (real items) first, then each
+                # match name. A virtual entry contributes only its pieces.
+                ids: list = []
+                if it.item_id and not it.virtual:
+                    ids.append(int(it.item_id))
+                for a in it.match_names:
+                    aid = item_id_by_name.get(_norm(a))
+                    if aid and int(aid) not in ids:
+                        ids.append(int(aid))
+                return ids
+
             for task, cfg in cfgs:
                 # Config-derived group/item defs (order matches the per-team
                 # breakdown below, so the grid maps by position).
@@ -1235,7 +1259,8 @@ async def get_loot_sweep_board(event_id: int):
                              "points": score_num(it.points), "awards_per_tier": it.awards_per_tier,
                              "max_awards": it.max_awards,
                              "counts_for_group": it.counts_for_group, "source": it.source,
-                             "required": it.required, "match_names": it.match_names}
+                             "required": it.required, "match_names": it.match_names,
+                             "virtual": it.virtual, "icon_ids": _icon_ids(it)}
                             for it in g.items
                         ],
                     }
@@ -1373,11 +1398,25 @@ async def get_loot_sweep_receipts(event_id: int):
                     "proof_url": r.proof_url,
                     "source_type": r.source_type,
                 })
+            # Per-piece icons for a pooled/virtual entry (label first has none).
+            from db import ItemList
+            icon_ids: list = []
+            if item.item_id and not item.virtual:
+                icon_ids.append(int(item.item_id))
+            if item.match_names:
+                for iid, iname in (s.query(ItemList.item_id, ItemList.item_name)
+                                   .filter(ItemList.item_name.in_(item.match_names)).all()):
+                    if iid and int(iid) not in icon_ids:
+                        icon_ids.append(int(iid))
             return {
                 "event_id": event_id,
                 "task_id": task_id,
                 "item_name": item.name,
                 "item_id": item.item_id,
+                "virtual": item.virtual,
+                "required": item.required,
+                "match_names": item.match_names,
+                "icon_ids": icon_ids,
                 "teams": list(teams.values()),
             }
 

@@ -149,7 +149,7 @@ ITEM_SOURCES = ("drop", "pet")
 class LootSweepItem:
     __slots__ = ("key", "name", "item_id", "points", "awards_per_tier",
                  "max_awards", "counts_for_group", "source",
-                 "match_names", "match_keys", "required")
+                 "match_names", "match_keys", "required", "virtual")
 
     def __init__(self, raw, cfg: "LootSweepConfig"):
         if isinstance(raw, str):
@@ -160,6 +160,11 @@ class LootSweepItem:
         self.key = _norm(name)
         self.name = str(name).strip()
         self.item_id = _int(entry.get("item_id"), 0) or None
+        # A "virtual" entry's name is a custom LABEL ("Any ancestral piece"),
+        # not itself a droppable item — the real items live in match_names, so
+        # the label key never credits a receipt. Set explicitly by the write
+        # validator (never inferred: a real item may also carry match_names).
+        self.virtual = bool(entry.get("virtual"))
         pts = _num(entry.get("points"), 1.0)
         self.points = pts if pts > 0 else 1.0
         self.awards_per_tier = _clamp(entry.get("awards_per_tier"),
@@ -175,12 +180,13 @@ class LootSweepItem:
         self.source = entry.get("source") if entry.get("source") in ITEM_SOURCES else "drop"
         # "Also counts as": alternate drop names that credit THIS entry's
         # counter/decay/cap — the vestige + gold-ring case, or an "any
-        # ancestral piece" pool where one entry lists every piece.
+        # ancestral piece" pool where one entry lists every piece. For a
+        # virtual entry these ARE the pool (the label itself never matches).
         raw_aliases = entry.get("match_names") or []
         if isinstance(raw_aliases, str):
             raw_aliases = [raw_aliases]
         names: list[str] = []
-        keys: list[str] = [self.key]
+        keys: list[str] = [] if self.virtual else [self.key]
         for a in (raw_aliases if isinstance(raw_aliases, list) else [])[:MAX_MATCH_NAMES]:
             ak = _norm(a)
             if ak and ak not in keys:
@@ -356,6 +362,7 @@ def score_counts(counts: dict[str, int], config: LootSweepConfig) -> dict:
                 "max_awards": it.max_awards, "awards_per_tier": it.awards_per_tier,
                 "counts_for_group": it.counts_for_group, "source": it.source,
                 "required": it.required, "match_names": it.match_names,
+                "virtual": it.virtual,
             })
         completions = min(item_completions, default=0)
         has_gating = bool(item_completions)
