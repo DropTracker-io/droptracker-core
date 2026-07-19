@@ -81,7 +81,7 @@ _STATE_KEY_TTL = 60 * 60 * 24 * 60         # 60 days for xp-baseline / kc-dedupe
 
 # Task types the engine can evaluate automatically (v1).
 AUTO_TASK_TYPES = ("item_collection", "kc_target", "pb_target", "xp_target", "skill_target",
-                   "loot_value", "pet_collection")
+                   "loot_value", "pet_collection", "loot_sweep")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -466,6 +466,17 @@ def pending_projection(session, task: dict, team_id) -> Optional[dict]:
     applied_rows = [r for r in rows if r.status != "pending"]
     threshold = completion_threshold(task)
     kind = _list_kind(task)
+    if kind == "loot_sweep":
+        # "applied"/"projected" are running POINT totals here (loot_sweep never
+        # completes, so pending_complete is always False).
+        from services.loot_sweep import LootSweepConfig, team_total
+        cfg = LootSweepConfig(task.get("config") or {})
+        return {
+            "applied": team_total(applied_rows, cfg),
+            "projected": team_total(rows, cfg),
+            "pending_count": len(pending_rows),
+            "pending_complete": False,
+        }
     if kind in ("all_of", "assembly"):
         applied = _distinct_progress_from_rows(applied_rows, threshold)
         projected = _distinct_progress_from_rows(rows, threshold)
@@ -517,6 +528,22 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
         # The matched name rides along to the ledger row so all_of/assembly
         # progress can count DISTINCT items rather than folding quantities.
         return {"mode": "count", "quantity": credit,
+                "matched_target": str(data.get("item_name") or "").strip()[:120] or None}
+
+    if task_type == "loot_sweep":
+        # Loot Sweep: credit any config item obtained via a drop / clog. The
+        # decaying-per-receipt scoring happens at apply time (off the ledger);
+        # here we only recognise the item and fold the raw quantity.
+        if kind not in ("drop", "clog"):
+            return None
+        name = _norm(data.get("item_name"))
+        if not name or name not in _config_item_entries(task.get("config") or {}):
+            return None
+        try:
+            qty = max(int((data.get("quantity", 1) if kind == "drop" else 1) or 1), 1)
+        except (TypeError, ValueError):
+            qty = 1
+        return {"mode": "count", "quantity": qty,
                 "matched_target": str(data.get("item_name") or "").strip()[:120] or None}
 
     if task_type == "kc_target":
@@ -1487,6 +1514,200 @@ def _current_leader(session, event_id: int, strict: bool = False):
     return (rows[0].id, int(rows[0].score or 0))
 
 
+def _loot_sweep_applied_rows(session, task: dict, team_id) -> list:
+    """Applied ledger rows for one loot_sweep (task, team) — the recompute
+    input for its running score (same status set as the item-list rollups)."""
+    from db.models import EventCompletion
+
+    return list(
+        session.query(EventCompletion)
+        .filter(EventCompletion.task_id == task["id"],
+                EventCompletion.team_id == team_id,
+                EventCompletion.status.in_(APPLIED_BONUS_STATUSES))
+        .all()
+    )
+
+
+def _loot_sweep_score(session, task: dict, team_id, *, include=None, exclude_id=None) -> dict:
+    """Full loot_sweep breakdown for a (task, team), optionally folding an
+    unsaved ``include`` row and/or dropping a soon-to-be-revoked ``exclude_id``
+    (so callers can score the before/after of a single change)."""
+    from services.loot_sweep import LootSweepConfig, score_rows
+
+    rows = _loot_sweep_applied_rows(session, task, team_id)
+    if exclude_id is not None:
+        rows = [r for r in rows if r.id != exclude_id]
+    if include is not None and all(r.id != include.id for r in rows):
+        rows = rows + [include]
+    return score_rows(rows, LootSweepConfig(task.get("config") or {}))
+
+
+def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
+                      player_name: Optional[str] = None) -> dict:
+    """Apply one loot_sweep receipt: recompute the team's running total for the
+    task off the ledger, fold the delta into the team score, and emit side
+    effects. Loot_sweep tasks never "complete" — ``EventProgress.progress`` is
+    the running point total (not a threshold count) and ``completed`` stays
+    False, so more receipts keep scoring until the per-item caps / set-bonus
+    cap stop advancing it (enforced in :func:`_row_advances_progress`)."""
+    from db.models import EventProgress, EventTeam
+
+    team_id = completion.team_id
+    player_id = completion.player_id
+
+    progress = (session.query(EventProgress)
+                .filter(EventProgress.task_id == task["id"],
+                        EventProgress.team_id == team_id)
+                .first())
+    if progress is None:
+        progress = EventProgress(
+            event_id=event["id"], task_id=task["id"], team_id=team_id,
+            progress=0, completed=False)
+        session.add(progress)
+    previous_total = int(progress.progress or 0)
+
+    # ``previous`` excludes just this row; ``current`` folds it in. Both are
+    # scored from the ledger so the delta (and any set-completion crossing) is
+    # exact and revoke-symmetric.
+    prev = _loot_sweep_score(session, task, team_id, exclude_id=completion.id)
+    curr = _loot_sweep_score(session, task, team_id, include=completion)
+    new_total = curr["total"]
+    delta = new_total - previous_total
+    progress.progress = new_total
+    progress.completed = False
+
+    team_score = None
+    lead_changed_to = None
+    if delta and team_id is not None:
+        previous_leader = _current_leader(session, event["id"], strict=True)
+        team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+        if team is not None:
+            team.score = int(team.score or 0) + delta
+            team_score = team.score
+            session.flush()
+            new_leader = _current_leader(session, event["id"], strict=True)
+            if (new_leader is not None and new_leader[0] == team_id
+                    and (previous_leader is None or previous_leader[0] != team_id)):
+                lead_changed_to = new_leader
+
+    # Contribution split over the whole running total (by receipt share), so
+    # end-of-event player points track who fed the sweep — rewritten each time.
+    contributors = _task_contributors(session, task["id"], team_id)
+    _award_contribution_points(session, event, task, team_id, contributors, new_total)
+
+    set_completed = curr["sets_awarded"] > prev["sets_awarded"]
+    result = {
+        "kind": "loot_sweep",
+        "event_id": event["id"],
+        "task_id": task["id"],
+        "team_id": team_id,
+        "player_id": player_id,
+        "points": delta,
+        "total": new_total,
+        "received_item": completion.matched_target,
+        "set_completed": set_completed,
+    }
+    if team_score is not None:
+        result["team_score"] = team_score
+    session.flush()
+
+    frame = dict(result)
+    if player_name:
+        frame["player_name"] = player_name
+    frame["task_label"] = task.get("label")
+    _publish(event["id"], frame)
+
+    # In-game plugin inbox: "received X (+N)". Best-effort; unit-test stubs
+    # lack the plugin module.
+    try:
+        from services.plugin_notifications import (
+            fan_out_event_notification, resolve_item_icon_id,
+        )
+        plugin_payload = {
+            "task_id": task["id"], "task_label": task.get("label"),
+            "team_id": team_id, "player_id": player_id, "player_name": player_name,
+            "points": delta, "team_score": team_score, "progress": new_total,
+            "received_item": completion.matched_target,
+        }
+        if completion.matched_target:
+            icon = resolve_item_icon_id(session, completion.matched_target)
+            if icon:
+                plugin_payload["icon_item_id"] = icon
+        fan_out_event_notification(session, "event_task_progress", event, plugin_payload)
+    except ImportError:
+        pass
+    except Exception as plugin_err:
+        print(f"loot_sweep plugin fan-out failed: {plugin_err}")
+
+    # Discord: announce only the big moment — a full set just paid out — so a
+    # game-wide sweep doesn't post per drop. Per-receipt detail rides SSE + the
+    # plugin inbox. (Reuses event_completion; loot_sweep-aware copy/layout is a
+    # frontend follow-up — see docs/LOOT_SWEEP.md.)
+    if set_completed and team_id is not None:
+        _enqueue_notification(session, "event_completion", event, player_id, {
+            "task_id": task["id"], "task_label": task.get("label"),
+            "team_id": team_id, "player_id": player_id, "player_name": player_name,
+            "points": curr["set_total"] - prev["set_total"],
+            "team_score": team_score,
+            "points_based": True, "loot_sweep": True, "set_completed": True,
+            "sets_completed": curr["sets_completed"],
+            "received_item": completion.matched_target,
+            "contributors": contributors,
+            "source_type": completion.source_type,
+            "proof_url": completion.proof_url,
+        })
+    if lead_changed_to:
+        _enqueue_notification(session, "event_lead_change", event, player_id, {
+            "team_id": team_id,
+            "team_score": lead_changed_to[1],
+            "task_id": task["id"],
+            "task_label": task.get("label"),
+        })
+    return result
+
+
+def _revoke_loot_sweep(session, event: dict, task: dict, team_id, completion) -> dict:
+    """Recompute a loot_sweep (task, team) after a receipt was revoked. The
+    caller already flipped the row to ``revoked``, so the applied-ledger score
+    excludes it; we re-fold the running total and take back the delta."""
+    from db.models import EventProgress, EventTeam
+
+    progress = (session.query(EventProgress)
+                .filter(EventProgress.task_id == task["id"],
+                        EventProgress.team_id == team_id)
+                .first())
+    previous_total = int(progress.progress or 0) if progress is not None else 0
+    new_total = _loot_sweep_score(session, task, team_id)["total"]
+    delta = new_total - previous_total
+
+    if progress is None:
+        if new_total <= 0:
+            return {"progress": 0, "completed": False, "team_score": None}
+        progress = EventProgress(event_id=event["id"], task_id=task["id"],
+                                 team_id=team_id, progress=0, completed=False)
+        session.add(progress)
+    progress.progress = new_total
+    progress.completed = False
+
+    team_score = None
+    if delta and team_id is not None:
+        team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+        if team is not None:
+            team.score = int(team.score or 0) + delta
+            team_score = team.score
+
+    contributors = _task_contributors(session, task["id"], team_id)
+    _award_contribution_points(session, event, task, team_id, contributors, new_total)
+
+    session.flush()
+    frame = {"kind": "revoke", "event_id": event["id"], "task_id": task["id"],
+             "team_id": team_id, "progress": new_total, "loot_sweep": True}
+    if team_score is not None:
+        frame["team_score"] = team_score
+    _publish(event["id"], frame)
+    return {"progress": new_total, "completed": False, "team_score": team_score}
+
+
 def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
                      cells: Optional[list] = None,
                      player_name: Optional[str] = None) -> dict:
@@ -1496,6 +1717,12 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
     approved. Caller owns the transaction; this only flushes.
     """
     from db.models import EventProgress, EventTeam
+
+    # Loot Sweep scores continuously off the ledger (decaying per-receipt
+    # item points + set bonuses) instead of completing once — its own path.
+    if _list_kind(task) == "loot_sweep":
+        return _apply_loot_sweep(session, redis_conn, event, task, completion,
+                                 player_name=player_name)
 
     team_id = completion.team_id
     player_id = completion.player_id
@@ -1740,6 +1967,11 @@ def _row_advances_progress(session, task: dict, team_id, candidate) -> bool:
     plain count/kc/xp folds every row advances progress until the threshold
     (the completed gate in :func:`record_match` handles the rest)."""
     kind = _list_kind(task)
+    if kind == "loot_sweep":
+        # Dead weight once the item is capped AND no new set completes — the
+        # running total wouldn't move, so don't record another popup.
+        return (_loot_sweep_score(session, task, team_id, include=candidate)["total"]
+                > _loot_sweep_score(session, task, team_id)["total"])
     if kind in ("all_of", "assembly"):
         helper = _distinct_item_progress
     elif kind == "groups":
@@ -1777,7 +2009,7 @@ def _dedupe_clog_echo(session, task: dict, team_id, player_id,
     ``pending`` echoes count too: the acquisition is already represented in
     the ledger awaiting review, and confirming it later must not double-pay.
     """
-    if task.get("type") != "item_collection" or not matched_target:
+    if task.get("type") not in ("item_collection", "loot_sweep") or not matched_target:
         return quantity
     if kind not in ("drop", "clog"):
         return quantity
@@ -2111,6 +2343,9 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
         _publish(event["id"], frame)
         return {"progress": None, "completed": None, "team_score": team_score,
                 "revoked_bonuses": [completion.note]}
+
+    if _list_kind(task) == "loot_sweep":
+        return _revoke_loot_sweep(session, event, task, team_id, completion)
 
     if _list_kind(task) in ("all_of", "assembly"):
         # Distinct-item semantics (the revoked row is already excluded — its

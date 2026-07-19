@@ -37,6 +37,11 @@ EVENT_TASK_TYPES = (
     # Pet acquisition — a specific pet by name, or "any pet" / a pet category
     # (boss/skilling/raids/…) resolved via utils.osrs_pets. See event_engine.
     "pet_collection",
+    # Loot Sweep (loot_sweep kind): one task per boss/"set". Each config item
+    # awards points that DECAY per successive team receipt, capped per item;
+    # collecting a full set awards a bonus (capped). Scored continuously off
+    # the ledger — never "completes". Config/scoring: services/loot_sweep.py.
+    "loot_sweep",
     # Manual-confirmation-only tasks (no automated evaluation).
     "custom",
 )
@@ -79,11 +84,16 @@ EVENT_MODES = ("standard", "clan_vs_clan")
 # - "standard"   — a flat task list scored by completions.
 # - "bingo"      — the task grid (has_bingo boards); put_bingo_board stamps it.
 # - "board_game" — the dice-board mode (web43a+): tiles, turns, coins, shop.
+# - "loot_sweep" — obtain items across the game for points that decay per
+#                  successive team receipt (capped per item), plus boss-"set"
+#                  completion bonuses. One EventTask (type 'loot_sweep') per
+#                  set; scoring is continuous off the ledger. See
+#                  services/loot_sweep.py + docs/LOOT_SWEEP.md.
 # Which kinds a non-superadmin may CREATE is governed site-wide by the
 # ``web_event_types`` registry (enabled/admin_only + per-type test-group
 # allowlist) — see services/event_types.py. Existing events of a disabled
 # kind keep running; the gate binds at creation only.
-EVENT_KINDS = ("standard", "bingo", "board_game")
+EVENT_KINDS = ("standard", "bingo", "board_game", "loot_sweep")
 
 # web_event_groups participant roles / invite lifecycle.
 EVENT_GROUP_ROLES = ("host", "opponent")

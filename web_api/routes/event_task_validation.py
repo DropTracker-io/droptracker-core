@@ -36,6 +36,18 @@ MAX_CONFIG_ITEMS = 100
 MAX_CONFIG_GROUPS = 10
 MAX_CONFIG_PATHS = 4
 
+# Loot Sweep (loot_sweep kind) config bounds. Kept in sync with
+# services/loot_sweep.py — which can't be imported here (this module's pytest
+# conftest stubs the whole ``services`` package, so a real import would fail).
+LOOT_SWEEP_DECAY_MODES = ("linear", "geometric")
+LOOT_SWEEP_DEFAULT_DECAY_PERCENT = 20
+LOOT_SWEEP_DEFAULT_MAX_AWARDS = 5
+LOOT_SWEEP_DEFAULT_SET_BONUS_MAX = 1
+LOOT_SWEEP_MAX_AWARDS_CAP = 100
+LOOT_SWEEP_MAX_ITEM_POINTS = 1_000_000
+LOOT_SWEEP_MAX_SET_BONUS_POINTS = 10_000_000
+LOOT_SWEEP_MAX_SET_BONUS_MAX = 100
+
 # any_path progress is tracked as a percentage of the closest-to-done path
 # (paths differ in size, so a raw item count would be meaningless).
 ANY_PATH_THRESHOLD = 100
@@ -52,6 +64,28 @@ def _canonical_item(s, name: str) -> str | None:
         .first()
     )
     return row[0] if row else None
+
+
+def _canonical_item_with_id(s, name: str) -> tuple[str | None, int | None]:
+    """Canonical item name + game id (for config icon refs), or (None, None)."""
+    row = (
+        s.query(ItemList.item_name, ItemList.item_id)
+        .filter(ItemList.item_name == (name or "").strip())
+        .first()
+    )
+    return (row[0], row[1]) if row else (None, None)
+
+
+def _clamp_int(value, *, default: int, lo: int, hi: int) -> int:
+    """Coerce to int and clamp to [lo, hi]; ``default`` when absent/garbage."""
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return default
+    return min(max(value, lo), hi)
 
 
 def _canonical_npc(s, name: str) -> str | None:
@@ -209,6 +243,97 @@ def _validated_paths(s, paths) -> tuple[list[dict], int]:
     return out, ANY_PATH_THRESHOLD
 
 
+def _validated_loot_sweep(s, config: dict | None) -> dict:
+    """Validate + normalize a ``loot_sweep`` task config (one task = one boss
+    "set"). Items are checked against the item DB and snapped to canonical
+    names + game ids; the set/decay parameters are clamped to sane bounds.
+
+    Result shape (what the engine + services/loot_sweep.py read)::
+
+        {"kind": "loot_sweep", "decay_percent", "decay_mode",
+         "default_max_awards", "set_bonus_points", "set_bonus_max",
+         "items": [{"item_name", "item_id"?, "points", "max_awards"?,
+                    "counts_for_set"?}]}
+    """
+    if not isinstance(config, dict):
+        abort_problem(422, "Invalid config",
+                      "A Loot Sweep task needs a config object with an 'items' array.")
+    items_raw = config.get("items")
+    if not isinstance(items_raw, list) or not items_raw:
+        abort_problem(422, "Invalid config",
+                      "A Loot Sweep task requires a non-empty 'items' array.")
+    if len(items_raw) > MAX_CONFIG_ITEMS:
+        abort_problem(422, "Invalid config", f"At most {MAX_CONFIG_ITEMS} items per task.")
+
+    decay_mode = config.get("decay_mode")
+    decay_mode = "linear" if decay_mode is None else decay_mode
+    if decay_mode not in LOOT_SWEEP_DECAY_MODES:
+        abort_problem(422, "Invalid config",
+                      f"decay_mode must be one of {list(LOOT_SWEEP_DECAY_MODES)}.")
+    decay_percent = _clamp_int(config.get("decay_percent"),
+                               default=LOOT_SWEEP_DEFAULT_DECAY_PERCENT, lo=0, hi=100)
+    default_max = _clamp_int(config.get("default_max_awards"),
+                             default=LOOT_SWEEP_DEFAULT_MAX_AWARDS, lo=1,
+                             hi=LOOT_SWEEP_MAX_AWARDS_CAP)
+    set_bonus_points = _clamp_int(config.get("set_bonus_points"), default=0, lo=0,
+                                  hi=LOOT_SWEEP_MAX_SET_BONUS_POINTS)
+    set_bonus_max = _clamp_int(config.get("set_bonus_max"),
+                               default=LOOT_SWEEP_DEFAULT_SET_BONUS_MAX, lo=1,
+                               hi=LOOT_SWEEP_MAX_SET_BONUS_MAX)
+
+    out_items, unknown, seen = [], [], set()
+    for raw in items_raw:
+        if isinstance(raw, str):
+            name, entry = raw, {}
+        elif isinstance(raw, dict):
+            name = raw.get("item_name") or raw.get("name") or ""
+            entry = raw
+        else:
+            abort_problem(422, "Invalid config",
+                          "Each Loot Sweep item must be a name or an object.")
+        canonical, item_id = _canonical_item_with_id(s, name)
+        if not canonical:
+            unknown.append(str(name).strip() or "(empty)")
+            continue
+        key = canonical.lower()
+        if key in seen:
+            continue  # same item listed twice — first wins
+        seen.add(key)
+        try:
+            pts = int(round(float(entry.get("points", 1) or 1)))
+        except (TypeError, ValueError):
+            abort_problem(422, "Invalid config",
+                          f"'{canonical}' points must be a number.")
+        item: dict = {"item_name": canonical,
+                      "points": min(max(pts, 1), LOOT_SWEEP_MAX_ITEM_POINTS)}
+        if item_id:
+            item["item_id"] = int(item_id)
+        if entry.get("max_awards") is not None:
+            item["max_awards"] = _clamp_int(entry.get("max_awards"), default=default_max,
+                                            lo=1, hi=LOOT_SWEEP_MAX_AWARDS_CAP)
+        # Set membership defaults True; only persist the opt-out (e.g. the pet,
+        # which scores but must not gate set completion).
+        if entry.get("counts_for_set") is False:
+            item["counts_for_set"] = False
+        out_items.append(item)
+    if unknown:
+        abort_problem(
+            422, "Unknown item(s)",
+            "Not found in the item database (exact in-game names required): "
+            + ", ".join(sorted(set(unknown))[:10]),
+        )
+
+    return {
+        "kind": "loot_sweep",
+        "decay_percent": decay_percent,
+        "decay_mode": decay_mode,
+        "default_max_awards": default_max,
+        "set_bonus_points": set_bonus_points,
+        "set_bonus_max": set_bonus_max,
+        "items": out_items,
+    }
+
+
 def validate_task_payload(s, body: dict) -> dict:
     """Validate + normalize a full task create payload.
 
@@ -342,6 +467,13 @@ def validate_task_payload(s, body: dict) -> dict:
     elif ttype in ("ehp_target", "ehb_target"):
         tv = _require_target_value(tv, what="Target " + ttype[:3].upper())
         config = None
+
+    elif ttype == "loot_sweep":
+        # One task = one boss/"set". Scoring params + item list live in config;
+        # target/target_value are unused (the task never "completes").
+        config = _validated_loot_sweep(s, config)
+        target = ""
+        tv = None
 
     else:  # custom — free-form manual task
         if tv is not None and (not isinstance(tv, int) or isinstance(tv, bool) or tv < 0):
