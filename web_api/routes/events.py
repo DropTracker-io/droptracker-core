@@ -1191,7 +1191,10 @@ async def get_loot_sweep_board(event_id: int):
                 for t in teams
             ]
             base = {"event_id": event_id, "kind": ev.kind, "teams": team_meta, "sets": []}
-            if not tasks or not teams:
+            # Render the set/item structure even with no teams yet (a fresh
+            # draft) — the board shows the boss sets greyed-out. Only bail when
+            # there are no loot_sweep tasks at all.
+            if not tasks:
                 return base
 
             task_ids = [t.id for t in tasks]
