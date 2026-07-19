@@ -53,6 +53,8 @@ MAX_TOTAL_AWARDS = 200   # cap on an item's max_awards
 MAX_BONUS_POINTS = 10_000_000
 MAX_BONUS_MAX = 100
 MAX_NPCS_PER_GROUP = 30
+MAX_MATCH_NAMES = 10     # alternate names that credit the same item entry
+MAX_REQUIRED = 100       # receipts a group can demand of one entry
 
 
 def _norm(value) -> str:
@@ -112,16 +114,30 @@ def default_max_awards(awards_per_tier: int = 1) -> int:
     return DEFAULT_TIERS * max(int(awards_per_tier or 1), 1)
 
 
+def _round2(value: float) -> float:
+    """Scores are decimal-valued to 2 places (a 1-pointer's second receipt at
+    20% decay is exactly 0.8, not 1). Rounding happens per receipt AND per
+    aggregate so sums re-folded from the ledger can never drift."""
+    return round(value + 0.0, 2)
+
+
+def receipt_points(base: float, k: int, decay_percent: int,
+                   awards_per_tier: int = 1,
+                   decay_mode: str = DEFAULT_DECAY_MODE) -> float:
+    """Points the ``k``-th receipt of an item is worth, to 2 decimals."""
+    return _round2(base * receipt_factor(k, decay_percent, awards_per_tier, decay_mode))
+
+
 def item_points(base: float, count: int, max_awards: int, decay_percent: int,
-                awards_per_tier: int = 1, decay_mode: str = DEFAULT_DECAY_MODE) -> int:
+                awards_per_tier: int = 1, decay_mode: str = DEFAULT_DECAY_MODE) -> float:
     """Total points an item is worth to a team that received it ``count`` times:
-    the first ``min(count, max_awards)`` receipts, each rounded to a whole point
-    (so the grid stays clean integers), tiered by ``awards_per_tier``."""
+    the first ``min(count, max_awards)`` receipts, each rounded to 2 decimals
+    (so 1 pt at −20%/tier pays 1, 0.8, 0.6, …), tiered by ``awards_per_tier``."""
     scored = min(max(count, 0), max(max_awards, 0))
-    total = 0
+    total = 0.0
     for k in range(1, scored + 1):
-        total += int(round(base * receipt_factor(k, decay_percent, awards_per_tier, decay_mode)))
-    return total
+        total += receipt_points(base, k, decay_percent, awards_per_tier, decay_mode)
+    return _round2(total)
 
 
 # --------------------------------------------------------------------------- #
@@ -132,7 +148,8 @@ ITEM_SOURCES = ("drop", "pet")
 
 class LootSweepItem:
     __slots__ = ("key", "name", "item_id", "points", "awards_per_tier",
-                 "max_awards", "counts_for_group", "source")
+                 "max_awards", "counts_for_group", "source",
+                 "match_names", "match_keys", "required")
 
     def __init__(self, raw, cfg: "LootSweepConfig"):
         if isinstance(raw, str):
@@ -156,6 +173,24 @@ class LootSweepItem:
         # "pet" (a `pet` submission matched by name — a pet only comes from its
         # boss, so no NPC scoping is needed).
         self.source = entry.get("source") if entry.get("source") in ITEM_SOURCES else "drop"
+        # "Also counts as": alternate drop names that credit THIS entry's
+        # counter/decay/cap — the vestige + gold-ring case, or an "any
+        # ancestral piece" pool where one entry lists every piece.
+        raw_aliases = entry.get("match_names") or []
+        if isinstance(raw_aliases, str):
+            raw_aliases = [raw_aliases]
+        names: list[str] = []
+        keys: list[str] = [self.key]
+        for a in (raw_aliases if isinstance(raw_aliases, list) else [])[:MAX_MATCH_NAMES]:
+            ak = _norm(a)
+            if ak and ak not in keys:
+                keys.append(ak)
+                names.append(str(a).strip())
+        self.match_names = names
+        self.match_keys = tuple(keys)
+        # Receipts (across ALL match names) the group demands before this entry
+        # counts toward its completion — "any 3 ancestral pieces". Default 1.
+        self.required = _clamp(entry.get("required"), 1, 1, MAX_REQUIRED)
 
 
 class LootSweepGroup:
@@ -242,19 +277,22 @@ class LootSweepConfig:
             yield from g.items
 
     def matcher_index(self) -> dict[str, dict]:
-        """``{item key: {"source", "npcs"}}`` for the engine matcher. ``source``
-        is "drop" (NPC-scoped: ``npcs`` = allowed NPC keys, empty = any) or
-        "pet" (matched from a pet submission by name; ``npcs`` unused). An item
-        in two groups merges their NPC allowances (validation forbids that)."""
+        """``{match key: {"source", "npcs"}}`` for the engine matcher — every
+        entry registers under its own name AND each of its ``match_names``
+        aliases, so any listed name credits the entry. ``source`` is "drop"
+        (NPC-scoped: ``npcs`` = allowed NPC keys, empty = any) or "pet"
+        (matched from a pet submission by name; ``npcs`` unused). A key in two
+        groups merges their NPC allowances (validation forbids that)."""
         out: dict[str, dict] = {}
         for g in self.groups:
             for it in g.items:
-                cur = out.get(it.key)
-                if cur is None:
-                    out[it.key] = {"source": it.source,
-                                   "npcs": g.npc_keys if it.source == "drop" else frozenset()}
-                else:
-                    cur["npcs"] = cur["npcs"] | g.npc_keys
+                for key in it.match_keys:
+                    cur = out.get(key)
+                    if cur is None:
+                        out[key] = {"source": it.source,
+                                    "npcs": g.npc_keys if it.source == "drop" else frozenset()}
+                    else:
+                        cur["npcs"] = cur["npcs"] | g.npc_keys
         return out
 
 
@@ -287,34 +325,43 @@ def score_counts(counts: dict[str, int], config: LootSweepConfig) -> dict:
          "groups": [{"label", "npcs", "bonus_points", "bonus_max",
                      "completions", "awarded", "bonus_total", "item_total",
                      "items": [{item_id,name,key,count,scored,points,
-                                max_awards,awards_per_tier,counts_for_group}]}]}
+                                max_awards,awards_per_tier,counts_for_group,
+                                required,match_names}]}]}
 
     ``total`` is what the team's :class:`EventTeam` score should reflect for this
     task. Groups/items are in config order."""
     groups_out = []
-    item_total_all = 0
+    item_total_all = 0.0
     group_bonus_all = 0
     gating_completions: list[int] = []
 
     for g in config.groups:
         item_rows = []
-        g_item_total = 0
+        g_item_total = 0.0
+        item_completions: list[int] = []
         for it in g.items:
-            count = max(_int(counts.get(it.key), 0), 0)
+            # An entry's receipts pool across ALL of its match names (aliases).
+            count = sum(max(_int(counts.get(k), 0), 0) for k in it.match_keys)
             pts = item_points(it.points, count, it.max_awards, config.decay_percent,
                               it.awards_per_tier, config.decay_mode)
-            g_item_total += pts
+            g_item_total = _round2(g_item_total + pts)
+            if it.counts_for_group:
+                # "Collected" once every `required` receipts (any mix of the
+                # entry's names) — an "any 3 ancestral pieces" entry completes
+                # at 3, 6, 9… receipts for repeatable group bonuses.
+                item_completions.append(count // it.required)
             item_rows.append({
                 "item_id": it.item_id, "name": it.name, "key": it.key,
                 "count": count, "scored": min(count, it.max_awards), "points": pts,
                 "max_awards": it.max_awards, "awards_per_tier": it.awards_per_tier,
                 "counts_for_group": it.counts_for_group, "source": it.source,
+                "required": it.required, "match_names": it.match_names,
             })
-        set_keys = g.set_item_keys
-        completions = min((max(_int(counts.get(k), 0), 0) for k in set_keys), default=0)
-        awarded = min(completions, g.bonus_max) if (set_keys and g.bonus_points > 0) else 0
+        completions = min(item_completions, default=0)
+        has_gating = bool(item_completions)
+        awarded = min(completions, g.bonus_max) if (has_gating and g.bonus_points > 0) else 0
         bonus_total = awarded * g.bonus_points
-        item_total_all += g_item_total
+        item_total_all = _round2(item_total_all + g_item_total)
         group_bonus_all += bonus_total
         if g.gates:
             gating_completions.append(completions)
@@ -332,7 +379,7 @@ def score_counts(counts: dict[str, int], config: LootSweepConfig) -> dict:
     set_total = set_awarded * config.set_bonus_points
 
     return {
-        "total": item_total_all + group_bonus_all + set_total,
+        "total": _round2(item_total_all + group_bonus_all + set_total),
         "item_total": item_total_all,
         "group_bonus_total": group_bonus_all,
         "set_total": set_total,
@@ -347,6 +394,6 @@ def score_rows(rows: Iterable, config: LootSweepConfig) -> dict:
     return score_counts(counts_from_rows(rows), config)
 
 
-def team_total(rows: Iterable, config: LootSweepConfig) -> int:
-    """Just the integer team-score contribution for a (task, team)."""
+def team_total(rows: Iterable, config: LootSweepConfig) -> float:
+    """Just the (2-decimal) team-score contribution for a (task, team)."""
     return score_rows(rows, config)["total"]

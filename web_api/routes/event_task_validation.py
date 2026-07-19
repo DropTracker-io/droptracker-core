@@ -75,6 +75,8 @@ LOOT_SWEEP_MAX_GROUPS = 40
 LOOT_SWEEP_MAX_ITEMS = 400          # across the whole task
 LOOT_SWEEP_MAX_AWARDS_PER_TIER = 20
 LOOT_SWEEP_MAX_TOTAL_AWARDS = 200
+LOOT_SWEEP_MAX_MATCH_NAMES = 10   # extra "also counts as" names per entry
+LOOT_SWEEP_MAX_REQUIRED = 100     # receipts a group can demand of one entry
 LOOT_SWEEP_MAX_NPCS = 30
 LOOT_SWEEP_MAX_ITEM_POINTS = 1_000_000
 LOOT_SWEEP_MAX_BONUS_POINTS = 10_000_000
@@ -330,6 +332,40 @@ def _validated_ls_item(s, raw, *, default_apt: int, unknown: list, seen: dict,
     # score but must not gate their group's bonus).
     if entry.get("counts_for_group") is False or entry.get("counts_for_set") is False:
         item["counts_for_group"] = False
+    # "Also counts as": alternate drop names crediting this same entry (the
+    # vestige + gold-ring rule, or an "any ancestral piece" pool). Each alias
+    # snaps to its canonical DB name and reserves it task-wide, so one receipt
+    # can never credit two entries.
+    raw_aliases = entry.get("match_names") or []
+    if isinstance(raw_aliases, str):
+        raw_aliases = [raw_aliases]
+    if not isinstance(raw_aliases, list):
+        abort_problem(422, "Invalid config", f"'{canonical}': match_names must be a list.")
+    if len(raw_aliases) > LOOT_SWEEP_MAX_MATCH_NAMES:
+        abort_problem(422, "Invalid config",
+                      f"'{canonical}': at most {LOOT_SWEEP_MAX_MATCH_NAMES} extra match names.")
+    aliases: list[str] = []
+    for a in raw_aliases:
+        acanon, _aid = _canonical_item_with_id(s, a)
+        if not acanon:
+            unknown.append(f"{str(a).strip() or '(empty)'} (also-counts on {canonical})")
+            continue
+        akey = acanon.lower()
+        if akey == key or any(x.lower() == akey for x in aliases):
+            continue
+        if akey in seen:
+            abort_problem(422, "Invalid config",
+                          f"'{acanon}' already appears under '{seen[akey]}' — a name can "
+                          f"only credit one entry per task.")
+        seen[akey] = group_label
+        aliases.append(acanon)
+    if aliases:
+        item["match_names"] = aliases
+    # Receipts (any mix of this entry's names) the group demands before the
+    # entry counts as collected — "any 3 ancestral pieces". Default 1.
+    required = _clamp_int(entry.get("required"), default=1, lo=1, hi=LOOT_SWEEP_MAX_REQUIRED)
+    if required != 1:
+        item["required"] = required
     return item
 
 

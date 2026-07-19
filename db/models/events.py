@@ -383,7 +383,10 @@ class EventTeam(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
     name = Column(String(80), nullable=False)
-    score = Column(Integer, nullable=False, default=0)
+    # DOUBLE (2026-07-19): loot_sweep awards decimal points (a 1-pointer's
+    # second receipt at 20% decay is 0.8). Every write rounds to 2dp; other
+    # event kinds keep integral values.
+    score = Column(Float(53), nullable=False, default=0)
     # The clan this team represents (clan_vs_clan only; NULL on standard/global).
     group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=True)
     # Admin-assigned accent color ("#rrggbb"); NULL = frontend palette default.
@@ -631,8 +634,10 @@ class EventProgress(Base):
     event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
     task_id = Column(Integer, ForeignKey("web_event_tasks.id"), nullable=False)
     team_id = Column(Integer, ForeignKey("web_event_teams.id"), nullable=False)
-    # BigInteger (P1-7): loot_value progress folds raw GP; see EventCompletion.
-    progress = Column(BigInteger, nullable=False, default=0)
+    # DOUBLE (2026-07-19, was BigInteger): loot_value progress folds raw GP
+    # (integers stay exact to 2^53 ≈ 9e15) and loot_sweep running totals are
+    # 2-decimal point values.
+    progress = Column(Float(53), nullable=False, default=0)
     completed = Column(Boolean, nullable=False, default=False)
     completed_at = Column(DateTime, nullable=True)
 

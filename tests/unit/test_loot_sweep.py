@@ -49,10 +49,17 @@ class TestItemPoints:
 
     def test_batched_full_then_step(self):
         # base 4, awards_per_tier 3: first 3 = 4 each (12); next 3 at 80% =
-        # round(3.2)=3 each. count 4 → 12+3=15; count 6 → 12+9=21.
+        # 3.2 each (decimal receipts). count 4 → 15.2; count 6 → 21.6.
         assert ls.item_points(4, 3, 15, 20, 3) == 12
-        assert ls.item_points(4, 4, 15, 20, 3) == 15
-        assert ls.item_points(4, 6, 15, 20, 3) == 21
+        assert ls.item_points(4, 4, 15, 20, 3) == 15.2
+        assert ls.item_points(4, 6, 15, 20, 3) == 21.6
+
+    def test_decimal_receipts(self):
+        # A 1-pointer at 20% linear decay pays 1, 0.8, 0.6, 0.4, 0.2 — stored
+        # and awarded with decimals, not rounded to whole points.
+        assert [ls.receipt_points(1, k, 20) for k in range(1, 6)] == [1, 0.8, 0.6, 0.4, 0.2]
+        assert ls.item_points(1, 5, 5, 20) == 3.0
+        assert ls.item_points(1, 2, 5, 20) == 1.8
 
     def test_default_max_awards(self):
         assert ls.default_max_awards(1) == 5
@@ -196,8 +203,8 @@ class TestBatchedScoring:
             "items": [{"item_name": "Brimstone key", "points": 4, "awards_per_tier": 3,
                        "counts_for_group": False}],
         }]})
-        # 5 receipts: 4+4+4 (tier0, full) + 3+3 (tier1, round(3.2)) = 18
-        assert ls.score_counts({"brimstone key": 5}, cfg)["item_total"] == 18
+        # 5 receipts: 4+4+4 (tier0, full) + 3.2+3.2 (tier1) = 18.4
+        assert ls.score_counts({"brimstone key": 5}, cfg)["item_total"] == 18.4
 
 
 class TestFromRows:
@@ -212,3 +219,50 @@ class TestFromRows:
 
     def test_bonus_rows_ignored(self):
         assert ls.counts_from_rows([_row("x", source_type="bonus")]) == {}
+
+
+class TestMatchNamesAndRequired:
+    """"Also counts as" aliases + required-count gating (2026-07-19)."""
+
+    def _cfg(self):
+        return ls.LootSweepConfig({"decay_percent": 20, "groups": [{
+            "npcs": ["Vardorvis"],
+            "bonus_points": 10,
+            "items": [
+                {"item_name": "Ultor vestige", "points": 5,
+                 "match_names": ["Gold ring"]},
+                {"item_name": "Executioner's axe head", "points": 2},
+            ],
+        }]})
+
+    def test_alias_keys_registered_in_matcher(self):
+        idx = self._cfg().matcher_index()
+        assert "ultor vestige" in idx and "gold ring" in idx
+        assert idx["gold ring"]["npcs"] == idx["ultor vestige"]["npcs"]
+
+    def test_alias_receipts_pool_into_one_entry(self):
+        cfg = self._cfg()
+        b = ls.score_counts({"gold ring": 1, "ultor vestige": 1,
+                             "executioner's axe head": 1}, cfg)
+        item = b["groups"][0]["items"][0]
+        # 2 pooled receipts: 5 + 4 = 9, one decay step despite mixed names.
+        assert item["count"] == 2 and item["points"] == 9
+        assert b["groups"][0]["awarded"] == 1  # both entries collected → bonus
+
+    def test_required_gates_group_completion(self):
+        cfg = ls.LootSweepConfig({"decay_percent": 20, "groups": [{
+            "npcs": ["Great Olm"],
+            "bonus_points": 25,
+            "items": [
+                {"item_name": "Ancestral hat", "points": 3, "required": 3,
+                 "match_names": ["Ancestral robe top", "Ancestral robe bottom"]},
+            ],
+        }]})
+        two = ls.score_counts({"ancestral hat": 1, "ancestral robe top": 1}, cfg)
+        assert two["groups"][0]["completions"] == 0 and two["groups"][0]["awarded"] == 0
+        three = ls.score_counts({"ancestral hat": 1, "ancestral robe top": 1,
+                                 "ancestral robe bottom": 1}, cfg)
+        assert three["groups"][0]["completions"] == 1 and three["groups"][0]["awarded"] == 1
+        # Repeat completions keep stepping every `required` receipts.
+        six = ls.score_counts({"ancestral robe top": 6}, cfg)
+        assert six["groups"][0]["completions"] == 2

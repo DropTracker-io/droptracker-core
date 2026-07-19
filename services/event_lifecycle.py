@@ -338,7 +338,10 @@ def final_standings(session, event_id: int, limit: int = 5) -> list:
         .limit(limit)
         .all()
     )
-    return [{"team_id": t.id, "name": t.name, "score": int(t.score or 0)} for t in rows]
+    return [{"team_id": t.id, "name": t.name,
+         # int-when-integral so non-loot_sweep standings stay clean
+         "score": (lambda f: int(f) if f == int(f) else f)(round(float(t.score or 0), 2))}
+        for t in rows]
 
 
 def _pot_advertise_line(session, event, team_count, *, ended=False, winner=None):

@@ -74,7 +74,8 @@ from db import (
     Player,
     user_group_association,
 )
-from web_api.common import abort_problem, db_session, money, private_no_store, with_cache_headers
+from web_api.common import (abort_problem, db_session, money, private_no_store,
+                            score_num, with_cache_headers)
 from web_api.task_tiles import build_tile, spec_names, tile_spec
 from web_api.deps import (
     assert_group_admin,
@@ -375,7 +376,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
         teams.append({
             "id": tm.id,
             "name": tm.name,
-            "score": int(tm.score or 0),
+            "score": score_num(tm.score),
             "group_id": getattr(tm, "group_id", None),  # clan bound (clan_vs_clan)
             "color": getattr(tm, "color", None),  # admin accent; null = palette default
             # Board game (web44a): coin wallet + game piece.
@@ -1012,7 +1013,7 @@ async def get_event_team(event_id: int, team_id: int):
                 "team": {
                     "id": team.id,
                     "name": team.name,
-                    "score": int(team.score or 0),
+                    "score": score_num(team.score),
                     "group_id": getattr(team, "group_id", None),
                     "color": getattr(team, "color", None),
                     "rank": rank,
@@ -1188,7 +1189,7 @@ async def get_loot_sweep_board(event_id: int):
                 .all()
             )
             team_meta = [
-                {"id": t.id, "name": t.name, "color": t.color, "score": int(t.score or 0)}
+                {"id": t.id, "name": t.name, "color": t.color, "score": score_num(t.score)}
                 for t in teams
             ]
             base = {"event_id": event_id, "kind": ev.kind, "teams": team_meta, "sets": []}
@@ -1231,9 +1232,10 @@ async def get_loot_sweep_board(event_id: int):
                         "bonus_points": g.bonus_points, "bonus_max": g.bonus_max,
                         "items": [
                             {"item_id": it.item_id, "item_name": it.name,
-                             "points": int(it.points), "awards_per_tier": it.awards_per_tier,
+                             "points": score_num(it.points), "awards_per_tier": it.awards_per_tier,
                              "max_awards": it.max_awards,
-                             "counts_for_group": it.counts_for_group, "source": it.source}
+                             "counts_for_group": it.counts_for_group, "source": it.source,
+                             "required": it.required, "match_names": it.match_names}
                             for it in g.items
                         ],
                     }
@@ -1245,17 +1247,18 @@ async def get_loot_sweep_board(event_id: int):
                         counts_from_rows(rows_by.get((task.id, t.id), [])), cfg)
                     teams_out.append({
                         "team_id": t.id,
-                        "total": b["total"],
+                        "total": score_num(b["total"]),
                         "set_completions": b["set_completions"],
                         "set_awarded": b["set_awarded"],
-                        "set_total": b["set_total"],
+                        "set_total": score_num(b["set_total"]),
                         "groups": [
                             {
                                 "completions": gb["completions"], "awarded": gb["awarded"],
-                                "bonus_total": gb["bonus_total"], "item_total": gb["item_total"],
+                                "bonus_total": score_num(gb["bonus_total"]),
+                                "item_total": score_num(gb["item_total"]),
                                 "items": [
                                     {"count": bi["count"], "scored": bi["scored"],
-                                     "points": bi["points"]}
+                                     "points": score_num(bi["points"])}
                                     for bi in gb["items"]
                                 ],
                             }
@@ -1325,7 +1328,9 @@ async def get_loot_sweep_receipts(event_id: int):
                 return None
             cfg = LootSweepConfig(task.config)
             key = _norm(item_q)
-            item = next((i for g in cfg.groups for i in g.items if i.key == key), None)
+            # An entry answers for its own name or any of its match_names
+            # aliases (the vestige + gold-ring case).
+            item = next((i for g in cfg.groups for i in g.items if key in i.match_keys), None)
             if item is None:
                 return None
             rows = (
@@ -1342,7 +1347,7 @@ async def get_loot_sweep_receipts(event_id: int):
             for r, player_name in rows:
                 if (r.source_type or "") == "bonus":
                     continue
-                if r.team_id is None or _norm(r.matched_target) != key:
+                if r.team_id is None or _norm(r.matched_target) not in item.match_keys:
                     continue
                 qty = max(int(r.quantity or 1), 1)
                 before = cum.get(r.team_id, 0)
@@ -1361,7 +1366,10 @@ async def get_loot_sweep_receipts(event_id: int):
                     "player_id": r.player_id,
                     "player_name": player_name,
                     "received_at": int(r.created_at.timestamp()) if r.created_at else None,
-                    "points": int(pts),
+                    # 2-decimal points (score_num keeps clean receipts as ints)
+                    "points": score_num(pts),
+                    # The name that actually dropped (may be an alias).
+                    "matched_name": r.matched_target,
                     "proof_url": r.proof_url,
                     "source_type": r.source_type,
                 })
@@ -2558,7 +2566,7 @@ async def delete_task(event_id: int, task_id: int):
             for team_id_, delta in deltas.items():
                 team = s.query(EventTeam).filter(EventTeam.id == team_id_).first()
                 if team is not None:
-                    team.score = max(int(team.score or 0) - delta, 0)
+                    team.score = max(round(float(team.score or 0) - delta, 2), 0)
 
             # Unbind the task's bingo cells — the labeled cell stays on the
             # board (rebindable), but its completions go with the binding.

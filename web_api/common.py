@@ -421,6 +421,14 @@ def with_cache_headers(response, max_age: int = 15, etag_seed: Optional[str] = N
     return response
 
 
+def score_num(value):
+    """Team scores JSON-serialize as ints until decimals actually appear
+    (loot_sweep awards 2-decimal points; every other kind stays integral) —
+    so bingo standings don't suddenly render "120.0"."""
+    f = round(float(value or 0), 2)
+    return int(f) if f == int(f) else f
+
+
 def private_no_store(response):
     response.headers["Cache-Control"] = "private, no-store"
     return response

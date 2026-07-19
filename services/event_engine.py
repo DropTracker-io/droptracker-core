@@ -1620,7 +1620,9 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
             event_id=event["id"], task_id=task["id"], team_id=team_id,
             progress=0, completed=False)
         session.add(progress)
-    previous_total = int(progress.progress or 0)
+    # Loot Sweep points are decimal-valued (2dp — a 1-pointer's second
+    # receipt at 20% decay is 0.8), so totals/deltas round at 2dp throughout.
+    previous_total = round(float(progress.progress or 0), 2)
 
     # ``previous`` excludes just this row; ``current`` folds it in. Both are
     # scored from the ledger so the delta (and any set-completion crossing) is
@@ -1628,7 +1630,7 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
     prev = _loot_sweep_score(session, task, team_id, exclude_id=completion.id)
     curr = _loot_sweep_score(session, task, team_id, include=completion)
     new_total = curr["total"]
-    delta = new_total - previous_total
+    delta = round(new_total - previous_total, 2)
     progress.progress = new_total
     progress.completed = False
 
@@ -1638,7 +1640,7 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
         previous_leader = _current_leader(session, event["id"], strict=True)
         team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
         if team is not None:
-            team.score = int(team.score or 0) + delta
+            team.score = round(float(team.score or 0) + delta, 2)
             team_score = team.score
             session.flush()
             new_leader = _current_leader(session, event["id"], strict=True)
@@ -1745,9 +1747,9 @@ def _revoke_loot_sweep(session, event: dict, task: dict, team_id, completion) ->
                 .filter(EventProgress.task_id == task["id"],
                         EventProgress.team_id == team_id)
                 .first())
-    previous_total = int(progress.progress or 0) if progress is not None else 0
+    previous_total = round(float(progress.progress or 0), 2) if progress is not None else 0.0
     new_total = _loot_sweep_score(session, task, team_id)["total"]
-    delta = new_total - previous_total
+    delta = round(new_total - previous_total, 2)
 
     if progress is None:
         if new_total <= 0:
@@ -1762,7 +1764,7 @@ def _revoke_loot_sweep(session, event: dict, task: dict, team_id, completion) ->
     if delta and team_id is not None:
         team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
         if team is not None:
-            team.score = int(team.score or 0) + delta
+            team.score = round(float(team.score or 0) + delta, 2)
             team_score = team.score
 
     contributors = _task_contributors(session, task["id"], team_id)
