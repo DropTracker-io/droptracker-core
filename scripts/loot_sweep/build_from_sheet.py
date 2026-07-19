@@ -9,12 +9,13 @@ Reads gviz.csv, resolves item + NPC names against the DB, folds meta-sets
 Does NOT touch prod. Pets are skipped (they arrive as `pet` submissions, not
 NPC-scoped drops, so loot_sweep can't credit them) and reported.
 """
-import csv, json, os, re
+import csv, json, os, re, sys
 from collections import defaultdict
 from dotenv import load_dotenv
 import pymysql
 
 SP = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SP, "..", "..")))  # repo root -> utils.*
 load_dotenv(os.path.join(SP, "..", "..", ".env"))
 conn = pymysql.connect(host="localhost", port=3306, user=os.getenv("DB_USER"),
                        password=os.getenv("DB_PASS"), database="data")
@@ -30,7 +31,10 @@ for (n,) in cur.fetchall():
 # id -> canonical name (the sheet's shorthand names are unreliable; its ids
 # bridge to the real name even though the ids themselves aren't stored).
 cur.execute("SELECT item_id, item_name FROM items WHERE item_name IS NOT NULL")
-NAME_BY_ID = {int(i): n for i, n in cur.fetchall()}
+NAME_BY_ID, ID_BY_NORM = {}, {}
+for i, n in cur.fetchall():
+    NAME_BY_ID[int(i)] = n
+    ID_BY_NORM.setdefault(" ".join(n.strip().lower().split()), int(i))
 conn.close()
 
 
@@ -40,6 +44,11 @@ def norm(s):
 
 def resolve_item(name):
     return ITEM_BY_NORM.get(norm(name))
+
+
+def resolve_item_with_id(name):
+    canon = resolve_item(name)
+    return canon, (ID_BY_NORM.get(norm(canon)) if canon else None)
 
 
 # Boss header -> canonical NpcList name(s), for headers that don't match the DB
@@ -69,6 +78,52 @@ def resolve_npc(name):
 
 def resolve_npc_raw(name):
     return NPC_BY_NORM.get(norm(name))
+
+
+from utils.osrs_pets import canonical_pet_name
+
+# Boss/sub-boss header -> its pet's taxonomy name. Pets score from `pet`
+# submissions (source:"pet"), matched by name — a pet only comes from its boss.
+PET_BY_BOSS = {
+    "kree'arra": "Pet kree'arra", "general graardor": "Pet general graardor",
+    "commander zilyana": "Pet zilyana", "k'ril tsutsaroth": "Pet k'ril tsutsaroth",
+    "nex": "Nexling", "chaos elemental": "Pet chaos elemental",
+    "venenatis / spindel": "Venenatis spiderling", "callisto / artio": "Callisto cub",
+    "vet'ion / calvar'ion": "Vet'ion jr.", "king black dragon": "Prince black dragon",
+    "sarachnis": "Sraracha", "dagannoth supreme": "Pet dagannoth supreme",
+    "dagannoth rex": "Pet dagannoth rex", "dagannoth prime": "Pet dagannoth prime",
+    "zulrah": "Pet snakeling", "vorkath": "Vorki", "vardorvis": "Butch",
+    "duke sucellus": "Baron", "the whisperer": "Wisp", "the leviathan": "Lil'viathan",
+    "phantom muspah": "Muphin", "kalphite queen": "Kalphite princess",
+    "hueycoatl": "Huberte", "nightmare": "Little nightmare", "amoxliatl": "Moxi",
+    "grotesque guardians": "Noon", "kraken (boss)": "Pet kraken", "cerberus": "Hellpuppy",
+    "araxxor": "Nid", "thermonuclear devil": "Pet smoke devil",
+    "alchemical hydra": "Ikkle hydra", "gauntlet": "Youngllef", "scurrius": "Scurry",
+    "chambers of xeric": "Olmlet", "theater of blood": "Lil' zik",
+    "tombs of amascut": "Tumeken's guardian",
+}
+
+# Shorthand / (bonus)-stripped item name -> canonical DB name (user-provided
+# fixes for rows the id-bridge can't resolve).
+ITEM_ALIAS = {
+    "vorkath head": "Vorkath's head", "kbd heads": "Kbd heads",
+    "pendant of ates": "Pendant of ates", "kit": "Twisted ancestral colour kit",
+    "dust": "Metamorphic dust", "sanguine dust": "Sanguine dust",
+    "jar of venom": "Jar of venom", "tanzanite mutagen": "Tanzanite mutagen",
+    "magma mutagen": "Magma mutagen",
+}
+
+# Multi-source section sets -> source NPC list. Empty [] means "match any NPC",
+# which is safe when the items are unique to those sources anyway.
+REVENANTS = sorted(v for v in NPC_BY_NORM.values() if v.lower().startswith("revenant "))
+NPC_SET = {
+    "theater of blood": [n for n in ["Theatre of Blood"] if resolve_npc(n)],
+    "wilderness wards": [n for n in ["Chaos Fanatic", "Crazy archaeologist", "Scorpia"]
+                         if resolve_npc(n)],
+    "revenant caves (pvm)": REVENANTS,
+    "virtus set": [n for n in ["Vardorvis", "Duke Sucellus", "The Whisperer", "The Leviathan"]
+                   if resolve_npc(n)],
+}
 
 
 # ── parse the sheet ──────────────────────────────────────────────────────────
@@ -121,13 +176,33 @@ tasks = []
 
 
 def base_item_name(n):
-    # strip a trailing "(1, 3, 5, 7, 9)" style receipt-tier suffix
-    return re.sub(r"\s*\(\s*\d+(?:\s*,\s*\d+)*\s*\)\s*$", "", n).strip()
+    # strip a trailing "(1, 3, 5, 7, 9)" tier suffix and a "(bonus)" marker
+    n = re.sub(r"\s*\(\s*\d+(?:\s*,\s*\d+)*\s*\)\s*$", "", n)
+    n = re.sub(r"\s*\(bonus\)\s*$", "", n, flags=re.I)
+    return n.strip()
+
+
+def resolve_item_named(b, iid):
+    """Resolve a de-suffixed item base name -> canonical DB name. Tries a
+    user-provided alias, then the DB name, then the sheet id, then a
+    '<x> champion scroll' variant (Champion Scrolls section)."""
+    if norm(b) in ITEM_ALIAS and resolve_item(ITEM_ALIAS[norm(b)]):
+        return resolve_item(ITEM_ALIAS[norm(b)])
+    c = resolve_item(b) or resolve_item(b.rstrip("s"))
+    if c:
+        return c
+    if b.lower().endswith(" scroll"):  # "goblin scroll" -> "Goblin champion scroll"
+        c = resolve_item(b[:-7] + " champion scroll")
+        if c:
+            return c
+    if iid is not None:
+        return NAME_BY_ID.get(iid)
+    return None
 
 
 def build_group(label, npc_names, bonus, raw_items):
-    """One group from a set's raw item rows: resolve items, collapse batched
-    duplicate rows (awards_per_tier), skip+report pets/unknowns."""
+    """One group from a set's raw item rows: resolve drop items + pets, collapse
+    batched duplicate rows (awards_per_tier), skip+report unknowns."""
     npcs = []
     for nn in npc_names:
         c = resolve_npc(nn)
@@ -135,38 +210,48 @@ def build_group(label, npc_names, bonus, raw_items):
             npcs.append(c)
         elif not c:
             report.append(f"NPC unresolved: '{nn}' (group '{label}')")
-    # collapse duplicate rows by base name
-    batches = defaultdict(list)
-    order = []
+
+    items = []
+    # pets: one per set (source:"pet", matched by name; don't gate the bonus)
+    for it in raw_items:
+        if not it["is_pet"]:
+            continue
+        pet = PET_BY_BOSS.get(norm(label))
+        canon = canonical_pet_name(pet) if pet else None
+        if not canon:
+            report.append(f"PET unresolved for '{label}' ({it['points']}pts) — add the pet name")
+            continue
+        _, pid = resolve_item_with_id(canon)
+        item = {"item_name": canon, "points": int(it["points"]),
+                "source": "pet", "counts_for_group": False}
+        if pid:
+            item["item_id"] = pid
+        items.append(item)
+
+    # drop items: collapse duplicate rows (batched decay)
+    batches, order = defaultdict(list), []
     for it in raw_items:
         if it["is_pet"]:
-            report.append(f"PET skipped (pet submissions aren't NPC drops): '{label}' {it['points']}pts")
             continue
         b = base_item_name(it["name"])
-        if b not in batches:
-            order.append(b)
-        batches[b].append(it)
-    items = []
+        # ToB "ornament kit" is two items (holy + sanguine)
+        keys = (["Holy ornament kit", "Sanguine ornament kit"]
+                if norm(b) == "ornament kit" else [b])
+        for k in keys:
+            if k not in batches:
+                order.append(k)
+            batches[k].append(it)
     for b in order:
         grp = batches[b]
-        # Prefer the sheet's id -> canonical DB name (its shorthand names don't
-        # match); fall back to resolving the (de-suffixed) name.
-        # Resolve by NAME first — the sheet's real item names are correct even
-        # where its ids are wrong (6 reused ids). Fall back to id->name only for
-        # shorthand names ("hood", "odium 1") that don't match the DB.
-        iid = grp[0].get("id")
-        canon = resolve_item(b) or resolve_item(b.rstrip("s"))
-        if not canon and iid is not None:
-            canon = NAME_BY_ID.get(iid)
+        canon = resolve_item_named(b, grp[0].get("id"))
         if not canon:
             report.append(f"ITEM unresolved: '{b}' (group '{label}')")
             continue
-        apt = len(grp)  # duplicate rows = receipts per decay tier
-        counts = grp[0]["counts"]
+        apt = len(grp)
         item = {"item_name": canon, "points": int(grp[0]["points"])}
         if apt > 1:
             item["awards_per_tier"] = apt
-        if not counts:
+        if not grp[0]["counts"]:
             item["counts_for_group"] = False
         items.append(item)
     return {"label": label, "npcs": npcs, "bonus_points": int(bonus), "bonus_max": 1,
@@ -174,7 +259,10 @@ def build_group(label, npc_names, bonus, raw_items):
 
 
 def npc_candidates(setname):
-    # split "A / B" into multiple NPCs; strip "(pvm)" etc.
+    # multi-source section sets carry an explicit NPC list; otherwise split
+    # "A / B" into multiple NPCs and strip "(pvm)" etc.
+    if norm(setname) in NPC_SET:
+        return list(NPC_SET[norm(setname)])
     base = re.sub(r"\s*\(.*?\)\s*", " ", setname).strip()
     return [p.strip() for p in base.split("/") if p.strip()]
 

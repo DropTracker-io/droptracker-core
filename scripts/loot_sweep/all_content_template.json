@@ -211,6 +211,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Pet dagannoth supreme",
+        "points": 30,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 12643
+       },
+       {
         "item_name": "Seercull",
         "points": 2
        },
@@ -241,6 +248,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Pet dagannoth rex",
+        "points": 30,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 12645
+       },
+       {
         "item_name": "Rock-shell plate",
         "points": 2
        },
@@ -266,6 +280,13 @@
       "bonus_points": 4,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Pet dagannoth prime",
+        "points": 30,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 12644
+       },
        {
         "item_name": "Mud battlestaff",
         "points": 2
@@ -378,6 +399,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Pet kree'arra",
+        "points": 60,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 12649
+       },
+       {
         "item_name": "Armadyl helmet",
         "points": 9
        },
@@ -421,6 +449,13 @@
       "bonus_points": 40,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Pet general graardor",
+        "points": 45,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 12650
+       },
        {
         "item_name": "Bandos chestplate",
         "points": 7
@@ -466,6 +501,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Pet zilyana",
+        "points": 45,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 12651
+       },
+       {
         "item_name": "Saradomin sword",
         "points": 2
        },
@@ -509,6 +551,13 @@
       "bonus_points": 40,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Pet k'ril tsutsaroth",
+        "points": 35,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 12652
+       },
        {
         "item_name": "Steam battlestaff",
         "points": 2
@@ -554,6 +603,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Nexling",
+        "points": 40,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 26348
+       },
+       {
         "item_name": "Zaryte vambraces",
         "points": 15
        },
@@ -566,17 +622,17 @@
         "points": 40
        },
        {
-        "item_name": "Torva full helm (damaged)",
+        "item_name": "Torva full helm",
         "points": 20,
         "counts_for_group": false
        },
        {
-        "item_name": "Torva platebody (damaged)",
+        "item_name": "Torva platebody",
         "points": 20,
         "counts_for_group": false
        },
        {
-        "item_name": "Torva platelegs (damaged)",
+        "item_name": "Torva platelegs",
         "points": 20,
         "counts_for_group": false
        }
@@ -602,7 +658,11 @@
     "groups": [
      {
       "label": "Wilderness wards",
-      "npcs": [],
+      "npcs": [
+       "Chaos Fanatic",
+       "Crazy archaeologist",
+       "Scorpia"
+      ],
       "bonus_points": 20,
       "bonus_max": 1,
       "items": [
@@ -659,6 +719,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Pet chaos elemental",
+        "points": 5,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 11995
+       },
+       {
         "item_name": "Dragon 2h sword",
         "points": 2
        },
@@ -695,6 +762,13 @@
       "bonus_points": 40,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Venenatis spiderling",
+        "points": 20,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 13177
+       },
        {
         "item_name": "Fangs of venenatis",
         "points": 4
@@ -745,6 +819,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Callisto cub",
+        "points": 20,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 13178
+       },
+       {
         "item_name": "Claws of callisto",
         "points": 4
        },
@@ -794,6 +875,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Vet'ion jr.",
+        "points": 30,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 13179
+       },
+       {
         "item_name": "Skull of vet'ion",
         "points": 6
        },
@@ -842,6 +930,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Prince black dragon",
+        "points": 25,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 12653
+       },
+       {
         "item_name": "Kbd heads",
         "points": 1
        },
@@ -875,7 +970,20 @@
     "groups": [
      {
       "label": "Revenant Caves (pvm)",
-      "npcs": [],
+      "npcs": [
+       "Revenant cyclops",
+       "Revenant dark beast",
+       "Revenant demon",
+       "Revenant dragon",
+       "Revenant goblin",
+       "Revenant hellhound",
+       "Revenant hobgoblin",
+       "Revenant imp",
+       "Revenant knight",
+       "Revenant maledictus",
+       "Revenant ork",
+       "Revenant pyrefiend"
+      ],
       "bonus_points": 60,
       "bonus_max": 1,
       "items": [
@@ -961,6 +1069,13 @@
       "bonus_points": 10,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Sraracha",
+        "points": 25,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 23495
+       },
        {
         "item_name": "Giant egg sac",
         "points": 1
@@ -1059,6 +1174,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Pet snakeling",
+        "points": 50,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 12921
+       },
+       {
         "item_name": "Tanzanite fang",
         "points": 12
        },
@@ -1073,6 +1195,16 @@
        {
         "item_name": "Uncut onyx",
         "points": 12
+       },
+       {
+        "item_name": "Tanzanite mutagen",
+        "points": 80,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Magma mutagen",
+        "points": 80,
+        "counts_for_group": false
        },
        {
         "item_name": "Jar of swamp",
@@ -1107,6 +1239,17 @@
       "bonus_points": 40,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Vorki",
+        "points": 40,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 21992
+       },
+       {
+        "item_name": "Vorkath's head",
+        "points": 2
+       },
        {
         "item_name": "Dragonbone necklace",
         "points": 30
@@ -1154,6 +1297,13 @@
       "bonus_points": 50,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Butch",
+        "points": 50,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 28248
+       },
        {
         "item_name": "Awakener's orb",
         "points": 3
@@ -1203,6 +1353,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Baron",
+        "points": 50,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 28250
+       },
+       {
         "item_name": "Awakener's orb",
         "points": 2
        },
@@ -1250,6 +1407,13 @@
       "bonus_points": 50,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Wisp",
+        "points": 50,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 28246
+       },
        {
         "item_name": "Awakener's orb",
         "points": 2
@@ -1299,6 +1463,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Lil'viathan",
+        "points": 50,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 28252
+       },
+       {
         "item_name": "Awakener's orb",
         "points": 2
        },
@@ -1340,7 +1511,12 @@
     "groups": [
      {
       "label": "Virtus set",
-      "npcs": [],
+      "npcs": [
+       "Vardorvis",
+       "Duke Sucellus",
+       "The Whisperer",
+       "The Leviathan"
+      ],
       "bonus_points": 20,
       "bonus_max": 1,
       "items": [
@@ -1431,6 +1607,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Muphin",
+        "points": 50,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 27590
+       },
+       {
         "item_name": "Frozen cache",
         "points": 1,
         "awards_per_tier": 2
@@ -1472,6 +1655,13 @@
       "bonus_points": 30,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Kalphite princess",
+        "points": 30,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 12647
+       },
        {
         "item_name": "Kq head",
         "points": 3
@@ -1522,6 +1712,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Huberte",
+        "points": 30,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 30152
+       },
+       {
         "item_name": "Hueycoatl hide",
         "points": 2,
         "awards_per_tier": 3
@@ -1562,6 +1759,13 @@
       "bonus_points": 100,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Little nightmare",
+        "points": 70,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 24491
+       },
        {
         "item_name": "Nightmare staff",
         "points": 15
@@ -1631,6 +1835,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Moxi",
+        "points": 40,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 30154
+       },
+       {
         "item_name": "Glacial temotli",
         "points": 4,
         "awards_per_tier": 2
@@ -1663,6 +1874,13 @@
       "bonus_points": 40,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Noon",
+        "points": 40,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 21748
+       },
        {
         "item_name": "Granite maul",
         "points": 3
@@ -1750,6 +1968,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Pet kraken",
+        "points": 30,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 12655
+       },
+       {
         "item_name": "Kraken tentacle",
         "points": 4,
         "awards_per_tier": 2
@@ -1792,6 +2017,13 @@
       "bonus_points": 30,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Hellpuppy",
+        "points": 50,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 13247
+       },
        {
         "item_name": "Smouldering stone",
         "points": 8
@@ -1842,6 +2074,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Nid",
+        "points": 45,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 29836
+       },
+       {
         "item_name": "Noxious halberd",
         "points": 4,
         "awards_per_tier": 3
@@ -1853,6 +2092,11 @@
        {
         "item_name": "Araxyte fang",
         "points": 12
+       },
+       {
+        "item_name": "Jar of Venom",
+        "points": 30,
+        "counts_for_group": false
        }
       ]
      }
@@ -1882,6 +2126,13 @@
       "bonus_points": 30,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Pet smoke devil",
+        "points": 24,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 12648
+       },
        {
         "item_name": "Ancient staff",
         "points": 1
@@ -1931,6 +2182,13 @@
       "bonus_points": 60,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Ikkle hydra",
+        "points": 45,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 22746
+       },
        {
         "item_name": "Brimstone ring",
         "points": 4,
@@ -1982,6 +2240,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Youngllef",
+        "points": 50,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 23757
+       },
+       {
         "item_name": "Crystal weapon seed",
         "points": 6
        },
@@ -2021,6 +2286,13 @@
       "bonus_points": 10,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Scurry",
+        "points": 15,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 28801
+       },
        {
         "item_name": "Spine",
         "points": 1,
@@ -2184,6 +2456,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Olmlet",
+        "points": 75,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 20851
+       },
+       {
         "item_name": "Arcane prayer scroll",
         "points": 4
        },
@@ -2238,6 +2517,16 @@
         "item_name": "Twisted bow",
         "points": 40,
         "counts_for_group": false
+       },
+       {
+        "item_name": "Twisted ancestral colour kit",
+        "points": 20,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Metamorphic dust",
+        "points": 75,
+        "counts_for_group": false
        }
       ]
      }
@@ -2261,10 +2550,19 @@
     "groups": [
      {
       "label": "Theater of Blood",
-      "npcs": [],
+      "npcs": [
+       "Theatre of Blood"
+      ],
       "bonus_points": 70,
       "bonus_max": 1,
       "items": [
+       {
+        "item_name": "Lil' zik",
+        "points": 100,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 22473
+       },
        {
         "item_name": "Avernic defender hilt",
         "points": 8
@@ -2294,6 +2592,21 @@
        {
         "item_name": "Justiciar legguards",
         "points": 15,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Holy ornament kit",
+        "points": 25,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Sanguine ornament kit",
+        "points": 25,
+        "counts_for_group": false
+       },
+       {
+        "item_name": "Sanguine dust",
+        "points": 75,
         "counts_for_group": false
        }
       ]
@@ -2325,6 +2638,13 @@
       "bonus_max": 1,
       "items": [
        {
+        "item_name": "Tumeken's guardian",
+        "points": 100,
+        "source": "pet",
+        "counts_for_group": false,
+        "item_id": 27352
+       },
+       {
         "item_name": "Lightbearer",
         "points": 8
        },
@@ -2354,6 +2674,72 @@
         "item_name": "Masori chaps",
         "points": 15,
         "counts_for_group": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "loot_sweep",
+   "label": "Champion Scrolls",
+   "target": null,
+   "target_value": null,
+   "points": 0,
+   "requires_confirmation": false,
+   "visibility": "public",
+   "config": {
+    "kind": "loot_sweep",
+    "decay_percent": 20,
+    "decay_mode": "linear",
+    "set_bonus_points": 0,
+    "set_bonus_max": 1,
+    "groups": [
+     {
+      "label": "Champion Scrolls",
+      "npcs": [],
+      "bonus_points": 60,
+      "bonus_max": 1,
+      "items": [
+       {
+        "item_name": "Goblin champion scroll",
+        "points": 2
+       },
+       {
+        "item_name": "Imp champion scroll",
+        "points": 3
+       },
+       {
+        "item_name": "Hobgoblin champion scroll",
+        "points": 4
+       },
+       {
+        "item_name": "Skeleton champion scroll",
+        "points": 6
+       },
+       {
+        "item_name": "Zombie champion scroll",
+        "points": 7
+       },
+       {
+        "item_name": "Jogre champion scroll",
+        "points": 8
+       },
+       {
+        "item_name": "Giant champion scroll",
+        "points": 10
+       },
+       {
+        "item_name": "Ghoul champion scroll",
+        "points": 10
+       },
+       {
+        "item_name": "Earth warrior champion scroll",
+        "points": 14
+       },
+       {
+        "item_name": "Lesser demon champion scroll",
+        "points": 16
        }
       ]
      }
