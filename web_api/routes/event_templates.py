@@ -160,6 +160,9 @@ def snapshot_event(s, ev: Event) -> dict:
             "bonus_line_points": int(ev.bonus_line_points or 0),
             "bonus_blackout_points": int(ev.bonus_blackout_points or 0),
             "mode": getattr(ev, "mode", None) or "standard",
+            # Game format (web43a) — preserved so a loot_sweep/board_game
+            # template instantiates as that kind, not a flat standard event.
+            "kind": getattr(ev, "kind", None) or "standard",
         },
         "tasks": tasks_out,
         "teams": teams_out,
@@ -199,16 +202,33 @@ def instantiate_template(
     starts_at,
     ends_at,
     include_teams: bool,
+    superadmin: bool = False,
 ) -> tuple[Event, list[dict]]:
-    """Materialize a payload as a fresh standard draft event.
+    """Materialize a payload as a fresh draft event (preserving its ``kind``).
 
     Returns ``(event, skipped_tasks)`` — tasks that no longer validate
     (renamed items/NPCs, tightened rules) are skipped and reported instead of
     failing the whole instantiation; their bingo cells survive unbound.
     """
+    from db import EVENT_KINDS
+    from services.event_types import is_event_type_creatable
     from web_api.routes.event_task_validation import validate_task_payload
 
     spec = payload.get("event") or {}
+    # Preserve the templated game format, but a restricted kind (loot_sweep is
+    # admin_only until launch) still respects the create gate for this viewer.
+    kind = spec.get("kind") or "standard"
+    if kind not in EVENT_KINDS:
+        kind = "standard"
+    if kind != "standard" and not is_event_type_creatable(
+        s, kind, is_superadmin=superadmin, group_id=group_id
+    ):
+        abort_problem(
+            403, "Event type unavailable",
+            f"This template creates a '{kind}' event, which isn't enabled for "
+            "you yet. Ask a site admin to enable it or add your clan to its "
+            "test list.",
+        )
 
     # Group events default their Discord destination to the group's linked
     # guild, exactly like POST /events.
@@ -231,6 +251,7 @@ def instantiate_template(
         submission_policy=spec.get("submission_policy") or "all",
         join_code=None,  # per-run secret, never templated
         discord_guild_id=discord_guild_id,
+        kind=kind,  # preserve the templated game format (web43a)
         mode="standard",  # clan bindings/invites are per-run (CvC resets)
         discord_event_policy="on_activate",
         ping_config=None,
@@ -603,6 +624,7 @@ async def instantiate_event_template(template_id: int):
                 starts_at=_dt(body.get("starts_at")),
                 ends_at=_dt(body.get("ends_at")),
                 include_teams=include_teams,
+                superadmin=superadmin,
             )
             tmpl.times_used = int(tmpl.times_used or 0) + 1
             if ev.discord_guild_id:
