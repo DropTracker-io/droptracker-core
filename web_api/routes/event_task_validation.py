@@ -36,17 +36,22 @@ MAX_CONFIG_ITEMS = 100
 MAX_CONFIG_GROUPS = 10
 MAX_CONFIG_PATHS = 4
 
-# Loot Sweep (loot_sweep kind) config bounds. Kept in sync with
-# services/loot_sweep.py — which can't be imported here (this module's pytest
-# conftest stubs the whole ``services`` package, so a real import would fail).
+# Loot Sweep (loot_sweep kind) config bounds — v2 (nested groups). Kept in sync
+# with services/loot_sweep.py, which can't be imported here (this module's
+# pytest conftest stubs the whole ``services`` package, so a real import fails).
 LOOT_SWEEP_DECAY_MODES = ("linear", "geometric")
 LOOT_SWEEP_DEFAULT_DECAY_PERCENT = 20
-LOOT_SWEEP_DEFAULT_MAX_AWARDS = 5
-LOOT_SWEEP_DEFAULT_SET_BONUS_MAX = 1
-LOOT_SWEEP_MAX_AWARDS_CAP = 100
+LOOT_SWEEP_DEFAULT_AWARDS_PER_TIER = 1
+LOOT_SWEEP_DEFAULT_TIERS = 5
+LOOT_SWEEP_DEFAULT_BONUS_MAX = 1
+LOOT_SWEEP_MAX_GROUPS = 40
+LOOT_SWEEP_MAX_ITEMS = 400          # across the whole task
+LOOT_SWEEP_MAX_AWARDS_PER_TIER = 20
+LOOT_SWEEP_MAX_TOTAL_AWARDS = 200
+LOOT_SWEEP_MAX_NPCS = 30
 LOOT_SWEEP_MAX_ITEM_POINTS = 1_000_000
-LOOT_SWEEP_MAX_SET_BONUS_POINTS = 10_000_000
-LOOT_SWEEP_MAX_SET_BONUS_MAX = 100
+LOOT_SWEEP_MAX_BONUS_POINTS = 10_000_000
+LOOT_SWEEP_MAX_BONUS_MAX = 100
 
 # any_path progress is tracked as a percentage of the closest-to-done path
 # (paths differ in size, so a raw item count would be meaningless).
@@ -243,94 +248,160 @@ def _validated_paths(s, paths) -> tuple[list[dict], int]:
     return out, ANY_PATH_THRESHOLD
 
 
+def _validated_ls_item(s, raw, *, default_apt: int, unknown: list, seen: dict,
+                       group_label: str) -> dict | None:
+    """Validate one loot_sweep item; None if its name is unknown (collected in
+    ``unknown``). ``seen`` maps item key -> group label to enforce that an item
+    appears in only ONE group per task (so a receipt maps to one group)."""
+    if isinstance(raw, str):
+        name, entry = raw, {}
+    elif isinstance(raw, dict):
+        name, entry = (raw.get("item_name") or raw.get("name") or ""), raw
+    else:
+        abort_problem(422, "Invalid config", "Each Loot Sweep item must be a name or object.")
+    canonical, item_id = _canonical_item_with_id(s, name)
+    if not canonical:
+        unknown.append(str(name).strip() or "(empty)")
+        return None
+    key = canonical.lower()
+    if key in seen:
+        abort_problem(422, "Invalid config",
+                      f"'{canonical}' is listed in more than one group "
+                      f"('{seen[key]}' and '{group_label}') — an item belongs to one group.")
+    seen[key] = group_label
+    try:
+        pts = int(round(float(entry.get("points", 1) or 1)))
+    except (TypeError, ValueError):
+        abort_problem(422, "Invalid config", f"'{canonical}' points must be a number.")
+    apt = _clamp_int(entry.get("awards_per_tier"), default=default_apt, lo=1,
+                     hi=LOOT_SWEEP_MAX_AWARDS_PER_TIER)
+    item: dict = {"item_name": canonical,
+                  "points": min(max(pts, 1), LOOT_SWEEP_MAX_ITEM_POINTS)}
+    if item_id:
+        item["item_id"] = int(item_id)
+    if apt != LOOT_SWEEP_DEFAULT_AWARDS_PER_TIER:
+        item["awards_per_tier"] = apt
+    if entry.get("max_awards") is not None:
+        item["max_awards"] = _clamp_int(
+            entry.get("max_awards"), default=LOOT_SWEEP_DEFAULT_TIERS * apt,
+            lo=1, hi=LOOT_SWEEP_MAX_TOTAL_AWARDS)
+    # Membership defaults True; persist only the opt-out (pets / mega-rares that
+    # score but must not gate their group's bonus).
+    if entry.get("counts_for_group") is False or entry.get("counts_for_set") is False:
+        item["counts_for_group"] = False
+    return item
+
+
 def _validated_loot_sweep(s, config: dict | None) -> dict:
-    """Validate + normalize a ``loot_sweep`` task config (one task = one boss
-    "set"). Items are checked against the item DB and snapped to canonical
-    names + game ids; the set/decay parameters are clamped to sane bounds.
+    """Validate + normalize a ``loot_sweep`` v2 config (nested groups).
+
+    One task = one "set" of one or more **groups** (sub-sets). Each group ties
+    items to source NPC(s) and has its own completion bonus; the task has a
+    whole-set bonus for completing every group. Items are snapped to canonical
+    DB names + ids and NPCs to canonical NpcList names.
 
     Result shape (what the engine + services/loot_sweep.py read)::
 
-        {"kind": "loot_sweep", "decay_percent", "decay_mode",
-         "default_max_awards", "set_bonus_points", "set_bonus_max",
-         "items": [{"item_name", "item_id"?, "points", "max_awards"?,
-                    "counts_for_set"?}]}
+        {"kind":"loot_sweep", "decay_percent", "decay_mode",
+         "set_bonus_points", "set_bonus_max",
+         "groups": [{"label"?, "npcs":[str], "bonus_points", "bonus_max",
+                     "items":[{"item_name","item_id"?,"points",
+                               "awards_per_tier"?,"max_awards"?,
+                               "counts_for_group"?}]}]}
     """
     if not isinstance(config, dict):
         abort_problem(422, "Invalid config",
-                      "A Loot Sweep task needs a config object with an 'items' array.")
-    items_raw = config.get("items")
-    if not isinstance(items_raw, list) or not items_raw:
+                      "A Loot Sweep task needs a config object with a 'groups' array.")
+    # v1 back-compat: a flat "items" list becomes one group carrying the set bonus.
+    groups_raw = config.get("groups")
+    if not groups_raw and isinstance(config.get("items"), list):
+        groups_raw = [{"npcs": config.get("npcs") or [],
+                       "bonus_points": config.get("set_bonus_points") or 0,
+                       "items": config.get("items")}]
+    if not isinstance(groups_raw, list) or not groups_raw:
         abort_problem(422, "Invalid config",
-                      "A Loot Sweep task requires a non-empty 'items' array.")
-    if len(items_raw) > MAX_CONFIG_ITEMS:
-        abort_problem(422, "Invalid config", f"At most {MAX_CONFIG_ITEMS} items per task.")
+                      "A Loot Sweep task requires a non-empty 'groups' array.")
+    if len(groups_raw) > LOOT_SWEEP_MAX_GROUPS:
+        abort_problem(422, "Invalid config", f"At most {LOOT_SWEEP_MAX_GROUPS} groups per task.")
 
-    decay_mode = config.get("decay_mode")
-    decay_mode = "linear" if decay_mode is None else decay_mode
+    decay_mode = config.get("decay_mode") or "linear"
     if decay_mode not in LOOT_SWEEP_DECAY_MODES:
         abort_problem(422, "Invalid config",
                       f"decay_mode must be one of {list(LOOT_SWEEP_DECAY_MODES)}.")
     decay_percent = _clamp_int(config.get("decay_percent"),
                                default=LOOT_SWEEP_DEFAULT_DECAY_PERCENT, lo=0, hi=100)
-    default_max = _clamp_int(config.get("default_max_awards"),
-                             default=LOOT_SWEEP_DEFAULT_MAX_AWARDS, lo=1,
-                             hi=LOOT_SWEEP_MAX_AWARDS_CAP)
     set_bonus_points = _clamp_int(config.get("set_bonus_points"), default=0, lo=0,
-                                  hi=LOOT_SWEEP_MAX_SET_BONUS_POINTS)
+                                  hi=LOOT_SWEEP_MAX_BONUS_POINTS)
     set_bonus_max = _clamp_int(config.get("set_bonus_max"),
-                               default=LOOT_SWEEP_DEFAULT_SET_BONUS_MAX, lo=1,
-                               hi=LOOT_SWEEP_MAX_SET_BONUS_MAX)
+                               default=LOOT_SWEEP_DEFAULT_BONUS_MAX, lo=1,
+                               hi=LOOT_SWEEP_MAX_BONUS_MAX)
 
-    out_items, unknown, seen = [], [], set()
-    for raw in items_raw:
-        if isinstance(raw, str):
-            name, entry = raw, {}
-        elif isinstance(raw, dict):
-            name = raw.get("item_name") or raw.get("name") or ""
-            entry = raw
-        else:
-            abort_problem(422, "Invalid config",
-                          "Each Loot Sweep item must be a name or an object.")
-        canonical, item_id = _canonical_item_with_id(s, name)
-        if not canonical:
-            unknown.append(str(name).strip() or "(empty)")
-            continue
-        key = canonical.lower()
-        if key in seen:
-            continue  # same item listed twice — first wins
-        seen.add(key)
-        try:
-            pts = int(round(float(entry.get("points", 1) or 1)))
-        except (TypeError, ValueError):
-            abort_problem(422, "Invalid config",
-                          f"'{canonical}' points must be a number.")
-        item: dict = {"item_name": canonical,
-                      "points": min(max(pts, 1), LOOT_SWEEP_MAX_ITEM_POINTS)}
-        if item_id:
-            item["item_id"] = int(item_id)
-        if entry.get("max_awards") is not None:
-            item["max_awards"] = _clamp_int(entry.get("max_awards"), default=default_max,
-                                            lo=1, hi=LOOT_SWEEP_MAX_AWARDS_CAP)
-        # Set membership defaults True; only persist the opt-out (e.g. the pet,
-        # which scores but must not gate set completion).
-        if entry.get("counts_for_set") is False:
-            item["counts_for_set"] = False
-        out_items.append(item)
-    if unknown:
-        abort_problem(
-            422, "Unknown item(s)",
-            "Not found in the item database (exact in-game names required): "
-            + ", ".join(sorted(set(unknown))[:10]),
-        )
+    out_groups, unknown_items, unknown_npcs, seen_items = [], [], [], {}
+    total_items = 0
+    for gi, graw in enumerate(groups_raw, start=1):
+        if not isinstance(graw, dict):
+            abort_problem(422, "Invalid config", f"Group {gi} must be an object.")
+        label = str(graw.get("label") or "").strip()[:80]
+        gl = label or f"group {gi}"
+        npcs_raw = graw.get("npcs") or graw.get("npc") or []
+        if isinstance(npcs_raw, str):
+            npcs_raw = [npcs_raw]
+        if not isinstance(npcs_raw, list):
+            abort_problem(422, "Invalid config", f"Group {gl}: 'npcs' must be a list.")
+        if len(npcs_raw) > LOOT_SWEEP_MAX_NPCS:
+            abort_problem(422, "Invalid config", f"Group {gl}: at most {LOOT_SWEEP_MAX_NPCS} NPCs.")
+        npcs = []
+        for n in npcs_raw:
+            canon = _canonical_npc(s, str(n))
+            if not canon:
+                unknown_npcs.append(str(n).strip() or "(empty)")
+            elif canon not in npcs:
+                npcs.append(canon)
+
+        items_raw = graw.get("items")
+        if not isinstance(items_raw, list) or not items_raw:
+            abort_problem(422, "Invalid config", f"Group {gl} requires a non-empty 'items' array.")
+        default_apt = _clamp_int(graw.get("default_awards_per_tier"),
+                                 default=LOOT_SWEEP_DEFAULT_AWARDS_PER_TIER, lo=1,
+                                 hi=LOOT_SWEEP_MAX_AWARDS_PER_TIER)
+        items = []
+        for it in items_raw:
+            v = _validated_ls_item(s, it, default_apt=default_apt, unknown=unknown_items,
+                                   seen=seen_items, group_label=gl)
+            if v is not None:
+                items.append(v)
+        total_items += len(items_raw)
+        if total_items > LOOT_SWEEP_MAX_ITEMS:
+            abort_problem(422, "Invalid config", f"At most {LOOT_SWEEP_MAX_ITEMS} items per task.")
+        group: dict = {
+            "npcs": npcs,
+            "bonus_points": _clamp_int(graw.get("bonus_points"), default=0, lo=0,
+                                       hi=LOOT_SWEEP_MAX_BONUS_POINTS),
+            "bonus_max": _clamp_int(graw.get("bonus_max"),
+                                    default=LOOT_SWEEP_DEFAULT_BONUS_MAX, lo=1,
+                                    hi=LOOT_SWEEP_MAX_BONUS_MAX),
+            "items": items,
+        }
+        if label:
+            group["label"] = label
+        out_groups.append(group)
+
+    if unknown_items:
+        abort_problem(422, "Unknown item(s)",
+                      "Not found in the item database (exact in-game names required): "
+                      + ", ".join(sorted(set(unknown_items))[:10]))
+    if unknown_npcs:
+        abort_problem(422, "Unknown NPC(s)",
+                      "Not found in the NPC database (exact in-game names required): "
+                      + ", ".join(sorted(set(unknown_npcs))[:10]))
 
     return {
         "kind": "loot_sweep",
         "decay_percent": decay_percent,
         "decay_mode": decay_mode,
-        "default_max_awards": default_max,
         "set_bonus_points": set_bonus_points,
         "set_bonus_max": set_bonus_max,
-        "items": out_items,
+        "groups": out_groups,
     }
 
 

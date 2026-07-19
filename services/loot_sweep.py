@@ -1,59 +1,64 @@
-"""Loot Sweep scoring (the ``loot_sweep`` event kind).
+"""Loot Sweep scoring (the ``loot_sweep`` event kind) — v2 (nested groups).
 
-A Loot Sweep is a race to obtain items from across the game. Unlike a standard
-task that *completes* once and awards a flat sum, a loot_sweep task accrues
-points continuously and never "completes":
+A Loot Sweep is a race to obtain items from across the game, scored continuously
+(a loot_sweep task never "completes"). v2 adds three things the "All Content"
+sheet needs:
 
-- Each configured **item** awards ``points`` the first time a team receives it,
-  then **decays** on every successive receipt (default: −20 percentage points
-  of the base each time → 100 / 80 / 60 / 40 / 20 % — the authoring grid the
-  admin screenshot shows), down to a per-item **cap** (``max_awards``) after
-  which further copies score nothing.
-- Items belong to a boss/"**set**". When a team has obtained every set item at
-  least once it earns a flat **set bonus** (``set_bonus_points``), repeatable up
-  to ``set_bonus_max`` times (a second full set → the bonus again).
+- **NPC scoping.** Every item only scores when it drops from its target NPC — a
+  Dragon 2h counts at Vet'ion, not from anywhere else. NPCs are declared per
+  *group* (below); the engine matcher enforces them, so only valid receipts ever
+  reach the ledger and the scoring here stays NPC-agnostic.
+- **Nested groups (sub-sets).** A task holds one or more **groups**. A group ties
+  a set of items to its source NPC(s) and awards ``bonus_points`` when a team has
+  collected every one of its set-items once (repeatable up to ``bonus_max``). A
+  simple boss is one group; a meta-set like Barrows is many. Completing **all**
+  groups awards the task's ``set_bonus_points`` (up to ``set_bonus_max``) — so
+  Barrows pays +4 per brother and +40 for all six.
+- **Batched decay.** Each item's points decay every ``awards_per_tier`` receipts
+  instead of every receipt: Brimstone with ``awards_per_tier: 3`` pays full for
+  the first 3, the 20%-step for the next 3, and so on (the sheet's duplicate
+  rows). Default 1 = the normal 100/80/60/40/20.
 
-One :class:`~db.models.events.EventTask` (``type='loot_sweep'``) models one set;
-its ``config`` JSON (``kind='loot_sweep'``) carries the item list and the set
-parameters. Standalone items with no set bonus are just a task whose
-``set_bonus_points`` is 0.
+Scoring is a **pure function of the applied ledger** (recomputed from every
+surviving receipt), so apply/revoke are simple deltas and can never drift. No
+I/O here — it stays unit-testable (the pytest conftest stubs ``db``/``services``).
 
-Scoring is a **pure function of the applied ledger** — like the ``all_of`` /
-``groups`` rollups in :mod:`services.event_engine`, the team total is recomputed
-from every surviving ``EventCompletion`` row for a (task, team), so apply and
-revoke are simple delta adjustments and can never drift. Nothing here does I/O,
-so it stays unit-testable (the pytest conftest stubs ``db``/``services``).
-
-The engine wiring (matcher / apply / revoke) lives in
-:mod:`services.event_engine`; the write-time config validation lives in
-:mod:`web_api.routes.event_task_validation`. See ``docs/LOOT_SWEEP.md``.
+Wiring: matcher/apply/revoke in :mod:`services.event_engine`; write-time config
+validation in :mod:`web_api.routes.event_task_validation`. See docs/LOOT_SWEEP.md.
 """
 from __future__ import annotations
 
 import json
+import math
 from typing import Iterable, Optional
 
 # ---- config defaults (mirrored by the web validator) ----------------------
-DEFAULT_DECAY_PERCENT = 20      # percentage points shed per successive receipt
+DEFAULT_DECAY_PERCENT = 20      # percentage points shed per decay tier
 DEFAULT_DECAY_MODE = "linear"   # "linear" | "geometric"
-DEFAULT_MAX_AWARDS = 5          # per-item receipts that still score
-DEFAULT_SET_BONUS_MAX = 1       # times a full set pays out per team
+DEFAULT_AWARDS_PER_TIER = 1     # receipts sharing each decay tier
+DEFAULT_TIERS = 5               # the sheet's 100/80/60/40/20 columns
+DEFAULT_SET_BONUS_MAX = 1       # times the whole-set bonus pays out per team
+DEFAULT_GROUP_BONUS_MAX = 1     # times a group bonus pays out per team
 
 DECAY_MODES = ("linear", "geometric")
 
 # Bounds the write validator enforces (kept here so scoring and validation
 # agree on what a legal config looks like).
-MAX_ITEMS = 100
+MAX_GROUPS = 40
+MAX_ITEMS = 400          # across the whole task
 MIN_ITEM_POINTS = 1
 MAX_ITEM_POINTS = 1_000_000
-MAX_AWARDS_CAP = 100
-MAX_SET_BONUS_POINTS = 10_000_000
-MAX_SET_BONUS_MAX = 100
+MAX_AWARDS_PER_TIER = 20
+MAX_TOTAL_AWARDS = 200   # cap on an item's max_awards
+MAX_BONUS_POINTS = 10_000_000
+MAX_BONUS_MAX = 100
+MAX_NPCS_PER_GROUP = 30
 
 
 def _norm(value) -> str:
     """Case-insensitive name key — identical to ``event_engine._norm`` so a
-    ledger row's ``matched_target`` lines up with a config item name."""
+    ledger row's ``matched_target`` / a drop's ``npc_name`` line up with config
+    item / NPC names."""
     if value is None:
         return ""
     return " ".join(str(value).strip().lower().split())
@@ -73,122 +78,167 @@ def _num(value, default: float = 0.0) -> float:
         return default
 
 
+def _clamp(value, default: int, lo: int, hi: int) -> int:
+    n = _int(value, default)
+    if value is None:
+        n = default
+    return min(max(n, lo), hi)
+
+
+# --------------------------------------------------------------------------- #
+# Award math
+# --------------------------------------------------------------------------- #
+def receipt_factor(k: int, decay_percent: int, awards_per_tier: int = 1,
+                   decay_mode: str = DEFAULT_DECAY_MODE) -> float:
+    """Multiplier on an item's base points for its ``k``-th receipt (1-indexed).
+
+    Receipts are grouped into decay *tiers* of ``awards_per_tier`` each: with
+    ``awards_per_tier=1`` every receipt steps down (100/80/60/40/20 for 20%);
+    with ``awards_per_tier=3`` receipts 1-3 are full, 4-6 take the first step,
+    etc. ``linear`` sheds ``decay_percent`` points per tier; ``geometric``
+    multiplies by ``(1 − decay_percent/100)`` per tier. Never negative."""
+    if k < 1:
+        return 0.0
+    apt = max(int(awards_per_tier or 1), 1)
+    tier = (k - 1) // apt  # 0-indexed decay tier
+    if decay_mode == "geometric":
+        return max(0.0, (1.0 - decay_percent / 100.0) ** tier)
+    return max(0.0, 1.0 - tier * decay_percent / 100.0)
+
+
+def default_max_awards(awards_per_tier: int = 1) -> int:
+    """Total scoring receipts when an item doesn't cap itself: the sheet's 5
+    decay tiers × the per-tier batch size."""
+    return DEFAULT_TIERS * max(int(awards_per_tier or 1), 1)
+
+
+def item_points(base: float, count: int, max_awards: int, decay_percent: int,
+                awards_per_tier: int = 1, decay_mode: str = DEFAULT_DECAY_MODE) -> int:
+    """Total points an item is worth to a team that received it ``count`` times:
+    the first ``min(count, max_awards)`` receipts, each rounded to a whole point
+    (so the grid stays clean integers), tiered by ``awards_per_tier``."""
+    scored = min(max(count, 0), max(max_awards, 0))
+    total = 0
+    for k in range(1, scored + 1):
+        total += int(round(base * receipt_factor(k, decay_percent, awards_per_tier, decay_mode)))
+    return total
+
+
 # --------------------------------------------------------------------------- #
 # Config parsing
 # --------------------------------------------------------------------------- #
+class LootSweepItem:
+    __slots__ = ("key", "name", "item_id", "points", "awards_per_tier",
+                 "max_awards", "counts_for_group")
+
+    def __init__(self, raw, cfg: "LootSweepConfig"):
+        if isinstance(raw, str):
+            name, entry = raw, {}
+        else:
+            entry = raw if isinstance(raw, dict) else {}
+            name = entry.get("item_name") or entry.get("name") or ""
+        self.key = _norm(name)
+        self.name = str(name).strip()
+        self.item_id = _int(entry.get("item_id"), 0) or None
+        pts = _num(entry.get("points"), 1.0)
+        self.points = pts if pts > 0 else 1.0
+        self.awards_per_tier = _clamp(entry.get("awards_per_tier"),
+                                      DEFAULT_AWARDS_PER_TIER, 1, MAX_AWARDS_PER_TIER)
+        mx = entry.get("max_awards")
+        self.max_awards = (_clamp(mx, default_max_awards(self.awards_per_tier), 1, MAX_TOTAL_AWARDS)
+                           if mx is not None else default_max_awards(self.awards_per_tier))
+        # False = scores but doesn't gate its group's bonus (pets, mega-rares).
+        self.counts_for_group = entry.get("counts_for_group", True) is not False
+
+
+class LootSweepGroup:
+    """One sub-set: items tied to source NPC(s), with its own completion bonus."""
+
+    __slots__ = ("label", "npcs", "npc_keys", "bonus_points", "bonus_max",
+                 "items", "by_key")
+
+    def __init__(self, raw, cfg: "LootSweepConfig"):
+        raw = raw if isinstance(raw, dict) else {}
+        self.label = str(raw.get("label") or "").strip()
+        npcs = raw.get("npcs") or raw.get("npc") or []
+        if isinstance(npcs, str):
+            npcs = [npcs]
+        self.npcs = [str(n).strip() for n in npcs if str(n).strip()]
+        self.npc_keys = frozenset(_norm(n) for n in self.npcs)
+        self.bonus_points = max(_int(raw.get("bonus_points"), 0), 0)
+        self.bonus_max = _clamp(raw.get("bonus_max"), DEFAULT_GROUP_BONUS_MAX, 1, MAX_BONUS_MAX)
+        self.items: list[LootSweepItem] = []
+        self.by_key: dict[str, LootSweepItem] = {}
+        for it in (raw.get("items") or []):
+            item = LootSweepItem(it, cfg)
+            if not item.key or item.key in self.by_key:
+                continue
+            self.items.append(item)
+            self.by_key[item.key] = item
+
+    @property
+    def set_item_keys(self) -> list[str]:
+        return [it.key for it in self.items if it.counts_for_group]
+
+    @property
+    def gates(self) -> bool:
+        """Does this group gate the whole-set bonus? (Has completion items and
+        an active group bonus, i.e. it is a real sub-set not a bonus dumping
+        ground.)"""
+        return bool(self.set_item_keys)
+
+
 class LootSweepConfig:
-    """Normalized view of a loot_sweep task config (defaults resolved).
+    """Normalized view of a loot_sweep task config (defaults resolved)."""
 
-    ``items`` is a list of dicts with normalized keys: ``key`` (norm name),
-    ``name`` (display), ``item_id`` (int|None), ``points`` (float base),
-    ``max_awards`` (int), ``counts_for_set`` (bool)."""
-
-    __slots__ = (
-        "decay_percent", "decay_mode", "default_max_awards",
-        "set_bonus_points", "set_bonus_max", "items", "by_key",
-    )
+    __slots__ = ("decay_percent", "decay_mode", "set_bonus_points",
+                 "set_bonus_max", "groups")
 
     def __init__(self, config):
-        # Accept a parsed dict, a JSON string (EventTask.config as stored), or
-        # None — so callers can hand the raw column straight in.
         if isinstance(config, str):
             try:
                 config = json.loads(config)
             except ValueError:
                 config = {}
         config = config if isinstance(config, dict) else {}
-        self.decay_percent = _clamp_percent(config.get("decay_percent"))
+
+        self.decay_percent = _clamp(config.get("decay_percent"), DEFAULT_DECAY_PERCENT, 0, 100)
         mode = config.get("decay_mode")
         self.decay_mode = mode if mode in DECAY_MODES else DEFAULT_DECAY_MODE
-        self.default_max_awards = _clamp_max_awards(
-            config.get("default_max_awards"), DEFAULT_MAX_AWARDS)
         self.set_bonus_points = max(_int(config.get("set_bonus_points"), 0), 0)
-        self.set_bonus_max = _clamp_max_awards(
-            config.get("set_bonus_max"), DEFAULT_SET_BONUS_MAX)
+        self.set_bonus_max = _clamp(config.get("set_bonus_max"), DEFAULT_SET_BONUS_MAX, 1, MAX_BONUS_MAX)
 
-        self.items: list[dict] = []
-        self.by_key: dict[str, dict] = {}
-        for raw in (config.get("items") or []):
-            item = self._parse_item(raw)
-            if item is None or item["key"] in self.by_key:
-                continue
-            self.items.append(item)
-            self.by_key[item["key"]] = item
+        groups_raw = config.get("groups")
+        if not groups_raw and config.get("items"):
+            # v1 back-compat: a flat item list becomes a single group carrying
+            # the set bonus (and any top-level npcs).
+            groups_raw = [{
+                "label": config.get("label") or "",
+                "npcs": config.get("npcs") or [],
+                "bonus_points": self.set_bonus_points,
+                "bonus_max": self.set_bonus_max,
+                "items": config.get("items"),
+            }]
+            self.set_bonus_points = 0
+        self.groups: list[LootSweepGroup] = []
+        for g in (groups_raw or []):
+            grp = LootSweepGroup(g, self)
+            if grp.items:
+                self.groups.append(grp)
 
-    def _parse_item(self, raw) -> Optional[dict]:
-        if isinstance(raw, str):
-            name, entry = raw, {}
-        elif isinstance(raw, dict):
-            name = raw.get("item_name") or raw.get("name") or ""
-            entry = raw
-        else:
-            return None
-        key = _norm(name)
-        if not key:
-            return None
-        points = _num(entry.get("points"), 1.0)
-        max_awards = entry.get("max_awards")
-        return {
-            "key": key,
-            "name": str(name).strip(),
-            "item_id": _int(entry.get("item_id"), 0) or None,
-            "points": points if points > 0 else 1.0,
-            "max_awards": (_clamp_max_awards(max_awards, self.default_max_awards)
-                           if max_awards is not None else self.default_max_awards),
-            # Set membership: default True. Standalone extras (e.g. the pet)
-            # set this False so they never gate set completion.
-            "counts_for_set": entry.get("counts_for_set", True) is not False,
-        }
+    def all_items(self) -> Iterable[LootSweepItem]:
+        for g in self.groups:
+            yield from g.items
 
-    @property
-    def set_item_keys(self) -> list[str]:
-        return [it["key"] for it in self.items if it["counts_for_set"]]
-
-    @property
-    def set_enabled(self) -> bool:
-        return self.set_bonus_points > 0 and bool(self.set_item_keys)
-
-
-def _clamp_percent(value) -> int:
-    pct = _int(value, DEFAULT_DECAY_PERCENT)
-    if value is None:
-        pct = DEFAULT_DECAY_PERCENT
-    return min(max(pct, 0), 100)
-
-
-def _clamp_max_awards(value, default: int) -> int:
-    n = _int(value, default)
-    if n < 1:
-        n = default
-    return min(n, MAX_AWARDS_CAP)
-
-
-# --------------------------------------------------------------------------- #
-# Award math
-# --------------------------------------------------------------------------- #
-def receipt_factor(k: int, decay_percent: int, decay_mode: str = DEFAULT_DECAY_MODE) -> float:
-    """Multiplier applied to an item's base points on its ``k``-th receipt
-    (1-indexed). ``linear`` sheds ``decay_percent`` percentage-points of the
-    base each time (100/80/60/40/20 for 20); ``geometric`` multiplies by
-    ``(1 − decay_percent/100)`` each time (100/80/64/51.2 for 20). Never
-    negative."""
-    if k < 1:
-        return 0.0
-    if decay_mode == "geometric":
-        return max(0.0, (1.0 - decay_percent / 100.0) ** (k - 1))
-    return max(0.0, 1.0 - (k - 1) * decay_percent / 100.0)
-
-
-def item_points(base: float, count: int, max_awards: int,
-                decay_percent: int, decay_mode: str = DEFAULT_DECAY_MODE) -> int:
-    """Total points an item is worth to a team that has received it ``count``
-    times: sum of the first ``min(count, max_awards)`` decayed receipts, each
-    receipt rounded to a whole point (so the grid columns are clean integers)."""
-    scored = min(max(count, 0), max(max_awards, 0))
-    total = 0
-    for k in range(1, scored + 1):
-        total += int(round(base * receipt_factor(k, decay_percent, decay_mode)))
-    return total
+    def matcher_index(self) -> dict[str, frozenset]:
+        """``{item key: allowed npc keys}`` (empty set = any NPC). An item in
+        two groups merges their NPC allowances; validation forbids that but the
+        merge keeps scoring sane if it ever happens."""
+        out: dict[str, frozenset] = {}
+        for g in self.groups:
+            for it in g.items:
+                out[it.key] = out.get(it.key, frozenset()) | g.npc_keys
+        return out
 
 
 # --------------------------------------------------------------------------- #
@@ -197,9 +247,10 @@ def item_points(base: float, count: int, max_awards: int,
 def counts_from_rows(rows: Iterable) -> dict[str, int]:
     """``{normalized item name: total receipts}`` from applied ledger rows.
 
-    Each unit of ``quantity`` is one receipt (a stack of 3 counts as 3). Bonus
-    rows and rows without a ``matched_target`` are ignored — loot_sweep only
-    scores identified item receipts."""
+    Each unit of ``quantity`` is one receipt. Bonus rows and rows without a
+    ``matched_target`` are ignored. NPC scoping is enforced upstream (the
+    matcher only records receipts from a valid NPC), so counts here are already
+    clean."""
     counts: dict[str, int] = {}
     for r in rows:
         if (getattr(r, "source_type", None) or "") == "bonus":
@@ -214,48 +265,63 @@ def counts_from_rows(rows: Iterable) -> dict[str, int]:
 def score_counts(counts: dict[str, int], config: LootSweepConfig) -> dict:
     """Full breakdown for a team's receipt counts. Returns::
 
-        {"total": int, "item_total": int, "set_total": int,
-         "sets_completed": int, "sets_awarded": int,
-         "items": [{item_id, name, key, count, scored, points, max_awards,
-                    counts_for_set}]}
+        {"total", "item_total", "group_bonus_total", "set_total",
+         "set_completions", "set_awarded",
+         "groups": [{"label", "npcs", "bonus_points", "bonus_max",
+                     "completions", "awarded", "bonus_total", "item_total",
+                     "items": [{item_id,name,key,count,scored,points,
+                                max_awards,awards_per_tier,counts_for_group}]}]}
 
-    ``total`` is what the team's :class:`EventTeam` score should reflect for
-    this task; ``items`` powers the per-item / per-team authoring grid and the
-    live board. Items appear in config order; unknown ledger names are ignored
-    (they can't score)."""
-    item_rows = []
-    item_total = 0
-    for it in config.items:
-        count = max(_int(counts.get(it["key"]), 0), 0)
-        pts = item_points(it["points"], count, it["max_awards"],
-                          config.decay_percent, config.decay_mode)
-        item_total += pts
-        item_rows.append({
-            "item_id": it["item_id"],
-            "name": it["name"],
-            "key": it["key"],
-            "count": count,
-            "scored": min(count, it["max_awards"]),
-            "points": pts,
-            "max_awards": it["max_awards"],
-            "counts_for_set": it["counts_for_set"],
+    ``total`` is what the team's :class:`EventTeam` score should reflect for this
+    task. Groups/items are in config order."""
+    groups_out = []
+    item_total_all = 0
+    group_bonus_all = 0
+    gating_completions: list[int] = []
+
+    for g in config.groups:
+        item_rows = []
+        g_item_total = 0
+        for it in g.items:
+            count = max(_int(counts.get(it.key), 0), 0)
+            pts = item_points(it.points, count, it.max_awards, config.decay_percent,
+                              it.awards_per_tier, config.decay_mode)
+            g_item_total += pts
+            item_rows.append({
+                "item_id": it.item_id, "name": it.name, "key": it.key,
+                "count": count, "scored": min(count, it.max_awards), "points": pts,
+                "max_awards": it.max_awards, "awards_per_tier": it.awards_per_tier,
+                "counts_for_group": it.counts_for_group,
+            })
+        set_keys = g.set_item_keys
+        completions = min((max(_int(counts.get(k), 0), 0) for k in set_keys), default=0)
+        awarded = min(completions, g.bonus_max) if (set_keys and g.bonus_points > 0) else 0
+        bonus_total = awarded * g.bonus_points
+        item_total_all += g_item_total
+        group_bonus_all += bonus_total
+        if g.gates:
+            gating_completions.append(completions)
+        groups_out.append({
+            "label": g.label, "npcs": g.npcs,
+            "bonus_points": g.bonus_points, "bonus_max": g.bonus_max,
+            "completions": completions, "awarded": awarded, "bonus_total": bonus_total,
+            "item_total": g_item_total, "items": item_rows,
         })
 
-    sets_completed = 0
-    sets_awarded = 0
-    set_total = 0
-    if config.set_enabled:
-        sets_completed = min(max(_int(counts.get(k), 0), 0) for k in config.set_item_keys)
-        sets_awarded = min(sets_completed, config.set_bonus_max)
-        set_total = sets_awarded * config.set_bonus_points
+    # Whole-set bonus: how many times EVERY gating group has been completed.
+    set_completions = min(gating_completions) if gating_completions else 0
+    set_awarded = (min(set_completions, config.set_bonus_max)
+                   if (config.set_bonus_points > 0 and gating_completions) else 0)
+    set_total = set_awarded * config.set_bonus_points
 
     return {
-        "total": item_total + set_total,
-        "item_total": item_total,
+        "total": item_total_all + group_bonus_all + set_total,
+        "item_total": item_total_all,
+        "group_bonus_total": group_bonus_all,
         "set_total": set_total,
-        "sets_completed": sets_completed,
-        "sets_awarded": sets_awarded,
-        "items": item_rows,
+        "set_completions": set_completions,
+        "set_awarded": set_awarded,
+        "groups": groups_out,
     }
 
 

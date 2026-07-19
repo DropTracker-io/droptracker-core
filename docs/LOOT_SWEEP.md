@@ -58,67 +58,80 @@ delta adjustments and can never drift.
 
 ---
 
-## The task `config` shape (`kind: "loot_sweep"`)
+## The task `config` shape (`kind: "loot_sweep"`) — v2 (nested groups)
 
-One task = one set. The write path
-(`web_api/routes/event_task_validation.py::_validated_loot_sweep`) validates and
-normalizes it; the engine + `services/loot_sweep.py` read the normalized form:
+One task = one "set" of one or more **groups** (sub-sets). A group ties items to
+their source NPC(s) and awards `bonus_points` when a team collects all its
+gating items once; the task awards `set_bonus_points` when **every** group is
+complete. A simple boss is one group; a meta-set (Barrows) is many. The write
+path (`web_api/routes/event_task_validation.py::_validated_loot_sweep`) validates
+and normalizes; the engine + `services/loot_sweep.py` read the normalized form:
 
 ```jsonc
 {
   "kind": "loot_sweep",
-  "decay_percent": 20,          // 0-100; points shed per successive receipt
+  "decay_percent": 20,          // 0-100; points shed per decay TIER
   "decay_mode": "linear",       // "linear" | "geometric" (default linear)
-  "default_max_awards": 5,      // per-item cap unless the item overrides it
-  "set_bonus_points": 40,       // flat bonus for a full set (0 = no set bonus)
-  "set_bonus_max": 1,           // times the set bonus pays out per team
-  "items": [
-    { "item_id": 11826, "item_name": "Armadyl helmet",     "points": 9 },
-    { "item_id": 11828, "item_name": "Armadyl chestplate",  "points": 9 },
-    { "item_id": 11830, "item_name": "Armadyl chainskirt",  "points": 9 },
-    { "item_id": 11810, "item_name": "Armadyl hilt",        "points": 13 },
-    { "item_id": 22473, "item_name": "Pet kree'arra",       "points": 60,
-      "counts_for_set": false }          // scores, but never gates set completion
+  "set_bonus_points": 40,       // awarded once EVERY group is complete (0 = none)
+  "set_bonus_max": 1,           // times the whole-set bonus pays out per team
+  "groups": [
+    { "label": "Ahrim",
+      "npcs": ["Ahrim the Blighted"],   // a drop only counts from these NPC(s)
+      "bonus_points": 4,                // awarded when all this group's set-items collected once
+      "bonus_max": 1,
+      "items": [
+        { "item_name": "Ahrim's hood", "points": 1 },
+        { "item_name": "Ahrim's staff", "points": 1 },
+        …
+      ] },
+    …  // 6 brothers → set_bonus_points 40 when all six are done
   ]
 }
+// Batched decay (Brimstone: full points for 3, then the 20% step for 3, …):
+//   { "item_name": "Brimstone key", "points": 4, "awards_per_tier": 3 }
+// Scores but doesn't gate its group's bonus (pets, mega-rares):
+//   { "item_name": "Pet kree'arra", "points": 60, "counts_for_group": false }
 ```
 
 Per-item keys:
 
 | Key | Meaning | Default |
 |---|---|---|
-| `item_name` | **Exact** in-game name (validated against `item_list`; snapped to canonical spelling). | required |
-| `item_id` | Game id, resolved server-side for icons — the frontend does not need to send it. | resolved |
+| `item_name` | **Exact** in-game name (validated against `items`; snapped to canonical). | required |
+| `item_id` | Game id, resolved server-side for icons — the frontend needn't send it. | resolved |
 | `points` | Base points for the **first** receipt. | 1 |
-| `max_awards` | Per-item cap on scoring receipts. | `default_max_awards` |
-| `counts_for_set` | Whether the item is required for set completion. Set `false` for extras like pets. | `true` |
+| `awards_per_tier` | Receipts sharing each decay tier — full points for this many before the first 20% step. | 1 |
+| `max_awards` | Total scoring receipts. | `5 × awards_per_tier` |
+| `counts_for_group` | Whether the item gates its group's bonus. `false` for pets/mega-rares. | `true` |
 
-**Validation bounds** (`event_task_validation.py`, mirrored in
-`services/loot_sweep.py`): ≤ 100 items/task, `points` 1–1,000,000, `max_awards`
-1–100, `set_bonus_points` 0–10,000,000, `set_bonus_max` 1–100. Unknown item
-names are rejected `422` with the offending names listed. `target` /
-`target_value` are unused for this type.
+Per-group keys: `label`, `npcs` (list; validated against `NpcList`), `bonus_points`,
+`bonus_max`. **An item may appear in only one group per task** (so a receipt maps
+to one group) — enforced `422`.
 
-### The decay math
+**Validation bounds**: ≤ 40 groups, ≤ 400 items/task, `points` 1–1,000,000,
+`awards_per_tier` 1–20, `max_awards` 1–200, bonuses 0–10,000,000 / max 1–100.
+Unknown item/NPC names are rejected `422`. `target`/`target_value` are unused.
+(v1 flat `{items:[…]}` configs still parse — wrapped into a single group.)
 
-k-th receipt (1-indexed) multiplier, then `round()`-ed and summed:
+### Decay math (batched)
 
-- **linear** (default): `max(0, 1 − (k−1)·decay/100)` → for `decay=20`:
-  `1.0, 0.8, 0.6, 0.4, 0.2, 0` — matches the grid columns exactly.
-- **geometric**: `(1 − decay/100)^(k−1)` → for `decay=20`:
-  `1.0, 0.8, 0.64, 0.512, …`
+Receipts are grouped into decay **tiers** of `awards_per_tier` each. The tier of
+receipt `k` is `(k−1) // awards_per_tier`; its multiplier (rounded per receipt,
+summed) is `max(0, 1 − tier·decay/100)` (linear) or `(1 − decay/100)^tier`
+(geometric). So `awards_per_tier = 1, decay = 20` gives `1.0, 0.8, 0.6, 0.4, 0.2`
+(then 0); `awards_per_tier = 3` gives full points for receipts 1-3, `0.8` for
+4-6, etc. — the sheet's duplicate rows.
 
-So `base 40, decay 20, linear` over 5 receipts = `40+32+24+16+8 = 120`.
+### Group + set completion
 
-### Set completion
+- **Group** `g_completions = min(count over g's counts_for_group items)`; payout
+  `g.bonus_points × min(g_completions, g.bonus_max)`.
+- **Set** `set_completions = min(g_completions over gating groups)` (a group is
+  gating when it has completion items); payout
+  `set_bonus_points × min(set_completions, set_bonus_max)`.
 
-`sets_completed = min(receipt count over every item where counts_for_set)` (0 if
-the set has no such items or `set_bonus_points = 0`). Payout =
-`set_bonus_points × min(sets_completed, set_bonus_max)`. A team that collects two
-full sets with `set_bonus_max = 1` still gets the bonus once.
-
-**Standalone items** (no set): just give the task `set_bonus_points: 0`. It still
-scores every item with decay + caps; there is simply no bonus row.
+A **standalone boss** is just one group with `set_bonus_points: 0` — its group
+bonus is the boss bonus.
 
 ---
 

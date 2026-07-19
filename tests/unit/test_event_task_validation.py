@@ -285,3 +285,88 @@ def test_pet_category_empty_list_rejected():
     with pytest.raises(ProblemException) as exc:
         _validate({"type": "pet_collection", "config": {"categories": []}})
     assert exc.value.status == 422
+
+
+# ── loot_sweep v2 (nested groups + NPC scoping + batched decay) ───────────────
+
+KNOWN_NPCS = {"Kree'arra", "Ahrim the Blighted", "Dharok the Wretched",
+              "Alchemical Hydra", "Vet'ion", "Calvar'ion"}
+_NPC_BY_NORM = {n.lower(): n for n in KNOWN_NPCS}
+KNOWN_LS_ITEMS = {
+    "Armadyl helmet": 11826, "Armadyl chestplate": 11828, "Armadyl hilt": 11810,
+    "Pet kree'arra": 22473, "Ahrim's hood": 4708, "Ahrim's staff": 4710,
+    "Brimstone key": 22975, "Dragon 2h sword": 7158,
+}
+_LS_BY_NORM = {n.lower(): (n, i) for n, i in KNOWN_LS_ITEMS.items()}
+
+
+@pytest.fixture
+def _stub_ls(monkeypatch):
+    monkeypatch.setattr(etv, "_canonical_item_with_id",
+                        lambda s, name: _LS_BY_NORM.get((name or "").strip().lower(), (None, None)))
+    monkeypatch.setattr(etv, "_canonical_npc",
+                        lambda s, name: _NPC_BY_NORM.get((name or "").strip().lower()))
+
+
+def test_loot_sweep_valid_group(_stub_ls):
+    out = _validate({"type": "loot_sweep", "config": {
+        "decay_percent": 20, "set_bonus_points": 0,
+        "groups": [{"label": "Kree'arra", "npcs": ["Kree'arra"], "bonus_points": 40,
+                    "items": [{"item_name": "Armadyl helmet", "points": 9},
+                              {"item_name": "Pet kree'arra", "points": 60,
+                               "counts_for_group": False}]}]}})
+    cfg = _cfg(out)
+    assert cfg["kind"] == "loot_sweep"
+    g = cfg["groups"][0]
+    assert g["npcs"] == ["Kree'arra"] and g["bonus_points"] == 40
+    assert g["items"][0]["item_id"] == 11826
+    assert g["items"][1]["counts_for_group"] is False
+    assert out["target"] is None and out["target_value"] is None
+
+
+def test_loot_sweep_unknown_npc_rejected(_stub_ls):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "loot_sweep", "config": {"groups": [
+            {"npcs": ["Nonexistent Boss"], "items": [{"item_name": "Armadyl helmet"}]}]}})
+    assert exc.value.status == 422 and "NPC" in exc.value.title
+
+
+def test_loot_sweep_unknown_item_rejected(_stub_ls):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "loot_sweep", "config": {"groups": [
+            {"npcs": ["Kree'arra"], "items": [{"item_name": "Nonexistent item"}]}]}})
+    assert exc.value.status == 422 and "item" in exc.value.title.lower()
+
+
+def test_loot_sweep_item_in_two_groups_rejected(_stub_ls):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "loot_sweep", "config": {"groups": [
+            {"npcs": ["Vet'ion"], "items": [{"item_name": "Dragon 2h sword"}]},
+            {"npcs": ["Calvar'ion"], "items": [{"item_name": "Dragon 2h sword"}]}]}})
+    assert exc.value.status == 422
+
+
+def test_loot_sweep_awards_per_tier(_stub_ls):
+    out = _validate({"type": "loot_sweep", "config": {"groups": [
+        {"npcs": ["Alchemical Hydra"], "items": [
+            {"item_name": "Brimstone key", "points": 4, "awards_per_tier": 3}]}]}})
+    it = _cfg(out)["groups"][0]["items"][0]
+    assert it["awards_per_tier"] == 3
+    # max_awards is left implicit (the scorer defaults it to 5 tiers * apt = 15).
+    assert "max_awards" not in it
+
+
+def test_loot_sweep_multi_npc_group(_stub_ls):
+    out = _validate({"type": "loot_sweep", "config": {"groups": [
+        {"label": "Vet'ion", "npcs": ["Vet'ion", "Calvar'ion"],
+         "items": [{"item_name": "Dragon 2h sword", "points": 8}]}]}})
+    assert _cfg(out)["groups"][0]["npcs"] == ["Vet'ion", "Calvar'ion"]
+
+
+def test_loot_sweep_v1_backcompat_flat_items(_stub_ls):
+    out = _validate({"type": "loot_sweep", "config": {
+        "set_bonus_points": 40, "npcs": ["Kree'arra"],
+        "items": [{"item_name": "Armadyl helmet", "points": 9}]}})
+    cfg = _cfg(out)
+    assert len(cfg["groups"]) == 1
+    assert cfg["groups"][0]["bonus_points"] == 40

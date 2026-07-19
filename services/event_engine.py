@@ -531,16 +531,22 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
                 "matched_target": str(data.get("item_name") or "").strip()[:120] or None}
 
     if task_type == "loot_sweep":
-        # Loot Sweep: credit any config item obtained via a drop / clog. The
-        # decaying-per-receipt scoring happens at apply time (off the ledger);
-        # here we only recognise the item and fold the raw quantity.
-        if kind not in ("drop", "clog"):
+        # Loot Sweep (v2): an item only credits when it DROPS from its group's
+        # target NPC. Only real drops carry a source NPC, so clog/other kinds
+        # never match. ``loot_sweep_index`` (item key -> allowed NPC keys, empty
+        # = any) is precomputed on the task dict in _task_to_dict. Decaying
+        # per-receipt scoring happens at apply time (off the ledger).
+        if kind != "drop":
             return None
         name = _norm(data.get("item_name"))
-        if not name or name not in _config_item_entries(task.get("config") or {}):
+        index = task.get("loot_sweep_index") or {}
+        if name not in index:
+            return None
+        allowed = index[name]
+        if allowed and _norm(data.get("npc_name")) not in allowed:
             return None
         try:
-            qty = max(int((data.get("quantity", 1) if kind == "drop" else 1) or 1), 1)
+            qty = max(int(data.get("quantity", 1) or 1), 1)
         except (TypeError, ValueError):
             qty = 1
         return {"mode": "count", "quantity": qty,
@@ -721,7 +727,7 @@ def _task_wom_metric(task_type, target) -> Optional[str]:
 
 
 def _task_to_dict(task) -> dict:
-    return {
+    d = {
         "id": task.id,
         "event_id": task.event_id,
         "type": task.type,
@@ -734,6 +740,16 @@ def _task_to_dict(task) -> dict:
         "wom_metric": _task_wom_metric(task.type, task.target),
         "difficulty": getattr(task, "difficulty", None),
     }
+    if task.type == "loot_sweep":
+        # Precompute the matcher's item->allowed-NPC index once per task (the
+        # matcher stays pure/cheap; NPC scoping is v2). Guarded: the unit-test
+        # conftest stubs services.loot_sweep.
+        try:
+            from services.loot_sweep import LootSweepConfig
+            d["loot_sweep_index"] = LootSweepConfig(d["config"]).matcher_index()
+        except Exception:
+            d["loot_sweep_index"] = {}
+    return d
 
 
 def multi_clan_players(members_by_gid: dict, gids) -> set:
@@ -1625,7 +1641,17 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
     contributors = _task_contributors(session, task["id"], team_id)
     _award_contribution_points(session, event, task, team_id, contributors, new_total)
 
-    set_completed = curr["sets_awarded"] > prev["sets_awarded"]
+    # A "milestone" = a group or the whole set just completed (a bonus was
+    # earned). Groups/sets are the announce-worthy moments; per-receipt detail
+    # rides SSE + the plugin inbox.
+    set_completed = curr["set_awarded"] > prev["set_awarded"]
+    new_group_label = None
+    for pg, cg in zip(prev["groups"], curr["groups"]):
+        if cg["awarded"] > pg["awarded"]:
+            new_group_label = cg["label"] or task.get("label")
+            break
+    bonus_delta = ((curr["group_bonus_total"] + curr["set_total"])
+                   - (prev["group_bonus_total"] + prev["set_total"]))
     result = {
         "kind": "loot_sweep",
         "event_id": event["id"],
@@ -1636,6 +1662,7 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
         "total": new_total,
         "received_item": completion.matched_target,
         "set_completed": set_completed,
+        "group_completed": new_group_label,
     }
     if team_score is not None:
         result["team_score"] = team_score
@@ -1669,18 +1696,20 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
     except Exception as plugin_err:
         print(f"loot_sweep plugin fan-out failed: {plugin_err}")
 
-    # Discord: announce only the big moment — a full set just paid out — so a
-    # game-wide sweep doesn't post per drop. Per-receipt detail rides SSE + the
-    # plugin inbox. (Reuses event_completion; loot_sweep-aware copy/layout is a
-    # frontend follow-up — see docs/LOOT_SWEEP.md.)
-    if set_completed and team_id is not None:
+    # Discord: announce only the big moments — a group or the whole set just
+    # paid out — so a game-wide sweep doesn't post per drop. (Reuses
+    # event_completion; loot_sweep-aware copy/layout is a follow-up — see
+    # docs/LOOT_SWEEP.md.)
+    if bonus_delta > 0 and team_id is not None:
         _enqueue_notification(session, "event_completion", event, player_id, {
             "task_id": task["id"], "task_label": task.get("label"),
             "team_id": team_id, "player_id": player_id, "player_name": player_name,
-            "points": curr["set_total"] - prev["set_total"],
+            "points": bonus_delta,
             "team_score": team_score,
-            "points_based": True, "loot_sweep": True, "set_completed": True,
-            "sets_completed": curr["sets_completed"],
+            "points_based": True, "loot_sweep": True,
+            "set_completed": set_completed,
+            "group_completed": new_group_label,
+            "set_completions": curr["set_completions"],
             "received_item": completion.matched_target,
             "contributors": contributors,
             "source_type": completion.source_type,
@@ -2039,7 +2068,7 @@ def _dedupe_clog_echo(session, task: dict, team_id, player_id,
     ``pending`` echoes count too: the acquisition is already represented in
     the ledger awaiting review, and confirming it later must not double-pay.
     """
-    if task.get("type") not in ("item_collection", "loot_sweep") or not matched_target:
+    if task.get("type") != "item_collection" or not matched_target:
         return quantity
     if kind not in ("drop", "clog"):
         return quantity

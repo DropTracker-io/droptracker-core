@@ -1207,6 +1207,22 @@ async def get_loot_sweep_board(event_id: int):
 
             for task in tasks:
                 cfg = LootSweepConfig(task.config)
+                # Config-derived group/item defs (order matches the per-team
+                # breakdown below, so the grid maps by position).
+                groups_def = [
+                    {
+                        "label": g.label, "npcs": g.npcs,
+                        "bonus_points": g.bonus_points, "bonus_max": g.bonus_max,
+                        "items": [
+                            {"item_id": it.item_id, "item_name": it.name,
+                             "points": int(it.points), "awards_per_tier": it.awards_per_tier,
+                             "max_awards": it.max_awards,
+                             "counts_for_group": it.counts_for_group}
+                            for it in g.items
+                        ],
+                    }
+                    for g in cfg.groups
+                ]
                 teams_out = []
                 for t in teams:
                     b = score_counts(
@@ -1214,13 +1230,20 @@ async def get_loot_sweep_board(event_id: int):
                     teams_out.append({
                         "team_id": t.id,
                         "total": b["total"],
-                        "sets_completed": b["sets_completed"],
-                        "sets_awarded": b["sets_awarded"],
+                        "set_completions": b["set_completions"],
+                        "set_awarded": b["set_awarded"],
                         "set_total": b["set_total"],
-                        "items": [
-                            {"count": bi["count"], "scored": bi["scored"],
-                             "points": bi["points"]}
-                            for bi in b["items"]
+                        "groups": [
+                            {
+                                "completions": gb["completions"], "awarded": gb["awarded"],
+                                "bonus_total": gb["bonus_total"], "item_total": gb["item_total"],
+                                "items": [
+                                    {"count": bi["count"], "scored": bi["scored"],
+                                     "points": bi["points"]}
+                                    for bi in gb["items"]
+                                ],
+                            }
+                            for gb in b["groups"]
                         ],
                     })
                 base["sets"].append({
@@ -1228,15 +1251,9 @@ async def get_loot_sweep_board(event_id: int):
                     "label": task.label,
                     "decay_percent": cfg.decay_percent,
                     "decay_mode": cfg.decay_mode,
-                    "default_max_awards": cfg.default_max_awards,
                     "set_bonus_points": cfg.set_bonus_points,
                     "set_bonus_max": cfg.set_bonus_max,
-                    "items": [
-                        {"item_id": it["item_id"], "item_name": it["name"],
-                         "points": it["points"], "max_awards": it["max_awards"],
-                         "counts_for_set": it["counts_for_set"]}
-                        for it in cfg.items
-                    ],
+                    "groups": groups_def,
                     "teams": teams_out,
                 })
             return base
