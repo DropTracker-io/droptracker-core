@@ -91,6 +91,32 @@ class TestMatchNpcScoping:
         assert engine.match_task(TASK, env) is None
 
 
+PET_CONFIG = {
+    "kind": "loot_sweep", "decay_percent": 20,
+    "groups": [{"label": "Kree'arra", "npcs": ["Kree'arra"], "bonus_points": 40, "items": [
+        {"item_name": "Armadyl helmet", "points": 9},
+        {"item_name": "Pet kree'arra", "points": 60, "source": "pet", "counts_for_group": False},
+    ]}],
+}
+PET_TASK = {"id": 5, "type": "loot_sweep", "config": PET_CONFIG,
+            "loot_sweep_index": _ls.LootSweepConfig(PET_CONFIG).matcher_index()}
+
+
+class TestPetSource:
+    def test_pet_submission_matches_pet_item(self):
+        env = {"kind": "pet", "data": {"pet_name": "Pet kree'arra"}}
+        m = engine.match_task(PET_TASK, env)
+        assert m and m["matched_target"] == "Pet kree'arra"
+
+    def test_drop_does_not_match_pet_item(self):
+        env = {"kind": "drop", "data": {"item_name": "Pet kree'arra", "npc_name": "Kree'arra"}}
+        assert engine.match_task(PET_TASK, env) is None
+
+    def test_pet_submission_ignores_non_pet_items(self):
+        env = {"kind": "pet", "data": {"pet_name": "Armadyl helmet"}}
+        assert engine.match_task(PET_TASK, env) is None
+
+
 class TestLootSweepScore:
     def test_group_complete_scores_bonus(self):
         s = _Session([_row("Armadyl helmet", rid=1), _row("Armadyl chestplate", rid=2),

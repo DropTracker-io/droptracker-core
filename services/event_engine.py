@@ -531,26 +531,36 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
                 "matched_target": str(data.get("item_name") or "").strip()[:120] or None}
 
     if task_type == "loot_sweep":
-        # Loot Sweep (v2): an item only credits when it DROPS from its group's
-        # target NPC. Only real drops carry a source NPC, so clog/other kinds
-        # never match. ``loot_sweep_index`` (item key -> allowed NPC keys, empty
-        # = any) is precomputed on the task dict in _task_to_dict. Decaying
-        # per-receipt scoring happens at apply time (off the ledger).
-        if kind != "drop":
-            return None
-        name = _norm(data.get("item_name"))
+        # Loot Sweep (v2). ``loot_sweep_index`` (item key -> {source, npcs}) is
+        # precomputed on the task dict in _task_to_dict. A "drop" item only
+        # credits when it DROPS from its group's target NPC; a "pet" item
+        # credits from a `pet` submission matched by name (a pet only comes from
+        # its boss, so no NPC scoping). Decaying scoring happens at apply time.
         index = task.get("loot_sweep_index") or {}
-        if name not in index:
-            return None
-        allowed = index[name]
-        if allowed and _norm(data.get("npc_name")) not in allowed:
-            return None
-        try:
-            qty = max(int(data.get("quantity", 1) or 1), 1)
-        except (TypeError, ValueError):
+        if kind == "drop":
+            name = _norm(data.get("item_name"))
+            entry = index.get(name)
+            if entry is None or entry.get("source") != "drop":
+                return None
+            allowed = entry.get("npcs")
+            if allowed and _norm(data.get("npc_name")) not in allowed:
+                return None
+            raw_name = data.get("item_name")
+            try:
+                qty = max(int(data.get("quantity", 1) or 1), 1)
+            except (TypeError, ValueError):
+                qty = 1
+        elif kind == "pet":
+            raw_name = data.get("pet_name") or data.get("item_name")
+            name = _norm(raw_name)
+            entry = index.get(name)
+            if entry is None or entry.get("source") != "pet":
+                return None
             qty = 1
+        else:
+            return None
         return {"mode": "count", "quantity": qty,
-                "matched_target": str(data.get("item_name") or "").strip()[:120] or None}
+                "matched_target": str(raw_name or "").strip()[:120] or None}
 
     if task_type == "kc_target":
         if kind == "wom_kc":

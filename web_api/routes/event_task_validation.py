@@ -259,10 +259,22 @@ def _validated_ls_item(s, raw, *, default_apt: int, unknown: list, seen: dict,
         name, entry = (raw.get("item_name") or raw.get("name") or ""), raw
     else:
         abort_problem(422, "Invalid config", "Each Loot Sweep item must be a name or object.")
-    canonical, item_id = _canonical_item_with_id(s, name)
-    if not canonical:
-        unknown.append(str(name).strip() or "(empty)")
-        return None
+    source = entry.get("source") if entry.get("source") in ("drop", "pet") else "drop"
+    if source == "pet":
+        # A pet scores from a `pet` submission by name — validate against the
+        # pet taxonomy, not the item DB; the item id (for the icon) is best
+        # effort from the item DB.
+        from utils.osrs_pets import canonical_pet_name
+        canonical = canonical_pet_name(name)
+        if not canonical:
+            unknown.append(f"{str(name).strip() or '(empty)'} (pet)")
+            return None
+        _, item_id = _canonical_item_with_id(s, canonical)
+    else:
+        canonical, item_id = _canonical_item_with_id(s, name)
+        if not canonical:
+            unknown.append(str(name).strip() or "(empty)")
+            return None
     key = canonical.lower()
     if key in seen:
         abort_problem(422, "Invalid config",
@@ -277,6 +289,8 @@ def _validated_ls_item(s, raw, *, default_apt: int, unknown: list, seen: dict,
                      hi=LOOT_SWEEP_MAX_AWARDS_PER_TIER)
     item: dict = {"item_name": canonical,
                   "points": min(max(pts, 1), LOOT_SWEEP_MAX_ITEM_POINTS)}
+    if source == "pet":
+        item["source"] = "pet"
     if item_id:
         item["item_id"] = int(item_id)
     if apt != LOOT_SWEEP_DEFAULT_AWARDS_PER_TIER:

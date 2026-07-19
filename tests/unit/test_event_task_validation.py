@@ -370,3 +370,21 @@ def test_loot_sweep_v1_backcompat_flat_items(_stub_ls):
     cfg = _cfg(out)
     assert len(cfg["groups"]) == 1
     assert cfg["groups"][0]["bonus_points"] == 40
+
+
+def test_loot_sweep_pet_source(_stub_ls):
+    out = _validate({"type": "loot_sweep", "config": {"groups": [
+        {"label": "Kree'arra", "npcs": ["Kree'arra"], "bonus_points": 40, "items": [
+            {"item_name": "Armadyl helmet", "points": 9},
+            {"item_name": "Nexling", "points": 40, "source": "pet", "counts_for_group": False}]}]}})
+    items = _cfg(out)["groups"][0]["items"]
+    pet = [i for i in items if i.get("source") == "pet"][0]
+    assert pet["item_name"] == "Nexling" and pet["counts_for_group"] is False
+
+
+def test_loot_sweep_unknown_pet_rejected(_stub_ls):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "loot_sweep", "config": {"groups": [
+            {"npcs": ["Kree'arra"], "items": [
+                {"item_name": "Not a pet", "source": "pet"}]}]}})
+    assert exc.value.status == 422

@@ -1217,7 +1217,7 @@ async def get_loot_sweep_board(event_id: int):
                             {"item_id": it.item_id, "item_name": it.name,
                              "points": int(it.points), "awards_per_tier": it.awards_per_tier,
                              "max_awards": it.max_awards,
-                             "counts_for_group": it.counts_for_group}
+                             "counts_for_group": it.counts_for_group, "source": it.source}
                             for it in g.items
                         ],
                     }

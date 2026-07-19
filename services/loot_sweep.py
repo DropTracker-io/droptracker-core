@@ -127,9 +127,12 @@ def item_points(base: float, count: int, max_awards: int, decay_percent: int,
 # --------------------------------------------------------------------------- #
 # Config parsing
 # --------------------------------------------------------------------------- #
+ITEM_SOURCES = ("drop", "pet")
+
+
 class LootSweepItem:
     __slots__ = ("key", "name", "item_id", "points", "awards_per_tier",
-                 "max_awards", "counts_for_group")
+                 "max_awards", "counts_for_group", "source")
 
     def __init__(self, raw, cfg: "LootSweepConfig"):
         if isinstance(raw, str):
@@ -149,6 +152,10 @@ class LootSweepItem:
                            if mx is not None else default_max_awards(self.awards_per_tier))
         # False = scores but doesn't gate its group's bonus (pets, mega-rares).
         self.counts_for_group = entry.get("counts_for_group", True) is not False
+        # How the item is credited: "drop" (NPC-scoped drop, the default) or
+        # "pet" (a `pet` submission matched by name — a pet only comes from its
+        # boss, so no NPC scoping is needed).
+        self.source = entry.get("source") if entry.get("source") in ITEM_SOURCES else "drop"
 
 
 class LootSweepGroup:
@@ -230,14 +237,20 @@ class LootSweepConfig:
         for g in self.groups:
             yield from g.items
 
-    def matcher_index(self) -> dict[str, frozenset]:
-        """``{item key: allowed npc keys}`` (empty set = any NPC). An item in
-        two groups merges their NPC allowances; validation forbids that but the
-        merge keeps scoring sane if it ever happens."""
-        out: dict[str, frozenset] = {}
+    def matcher_index(self) -> dict[str, dict]:
+        """``{item key: {"source", "npcs"}}`` for the engine matcher. ``source``
+        is "drop" (NPC-scoped: ``npcs`` = allowed NPC keys, empty = any) or
+        "pet" (matched from a pet submission by name; ``npcs`` unused). An item
+        in two groups merges their NPC allowances (validation forbids that)."""
+        out: dict[str, dict] = {}
         for g in self.groups:
             for it in g.items:
-                out[it.key] = out.get(it.key, frozenset()) | g.npc_keys
+                cur = out.get(it.key)
+                if cur is None:
+                    out[it.key] = {"source": it.source,
+                                   "npcs": g.npc_keys if it.source == "drop" else frozenset()}
+                else:
+                    cur["npcs"] = cur["npcs"] | g.npc_keys
         return out
 
 
@@ -291,7 +304,7 @@ def score_counts(counts: dict[str, int], config: LootSweepConfig) -> dict:
                 "item_id": it.item_id, "name": it.name, "key": it.key,
                 "count": count, "scored": min(count, it.max_awards), "points": pts,
                 "max_awards": it.max_awards, "awards_per_tier": it.awards_per_tier,
-                "counts_for_group": it.counts_for_group,
+                "counts_for_group": it.counts_for_group, "source": it.source,
             })
         set_keys = g.set_item_keys
         completions = min((max(_int(counts.get(k), 0), 0) for k in set_keys), default=0)

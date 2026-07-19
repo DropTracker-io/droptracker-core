@@ -91,10 +91,15 @@ class TestConfig:
 
     def test_matcher_index(self):
         cfg = ls.LootSweepConfig({"groups": [
-            {"npcs": ["Vet'ion", "Calvar'ion"], "items": [{"item_name": "Dragon 2h"}]},
+            {"npcs": ["Vet'ion", "Calvar'ion"],
+             "items": [{"item_name": "Dragon 2h"},
+                       {"item_name": "Vet'ion jr.", "source": "pet"}]},
         ]})
         idx = cfg.matcher_index()
-        assert idx["dragon 2h"] == frozenset({"vet'ion", "calvar'ion"})
+        assert idx["dragon 2h"] == {"source": "drop",
+                                    "npcs": frozenset({"vet'ion", "calvar'ion"})}
+        # pet items aren't NPC-scoped
+        assert idx["vet'ion jr."] == {"source": "pet", "npcs": frozenset()}
 
     def test_item_awards_per_tier_and_max(self):
         cfg = ls.LootSweepConfig({"groups": [{"items": [
