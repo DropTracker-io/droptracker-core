@@ -293,6 +293,7 @@ class TestJoinClanRouting:
             [_player()],                    # owned player
             [(10,), (20,)],                 # participating groups (eligibility)
             [(1,)],                         # player is in a participating clan
+            [(20,)],                        # G7 guard: in exactly one clan
             [],                             # not already on a team
             [(3,)],                         # one-RSN: user's players (only self)
             [_team(1, group_id=10), _team(2, group_id=20)],
@@ -305,7 +306,7 @@ class TestJoinClanRouting:
 
     async def test_cannot_pick_other_clans_team(self, client, monkeypatch):
         s = _S(
-            [_cvc()], [_player()], [(10,), (20,)], [(1,)], [], [(3,)],
+            [_cvc()], [_player()], [(10,), (20,)], [(1,)], [(20,)], [], [(3,)],
             [_team(1, group_id=10), _team(2, group_id=20)],
             [(20,)],
         )
@@ -318,7 +319,7 @@ class TestJoinClanRouting:
     async def test_auto_assign_balances_within_own_clan(self, client, monkeypatch):
         s = _S(
             [_cvc(formation_mode="auto_assign")], [_player()],
-            [(10,), (20,)], [(1,)], [], [(3,)],
+            [(10,), (20,)], [(1,)], [(10,)], [], [(3,)],
             [_team(1, group_id=10), _team(2, group_id=10), _team(3, group_id=20)],
             [(10,)],                        # player's clan: 10 -> teams 1 and 2
             [(1, 4), (2, 1), (3, 0)],       # team 3 is smallest overall but foreign
@@ -330,7 +331,7 @@ class TestJoinClanRouting:
 
     async def test_no_team_for_own_clan_yet(self, client, monkeypatch):
         s = _S(
-            [_cvc()], [_player()], [(10,), (20,)], [(1,)], [], [(3,)],
+            [_cvc()], [_player()], [(10,), (20,)], [(1,)], [(20,)], [], [(3,)],
             [_team(1, group_id=10)],
             [(20,)],                        # own clan 20 has no team
         )
@@ -341,13 +342,25 @@ class TestJoinClanRouting:
     async def test_second_account_of_same_user_rejected(self, client, monkeypatch):
         # One-RSN: the user already entered with player 9; player 3 is refused.
         s = _S(
-            [_cvc()], [_player()], [(10,), (20,)], [(1,)], [],
+            [_cvc()], [_player()], [(10,), (20,)], [(1,)], [(20,)], [],
             [(3,), (9,)],   # user owns 3 and 9
             [(9,)],         # player 9 already signed up (other account)
         )
         _wire_events(monkeypatch, s)
         r = await client.post("/api/v1/events/1/join", json={"player_id": 3})
         assert r.status_code == 409
+
+    async def test_multi_clan_member_blocked(self, client, monkeypatch):
+        # G7: the player is in BOTH participating clans, so the web self-join is
+        # refused (409) and they're told to ask a leader to add them to a team.
+        s = _S(
+            [_cvc()], [_player()], [(10,), (20,)], [(1,)],
+            [(10,), (20,)],   # guard: member of two participating clans
+        )
+        _wire_events(monkeypatch, s)
+        r = await client.post("/api/v1/events/1/join", json={"player_id": 3})
+        assert r.status_code == 409
+        assert "Multiple clans" in (await r.get_json()).get("title", "")
 
 
 # ── admin_add_member: team clan constraint ───────────────────────────────────

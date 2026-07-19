@@ -2731,6 +2731,35 @@ def _signup_group_for_player(s, ev, player_id: int) -> int | None:
     return ev.group_id
 
 
+def _assert_single_participating_clan(s, ev, player_id: int) -> None:
+    """clan_vs_clan (G7): a player who belongs to MORE THAN ONE participating
+    clan can't self-place — the system can't tell which side they're on. Block
+    self sign-up (every self-service mode) and route them to a manual admin team
+    add. No-op for standard/global events and single-clan players. One query
+    (accepted-clan membership count) so the self-service path stays cheap."""
+    if (getattr(ev, "mode", None) or "standard") != "clan_vs_clan":
+        return
+    n = (
+        s.query(user_group_association.c.group_id)
+        .join(EventGroup, EventGroup.group_id == user_group_association.c.group_id)
+        .filter(
+            user_group_association.c.player_id == player_id,
+            EventGroup.event_id == ev.id,
+            EventGroup.status == "accepted",
+        )
+        .distinct()
+        .count()
+    )
+    if n > 1:
+        abort_problem(
+            409, "Multiple clans",
+            "You're a member of more than one clan taking part in this event, so "
+            "we can't add you to a team automatically — we don't know which side "
+            "you're on. Ask a leader of the clan you want to play for to add you "
+            "to one of their teams.",
+        )
+
+
 def _user_other_entry(s, ev, event_id: int, user_id: int, player_id: int) -> int | None:
     """A DIFFERENT account of ``user_id`` already signed up or placed on this
     event (one RSN per person). Returns that player_id, or None."""
@@ -2783,6 +2812,9 @@ async def join_event(event_id: int):
             if mode == "self_join" and ev.join_code:
                 if not isinstance(join_code, str) or join_code.strip() != ev.join_code:
                     abort_problem(403, "Join code required", "The join code is missing or wrong.")
+
+            # G7: a player in several participating clans can't self-place.
+            _assert_single_participating_clan(s, ev, player_id)
 
             if _event_membership(s, event_id, player_id):
                 abort_problem(409, "Already joined", "That player is already on a team in this event.")

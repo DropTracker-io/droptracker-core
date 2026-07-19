@@ -50,6 +50,9 @@ class _Q:
     def group_by(self, *a, **k):
         return self
 
+    def distinct(self, *a, **k):
+        return self
+
     def limit(self, *a, **k):
         return self
 
