@@ -162,7 +162,7 @@ class LootSweepGroup:
     """One sub-set: items tied to source NPC(s), with its own completion bonus."""
 
     __slots__ = ("label", "npcs", "npc_keys", "bonus_points", "bonus_max",
-                 "items", "by_key")
+                 "items", "by_key", "image_url")
 
     def __init__(self, raw, cfg: "LootSweepConfig"):
         raw = raw if isinstance(raw, dict) else {}
@@ -174,6 +174,10 @@ class LootSweepGroup:
         self.npc_keys = frozenset(_norm(n) for n in self.npcs)
         self.bonus_points = max(_int(raw.get("bonus_points"), 0), 0)
         self.bonus_max = _clamp(raw.get("bonus_max"), DEFAULT_GROUP_BONUS_MAX, 1, MAX_BONUS_MAX)
+        # Custom boss/category image URL (uploaded); None falls back to the
+        # NPC's own artwork on the board.
+        iu = raw.get("image_url")
+        self.image_url = str(iu).strip()[:255] if iu and str(iu).strip() else None
         self.items: list[LootSweepItem] = []
         self.by_key: dict[str, LootSweepItem] = {}
         for it in (raw.get("items") or []):

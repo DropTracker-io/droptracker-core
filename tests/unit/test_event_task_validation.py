@@ -388,3 +388,18 @@ def test_loot_sweep_unknown_pet_rejected(_stub_ls):
             {"npcs": ["Kree'arra"], "items": [
                 {"item_name": "Not a pet", "source": "pet"}]}]}})
     assert exc.value.status == 422
+
+
+def test_loot_sweep_group_image_url_relative(_stub_ls):
+    out = _validate({"type": "loot_sweep", "config": {"groups": [
+        {"npcs": ["Kree'arra"], "image_url": "/img/x/kreearra.png",
+         "items": [{"item_name": "Armadyl helmet"}]}]}})
+    assert _cfg(out)["groups"][0]["image_url"] == "/img/x/kreearra.png"
+
+
+def test_loot_sweep_group_rejects_external_image(_stub_ls):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "loot_sweep", "config": {"groups": [
+            {"npcs": ["Kree'arra"], "image_url": "https://evil.example/x.png",
+             "items": [{"item_name": "Armadyl helmet"}]}]}})
+    assert exc.value.status == 422

@@ -1163,6 +1163,7 @@ async def get_loot_sweep_board(event_id: int):
     (a standard event could carry a loot_sweep task), keyed off the task type.
     """
     # Lazy: services is stubbed by the unit-test conftest.
+    from db import NpcList
     from services.loot_sweep import LootSweepConfig, counts_from_rows, score_counts
 
     viewer_id = optional_user_id()
@@ -1208,13 +1209,25 @@ async def get_loot_sweep_board(event_id: int):
             ):
                 rows_by.setdefault((r.task_id, r.team_id), []).append(r)
 
-            for task in tasks:
-                cfg = LootSweepConfig(task.config)
+            cfgs = [(task, LootSweepConfig(task.config)) for task in tasks]
+            # Resolve group NPCs -> ids so the board can show the boss's own
+            # artwork (npcdb/{id}.png) when no custom image_url is set.
+            all_npcs = {n for _t, cfg in cfgs for g in cfg.groups for n in g.npcs}
+            npc_id_by_name: dict = {}
+            if all_npcs:
+                for nid, nname in (s.query(NpcList.npc_id, NpcList.npc_name)
+                                   .filter(NpcList.npc_name.in_(list(all_npcs))).all()):
+                    npc_id_by_name.setdefault(nname, nid)
+
+            for task, cfg in cfgs:
                 # Config-derived group/item defs (order matches the per-team
                 # breakdown below, so the grid maps by position).
                 groups_def = [
                     {
                         "label": g.label, "npcs": g.npcs,
+                        "npc_id": next((npc_id_by_name.get(n) for n in g.npcs
+                                        if npc_id_by_name.get(n) is not None), None),
+                        "image_url": g.image_url,
                         "bonus_points": g.bonus_points, "bonus_max": g.bonus_max,
                         "items": [
                             {"item_id": it.item_id, "item_name": it.name,
@@ -1267,6 +1280,74 @@ async def get_loot_sweep_board(event_id: int):
     if viewer_id is not None:
         return private_no_store(jsonify(payload))
     return with_cache_headers(jsonify(payload), max_age=15)
+
+
+_LS_IMAGE_MAX_BYTES = 4 * 1024 * 1024
+_LS_IMAGE_FORMATS = {"PNG": ("png", "image/png"), "JPEG": ("jpg", "image/jpeg"),
+                     "WEBP": ("webp", "image/webp")}
+
+
+@events_bp.post("/events/<int:event_id>/loot-sweep/image")
+async def upload_loot_sweep_image(event_id: int):
+    """Upload a custom boss/category image for a Loot Sweep group → B2 (the
+    board-background pattern: server-side put, bucket CORS allows GET only).
+    Returns the URL; the caller stores it in the group's ``image_url`` config."""
+    import io
+    import uuid as _uuid
+
+    user_id = current_user_id()
+    files = await request.files
+    upload = files.get("file")
+    if upload is None:
+        abort_problem(422, "Invalid body", "A multipart 'file' field is required.")
+    raw = upload.read()
+    if not raw:
+        abort_problem(422, "Empty file", "The uploaded image was empty.")
+    if len(raw) > _LS_IMAGE_MAX_BYTES:
+        abort_problem(422, "File too large", "Loot Sweep images are capped at 4 MB.")
+
+    from PIL import Image, UnidentifiedImageError
+    try:
+        im = Image.open(io.BytesIO(raw))
+        fmt_name = im.format
+        width, height = im.size
+        im.verify()
+    except (UnidentifiedImageError, OSError, ValueError):
+        abort_problem(422, "Unsupported image", "Upload a PNG, JPEG, or WebP image.")
+    fmt = _LS_IMAGE_FORMATS.get(fmt_name or "")
+    if fmt is None:
+        abort_problem(422, "Unsupported image", "Upload a PNG, JPEG, or WebP image.")
+    ext, content_type = fmt
+
+    def _check():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if ev is None:
+                abort_problem(404, "Event not found", f"No event {event_id}.")
+            _assert_event_admin(s, user_id, ev)
+
+    await asyncio.to_thread(_check)
+
+    key = f"dt_uploads/loot_sweep/{event_id}-{_uuid.uuid4().hex[:12]}.{ext}"
+    try:
+        from utils.b2_storage import upload_bytes
+        from web_api.routes.submissions import B2_CDN_BASE_URL
+        await upload_bytes(raw, key, content_type)
+        public_url = f"{B2_CDN_BASE_URL.rstrip('/')}/{key}"
+    except Exception as e:
+        abort_problem(502, "Upload service unavailable", str(e))
+
+    await asyncio.to_thread(_audit_ls_image, user_id, event_id, public_url)
+    return private_no_store(jsonify({"url": public_url, "width": width, "height": height}))
+
+
+def _audit_ls_image(user_id, event_id: int, url: str) -> None:
+    with db_session() as s:
+        ev = s.query(Event).filter(Event.id == event_id).first()
+        s.add(AuditLog(actor_user_id=user_id, group_id=getattr(ev, "group_id", None),
+                       action="event.loot_sweep.image", target=str(event_id),
+                       after=url[:250]))
+        s.commit()
 
 
 # --------------------------------------------------------------------------- #

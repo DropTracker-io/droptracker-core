@@ -12,9 +12,36 @@ service imports (pytest conftest stubs ``services``).
 from __future__ import annotations
 
 import json
+import os
 
 from db import ItemList, NpcList
 from web_api.common import abort_problem
+
+# Hosts a loot_sweep group image may come from — our own upload CDN + site.
+# Arbitrary external URLs are rejected (admins can only point at images we host).
+_ALLOWED_IMAGE_HOSTS = (
+    os.getenv("B2_CDN_BASE_URL", "https://videos.droptracker.io").rstrip("/"),
+    "https://www.droptracker.io",
+    "https://droptracker.io",
+)
+
+
+def _validated_image_url(raw) -> str | None:
+    """A safe image URL for a loot_sweep group (uploaded CDN URL or a relative
+    path on our domain), or None. 422 on an external/garbage URL."""
+    if raw is None or raw == "":
+        return None
+    if not isinstance(raw, str):
+        abort_problem(422, "Invalid config", "Group image_url must be a string URL.")
+    url = raw.strip()
+    if not url:
+        return None
+    if len(url) > 255:
+        abort_problem(422, "Invalid config", "Group image_url is too long.")
+    if url.startswith("/") or any(url.startswith(h + "/") for h in _ALLOWED_IMAGE_HOSTS):
+        return url
+    abort_problem(422, "Invalid image",
+                  "Group images must be uploaded through DropTracker (external URLs aren't allowed).")
 
 # Canonical OSRS skill names as RuneLite reports them in experience payloads.
 OSRS_SKILLS = (
@@ -398,6 +425,9 @@ def _validated_loot_sweep(s, config: dict | None) -> dict:
         }
         if label:
             group["label"] = label
+        img = _validated_image_url(graw.get("image_url"))
+        if img:
+            group["image_url"] = img
         out_groups.append(group)
 
     if unknown_items:
