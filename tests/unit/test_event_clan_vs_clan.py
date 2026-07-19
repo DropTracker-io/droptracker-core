@@ -430,6 +430,66 @@ class TestInviteEndpoint:
         assert r.status_code == 422
 
 
+class TestBulkInvite:
+    def _rec(self, monkeypatch):
+        created = []
+        real = epr.EventGroup  # reuse real columns so `.in_()` filters work
+
+        class _RecEventGroup:
+            event_id = real.event_id
+            group_id = real.group_id
+
+            def __init__(self, **kw):
+                created.append(kw)
+
+        monkeypatch.setattr(epr, "EventGroup", _RecEventGroup)
+        return created
+
+    async def test_invites_new_and_reports_each_skip(self, client, monkeypatch):
+        # requested: 20 new, 30 already on roster, 10 host, 99 missing.
+        s = _S(
+            [_cvc()],                            # event (host group_id=10)
+            [(30,)],                             # existing roster group_ids
+            [(20, "Twenty"), (30, "Thirty")],    # names (10 host + 99 absent)
+        )
+        _wire_participants(monkeypatch, s)
+        monkeypatch.setattr(epr, "_assert_event_admin", lambda *a, **k: None)
+        created = self._rec(monkeypatch)
+        r = await client.post(
+            "/api/v1/events/1/participants/bulk",
+            json={"group_ids": [20, 30, 10, 99]},
+        )
+        assert r.status_code == 200
+        body = await r.get_json()
+        assert [i["group_id"] for i in body["invited"]] == [20]
+        reasons = {sk["group_id"]: sk["reason"] for sk in body["skipped"]}
+        assert set(reasons) == {30, 10, 99}
+        assert "host" in reasons[10].lower()
+        assert len(created) == 1 and created[0]["group_id"] == 20
+        assert created[0]["role"] == "opponent" and created[0]["status"] == "invited"
+        assert s.committed
+
+    async def test_empty_list_rejected(self, client, monkeypatch):
+        _wire_participants(monkeypatch, _S())
+        r = await client.post("/api/v1/events/1/participants/bulk", json={"group_ids": []})
+        assert r.status_code == 422
+
+    async def test_non_int_rejected(self, client, monkeypatch):
+        _wire_participants(monkeypatch, _S())
+        r = await client.post(
+            "/api/v1/events/1/participants/bulk", json={"group_ids": ["x"]}
+        )
+        assert r.status_code == 422
+
+    async def test_standard_event_rejected(self, client, monkeypatch):
+        s = _S([_event()])
+        _wire_participants(monkeypatch, s)
+        r = await client.post(
+            "/api/v1/events/1/participants/bulk", json={"group_ids": [20]}
+        )
+        assert r.status_code == 422
+
+
 class TestAcceptDecline:
     def _row(self, status="invited", role="opponent"):
         return SimpleNamespace(status=status, role=role, responded_at=None)

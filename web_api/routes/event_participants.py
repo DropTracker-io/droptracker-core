@@ -153,6 +153,90 @@ async def invite_participant(event_id: int):
     return private_no_store(jsonify({"ok": True}))
 
 
+# Cap one bulk-invite request — enough for the 12+-clan case with headroom,
+# small enough to bound the roster/existence queries.
+MAX_BULK_INVITE = 30
+
+
+@event_participants_bp.post("/events/<int:event_id>/participants/bulk")
+async def invite_participants_bulk(event_id: int):
+    """Host admin invites SEVERAL opponent clans in one call (the many-clan
+    case). Body ``{"group_ids": [int, ...]}``. Idempotent per clan: a clan
+    already on the roster (any status), the host itself, or a group that does
+    not exist is returned in ``skipped`` with a reason; freshly-invited clans
+    come back in ``invited``. One summary audit row for the batch."""
+    user_id = current_user_id()
+    body = await json_body()
+    raw = body.get("group_ids")
+    if not isinstance(raw, list) or not raw:
+        abort_problem(422, "Invalid group_ids", "'group_ids' must be a non-empty list.")
+    # Dedupe, keep request order, validate ints.
+    requested: list[int] = []
+    seen: set[int] = set()
+    for gid in raw:
+        if not isinstance(gid, int):
+            abort_problem(422, "Invalid group_ids", "'group_ids' must contain only integers.")
+        if gid not in seen:
+            seen.add(gid)
+            requested.append(gid)
+    if len(requested) > MAX_BULK_INVITE:
+        abort_problem(422, "Too many clans",
+                      f"At most {MAX_BULK_INVITE} clans per invite.")
+
+    def _apply():
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _require_clan_vs_clan(ev)
+            _assert_event_not_over(ev)
+            # Host admin + events entitlement — the host "pays", opponents don't.
+            _assert_event_admin(s, user_id, ev.group_id)
+
+            existing = {
+                gid for (gid,) in
+                s.query(EventGroup.group_id)
+                .filter(EventGroup.event_id == event_id,
+                        EventGroup.group_id.in_(requested))
+                .all()
+            }
+            names = dict(
+                s.query(Group.group_id, Group.group_name)
+                .filter(Group.group_id.in_(requested))
+                .all()
+            )
+            invited: list[dict] = []
+            skipped: list[dict] = []
+            for gid in requested:
+                if gid == ev.group_id:
+                    skipped.append({"group_id": gid, "group_name": names.get(gid),
+                                    "reason": "That clan is the host of this event."})
+                    continue
+                if gid not in names:
+                    skipped.append({"group_id": gid, "group_name": None,
+                                    "reason": "No such clan."})
+                    continue
+                if gid in existing:
+                    skipped.append({"group_id": gid, "group_name": names.get(gid),
+                                    "reason": "Already on the roster."})
+                    continue
+                s.add(EventGroup(
+                    event_id=event_id, group_id=gid, role="opponent",
+                    status="invited", invited_by_user_id=user_id,
+                ))
+                invited.append({"group_id": gid, "group_name": names.get(gid)})
+            if invited:
+                s.add(AuditLog(
+                    actor_user_id=user_id, group_id=ev.group_id,
+                    action="event.participant.invite_bulk",
+                    target=f"web_events.{event_id}",
+                    before=None, after=f"invited:{len(invited)}",
+                ))
+                s.commit()
+            return {"invited": invited, "skipped": skipped}
+
+    result = await asyncio.to_thread(_apply)
+    return private_no_store(jsonify(result))
+
+
 @event_participants_bp.get("/events/<int:event_id>/participants")
 async def list_participants(event_id: int):
     user_id = current_user_id()
