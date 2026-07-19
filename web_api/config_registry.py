@@ -67,6 +67,12 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "notify_levels", "type": "boolean", "default": False, "seasonal": True},
     {"key": "level_minimum_for_notifications", "type": "int", "default": 1, "min": 1, "max": 99},
     {"key": "level_increment", "type": "int", "default": 1, "min": 1, "max": 99},
+    # Virtual (100-126) skill level-ups. Off by default so level 99 is the
+    # final per-skill level-up notification unless a group opts in.
+    {"key": "notify_virtual_levels", "type": "boolean", "default": False},
+    # Combat level increases. The plugin reports these as level-ups; they are
+    # their own opt-in family and ignore the min/increment skill filters.
+    {"key": "notify_combat_levels", "type": "boolean", "default": False},
     # TOTAL-level milestones (e.g. 1500,2000,2277) that always notify.
     {"key": "level_milestones", "type": "csv", "default": ""},
     # Post-99 XP notification interval; 0 disables. Plugin reports at 1M

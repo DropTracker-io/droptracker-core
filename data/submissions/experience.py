@@ -109,6 +109,45 @@ def _parse_int_list_config(value) -> list[int]:
         return []
 
 
+def _skill_qualifies_for_group(
+    skill: dict,
+    *,
+    minimum_level: int,
+    level_increment: int,
+    notify_virtual_levels: bool,
+    notify_combat_levels: bool,
+) -> bool:
+    """Decide whether one leveled skill passes a group's level filters.
+
+    Evaluated per skill, so non-qualifying skills in a coalesced submission
+    no longer ride along with a qualifying one. Rules:
+      - "combat" is its own opt-in family (notify_combat_levels) and ignores
+        the minimum/increment skill filters (those are 1-99 skill concepts;
+        combat runs 3-126).
+      - Real skills check every level crossed by the gain, so a multi-level
+        jump (e.g. a lamp taking a skill 98 -> 100) still announces the 99:
+        a crossed level qualifies when it is >= minimum_level and aligned to
+        level_increment; level 99 always qualifies regardless of increment;
+        levels above 99 (virtual levels) only count when
+        notify_virtual_levels is enabled.
+    """
+    new_level = _safe_int(skill.get("new_level"), default=0)
+    if new_level < 1:
+        return False
+    if skill.get("skill_key") == "combat":
+        return notify_combat_levels
+    gained = _safe_int(skill.get("levels_gained"), default=0)
+    start = max(new_level - gained + 1, 1) if gained >= 1 else new_level
+    for crossed in range(start, new_level + 1):
+        if crossed > 99 and not notify_virtual_levels:
+            continue
+        if crossed < minimum_level:
+            continue
+        if crossed == 99 or level_increment <= 1 or crossed % level_increment == 0:
+            return True
+    return False
+
+
 def _parse_skill_data(experience_data: dict) -> dict:
     """Parse skill-specific data from the experience submission.
     
@@ -717,6 +756,51 @@ async def experience_processor(experience_data, external_session=None):
         player_groups = get_player_groups_with_global(session, player)
     
         stage = "group_loop"
+
+        def _build_notification_data(payload_skills):
+            """Assemble a level_up/total_level_milestone payload from a
+            per-group-filtered skill list, so notifications only show the
+            skills that actually passed that group's filters."""
+            names = ", ".join(
+                [s.get("skill_name", "") for s in payload_skills if s.get("skill_name")]
+            ) or ""
+            text = ", ".join(
+                [
+                    f"{s.get('skill_name')} {s.get('new_level')} (+{s.get('levels_gained')})"
+                    if _safe_int(s.get("levels_gained"), default=0) > 0
+                    else f"{s.get('skill_name')} {s.get('new_level')}"
+                    for s in payload_skills
+                    if s.get("skill_name")
+                ]
+            )
+            return {
+                "player_name": player_name,
+                "player_id": player_id,
+                # Legacy fields (kept for older templates)
+                "skill_name": names or (skill_name or ""),
+                "new_level": max(
+                    (_safe_int(s.get("new_level"), default=0) for s in payload_skills),
+                    default=0,
+                ),
+                "levels_gained": sum(
+                    (_safe_int(s.get("levels_gained"), default=0) for s in payload_skills)
+                ),
+                "xp_total": xp_total,
+                # New multi-skill fields
+                "skills": payload_skills,
+                "skills_names": names,
+                "skills_text": text,
+                "total_level": total_level,
+                "total_xp": total_xp,
+                "combat_level": combat_level,
+                "image_url": image_url if image_url else "",
+                "plugin_version": plugin_version,
+            }
+
+        # Submission-level text for the plugin response (per-group payloads
+        # below only contain each group's qualifying skills).
+        submission_skills_text = _build_notification_data(skills).get("skills_text", "")
+
         for group in player_groups:
             await asyncio.sleep(0)  # Yield to event loop
             group_id = group.group_id
@@ -725,99 +809,70 @@ async def experience_processor(experience_data, external_session=None):
             # if not is_feature_active_for_group(group_id=group_id, feature_key='level_notifications', session=session):
             #     continue
 
-            # Check if group has level notifications enabled
-            level_notify_config = (
-                session.query(GroupConfiguration)
-                .filter(
-                    GroupConfiguration.group_id == group_id,
-                    GroupConfiguration.config_key == "notify_levels",
-                )
-                .first()
-            )
-            minimum_level = (
-                session.query(GroupConfiguration)
-                .filter(
-                    GroupConfiguration.group_id == group_id,
-                    GroupConfiguration.config_key == "level_minimum_for_notifications",
-                )
-                .first()
-            )
-            minimum_level_to_notify = (
-                _safe_int(getattr(minimum_level, "config_value", None), default=1) if minimum_level else 1
-            )
-            # Canonical key is level_milestones (what the web config editor
-            # writes); level_milestones_to_notify is the legacy key this
-            # processor used to read. These are TOTAL-level milestones.
-            milestone_levels = (
+            # Fetch the level-notification config family in one query.
+            config_rows = (
                 session.query(GroupConfiguration)
                 .filter(
                     GroupConfiguration.group_id == group_id,
                     GroupConfiguration.config_key.in_(
-                        ["level_milestones", "level_milestones_to_notify"]
+                        [
+                            "notify_levels",
+                            "level_minimum_for_notifications",
+                            "level_increment",
+                            "notify_virtual_levels",
+                            "notify_combat_levels",
+                            "level_milestones",
+                            "level_milestones_to_notify",
+                        ]
                     ),
-                    GroupConfiguration.config_value.isnot(None),
-                    GroupConfiguration.config_value != "",
                 )
-                .order_by(
-                    # Prefer the canonical key when both rows exist.
-                    (GroupConfiguration.config_key != "level_milestones").asc()
-                )
-                .first()
+                .all()
             )
-            milestone_levels_to_notify = _parse_int_list_config(milestone_levels)
-            level_increment_config = (
-                session.query(GroupConfiguration)
-                .filter(
-                    GroupConfiguration.group_id == group_id,
-                    GroupConfiguration.config_key == "level_increment",
-                )
-                .first()
+            cfg = {row.config_key: row.config_value for row in config_rows}
+
+            # notify_levels is the master toggle for the level/XP family.
+            if not is_truthy_config(cfg.get("notify_levels")):
+                continue
+
+            minimum_level_to_notify = _safe_int(
+                cfg.get("level_minimum_for_notifications"), default=1
             )
-            level_increment = (
-                _safe_int(getattr(level_increment_config, "config_value", None), default=1)
-                if level_increment_config
-                else 1
-            )
+            if minimum_level_to_notify < 1:
+                minimum_level_to_notify = 1
+            level_increment = _safe_int(cfg.get("level_increment"), default=1)
             if level_increment < 1:
                 level_increment = 1
+            notify_virtual_levels = is_truthy_config(cfg.get("notify_virtual_levels"))
+            notify_combat_levels = is_truthy_config(cfg.get("notify_combat_levels"))
+            # Canonical key is level_milestones (what the web config editor
+            # writes); level_milestones_to_notify is the legacy key this
+            # processor used to read. These are TOTAL-level milestones.
+            milestone_levels_to_notify = _parse_int_list_config(
+                cfg.get("level_milestones") or cfg.get("level_milestones_to_notify")
+            )
+            is_total_milestone = (
+                total_level is not None
+                and total_level >= 1
+                and total_level in milestone_levels_to_notify
+            )
 
-            # Per-group diagnostic print (helps isolate config-related failures)
-            # try:
-            #     print(
-            #         "[EXP] group_diag "
-            #         f"group_id={group_id} "
-            #         f"notify_levels={getattr(level_notify_config, 'config_value', None)} "
-            #         f"min_level={getattr(minimum_level, 'config_value', None)} "
-            #         f"milestones={getattr(milestone_levels, 'config_value', None)} "
-            #         f"parsed_milestones={milestone_levels_to_notify}"
-            #     )
-            # except Exception:
-            #     pass
-
-            def is_milestone_level():
-                if total_level is None or total_level < 1:
-                    return False
-                return total_level in milestone_levels_to_notify
-
-            max_new_level = max((_safe_int(s.get("new_level"), default=0) for s in skills), default=0)
-            if max_new_level < minimum_level_to_notify and not is_milestone_level():
-                continue
-            # level_increment: only notify every Nth level (1 = every level).
-            # Level 99 always notifies; a milestone total level always notifies.
-            if level_increment > 1 and not is_milestone_level():
-                aligned = any(
-                    _safe_int(s.get("new_level"), default=0) >= minimum_level_to_notify
-                    and (
-                        _safe_int(s.get("new_level"), default=0) % level_increment == 0
-                        or _safe_int(s.get("new_level"), default=0) == 99
-                    )
-                    for s in skills
+            # Per-skill filtering: only skills that individually pass this
+            # group's filters appear in its notification. Previously one
+            # qualifying skill dragged every other skill in the submission
+            # (pre-99 tag-alongs, combat levels) into the announcement.
+            qualifying_skills = [
+                s
+                for s in skills
+                if _skill_qualifies_for_group(
+                    s,
+                    minimum_level=minimum_level_to_notify,
+                    level_increment=level_increment,
+                    notify_virtual_levels=notify_virtual_levels,
+                    notify_combat_levels=notify_combat_levels,
                 )
-                if not aligned:
-                    continue
-            if not level_notify_config:
-                continue
-            if not is_truthy_config(level_notify_config.config_value):
+            ]
+
+            if not qualifying_skills and not is_total_milestone:
                 continue
 
             # Check screenshot requirement
@@ -830,55 +885,26 @@ async def experience_processor(experience_data, external_session=None):
                     )
                     continue
 
-            # Build notification data
-            skills_names = ", ".join([s.get("skill_name", "") for s in skills if s.get("skill_name")]) or ""
-            skills_text = ", ".join(
-                [
-                    f"{s.get('skill_name')} {s.get('new_level')} (+{s.get('levels_gained')})"
-                    if _safe_int(s.get("levels_gained"), default=0) > 0
-                    else f"{s.get('skill_name')} {s.get('new_level')}"
-                    for s in skills
-                    if s.get("skill_name")
-                ]
-            )
-            notification_data = {
-                "player_name": player_name,
-                "player_id": player_id,
-                # Legacy fields (kept for older templates)
-                "skill_name": skills_names or (skill_name or ""),
-                "new_level": max_new_level,
-                "levels_gained": sum((_safe_int(s.get("levels_gained"), default=0) for s in skills)),
-                "xp_total": xp_total,
-                # New multi-skill fields
-                "skills": skills,
-                "skills_names": skills_names,
-                "skills_text": skills_text,
-                "total_level": total_level,
-                "total_xp": total_xp,
-                "combat_level": combat_level,
-                "image_url": image_url if image_url else "",
-                "plugin_version": plugin_version,
-            }
-
             stage = "create_group_notifications"
-            await create_notification(
-                "level_up",
-                player_id,
-                notification_data,
-                group_id,
-                existing_session=session if use_external_session else None,
-            )
-            #print(f"[EXP] Created level_up notification for group {group_id}")
-
-            if is_milestone_level():
+            if qualifying_skills:
                 await create_notification(
-                    "total_level_milestone",
+                    "level_up",
                     player_id,
-                    notification_data,
+                    _build_notification_data(qualifying_skills),
                     group_id,
                     existing_session=session if use_external_session else None,
                 )
-                #print(f"[EXP] Created total_level_milestone notification for group {group_id}")
+
+            if is_total_milestone:
+                # Milestone total levels always notify; show every skill from
+                # the submission for context, filters notwithstanding.
+                await create_notification(
+                    "total_level_milestone",
+                    player_id,
+                    _build_notification_data(skills),
+                    group_id,
+                    existing_session=session if use_external_session else None,
+                )
 
         # Personal submission DM (supporter perk): queued once per level-up,
         # OUTSIDE the group loop — group notify/min-level/screenshot criteria
@@ -917,10 +943,7 @@ async def experience_processor(experience_data, external_session=None):
 
         stage = "done"
         #print(f"[EXP] === EXPERIENCE PROCESSOR END ===")
-        try:
-            summary = notification_data.get("skills_text") if "notification_data" in locals() else ""
-        except Exception:
-            summary = ""
+        summary = submission_skills_text
         return SubmissionResponse(
             success=True,
             message=f"Level-up recorded: {summary}" if summary else "Level-up recorded.",
