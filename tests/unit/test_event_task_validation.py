@@ -424,6 +424,20 @@ def test_loot_sweep_virtual_without_pieces_rejected(_stub_ls):
     assert exc.value.status == 422
 
 
+def test_loot_sweep_same_group_name_reuse_allowed(_stub_ls):
+    # An ancestral piece as its own entry AND inside an "any" pool in the SAME
+    # group is allowed (additive scoring); no 422.
+    out = _validate({"type": "loot_sweep", "config": {"groups": [
+        {"npcs": ["Kree'arra"], "bonus_points": 10, "items": [
+            {"item_name": "Armadyl helmet", "points": 9},
+            {"item_name": "Any armadyl piece", "virtual": True, "required": 2,
+             "match_names": ["Armadyl helmet", "Armadyl chestplate"]},
+        ]}]}})
+    items = _cfg(out)["groups"][0]["items"]
+    assert items[0]["item_name"] == "Armadyl helmet"
+    assert items[1]["match_names"] == ["Armadyl helmet", "Armadyl chestplate"]
+
+
 def test_loot_sweep_unknown_name_still_rejected_without_virtual(_stub_ls):
     # A typo'd name with no aliases and no virtual flag is still an error.
     with pytest.raises(ProblemException) as exc:

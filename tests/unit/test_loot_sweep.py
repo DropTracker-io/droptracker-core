@@ -294,6 +294,30 @@ class TestMatchNamesAndRequired:
         assert b["groups"][0]["items"][0]["count"] == 3
         assert b["groups"][0]["completions"] == 1  # required 3 met
 
+    def test_same_name_in_two_entries_scores_both_additively(self):
+        # An ancestral piece that's BOTH an individual entry and a member of an
+        # "any 3" pool in the same group scores in each (the additive model).
+        cfg = ls.LootSweepConfig({"decay_percent": 20, "groups": [{
+            "npcs": ["Great Olm"],
+            "bonus_points": 25,
+            "items": [
+                {"item_name": "Ancestral hat", "item_id": 21018, "points": 5},
+                {"item_name": "Any ancestral piece", "virtual": True, "points": 2,
+                 "required": 3,
+                 "match_names": ["Ancestral hat", "Ancestral robe top",
+                                 "Ancestral robe bottom"]},
+            ],
+        }]})
+        b = ls.score_counts({"ancestral hat": 1}, cfg)
+        indiv, pool = b["groups"][0]["items"]
+        # The single drop credits the individual entry (5) AND the pool (2).
+        assert indiv["count"] == 1 and indiv["points"] == 5
+        assert pool["count"] == 1 and pool["points"] == 2
+        assert b["total"] == 7  # additive, no group bonus yet (pool needs 3)
+        # The matcher registers the piece once (merged), so intake records one row.
+        idx = cfg.matcher_index()
+        assert idx["ancestral hat"]["source"] == "drop"
+
     def test_required_gates_group_completion(self):
         cfg = ls.LootSweepConfig({"decay_percent": 20, "groups": [{
             "npcs": ["Great Olm"],

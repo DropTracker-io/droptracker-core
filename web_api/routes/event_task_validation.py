@@ -318,11 +318,15 @@ def _validated_ls_item(s, raw, *, default_apt: int, unknown: list, seen: dict,
                 unknown.append(label or "(empty)")
                 return None
     key = canonical.lower()
-    if key in seen:
+    # A name may credit SEVERAL entries in the SAME group (additive: e.g. an
+    # ancestral piece scores its own row AND feeds an "any 3 ancestral" pool),
+    # but not across DIFFERENT groups — that would merge the two bosses' NPC
+    # scopes and cross-credit their receipts.
+    if key in seen and seen[key] != group_label:
         abort_problem(422, "Invalid config",
                       f"'{canonical}' is listed in more than one group "
                       f"('{seen[key]}' and '{group_label}') — an item belongs to one group.")
-    seen[key] = group_label
+    seen.setdefault(key, group_label)
     try:
         pts = int(round(float(entry.get("points", 1) or 1)))
     except (TypeError, ValueError):
@@ -366,11 +370,12 @@ def _validated_ls_item(s, raw, *, default_apt: int, unknown: list, seen: dict,
         akey = acanon.lower()
         if akey == key or any(x.lower() == akey for x in aliases):
             continue
-        if akey in seen:
+        # Same-group reuse is allowed (additive scoring); cross-group is not.
+        if akey in seen and seen[akey] != group_label:
             abort_problem(422, "Invalid config",
-                          f"'{acanon}' already appears under '{seen[akey]}' — a name can "
-                          f"only credit one entry per task.")
-        seen[akey] = group_label
+                          f"'{acanon}' already appears under a different group "
+                          f"('{seen[akey]}') — a name can't credit entries in two groups.")
+        seen.setdefault(akey, group_label)
         aliases.append(acanon)
     if aliases:
         item["match_names"] = aliases
