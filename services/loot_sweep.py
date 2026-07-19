@@ -396,6 +396,23 @@ def score_counts(counts: dict[str, int], config: LootSweepConfig) -> dict:
     }
 
 
+def icon_ids_for(item: "LootSweepItem", alias_id_by_key: dict) -> list:
+    """Ordered, de-duped display icons for an entry: the primary item id (real
+    items only — a virtual label has none) then each match name's id, looked up
+    in ``alias_id_by_key`` (keyed by :func:`_norm` of the name). Used by the
+    board + receipts endpoints so a pooled/virtual entry shows every piece it
+    stands for. Lives here (beside ``_norm``) so it's importable + unit-tested
+    rather than duplicated as an endpoint closure."""
+    ids: list = []
+    if item.item_id and not item.virtual:
+        ids.append(int(item.item_id))
+    for a in item.match_names:
+        aid = alias_id_by_key.get(_norm(a))
+        if aid and int(aid) not in ids:
+            ids.append(int(aid))
+    return ids
+
+
 def score_rows(rows: Iterable, config: LootSweepConfig) -> dict:
     """Convenience: :func:`score_counts` straight from ledger rows."""
     return score_counts(counts_from_rows(rows), config)

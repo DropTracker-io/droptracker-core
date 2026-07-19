@@ -1165,7 +1165,8 @@ async def get_loot_sweep_board(event_id: int):
     """
     # Lazy: services is stubbed by the unit-test conftest.
     from db import NpcList
-    from services.loot_sweep import LootSweepConfig, counts_from_rows, score_counts
+    from services.loot_sweep import (LootSweepConfig, counts_from_rows, score_counts,
+                                     icon_ids_for, _norm)
 
     viewer_id = optional_user_id()
 
@@ -1232,18 +1233,6 @@ async def get_loot_sweep_board(event_id: int):
                                    .filter(ItemList.item_name.in_(list(all_aliases))).all()):
                     item_id_by_name.setdefault(_norm(iname), iid)
 
-            def _icon_ids(it) -> list:
-                # Ordered, de-duped icons: primary (real items) first, then each
-                # match name. A virtual entry contributes only its pieces.
-                ids: list = []
-                if it.item_id and not it.virtual:
-                    ids.append(int(it.item_id))
-                for a in it.match_names:
-                    aid = item_id_by_name.get(_norm(a))
-                    if aid and int(aid) not in ids:
-                        ids.append(int(aid))
-                return ids
-
             for task, cfg in cfgs:
                 # Config-derived group/item defs (order matches the per-team
                 # breakdown below, so the grid maps by position).
@@ -1260,7 +1249,8 @@ async def get_loot_sweep_board(event_id: int):
                              "max_awards": it.max_awards,
                              "counts_for_group": it.counts_for_group, "source": it.source,
                              "required": it.required, "match_names": it.match_names,
-                             "virtual": it.virtual, "icon_ids": _icon_ids(it)}
+                             "virtual": it.virtual,
+                             "icon_ids": icon_ids_for(it, item_id_by_name)}
                             for it in g.items
                         ],
                     }
@@ -1324,7 +1314,7 @@ async def get_loot_sweep_receipts(event_id: int):
     same ``item_points`` fold the engine scores with, so the card can never
     disagree with the board."""
     from db import Player
-    from services.loot_sweep import LootSweepConfig, _norm, item_points
+    from services.loot_sweep import LootSweepConfig, _norm, icon_ids_for, item_points
 
     viewer_id = optional_user_id()
     try:
@@ -1400,14 +1390,12 @@ async def get_loot_sweep_receipts(event_id: int):
                 })
             # Per-piece icons for a pooled/virtual entry (label first has none).
             from db import ItemList
-            icon_ids: list = []
-            if item.item_id and not item.virtual:
-                icon_ids.append(int(item.item_id))
+            alias_ids: dict = {}
             if item.match_names:
                 for iid, iname in (s.query(ItemList.item_id, ItemList.item_name)
                                    .filter(ItemList.item_name.in_(item.match_names)).all()):
-                    if iid and int(iid) not in icon_ids:
-                        icon_ids.append(int(iid))
+                    alias_ids.setdefault(_norm(iname), iid)
+            icon_ids = icon_ids_for(item, alias_ids)
             return {
                 "event_id": event_id,
                 "task_id": task_id,

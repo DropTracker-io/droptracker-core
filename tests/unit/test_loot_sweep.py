@@ -249,6 +249,26 @@ class TestMatchNamesAndRequired:
         assert item["count"] == 2 and item["points"] == 9
         assert b["groups"][0]["awarded"] == 1  # both entries collected → bonus
 
+    def test_icon_ids_for_orders_primary_then_pieces(self):
+        cfg = ls.LootSweepConfig({"groups": [{
+            "npcs": ["Vardorvis"],
+            "items": [
+                {"item_name": "Ultor vestige", "item_id": 28281,
+                 "match_names": ["Gold ring"]},
+                {"item_name": "Any ancestral piece", "virtual": True,
+                 "match_names": ["Ancestral hat", "Ancestral robe top"]},
+            ],
+        }]})
+        alias_ids = {"gold ring": 1635, "ancestral hat": 21018,
+                     "ancestral robe top": 21021}
+        vestige, ancestral = cfg.groups[0].items
+        # Real item: its own icon first, then the alias.
+        assert ls.icon_ids_for(vestige, alias_ids) == [28281, 1635]
+        # Virtual label: only the pieces (no own icon).
+        assert ls.icon_ids_for(ancestral, alias_ids) == [21018, 21021]
+        # Missing alias ids are skipped, not crashed on.
+        assert ls.icon_ids_for(vestige, {}) == [28281]
+
     def test_virtual_label_pools_pieces_without_own_key(self):
         cfg = ls.LootSweepConfig({"decay_percent": 20, "groups": [{
             "npcs": ["Great Olm"],
