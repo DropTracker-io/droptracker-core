@@ -1282,6 +1282,105 @@ async def get_loot_sweep_board(event_id: int):
     return with_cache_headers(jsonify(payload), max_age=15)
 
 
+@events_bp.get("/events/<int:event_id>/loot-sweep/receipts")
+async def get_loot_sweep_receipts(event_id: int):
+    """Per-team receipt ledger for ONE loot_sweep item — powers the board's
+    hover card: who pulled each receipt, when, the points it credited, and the
+    screenshot proof when the ledger row carries one.
+
+    Query: ``task_id`` (the loot_sweep set task) + ``item`` (item name,
+    normalized server-side to the config key). Receipts come back in credit
+    order per team; ``n`` is the 1-based ordinal of the row's FIRST receipt
+    (a quantity-3 stack consumes ordinals n..n+2), and ``points`` is exactly
+    what that row added under the decay schedule (0 once past the cap) — the
+    same ``item_points`` fold the engine scores with, so the card can never
+    disagree with the board."""
+    from db import Player
+    from services.loot_sweep import LootSweepConfig, _norm, item_points
+
+    viewer_id = optional_user_id()
+    try:
+        task_id = int(request.args.get("task_id", ""))
+    except ValueError:
+        abort_problem(400, "Bad request", "task_id must be an integer.")
+    item_q = (request.args.get("item") or "").strip()
+    if not item_q:
+        abort_problem(400, "Bad request", "item is required.")
+
+    def _load():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                return None
+            task = (
+                s.query(EventTask)
+                .filter(EventTask.id == task_id,
+                        EventTask.event_id == event_id,
+                        EventTask.type == "loot_sweep")
+                .first()
+            )
+            if not task:
+                return None
+            cfg = LootSweepConfig(task.config)
+            key = _norm(item_q)
+            item = next((i for g in cfg.groups for i in g.items if i.key == key), None)
+            if item is None:
+                return None
+            rows = (
+                s.query(EventCompletion, Player.player_name)
+                .outerjoin(Player, Player.player_id == EventCompletion.player_id)
+                .filter(EventCompletion.event_id == event_id,
+                        EventCompletion.task_id == task_id,
+                        EventCompletion.status.in_(_APPLIED_STATUSES))
+                .order_by(EventCompletion.created_at.asc(), EventCompletion.id.asc())
+                .all()
+            )
+            teams: dict[int, dict] = {}
+            cum: dict[int, int] = {}
+            for r, player_name in rows:
+                if (r.source_type or "") == "bonus":
+                    continue
+                if r.team_id is None or _norm(r.matched_target) != key:
+                    continue
+                qty = max(int(r.quantity or 1), 1)
+                before = cum.get(r.team_id, 0)
+                after = before + qty
+                cum[r.team_id] = after
+                pts = (
+                    item_points(item.points, after, item.max_awards,
+                                cfg.decay_percent, item.awards_per_tier, cfg.decay_mode)
+                    - item_points(item.points, before, item.max_awards,
+                                  cfg.decay_percent, item.awards_per_tier, cfg.decay_mode)
+                )
+                entry = teams.setdefault(r.team_id, {"team_id": r.team_id, "receipts": []})
+                entry["receipts"].append({
+                    "n": before + 1,
+                    "quantity": qty,
+                    "player_id": r.player_id,
+                    "player_name": player_name,
+                    "received_at": int(r.created_at.timestamp()) if r.created_at else None,
+                    "points": int(pts),
+                    "proof_url": r.proof_url,
+                    "source_type": r.source_type,
+                })
+            return {
+                "event_id": event_id,
+                "task_id": task_id,
+                "item_name": item.name,
+                "item_id": item.item_id,
+                "teams": list(teams.values()),
+            }
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(404, "Not found", f"No event {event_id}, or no such set/item.")
+    if viewer_id is not None:
+        return private_no_store(jsonify(payload))
+    return with_cache_headers(jsonify(payload), max_age=15)
+
+
 _LS_IMAGE_MAX_BYTES = 4 * 1024 * 1024
 _LS_IMAGE_FORMATS = {"PNG": ("png", "image/png"), "JPEG": ("jpg", "image/jpeg"),
                      "WEBP": ("webp", "image/webp")}
