@@ -113,10 +113,14 @@ def activation_blocker_items(session, event, now: Optional[datetime] = None) -> 
             .all()
         ]
         if len(accepted) < 2:
+            have = len(accepted)
             blockers.append({
                 "code": "cvc_needs_two_clans", "target": "teams",
-                "message": ("A clan-vs-clan event needs at least two accepted clans "
-                            "(the host plus an opponent that accepted its invitation)."),
+                "message": (
+                    f"A clan-vs-clan event needs at least two accepted clans — "
+                    f"{have} {'clan has' if have == 1 else 'clans have'} accepted so "
+                    f"far. Invite more clans, or wait for invited clans to accept."
+                ),
             })
         # Teams are optional: with none, activation seeds one whole-clan team
         # per clan (anyone-vs-anyone). But a half-built roster is ambiguous, so
@@ -510,11 +514,11 @@ def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> in
     # G7: players in more than one auto-clan team's clan are ambiguous — never
     # auto-enrol them (an admin adds them to a specific team explicitly). The
     # leave pass below is left untouched, so a manual placement still stands.
-    _clan_seen: dict = {}
-    for members in clan_members.values():
-        for pid in members:
-            _clan_seen[pid] = _clan_seen.get(pid, 0) + 1
-    multi_clan = {pid for pid, n in _clan_seen.items() if n > 1}
+    # Keys are team ids here, but each auto team is one clan, so counting across
+    # them counts across clans (the matcher's per-gid helper, reused).
+    from services import event_engine
+
+    multi_clan = event_engine.multi_clan_players(clan_members, clan_members.keys())
 
     auto_team_ids = [t.id for t in auto_teams]
     removed = 0

@@ -736,6 +736,20 @@ def _task_to_dict(task) -> dict:
     }
 
 
+def multi_clan_players(members_by_gid: dict, gids) -> set:
+    """Player ids that belong to MORE THAN ONE of ``gids`` (G7). Each key of
+    ``members_by_gid`` maps a group id to its member player-id set/iterable.
+    Pure and O(total memberships) — the ambiguous-membership exclusion shared
+    by the matcher (roster-less credit) and roster sync."""
+    counts: dict = {}
+    for gid in gids:
+        # set() per clan: duplicate association rows (the NULL-user_id insert
+        # race) must not read as membership in two clans.
+        for pid in set(members_by_gid.get(gid, ())):
+            counts[pid] = counts.get(pid, 0) + 1
+    return {pid for pid, n in counts.items() if n > 1}
+
+
 def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
     """Load all active events + tasks + bingo cells + rosters into a
     :class:`MatcherState`. One query burst per refresh, not per submission."""
@@ -803,13 +817,10 @@ def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
         gids_by_event: dict = {}
         for t in auto_teams:
             gids_by_event.setdefault(team_event[t.id], set()).add(t.group_id)
-        multi_clan_by_event: dict = {}
-        for ev_id, ev_gids in gids_by_event.items():
-            counts: dict = {}
-            for gid in ev_gids:
-                for pid in members_by_gid.get(gid, ()):
-                    counts[pid] = counts.get(pid, 0) + 1
-            multi_clan_by_event[ev_id] = {pid for pid, n in counts.items() if n > 1}
+        multi_clan_by_event = {
+            ev_id: multi_clan_players(members_by_gid, ev_gids)
+            for ev_id, ev_gids in gids_by_event.items()
+        }
         for t in auto_teams:
             event_id = team_event[t.id]
             excluded = multi_clan_by_event.get(event_id, ())
