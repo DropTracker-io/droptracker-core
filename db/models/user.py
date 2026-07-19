@@ -56,7 +56,10 @@ class User(Base):
     }
 
     user_id = Column(Integer, primary_key=True, autoincrement=True)
-    discord_id = Column(String(35))
+    # Unique since web56a: one users row per Discord account. All create paths
+    # (web OAuth, try_create_user, group_creation._ensure_user) must catch
+    # IntegrityError and re-select the winner on insert races.
+    discord_id = Column(String(35), unique=True)
     date_added = Column(DateTime, default=func.now())
     auth_token = Column(String(16), nullable=False)
     date_updated = Column(DateTime, onupdate=func.now(), default=func.now())

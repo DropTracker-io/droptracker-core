@@ -27,6 +27,8 @@ import secrets
 from datetime import datetime, timezone
 from typing import Optional, TypedDict
 
+from sqlalchemy.exc import IntegrityError
+
 from db.clan_sync import insert_xf_group
 from db.models import (
     Group,
@@ -109,6 +111,12 @@ def _ensure_user(discord_user_id: str, username: Optional[str]) -> Optional[User
         )
         session.add(new_user)
         session.commit()
+    except IntegrityError:
+        # Lost an insert race — users.discord_id is unique, so another path
+        # (bot command, web OAuth login) created the row between our check and
+        # commit. Roll back and return the winner.
+        session.rollback()
+        return session.query(User).filter(User.discord_id == discord_user_id).first()
     except Exception as exc:  # noqa: BLE001 - mirror bot's defensive handling
         session.rollback()
         print(f"[create_web_group] Failed to create user {discord_user_id}: {exc}")

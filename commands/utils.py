@@ -17,6 +17,7 @@ import json
 import subprocess
 from datetime import datetime
 from interactions import SlashContext, Embed, BaseContext
+from sqlalchemy.exc import IntegrityError
 from db.models import Session, User, Group, Guild, UserConfiguration, session
 from services.points import award_points_to_player
 from utils.format import get_command_id
@@ -49,51 +50,68 @@ async def try_create_user(discord_id: str = None, username: str = None, ctx: Sla
             discord_id = ctx.user.id
             if len(username) > 20:
                 username = username[:20] # truncuate name to 20 characters for database limits
-    user = None
-    try:
-        group = None
-        if ctx:
-            if ctx.guild_id:
-                guild_ob = session.query(Guild).filter(Guild.guild_id == ctx.guild_id).first()
-                if guild_ob:
-                    group = session.query(Group).filter(Group.group_id == guild_ob.group_id).first()
-        if group:
-            new_user: User = User(auth_token="", discord_id=str(discord_id), username=str(username), groups=[group])
-        else:
-            new_user: User = User(auth_token="", discord_id=str(discord_id), username=str(username))
-        if new_user:
+    discord_id = str(discord_id)
+    # Re-check here rather than trusting the caller: callers race each other
+    # (other commands, tickets, web OAuth login) and this shared session's
+    # REPEATABLE READ snapshot can predate a row another process just made.
+    user = session.query(User).filter(User.discord_id == discord_id).first()
+    new_user = None
+    if user is None:
+        try:
+            group = None
+            if ctx:
+                if ctx.guild_id:
+                    guild_ob = session.query(Guild).filter(Guild.guild_id == ctx.guild_id).first()
+                    if guild_ob:
+                        group = session.query(Group).filter(Group.group_id == guild_ob.group_id).first()
+            if group:
+                new_user: User = User(auth_token="", discord_id=discord_id, username=str(username), groups=[group])
+            else:
+                new_user: User = User(auth_token="", discord_id=discord_id, username=str(username))
             session.add(new_user)
             session.commit()
-
-    except Exception as e:
-        print("An error occured trying to add a new user to the database:", e)
-        if ctx:
-            # Answer through the interaction (always deliverable) — a DM here
-            # 403s for users with no mutual guild / DMs disabled.
-            return await ctx.send(f"An error occurred attempting to register your account in the database.\n" +
-                                  f"Please reach out for help: https://www.droptracker.io/discord", ephemeral=True)
-    default_config = session.query(UserConfiguration).filter(UserConfiguration.user_id == 1).all()
-    # grab the default configuration options from the database
+        except IntegrityError:
+            # Lost the race — users.discord_id is unique, so another path just
+            # created this user. Roll back (also refreshes the snapshot) and
+            # use the winner's row.
+            session.rollback()
+            new_user = None
+            user = session.query(User).filter(User.discord_id == discord_id).first()
+        except Exception as e:
+            session.rollback()
+            print("An error occured trying to add a new user to the database:", e)
+            if ctx:
+                # Answer through the interaction (always deliverable) — a DM here
+                # 403s for users with no mutual guild / DMs disabled.
+                return await ctx.send(f"An error occurred attempting to register your account in the database.\n" +
+                                      f"Please reach out for help: https://www.droptracker.io/discord", ephemeral=True)
     if new_user:
         user = new_user
     if not user:
         user = session.query(User).filter(User.discord_id == discord_id).first()
 
-    new_config = []
-    for option in default_config:
-        option_value = option.config_value
-        default_option = UserConfiguration(
-            user_id=user.user_id,
-            config_key=option.config_key,
-            config_value=option_value,
-            updated_at=datetime.now()
-        )
-        new_config.append(default_option)
-    try:
-        session.add_all(new_config)
-        session.commit()
-    except Exception as e:
-        session.rollback()
+    # Seed the default configuration rows (cloned from template user 1), but
+    # only when this user has none — re-seeding an existing user duplicates
+    # every row.
+    has_config = session.query(UserConfiguration).filter(
+        UserConfiguration.user_id == user.user_id).first()
+    if not has_config:
+        default_config = session.query(UserConfiguration).filter(UserConfiguration.user_id == 1).all()
+        new_config = []
+        for option in default_config:
+            option_value = option.config_value
+            default_option = UserConfiguration(
+                user_id=user.user_id,
+                config_key=option.config_key,
+                config_value=option_value,
+                updated_at=datetime.now()
+            )
+            new_config.append(default_option)
+        try:
+            session.add_all(new_config)
+            session.commit()
+        except Exception as e:
+            session.rollback()
     try:
         droptracker_guild = await ctx.bot.fetch_guild(guild_id=1172737525069135962)
         dt_member = droptracker_guild.get_member(member_id=discord_id)

@@ -24,6 +24,7 @@ import time
 
 import httpx
 from quart import Blueprint, jsonify, request
+from sqlalchemy.exc import IntegrityError
 
 from db import User
 from utils.redis import redis_client
@@ -121,7 +122,13 @@ def _find_or_create_user(discord_id: str, display_name: str) -> int:
             is_superadmin=is_bootstrap_admin,
         )
         s.add(user)
-        s.commit()
+        try:
+            s.commit()
+        except IntegrityError:
+            # Lost an insert race — users.discord_id is unique, so a
+            # concurrent login/bot path created the row first. Use theirs.
+            s.rollback()
+            user = s.query(User).filter(User.discord_id == str(discord_id)).first()
         return user.user_id
 
 
