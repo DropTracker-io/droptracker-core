@@ -94,6 +94,18 @@ class TestConfig:
         cfg = ls.LootSweepConfig({"decay_mode": "bogus", "items": []})
         assert cfg.decay_mode == "linear"
 
+    def test_accepts_json_string(self):
+        # The board endpoint hands EventTask.config (a JSON string) straight in.
+        import json as _json
+        cfg = ls.LootSweepConfig(_json.dumps(
+            {"decay_percent": 25, "items": [{"item_name": "Claws", "points": 10}]}))
+        assert cfg.decay_percent == 25
+        assert cfg.by_key["claws"]["points"] == 10.0
+
+    def test_garbage_string_is_empty(self):
+        cfg = ls.LootSweepConfig("not json{")
+        assert cfg.items == [] and cfg.decay_percent == 20
+
     def test_duplicate_items_deduped(self):
         cfg = ls.LootSweepConfig({"items": [
             {"item_name": "Claws", "points": 5},

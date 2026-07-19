@@ -1150,6 +1150,105 @@ async def get_task_breakdown(event_id: int, task_id: int):
     return with_cache_headers(jsonify(payload), max_age=15)
 
 
+@events_bp.get("/events/<int:event_id>/loot-sweep")
+async def get_loot_sweep_board(event_id: int):
+    """Loot Sweep live board: every ``loot_sweep`` "set" task with, per team,
+    the per-item receipt counts, decayed points, and set-bonus status. Rebuilt
+    from the applied ledger via services/loot_sweep.py — the same scoring the
+    engine folds — so the board can never disagree with ``EventTeam.score``.
+
+    ``sets[].items`` (config order) carries the item defs (id/name/points/cap);
+    each ``sets[].teams[].items`` is the SAME-INDEXED per-item ``{count,
+    scored, points}`` so the grid maps by position. Any event kind is served
+    (a standard event could carry a loot_sweep task), keyed off the task type.
+    """
+    # Lazy: services is stubbed by the unit-test conftest.
+    from services.loot_sweep import LootSweepConfig, counts_from_rows, score_counts
+
+    viewer_id = optional_user_id()
+
+    def _load():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                return None
+            tasks = (
+                s.query(EventTask)
+                .filter(EventTask.event_id == event_id, EventTask.type == "loot_sweep")
+                .order_by(EventTask.id.asc())
+                .all()
+            )
+            teams = (
+                s.query(EventTeam)
+                .filter(EventTeam.event_id == event_id)
+                .order_by(EventTeam.score.desc(), EventTeam.id.asc())
+                .all()
+            )
+            team_meta = [
+                {"id": t.id, "name": t.name, "color": t.color, "score": int(t.score or 0)}
+                for t in teams
+            ]
+            base = {"event_id": event_id, "kind": ev.kind, "teams": team_meta, "sets": []}
+            if not tasks or not teams:
+                return base
+
+            task_ids = [t.id for t in tasks]
+            rows_by: dict = {}
+            for r in (
+                s.query(EventCompletion)
+                .filter(EventCompletion.event_id == event_id,
+                        EventCompletion.task_id.in_(task_ids),
+                        EventCompletion.status.in_(_APPLIED_STATUSES))
+                .all()
+            ):
+                rows_by.setdefault((r.task_id, r.team_id), []).append(r)
+
+            for task in tasks:
+                cfg = LootSweepConfig(task.config)
+                teams_out = []
+                for t in teams:
+                    b = score_counts(
+                        counts_from_rows(rows_by.get((task.id, t.id), [])), cfg)
+                    teams_out.append({
+                        "team_id": t.id,
+                        "total": b["total"],
+                        "sets_completed": b["sets_completed"],
+                        "sets_awarded": b["sets_awarded"],
+                        "set_total": b["set_total"],
+                        "items": [
+                            {"count": bi["count"], "scored": bi["scored"],
+                             "points": bi["points"]}
+                            for bi in b["items"]
+                        ],
+                    })
+                base["sets"].append({
+                    "task_id": task.id,
+                    "label": task.label,
+                    "decay_percent": cfg.decay_percent,
+                    "decay_mode": cfg.decay_mode,
+                    "default_max_awards": cfg.default_max_awards,
+                    "set_bonus_points": cfg.set_bonus_points,
+                    "set_bonus_max": cfg.set_bonus_max,
+                    "items": [
+                        {"item_id": it["item_id"], "item_name": it["name"],
+                         "points": it["points"], "max_awards": it["max_awards"],
+                         "counts_for_set": it["counts_for_set"]}
+                        for it in cfg.items
+                    ],
+                    "teams": teams_out,
+                })
+            return base
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(404, "Event not found", f"No event {event_id}.")
+    if viewer_id is not None:
+        return private_no_store(jsonify(payload))
+    return with_cache_headers(jsonify(payload), max_age=15)
+
+
 # --------------------------------------------------------------------------- #
 # Admin writes
 # --------------------------------------------------------------------------- #

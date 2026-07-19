@@ -30,6 +30,7 @@ The engine wiring (matcher / apply / revoke) lives in
 """
 from __future__ import annotations
 
+import json
 from typing import Iterable, Optional
 
 # ---- config defaults (mirrored by the web validator) ----------------------
@@ -87,7 +88,14 @@ class LootSweepConfig:
         "set_bonus_points", "set_bonus_max", "items", "by_key",
     )
 
-    def __init__(self, config: Optional[dict]):
+    def __init__(self, config):
+        # Accept a parsed dict, a JSON string (EventTask.config as stored), or
+        # None — so callers can hand the raw column straight in.
+        if isinstance(config, str):
+            try:
+                config = json.loads(config)
+            except ValueError:
+                config = {}
         config = config if isinstance(config, dict) else {}
         self.decay_percent = _clamp_percent(config.get("decay_percent"))
         mode = config.get("decay_mode")

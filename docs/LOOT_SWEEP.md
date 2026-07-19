@@ -152,6 +152,16 @@ what the unknown `loot_sweep` key originally did to the Zod `.parse()`).
 
 ---
 
+## Read endpoint (the live board)
+
+`GET /api/v1/events/{id}/loot-sweep` (public, viewer-permission aware) returns
+every `loot_sweep` set with, per team, the per-item receipt counts + decayed
+points + set-bonus status — rebuilt from the applied ledger via
+`services/loot_sweep.py::score_counts`, so it can never disagree with
+`EventTeam.score`. `sets[].items` (config order) carries the item defs; each
+`sets[].teams[].items` is the SAME-INDEXED `{count, scored, points}` so the grid
+maps by position. Implemented in `web_api/routes/events.py::get_loot_sweep_board`.
+
 ## SSE / realtime frames
 
 `rt:event:{id}` gains a `loot_sweep` frame on each scoring receipt:
@@ -169,34 +179,29 @@ Revokes publish `{ "kind": "revoke", …, "loot_sweep": true, "progress": <total
 
 ---
 
-## What the frontend still needs to build
+## Frontend (built — droptracker-web)
 
-Backend is complete and testable via the API; the UI is not. In rough order:
+The web UI is implemented (see the web repo `docs/loot-sweep-frontend.md`):
 
-1. **Admin toggle card** — *already works*: `/admin/event-types` now renders the
-   Loot Sweep card (Enabled / Staff-testing-only / test-groups) like any kind,
-   because `loot_sweep` is in `EVENT_KINDS`. Enable it or add a test group to
-   let a clan create one.
-2. **Create-form kind option** — the kind picker reads
-   `GET /events/meta/types` (registry-driven), so Loot Sweep shows up
-   automatically once creatable; no hardcoding.
-3. **The authoring grid** (the screenshot) — a task editor for
-   `type: "loot_sweep"` that writes the `config` above: rows of
-   `item id · points · name`, per-item `max_awards`, a `counts_for_set` toggle,
-   and set-level `set_bonus_points` / `set_bonus_max` / `decay_percent` /
-   `decay_mode`. Item name autocomplete against the item DB (names are validated
-   server-side; unknowns 422). One grid block per set = one task.
-4. **Live board** — render per-team receipt counts as the decaying-cell grid.
-   Counts come from the completions ledger (`matched_target` per team) or a new
-   read endpoint; `services/loot_sweep.py::score_counts()` already returns the
-   full per-item breakdown (`count`, `scored`, `points`, `max_awards`,
-   `counts_for_set`) + set totals if you want to compute it server-side.
-   `services/event_board_image.py` has no `loot_sweep` signature yet — the
-   Discord board image for this kind is a follow-up.
-5. **Discord copy/layout** — the per-set-completion message currently reuses the
-   `event_completion` layout with `loot_sweep: true` + `points_based: true`
-   markers. A Loot-Sweep-aware layout (and any per-receipt verbosity toggle) is
-   a later polish; per-receipt detail already rides SSE + the plugin inbox.
+1. **Admin toggle card** — `/admin/event-types` renders the Loot Sweep card
+   (Enabled / Staff-testing-only / test-groups) like any kind.
+2. **Create-form kind option** — the kind picker reads `GET /events/meta/types`
+   (registry-driven), so Loot Sweep appears automatically once creatable.
+3. **Authoring editor** — `components/loot-sweep-editor.tsx`: item search +
+   per-item points / `max_awards` / `counts_for_set` with a live decay preview,
+   and the set-level `set_bonus_points` / `set_bonus_max` / `decay_percent` /
+   `decay_mode` controls. Wired into `event-task-form.tsx` for
+   `type: "loot_sweep"`.
+4. **Live board** — `components/loot-sweep-board.tsx`: an icon-first "collection
+   race" (greyed-out until obtained, ×count + scored/cap pips once received, set
+   badge + running total), fed by the read endpoint above and refetched on SSE.
+
+**Still a backend follow-up:** `services/event_board_image.py` has no
+`loot_sweep` signature, so the Discord board *image* for this kind isn't drawn
+yet; and the per-set-completion Discord message reuses the `event_completion`
+layout with `loot_sweep: true` + `points_based: true` markers — a
+Loot-Sweep-aware layout is later polish (per-receipt detail already rides SSE +
+the plugin inbox).
 
 ## Open product questions (sensible defaults chosen; easy to change)
 
