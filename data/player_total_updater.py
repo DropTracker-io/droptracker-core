@@ -336,9 +336,62 @@ async def update():
             session.rollback()
             return {"status": "failed", "error": str(e)}
 
+async def _run_periodic_refold(module, label: str) -> None:
+    """Day-chunk ABSOLUTE re-fold of the current partition(s), capped at the
+    tailer pointer, to heal drops the additive tailer skipped (auto-increment
+    commit-order gaps — see <module>.refold_day).
+
+    Runs in the SAME loop as the tailer (never concurrently with it), so the
+    rollup has a single writer and the pointer is stable for the whole pass.
+    Drives one day per executor call, sending watchdog heartbeats *while* each
+    day's statement runs so a heavy day can't trip WatchdogSec (30s)."""
+    cap = module.get_pointer()
+    if not cap:
+        return  # tailer not seeded yet; nothing folded, nothing to re-fold
+    loop = asyncio.get_event_loop()
+    touched = 0
+
+    for partition, day_start, day_end in module.refold_plan():
+        def _do(p=partition, a=day_start, b=day_end):
+            with Session() as s:
+                try:
+                    return module.refold_day(s, p, a, b, cap)
+                except Exception:
+                    s.rollback()
+                    raise
+
+        for attempt in range(3):
+            fut = loop.run_in_executor(None, _do)
+            try:
+                # Keep the watchdog fed while the day's INSERT..SELECT runs:
+                # wait returns the instant the day finishes, else every 10s
+                # (well inside WatchdogSec=30) so a heavy day can't trip it.
+                while True:
+                    done, _ = await asyncio.wait({fut}, timeout=10)
+                    await send_watchdog_heartbeat()
+                    if done:
+                        break
+                touched += await fut
+                break
+            except Exception as e:
+                if attempt < 2 and any(tok in str(e) for tok in ("1205", "Lock wait", "Deadlock")):
+                    print(f"{label}: re-fold {day_start} lock contention, retry {attempt + 1}")
+                    await sleep_with_watchdog_heartbeats(10)
+                    continue
+                # Don't abort the whole pass (or the tailer) for one bad day;
+                # the next scheduled re-fold recomputes it anyway (idempotent).
+                print(f"{label}: re-fold {day_start} failed: {e}")
+                break
+        await send_watchdog_heartbeat()
+        await asyncio.sleep(module.REFOLD_PACE_SEC)
+
+    print(f"{label}: periodic re-fold touched {touched} rollup rows")
+
+
 async def npc_totals_loop():
     """Keep the player_npc_hourly_totals rollup current (powers the profile
-    'top bosses' blocks). Tails the drops table by drop_id every 60s."""
+    'top bosses' blocks). Tails the drops table by drop_id every 60s, and
+    periodically re-folds the current partition to heal commit-order gaps."""
     from services import npc_totals
 
     def run_once():
@@ -352,6 +405,7 @@ async def npc_totals_loop():
                 s.rollback()
                 raise
 
+    last_refold = 0.0  # 0 => re-fold on first pass (heals gaps right after a restart)
     while not shutdown_event.is_set():
         try:
             await send_watchdog_heartbeat()
@@ -359,6 +413,10 @@ async def npc_totals_loop():
             scanned = await loop.run_in_executor(None, run_once)
             if scanned:
                 print(f"npc_totals: folded {scanned} new drops into hourly rollup")
+
+            if time.time() - last_refold >= npc_totals.REFOLD_INTERVAL_SEC:
+                last_refold = time.time()  # set before running so a failure can't retry-storm
+                await _run_periodic_refold(npc_totals, "npc_totals")
         except Exception as e:
             print(f"Error in npc totals loop: {e}")
             app_logger.log(
@@ -373,7 +431,8 @@ async def npc_totals_loop():
 async def item_totals_loop():
     """Keep the player_item_hourly_totals rollup current (powers the item
     pages' receive totals + search ranking). Tails the drops table by drop_id
-    every 60s, same pattern as npc_totals_loop."""
+    every 60s, and periodically re-folds the current partition to heal
+    commit-order gaps. Same pattern as npc_totals_loop."""
     from services import item_totals
 
     def run_once():
@@ -385,6 +444,7 @@ async def item_totals_loop():
                 s.rollback()
                 raise
 
+    last_refold = 0.0  # 0 => re-fold on first pass (heals gaps right after a restart)
     while not shutdown_event.is_set():
         try:
             await send_watchdog_heartbeat()
@@ -392,6 +452,10 @@ async def item_totals_loop():
             scanned = await loop.run_in_executor(None, run_once)
             if scanned:
                 print(f"item_totals: folded {scanned} new drops into hourly rollup")
+
+            if time.time() - last_refold >= item_totals.REFOLD_INTERVAL_SEC:
+                last_refold = time.time()  # set before running so a failure can't retry-storm
+                await _run_periodic_refold(item_totals, "item_totals")
         except Exception as e:
             print(f"Error in item totals loop: {e}")
             app_logger.log(

@@ -1,7 +1,7 @@
 # Loot Sweep event kind (`loot_sweep`)
 
-Status: **backend implemented** (2026-07-19) · frontend authoring UI + board
-rendering **pending** (this doc is the contract for that work).
+Status: **backend + frontend implemented** (2026-07-19) · Discord verbosity
+messaging + compact standings board image **implemented** (2026-07-20).
 
 A **Loot Sweep** is a race to obtain items from across the game. Unlike a
 standard task that *completes once* and awards a flat sum, a Loot Sweep accrues
@@ -209,17 +209,44 @@ The web UI is implemented (see the web repo `docs/loot-sweep-frontend.md`):
    race" (greyed-out until obtained, ×count + scored/cap pips once received, set
    badge + running total), fed by the read endpoint above and refetched on SSE.
 
-**Still a backend follow-up:** `services/event_board_image.py` has no
-`loot_sweep` signature, so the Discord board *image* for this kind isn't drawn
-yet; and the per-set-completion Discord message reuses the `event_completion`
-layout with `loot_sweep: true` + `points_based: true` markers — a
-Loot-Sweep-aware layout is later polish (per-receipt detail already rides SSE +
-the plugin inbox).
+### Discord messaging + board image (built)
+
+Loot Sweep has its own, independently-toggleable Discord verbosity — three
+notification types (`db.models.events.EVENT_MESSAGE_TOGGLE_KEYS`), each enriched
+with the item/points detail that used to live only on the website:
+
+| Type | Fires when | Default | Content |
+|---|---|---|---|
+| `event_sweep_item` | a receipt scores item points | **off** | item + `+N pts`, `scored/max` copies + next value, group progress bar, running set total, who |
+| `event_sweep_group` | a subset (group) bonus completes | on | boss set done, bonus paid (+ completion #), contributors, team total/rank |
+| `event_sweep_set` | the whole-set bonus completes | on | full sweep, set bonus, contributors, standing |
+
+Toggles live in the event's `message_config` (`toggles.event_sweep_*`), with a
+`loot_sweep.item_min_points` scalar that only posts item receipts worth ≥ N
+(enable item posts but keep them to notable drops). Enqueued in
+`services/event_engine._apply_loot_sweep` (gated by the event config OR any
+per-team channel's interest — web53a pattern); rendered by
+`services/event_message_layouts.py` (V2) + `event_notifications.event_embed_spec`
+(fallback); routed to team channels via `services/event_team_discord.py`. The
+per-receipt scoring detail comes from the pure `services/loot_sweep.receipt_detail`.
+
+The Discord **board image** is a **compact standings leaderboard** (rank / team /
+score / sets-done / top bosses) — the full per-item matrix is far too tall to
+screenshot for a game-wide sweep (event #27 = 49 sets × 320 items). It reuses the
+screenshot pipeline: `services/event_board_image._loot_sweep_signature` hashes
+the ordered team scores (cheap, faithful change-detector), the Next page
+`/board-image/[id]` renders `components/loot-sweep-standings.tsx` from
+`GET /events/{id}/loot-sweep/summary`, and the live `event_board` message swaps
+its text standings for the image (keeping a top-3 text fallback).
 
 ## Open product questions (sensible defaults chosen; easy to change)
 
 - **A "receipt" counts stack quantity** (a stack of 3 = 3 decaying receipts,
   capped at `max_awards`). Fine for uniques; revisit if stackables are added.
 - **Decay defaults to linear** to match the grid. `geometric` is supported.
-- **Discord announces only full-set completions** to avoid per-drop spam. Make
-  it configurable if groups want per-receipt posts.
+- **Item-receipt posts default off** (subset/whole-set completions default on)
+  so a game-wide sweep doesn't flood the channel; groups opt in per event, with
+  an optional `item_min_points` floor.
+- **Web message-config editor** still shows the three sweep toggles on every
+  event kind (they only ever fire for `loot_sweep`); gating the UI to loot_sweep
+  events is cosmetic polish, not required for correctness.

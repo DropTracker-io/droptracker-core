@@ -56,6 +56,10 @@ TEMPLATE_GROUP_ID = 1
 
 LAYOUT_SCHEMA_VERSION = 1
 
+# Loot Sweep verbosity message types (loot_sweep kind) — they build their own
+# enriched standing/contributor tokens rather than the generic bingo path.
+_SWEEP_TYPES = ("event_sweep_item", "event_sweep_group", "event_sweep_set")
+
 
 def deeplink_enabled() -> bool:
     """Whether "Open in Discord" launch buttons are rendered on event messages.
@@ -193,6 +197,54 @@ DEFAULT_LAYOUTS = {
             },
         ],
     },
+    # Loot Sweep (loot_sweep kind) — three verbosity levels, each enriched with
+    # the item/points detail that used to live only on the website. Composite
+    # line-tokens (sweep_*) are pre-resolved in notification_context so an
+    # absent piece drops its own line cleanly.
+    "event_sweep_item": {
+        "accent_color": "#3498DB",
+        "blocks": [
+            {
+                "type": "section",
+                "content": "### \U0001F4E5 {team_name} received {received_display}\n"
+                           "{sweep_npc_line}\n"
+                           "**Scored** `+{received_points} pts`\n"
+                           "{sweep_copies_line}\n"
+                           "{sweep_group_progress_line}\n"
+                           "{sweep_set_total_line}\n"
+                           "{sweep_by_line}",
+                "thumbnail": "{completion_icon}",
+            },
+        ],
+    },
+    "event_sweep_group": {
+        "accent_color": "#1ABC9C",
+        "blocks": [
+            {"type": "text", "content": "## ✅ {team_name} completed {group_label}!"},
+            {"type": "text", "content": "{sweep_group_again_line}"},
+            {
+                "type": "section",
+                "content": "**Set bonus** `+{sweep_bonus} pts`\n"
+                           "{sweep_standing_line}\n"
+                           "{contributors_block}",
+                "thumbnail": "{completion_icon}",
+            },
+        ],
+    },
+    "event_sweep_set": {
+        "accent_color": "#57F287",
+        "blocks": [
+            {"type": "text", "content": "## \U0001F3C6 {team_name} swept {task_label}!"},
+            {"type": "text", "content": "-# Completed every boss in the set{sweep_set_again_suffix}"},
+            {
+                "type": "section",
+                "content": "**Full-set bonus** `+{sweep_bonus} pts`\n"
+                           "{sweep_standing_line}\n"
+                           "{contributors_block}",
+                "thumbnail": "{completion_icon}",
+            },
+        ],
+    },
     "event_line": {
         "accent_color": "#9B59B6",
         "blocks": [
@@ -216,6 +268,9 @@ DEFAULT_LAYOUTS = {
         "blocks": [
             {"type": "text", "content": "## \U0001F451 New leader: {team_name}"},
             {"type": "text", "content": "-# after **{task_label}**"},
+            # Loot Sweep names the drop that took the lead (drops for other
+            # kinds, whose lead-change payload carries no received item).
+            {"type": "text", "content": "{lead_via_line}"},
             {"type": "separator"},
             {"type": "standings", "limit": 3, "title": "**Standings**"},
         ],
@@ -643,7 +698,8 @@ def notification_context(notification_type: str, data: dict) -> dict:
     so their lines drop out of the rendered message."""
     from services.event_notifications import (
         _completion_item_redundant, _fmt_ts, _received_item_text,
-        event_url, format_gp, line_bonus_summary,
+        event_url, fmt_pts, format_gp, line_bonus_summary,
+        sweep_contributor_lines,
     )
 
     data = data or {}
@@ -670,6 +726,12 @@ def notification_context(notification_type: str, data: dict) -> dict:
         # Always resolvable (falls back to "completed a full line" on legacy
         # payloads without line identity) so the title line never drops.
         context["line_summary"] = line_bonus_summary(data)
+    if notification_type == "event_lead_change" and data.get("received_item"):
+        # Loot Sweep: name the drop (+ points) that took the lead.
+        pts = data.get("points")
+        context["lead_via_line"] = (
+            f"-# with **{data['received_item']}**"
+            + (f" (`+{fmt_pts(pts)} pts`)" if pts else ""))
     put("starts_at", _fmt_ts(data.get("starts_at")))
     put("ends_at", _fmt_ts(data.get("ends_at")))
     # Raw unix seconds for the universal footer line (event_footer_line);
@@ -771,7 +833,9 @@ def notification_context(notification_type: str, data: dict) -> dict:
     tiles = data.get("tiles_completed")
     rank, tcount = data.get("team_rank"), data.get("team_count")
     score = data.get("team_score")
-    if tiles is not None or rank is not None:
+    if notification_type in _SWEEP_TYPES:
+        pass  # sweep types compose their own standing line below
+    elif tiles is not None or rank is not None:
         parts = []
         if tiles is not None:
             parts.append(f"**Total tiles completed** `{int(tiles)}`")
@@ -809,5 +873,56 @@ def notification_context(notification_type: str, data: dict) -> dict:
                            "admins will sort teams later.",
         }.get(data.get("formation_mode"), "Pick your account to enter.")
         context.setdefault("description", "This event is open for sign-ups!")
+
+    # Loot Sweep verbosity messages (services.event_engine loot_sweep enrichment).
+    # Compose the enriched detail lines here so an absent field drops only its
+    # own line under the layout's per-line token-drop rule.
+    if notification_type in _SWEEP_TYPES:
+        item = data.get("received_item")
+        qty = int(data.get("received_qty") or 0)
+        put("received_display",
+            f"{qty}× {item}" if item and qty and qty != 1 else item)
+        put("group_label", data.get("group_label"))
+        if data.get("progress") is not None:
+            context["sweep_set_total_line"] = (
+                f"-# Set running total `{fmt_pts(data['progress'])} pts`")
+        standing = []
+        if data.get("team_score") is not None:
+            standing.append(f"**Team total** `{fmt_pts(data['team_score'])} pts`")
+        if data.get("team_rank") and data.get("team_count"):
+            standing.append(f"`#{int(data['team_rank'])}/{int(data['team_count'])}`")
+        if standing:
+            context["sweep_standing_line"] = " • ".join(standing)
+        # Contributors, always medal-ranked (even a solo finisher), overriding
+        # the generic completion path so group/set posts read consistently.
+        contrib = sweep_contributor_lines(data.get("contributors"))
+        if contrib:
+            context["contributors_block"] = "**Contributors**\n" + contrib
+
+        if notification_type == "event_sweep_item":
+            context["received_points"] = fmt_pts(data.get("received_points"))
+            if data.get("npc"):
+                context["sweep_npc_line"] = f"-# from **{data['npc']}**"
+            scored, mx = data.get("item_scored"), data.get("item_max")
+            if scored is not None and mx:
+                nxt = data.get("next_receipt_points")
+                tail = (f" • next `+{fmt_pts(nxt)}`" if nxt not in (None, 0, 0.0)
+                        else " • fully farmed")
+                context["sweep_copies_line"] = (
+                    f"-# `{int(scored)}/{int(mx)}` scoring copies{tail}")
+            gl, gh, gn = data.get("group_label"), data.get("group_have"), data.get("group_need")
+            if gl and gh is not None and gn:
+                context["sweep_group_progress_line"] = (
+                    f"**{gl}** {text_progress_bar(gh, gn)} `{int(gh)}/{int(gn)} items`")
+            if data.get("player_name"):
+                context["sweep_by_line"] = f"-# by **{data['player_name']}**"
+        else:  # group / set completion
+            context["sweep_bonus"] = fmt_pts(data.get("bonus_points"))
+            n = int(data.get("completion_n") or 1)
+            if notification_type == "event_sweep_group" and n > 1:
+                context["sweep_group_again_line"] = (
+                    f"-# Completed ×{n} — the bonus decays each time")
+            if notification_type == "event_sweep_set":
+                context["sweep_set_again_suffix"] = f" (×{n})" if n > 1 else ""
 
     return context

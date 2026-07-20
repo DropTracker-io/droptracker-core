@@ -1598,6 +1598,24 @@ def _loot_sweep_score(session, task: dict, team_id, *, include=None, exclude_id=
     return score_rows(rows, LootSweepConfig(task.get("config") or {}))
 
 
+def _loot_sweep_rank(session, event_id: int, team_id) -> tuple:
+    """``(rank, team_count)`` for one team in an event's standings — rank is
+    1-based by score (desc, id tiebreak), ``None`` when the team isn't found.
+    Used to enrich loot_sweep completion messages with "#2/4 teams"."""
+    from db.models import EventTeam
+
+    rows = (session.query(EventTeam.id, EventTeam.score)
+            .filter(EventTeam.event_id == event_id)
+            .order_by(EventTeam.score.desc(), EventTeam.id.asc())
+            .all())
+    rank = None
+    for i, (tid, _score) in enumerate(rows):
+        if tid == team_id:
+            rank = i + 1
+            break
+    return rank, len(rows)
+
+
 def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
                       player_name: Optional[str] = None) -> dict:
     """Apply one loot_sweep receipt: recompute the team's running total for the
@@ -1607,9 +1625,11 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
     False, so more receipts keep scoring until the per-item caps / set-bonus
     cap stop advancing it (enforced in :func:`_row_advances_progress`)."""
     from db.models import EventProgress, EventTeam
+    from services.loot_sweep import LootSweepConfig, receipt_detail
 
     team_id = completion.team_id
     player_id = completion.player_id
+    config = LootSweepConfig(task.get("config") or {})
 
     progress = (session.query(EventProgress)
                 .filter(EventProgress.task_id == task["id"],
@@ -1654,13 +1674,18 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
     _award_contribution_points(session, event, task, team_id, contributors, new_total)
 
     # A "milestone" = a group or the whole set just completed (a bonus was
-    # earned). Groups/sets are the announce-worthy moments; per-receipt detail
-    # rides SSE + the plugin inbox.
+    # earned). Groups/sets are the announce-worthy moments; the per-receipt
+    # ``event_sweep_item`` message (opt-in) covers everything else.
     set_completed = curr["set_awarded"] > prev["set_awarded"]
+    set_bonus_delta = round(curr["set_total"] - prev["set_total"], 2)
     new_group_label = None
+    new_group_bonus = 0.0
+    new_group_n = 0
     for pg, cg in zip(prev["groups"], curr["groups"]):
         if cg["awarded"] > pg["awarded"]:
             new_group_label = cg["label"] or task.get("label")
+            new_group_bonus = round(cg["bonus_total"] - pg["bonus_total"], 2)
+            new_group_n = cg["awarded"]
             break
     bonus_delta = ((curr["group_bonus_total"] + curr["set_total"])
                    - (prev["group_bonus_total"] + prev["set_total"]))
@@ -1708,31 +1733,100 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
     except Exception as plugin_err:
         print(f"loot_sweep plugin fan-out failed: {plugin_err}")
 
-    # Discord: announce only the big moments — a group or the whole set just
-    # paid out — so a game-wide sweep doesn't post per drop. (Reuses
-    # event_completion; loot_sweep-aware copy/layout is a follow-up — see
-    # docs/LOOT_SWEEP.md.)
-    if bonus_delta > 0 and team_id is not None:
-        _enqueue_notification(session, "event_completion", event, player_id, {
+    # Discord: three independently-toggleable loot_sweep verbosity levels
+    # (services.event_notifications DEFAULT_MESSAGE_TOGGLES / message_config),
+    # each enriched with the item/points detail that used to live only on the
+    # website. Whole-set + subset completions default on; individual item
+    # receipts default off (a game-wide sweep would flood the channel) and are
+    # additionally gated by loot_sweep.item_min_points. A message is enqueued
+    # when the event-level config wants it OR any per-team channel does (web53a
+    # pattern) — the sender applies each destination's own toggle.
+    if team_id is not None:
+        from services.event_notifications import (
+            effective_message_config, should_send_event_message,
+        )
+
+        cfg = effective_message_config(event.get("message_config"))
+
+        def _sweep_wanted(ntype: str) -> bool:
+            if should_send_event_message(cfg, ntype):
+                return True
+            try:
+                from services.event_team_discord import team_channel_interest
+                return team_channel_interest(session, event["id"], ntype, team_id)
+            except Exception:
+                return False
+
+        detail = receipt_detail(curr, prev, config, completion.matched_target)
+        team_rank, team_count = _loot_sweep_rank(session, event["id"], team_id)
+        # Fields shared by every sweep message for this receipt.
+        base = {
             "task_id": task["id"], "task_label": task.get("label"),
             "team_id": team_id, "player_id": player_id, "player_name": player_name,
-            "points": bonus_delta,
-            "team_score": team_score,
+            "team_score": team_score, "team_rank": team_rank, "team_count": team_count,
             "points_based": True, "loot_sweep": True,
-            "set_completed": set_completed,
-            "group_completed": new_group_label,
-            "set_completions": curr["set_completions"],
             "received_item": completion.matched_target,
-            "contributors": contributors,
             "source_type": completion.source_type,
             "proof_url": completion.proof_url,
-        })
+        }
+        if detail:
+            base["group_label"] = detail["group_label"]
+            base["npcs"] = detail["npcs"]
+            # Custom boss/category art for the group/set message thumbnail
+            # (resolved by the sender; falls back to the received item's icon).
+            if detail.get("group_image"):
+                base["group_image"] = detail["group_image"]
+
+        # 1) Individual scoring receipt (opt-in, min-points gated).
+        min_pts = int((cfg.get("loot_sweep") or {}).get("item_min_points", 0) or 0)
+        if (detail and detail["received_points"] > 0
+                and detail["received_points"] >= min_pts
+                and _sweep_wanted("event_sweep_item")):
+            item_payload = dict(base)
+            item_payload.update({
+                "received_qty": max(int(getattr(completion, "quantity", 1) or 1), 1),
+                "received_points": detail["received_points"],
+                "npc": detail["npcs"][0] if detail["npcs"] else None,
+                "item_scored": detail["item_scored"], "item_max": detail["item_max"],
+                "item_remaining": detail["item_remaining"],
+                "next_receipt_points": detail["next_receipt_points"],
+                "group_have": detail["group_have"], "group_need": detail["group_need"],
+                "progress": new_total,
+            })
+            _enqueue_notification(session, "event_sweep_item", event, player_id, item_payload)
+
+        # 2) Subset (group) bonus just completed.
+        if new_group_label and _sweep_wanted("event_sweep_group"):
+            grp_payload = dict(base)
+            grp_payload.update({
+                "group_label": new_group_label,
+                "bonus_points": new_group_bonus,
+                "completion_n": new_group_n,
+                "contributors": contributors,
+            })
+            _enqueue_notification(session, "event_sweep_group", event, player_id, grp_payload)
+
+        # 3) Whole-set bonus just completed.
+        if set_completed and _sweep_wanted("event_sweep_set"):
+            set_payload = dict(base)
+            set_payload.update({
+                "bonus_points": set_bonus_delta,
+                "completion_n": curr["set_awarded"],
+                "set_completions": curr["set_completions"],
+                "contributors": contributors,
+            })
+            _enqueue_notification(session, "event_sweep_set", event, player_id, set_payload)
+
     if lead_changed_to:
+        # Enrich the lead-change with the receipt that triggered it (item +
+        # points), so the message can name the drop that took the lead.
         _enqueue_notification(session, "event_lead_change", event, player_id, {
             "team_id": team_id,
             "team_score": lead_changed_to[1],
             "task_id": task["id"],
             "task_label": task.get("label"),
+            "received_item": completion.matched_target,
+            "points": delta,
         })
     return result
 

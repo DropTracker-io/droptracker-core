@@ -27,6 +27,13 @@ KIND_FOR_TYPE = {
     "event_completion": "completions",
     "event_line": "completions",
     "event_blackout": "completions",
+    # Loot Sweep (loot_sweep kind): three independently-toggleable verbosity
+    # levels — an individual scoring receipt, a subset (group) bonus completing,
+    # and the whole-set bonus completing. All post to the completions channel
+    # (falling back to announcements), each enriched with the item/points detail.
+    "event_sweep_item": "completions",
+    "event_sweep_group": "completions",
+    "event_sweep_set": "completions",
     "event_lead_change": "leaderboard",
     "event_pending": "admin",
     # Task 21: the scheduler sweep could not activate a scheduled draft.
@@ -64,6 +71,9 @@ _COLORS = {
     "event_completion": 0x00FF00,
     "event_line": 0x9B59B6,
     "event_blackout": 0x2C2F33,
+    "event_sweep_item": 0x3498DB,   # informational blue — a drop scored
+    "event_sweep_group": 0x1ABC9C,  # teal — a subset (boss) completed
+    "event_sweep_set": 0x00FF00,    # green victory — the whole set completed
     "event_lead_change": 0xFFD700,
     "event_pending": 0xE67E22,
     "event_activation_failed": 0xED4245,
@@ -101,7 +111,18 @@ DEFAULT_MESSAGE_TOGGLES = {
     "event_activation_failed": True,
     "event_board_turn": True,
     "event_board_roll_prompt": False,  # team-channel first; opt-in for main channels
+    # Loot Sweep verbosity: subset + whole-set completions announce by default;
+    # per-item receipts are opt-in (a game-wide sweep would flood the channel).
+    "event_sweep_item": False,
+    "event_sweep_group": True,
+    "event_sweep_set": True,
 }
+
+# Loot Sweep messaging sub-config defaults (message_config["loot_sweep"]).
+# ``item_min_points`` only posts an ``event_sweep_item`` when the receipt scored
+# at least this many points — a way to enable item posts but keep them to the
+# notable drops. 0 = every scoring receipt (when the toggle is on).
+DEFAULT_LOOT_SWEEP_CONFIG = {"item_min_points": 0}
 
 DEFAULT_MESSAGE_CONFIG = {
     "toggles": dict(DEFAULT_MESSAGE_TOGGLES),
@@ -111,6 +132,7 @@ DEFAULT_MESSAGE_CONFIG = {
     # event_completion message on top of the always-present contributor list.
     # Default on (additive detail); a group can silence it per event.
     "item_details": True,
+    "loot_sweep": dict(DEFAULT_LOOT_SWEEP_CONFIG),
     "leaderboard": {"live": True, "top_n": 10, "show_tasks": True},
 }
 
@@ -128,6 +150,7 @@ def effective_message_config(raw_json) -> dict:
         "toggles": dict(DEFAULT_MESSAGE_TOGGLES),
         "task_progress": DEFAULT_MESSAGE_CONFIG["task_progress"],
         "item_details": DEFAULT_MESSAGE_CONFIG["item_details"],
+        "loot_sweep": dict(DEFAULT_LOOT_SWEEP_CONFIG),
         "leaderboard": dict(DEFAULT_MESSAGE_CONFIG["leaderboard"]),
     }
     if not raw_json:
@@ -154,6 +177,15 @@ def effective_message_config(raw_json) -> dict:
 
     if "item_details" in data:
         config["item_details"] = bool(data["item_details"])
+
+    sweep = data.get("loot_sweep")
+    if isinstance(sweep, dict):
+        try:
+            mp = int(sweep.get("item_min_points"))
+        except (TypeError, ValueError):
+            mp = None
+        if mp is not None:
+            config["loot_sweep"]["item_min_points"] = max(0, mp)
 
     board = data.get("leaderboard")
     if isinstance(board, dict):
@@ -259,6 +291,96 @@ def _received_item_text(data: dict) -> Optional[str]:
     if contributed:
         return f"{label} (+{format_gp(contributed)}{unit})"
     return label
+
+
+def fmt_pts(value) -> str:
+    """Loot Sweep points are decimal-valued (a 1-pointer's 2nd receipt is 0.8),
+    so render them tersely: ``9``, ``10.4`` — trailing ``.0`` dropped."""
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def sweep_contributor_lines(contributors, limit: int = 5) -> Optional[str]:
+    """Ranked contributor list for a Loot Sweep group/set completion (points-
+    based ledger). Medals for the top three; a compact comma list past five.
+    None when there is nobody to show."""
+    contributors = contributors or []
+    if not contributors:
+        return None
+
+    def one(c):
+        return f"`{c.get('player_name') or 'Unknown'}` ({fmt_pts(c.get('quantity') or 0)} pts)"
+
+    if len(contributors) <= limit:
+        rows = [f"{_MEDALS[i] if i < len(_MEDALS) else '•'} {one(c)}"
+                for i, c in enumerate(contributors)]
+        return "\n".join(rows)
+    return ", ".join(one(c) for c in contributors)
+
+
+def _sweep_embed(notification_type, spec, field, data, team, player) -> None:
+    """Fill a loot_sweep receipt / subset / whole-set completion embed spec.
+    Shared by the legacy embed path (here) — the V2 layout renders the same
+    detail from :func:`services.event_message_layouts.notification_context`."""
+    task_label = data.get("task_label")
+    who = f"**{team}**" if team else "A team"
+    item = data.get("received_item")
+    qty = int(data.get("received_qty") or 0)
+    item_label = f"**{qty}× {item}**" if item and qty and qty != 1 else f"**{item}**"
+
+    if notification_type == "event_sweep_item":
+        spec["title"] = f"\U0001F4E5 {team or 'A team'} received {item or 'a drop'}"
+        npc = data.get("npc")
+        at = f" from **{npc}**" if npc else ""
+        spec["description"] = (f"{who} received {item_label}{at} "
+                               f"— `+{fmt_pts(data.get('received_points'))} pts`")
+        scored, mx = data.get("item_scored"), data.get("item_max")
+        if scored is not None and mx:
+            nxt = data.get("next_receipt_points")
+            tail = (f" • next `+{fmt_pts(nxt)}`"
+                    if nxt not in (None, 0, 0.0) else " • fully farmed")
+            field("Copies scored", f"`{int(scored)}/{int(mx)}`{tail}", inline=False)
+        gl, gh, gn = data.get("group_label"), data.get("group_have"), data.get("group_need")
+        if gl and gh is not None and gn:
+            field(gl, f"`{int(gh)}/{int(gn)} items` collected")
+        if data.get("player_name"):
+            field("From", f"`{data['player_name']}`")
+        if data.get("progress") is not None:
+            field("Set total", f"`{fmt_pts(data['progress'])} pts`")
+
+    elif notification_type == "event_sweep_group":
+        spec["title"] = f"✅ {team or 'A team'} completed {data.get('group_label') or 'a boss set'}!"
+        n = int(data.get("group_completion_n") or 1)
+        again = f" (×{n})" if n > 1 else ""
+        spec["description"] = (f"{who} collected every item in "
+                               f"**{data.get('group_label') or task_label or 'the set'}**{again}")
+        if data.get("bonus_points"):
+            field("Set bonus", f"`+{fmt_pts(data['bonus_points'])} pts`")
+
+    else:  # event_sweep_set
+        spec["title"] = f"\U0001F3C6 {team or 'A team'} swept {task_label or 'the set'}!"
+        n = int(data.get("set_completion_n") or 1)
+        again = f" (×{n})" if n > 1 else ""
+        spec["description"] = (f"{who} completed **every** boss in "
+                               f"**{task_label or 'the set'}**{again} — full sweep!")
+        if data.get("bonus_points"):
+            field("Full-set bonus", f"`+{fmt_pts(data['bonus_points'])} pts`")
+
+    # Shared tail: contributors (group/set), running team total, standing, icon.
+    if notification_type in ("event_sweep_group", "event_sweep_set"):
+        contribs = sweep_contributor_lines(data.get("contributors"))
+        if contribs:
+            field("Contributors", contribs, inline=False)
+    if data.get("team_score") is not None:
+        field("Team total", f"`{fmt_pts(data['team_score'])} pts`")
+    rank, tcount = data.get("team_rank"), data.get("team_count")
+    if rank and tcount:
+        field("Team position", f"`#{int(rank)}/{int(tcount)} teams`")
+    thumb = data.get("completion_icon") or data.get("proof_url")
+    if thumb:
+        spec["thumbnail"] = thumb
 
 
 def line_label(note) -> str:
@@ -583,6 +705,10 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         if thumb:
             spec["thumbnail"] = thumb
 
+    elif notification_type in ("event_sweep_item", "event_sweep_group",
+                               "event_sweep_set"):
+        _sweep_embed(notification_type, spec, field, data, team, player)
+
     elif notification_type == "event_task_progress":
         spec["title"] = f"\U0001F4C8 Progress: {task_label or 'Task'}"
         who = f"**{team}**" if team else "A team"
@@ -660,6 +786,12 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         spec["title"] = f"\U0001F451 New leader: {team or 'a new team'}"
         via = f" after **{task_label}**" if task_label else ""
         spec["description"] = f"**{team or 'A team'}** takes first place{via}!"
+        # Loot Sweep names the drop (+ points) that took the lead.
+        item = data.get("received_item")
+        if item:
+            pts = data.get("points")
+            spec["description"] += (f"\n-# with **{item}**"
+                                    + (f" (+{fmt_pts(pts)} pts)" if pts else ""))
         field("Standings", _standings_lines(standings, 3), inline=False)
 
     elif notification_type == "event_pending":

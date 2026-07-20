@@ -40,6 +40,8 @@ Notes:
 - Groups with more than 2,500 members (the global catch-all pseudo-groups)
   get `413`; they should use the public global endpoints instead.
 - Rate limit: 30 requests/min per endpoint per IP.
+- `503` means the query was too heavy to finish in time — narrow the window
+  (or add an `npc_id`/`npc_name` filter) and retry. It is safe to retry.
 
 ## `GET /groups/<group_id>/export/top-players`
 
@@ -86,6 +88,12 @@ curl -H "Authorization: Bearer $KEY" \
 
 `totals` covers the whole group over the window (not just the returned page).
 `npcs` is `null` when no NPC filter was applied (all loot counted).
+
+Without an NPC filter, months before the current one are served from an hourly
+rollup, so `start_time`/`end_time` are effectively rounded to the hour for that
+older portion and a `first_drop` that falls in it is hour-granular. The current
+calendar month is always exact to the second, and day- or month-aligned windows
+are exact throughout. NPC-filtered requests are exact to the second everywhere.
 
 ## `GET /groups/<group_id>/export/drops`
 

@@ -339,6 +339,7 @@ async def confirm_completion(event_id: int, completion_id: int):
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.completion.confirm",
                 target=f"web_event_completions.{completion_id}",
                 before=before,
@@ -378,6 +379,7 @@ async def reject_completion(event_id: int, completion_id: int):
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.completion.reject",
                 target=f"web_event_completions.{completion_id}",
                 before=before,
@@ -463,6 +465,7 @@ async def award_completion(event_id: int):
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.award",
                 target=f"web_event_completions.{comp.id}",
                 before=None,
@@ -511,6 +514,7 @@ async def revoke_completion(event_id: int):
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.revoke",
                 target=f"web_event_completions.{completion_id}",
                 before=before,
@@ -542,6 +546,11 @@ async def update_task(event_id: int, task_id: int):
             )
             if not task:
                 abort_problem(404, "Task not found", f"No task {task_id} in this event.")
+            _before_task = {
+                "label": task.label, "points": int(task.points or 0),
+                "target": task.target, "target_value": task.target_value,
+                "visibility": task.visibility,
+            }
             if "label" in body:
                 label = (body.get("label") or "").strip()
                 if not (1 <= len(label) <= 255):
@@ -608,6 +617,21 @@ async def update_task(event_id: int, task_id: int):
             visibility = clean_task_visibility(body, default=None)
             if visibility is not None:
                 task.visibility = save_task_to_library(s, ev, task, visibility)
+            _after_task = {
+                "label": task.label, "points": int(task.points or 0),
+                "target": task.target, "target_value": task.target_value,
+                "visibility": task.visibility,
+            }
+            if _after_task != _before_task:
+                # A mid-event points/goal edit silently rescores — record it so
+                # the audit log can explain a task's point total (web57a).
+                s.add(AuditLog(
+                    actor_user_id=user_id, group_id=ev.group_id, event_id=event_id,
+                    action="event.task.update",
+                    target=f"web_event_tasks.{task.id}",
+                    before=json.dumps(_before_task),
+                    after=json.dumps(_after_task),
+                ))
             s.commit()
             return {
                 "id": task.id,
@@ -981,6 +1005,7 @@ async def put_bingo_board(event_id: int):
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.bingo.replace",
                 target=f"web_events.{event_id}.bingo",
                 before=None,

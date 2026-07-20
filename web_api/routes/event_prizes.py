@@ -343,6 +343,7 @@ async def record_buyin(event_id: int):
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.buyin.record",
                 target=f"web_event_buyins.{row.id}",
                 before=None,
@@ -396,6 +397,7 @@ async def update_buyin(event_id: int, buyin_id: int):
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.buyin.update",
                 target=f"web_event_buyins.{buyin_id}",
                 before=before,
@@ -438,6 +440,7 @@ async def delete_buyin(event_id: int, buyin_id: int):
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.buyin.delete",
                 target=f"web_event_buyins.{buyin_id}",
                 before=before,
@@ -500,6 +503,7 @@ async def bulk_seed_buyins(event_id: int):
             if created:
                 s.add(AuditLog(
                     actor_user_id=user_id, group_id=ev.group_id,
+                    event_id=ev.id,
                     action="event.buyin.bulk_seed",
                     target=f"web_events.{event_id}",
                     before=None,
@@ -572,6 +576,7 @@ async def announce_pot(event_id: int):
             ))
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.pot.announce",
                 target=f"web_events.{event_id}", before=None, after="posted",
             ))

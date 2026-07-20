@@ -29,14 +29,16 @@ TIME WINDOWS
 """
 
 import hmac
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from quart import Blueprint, jsonify, request
 from quart_cors import route_cors
 from quart_rate_limiter import rate_limit
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
+from sqlalchemy.exc import OperationalError
 
-from api.core import get_db_session
+from api.core import get_db_session, logger
 from db import (
     Drop,
     Group,
@@ -44,6 +46,7 @@ from db import (
     ItemList,
     NpcList,
     Player,
+    PlayerItemHourlyTotals,
     user_group_association,
 )
 
@@ -260,6 +263,206 @@ def _iso_utc(dt) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Query safety net
+# ──────────────────────────────────────────────────────────────────────────────
+# The shared engine sets a 30s client read_timeout (db/models/base.py). A drops
+# aggregate that runs past it dies as pymysql errno 2013 "Lost connection …
+# (timed out)" — an unhandled 500 — and, worse, keeps scanning server-side after
+# the client has already given up. We cap execution *server-side* below that
+# client timeout so MariaDB aborts the query itself (errno 1969), which we turn
+# into a clean 503. Kept a few seconds under 30 so the server wins the race.
+STATEMENT_TIMEOUT_SECONDS = 25
+# MariaDB timeout / lost-connection error codes worth surfacing as "too heavy".
+_TIMEOUT_ERR_CODES = {1969, 3024, 2013}
+
+
+@contextmanager
+def _statement_timeout(db_session, seconds: int = STATEMENT_TIMEOUT_SECONDS):
+    """Bound server-side execution time for queries run inside the block.
+
+    Sessions come from the shared pool, so the cap is reset on exit to avoid it
+    riding a checked-in connection into the next caller. A query killed by the
+    timeout leaves the connection usable, so the reset still runs.
+    """
+    db_session.execute(text(f"SET SESSION max_statement_time = {int(seconds)}"))
+    try:
+        yield
+    finally:
+        try:
+            db_session.execute(text("SET SESSION max_statement_time = 0"))
+        except Exception:
+            pass
+
+
+def _is_timeout_error(err: OperationalError) -> bool:
+    try:
+        return err.orig.args[0] in _TIMEOUT_ERR_CODES
+    except (AttributeError, IndexError, TypeError):
+        return False
+
+
+def _query_too_heavy_response():
+    return jsonify({
+        "success": False,
+        "error": (
+            "Query timed out. Narrow the request — use a smaller time window "
+            "(start_time/end_time) or add an npc_id/npc_name filter — and retry."
+        ),
+    }), 503
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Hybrid aggregation (top-players, no NPC filter)
+# ──────────────────────────────────────────────────────────────────────────────
+# A full-history drops aggregate over a wide window is what tripped the timeout.
+# `player_item_hourly_totals` is an hourly rollup (SUM(value*quantity),
+# drop_count, MAX(date_added) as last_drop_time) that reconciles exactly with
+# `drops` for settled months but lags/has gaps for the in-progress month. So we
+# read settled months from the rollup (cheap) and the current calendar month
+# straight from `drops` (source of truth, bounded to ≤1 month), then merge.
+#
+# Windowing note: the rollup is bucketed by hour, so for the pre-current-month
+# portion start_time/end_time are effectively floored to the hour, and a drop's
+# first_drop from that portion is hour-granular. The current-month portion (from
+# drops) stays exact to the second. Day/month-aligned windows are exact either
+# way. NPC-filtered requests never take this path (the item rollup has no NPC
+# dimension) — they aggregate from `drops` directly, under the same timeout cap.
+
+# For a large member IN-list the optimizer mis-picks the single-column
+# `ix_drops_player_id` and reads each member's ENTIRE lifetime of drops before
+# filtering by date (EXPLAIN: key=ix_drops_player_id, "Using where"). Forcing
+# the composite index makes it seek per-player *within the date range* — the
+# difference between a >30s timeout and ~11s for the current month of a
+# 496-member clan. Kept in sync with the index name in the drops schema.
+_DROPS_WINDOW_HINT = "FORCE INDEX (ix_drops_player_id_date_added)"
+
+
+def _current_month_start() -> datetime:
+    """First instant of the current calendar month (naive UTC)."""
+    now = datetime.utcnow()
+    return datetime(now.year, now.month, 1)
+
+
+def _hour_str(dt: datetime) -> str:
+    """Rollup date_hour key ('YYYY-MM-DD-HH') for a datetime."""
+    return dt.strftime("%Y-%m-%d-%H")
+
+
+def _parse_hour(hour_key: str):
+    """Inverse of _hour_str → datetime at the top of that hour (or None)."""
+    try:
+        return datetime.strptime(hour_key, "%Y-%m-%d-%H")
+    except (ValueError, TypeError):
+        return None
+
+
+def _fold_player(agg, pid, value, count, first_dt, last_dt):
+    entry = agg.get(pid)
+    if entry is None:
+        agg[pid] = [value, count, first_dt, last_dt]
+        return
+    entry[0] += value
+    entry[1] += count
+    if first_dt and (entry[2] is None or first_dt < entry[2]):
+        entry[2] = first_dt
+    if last_dt and (entry[3] is None or last_dt > entry[3]):
+        entry[3] = last_dt
+
+
+def _agg_players_hybrid(db_session, member_ids, start, end):
+    """Per-player totals over [start, end): rollup for settled months + drops
+    for the current month. Returns {pid: [total_value, drop_count, first_dt,
+    last_dt]}."""
+    boundary = _current_month_start()
+    agg = {}
+
+    rollup_hi = min(end, boundary)
+    if start < rollup_hi:
+        for pid, val, cnt, min_hour, max_last in db_session.query(
+            PlayerItemHourlyTotals.player_id,
+            func.sum(PlayerItemHourlyTotals.total_value),
+            func.sum(PlayerItemHourlyTotals.drop_count),
+            func.min(PlayerItemHourlyTotals.date_hour),
+            func.max(PlayerItemHourlyTotals.last_drop_time),
+        ).filter(
+            PlayerItemHourlyTotals.player_id.in_(member_ids),
+            PlayerItemHourlyTotals.date_hour >= _hour_str(start),
+            PlayerItemHourlyTotals.date_hour < _hour_str(rollup_hi),
+        ).group_by(PlayerItemHourlyTotals.player_id).all():
+            _fold_player(agg, pid, int(val or 0), int(cnt or 0), _parse_hour(min_hour), max_last)
+
+    drops_lo = max(start, boundary)
+    if drops_lo < end:
+        for pid, val, cnt, mn, mx in db_session.query(
+            Drop.player_id,
+            func.sum(Drop.value * Drop.quantity),
+            func.count(Drop.drop_id),
+            func.min(Drop.date_added),
+            func.max(Drop.date_added),
+        ).with_hint(Drop, _DROPS_WINDOW_HINT, "mysql").filter(
+            Drop.player_id.in_(member_ids),
+            Drop.date_added >= drops_lo,
+            Drop.date_added < end,
+            func.coalesce(Drop.hidden, False) == False,  # noqa: E712
+        ).group_by(Drop.player_id).all():
+            _fold_player(agg, pid, int(val or 0), int(cnt or 0), mn, mx)
+
+    return agg
+
+
+def _agg_items_hybrid(db_session, player_ids, start, end):
+    """Per-(player, item) totals over [start, end): rollup for settled months +
+    drops for the current month. Returns {pid: {item_id: [qty, value, count]}}."""
+    boundary = _current_month_start()
+    items = {}
+
+    def _fold(pid, item_id, qty, value, count):
+        by_item = items.setdefault(pid, {})
+        entry = by_item.get(item_id)
+        if entry is None:
+            by_item[item_id] = [qty, value, count]
+        else:
+            entry[0] += qty
+            entry[1] += value
+            entry[2] += count
+
+    rollup_hi = min(end, boundary)
+    if start < rollup_hi:
+        for pid, item_id, qty, val, cnt in db_session.query(
+            PlayerItemHourlyTotals.player_id,
+            PlayerItemHourlyTotals.item_id,
+            func.sum(PlayerItemHourlyTotals.quantity),
+            func.sum(PlayerItemHourlyTotals.total_value),
+            func.sum(PlayerItemHourlyTotals.drop_count),
+        ).filter(
+            PlayerItemHourlyTotals.player_id.in_(player_ids),
+            PlayerItemHourlyTotals.date_hour >= _hour_str(start),
+            PlayerItemHourlyTotals.date_hour < _hour_str(rollup_hi),
+        ).group_by(
+            PlayerItemHourlyTotals.player_id, PlayerItemHourlyTotals.item_id
+        ).all():
+            _fold(pid, item_id, int(qty or 0), int(val or 0), int(cnt or 0))
+
+    drops_lo = max(start, boundary)
+    if drops_lo < end:
+        for pid, item_id, qty, val, cnt in db_session.query(
+            Drop.player_id,
+            Drop.item_id,
+            func.sum(Drop.quantity),
+            func.sum(Drop.value * Drop.quantity),
+            func.count(Drop.drop_id),
+        ).with_hint(Drop, _DROPS_WINDOW_HINT, "mysql").filter(
+            Drop.player_id.in_(player_ids),
+            Drop.date_added >= drops_lo,
+            Drop.date_added < end,
+            func.coalesce(Drop.hidden, False) == False,  # noqa: E712
+        ).group_by(Drop.player_id, Drop.item_id).all():
+            _fold(pid, item_id, int(qty or 0), int(val or 0), int(cnt or 0))
+
+    return items
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # GET /groups/<group_id>/export/top-players
 # ──────────────────────────────────────────────────────────────────────────────
 # Query params:
@@ -305,68 +508,103 @@ async def group_export_top_players(group_id: int):
         if len(member_ids) > MAX_EXPORT_MEMBERS:
             return _too_large_response(group_id)
 
-        base_filters = [
-            Drop.player_id.in_(member_ids),
-            Drop.date_added >= start,
-            Drop.date_added < end,
-            func.coalesce(Drop.hidden, False) == False,  # noqa: E712
-        ]
-        if npc_ids:
-            base_filters.append(Drop.npc_id.in_(npc_ids))
-
         players_payload = []
         totals = {"total_value": 0, "drop_count": 0, "players_with_drops": 0}
 
         if member_ids:
-            # One aggregation pass over the window: per-player rows are bounded
-            # by group size, so group totals and ranking happen in Python.
-            per_player = db_session.query(
-                Drop.player_id,
-                func.sum(Drop.value * Drop.quantity),
-                func.count(Drop.drop_id),
-                func.min(Drop.date_added),
-                func.max(Drop.date_added),
-            ).filter(*base_filters).group_by(Drop.player_id).all()
+            try:
+                with _statement_timeout(db_session):
+                    # Per-player aggregation. Without an NPC filter, settled
+                    # months come from the hourly rollup and only the current
+                    # month from `drops` (a wide all-drops scan is what timed
+                    # out). NPC-filtered requests are naturally narrow, so they
+                    # aggregate straight from `drops`.
+                    if npc_ids:
+                        npc_filters = [
+                            Drop.player_id.in_(member_ids),
+                            Drop.date_added >= start,
+                            Drop.date_added < end,
+                            func.coalesce(Drop.hidden, False) == False,  # noqa: E712
+                            Drop.npc_id.in_(npc_ids),
+                        ]
+                        per_player = db_session.query(
+                            Drop.player_id,
+                            func.sum(Drop.value * Drop.quantity),
+                            func.count(Drop.drop_id),
+                            func.min(Drop.date_added),
+                            func.max(Drop.date_added),
+                        ).filter(*npc_filters).group_by(Drop.player_id).all()
+                    else:
+                        agg = _agg_players_hybrid(db_session, member_ids, start, end)
+                        per_player = [(pid, v[0], v[1], v[2], v[3]) for pid, v in agg.items()]
 
-            totals = {
-                "total_value": sum(int(row[1] or 0) for row in per_player),
-                "drop_count": sum(int(row[2] or 0) for row in per_player),
-                "players_with_drops": len(per_player),
-            }
-            ranked = sorted(per_player, key=lambda row: int(row[1] or 0), reverse=True)[:limit]
+                    totals = {
+                        "total_value": sum(int(row[1] or 0) for row in per_player),
+                        "drop_count": sum(int(row[2] or 0) for row in per_player),
+                        "players_with_drops": len(per_player),
+                    }
+                    ranked = sorted(per_player, key=lambda row: int(row[1] or 0), reverse=True)[:limit]
+                    top_ids = [row[0] for row in ranked]
 
-            top_ids = [row[0] for row in ranked]
-            name_by_id = {}
-            if top_ids:
-                for pid, pname, wom in db_session.query(
-                    Player.player_id, Player.player_name, Player.wom_id
-                ).filter(Player.player_id.in_(top_ids)).all():
-                    name_by_id[pid] = (pname, wom)
+                    name_by_id = {}
+                    if top_ids:
+                        for pid, pname, wom in db_session.query(
+                            Player.player_id, Player.player_name, Player.wom_id
+                        ).filter(Player.player_id.in_(top_ids)).all():
+                            name_by_id[pid] = (pname, wom)
 
-            items_by_player = {}
-            if include_items and top_ids:
-                item_rows = db_session.query(
-                    Drop.player_id,
-                    Drop.item_id,
-                    ItemList.item_name,
-                    func.sum(Drop.quantity),
-                    func.sum(Drop.value * Drop.quantity),
-                    func.count(Drop.drop_id),
-                ).outerjoin(ItemList, ItemList.item_id == Drop.item_id).filter(
-                    *base_filters, Drop.player_id.in_(top_ids)
-                ).group_by(Drop.player_id, Drop.item_id, ItemList.item_name).all()
+                    items_by_player = {}
+                    if include_items and top_ids:
+                        # {pid: {item_id: [qty, value, count]}}
+                        if npc_ids:
+                            items_raw = {}
+                            for pid, item_id, qty, value, count in db_session.query(
+                                Drop.player_id,
+                                Drop.item_id,
+                                func.sum(Drop.quantity),
+                                func.sum(Drop.value * Drop.quantity),
+                                func.count(Drop.drop_id),
+                            ).filter(
+                                Drop.player_id.in_(top_ids),
+                                Drop.date_added >= start,
+                                Drop.date_added < end,
+                                func.coalesce(Drop.hidden, False) == False,  # noqa: E712
+                                Drop.npc_id.in_(npc_ids),
+                            ).group_by(Drop.player_id, Drop.item_id).all():
+                                items_raw.setdefault(pid, {})[item_id] = [
+                                    int(qty or 0), int(value or 0), int(count or 0)
+                                ]
+                        else:
+                            items_raw = _agg_items_hybrid(db_session, top_ids, start, end)
 
-                for pid, item_id, item_name, qty, value, count in item_rows:
-                    items_by_player.setdefault(pid, []).append({
-                        "item_id": item_id,
-                        "item_name": item_name,
-                        "quantity": int(qty or 0),
-                        "total_value": int(value or 0),
-                        "drop_count": int(count or 0),
-                    })
-                for pid in items_by_player:
-                    items_by_player[pid].sort(key=lambda entry: entry["total_value"], reverse=True)
-                    items_by_player[pid] = items_by_player[pid][:items_per_player]
+                        wanted_item_ids = {iid for by_item in items_raw.values() for iid in by_item}
+                        name_by_item = {}
+                        if wanted_item_ids:
+                            for iid, iname in db_session.query(
+                                ItemList.item_id, ItemList.item_name
+                            ).filter(ItemList.item_id.in_(wanted_item_ids)).all():
+                                name_by_item[iid] = iname
+
+                        for pid, by_item in items_raw.items():
+                            entries = [{
+                                "item_id": iid,
+                                "item_name": name_by_item.get(iid),
+                                "quantity": vals[0],
+                                "total_value": vals[1],
+                                "drop_count": vals[2],
+                            } for iid, vals in by_item.items()]
+                            entries.sort(key=lambda e: e["total_value"], reverse=True)
+                            items_by_player[pid] = entries[:items_per_player]
+            except OperationalError as exc:
+                if _is_timeout_error(exc):
+                    logger.log_sync(
+                        "error",
+                        f"group_export top-players query too heavy (group {group_id})",
+                        {"group_id": group_id, "members": len(member_ids),
+                         "start": str(start), "end": str(end), "npc_ids": npc_ids},
+                    )
+                    return _query_too_heavy_response()
+                raise
 
             for rank, (pid, total_value, drop_count, first_drop, last_drop) in enumerate(ranked, start=1):
                 pname, wom = name_by_id.get(pid, (None, None))
@@ -465,25 +703,38 @@ async def group_export_drops(group_id: int):
             if min_value > 0:
                 filters.append((Drop.value * Drop.quantity) >= min_value)
 
-            rows = db_session.query(
-                Drop.drop_id,
-                Drop.player_id,
-                Player.player_name,
-                Drop.npc_id,
-                NpcList.npc_name,
-                Drop.item_id,
-                ItemList.item_name,
-                Drop.quantity,
-                Drop.value,
-                Drop.date_added,
-                Drop.image_url,
-            ).join(Player, Player.player_id == Drop.player_id).outerjoin(
-                NpcList, NpcList.npc_id == Drop.npc_id
-            ).outerjoin(
-                ItemList, ItemList.item_id == Drop.item_id
-            ).filter(*filters).order_by(
-                Drop.date_added.desc(), Drop.drop_id.desc()
-            ).limit(limit).offset(offset).all()
+            try:
+                with _statement_timeout(db_session):
+                    rows = db_session.query(
+                        Drop.drop_id,
+                        Drop.player_id,
+                        Player.player_name,
+                        Drop.npc_id,
+                        NpcList.npc_name,
+                        Drop.item_id,
+                        ItemList.item_name,
+                        Drop.quantity,
+                        Drop.value,
+                        Drop.date_added,
+                        Drop.image_url,
+                    ).join(Player, Player.player_id == Drop.player_id).outerjoin(
+                        NpcList, NpcList.npc_id == Drop.npc_id
+                    ).outerjoin(
+                        ItemList, ItemList.item_id == Drop.item_id
+                    ).filter(*filters).order_by(
+                        Drop.date_added.desc(), Drop.drop_id.desc()
+                    ).limit(limit).offset(offset).all()
+            except OperationalError as exc:
+                if _is_timeout_error(exc):
+                    logger.log_sync(
+                        "error",
+                        f"group_export drops query too heavy (group {group_id})",
+                        {"group_id": group_id, "members": len(member_ids),
+                         "start": str(start), "end": str(end),
+                         "offset": offset, "npc_ids": npc_ids},
+                    )
+                    return _query_too_heavy_response()
+                raise
 
             for row in rows:
                 (drop_id, pid, pname, npc_id, npc_name, item_id,

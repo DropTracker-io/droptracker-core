@@ -74,8 +74,9 @@ from db import (
     Player,
     user_group_association,
 )
-from web_api.common import (abort_problem, db_session, money, private_no_store,
-                            score_num, with_cache_headers)
+from web_api.common import (abort_problem, db_session, hidden_player_ids, money,
+                            parse_page, private_no_store, score_num,
+                            with_cache_headers)
 from web_api.task_tiles import build_tile, spec_names, tile_spec
 from web_api.deps import (
     assert_group_admin,
@@ -366,7 +367,11 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
         for m, player_name in member_rows:
             members_by_team.setdefault(m.team_id, []).append({
                 "player_id": m.player_id,
-                "player_name": player_name,
+                # Player rows can carry a null name (e.g. bulk-added accounts
+                # before WOM resolves an RSN); fall back to a stable display
+                # string so the contract's `player_name: string` never breaks
+                # the event/admin pages on a null.
+                "player_name": player_name or f"Player {m.player_id}",
                 "joined_at": _ts(m.joined_at),
                 "role": getattr(m, "role", None),
             })
@@ -917,7 +922,7 @@ async def get_event_team(event_id: int, team_id: int):
             members = [
                 {
                     "player_id": m.player_id,
-                    "player_name": player_name,
+                    "player_name": player_name or f"Player {m.player_id}",
                     "joined_at": _ts(m.joined_at),
                     "role": getattr(m, "role", None),
                     "completions": contrib.get(m.player_id, {}).get("completions", 0),
@@ -1300,6 +1305,93 @@ async def get_loot_sweep_board(event_id: int):
     return with_cache_headers(jsonify(payload), max_age=15)
 
 
+@events_bp.get("/events/<int:event_id>/loot-sweep/summary")
+async def get_loot_sweep_summary(event_id: int):
+    """Compact Loot Sweep standings — the Discord-image view (a leaderboard, not
+    the full per-item matrix, which is far too big to screenshot for a 300-item
+    game-wide sweep). Per team: rank, score, sets completed / total, and the top
+    contributing sets (label + boss npc_id + points). Rebuilt from the applied
+    ledger via services/loot_sweep.py, so it can never disagree with the full
+    board or ``EventTeam.score``.
+
+    Powers ``/board-image/{id}`` for loot_sweep events (services/event_board_image.py)
+    and any lightweight standings widget."""
+    from db import NpcList
+    from services.loot_sweep import LootSweepConfig, counts_from_rows, score_counts
+
+    viewer_id = optional_user_id()
+    render_bypass = render_token_authorized()  # the board-image page's token
+    top_n = 3  # contributing sets shown per team
+
+    def _load():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if (_is_restricted(ev) and not render_bypass
+                    and not _can_view_restricted(s, viewer_id, ev)):
+                return None
+            tasks = (s.query(EventTask)
+                     .filter(EventTask.event_id == event_id, EventTask.type == "loot_sweep")
+                     .order_by(EventTask.id.asc()).all())
+            teams = (s.query(EventTeam)
+                     .filter(EventTeam.event_id == event_id)
+                     .order_by(EventTeam.score.desc(), EventTeam.id.asc()).all())
+            base = {"event_id": event_id, "event_name": ev.name, "status": ev.status,
+                    "sets_total": len(tasks), "teams": []}
+            if not tasks:
+                base["teams"] = [
+                    {"team_id": t.id, "rank": i + 1, "name": t.name, "color": t.color,
+                     "score": score_num(t.score), "sets_completed": 0, "top_sets": []}
+                    for i, t in enumerate(teams)]
+                return base
+
+            task_ids = [t.id for t in tasks]
+            rows_by: dict = {}
+            for r in (s.query(EventCompletion)
+                      .filter(EventCompletion.event_id == event_id,
+                              EventCompletion.task_id.in_(task_ids),
+                              EventCompletion.status.in_(_APPLIED_STATUSES)).all()):
+                rows_by.setdefault((r.task_id, r.team_id), []).append(r)
+
+            cfgs = [(task, LootSweepConfig(task.config)) for task in tasks]
+            # First-group NPC per task → id, for the board's boss art.
+            first_npc = {task.id: (cfg.groups[0].npcs[0] if cfg.groups and cfg.groups[0].npcs
+                                   else None) for task, cfg in cfgs}
+            npc_id_by_name: dict = {}
+            wanted = {n for n in first_npc.values() if n}
+            if wanted:
+                for nid, nname in (s.query(NpcList.npc_id, NpcList.npc_name)
+                                   .filter(NpcList.npc_name.in_(list(wanted))).all()):
+                    npc_id_by_name.setdefault(nname, nid)
+
+            for rank, t in enumerate(teams, start=1):
+                completed = 0
+                contribs = []  # (points, label, npc_id)
+                for task, cfg in cfgs:
+                    b = score_counts(counts_from_rows(rows_by.get((task.id, t.id), [])), cfg)
+                    if b["set_completions"] >= 1:
+                        completed += 1
+                    if b["total"] > 0:
+                        contribs.append((b["total"], task.label,
+                                         npc_id_by_name.get(first_npc.get(task.id))))
+                contribs.sort(key=lambda c: c[0], reverse=True)
+                base["teams"].append({
+                    "team_id": t.id, "rank": rank, "name": t.name, "color": t.color,
+                    "score": score_num(t.score), "sets_completed": completed,
+                    "top_sets": [{"label": lbl, "npc_id": nid, "points": score_num(pts)}
+                                 for pts, lbl, nid in contribs[:top_n]],
+                })
+            return base
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(404, "Event not found", f"No event {event_id}.")
+    if viewer_id is not None:
+        return private_no_store(jsonify(payload))
+    return with_cache_headers(jsonify(payload), max_age=15)
+
+
 @events_bp.get("/events/<int:event_id>/loot-sweep/receipts")
 async def get_loot_sweep_receipts(event_id: int):
     """Per-team receipt ledger for ONE loot_sweep item — powers the board's
@@ -1416,6 +1508,186 @@ async def get_loot_sweep_receipts(event_id: int):
     return with_cache_headers(jsonify(payload), max_age=15)
 
 
+def _history_points(tasks: dict, all_rows: list) -> dict:
+    """``{completion_id: points that row credited}``.
+
+    loot_sweep tasks use the exact incremental receipt fold; every other task
+    type credits its face ``points`` to the row that pushes a team's summed
+    progress across the completion threshold (exact for simple count tasks, a
+    reasonable approximation for distinct/grouped goals) and 0 to partial rows.
+    The task's face value travels separately as ``task_points`` so the UI never
+    has to infer it."""
+    from collections import defaultdict
+
+    from services.event_engine import _task_to_dict, completion_threshold
+    from services.loot_sweep import LootSweepConfig, receipt_points_by_row
+
+    by_task: dict = defaultdict(list)
+    for r in all_rows:
+        by_task[r.task_id].append(r)
+
+    out: dict = {}
+    for task_id, rows in by_task.items():
+        task = tasks.get(task_id)
+        if task is None:
+            for r in rows:
+                out[r.id] = 0.0
+            continue
+        if task.type == "loot_sweep":
+            out.update(receipt_points_by_row(rows, LootSweepConfig(task.config)))
+            continue
+        try:
+            threshold = max(int(completion_threshold(_task_to_dict(task))), 1)
+        except Exception:
+            threshold = 1
+        face = float(task.points or 0)
+        cum: dict = defaultdict(int)
+        done: set = set()
+        for r in rows:  # already global created-asc; monotonic per team
+            pts = 0.0
+            tid = r.team_id
+            if tid is not None and tid not in done:
+                before = cum[tid]
+                after = before + max(int(r.quantity or 1), 1)
+                cum[tid] = after
+                if before < threshold <= after:
+                    pts = face
+                    done.add(tid)
+            out[r.id] = pts
+    return out
+
+
+@events_bp.get("/events/<int:event_id>/completions/history")
+async def get_completion_history(event_id: int):
+    """Public, read-only timeline of applied task completions — the centralized
+    "where the points came from" view for loot_sweep and every other kind.
+
+    Only applied rows (``auto``/``confirmed``/``manual``) for **public** tasks
+    are visible to the general public; event admins additionally see hidden
+    tasks and the real RSN behind a hidden player (whose identity is otherwise
+    masked to "Hidden player" — the completion itself always stays visible so
+    public point totals reconcile, which is what keeps an event auditable and
+    fair). Filter with ``teamId``, ``taskId`` and ``player``; paginated."""
+    from db import Player
+
+    viewer_id = optional_user_id()
+
+    def _int_or_none(name: str):
+        raw = request.args.get(name)
+        if raw in (None, ""):
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            abort_problem(422, f"Invalid {name}", f"'{name}' must be an integer.")
+
+    team_arg = _int_or_none("teamId")
+    task_arg = _int_or_none("taskId")
+    player_q = (request.args.get("player") or "").strip()
+    page, limit = parse_page(request, default_limit=50, max_limit=100)
+
+    def _load():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                return None
+            is_admin = _is_event_admin(s, viewer_id, ev)
+
+            task_rows = s.query(EventTask).filter(EventTask.event_id == event_id).all()
+            tasks = {t.id: t for t in task_rows}
+            if is_admin:
+                visible_task_ids = set(tasks)
+            else:
+                visible_task_ids = {
+                    t.id for t in task_rows if (t.visibility or "public") == "public"
+                }
+
+            base = {
+                "event_id": event_id,
+                "kind": getattr(ev, "kind", "standard") or "standard",
+                "is_admin": bool(is_admin),
+            }
+            if not visible_task_ids:
+                return {**base, "entries": [],
+                        "meta": {"page": page, "limit": limit, "total": 0}}
+
+            all_rows = (
+                s.query(EventCompletion)
+                .filter(EventCompletion.event_id == event_id,
+                        EventCompletion.status.in_(_APPLIED_STATUSES),
+                        EventCompletion.task_id.in_(visible_task_ids))
+                .order_by(EventCompletion.created_at.asc(), EventCompletion.id.asc())
+                .all()
+            )
+            points_by_row = _history_points(tasks, all_rows)
+
+            team_names = dict(
+                s.query(EventTeam.id, EventTeam.name)
+                .filter(EventTeam.event_id == event_id).all()
+            )
+            pids = {r.player_id for r in all_rows if r.player_id}
+            pnames: dict = {}
+            phidden: set = set()
+            if pids:
+                for pid, name, hidden in (
+                    s.query(Player.player_id, Player.player_name, Player.hidden)
+                    .filter(Player.player_id.in_(pids)).all()
+                ):
+                    pnames[pid] = name
+                    if hidden:
+                        phidden.add(pid)
+            hidden_global = hidden_player_ids()
+
+            entries = []
+            for r in reversed(all_rows):  # newest-first
+                if team_arg is not None and r.team_id != team_arg:
+                    continue
+                if task_arg is not None and r.task_id != task_arg:
+                    continue
+                is_hidden = bool(r.player_id and
+                                 (r.player_id in phidden or r.player_id in hidden_global))
+                if is_hidden and not is_admin:
+                    disp_name, disp_pid = "Hidden player", None
+                else:
+                    disp_name, disp_pid = pnames.get(r.player_id), r.player_id
+                if player_q and not (disp_name and player_q.lower() in disp_name.lower()):
+                    continue
+                task = tasks.get(r.task_id)
+                entries.append({
+                    "completion_id": r.id,
+                    "task_id": r.task_id,
+                    "task_label": task.label if task else None,
+                    "task_type": task.type if task else None,
+                    "task_points": int(task.points or 0) if task else 0,
+                    "team_id": r.team_id,
+                    "team_name": team_names.get(r.team_id),
+                    "player_id": disp_pid,
+                    "player_name": disp_name,
+                    "hidden": is_hidden,
+                    "matched_target": r.matched_target,
+                    "quantity": int(r.quantity or 1),
+                    "points": score_num(points_by_row.get(r.id, 0.0)),
+                    "source_type": r.source_type,
+                    "status": r.status,
+                    "proof_url": r.proof_url,
+                    "created_at": _ts(r.created_at),
+                })
+
+            total = len(entries)
+            start = (page - 1) * limit
+            return {**base, "entries": entries[start:start + limit],
+                    "meta": {"page": page, "limit": limit, "total": total}}
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(404, "Not found", f"No event {event_id}.")
+    if viewer_id is not None:
+        return private_no_store(jsonify(payload))
+    return with_cache_headers(jsonify(payload), max_age=15)
+
+
 _LS_IMAGE_MAX_BYTES = 4 * 1024 * 1024
 _LS_IMAGE_FORMATS = {"PNG": ("png", "image/png"), "JPEG": ("jpg", "image/jpeg"),
                      "WEBP": ("webp", "image/webp")}
@@ -1479,6 +1751,7 @@ def _audit_ls_image(user_id, event_id: int, url: str) -> None:
     with db_session() as s:
         ev = s.query(Event).filter(Event.id == event_id).first()
         s.add(AuditLog(actor_user_id=user_id, group_id=getattr(ev, "group_id", None),
+                       event_id=event_id,
                        action="event.loot_sweep.image", target=str(event_id),
                        after=url[:250]))
         s.commit()
@@ -1666,6 +1939,28 @@ async def create_event():
     return jsonify({"id": ev_id})
 
 
+def _event_settings_snapshot(ev) -> dict:
+    """Audit snapshot of the scoring/config fields whose changes a manager
+    needs to trace (web57a) — points multipliers, review policy, schedule and
+    identity — so `event.settings.update` can record a precise before/after."""
+    starts_at = getattr(ev, "starts_at", None)
+    ends_at = getattr(ev, "ends_at", None)
+    return {
+        "name": getattr(ev, "name", None),
+        "visibility": getattr(ev, "visibility", None),
+        "mode": getattr(ev, "mode", None),
+        "kind": getattr(ev, "kind", None),
+        "formation_mode": getattr(ev, "formation_mode", None),
+        "requires_confirmation": bool(getattr(ev, "requires_confirmation", False)),
+        "submission_policy": getattr(ev, "submission_policy", None),
+        "bonus_line_points": int(getattr(ev, "bonus_line_points", 0) or 0),
+        "bonus_blackout_points": int(getattr(ev, "bonus_blackout_points", 0) or 0),
+        "buyins_enabled": bool(getattr(ev, "buyins_enabled", False)),
+        "starts_at": starts_at.isoformat() if starts_at else None,
+        "ends_at": ends_at.isoformat() if ends_at else None,
+    }
+
+
 @events_bp.patch("/events/<int:event_id>")
 async def update_event(event_id: int):
     user_id = current_user_id()
@@ -1677,6 +1972,7 @@ async def update_event(event_id: int):
             if not ev:
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             _assert_event_admin(s, user_id, ev)
+            _settings_before = _event_settings_snapshot(ev)
             if "name" in body:
                 name = (body.get("name") or "").strip()
                 if not (1 <= len(name) <= 120):
@@ -1877,6 +2173,21 @@ async def update_event(event_id: int):
                 # live Discord scheduled event (never re-creates: the row
                 # keeps its discord_scheduled_event_id).
                 _sync_event_guilds(s, ev)
+            # Audit only the scoring/config fields that actually changed — a
+            # no-op PATCH (or one touching non-tracked keys) writes no row.
+            _settings_after = _event_settings_snapshot(ev)
+            _changed = {
+                k: {"from": _settings_before[k], "to": v}
+                for k, v in _settings_after.items()
+                if _settings_before.get(k) != v
+            }
+            if _changed:
+                s.add(AuditLog(
+                    actor_user_id=user_id, group_id=ev.group_id, event_id=event_id,
+                    action="event.settings.update",
+                    target=f"web_events.{ev.id}",
+                    after=json.dumps(_changed),
+                ))
             s.commit()
             return _detail(s, ev, viewer_id=user_id)
 
@@ -2111,6 +2422,7 @@ async def delete_event(event_id: int):
                 AuditLog(
                     actor_user_id=user_id,
                     group_id=group_id,
+                    event_id=event_id,
                     action="event.delete",
                     target=f"web_events.{event_id}",
                     before=f"name:{name} status:{eff}",
@@ -2379,6 +2691,20 @@ async def add_task(event_id: int):
             )
             s.add(task)
             task.visibility = save_task_to_library(s, ev, task, visibility)
+            s.flush()  # populate task.id for the audit target
+            s.add(AuditLog(
+                actor_user_id=user_id,
+                group_id=ev.group_id,
+                event_id=event_id,
+                action="event.task.create",
+                target=f"web_event_tasks.{task.id}",
+                after=json.dumps({
+                    "type": task.type, "label": task.label,
+                    "points": int(task.points or 0),
+                    "target": task.target, "target_value": task.target_value,
+                    "visibility": task.visibility,
+                }),
+            ))
             s.commit()
             return task.id, task.visibility
 
@@ -2638,6 +2964,7 @@ async def delete_task(event_id: int, task_id: int):
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.task.delete",
                 target=f"web_events.{event_id}.task.{task_id}",
                 before=f"label:{task_label}",
@@ -2751,6 +3078,7 @@ async def update_team(event_id: int, team_id: int):
                 AuditLog(
                     actor_user_id=user_id,
                     group_id=ev.group_id,
+                    event_id=ev.id,
                     action="event.team.update",
                     target=f"web_events.{event_id}.team.{team_id}",
                     before=json.dumps(before),
@@ -2847,6 +3175,7 @@ async def delete_team(event_id: int, team_id: int):
                 AuditLog(
                     actor_user_id=user_id,
                     group_id=ev.group_id,
+                    event_id=ev.id,
                     action="event.team.delete",
                     target=f"web_events.{event_id}.team.{team_id}",
                     before=f"name:{team_name}",
@@ -3239,6 +3568,7 @@ async def admin_add_member(event_id: int, team_id: int):
                 AuditLog(
                     actor_user_id=user_id,
                     group_id=ev.group_id,
+                    event_id=ev.id,
                     action="event.member.add",
                     target=f"web_events.{event_id}.player.{player_id}",
                     before=before,
@@ -3384,6 +3714,7 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
                     AuditLog(
                         actor_user_id=user_id,
                         group_id=ev.group_id,
+                        event_id=ev.id,
                         action="event.member.bulk_add",
                         target=f"web_events.{event_id}.team.{team_id}",
                         before=None,
@@ -3438,6 +3769,7 @@ async def admin_remove_member(event_id: int, team_id: int, player_id: int):
                     AuditLog(
                         actor_user_id=user_id,
                         group_id=ev.group_id,
+                        event_id=ev.id,
                         action="event.member.remove",
                         target=f"web_events.{event_id}.player.{player_id}",
                         before=f"team:{team_id}",
@@ -3504,6 +3836,7 @@ async def set_team_leadership(event_id: int, team_id: int):
                               "That player is not on this team.")
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.leadership.assign",
                 target=f"web_events.{event_id}.team.{team_id}",
                 before=None, after=f"{role}:{player_id}",
@@ -3553,6 +3886,7 @@ async def clear_team_leadership(event_id: int, team_id: int, player_id: int):
             member.role = None
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.leadership.remove",
                 target=f"web_events.{event_id}.team.{team_id}",
                 before=before, after=None,
@@ -3671,6 +4005,7 @@ async def assign_signup(event_id: int):
                 abort_problem(exc.status, exc.title, exc.detail)
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.signup.assign",
                 target=f"web_events.{event_id}.player.{player_id}",
                 before=None, after=f"team:{team_id}",
@@ -3704,6 +4039,7 @@ async def randomize_signups(event_id: int):
             result = randomize_pool(s, ev, group_id=group_id)
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.signup.randomize",
                 target=f"web_events.{event_id}",
                 before=None, after=f"assigned:{result['assigned']}",
@@ -3747,6 +4083,7 @@ async def populate_random_members(event_id: int):
                 abort_problem(e.status, e.title, e.detail)
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.populate_random",
                 target=f"web_events.{event_id}",
                 before=None, after=f"source:{source} added:{result['added']}",
@@ -3812,6 +4149,7 @@ async def post_signup_message(event_id: int):
             ))
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.signup.message",
                 target=f"web_events.{event_id}", before=None, after="posted",
             ))
@@ -3852,6 +4190,7 @@ async def remove_event_signup(event_id: int, player_id: int):
             remove_signup(s, ev, player_id)
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.signup.remove",
                 target=f"web_events.{event_id}.player.{player_id}",
                 before="signed_up", after=None,

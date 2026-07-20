@@ -173,6 +173,35 @@ def _board_game_signature(session, event) -> Optional[dict]:
     }
 
 
+def _loot_sweep_signature(session, event) -> Optional[dict]:
+    """State signature for a Loot Sweep event's compact standings image
+    (``loot_sweep`` kind). ``None`` when the event carries no loot_sweep task.
+
+    The picture is a leaderboard: rank / team / score / sets-done. Every scoring
+    receipt AND every bonus payout moves a team's ``EventTeam.score`` (dead-weight
+    receipts never reach apply), so hashing the ordered per-team scores is a
+    faithful, cheap change-detector — no need to re-fold 300 items × N teams off
+    the ledger on every 2-minute sweep just to decide whether to re-screenshot."""
+    from db.models import EventTask, EventTeam
+
+    has_task = (session.query(EventTask.id)
+                .filter(EventTask.event_id == event.id,
+                        EventTask.type == "loot_sweep")
+                .first())
+    if not has_task:
+        return None
+    teams = (session.query(EventTeam)
+             .filter(EventTeam.event_id == event.id)
+             .order_by(EventTeam.score.desc(), EventTeam.id.asc())
+             .all())
+    return {
+        "kind": "loot_sweep",
+        "name": event.name,
+        "status": event.status,
+        "teams": [(t.id, t.name, t.color, round(float(t.score or 0), 2)) for t in teams],
+    }
+
+
 def _collect_render_inputs(session, event, team_id=None) -> Optional[dict]:
     """State signature for one event's board view: ``{"kind", "hash_src"}`` —
     or ``None`` for events with no visual board (standard task-list events).
@@ -180,13 +209,15 @@ def _collect_render_inputs(session, event, team_id=None) -> Optional[dict]:
     ``hash_src`` folds everything that changes the rendered picture, so the
     Redis cache re-screenshots exactly when the board actually changes.
     ``team_id`` scopes a bingo signature to that team's tab-selected view; a
-    board game's shared track keeps a team-agnostic signature (the team param
-    only highlights "their" piece — the per-team cache keys keep the
-    highlighted variants apart)."""
+    board game's shared track / a loot sweep's shared standings keep a
+    team-agnostic signature (the team param only highlights "their" row/piece —
+    the per-team cache keys keep the highlighted variants apart)."""
     if getattr(event, "has_bingo", False):
         sig = _bingo_signature(session, event, team_id)
     elif getattr(event, "kind", None) == "board_game":
         sig = _board_game_signature(session, event)
+    elif getattr(event, "kind", None) == "loot_sweep":
+        sig = _loot_sweep_signature(session, event)
     else:
         return None
     if sig is None:

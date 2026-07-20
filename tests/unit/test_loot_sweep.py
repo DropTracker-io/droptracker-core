@@ -153,14 +153,26 @@ class TestSimpleBoss:
         assert r["groups"][0]["completions"] == 0
         assert r["total"] == 69
 
-    def test_group_bonus_capped(self):
+    def test_group_bonus_decays_on_repeat_completion(self):
+        # Completing the set a second time scores the bonus AGAIN, decayed like
+        # an item receipt: 40 then 40*0.8 = 32.
         cfg = _kreearra()
         counts = {k: 2 for k in ("armadyl helmet", "armadyl chestplate",
                                  "armadyl chainskirt", "armadyl hilt")}
         r = ls.score_counts(counts, cfg)
         assert r["groups"][0]["completions"] == 2
-        assert r["groups"][0]["awarded"] == 1  # bonus_max default 1
-        assert r["group_bonus_total"] == 40
+        assert r["groups"][0]["awarded"] == 2          # both completions scored
+        assert r["group_bonus_total"] == 72            # 40 + 32
+
+    def test_group_bonus_decays_to_zero_after_five(self):
+        # Mirrors an item's 5 decay tiers: 40+32+24+16+8 = 120, capped there.
+        cfg = _kreearra()
+        counts = {k: 7 for k in ("armadyl helmet", "armadyl chestplate",
+                                 "armadyl chainskirt", "armadyl hilt")}
+        r = ls.score_counts(counts, cfg)
+        assert r["groups"][0]["completions"] == 7
+        assert r["groups"][0]["awarded"] == 5          # capped at bonus_max (tiers)
+        assert r["group_bonus_total"] == 120           # 40+32+24+16+8
 
 
 # --- scoring: meta-set (Barrows-style) ------------------------------------- #
@@ -170,7 +182,7 @@ def _mini_barrows():
                 "items": [{"item_name": f"{prefix} {p}", "points": 1}
                           for p in ("a", "b", "c", "d")]}
     return ls.LootSweepConfig({
-        "decay_percent": 20, "set_bonus_points": 40, "set_bonus_max": 1,
+        "decay_percent": 20, "set_bonus_points": 40,
         "groups": [bro("Ahrim", "Ahrim the Blighted", "ahrim"),
                    bro("Dharok", "Dharok the Wretched", "dharok")],
     })
@@ -193,6 +205,17 @@ class TestMetaSet:
         assert r["set_completions"] == 1
         assert r["set_total"] == 40
         assert r["total"] == 8 + 8 + 40       # items(8) + group bonuses(8) + set(40)
+
+    def test_repeat_completion_decays_both_levels(self):
+        # Two full Barrows completions: each brother sub-set pays 4 then 3.2
+        # (7.2 each → 14.4 across two brothers); the whole-set bonus pays
+        # 40 then 32 (72). Items score their own decaying points on top.
+        cfg = _mini_barrows()
+        counts = {f"{b} {p}": 2 for b in ("ahrim", "dharok") for p in "abcd"}
+        r = ls.score_counts(counts, cfg)
+        assert r["set_completions"] == 2
+        assert r["group_bonus_total"] == 14.4   # (4+3.2) * 2 brothers
+        assert r["set_total"] == 72             # 40 + 32
 
 
 # --- scoring: batched item end to end -------------------------------------- #
@@ -219,6 +242,81 @@ class TestFromRows:
 
     def test_bonus_rows_ignored(self):
         assert ls.counts_from_rows([_row("x", source_type="bonus")]) == {}
+
+
+# --- receipt enrichment (the Discord message detail) ----------------------- #
+class TestReceiptDetail:
+    def test_first_receipt_full_points_and_decay_preview(self):
+        cfg = _kreearra()
+        prev = ls.score_counts({}, cfg)
+        curr = ls.score_counts({"armadyl helmet": 1}, cfg)
+        d = ls.receipt_detail(curr, prev, cfg, "Armadyl helmet")
+        assert d["item_name"] == "Armadyl helmet"
+        assert d["received_points"] == 9        # first receipt, full base
+        assert d["item_count"] == 1
+        assert d["item_max"] == 5               # default 5 decay tiers
+        assert d["item_remaining"] == 4
+        assert d["next_receipt_points"] == 7.2  # 9 * 0.8
+        assert d["group_have"] == 1
+        assert d["group_need"] == 4             # gating items (pet excluded)
+        assert d["group_bonus_points"] == 40
+
+    def test_decayed_receipt(self):
+        cfg = _kreearra()
+        prev = ls.score_counts({"armadyl hilt": 1}, cfg)
+        curr = ls.score_counts({"armadyl hilt": 2}, cfg)
+        d = ls.receipt_detail(curr, prev, cfg, "Armadyl hilt")
+        assert d["received_points"] == 10.4     # 13 * 0.8
+        assert d["item_count"] == 2
+        assert d["next_receipt_points"] == 7.8  # 13 * 0.6
+
+    def test_capped_item_scores_nothing(self):
+        cfg = _kreearra()
+        prev = ls.score_counts({"armadyl helmet": 5}, cfg)
+        curr = ls.score_counts({"armadyl helmet": 6}, cfg)
+        d = ls.receipt_detail(curr, prev, cfg, "Armadyl helmet")
+        assert d["received_points"] == 0
+        assert d["item_remaining"] == 0
+        assert d["next_receipt_points"] == 0
+
+    def test_group_completion_progress(self):
+        cfg = _kreearra()
+        base = {"armadyl helmet": 1, "armadyl chestplate": 1, "armadyl chainskirt": 1}
+        prev = ls.score_counts(base, cfg)
+        curr = ls.score_counts({**base, "armadyl hilt": 1}, cfg)
+        d = ls.receipt_detail(curr, prev, cfg, "Armadyl hilt")
+        assert (d["group_have"], d["group_need"]) == (4, 4)
+        assert d["group_completions"] == 1
+        assert d["group_awarded"] == 1
+
+    def test_set_progress_across_groups(self):
+        cfg = _mini_barrows()
+        prevc = {f"ahrim {p}": 1 for p in "abcd"}
+        prevc.update({f"dharok {p}": 1 for p in "abc"})
+        currc = {f"ahrim {p}": 1 for p in "abcd"}
+        currc.update({f"dharok {p}": 1 for p in "abcd"})
+        d = ls.receipt_detail(ls.score_counts(currc, cfg),
+                              ls.score_counts(prevc, cfg), cfg, "dharok d")
+        assert (d["set_have"], d["set_need"]) == (2, 2)
+        assert d["set_completions"] == 1
+        assert d["set_bonus_points"] == 40
+        assert d["group_label"] == "Dharok"
+
+    def test_alias_credits_its_entry(self):
+        cfg = ls.LootSweepConfig({"decay_percent": 20, "groups": [{
+            "label": "Vestige", "npcs": ["Vardorvis"], "bonus_points": 0,
+            "items": [{"item_name": "Ultor vestige", "points": 10,
+                       "match_names": ["Gold ring"]}]}]})
+        d = ls.receipt_detail(ls.score_counts({"gold ring": 1}, cfg),
+                              ls.score_counts({}, cfg), cfg, "Gold ring")
+        assert d is not None
+        assert d["item_name"] == "Ultor vestige"
+        assert d["received_points"] == 10
+
+    def test_unknown_item_returns_none(self):
+        cfg = _kreearra()
+        curr = ls.score_counts({}, cfg)
+        assert ls.receipt_detail(curr, curr, cfg, "Twisted bow") is None
 
 
 class TestMatchNamesAndRequired:
@@ -317,6 +415,27 @@ class TestMatchNamesAndRequired:
         # The matcher registers the piece once (merged), so intake records one row.
         idx = cfg.matcher_index()
         assert idx["ancestral hat"]["source"] == "drop"
+
+    def test_pool_completes_on_any_mix_including_duplicates(self):
+        # "Any 3" means 3 receipts total across the pool's names — same item ×3,
+        # 2+1, or 1+1+1 all complete it once; 6 completes it twice.
+        cfg = ls.LootSweepConfig({"decay_percent": 20, "groups": [{
+            "npcs": ["Great Olm"], "bonus_points": 25, "bonus_max": 3,
+            "items": [{"item_name": "Any ancestral piece", "virtual": True,
+                       "points": 3, "required": 3,
+                       "match_names": ["Ancestral hat", "Ancestral robe top",
+                                       "Ancestral robe bottom"]}],
+        }]})
+
+        def completions(counts):
+            return ls.score_counts(counts, cfg)["groups"][0]["completions"]
+
+        assert completions({"ancestral hat": 3}) == 1               # 3 of the same
+        assert completions({"ancestral hat": 2, "ancestral robe top": 1}) == 1  # 2+1
+        assert completions({"ancestral hat": 1, "ancestral robe top": 1,
+                            "ancestral robe bottom": 1}) == 1         # 1+1+1
+        assert completions({"ancestral hat": 2}) == 0                # only 2
+        assert completions({"ancestral hat": 6}) == 2                # two completions
 
     def test_required_gates_group_completion(self):
         cfg = ls.LootSweepConfig({"decay_percent": 20, "groups": [{

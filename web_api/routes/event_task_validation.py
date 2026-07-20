@@ -70,7 +70,10 @@ LOOT_SWEEP_DECAY_MODES = ("linear", "geometric")
 LOOT_SWEEP_DEFAULT_DECAY_PERCENT = 20
 LOOT_SWEEP_DEFAULT_AWARDS_PER_TIER = 1
 LOOT_SWEEP_DEFAULT_TIERS = 5
-LOOT_SWEEP_DEFAULT_BONUS_MAX = 1
+# A set/section completion scores like a decaying item (full, then 80%, 60% …),
+# so by default it pays over the decay-tier count of completions rather than
+# once. Must match services.loot_sweep.DEFAULT_{GROUP,SET}_BONUS_MAX.
+LOOT_SWEEP_DEFAULT_BONUS_MAX = LOOT_SWEEP_DEFAULT_TIERS
 LOOT_SWEEP_MAX_GROUPS = 40
 LOOT_SWEEP_MAX_ITEMS = 400          # across the whole task
 LOOT_SWEEP_MAX_AWARDS_PER_TIER = 20

@@ -120,12 +120,20 @@ class AuditLog(Base):
     __tablename__ = "audit_log"
     __table_args__ = (
         Index("idx_audit_group_created", "group_id", "created_at"),
+        # Event-scoped audit browser (web57a): the manager audit log filters one
+        # event's admin actions by this column, newest-first.
+        Index("idx_audit_event_created", "event_id", "created_at"),
         {"extend_existing": True},
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     actor_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=True)
+    # The web event this action happened inside, when it is event-scoped
+    # (web57a). Deliberately NOT a ForeignKey: an event hard-delete must not
+    # be blocked by — nor cascade away — its own durable audit trail, and
+    # library/template/config actions legitimately carry NULL here.
+    event_id = Column(Integer, nullable=True)
     action = Column(String(64), nullable=False)      # e.g. 'config.update'
     target = Column(String(128), nullable=True)      # e.g. 'group_configurations.notify_pets'
     before = Column(Text, nullable=True)

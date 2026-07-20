@@ -35,6 +35,11 @@ REFRESH_AFTER_TYPES = (
     "event_blackout",
     "event_lead_change",
     "event_ended",
+    # Loot Sweep bonus payouts change standings — keep the board hot. The
+    # per-item event_sweep_item is deliberately excluded (the 2-min sweep +
+    # Redis-cached image already cover it without an edit per drop).
+    "event_sweep_group",
+    "event_sweep_set",
 )
 
 # Skip hook-triggered refreshes when the board was edited this recently; the
@@ -224,7 +229,22 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
             if channel is None or not callable(getattr(channel, "send", None)):
                 continue
 
+            # Render the board image once per sweep (reused across rows).
+            if not board_img_computed:
+                board_img_computed = True
+                try:
+                    from services.event_board_image import board_image_png
+                    board_img = await board_image_png(session, event)
+                except Exception:
+                    board_img = None  # never let board art block the standings
+
             top_n = int(config["leaderboard"].get("top_n") or 10)
+            # Loot Sweep: the compact standings IMAGE carries the full
+            # leaderboard, so the text collapses to a short top-3 fallback (for
+            # image-muted clients). Only when the image actually rendered — a
+            # render failure keeps the full text standings.
+            if getattr(event, "kind", None) == "loot_sweep" and board_img is not None:
+                top_n = min(top_n, 3)
             layout = _apply_top_n(load_layout(session, event.group_id, "event_board"), top_n)
             # Threads/announcement channels can't host a LAUNCH_ACTIVITY
             # callback — render an Activity Link URL button (client-side
@@ -243,13 +263,6 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
                     context.get("ends_at_unix"),
                 ),
             )
-            if not board_img_computed:
-                board_img_computed = True
-                try:
-                    from services.event_board_image import board_image_png
-                    board_img = await board_image_png(session, event)
-                except Exception:
-                    board_img = None  # never let board art block the standings
             # Attach the board as a FILE and reference it as attachment:// —
             # Components-V2 media galleries render attachments reliably where
             # external URLs spin forever. The bytes come from the Redis cache,

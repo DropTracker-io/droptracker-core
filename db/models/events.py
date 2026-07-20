@@ -219,6 +219,12 @@ EVENT_MESSAGE_TOGGLE_KEYS = (
     # the event's main channels (team channels carry it by default instead —
     # services/event_team_discord.DEFAULT_TEAM_MESSAGE_TOGGLES).
     "event_board_roll_prompt",
+    # Loot Sweep (loot_sweep kind): three independently-toggleable verbosity
+    # levels. Individual item receipts default OFF (a 300-item game-wide sweep
+    # would flood the channel); subset + whole-set completions default ON.
+    "event_sweep_item",
+    "event_sweep_group",
+    "event_sweep_set",
 )
 
 # Message types that have a component-layout row in web_event_message_layouts:

@@ -67,6 +67,11 @@ DEFAULT_TEAM_MESSAGE_TOGGLES = {
     "event_lead_change": True,
     "event_board_turn": True,
     "event_board_roll_prompt": True,
+    # Loot Sweep verbosity — inherits the event-level toggles (individual item
+    # receipts default off; subset + whole-set completions default on).
+    "event_sweep_item": False,
+    "event_sweep_group": True,
+    "event_sweep_set": True,
 }
 
 # Types the roll-prompt exception applies to (never inherited from the event
@@ -85,6 +90,11 @@ DEFAULT_TEAM_MESSAGE_PINGS = {
     "event_lead_change": True,
     "event_board_turn": False,
     "event_board_roll_prompt": True,
+    # Ping for the celebratory set/subset completions; stay quiet for the
+    # high-frequency individual item receipts.
+    "event_sweep_item": False,
+    "event_sweep_group": True,
+    "event_sweep_set": True,
 }
 
 # Progress verbosity for team channels ('off'|'milestones'|'all') when the
@@ -437,6 +447,10 @@ TEAM_SCOPED_TYPES = (
     "event_blackout",
     "event_board_turn",
     "event_board_roll_prompt",
+    # Loot Sweep verbosity posts to the owning team's channel.
+    "event_sweep_item",
+    "event_sweep_group",
+    "event_sweep_set",
 )
 
 

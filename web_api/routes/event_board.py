@@ -640,7 +640,7 @@ def _write_board(s, ev, user_id: int, tiles_in: list, body: dict,
             setattr(config, key, v)
 
     s.add(AuditLog(
-        actor_user_id=user_id, group_id=ev.group_id,
+        actor_user_id=user_id, group_id=ev.group_id, event_id=ev.id,
         action=audit_action, target=str(ev.id),
         after=audit_after if audit_after is not None else f"tiles={len(tiles_in)}",
     ))
@@ -726,6 +726,7 @@ async def patch_board_settings(event_id: int):
             config.settings = json.dumps(merged)
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.board.settings", target=str(ev.id),
                 after=json.dumps(patch)[:250],
             ))
@@ -799,6 +800,7 @@ async def upload_board_background(event_id: int):
             config.bg_height = height
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=group_id,
+                event_id=event_id,
                 action="event.board.background", target=str(event_id),
                 after=public_url[:250],
             ))
@@ -1125,6 +1127,7 @@ async def buy_board_item(event_id: int):
                 abort_problem(e.status, e.title, e.detail)
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.board.shop.buy", target=str(ev.id),
                 after=f"team={team_id} item={shop_item_id}",
             ))
@@ -1172,6 +1175,7 @@ async def use_board_item(event_id: int, inventory_id: int):
                 abort_problem(e.status, e.title, e.detail)
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.board.item.use", target=str(ev.id),
                 after=f"team={team_id} inv={inventory_id} fx={result.get('effect')}",
             ))
@@ -1223,6 +1227,7 @@ async def choose_board_task(event_id: int):
                 abort_problem(e.status, e.title, e.detail)
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.board.task.choose", target=str(ev.id),
                 after=f"team={team_id} choice={choice_index}",
             ))
@@ -1372,6 +1377,7 @@ async def put_board_shop_config(event_id: int):
                     rot.stock = entry["stock_per_refresh"]
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.board.shop.config", target=str(ev.id),
                 after=f"items={len(cleaned)}",
             ))

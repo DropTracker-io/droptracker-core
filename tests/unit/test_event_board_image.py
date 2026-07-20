@@ -48,13 +48,28 @@ def test_dispatch_recognizes_bingo_and_board_game(monkeypatch):
                         lambda s, e, team_id=None: {"kind": "bingo", "x": 1})
     monkeypatch.setattr(m, "_board_game_signature",
                         lambda s, e, team_id=None: {"kind": "board_game", "y": 2})
+    monkeypatch.setattr(m, "_loot_sweep_signature",
+                        lambda s, e: {"kind": "loot_sweep", "z": 3})
     bingo = m._collect_render_inputs(object(), _event(has_bingo=True, kind="bingo"))
     board = m._collect_render_inputs(object(), _event(has_bingo=False, kind="board_game"))
+    sweep = m._collect_render_inputs(object(), _event(has_bingo=False, kind="loot_sweep"))
     assert bingo["kind"] == "bingo" and bingo["hash_src"]["x"] == 1
     assert board["kind"] == "board_game" and board["hash_src"]["y"] == 2
+    assert sweep["kind"] == "loot_sweep" and sweep["hash_src"]["z"] == 3
     # A signature of None (e.g. bingo flag but no cells yet) → no visual board.
     monkeypatch.setattr(m, "_bingo_signature", lambda s, e, team_id=None: None)
     assert m._collect_render_inputs(object(), _event(has_bingo=True)) is None
+
+
+def test_loot_sweep_hash_changes_when_a_team_score_moves():
+    # The compact standings image re-renders exactly when a team's score moves
+    # (every scoring receipt / bonus does), so hashing the ordered team scores
+    # is the cache key.
+    before = {"kind": "loot_sweep", "hash_src": {
+        "kind": "loot_sweep", "teams": [(1, "Red", "#f00", 100.0), (2, "Blue", "#00f", 80.0)]}}
+    after = {"kind": "loot_sweep", "hash_src": {
+        "kind": "loot_sweep", "teams": [(1, "Red", "#f00", 113.0), (2, "Blue", "#00f", 80.0)]}}
+    assert m._state_hash(before) != m._state_hash(after)
 
 
 # --------------------------------------------------------------------------- #

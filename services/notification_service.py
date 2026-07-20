@@ -1756,18 +1756,26 @@ class NotificationService:
             # Task-tile icon: completion/progress messages show the item/NPC/skill
             # the task is about (same icon the website's task tiles use). On
             # completion a real proof screenshot still wins; the icon is the
-            # fallback so a completion is never image-less.
-            if notification_type in ('event_completion', 'event_task_progress') and data.get('task_id'):
+            # fallback so a completion is never image-less. Loot Sweep verbosity
+            # messages (event_sweep_*) show the received item's icon too.
+            _SWEEP_TYPES = ('event_sweep_item', 'event_sweep_group', 'event_sweep_set')
+            if (notification_type in ('event_completion', 'event_task_progress') + _SWEEP_TYPES
+                    and data.get('task_id')):
                 task_icon = self._resolve_task_icon_url(db_session, data.get('task_id'))
                 if task_icon:
                     data['task_icon'] = task_icon
-                if notification_type == 'event_completion':
+                if notification_type in ('event_completion',) + _SWEEP_TYPES:
                     # Section thumbnail = the item that was received (falls back
-                    # to the task tile when there's no resolvable item). The
-                    # proof screenshot is NOT the thumbnail — it rides below as
-                    # the full image (image_ref), so it isn't shown twice.
+                    # to the task tile when there's no resolvable item). Sweep
+                    # group/set completions prefer the group's custom boss art
+                    # when the payload carries one. The proof screenshot is NOT
+                    # the thumbnail — it rides below as the full image
+                    # (image_ref), so it isn't shown twice.
                     completion_icon = (
-                        self._resolve_item_icon_url(db_session, data.get('received_item'))
+                        (data.get('group_image')
+                         if notification_type in ('event_sweep_group', 'event_sweep_set')
+                         else None)
+                        or self._resolve_item_icon_url(db_session, data.get('received_item'))
                         or task_icon
                     )
                     if completion_icon:
@@ -1778,7 +1786,7 @@ class NotificationService:
             # ...) get — on top of the small task-tile thumbnail above, which
             # stays icon-only. Progress messages now carry the proof of the
             # ledger row that drove them (services.event_engine enrichment).
-            if notification_type in ('event_completion', 'event_task_progress'):
+            if notification_type in ('event_completion', 'event_task_progress') + _SWEEP_TYPES:
                 proof_url = data.get('proof_url')
                 if proof_url:
                     image_attachment, image_temp_path = await self._resolve_image_attachment(

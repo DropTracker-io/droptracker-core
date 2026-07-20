@@ -301,6 +301,7 @@ class TestDefaultLayouts:
             "event_activation_failed", "event_multi_clan_skipped",
             "event_signup_prompt", "event_board",
             "event_board_turn", "event_pot", "event_board_roll_prompt",
+            "event_sweep_item", "event_sweep_group", "event_sweep_set",
         }
         assert set(ml.DEFAULT_LAYOUTS) == expected
 
@@ -339,6 +340,20 @@ class TestDefaultLayouts:
                                         "team_name": "Reds", "task_label": "Get a whip",
                                         "player_name": "Zed", "coins_awarded": 5,
                                         "coin_balance": 12},
+            "event_sweep_item": {"event_id": 7, "team_id": 1, "team_name": "Reds",
+                                 "player_name": "Zed", "received_item": "Armadyl hilt",
+                                 "received_qty": 1, "received_points": 13, "item_scored": 1,
+                                 "item_max": 5, "next_receipt_points": 10.4, "npc": "Kree'arra",
+                                 "group_label": "Kree'arra", "group_have": 3, "group_need": 4,
+                                 "progress": 53, "team_score": 512},
+            "event_sweep_group": {"event_id": 7, "team_id": 1, "team_name": "Reds",
+                                  "group_label": "Ahrim", "bonus_points": 4, "points_based": True,
+                                  "team_score": 540, "team_rank": 1, "team_count": 4,
+                                  "contributors": [{"player_name": "Zed", "quantity": 7.2}]},
+            "event_sweep_set": {"event_id": 7, "team_id": 1, "team_name": "Reds",
+                                "task_label": "Barrows", "bonus_points": 40, "points_based": True,
+                                "team_score": 620, "team_rank": 1, "team_count": 4,
+                                "contributors": [{"player_name": "Zed", "quantity": 22}]},
         }
         standings = [{"name": "Reds", "score": 30}, {"name": "Blues", "score": 20}]
         for message_type, data in payloads.items():
@@ -652,3 +667,78 @@ class TestContributorBlockStyles:
         assert block.count("\n") == 1
         assert block.split("\n", 1)[1].count("**P") == 6
         assert "\U0001F947" not in block
+
+
+class TestLootSweepMessages:
+    def _render(self, nt, data):
+        context = ml.notification_context(nt, data)
+        spec = ml.render_message_spec(ml.DEFAULT_LAYOUTS[nt], context, deep_link=False)
+        text = "\n".join(
+            b.get("content", "") for b in spec["blocks"] if b["type"] in ("text", "section"))
+        return context, text
+
+    def test_item_receipt_is_fully_enriched(self):
+        ctx, text = self._render("event_sweep_item", {
+            "event_id": 27, "team_id": 3, "team_name": "Red", "player_name": "Zezima",
+            "received_item": "Armadyl hilt", "received_qty": 1, "received_points": 13,
+            "item_scored": 1, "item_max": 5, "next_receipt_points": 10.4,
+            "npc": "Kree'arra", "group_label": "Kree'arra", "group_have": 3,
+            "group_need": 4, "progress": 53, "team_score": 512,
+            "completion_icon": "https://x/hilt.png"})
+        assert "Red received Armadyl hilt" in text
+        assert "+13 pts" in text
+        assert "1/5" in text and "next `+10.4`" in text
+        assert "3/4 items" in text
+        assert "Kree'arra" in text
+        assert "53 pts" in text        # set running total
+        assert "Zezima" in text
+        assert "{" not in text         # no unresolved tokens
+
+    def test_item_quantity_multiplier(self):
+        _ctx, text = self._render("event_sweep_item", {
+            "event_id": 27, "team_id": 3, "team_name": "Red",
+            "received_item": "Coins", "received_qty": 3, "received_points": 6})
+        assert "3× Coins" in text
+
+    def test_capped_item_reads_fully_farmed(self):
+        _ctx, text = self._render("event_sweep_item", {
+            "event_id": 27, "team_id": 3, "team_name": "Red",
+            "received_item": "Bones", "received_qty": 1, "received_points": 0,
+            "item_scored": 5, "item_max": 5, "next_receipt_points": 0})
+        assert "fully farmed" in text
+        assert "next `+" not in text
+
+    def test_group_completion(self):
+        _ctx, text = self._render("event_sweep_group", {
+            "event_id": 27, "team_id": 3, "team_name": "Red", "group_label": "Ahrim",
+            "bonus_points": 4, "completion_n": 2, "points_based": True,
+            "team_score": 540, "team_rank": 1, "team_count": 4,
+            "contributors": [{"player_name": "Zezima", "quantity": 7.2},
+                             {"player_name": "Woox", "quantity": 4}]})
+        assert "completed Ahrim" in text
+        assert "+4 pts" in text
+        assert "×2" in text                       # repeat marker
+        assert "540 pts" in text and "#1/4" in text
+        assert "\U0001F947" in text               # medal on top contributor
+        assert "7.2 pts" in text
+
+    def test_set_completion(self):
+        _ctx, text = self._render("event_sweep_set", {
+            "event_id": 27, "team_id": 3, "team_name": "Red", "task_label": "Barrows",
+            "bonus_points": 40, "completion_n": 1, "points_based": True,
+            "team_score": 620, "team_rank": 1, "team_count": 4,
+            "contributors": [{"player_name": "Zezima", "quantity": 22}]})
+        assert "swept Barrows" in text
+        assert "+40 pts" in text
+        assert "{" not in text                    # again-suffix always resolves
+
+    def test_min_points_config_parsed(self):
+        cfg = en.effective_message_config({"loot_sweep": {"item_min_points": 5}})
+        assert cfg["loot_sweep"]["item_min_points"] == 5
+        assert en.effective_message_config(None)["loot_sweep"]["item_min_points"] == 0
+
+    def test_item_toggle_off_by_default_group_set_on(self):
+        cfg = en.effective_message_config(None)
+        assert en.should_send_event_message(cfg, "event_sweep_item") is False
+        assert en.should_send_event_message(cfg, "event_sweep_group") is True
+        assert en.should_send_event_message(cfg, "event_sweep_set") is True

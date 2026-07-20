@@ -706,6 +706,7 @@ async def put_event_discord(event_id: int):
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=scope_group_id if scope_group_id is not None else ev.group_id,
+                event_id=event_id,
                 action="event.discord.update",
                 target=f"web_events.{event_id}" + (
                     f".group.{scope_group_id}" if scope_group_id is not None else ""),
@@ -983,6 +984,7 @@ async def put_event_team_discord(event_id: int):
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=scope_group_id if scope_group_id is not None else ev.group_id,
+                event_id=event_id,
                 action="event.team_discord.update",
                 target=f"web_events.{event_id}" + (
                     f".group.{scope_group_id}" if scope_group_id is not None else ""),
@@ -1193,6 +1195,7 @@ async def put_team_notifications(event_id: int, team_id: int):
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
+                event_id=event_id,
                 action="event.team_discord.notifications",
                 target=f"web_events.{event_id}.team.{team_id}",
                 before=None,

@@ -37,8 +37,12 @@ DEFAULT_DECAY_PERCENT = 20      # percentage points shed per decay tier
 DEFAULT_DECAY_MODE = "linear"   # "linear" | "geometric"
 DEFAULT_AWARDS_PER_TIER = 1     # receipts sharing each decay tier
 DEFAULT_TIERS = 5               # the sheet's 100/80/60/40/20 columns
-DEFAULT_SET_BONUS_MAX = 1       # times the whole-set bonus pays out per team
-DEFAULT_GROUP_BONUS_MAX = 1     # times a group bonus pays out per team
+# A set/section completion scores like an item receipt: it pays full value the
+# first time the set is completed and DECAYS on each successive completion
+# (40 → 32 → 24 … at 20%), up to this many completions. Default = the item
+# decay-tier count so a linear-decay bonus fades to zero exactly like an item.
+DEFAULT_SET_BONUS_MAX = DEFAULT_TIERS     # decaying completions of the whole-set bonus
+DEFAULT_GROUP_BONUS_MAX = DEFAULT_TIERS   # decaying completions of a group (sub-set) bonus
 
 DECAY_MODES = ("linear", "geometric")
 
@@ -338,7 +342,7 @@ def score_counts(counts: dict[str, int], config: LootSweepConfig) -> dict:
     task. Groups/items are in config order."""
     groups_out = []
     item_total_all = 0.0
-    group_bonus_all = 0
+    group_bonus_all = 0.0
     gating_completions: list[int] = []
 
     for g in config.groups:
@@ -366,10 +370,20 @@ def score_counts(counts: dict[str, int], config: LootSweepConfig) -> dict:
             })
         completions = min(item_completions, default=0)
         has_gating = bool(item_completions)
-        awarded = min(completions, g.bonus_max) if (has_gating and g.bonus_points > 0) else 0
-        bonus_total = awarded * g.bonus_points
+        # A set (sub-)completion scores like an item receipt: full value the
+        # first time the team holds one of each gating item, then DECAYING on
+        # each successive completion (a 4-pt sub-set pays 4, 3.2, 2.4 … at 20%),
+        # up to ``bonus_max`` completions. Mirrors item decay so "complete the
+        # set again" behaves exactly like "receive the item again".
+        if has_gating and g.bonus_points > 0:
+            bonus_total = item_points(g.bonus_points, completions, g.bonus_max,
+                                      config.decay_percent, 1, config.decay_mode)
+            awarded = min(completions, g.bonus_max)
+        else:
+            bonus_total = 0.0
+            awarded = 0
         item_total_all = _round2(item_total_all + g_item_total)
-        group_bonus_all += bonus_total
+        group_bonus_all = _round2(group_bonus_all + bonus_total)
         if g.gates:
             gating_completions.append(completions)
         groups_out.append({
@@ -380,10 +394,17 @@ def score_counts(counts: dict[str, int], config: LootSweepConfig) -> dict:
         })
 
     # Whole-set bonus: how many times EVERY gating group has been completed.
+    # Like the group bonus, each whole-set completion decays (40 → 32 → … at
+    # 20%), up to ``set_bonus_max`` completions.
     set_completions = min(gating_completions) if gating_completions else 0
-    set_awarded = (min(set_completions, config.set_bonus_max)
-                   if (config.set_bonus_points > 0 and gating_completions) else 0)
-    set_total = set_awarded * config.set_bonus_points
+    if config.set_bonus_points > 0 and gating_completions:
+        set_total = item_points(config.set_bonus_points, set_completions,
+                                config.set_bonus_max, config.decay_percent, 1,
+                                config.decay_mode)
+        set_awarded = min(set_completions, config.set_bonus_max)
+    else:
+        set_total = 0.0
+        set_awarded = 0
 
     return {
         "total": _round2(item_total_all + group_bonus_all + set_total),
@@ -421,3 +442,151 @@ def score_rows(rows: Iterable, config: LootSweepConfig) -> dict:
 def team_total(rows: Iterable, config: LootSweepConfig) -> float:
     """Just the (2-decimal) team-score contribution for a (task, team)."""
     return score_rows(rows, config)["total"]
+
+
+def receipt_points_by_row(rows: Iterable, config: LootSweepConfig) -> dict:
+    """``{row.id: item receipt points}`` for a task's applied ledger rows in
+    credit order — the same incremental ``item_points`` fold the board scores
+    with and the per-item receipts card shows, generalized across every item.
+
+    Cumulative counts are tracked per ``(team_id, item)`` and pool across an
+    item's aliases (``match_keys``), so the n-th receipt decays correctly no
+    matter which alias dropped. Only per-item receipt points are attributed —
+    group/set bonuses arise from combinations across rows and can't be credited
+    to a single receipt. ``rows`` MUST be ordered oldest-first."""
+    item_by_key: dict = {}
+    for it in config.all_items():
+        for k in it.match_keys:
+            item_by_key[k] = it
+    cum: dict = {}
+    out: dict = {}
+    for r in rows:
+        rid = getattr(r, "id", None)
+        if (getattr(r, "source_type", None) or "") == "bonus":
+            out[rid] = 0.0
+            continue
+        key = _norm(getattr(r, "matched_target", None))
+        it = item_by_key.get(key)
+        team_id = getattr(r, "team_id", None)
+        if it is None or team_id is None:
+            out[rid] = 0.0
+            continue
+        qty = max(_int(getattr(r, "quantity", 1), 1), 1)
+        ck = (team_id, it.key)
+        before = cum.get(ck, 0)
+        after = before + qty
+        cum[ck] = after
+        out[rid] = _round2(
+            item_points(it.points, after, it.max_awards, config.decay_percent,
+                        it.awards_per_tier, config.decay_mode)
+            - item_points(it.points, before, it.max_awards, config.decay_percent,
+                          it.awards_per_tier, config.decay_mode)
+        )
+    return out
+
+
+def _locate_entry(config: LootSweepConfig, matched_target) -> Optional[tuple]:
+    """``(group_index, item_index, LootSweepItem, LootSweepGroup)`` for the
+    config entry a receipt of ``matched_target`` credits (matching the entry's
+    own name OR any of its ``match_names`` aliases), or ``None`` when the drop
+    isn't part of this task. Indices line up with the config-ordered
+    :func:`score_counts` ``groups``/``items`` so a caller can read the matching
+    breakdown rows by position."""
+    mk = _norm(matched_target)
+    if not mk:
+        return None
+    for gi, g in enumerate(config.groups):
+        for ii, it in enumerate(g.items):
+            if mk in it.match_keys:
+                return gi, ii, it, g
+    return None
+
+
+def receipt_detail(curr: dict, prev: dict, config: LootSweepConfig,
+                   matched_target) -> Optional[dict]:
+    """Per-receipt enrichment for a Loot Sweep Discord message — everything a
+    reader needs about a single scoring drop without leaving Discord:
+
+        {"item_name", "item_id", "npcs", "group_label",
+         "item_count", "item_scored", "item_max", "item_remaining",
+         "item_base_points", "received_points", "next_receipt_points",
+         "group_have", "group_need", "group_completions", "group_awarded",
+         "group_bonus_points",
+         "set_have", "set_need", "set_completions", "set_awarded",
+         "set_bonus_points"}
+
+    ``curr`` folds the receipt in; ``prev`` excludes it (both from
+    :func:`score_counts`), so ``received_points`` is exactly what THIS receipt
+    added to the item's decayed total. ``item_remaining`` is how many more copies
+    can still score (``max_awards − count``, floored at 0); ``next_receipt_points``
+    is what the next copy would be worth (0 once capped). Group/set ``have/need``
+    count gating entries collected vs. required. Pure (reads only the breakdown +
+    config), so it stays unit-testable under the conftest stubs. ``None`` when the
+    drop isn't a config item (caller drops the enrichment)."""
+    located = _locate_entry(config, matched_target)
+    if located is None:
+        return None
+    gi, ii, item, group = located
+    try:
+        cg = curr["groups"][gi]
+        ci = cg["items"][ii]
+    except (KeyError, IndexError, TypeError):
+        return None
+    pi = None
+    try:
+        pi = prev["groups"][gi]["items"][ii]
+    except (KeyError, IndexError, TypeError):
+        pi = None
+
+    item_count = _int(ci.get("count"), 0)
+    item_max = _int(ci.get("max_awards"), item.max_awards)
+    prev_points = _num((pi or {}).get("points"), 0.0)
+    received_points = _round2(_num(ci.get("points"), 0.0) - prev_points)
+    next_receipt_points = (
+        receipt_points(item.points, item_count + 1, config.decay_percent,
+                       item.awards_per_tier, config.decay_mode)
+        if item_count < item_max else 0.0)
+
+    # Group progress: gating entries (counts_for_group) collected at least once
+    # (count >= required) vs. the group's gating-entry total.
+    gating = [bi for bi in cg.get("items") or [] if bi.get("counts_for_group")]
+    group_have = sum(1 for bi in gating
+                     if _int(bi.get("count"), 0) >= max(_int(bi.get("required"), 1), 1))
+
+    # Set progress: gating groups (those with completion items) that have been
+    # completed at least once, vs. the count of gating groups.
+    set_need = set_have = 0
+    for j, g in enumerate(config.groups):
+        if not g.gates:
+            continue
+        set_need += 1
+        try:
+            if _int(curr["groups"][j].get("completions"), 0) >= 1:
+                set_have += 1
+        except (KeyError, IndexError, TypeError):
+            pass
+
+    return {
+        "item_name": item.name,
+        "item_id": item.item_id,
+        "npcs": list(group.npcs),
+        "group_image": group.image_url,
+        "group_label": group.label or (group.npcs[0] if group.npcs else None),
+        "item_count": item_count,
+        "item_scored": _int(ci.get("scored"), min(item_count, item_max)),
+        "item_max": item_max,
+        "item_remaining": max(item_max - item_count, 0),
+        "item_base_points": item.points,
+        "received_points": received_points,
+        "next_receipt_points": next_receipt_points,
+        "group_have": group_have,
+        "group_need": len(gating),
+        "group_completions": _int(cg.get("completions"), 0),
+        "group_awarded": _int(cg.get("awarded"), 0),
+        "group_bonus_points": group.bonus_points,
+        "set_have": set_have,
+        "set_need": set_need,
+        "set_completions": _int(curr.get("set_completions"), 0),
+        "set_awarded": _int(curr.get("set_awarded"), 0),
+        "set_bonus_points": config.set_bonus_points,
+    }

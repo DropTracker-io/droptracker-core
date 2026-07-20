@@ -143,6 +143,7 @@ async def invite_participant(event_id: int):
             ))
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.participant.invite",
                 target=f"web_events.{event_id}.group.{group_id}",
                 before=None, after="invited",
@@ -226,6 +227,7 @@ async def invite_participants_bulk(event_id: int):
             if invited:
                 s.add(AuditLog(
                     actor_user_id=user_id, group_id=ev.group_id,
+                    event_id=ev.id,
                     action="event.participant.invite_bulk",
                     target=f"web_events.{event_id}",
                     before=None, after=f"invited:{len(invited)}",
@@ -403,7 +405,7 @@ def _respond_to_invitation(event_id: int, group_id: int, user_id: int, accept: b
             # server unasked.
             row.mirror_discord_event = bool(mirror_discord_event)
         s.add(AuditLog(
-            actor_user_id=user_id, group_id=group_id,
+            actor_user_id=user_id, group_id=group_id, event_id=event_id,
             action=f"event.participant.{'accept' if accept else 'decline'}",
             target=f"web_events.{event_id}.group.{group_id}",
             before="invited", after=row.status,
@@ -472,6 +474,7 @@ async def remove_participant(event_id: int, group_id: int):
             s.delete(row)
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
                 action="event.participant.remove",
                 target=f"web_events.{event_id}.group.{group_id}",
                 before=row.status, after=None,
