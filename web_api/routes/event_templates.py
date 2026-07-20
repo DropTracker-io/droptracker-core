@@ -163,11 +163,33 @@ def snapshot_event(s, ev: Event) -> dict:
             # Game format (web43a) — preserved so a loot_sweep/board_game
             # template instantiates as that kind, not a flat standard event.
             "kind": getattr(ev, "kind", None) or "standard",
+            # Organizer settings (audit): these were silently dropped, so a
+            # monthly re-run shipped with the pot/leadership/verbosity OFF
+            # while the organizer believed the template carried them.
+            "buyins_enabled": bool(getattr(ev, "buyins_enabled", False)),
+            "prize_config": _parse_json_col(getattr(ev, "prize_config", None)),
+            "leadership_config": _parse_json_col(
+                getattr(ev, "leadership_config", None)),
+            "message_config": _parse_json_col(
+                getattr(ev, "message_config", None)),
         },
         "tasks": tasks_out,
         "teams": teams_out,
         "bingo": bingo,
     }
+
+
+def _parse_json_col(raw) -> dict | None:
+    """Parsed dict from a JSON text column (None for empty/corrupt/non-dict)."""
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _normalize_payload(raw: str) -> dict:
@@ -258,7 +280,14 @@ def instantiate_template(
         board_size=int(spec.get("board_size") or 5),
         bonus_line_points=int(spec.get("bonus_line_points") or 0),
         bonus_blackout_points=int(spec.get("bonus_blackout_points") or 0),
+        # Organizer settings carried by the template (audit) — absent on old
+        # (pre-carry) templates, so each falls back to the create default.
+        buyins_enabled=bool(spec.get("buyins_enabled")),
     )
+    for json_key in ("prize_config", "leadership_config", "message_config"):
+        value = spec.get(json_key)
+        if isinstance(value, dict):
+            setattr(ev, json_key, json.dumps(value))
     s.add(ev)
     s.flush()
 

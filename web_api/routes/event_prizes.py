@@ -30,6 +30,7 @@ from datetime import datetime
 
 from quart import Blueprint, jsonify
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 
 from db import (
     AuditLog,
@@ -77,21 +78,34 @@ _SETTABLE_STATUSES = ("pledged", "paid")
 # Authorization: admins always (entitlement-gated); team leaders may tick their
 # OWN team's rows when prize_config.allow_leader_mark (decision #2).
 # --------------------------------------------------------------------------- #
-def _assert_pot_writer(s, user_id, ev, team_id=None) -> None:
+def _pot_role(s, user_id, ev, team_id=None):
+    """``'admin'`` | ``'leader'`` | ``None`` — how this user may touch the pot.
+
+    ``allow_leader_mark`` is advertised as "leaders can tick their team's
+    buy-ins paid" — so a leader's write access is limited to exactly that
+    (status/note on existing rows, and seeding their own team's checklist at
+    the config default). Creating rows with arbitrary amounts, editing
+    amounts, and voiding are admin-only (audit: leaders previously had full
+    pot CRUD up to the amount cap)."""
     if _is_event_admin(s, user_id, ev):
         # Re-assert to bind the 'events' entitlement (role alone isn't enough).
         _assert_event_admin(s, user_id, ev)
-        return
+        return "admin"
     cfg = effective_prize_config(getattr(ev, "prize_config", None))
     if cfg["allow_leader_mark"] and team_id is not None:
         from web_api.event_leadership import team_role_for_user
 
         if team_role_for_user(s, team_id, user_id):
-            return
-    abort_problem(
-        403, "Forbidden",
-        "You must administer this event (or lead this team) to manage the pot.",
-    )
+            return "leader"
+    return None
+
+
+def _assert_pot_writer(s, user_id, ev, team_id=None) -> None:
+    if _pot_role(s, user_id, ev, team_id) is None:
+        abort_problem(
+            403, "Forbidden",
+            "You must administer this event (or lead this team) to manage the pot.",
+        )
 
 
 def _snapshot(b: EventBuyin) -> str:
@@ -307,7 +321,10 @@ async def record_buyin(event_id: int):
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_team_in_event(s, event_id, team_id)
-            _assert_pot_writer(s, user_id, ev, team_id)
+            # Admin-only: this route takes an arbitrary amount/kind/status —
+            # leaders' allow_leader_mark covers ticking and seeding, not
+            # authoring contributions (audit).
+            _assert_event_admin(s, user_id, ev)
 
             rsn = None
             uid = None
@@ -378,7 +395,19 @@ async def update_buyin(event_id: int, buyin_id: int):
             )
             if not row:
                 abort_problem(404, "Buy-in not found", f"No buy-in {buyin_id} in this event.")
-            _assert_pot_writer(s, user_id, ev, row.team_id)
+            role = _pot_role(s, user_id, ev, row.team_id)
+            if role is None:
+                abort_problem(
+                    403, "Forbidden",
+                    "You must administer this event (or lead this team) to "
+                    "manage the pot.",
+                )
+            if role == "leader" and "amount" in body:
+                abort_problem(
+                    403, "Leaders mark payments only",
+                    "Team leaders can tick contributions paid or pledged (and "
+                    "add a note) — amounts are set by event admins.",
+                )
             before = _snapshot(row)
             if "amount" in body:
                 row.amount = _clean_amount(body.get("amount"))
@@ -430,7 +459,9 @@ async def delete_buyin(event_id: int, buyin_id: int):
             )
             if not row:
                 abort_problem(404, "Buy-in not found", f"No buy-in {buyin_id} in this event.")
-            _assert_pot_writer(s, user_id, ev, row.team_id)
+            # Admin-only: voiding/deleting removes money from the advertised
+            # pot — outside the "tick paid" scope leaders are granted.
+            _assert_event_admin(s, user_id, ev)
             before = _snapshot(row)
             ever_paid = row.status == "paid" or row.paid_at is not None
             if ever_paid:
@@ -477,6 +508,13 @@ async def bulk_seed_buyins(event_id: int):
             _assert_pot_writer(s, user_id, ev, team_id)
             cfg = effective_prize_config(getattr(ev, "prize_config", None))
             default = int(cfg["default_buyin"])
+            # Serialize concurrent seeds on the event row (audit): the
+            # existing-rows check below is check-then-insert, and MariaDB
+            # can't express "unique unless void" — two simultaneous seeds
+            # would both read the same pre-insert set and double-pledge every
+            # member; both later ticked paid = the pot counts twice.
+            s.query(Event.id).filter(Event.id == event_id) \
+                .with_for_update().first()
             members_q = (
                 s.query(EventTeamMember.team_id, EventTeamMember.player_id,
                         Player.player_name, Player.user_id)
@@ -488,10 +526,14 @@ async def bulk_seed_buyins(event_id: int):
                 members_q = members_q.filter(EventTeamMember.team_id == team_id)
             existing = {
                 (t, p) for (t, p) in
+                # Locking read = current read: a seed that waited on the
+                # event-row lock must see the winner's committed rows, not
+                # its own pre-lock snapshot.
                 s.query(EventBuyin.team_id, EventBuyin.player_id)
                 .filter(EventBuyin.event_id == event_id,
                         EventBuyin.kind == "buyin",
-                        EventBuyin.status != "void").all()
+                        EventBuyin.status != "void")
+                .with_for_update().all()
             }
             created = 0
             for tid, pid, pname, puid in members_q.all():
@@ -570,13 +612,22 @@ async def announce_pot(event_id: int):
                 # unique (type, player, group, data) index.
                 "posted_at": int(_dt.now().timestamp()),
             }
-            s.add(NotificationQueue(
-                notification_type="event_pot",
-                player_id=rep,
-                group_id=ev.group_id,
-                data=json.dumps(payload),
-                status="pending",
-            ))
+            try:
+                # Same-second double click builds a byte-identical payload —
+                # the queue's unique index rejects it. That's a duplicate of
+                # an announcement that IS queued, not an error (audit: this
+                # used to surface as a raw 500).
+                with s.begin_nested():
+                    s.add(NotificationQueue(
+                        notification_type="event_pot",
+                        player_id=rep,
+                        group_id=ev.group_id,
+                        data=json.dumps(payload),
+                        status="pending",
+                    ))
+                    s.flush()
+            except IntegrityError:
+                pass
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
                 event_id=ev.id,

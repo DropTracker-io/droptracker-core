@@ -100,6 +100,17 @@ class _S:
     def commit(self):
         self.committed = True
 
+    def begin_nested(self):
+        """No-op savepoint context (routes use it for dedupe-tolerant adds)."""
+        class _NestedCM:
+            def __enter__(cm):
+                return cm
+
+            def __exit__(cm, *exc):
+                return False
+
+        return _NestedCM()
+
 
 class _Col:
     """Column stand-in usable in filter expressions (==, in_)."""

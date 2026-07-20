@@ -152,7 +152,15 @@ def _wire_epr(monkeypatch, session, *, user_id=7, admin=True):
     monkeypatch.setattr(epr, "db_session", lambda: _SessionCM(session))
     monkeypatch.setattr(epr, "_bump", lambda *a, **k: None)
     monkeypatch.setattr(epr, "_is_event_admin", lambda *a, **k: admin)
-    monkeypatch.setattr(epr, "_assert_event_admin", lambda *a, **k: None)
+
+    def _assert_admin(*a, **k):
+        # Mirror production: a non-admin hitting an admin-only pot route gets
+        # the 403 (create/void are admin-only since the leader-mark scoping).
+        if not admin:
+            raise ProblemException(
+                403, "Forbidden", "You must administer this event.")
+
+    monkeypatch.setattr(epr, "_assert_event_admin", _assert_admin)
     # The conftest stubs `db` with a MagicMock, so the enum tuples imported
     # `from db` are mocks (``"paid" in <MagicMock>`` is False). Restore the real
     # tuples so the route's membership validation behaves like production.
@@ -318,7 +326,9 @@ class TestBulkSeed:
     async def test_seeds_one_pledged_row_per_member(self, client, monkeypatch):
         members = [(1, 5, "Alice", 7), (1, 6, "Bob", 8)]  # (team, player, rsn, uid)
         existing = []  # nobody seeded yet
-        s = _S([_event(prize_config='{"default_buyin": 5000000}')], members, existing)
+        # Second batch: the event-row FOR UPDATE mutex (concurrent-seed guard).
+        s = _S([_event(prize_config='{"default_buyin": 5000000}')], [(1,)],
+               members, existing)
         _wire_epr(monkeypatch, s)
         monkeypatch.setattr(epr, "EventBuyin", _RecBuyin)
         r = await client.post("/api/v1/events/1/buyins/bulk", json={})
@@ -331,7 +341,8 @@ class TestBulkSeed:
     async def test_skips_already_seeded_members(self, client, monkeypatch):
         members = [(1, 5, "Alice", 7), (1, 6, "Bob", 8)]
         existing = [(1, 5)]  # Alice already has a buy-in
-        s = _S([_event(prize_config=None)], members, existing)
+        # Second batch: the event-row FOR UPDATE mutex (concurrent-seed guard).
+        s = _S([_event(prize_config=None)], [(1,)], members, existing)
         _wire_epr(monkeypatch, s)
         monkeypatch.setattr(epr, "EventBuyin", _RecBuyin)
         r = await client.post("/api/v1/events/1/buyins/bulk", json={})

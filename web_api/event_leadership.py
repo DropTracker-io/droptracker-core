@@ -144,18 +144,25 @@ def apply_election(session, event_id: int, team_id: int) -> Optional[int]:
     resulting leader player_id (or None when no leader)."""
     from db.models import EventLeaderVote, EventTeamMember
 
+    # Serialize concurrent tallies on the roster rows (audit): two votes cast
+    # together used to tally from pre-commit snapshots and race the
+    # demote/promote writes. The locking read doubles as the source for the
+    # current leader — a plain re-read after the lock would still see the
+    # pre-lock snapshot under REPEATABLE READ.
+    members = (session.query(EventTeamMember)
+               .filter(EventTeamMember.team_id == team_id)
+               .with_for_update()
+               .all())
+    current_leader = next(
+        (m.player_id for m in members if m.role == "leader"), None)
     votes = [
         (v.voter_player_id, v.candidate_player_id)
         for v in session.query(EventLeaderVote)
         .filter(EventLeaderVote.event_id == event_id,
                 EventLeaderVote.team_id == team_id)
+        .with_for_update()
         .all()
     ]
-    current = (session.query(EventTeamMember.player_id)
-               .filter(EventTeamMember.team_id == team_id,
-                       EventTeamMember.role == "leader")
-               .first())
-    current_leader = current[0] if current else None
     winner = tally_election(votes, current_leader)
     if winner is not None and winner != current_leader:
         if not set_team_role(session, team_id, winner, "leader"):

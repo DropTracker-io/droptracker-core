@@ -320,6 +320,10 @@ class TestSnapshot:
             "requires_confirmation": True, "submission_policy": "api_only",
             "has_bingo": True, "board_size": 3, "bonus_line_points": 5,
             "bonus_blackout_points": 25, "mode": "standard", "kind": "standard",
+            # Organizer settings carried since the audit fix (absent attrs on
+            # the fake event snapshot to their defaults).
+            "buyins_enabled": False, "prize_config": None,
+            "leadership_config": None, "message_config": None,
         }
         assert [t["label"] for t in payload["tasks"]] == ["Whip", "Zulrah x50"]
         assert payload["teams"] == [{"name": "Red"}]

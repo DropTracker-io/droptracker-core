@@ -42,10 +42,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime
 
 from quart import Blueprint, jsonify, request
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 
 from db import (
     AuditLog,
@@ -481,11 +483,24 @@ async def award_completion(event_id: int):
                 status="manual",
                 quantity=quantity,
                 source_type="manual",
+                # Time-bucketed guid: manual rows used to carry NULL, which
+                # the ledger's unique (task, team, guid) index never collides
+                # on — this is the DB-level double-click backstop behind the
+                # Redis claim above (works even with Redis down).
+                submission_guid=f"manual:{task_id}:{team_id}:{user_id}:{int(time.time()) // 5}",
                 acted_by_user_id=user_id,
                 note=note,
             )
             s.add(comp)
-            s.flush()
+            try:
+                s.flush()
+            except IntegrityError:
+                s.rollback()
+                abort_problem(
+                    409, "Award already applied",
+                    "An identical award was applied moments ago — refresh to "
+                    "see it. (If you really meant to award twice, wait a few "
+                    "seconds and try again.)")
             # Same shared apply path as auto/confirmed rows.
             _engine().apply_completion(s, comp)
             s.add(AuditLog(
