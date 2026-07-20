@@ -212,10 +212,16 @@ async def event_audit(event_id: int):
                 if date_to is not None:
                     lq = lq.filter(EventCompletion.created_at <= _dt(date_to))
                 ledger_total = lq.count()
+                # Batch 2: page N of a merge of two DESC-sorted streams can
+                # only contain rows from the top page*limit of each stream —
+                # fetch that window instead of hydrating _CAP (4000) rows per
+                # source for every page-1 view. The free-text q filter is
+                # applied post-enrichment, so it still needs the deep fetch.
+                window = _CAP if q else min(_CAP, page * limit)
                 ledger_rows = (
                     lq.order_by(EventCompletion.created_at.desc(),
                                 EventCompletion.id.desc())
-                    .limit(_CAP).all()
+                    .limit(window).all()
                 )
 
             audit_rows = []
@@ -236,12 +242,17 @@ async def event_audit(event_id: int):
                 if date_to is not None:
                     aq = aq.filter(AuditLog.created_at <= _dt(date_to))
                 audit_total = aq.count()
+                # Same merge-window bound as the ledger stream above.
+                window = _CAP if q else min(_CAP, page * limit)
                 audit_rows = (
                     aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
-                    .limit(_CAP).all()
+                    .limit(window).all()
                 )
 
-            capped = ledger_total > len(ledger_rows) or audit_total > len(audit_rows)
+            # Oldest rows are truly unreachable only past _CAP — the paging
+            # window (page*limit) grows with the page, so compare against the
+            # hard cap, not the fetched count.
+            capped = ledger_total > _CAP or audit_total > _CAP
 
             # ---- enrichment lookups (batched) -------------------------------
             comp_ids = {

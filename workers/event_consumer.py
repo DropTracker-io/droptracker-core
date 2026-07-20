@@ -78,6 +78,27 @@ DEAD_MAX_ENTRIES = 1000
 RETRY_MAX_ATTEMPTS = 5
 _ATTEMPTS_KEY = "_attempts"
 
+# Batch 2: in-process apply lanes. Applies are DB-bound (SQL round trips, not
+# CPU), so N concurrent lanes give ~Nx throughput on one core. Envelopes are
+# routed by player_id so everything the watermark/baseline folds key on stays
+# strictly ordered per player; cross-player writes to shared rows (team score,
+# progress, bingo bonuses, board state) are serialized by the engine's FOR
+# UPDATE locks. Lane count is sized against the DB pool (base 5): 4 lanes +
+# the main loop's housekeeping session.
+LANES = 4
+LANE_QUEUE_MAX = 50   # bounded → a hot lane backpressures the dispatcher
+QUEUE_ALARM_DEPTH = 10_000  # pending above this = lanes can't keep up
+
+
+def _lane_for(entry_bytes) -> int:
+    """Deterministic lane for an envelope (player_id modulo). Malformed
+    payloads route to lane 0 — they're skip-logged during apply anyway."""
+    try:
+        envelope = json.loads(entry_bytes)
+        return int(envelope.get("player_id") or 0) % LANES
+    except Exception:
+        return 0
+
 
 def _is_retryable(exc) -> bool:
     """True for infrastructure errors worth retrying; False for poison."""
@@ -226,58 +247,147 @@ def _process_entry(r, state, entry_bytes) -> list:
         reset_db_connections()
 
 
-async def _drain_queue_inline(r, state) -> int:
-    """Synchronously drain events:submissions (final WOM pass ordering: the
+async def _apply_entry(r, shared, entry_bytes) -> None:
+    """Apply one claimed envelope end-to-end: process, classify failures
+    (requeue transient / dead-letter poison — P0-5), handle board-win
+    outcomes, and release the in-flight claim. Runs inside a lane."""
+    try:
+        outcomes = await asyncio.to_thread(
+            _process_entry, r, shared["state"], entry_bytes)
+    except Exception as exc:
+        # P0-5: a transient infra error (deadlock / lock-wait / gone-away /
+        # Redis blip) gets the envelope REQUEUED with a bounded attempt
+        # counter — dead-lettering it would silently discard earned credit
+        # for what is usually a self-healing failure. Only poison payloads
+        # (or ones past the cap) go to DEAD.
+        attempts, requeued = 0, False
+        envelope = None
+        try:
+            envelope = json.loads(entry_bytes)
+            attempts = int(envelope.get(_ATTEMPTS_KEY, 0))
+        except Exception:
+            envelope = None
+        context = ""
+        if isinstance(envelope, dict):
+            context = " (type=%s player=%s guid=%s)" % (
+                envelope.get("kind") or envelope.get("type"),
+                envelope.get("player_id"),
+                str(envelope.get("guid") or envelope.get(
+                    "submission_guid"))[:40])
+        if (isinstance(envelope, dict) and _is_retryable(exc)
+                and attempts < RETRY_MAX_ATTEMPTS):
+            try:
+                from services.event_engine import QUEUE_KEY
+
+                envelope[_ATTEMPTS_KEY] = attempts + 1
+                requeue_bytes = json.dumps(envelope).encode()
+                pipe = r.pipeline()
+                pipe.lrem(PROCESSING_KEY, 1, entry_bytes)
+                pipe.lpush(QUEUE_KEY, requeue_bytes)
+                await asyncio.to_thread(pipe.execute)
+                requeued = True
+                log.warning(
+                    "Transient %s applying envelope%s; requeued "
+                    "(attempt %d/%d)", exc.__class__.__name__,
+                    context, attempts + 1, RETRY_MAX_ATTEMPTS)
+            except Exception:
+                log.error("Requeue failed; falling back to "
+                          "dead-letter:\n%s", traceback.format_exc())
+        if not requeued:
+            log.error("Failed to apply envelope%s; dead-lettering "
+                      "(attempts=%d):\n%s", context, attempts,
+                      traceback.format_exc())
+            try:
+                pipe = r.pipeline()
+                pipe.lrem(PROCESSING_KEY, 1, entry_bytes)
+                pipe.lpush(DEAD_KEY, entry_bytes)
+                pipe.ltrim(DEAD_KEY, 0, DEAD_MAX_ENTRIES - 1)
+                await asyncio.to_thread(pipe.execute)
+            except Exception:
+                log.error("Dead-letter move failed:\n%s",
+                          traceback.format_exc())
+        return
+    for outcome in outcomes:
+        log.info("Applied %s: event=%s task=%s team=%s",
+                 outcome.get("kind"), outcome.get("event_id"),
+                 outcome.get("task_id"), outcome.get("team_id"))
+        # Board game (web44a, win.rule=finish_tile): the first team to cross
+        # the finish ends the event — final standings post through the
+        # normal event_ended flow.
+        board = outcome.get("board") or {}
+        roll = board.get("roll") or {}
+        if roll.get("won"):
+            # (The winning roll already published an admin bump, so the
+            # state refreshes on the next loop pass.)
+            try:
+                await asyncio.to_thread(
+                    _end_won_event, r, outcome.get("event_id"))
+            except Exception:
+                log.error("Auto-end after board win failed:\n%s",
+                          traceback.format_exc())
+    # Applied (or a no-op) — drop it from the in-flight list.
+    await asyncio.to_thread(r.lrem, PROCESSING_KEY, 1, entry_bytes)
+
+
+async def _lane_worker(lane_idx: int, r, shared, lane_queue) -> None:
+    """One apply lane: serially applies every envelope routed to it. The
+    backstop except keeps a lane alive on truly unexpected failures —
+    _apply_entry already classifies and records everything expected."""
+    while True:
+        entry_bytes = await lane_queue.get()
+        try:
+            await _apply_entry(r, shared, entry_bytes)
+        except Exception:
+            log.error("Lane %d: unexpected apply failure:\n%s",
+                      lane_idx, traceback.format_exc())
+        finally:
+            lane_queue.task_done()
+
+
+async def _drain_queue_inline(r, lane_queues) -> int:
+    """Drain events:submissions (+ the WOM lane) ahead of an event end — the
     queued envelopes must be applied while the ending event is still in the
-    matcher state). One bad envelope is dead-lettered and must not abort the
-    drain — this runs at the most consequential moment (right before the
-    event ends) and every envelope behind it still deserves to land."""
-    from services.event_engine import QUEUE_KEY
+    matcher state. Entries are dispatched through the normal lanes (per-player
+    ordering holds) and the join() barrier guarantees everything has been
+    applied before the caller lets the lifecycle sweep end the event."""
+    from services.event_engine import QUEUE_KEY, WOM_QUEUE_KEY
 
     drained = 0
     while drained < FINAL_DRAIN_MAX_ENTRIES:
         entry = await asyncio.to_thread(r.rpoplpush, QUEUE_KEY, PROCESSING_KEY)
         if entry is None:
+            entry = await asyncio.to_thread(
+                r.rpoplpush, WOM_QUEUE_KEY, PROCESSING_KEY)
+        if entry is None:
             break
-        try:
-            await asyncio.to_thread(_process_entry, r, state, entry)
-        except Exception:
-            log.error("Final drain: envelope failed; dead-lettering:\n%s",
-                      traceback.format_exc())
-            try:
-                pipe = r.pipeline()
-                pipe.lrem(PROCESSING_KEY, 1, entry)
-                pipe.lpush(DEAD_KEY, entry)
-                pipe.ltrim(DEAD_KEY, 0, DEAD_MAX_ENTRIES - 1)
-                await asyncio.to_thread(pipe.execute)
-            except Exception:
-                log.error("Final drain: dead-letter move failed:\n%s",
-                          traceback.format_exc())
-        else:
-            await asyncio.to_thread(r.lrem, PROCESSING_KEY, 1, entry)
+        await lane_queues[_lane_for(entry)].put(entry)
         drained += 1
+    for lane_queue in lane_queues:
+        await lane_queue.join()
     return drained
 
 
-async def _run_wom_final_passes(r, state) -> bool:
+async def _run_wom_final_passes(r, shared, lane_queues) -> bool:
     """Final WOM reconcile + inline drain for events whose window closed but
     which the lifecycle sweep hasn't ended yet. Returns True if any ran."""
     from services import event_wom_reconciler as wom
 
+    state = shared["state"]
     event_ids = wom.pending_final_event_ids(state, r)
     if not event_ids:
         return False
     for event_id in event_ids:
         stats = await wom.final_reconcile(state, r, event_id)
         log.info("WOM final reconcile for event %s: %s", event_id, stats)
-    drained = await _drain_queue_inline(r, state)
+    drained = await _drain_queue_inline(r, lane_queues)
     if drained:
         log.info("Drained %d queue entries ahead of event end", drained)
     return True
 
 
 async def run_consumer() -> None:
-    from services.event_engine import ADMIN_BUMP_CHANNEL, QUEUE_KEY
+    from services.event_engine import (ADMIN_BUMP_CHANNEL, QUEUE_KEY,
+                                       WOM_QUEUE_KEY)
     from services import event_wom_reconciler as wom
 
     log.info("Event consumer starting (queue=%s)", QUEUE_KEY)
@@ -298,6 +408,16 @@ async def run_consumer() -> None:
     last_reconcile = 0.0
     reconcile_task = None
     last_dead_count = 0
+
+    # Batch 2: apply lanes. The main loop only claims + routes; the lanes do
+    # the DB work concurrently (player-hash routing keeps per-player order).
+    shared = {"state": None}
+    lane_queues = [asyncio.Queue(maxsize=LANE_QUEUE_MAX) for _ in range(LANES)]
+    lane_tasks = [  # noqa: F841 — referenced to keep the workers alive
+        asyncio.create_task(_lane_worker(i, r, shared, lane_queues[i]))
+        for i in range(LANES)
+    ]
+    log.info("Apply lanes started: %d (player-hash routed)", LANES)
 
     async def _run_reconcile(current_state):
         try:
@@ -328,7 +448,7 @@ async def run_consumer() -> None:
             if (time.time() - last_sweep) >= LIFECYCLE_SWEEP_SECONDS:
                 if state is not None:
                     try:
-                        await _run_wom_final_passes(r, state)
+                        await _run_wom_final_passes(r, shared, lane_queues)
                     except Exception:
                         log.error("WOM final pass failed:\n%s", traceback.format_exc())
                 # P0-1: the sweep has per-event guards inside, but an
@@ -351,11 +471,21 @@ async def run_consumer() -> None:
                 # tell a degraded consumer from a healthy one. DLQ growth is
                 # an ERROR so it reaches Sentry the moment credit is dropped.
                 try:
-                    pending, inflight, dead = await asyncio.to_thread(
-                        lambda: (r.llen(QUEUE_KEY), r.llen(PROCESSING_KEY),
-                                 r.llen(DEAD_KEY)))
-                    log.info("Queue depth: pending=%d inflight=%d dead=%d",
-                             pending, inflight, dead)
+                    pending, wom_pending, inflight, dead = await asyncio.to_thread(
+                        lambda: (r.llen(QUEUE_KEY), r.llen(WOM_QUEUE_KEY),
+                                 r.llen(PROCESSING_KEY), r.llen(DEAD_KEY)))
+                    lane_fill = sum(q.qsize() for q in lane_queues)
+                    log.info(
+                        "Queue depth: pending=%d wom=%d inflight=%d lanes=%d dead=%d",
+                        pending, wom_pending, inflight, lane_fill, dead)
+                    if pending > QUEUE_ALARM_DEPTH:
+                        # Backpressure alarm (batch 2): the lanes cannot keep
+                        # up — reaches Sentry so someone looks BEFORE credit
+                        # lags into hours.
+                        log.error(
+                            "Event queue backlog: %d pending — apply lanes "
+                            "can't keep up (investigate DB latency / raise "
+                            "LANES / add capacity)", pending)
                     if dead > last_dead_count:
                         log.error(
                             "Event DLQ grew: %d -> %d entries "
@@ -378,6 +508,7 @@ async def run_consumer() -> None:
 
             if state is None or bumped or (time.time() - last_refresh) >= STATE_REFRESH_SECONDS:
                 state = await asyncio.to_thread(_refresh_state, r)
+                shared["state"] = state  # lanes read the freshest snapshot
                 last_refresh = time.time()
                 log.info(
                     "Matcher state refreshed: %d active event(s), %d participant(s)%s",
@@ -402,85 +533,22 @@ async def run_consumer() -> None:
 
             # P1-1: atomically move the envelope to the in-flight PROCESSING
             # list instead of removing it outright, so a crash mid-apply keeps
-            # it for reclaim rather than dropping credit.
+            # it for reclaim rather than dropping credit. This loop only
+            # claims and routes; the lanes do the applying (batch 2).
+            # Priority: main queue first (non-blocking), then one WOM
+            # envelope, then a blocking wait on the main queue — live plugin
+            # drops always cut ahead of a reconcile burst.
             entry_bytes = await asyncio.to_thread(
-                r.brpoplpush, QUEUE_KEY, PROCESSING_KEY, BRPOP_TIMEOUT)
+                r.rpoplpush, QUEUE_KEY, PROCESSING_KEY)
+            if entry_bytes is None:
+                entry_bytes = await asyncio.to_thread(
+                    r.rpoplpush, WOM_QUEUE_KEY, PROCESSING_KEY)
+            if entry_bytes is None:
+                entry_bytes = await asyncio.to_thread(
+                    r.brpoplpush, QUEUE_KEY, PROCESSING_KEY, BRPOP_TIMEOUT)
             if entry_bytes is None:
                 continue
-            try:
-                outcomes = await asyncio.to_thread(
-                    _process_entry, r, state, entry_bytes)
-            except Exception as exc:
-                # P0-5: a transient infra error (deadlock / lock-wait / gone-
-                # away / Redis blip) gets the envelope REQUEUED with a bounded
-                # attempt counter — dead-lettering it would silently discard
-                # earned credit for what is usually a self-healing failure.
-                # Only poison payloads (or ones past the cap) go to DEAD.
-                attempts, requeued = 0, False
-                envelope = None
-                try:
-                    envelope = json.loads(entry_bytes)
-                    attempts = int(envelope.get(_ATTEMPTS_KEY, 0))
-                except Exception:
-                    envelope = None
-                context = ""
-                if isinstance(envelope, dict):
-                    context = " (type=%s player=%s guid=%s)" % (
-                        envelope.get("kind") or envelope.get("type"),
-                        envelope.get("player_id"),
-                        str(envelope.get("guid") or envelope.get(
-                            "submission_guid"))[:40])
-                if (isinstance(envelope, dict) and _is_retryable(exc)
-                        and attempts < RETRY_MAX_ATTEMPTS):
-                    try:
-                        envelope[_ATTEMPTS_KEY] = attempts + 1
-                        requeue_bytes = json.dumps(envelope).encode()
-                        pipe = r.pipeline()
-                        pipe.lrem(PROCESSING_KEY, 1, entry_bytes)
-                        pipe.lpush(QUEUE_KEY, requeue_bytes)
-                        await asyncio.to_thread(pipe.execute)
-                        requeued = True
-                        log.warning(
-                            "Transient %s applying envelope%s; requeued "
-                            "(attempt %d/%d)", exc.__class__.__name__,
-                            context, attempts + 1, RETRY_MAX_ATTEMPTS)
-                    except Exception:
-                        log.error("Requeue failed; falling back to "
-                                  "dead-letter:\n%s", traceback.format_exc())
-                if not requeued:
-                    log.error("Failed to apply envelope%s; dead-lettering "
-                              "(attempts=%d):\n%s", context, attempts,
-                              traceback.format_exc())
-                    try:
-                        pipe = r.pipeline()
-                        pipe.lrem(PROCESSING_KEY, 1, entry_bytes)
-                        pipe.lpush(DEAD_KEY, entry_bytes)
-                        pipe.ltrim(DEAD_KEY, 0, DEAD_MAX_ENTRIES - 1)
-                        await asyncio.to_thread(pipe.execute)
-                    except Exception:
-                        log.error("Dead-letter move failed:\n%s",
-                                  traceback.format_exc())
-                continue
-            for outcome in outcomes:
-                log.info("Applied %s: event=%s task=%s team=%s",
-                         outcome.get("kind"), outcome.get("event_id"),
-                         outcome.get("task_id"), outcome.get("team_id"))
-                # Board game (web44a, win.rule=finish_tile): the first team
-                # to cross the finish ends the event — final standings post
-                # through the normal event_ended flow.
-                board = outcome.get("board") or {}
-                roll = board.get("roll") or {}
-                if roll.get("won"):
-                    # (The winning roll already published an admin bump, so
-                    # the state refreshes on the next loop pass.)
-                    try:
-                        await asyncio.to_thread(
-                            _end_won_event, r, outcome.get("event_id"))
-                    except Exception:
-                        log.error("Auto-end after board win failed:\n%s",
-                                  traceback.format_exc())
-            # Applied (or a no-op) — drop it from the in-flight list.
-            await asyncio.to_thread(r.lrem, PROCESSING_KEY, 1, entry_bytes)
+            await lane_queues[_lane_for(entry_bytes)].put(entry_bytes)
         except Exception:
             log.error("Error in event consumer loop:\n%s", traceback.format_exc())
             await asyncio.sleep(1)

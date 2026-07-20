@@ -69,6 +69,11 @@ from sqlalchemy.exc import DataError, IntegrityError
 
 # ── Redis keys / channels ─────────────────────────────────────────────────────
 QUEUE_KEY = "events:submissions"           # LPUSH by producers, BRPOP by worker
+# Batch 2: WOM-reconciler synthetic envelopes ride a lower-priority queue —
+# a reconcile burst (one envelope per skill/boss per updated player) must
+# never head-of-line-block live plugin drops. The consumer drains it only
+# when the main queue is idle.
+WOM_QUEUE_KEY = "events:submissions:wom"
 ACTIVE_EVENTS_KEY = "events:active"        # set of active event ids (gate)
 # P1-6: the gate carries a TTL refreshed by the consumer every ≤30s
 # (STATE_REFRESH_SECONDS). If the consumer dies, the gate expires within this
@@ -1218,18 +1223,23 @@ def _enqueue_notification(session, notification_type: str, event: dict,
 APPLIED_BONUS_STATUSES = ("auto", "confirmed", "manual")
 
 
-def _team_completed_idxs(session, cells, team_id: int) -> set:
-    """Board idxs the team has completed, given the event's cell rows."""
+def _team_completed_idxs(session, cells, team_id: int,
+                         for_update: bool = False) -> set:
+    """Board idxs the team has completed, given the event's cell rows.
+
+    ``for_update`` makes it a locking (current) read — required when the
+    caller holds the team-row mutex and must see rows committed by the
+    transaction it just waited on, not its own pre-lock snapshot."""
     from db.models import EventBingoCompletion
 
     if not cells:
         return set()
-    done_cell_ids = {
-        row.cell_id
-        for row in session.query(EventBingoCompletion).filter(
-            EventBingoCompletion.cell_id.in_([c.id for c in cells]),
-            EventBingoCompletion.team_id == team_id).all()
-    }
+    q = session.query(EventBingoCompletion).filter(
+        EventBingoCompletion.cell_id.in_([c.id for c in cells]),
+        EventBingoCompletion.team_id == team_id)
+    if for_update:
+        q = q.with_for_update()
+    done_cell_ids = {row.cell_id for row in q.all()}
     return {c.idx for c in cells if c.id in done_cell_ids}
 
 
@@ -1267,12 +1277,21 @@ def evaluate_bingo_bonuses(session, event: dict, team_id: int,
 
     from db.models import EventBingoCell, EventCompletion, EventTeam
 
+    # Concurrency guard (batch 2): applies run in parallel lanes now, and two
+    # teammates completing different cells can jointly finish the same line.
+    # The team row is the per-team mutex — take it BEFORE deriving earned /
+    # awarded, and read both via locking (current) reads, so a transaction
+    # that waited here sees the winner's committed rows instead of its own
+    # pre-lock snapshot (which is exactly the double-award).
+    team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+            .with_for_update().first())  # doubles as the P0-7 score lock
+
     cells = session.query(EventBingoCell).filter(
         EventBingoCell.event_id == event["id"]).all()
     size = _board_size_for(event, cells)
     if not size:
         return []
-    done_idxs = _team_completed_idxs(session, cells, team_id)
+    done_idxs = _team_completed_idxs(session, cells, team_id, for_update=True)
 
     earned = set()
     if line_pts > 0:
@@ -1288,7 +1307,8 @@ def evaluate_bingo_bonuses(session, event: dict, team_id: int,
             EventCompletion.event_id == event["id"],
             EventCompletion.team_id == team_id,
             EventCompletion.source_type == "bonus",
-            EventCompletion.status.in_(APPLIED_BONUS_STATUSES)).all()
+            EventCompletion.status.in_(APPLIED_BONUS_STATUSES))
+        .with_for_update().all()
         if row.note
     }
     new_notes = sorted(earned - awarded)
@@ -1309,8 +1329,7 @@ def evaluate_bingo_bonuses(session, event: dict, team_id: int,
     if ledger_task_id is None:
         return []
 
-    team = (session.query(EventTeam).filter(EventTeam.id == team_id)
-            .with_for_update().first())  # P0-7: locked score RMW
+    # ``team`` was locked at the top of the function (the per-team mutex).
     team_name = team.name if team is not None else None
     results = []
     line_notes = []

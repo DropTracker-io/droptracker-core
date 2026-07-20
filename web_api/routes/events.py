@@ -1479,15 +1479,41 @@ async def get_loot_sweep_receipts(event_id: int):
             item = next((i for g in cfg.groups for i in g.items if key in i.match_keys), None)
             if item is None:
                 return None
-            rows = (
-                s.query(EventCompletion, Player.player_name)
-                .outerjoin(Player, Player.player_id == EventCompletion.player_id)
+            # Batch 2: this endpoint used to hydrate the task's ENTIRE ledger
+            # to fold one item's receipts. The fold only ever advances on
+            # rows whose normalized matched_target is this item's, so first
+            # resolve which RAW target strings normalize into it (a cheap
+            # DISTINCT over one indexed column), then fetch only those rows.
+            distinct_targets = [
+                t for (t,) in
+                s.query(EventCompletion.matched_target)
                 .filter(EventCompletion.event_id == event_id,
                         EventCompletion.task_id == task_id,
                         EventCompletion.status.in_(_APPLIED_STATUSES))
-                .order_by(EventCompletion.created_at.asc(), EventCompletion.id.asc())
-                .all()
-            )
+                .distinct().all()
+            ]
+            wanted_targets = [
+                t for t in distinct_targets
+                if t is not None and _norm(t) in item.match_keys
+            ]
+            if not wanted_targets:
+                rows = []
+            else:
+                rows = (
+                    s.query(EventCompletion, Player.player_name)
+                    .outerjoin(Player, Player.player_id == EventCompletion.player_id)
+                    .filter(EventCompletion.event_id == event_id,
+                            EventCompletion.task_id == task_id,
+                            EventCompletion.status.in_(_APPLIED_STATUSES),
+                            EventCompletion.matched_target.in_(wanted_targets),
+                            EventCompletion.team_id.isnot(None),
+                            # NULL-safe: NULL source_type is NOT a bonus row.
+                            sa_or(EventCompletion.source_type.is_(None),
+                                  EventCompletion.source_type != "bonus"))
+                    .order_by(EventCompletion.created_at.asc(),
+                              EventCompletion.id.asc())
+                    .all()
+                )
             teams: dict[int, dict] = {}
             cum: dict[int, int] = {}
             for r, player_name in rows:
@@ -1653,67 +1679,116 @@ async def get_completion_history(event_id: int):
                 return {**base, "entries": [],
                         "meta": {"page": page, "limit": limit, "total": 0}}
 
-            all_rows = (
-                s.query(EventCompletion)
-                .filter(EventCompletion.event_id == event_id,
-                        EventCompletion.status.in_(_APPLIED_STATUSES),
-                        EventCompletion.task_id.in_(visible_task_ids))
-                .order_by(EventCompletion.created_at.asc(), EventCompletion.id.asc())
-                .all()
-            )
-            points_by_row = _history_points(tasks, all_rows)
+            # Batch 2 scale rework. The per-row points are a stateful fold
+            # over the ordered ledger (cumulative threshold crossing per
+            # team; loot_sweep receipt decay per (team, item)), so a page
+            # can't be computed from page rows alone. Two levers instead:
+            # - teamId/taskId push into SQL — exact, because both folds are
+            #   keyed by (task, team) and never read across the filter; and
+            # - the expensive UNFILTERED view builds its entry list once per
+            #   ledger version (max completion id) and serves pages from a
+            #   short Redis cache — hot events stop re-folding the whole
+            #   ledger for every viewer. (A revoke doesn't mint an id, so a
+            #   revoked row can linger for up to the 30s TTL.)
+            entries_all = None
+            cache_key = None
+            if team_arg is None and task_arg is None:
+                try:
+                    from utils.redis import redis_client as _rc
 
-            team_names = dict(
-                s.query(EventTeam.id, EventTeam.name)
-                .filter(EventTeam.event_id == event_id).all()
-            )
-            pids = {r.player_id for r in all_rows if r.player_id}
-            pnames: dict = {}
-            phidden: set = set()
-            if pids:
-                for pid, name, hidden in (
-                    s.query(Player.player_id, Player.player_name, Player.hidden)
-                    .filter(Player.player_id.in_(pids)).all()
-                ):
-                    pnames[pid] = name
-                    if hidden:
-                        phidden.add(pid)
-            hidden_global = hidden_player_ids()
+                    version = (
+                        s.query(func.max(EventCompletion.id))
+                        .filter(EventCompletion.event_id == event_id)
+                        .scalar() or 0
+                    )
+                    cache_key = (
+                        f"events:{event_id}:history:"
+                        f"{'admin' if is_admin else 'pub'}:{version}")
+                    cached = _rc.client.get(cache_key)
+                    if cached:
+                        entries_all = json.loads(cached)
+                except Exception:
+                    cache_key = None
 
-            entries = []
-            for r in reversed(all_rows):  # newest-first
-                if team_arg is not None and r.team_id != team_arg:
-                    continue
-                if task_arg is not None and r.task_id != task_arg:
-                    continue
-                is_hidden = bool(r.player_id and
-                                 (r.player_id in phidden or r.player_id in hidden_global))
-                if is_hidden and not is_admin:
-                    disp_name, disp_pid = "Hidden player", None
-                else:
-                    disp_name, disp_pid = pnames.get(r.player_id), r.player_id
-                if player_q and not (disp_name and player_q.lower() in disp_name.lower()):
-                    continue
-                task = tasks.get(r.task_id)
-                entries.append({
-                    "completion_id": r.id,
-                    "task_id": r.task_id,
-                    "task_label": task.label if task else None,
-                    "task_type": task.type if task else None,
-                    "task_points": int(task.points or 0) if task else 0,
-                    "team_id": r.team_id,
-                    "team_name": team_names.get(r.team_id),
-                    "player_id": disp_pid,
-                    "player_name": disp_name,
-                    "hidden": is_hidden,
-                    "matched_target": r.matched_target,
-                    "quantity": int(r.quantity or 1),
-                    "points": score_num(points_by_row.get(r.id, 0.0)),
-                    "source_type": r.source_type,
-                    "status": r.status,
-                    "proof_url": r.proof_url,
-                    "created_at": _ts(r.created_at),
-                })
+            if entries_all is None:
+                rows_q = (
+                    s.query(EventCompletion)
+                    .filter(EventCompletion.event_id == event_id,
+                            EventCompletion.status.in_(_APPLIED_STATUSES),
+                            EventCompletion.task_id.in_(visible_task_ids))
+                )
+                if team_arg is not None:
+                    rows_q = rows_q.filter(EventCompletion.team_id == team_arg)
+                if task_arg is not None:
+                    rows_q = rows_q.filter(EventCompletion.task_id == task_arg)
+                all_rows = (
+                    rows_q
+                    .order_by(EventCompletion.created_at.asc(),
+                              EventCompletion.id.asc())
+                    .all()
+                )
+                points_by_row = _history_points(tasks, all_rows)
+
+                team_names = dict(
+                    s.query(EventTeam.id, EventTeam.name)
+                    .filter(EventTeam.event_id == event_id).all()
+                )
+                pids = {r.player_id for r in all_rows if r.player_id}
+                pnames: dict = {}
+                phidden: set = set()
+                if pids:
+                    for pid, name, hidden in (
+                        s.query(Player.player_id, Player.player_name, Player.hidden)
+                        .filter(Player.player_id.in_(pids)).all()
+                    ):
+                        pnames[pid] = name
+                        if hidden:
+                            phidden.add(pid)
+                hidden_global = hidden_player_ids()
+
+                entries_all = []
+                for r in reversed(all_rows):  # newest-first
+                    is_hidden = bool(r.player_id and
+                                     (r.player_id in phidden or r.player_id in hidden_global))
+                    if is_hidden and not is_admin:
+                        disp_name, disp_pid = "Hidden player", None
+                    else:
+                        disp_name, disp_pid = pnames.get(r.player_id), r.player_id
+                    task = tasks.get(r.task_id)
+                    entries_all.append({
+                        "completion_id": r.id,
+                        "task_id": r.task_id,
+                        "task_label": task.label if task else None,
+                        "task_type": task.type if task else None,
+                        "task_points": int(task.points or 0) if task else 0,
+                        "team_id": r.team_id,
+                        "team_name": team_names.get(r.team_id),
+                        "player_id": disp_pid,
+                        "player_name": disp_name,
+                        "hidden": is_hidden,
+                        "matched_target": r.matched_target,
+                        "quantity": int(r.quantity or 1),
+                        "points": score_num(points_by_row.get(r.id, 0.0)),
+                        "source_type": r.source_type,
+                        "status": r.status,
+                        "proof_url": r.proof_url,
+                        "created_at": _ts(r.created_at),
+                    })
+                if cache_key is not None:
+                    try:
+                        from utils.redis import redis_client as _rc
+
+                        _rc.client.set(cache_key, json.dumps(entries_all), ex=30)
+                    except Exception:
+                        pass
+
+            if player_q:
+                needle = player_q.lower()
+                entries = [e for e in entries_all
+                           if e.get("player_name")
+                           and needle in e["player_name"].lower()]
+            else:
+                entries = entries_all
 
             total = len(entries)
             start = (page - 1) * limit

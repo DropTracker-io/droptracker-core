@@ -65,13 +65,14 @@ from db import (
     GroupAdmin,
     Player,
 )
-from web_api.common import abort_problem, db_session, private_no_store
+from web_api.common import abort_problem, db_session, parse_page, private_no_store
 from web_api.deps import (
     current_user_id,
     is_superadmin,
     json_body,
     load_user,
     manageable_guild_ids,
+    resolve_group_role,
 )
 from web_api.routes.events import (
     _assert_event_admin,
@@ -82,6 +83,7 @@ from web_api.routes.events import (
     _load_event_or_404,
     _ts,
     clean_task_visibility,
+    participating_group_ids,
     save_task_to_library,
 )
 
@@ -194,10 +196,37 @@ async def my_pending_reviews():
                 .filter(Event.id.in_([eid for eid, _ in counts]))
                 .all()
             }
+            # Batch 2 (N+1 fix): _is_event_admin re-ran load_user +
+            # manageable_guild_ids + a Group query for EVERY active event
+            # with pendings, platform-wide, on every Activity poll. Resolve
+            # the viewer context once and cache the per-group role — same
+            # decisions, one pass.
+            user = load_user(s, user_id)
+            superadmin = is_superadmin(user)
+            mgids = manageable_guild_ids(user_id) if not superadmin else set()
+            role_cache: dict = {}
+
+            def _admin_of_group(gid) -> bool:
+                if gid is None:
+                    return False
+                if gid not in role_cache:
+                    role_cache[gid] = resolve_group_role(
+                        s, user_id, gid, mgids, user=user)
+                return role_cache[gid] in ("owner", "admin")
+
             out = []
             for event_id, count in counts:
                 ev = events.get(event_id)
-                if ev is None or not _is_event_admin(s, user_id, ev):
+                if ev is None:
+                    continue
+                if superadmin:
+                    is_admin = True
+                elif (getattr(ev, "mode", None) or "standard") == "clan_vs_clan":
+                    is_admin = any(_admin_of_group(g)
+                                   for g in participating_group_ids(s, ev))
+                else:
+                    is_admin = _admin_of_group(ev.group_id)
+                if not is_admin:
                     continue
                 rows = (
                     s.query(EventCompletion, EventTask.label, EventTeam.name,
@@ -253,6 +282,11 @@ async def list_completions(event_id: int):
 
     team_id = _int_arg("teamId")
     task_id = _int_arg("taskId")
+    # Batch 2: real SQL pagination + total, opt-in via ?page= so the legacy
+    # bare-list contract (capped at 500, no total — the review queue's
+    # "everything is here" illusion, audit) keeps working until the UI moves.
+    paged = request.args.get("page") not in (None, "")
+    page, limit = parse_page(request, default_limit=50, max_limit=200)
 
     def _load():
         with db_session() as s:
@@ -271,6 +305,17 @@ async def list_completions(event_id: int):
                 q = q.filter(EventCompletion.team_id == team_id)
             if task_id is not None:
                 q = q.filter(EventCompletion.task_id == task_id)
+            if paged:
+                total = q.count()
+                rows = (q.order_by(EventCompletion.id.desc())
+                        .offset((page - 1) * limit).limit(limit).all())
+                return {
+                    "items": [
+                        _completion_payload(c, task_label, team_name, player_name)
+                        for c, task_label, team_name, player_name in rows
+                    ],
+                    "meta": {"page": page, "limit": limit, "total": total},
+                }
             rows = q.order_by(EventCompletion.id.desc()).limit(500).all()
             return [
                 _completion_payload(c, task_label, team_name, player_name)

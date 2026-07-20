@@ -261,7 +261,9 @@ def _match_participant(target: ReconcileTarget, player_obj: dict):
 def _emit_for_row(redis_conn, target: ReconcileTarget, row: dict,
                   *, clamp_epoch: Optional[int], force: bool, stats: dict) -> int:
     """Queue envelopes for one bulk-gained row. Returns envelopes pushed."""
-    from services.event_engine import QUEUE_KEY
+    # Low-priority lane (batch 2): a reconcile burst must not head-of-line
+    # block live plugin drops; the consumer drains this queue when idle.
+    from services.event_engine import WOM_QUEUE_KEY as QUEUE_KEY
 
     player_obj = row.get("player") or {}
     entry = _match_participant(target, player_obj)
