@@ -55,6 +55,33 @@ def create_frontend(bot: interactions.Client):
     async def serve_img(filename):
         ## Check if the file exists
         if not os.path.exists(os.path.join('static/assets/img', filename)):
+            # Grayscale receipt-tab variants (Loot Sweep board): serve
+            # itemdb/gray/{id}.png. Pre-baked files are served straight through
+            # by the send_from_directory at the end of this function; this
+            # branch only runs for a variant that hasn't been generated yet —
+            # desaturate the colour icon once (recovering it first if missing),
+            # cache it, and serve. Moves the old per-tab CSS grayscale raster
+            # off every website client. Backfill: scripts/generate_grayscale_icons.py.
+            if filename.startswith('itemdb/gray/') and filename.endswith('.png'):
+                gid = filename[len('itemdb/gray/'):-len('.png')]
+                if gid.isdigit():
+                    try:
+                        from utils.item_images import (
+                            ensure_item_image,
+                            ensure_grayscale_variant,
+                            item_image_path,
+                        )
+                        if not os.path.exists(item_image_path(gid)):
+                            await ensure_item_image(gid)
+                        if ensure_grayscale_variant(gid):
+                            return await send_from_directory('static/assets/img', filename)
+                    except Exception as e:
+                        print(f"On-demand grayscale fetch failed for {filename}: {e}")
+                    # Never leave a receipt tab blank — fall back to the colour icon.
+                    color_rel = f'itemdb/{gid}.png'
+                    if os.path.exists(os.path.join('static/assets/img', color_rel)):
+                        return await send_from_directory('static/assets/img', color_rel)
+                return await send_from_directory('static/assets/img', 'droptracker-small.gif')
             # Item icons: recover a missing itemdb/{id}.png on demand from the
             # RuneLite cache, the same way the lootboard generator does. Without
             # this the website perpetually renders newly-tracked items as the

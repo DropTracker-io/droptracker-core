@@ -87,3 +87,59 @@ async def ensure_item_image(item_id, session: "aiohttp.ClientSession | None" = N
 def ensure_item_image_sync(item_id) -> bool:
     """Blocking wrapper around :func:`ensure_item_image` for non-async callers."""
     return asyncio.run(ensure_item_image(item_id))
+
+
+# Grayscale (desaturated) variants of item icons, served as
+# ``{IMG_BASE}/itemdb/gray/{id}.png``. The Loot Sweep board renders hundreds of
+# "not yet received" receipt tabs as greyed icons; it used to do that with a
+# per-element CSS ``filter: grayscale(100%)``, which the browser re-rasterises
+# every time a row scrolls into view (the desktop scroll-jank culprit). Baking
+# the grayscale into a static PNG once moves that cost off every website client.
+# Backfilled by scripts/generate_grayscale_icons.py and self-healed on demand by
+# web/front.py's image route.
+GRAY_DIR = os.path.join(ITEMDB_DIR, "gray")
+
+
+def gray_image_path(item_id) -> str:
+    """Absolute path to the grayscale icon PNG for ``item_id`` (may not exist)."""
+    return os.path.join(GRAY_DIR, f"{int(item_id)}.png")
+
+
+def ensure_grayscale_variant(item_id) -> bool:
+    """Ensure a grayscale variant of the icon exists on disk.
+
+    Desaturates ``itemdb/{id}.png`` (luminance, alpha preserved) into
+    ``itemdb/gray/{id}.png``. Requires the colour source to already exist —
+    callers that might be missing it should ``await ensure_item_image`` first.
+    Returns True when the grayscale file is present afterwards. Never raises —
+    a failure just means the client falls back to the colour icon.
+    """
+    try:
+        iid = int(item_id)
+    except (TypeError, ValueError):
+        return False
+    if iid < 0:
+        return False
+    dst = gray_image_path(iid)
+    if os.path.exists(dst):
+        return True
+    src = item_image_path(iid)
+    if not os.path.exists(src):
+        return False
+    try:
+        # Lazy import so this module stays Pillow-free for the ingest path that
+        # only ever calls ensure_item_image.
+        from PIL import Image
+
+        with Image.open(src) as im:
+            im = im.convert("RGBA")
+            lum = im.convert("L")
+            out = Image.merge("RGBA", (lum, lum, lum, im.getchannel("A")))
+        os.makedirs(GRAY_DIR, exist_ok=True)
+        # Write atomically so a concurrent reader never sees a partial file.
+        tmp_path = f"{dst}.tmp.{os.getpid()}"
+        out.save(tmp_path, "PNG")
+        os.replace(tmp_path, dst)
+        return True
+    except Exception:
+        return False
