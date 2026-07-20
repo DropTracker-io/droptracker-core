@@ -676,8 +676,8 @@ class NotificationService:
         never locked for long.
         """
         from api.core import get_db_session
-        totals = {"sent": 0, "failed": 0}
-        for status, days in (("sent", 7), ("failed", 30)):
+        totals = {"sent": 0, "skipped": 0, "failed": 0}
+        for status, days in (("sent", 7), ("skipped", 7), ("failed", 30)):
             cutoff = datetime.now() - timedelta(days=days)
             while True:
                 with get_db_session() as db_session:
@@ -696,10 +696,10 @@ class NotificationService:
                     break
                 # Yield between batches so notification sending isn't starved.
                 await asyncio.sleep(0.25)
-        if totals["sent"] or totals["failed"]:
+        if totals["sent"] or totals["skipped"] or totals["failed"]:
             app_logger.log(
                 log_type="info",
-                data=f"Pruned notification_queue: {totals['sent']} sent rows (>7d), {totals['failed']} failed rows (>30d)",
+                data=f"Pruned notification_queue: {totals['sent']} sent + {totals['skipped']} skipped rows (>7d), {totals['failed']} failed rows (>30d)",
                 app_name="notification_service",
                 description="prune_notification_queue",
             )
@@ -747,6 +747,12 @@ class NotificationService:
 
                 # Once-a-day retention prune: sent rows kept 7 days, failed 30.
                 await self._maybe_prune_notification_queue()
+                # P0-3: a full batch means more is almost surely queued —
+                # drain hot instead of sleeping 3s per 50 rows (the sleep is
+                # for idling, not for pacing a busy fleet; Discord pacing is
+                # the rate limiter's job).
+                if processed_count >= self.NOTIF_BATCH_SIZE:
+                    continue
             except asyncio.CancelledError:
                 # Graceful shutdown
                 app_logger.log(log_type="info", data="Notification service loop cancelled", app_name="notification_service", description="process_notifications_loop")
@@ -765,19 +771,33 @@ class NotificationService:
             # Normal sleep time between iterations - ensures regular processing
             await asyncio.sleep(self.sleep_interval)
     
+    # Audit P0-3 tuning: how many queue rows one cycle claims, and how many
+    # group lanes send concurrently. Ordering only matters per destination
+    # channel and channels belong to one group, so per-group lanes keep
+    # message order while unrelated groups send in parallel.
+    NOTIF_BATCH_SIZE = 50
+    NOTIF_LANE_CONCURRENCY = 6
+
     async def process_pending_notifications(self):
-        """Process pending notifications with improved locking strategy"""
-        processed_count = 0
+        """Process pending notifications: batched fetch, per-group lanes sent
+        concurrently (audit P0-3).
+
+        The old loop awaited every Discord send serially under a fixed 3s
+        sleep — ~2-3 sends/sec for the ENTIRE fleet, so completion and
+        lead-change embeds arrived minutes late exactly when hundreds of
+        events were busy. Each lane claims rows with skip-locked reads and
+        holds its own session (sessions are not task-safe)."""
         try:
-            # Use a fresh session for this operation
             from api.core import get_db_session
+            retry_cutoff = datetime.now() - timedelta(seconds=15)
             with get_db_session() as db_session:
-                # First, get a small batch of pending notifications without locking
-                # Include deferred notifications waiting on video, but only retry them
-                # at a modest interval to avoid tight loops.
-                retry_cutoff = datetime.now() - timedelta(seconds=15)
-                notifications = (
-                    db_session.query(NotificationQueue)
+                # Ids + lane key only — the claim (lock) happens per row in
+                # the lane so a concurrent process never double-sends.
+                # Include deferred notifications waiting on video, but only
+                # retry them at a modest interval to avoid tight loops.
+                rows = (
+                    db_session.query(NotificationQueue.id,
+                                     NotificationQueue.group_id)
                     .filter(
                         (NotificationQueue.status == "pending")
                         | (
@@ -789,50 +809,74 @@ class NotificationService:
                         )
                     )
                     .order_by(NotificationQueue.created_at.asc())
-                    .limit(10)
+                    .limit(self.NOTIF_BATCH_SIZE)
                     .all()
-                )  # Increased batch size for better efficiency
-                
-                og_length = len(notifications)
-                if og_length == 0:
-                    # No pending notifications found, return immediately
-                    return processed_count
-                    
-                app_logger.log(log_type="info", data=f"Processing {og_length} pending notifications", app_name="notification_service", description="process_pending_notifications")
-                
-                for notification in notifications:
-                    try:
-                        # Use a more targeted locking approach - lock only the specific row
-                        locked_notification = db_session.query(NotificationQueue).filter(
-                            NotificationQueue.id == notification.id,
-                            NotificationQueue.status.in_(["pending", "video_processing"])
-                        ).with_for_update(skip_locked=True).first()
-                        
-                        # Skip if already locked by another process or no longer pending
-                        if not locked_notification:
-                            continue
-                            
-                        # Mark as processing immediately after acquiring lock
-                        locked_notification.status = 'processing'
-                        db_session.commit()
-                        
-                        # Process the notification with the same session
-                        await self.process_notification_with_session(locked_notification, db_session)
-                        processed_count += 1
-                        
-                    except Exception as e:
-                        # Ensure we have a valid notification object for error handling
-                        if 'locked_notification' in locals() and locked_notification:
-                            locked_notification.status = 'failed'
-                            locked_notification.error_message = str(e)
-                            db_session.commit()
-                        app_logger.log(log_type="error", data=f"Error processing notification {notification.id}: {e}", app_name="notification_service", description="process_pending_notifications")
-            
+                )
+
+            if not rows:
+                return 0
+
+            lanes = {}
+            for notification_id, group_id in rows:
+                lanes.setdefault(int(group_id or 0), []).append(notification_id)
+            app_logger.log(log_type="info", data=f"Processing {len(rows)} pending notifications across {len(lanes)} group lane(s)", app_name="notification_service", description="process_pending_notifications")
+
+            semaphore = asyncio.Semaphore(self.NOTIF_LANE_CONCURRENCY)
+
+            async def _run_lane(notification_ids):
+                async with semaphore:
+                    done = 0
+                    for notification_id in notification_ids:
+                        done += await self._process_one_notification(notification_id)
+                    return done
+
+            lane_results = await asyncio.gather(
+                *(_run_lane(ids) for ids in lanes.values()),
+                return_exceptions=True,
+            )
+            processed_count = 0
+            for lane_result in lane_results:
+                if isinstance(lane_result, int):
+                    processed_count += lane_result
+                else:
+                    app_logger.log(log_type="error", data=f"Notification lane failed: {lane_result}", app_name="notification_service", description="process_pending_notifications")
             return processed_count
-            
+
         except Exception as e:
             app_logger.log(log_type="error", data=f"Error in process_pending_notifications: {e}", app_name="notification_service", description="process_pending_notifications")
-            return processed_count
+            return 0
+
+    async def _process_one_notification(self, notification_id) -> int:
+        """Claim one queue row (skip-locked) and send it. Own short-lived
+        session per call — lanes run concurrently and must share nothing."""
+        from api.core import get_db_session
+        try:
+            with get_db_session() as db_session:
+                locked_notification = db_session.query(NotificationQueue).filter(
+                    NotificationQueue.id == notification_id,
+                    NotificationQueue.status.in_(["pending", "video_processing"])
+                ).with_for_update(skip_locked=True).first()
+
+                # Already claimed by another lane/process or no longer pending.
+                if not locked_notification:
+                    return 0
+
+                # Mark as processing immediately after acquiring the lock.
+                locked_notification.status = 'processing'
+                db_session.commit()
+
+                try:
+                    await self.process_notification_with_session(locked_notification, db_session)
+                    return 1
+                except Exception as e:
+                    locked_notification.status = 'failed'
+                    locked_notification.error_message = str(e)
+                    db_session.commit()
+                    app_logger.log(log_type="error", data=f"Error processing notification {notification_id}: {e}", app_name="notification_service", description="process_pending_notifications")
+                    return 0
+        except Exception as e:
+            app_logger.log(log_type="error", data=f"Error claiming notification {notification_id}: {e}", app_name="notification_service", description="process_pending_notifications")
+            return 0
 
     async def process_notification_with_session(self, notification: NotificationQueue, db_session):
         """Process a single notification based on its type with a specific session"""
@@ -924,7 +968,11 @@ class NotificationService:
                 print(f"Notification type not found: '{notification_type}'")
                 db_session.commit()
         except interactions.errors.Forbidden:
-            group_id = data.get('group_id', None)
+            # Event notifications carry group_id as a COLUMN, not in the JSON
+            # payload — reading only data['group_id'] silently skipped this
+            # "grant the bot permissions" DM for every event message, hiding
+            # the #1 first-run misconfiguration (audit). Column wins.
+            group_id = notification.group_id or data.get('group_id', None)
             if group_id:
                 group = db_session.query(Group).filter(Group.group_id == group_id).first()
                 if group:
@@ -933,9 +981,13 @@ class NotificationService:
                     for user in authorized_users:
                         try:
                             discord_user = await self.bot.fetch_user(user_id=user)
-                            await discord_user.send(f"Hey, <@{discord_user}>!\n" + 
-                            f"We just tried to process a `{notification_type}` submission for your group, however the <@{self.bot.user.id}> does not have permissions to send messages in the channel you configured...\n\n" + 
-                            f"Please make sure the bot has **Manage Messages** and **Read Message History** permissions in the channel(s) you are using for notifications!")
+                            await discord_user.send(
+                                f"Hey, <@{discord_user.id}>!\n"
+                                f"We just tried to post a `{notification_type}` notification for your group, "
+                                f"but <@{self.bot.user.id}> isn't allowed to post in the channel you configured.\n\n"
+                                f"In that channel's settings, give the DropTracker bot **View Channel**, "
+                                f"**Send Messages**, **Embed Links** and **Attach Files** — "
+                                f"notifications resume automatically once it can post.")
                         except Exception as e:
                             print("Couldn't DM server admin about failed notification (bot permissions in server)...")
             print(f"Forbidden access error attempting to send a notification to {group_id}")
@@ -1730,8 +1782,10 @@ class NotificationService:
                 })
             skip_reason = skip_reason if not destinations else None
             if skip_reason:
-                # Nothing configured for this kind (or at all) — processed, skipped.
-                notification.status = 'sent'
+                # Nothing configured for this kind (or at all). Recorded as
+                # 'skipped', NOT 'sent' — the old status literally lied to
+                # anyone debugging "why did my clan see nothing" (audit).
+                notification.status = 'skipped'
                 notification.error_message = skip_reason
                 notification.processed_at = datetime.now()
                 db_session.commit()

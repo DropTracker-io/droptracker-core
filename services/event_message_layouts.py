@@ -288,6 +288,23 @@ DEFAULT_LAYOUTS = {
             },
         ],
     },
+    # Board-game victory (layout-only key: queued as event_board_turn with
+    # data.won, remapped in render_event_components). Without it the primary
+    # layout rendered a winning roll as a mundane "rolled 3+4 — Next task"
+    # line — the trophy copy lived only in the legacy embed (audit).
+    "event_board_win": {
+        "accent_color": "#FFD700",
+        "blocks": [
+            {"type": "text", "content": "## \U0001F3C6 {team_name} reached the finish!"},
+            {
+                "type": "text",
+                "content": "**{team_name}** rolled `{dice_str}` and crossed the "
+                           "finish line — the board is theirs!\n"
+                           "-# Final standings follow in the wrap-up message.",
+            },
+            _EVENT_BUTTON,
+        ],
+    },
     "event_board_roll_prompt": {
         "accent_color": "#F1C40F",
         "blocks": [
@@ -328,6 +345,21 @@ DEFAULT_LAYOUTS = {
                 "content": "The scheduled start passed, but the event could not be activated: {reason}",
             },
             {"type": "text", "content": "**Scheduled start** {starts_at}"},
+            {
+                "type": "buttons",
+                "buttons": [{"label": "Open the event manager", "url": "{event_url}"}],
+            },
+        ],
+    },
+    "event_end_failed": {
+        "accent_color": "#ED4245",
+        "blocks": [
+            {"type": "text", "content": "## ⚠️ {event_name} needs attention at the finish"},
+            {
+                "type": "text",
+                "content": "Something went wrong while ending the event: {reason}\nCheck the final standings and announcements — some may need to be posted by hand.",
+            },
+            {"type": "text", "content": "**Scheduled end** {ends_at}"},
             {
                 "type": "buttons",
                 "buttons": [{"label": "Open the event manager", "url": "{event_url}"}],
@@ -673,6 +705,11 @@ def render_event_components(
     ``image_ref`` is passed straight through to :func:`build_components`."""
     from services.event_notifications import event_footer_line
 
+    # Board-game victory gets its own layout — the turn layout is a static
+    # token template with no conditional branch, so a winning roll would
+    # otherwise render as an ordinary dice move (audit).
+    if message_type == "event_board_turn" and context.get("board_won"):
+        message_type = "event_board_win"
     layout = load_layout(session, group_id, message_type)
     enabled = deeplink_enabled()
     footer = event_footer_line(
@@ -720,7 +757,9 @@ def notification_context(notification_type: str, data: dict) -> dict:
     put("task_label", data.get("task_label"))
     put("points", int(data.get("points") or 0))
     if data.get("team_score") is not None:
-        put("team_score", int(data["team_score"]))
+        # fmt_pts, not int(): loot_sweep team scores carry 2dp decimals —
+        # int() showed a 100.8-point leader as "100 pts" (audit).
+        put("team_score", fmt_pts(data["team_score"]))
     put("bonus_points", int(data.get("bonus_points") or data.get("points") or 0))
     if notification_type == "event_line":
         # Always resolvable (falls back to "completed a full line" on legacy
@@ -855,6 +894,8 @@ def notification_context(notification_type: str, data: dict) -> dict:
     dice = data.get("dice") or []
     put("dice_str", data.get("dice_str")
         or (" + ".join(str(d) for d in dice) if dice else None))
+    if data.get("won"):
+        context["board_won"] = True  # flips the layout to event_board_win
     for key in ("tile_from", "tile_to", "turn", "coin_balance"):
         if data.get(key) is not None:
             context[key] = data[key]

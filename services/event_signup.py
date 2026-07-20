@@ -265,7 +265,8 @@ def perform_signup(session, ev, player, user_id: int, team_id: Optional[int] = N
         counts = _team_counts(session, [t.id for t in teams])
         team = min(teams, key=lambda t: (counts.get(t.id, 0), t.id))
 
-    session.add(EventTeamMember(team_id=team.id, player_id=player.player_id))
+    session.add(EventTeamMember(team_id=team.id, player_id=player.player_id,
+                                event_id=team.event_id))
     return {"team_id": team.id, "pooled": False}
 
 
@@ -348,7 +349,8 @@ def _place(session, event_id: int, player_id: int, team_id: int) -> None:
     for m in existing:
         session.delete(m)
     session.flush()
-    session.add(EventTeamMember(team_id=team_id, player_id=player_id))
+    session.add(EventTeamMember(team_id=team_id, player_id=player_id,
+                                event_id=event_id))
 
 
 def assign_from_pool(session, ev, player_id: int, team_id: int) -> None:

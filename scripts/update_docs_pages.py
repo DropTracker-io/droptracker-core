@@ -190,6 +190,15 @@ Sometimes the plugin isn't running when something good happens. The
    with your submission. Some groups require an image before a notification
    is posted, so proof is worth including.
 
+## Review before it counts
+
+During **events**, manual submissions usually don't score instantly: most
+events are set to hold anything that didn't come from the plugin in a
+**pending review queue**, and an event admin confirms it before points are
+awarded. If your submission shows as *pending*, that's working as intended —
+it will count as soon as an admin approves it. (Event organizers can change
+this under the event's submission policy.)
+
 ## When to use it
 
 Manual submission is for one-offs — the plugin is always preferred because
@@ -405,10 +414,11 @@ from the latest data:
 ## The Discord board
 
 The bot posts your group's lootboard image to the channel configured in your
-[group settings](/docs/group-settings) and refreshes it automatically every
-couple of minutes. You can choose the board's visual theme, and whether the
-bot **edits the existing message** in place or **reposts** a fresh one each
-time.
+[group settings](/docs/group-settings) and refreshes it automatically —
+**hourly** for standard groups, and every few minutes for groups with a
+[premium subscription](/premium). You can choose the board's visual theme,
+and whether the bot **edits the existing message** in place or **reposts** a
+fresh one each time.
 """,
     ),
 

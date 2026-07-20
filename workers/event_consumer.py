@@ -70,6 +70,34 @@ PROCESSING_KEY = "events:submissions:processing"
 DEAD_KEY = "events:submissions:dead"
 DEAD_MAX_ENTRIES = 1000
 
+# P0-5: transient infrastructure errors (deadlock, lock-wait timeout, "MySQL
+# server has gone away", pool exhaustion, Redis hiccup) are the COMMON failure
+# at scale and must be retried, not dead-lettered — dead-lettering them
+# silently discards legitimately-earned credit. Only genuine poison payloads
+# (or envelopes that keep failing past the cap) go to the DEAD list.
+RETRY_MAX_ATTEMPTS = 5
+_ATTEMPTS_KEY = "_attempts"
+
+
+def _is_retryable(exc) -> bool:
+    """True for infrastructure errors worth retrying; False for poison."""
+    try:
+        from sqlalchemy.exc import (
+            DBAPIError, InterfaceError, OperationalError,
+            TimeoutError as SATimeoutError,
+        )
+
+        if isinstance(exc, (OperationalError, InterfaceError, SATimeoutError)):
+            return True
+        if isinstance(exc, DBAPIError) and getattr(
+                exc, "connection_invalidated", False):
+            return True
+    except ImportError:
+        pass
+    if isinstance(exc, _redis.RedisError):
+        return True
+    return False
+
 
 def _reclaim_inflight(r, queue_key: str) -> int:
     """Move any envelopes stranded in the PROCESSING list (a hard crash between
@@ -179,9 +207,16 @@ def _process_entry(r, state, entry_bytes) -> list:
         return []
 
     db_session = get_db_session()
+    # P0-6: watermark/baseline/dedupe advances are staged and only flushed
+    # once the ledger row is durable — a rolled-back apply leaves the
+    # watermark untouched so the retry re-earns the same delta instead of
+    # folding to 0 (silent credit loss).
+    staged = event_engine.StagedWrites()
     try:
-        results = event_engine.handle_envelope(db_session, r, state, envelope)
+        results = event_engine.handle_envelope(
+            db_session, r, state, envelope, staged=staged)
         db_session.commit()
+        staged.flush(r)
         return results
     except Exception:
         db_session.rollback()
@@ -194,15 +229,32 @@ def _process_entry(r, state, entry_bytes) -> list:
 async def _drain_queue_inline(r, state) -> int:
     """Synchronously drain events:submissions (final WOM pass ordering: the
     queued envelopes must be applied while the ending event is still in the
-    matcher state)."""
+    matcher state). One bad envelope is dead-lettered and must not abort the
+    drain — this runs at the most consequential moment (right before the
+    event ends) and every envelope behind it still deserves to land."""
     from services.event_engine import QUEUE_KEY
 
     drained = 0
     while drained < FINAL_DRAIN_MAX_ENTRIES:
-        entry = await asyncio.to_thread(r.rpop, QUEUE_KEY)
+        entry = await asyncio.to_thread(r.rpoplpush, QUEUE_KEY, PROCESSING_KEY)
         if entry is None:
             break
-        await asyncio.to_thread(_process_entry, r, state, entry)
+        try:
+            await asyncio.to_thread(_process_entry, r, state, entry)
+        except Exception:
+            log.error("Final drain: envelope failed; dead-lettering:\n%s",
+                      traceback.format_exc())
+            try:
+                pipe = r.pipeline()
+                pipe.lrem(PROCESSING_KEY, 1, entry)
+                pipe.lpush(DEAD_KEY, entry)
+                pipe.ltrim(DEAD_KEY, 0, DEAD_MAX_ENTRIES - 1)
+                await asyncio.to_thread(pipe.execute)
+            except Exception:
+                log.error("Final drain: dead-letter move failed:\n%s",
+                          traceback.format_exc())
+        else:
+            await asyncio.to_thread(r.lrem, PROCESSING_KEY, 1, entry)
         drained += 1
     return drained
 
@@ -245,6 +297,7 @@ async def run_consumer() -> None:
     last_sweep = 0.0
     last_reconcile = 0.0
     reconcile_task = None
+    last_dead_count = 0
 
     async def _run_reconcile(current_state):
         try:
@@ -278,13 +331,40 @@ async def run_consumer() -> None:
                         await _run_wom_final_passes(r, state)
                     except Exception:
                         log.error("WOM final pass failed:\n%s", traceback.format_exc())
-                summary = await asyncio.to_thread(_run_lifecycle_sweep, r)
+                # P0-1: the sweep has per-event guards inside, but an
+                # infra-level failure (the due-list query itself) must not
+                # kill the consumer loop — and must not retry hot: stamp
+                # last_sweep either way so the next attempt waits a full tick.
+                try:
+                    summary = await asyncio.to_thread(_run_lifecycle_sweep, r)
+                except Exception:
+                    summary = {}
+                    log.error("Lifecycle sweep failed:\n%s", traceback.format_exc())
                 last_sweep = time.time()
                 if summary.get("activated") or summary.get("ended") or summary.get("failed"):
                     log.info("Lifecycle sweep: activated=%s ended=%s failed=%s",
                              summary.get("activated"), summary.get("ended"),
                              summary.get("failed"))
                     bumped = True  # transitions changed the active set
+                # P0-5 visibility: queue / in-flight / dead depths once per
+                # tick (~60s) — the one heartbeat line an operator needs to
+                # tell a degraded consumer from a healthy one. DLQ growth is
+                # an ERROR so it reaches Sentry the moment credit is dropped.
+                try:
+                    pending, inflight, dead = await asyncio.to_thread(
+                        lambda: (r.llen(QUEUE_KEY), r.llen(PROCESSING_KEY),
+                                 r.llen(DEAD_KEY)))
+                    log.info("Queue depth: pending=%d inflight=%d dead=%d",
+                             pending, inflight, dead)
+                    if dead > last_dead_count:
+                        log.error(
+                            "Event DLQ grew: %d -> %d entries "
+                            "(events:submissions:dead) — dropped credit needs "
+                            "an operator (inspect + requeue or purge)",
+                            last_dead_count, dead)
+                    last_dead_count = dead
+                except Exception:
+                    pass
                 # Board-game mercy rule (web44a): overdue tile tasks
                 # auto-complete so RNG can't strand a team.
                 try:
@@ -330,20 +410,56 @@ async def run_consumer() -> None:
             try:
                 outcomes = await asyncio.to_thread(
                     _process_entry, r, state, entry_bytes)
-            except Exception:
-                # A handled failure to apply THIS envelope: dead-letter it (out
-                # of PROCESSING, onto a bounded DEAD list) so it neither loops
-                # forever nor silently vanishes, then keep draining.
-                log.error("Failed to apply envelope; dead-lettering:\n%s",
-                          traceback.format_exc())
+            except Exception as exc:
+                # P0-5: a transient infra error (deadlock / lock-wait / gone-
+                # away / Redis blip) gets the envelope REQUEUED with a bounded
+                # attempt counter — dead-lettering it would silently discard
+                # earned credit for what is usually a self-healing failure.
+                # Only poison payloads (or ones past the cap) go to DEAD.
+                attempts, requeued = 0, False
+                envelope = None
                 try:
-                    pipe = r.pipeline()
-                    pipe.lrem(PROCESSING_KEY, 1, entry_bytes)
-                    pipe.lpush(DEAD_KEY, entry_bytes)
-                    pipe.ltrim(DEAD_KEY, 0, DEAD_MAX_ENTRIES - 1)
-                    await asyncio.to_thread(pipe.execute)
+                    envelope = json.loads(entry_bytes)
+                    attempts = int(envelope.get(_ATTEMPTS_KEY, 0))
                 except Exception:
-                    log.error("Dead-letter move failed:\n%s", traceback.format_exc())
+                    envelope = None
+                context = ""
+                if isinstance(envelope, dict):
+                    context = " (type=%s player=%s guid=%s)" % (
+                        envelope.get("kind") or envelope.get("type"),
+                        envelope.get("player_id"),
+                        str(envelope.get("guid") or envelope.get(
+                            "submission_guid"))[:40])
+                if (isinstance(envelope, dict) and _is_retryable(exc)
+                        and attempts < RETRY_MAX_ATTEMPTS):
+                    try:
+                        envelope[_ATTEMPTS_KEY] = attempts + 1
+                        requeue_bytes = json.dumps(envelope).encode()
+                        pipe = r.pipeline()
+                        pipe.lrem(PROCESSING_KEY, 1, entry_bytes)
+                        pipe.lpush(QUEUE_KEY, requeue_bytes)
+                        await asyncio.to_thread(pipe.execute)
+                        requeued = True
+                        log.warning(
+                            "Transient %s applying envelope%s; requeued "
+                            "(attempt %d/%d)", exc.__class__.__name__,
+                            context, attempts + 1, RETRY_MAX_ATTEMPTS)
+                    except Exception:
+                        log.error("Requeue failed; falling back to "
+                                  "dead-letter:\n%s", traceback.format_exc())
+                if not requeued:
+                    log.error("Failed to apply envelope%s; dead-lettering "
+                              "(attempts=%d):\n%s", context, attempts,
+                              traceback.format_exc())
+                    try:
+                        pipe = r.pipeline()
+                        pipe.lrem(PROCESSING_KEY, 1, entry_bytes)
+                        pipe.lpush(DEAD_KEY, entry_bytes)
+                        pipe.ltrim(DEAD_KEY, 0, DEAD_MAX_ENTRIES - 1)
+                        await asyncio.to_thread(pipe.execute)
+                    except Exception:
+                        log.error("Dead-letter move failed:\n%s",
+                                  traceback.format_exc())
                 continue
             for outcome in outcomes:
                 log.info("Applied %s: event=%s task=%s team=%s",

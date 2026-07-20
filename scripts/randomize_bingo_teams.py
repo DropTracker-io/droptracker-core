@@ -306,7 +306,7 @@ def main() -> None:
         for tid, pids in buckets.items():
             for pid in pids:
                 s.add(EventTeamMember(team_id=tid, player_id=pid,
-                                      joined_at=joined_at))
+                                      event_id=ev.id, joined_at=joined_at))
 
         s.add(AuditLog(
             actor_user_id=args.actor_user_id,

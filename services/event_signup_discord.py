@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 
 import interactions
+from sqlalchemy.exc import IntegrityError
 from interactions import (
     ActionRow,
     Extension,
@@ -86,6 +87,16 @@ class EventSignupButtons(Extension):
                 await self._finalize(ctx, int(event_id_s), int(player_id_s))
         except sus.SignupError as exc:
             await self._reply(ctx, f"⚠️ {exc.detail}")
+        except IntegrityError:
+            # web59a unique backstop: a double click raced its twin and lost —
+            # from the player's point of view the sign-up WORKED. Don't show
+            # them "Something went wrong" for a success (audit).
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            await self._reply(
+                ctx, "✅ You're already signed up — your team placement is set.")
         except Exception:
             log.exception("event signup component failed: %s", custom_id)
             try:

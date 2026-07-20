@@ -415,6 +415,25 @@ async def award_completion(event_id: int):
 
     def _apply():
         nonlocal quantity
+        # P0-10: manual rows have no submission_guid, so the ledger's unique
+        # (task, team, guid) index can't dedupe them — an organizer's double
+        # click would insert and apply two identical awards. A short one-shot
+        # Redis claim absorbs the double click before any DB work.
+        fresh_click = True
+        try:
+            from utils.redis import redis_client
+
+            claim = f"events:{event_id}:awardclick:{task_id}:{team_id}:{user_id}"
+            conn = getattr(redis_client, "client", None) or redis_client
+            fresh_click = bool(conn.set(claim, 1, nx=True, ex=5))
+        except Exception:
+            pass  # Redis down → fall through; the progress lock still guards
+        if not fresh_click:
+            abort_problem(
+                409, "Award already in flight",
+                "An identical award was applied moments ago — refresh to "
+                "see it. (If you really meant to award twice, wait a few "
+                "seconds and try again.)")
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev)
@@ -436,15 +455,22 @@ async def award_completion(event_id: int):
                 # "Mark complete": fill whatever progress is left so this one
                 # ledger row crosses the task's threshold (an award of the
                 # default quantity 1 on a 50-KC task otherwise just records
-                # 1/50 and completes nothing).
+                # 1/50 and completes nothing). Locked read (P0-10): a
+                # concurrent award/confirm must not both see the same "left".
                 eng = _engine()
                 threshold = eng.completion_threshold(eng._task_to_dict(task))
                 current = (
                     s.query(EventProgress)
                     .filter(EventProgress.task_id == task_id,
                             EventProgress.team_id == team_id)
+                    .with_for_update()
                     .first()
                 )
+                if current is not None and current.completed:
+                    abort_problem(
+                        409, "Already complete",
+                        "This task is already complete for that team — "
+                        "nothing to mark.")
                 done = int(current.progress or 0) if current else 0
                 quantity = max(threshold - done, 1)
             comp = EventCompletion(

@@ -136,14 +136,37 @@ async def get_notifications():
 
 
 @notifications_bp.get("/event_state")
+@rate_limit(limit=12, period=timedelta(seconds=60))
 async def get_event_state():
-    """HUD / Events-tab state for every active event the player is in."""
+    """HUD / Events-tab state for every active event the player is in.
+
+    ``compose_event_state`` is a heavy multi-query composition (teams,
+    standings, tasks, progress, tiles, board position, banked items) and
+    notifications fan out to whole teams — one completion used to trigger N
+    teammates' clients into N uncached compositions at once (audit P0-14).
+    A short per-identity Redis cache absorbs the burst; the rate limit is the
+    per-client backstop. The 10s staleness is invisible next to the plugin's
+    own polling cadence."""
     player_name = request.args.get("player_name", None)
     acc_hash = request.args.get("acc_hash", None)
     if not player_name or not acc_hash:
         return jsonify({"error": "player_name and acc_hash are required"}), 400
 
+    import hashlib
+    import json as _json
+
     from services.plugin_notifications import compose_event_state
+
+    cache_key = "plugin:event_state:" + hashlib.sha1(
+        f"{player_name}:{acc_hash}".encode()).hexdigest()
+    try:
+        from utils.redis import redis_client
+
+        cached = redis_client.client.get(cache_key)
+        if cached:
+            return Response(cached, content_type="application/json"), 200
+    except Exception:
+        pass
 
     def _load():
         db_session = get_db_session()
@@ -162,6 +185,12 @@ async def get_event_state():
         return jsonify({"error": "Internal error"}), 500
     if state is None:
         return jsonify({"error": "Player not found"}), 404
+    try:
+        from utils.redis import redis_client
+
+        redis_client.client.set(cache_key, _json.dumps(state, default=str), ex=10)
+    except Exception:
+        pass
     return jsonify(state), 200
 
 

@@ -213,6 +213,8 @@ EVENT_MESSAGE_TOGGLE_KEYS = (
     "event_lead_change",
     "event_pending",
     "event_activation_failed",
+    # P0-8: scheduled end failed / wrap-up incomplete — an admin must look.
+    "event_end_failed",
     # Board game (web44a): a team rolled + moved (+ the next task drawn).
     "event_board_turn",
     # Board game (web53a): "task done — roll the dice" nudge. Default OFF for
@@ -235,6 +237,10 @@ EVENT_MESSAGE_LAYOUT_TYPES = EVENT_MESSAGE_TOGGLE_KEYS + (
     # Prize pot (web52a) — the manual "advertise the pot now" post. Admin
     # action, no verbosity toggle (absent from EVENT_MESSAGE_TOGGLE_KEYS).
     "event_pot",
+    # Board-game victory (audit): layout-only key — queued as
+    # event_board_turn with data.won, remapped at render time so a winning
+    # roll doesn't read as a mundane dice move. Toggled via event_board_turn.
+    "event_board_win",
 )
 
 # Team-leadership roles a roster row may carry (web_event_team_members.role;
@@ -458,10 +464,20 @@ class EventGroup(Base):
 
 class EventTeamMember(Base):
     __tablename__ = "web_event_team_members"
-    __table_args__ = ({"extend_existing": True},)
+    __table_args__ = (
+        # web59a (P0-9): "one team per event" as a DB constraint — the
+        # check-then-insert join flow races, and two concurrent joins can put
+        # a player on two teams (double-crediting every drop). The composite
+        # PK can't catch that (different team_id); the denormalized event_id
+        # can. Every creation site must set event_id.
+        Index("uq_web_evt_member_event_player", "event_id", "player_id",
+              unique=True),
+        {"extend_existing": True},
+    )
 
     team_id = Column(Integer, ForeignKey("web_event_teams.id"), primary_key=True)
     player_id = Column(Integer, ForeignKey("players.player_id"), primary_key=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
     # Credit cutoff: the engine ignores submissions timestamped earlier (PRD D10).
     joined_at = Column(DateTime, default=func.now(), nullable=False)
     # EVENT_TEAM_ROLES ("leader"/"co_leader"); NULL = plain member. Only

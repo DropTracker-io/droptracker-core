@@ -128,26 +128,37 @@ class TestSyncMembersOutcomes:
             http = Http()
 
         row = SimpleNamespace(guild_id="1", role_id="2", channel_id=None,
-                              channel_kind=None,
+                              channel_kind=None, last_error=None,
                               member_state=json.dumps(sorted(state)) if state else None)
         converged = asyncio.get_event_loop().run_until_complete(
             bot_mod._sync_members(Bot(), None, row, desired))
-        return converged, set(json.loads(row.member_state))
+        return converged, set(json.loads(row.member_state)), row
 
     def test_ok_and_absent_are_handled(self):
-        converged, state = self._run(
-            {"10": "ok", "11": "absent", "12": "forbidden"}, {"10", "11", "12"})
+        converged, state, _row = self._run(
+            {"10": "ok", "11": "absent"}, {"10", "11"})
         assert converged
-        assert state == {"10", "11", "12"}
+        assert state == {"10", "11"}
+
+    def test_forbidden_not_marked_handled(self):
+        # Audit P0-11: a 403 (bot role below the team role / Manage Roles
+        # revoked) must NOT be treated as "absent" — the member never got the
+        # role while the UI read "synced". It stays unhandled (retried once
+        # perms are fixed) and leaves an actionable last_error on the row.
+        converged, state, row = self._run(
+            {"10": "ok", "12": "forbidden"}, {"10", "12"})
+        assert not converged
+        assert state == {"10"}
+        assert row.last_error and "Manage Roles" in row.last_error
 
     def test_transient_error_not_marked_handled(self):
-        converged, state = self._run(
+        converged, state, _row = self._run(
             {"10": "ok", "11": "error"}, {"10", "11"})
         assert not converged  # stays members_dirty — retried next pass
         assert state == {"10"}
 
     def test_remove_error_keeps_id_for_retry(self):
-        converged, state = self._run(
+        converged, state, _row = self._run(
             {"99": "error"}, set(), state={"99"})
         assert not converged
         assert state == {"99"}

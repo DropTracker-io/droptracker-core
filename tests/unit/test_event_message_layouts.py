@@ -298,9 +298,11 @@ class TestDefaultLayouts:
             "event_started", "event_ended", "event_completion",
             "event_task_progress", "event_line",
             "event_blackout", "event_lead_change", "event_pending",
-            "event_activation_failed", "event_multi_clan_skipped",
+            "event_activation_failed", "event_end_failed",
+            "event_multi_clan_skipped",
             "event_signup_prompt", "event_board",
-            "event_board_turn", "event_pot", "event_board_roll_prompt",
+            "event_board_turn", "event_board_win", "event_pot",
+            "event_board_roll_prompt",
             "event_sweep_item", "event_sweep_group", "event_sweep_set",
         }
         assert set(ml.DEFAULT_LAYOUTS) == expected

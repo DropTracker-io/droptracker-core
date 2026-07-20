@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 
 # ── Redis keys / channels ─────────────────────────────────────────────────────
 QUEUE_KEY = "events:submissions"           # LPUSH by producers, BRPOP by worker
@@ -892,12 +892,52 @@ def set_active_events(redis_conn, event_ids) -> None:
 # 3. Apply layer (worker + Task 18 confirmation flow)
 # ══════════════════════════════════════════════════════════════════════════════
 
+class StagedWrites:
+    """Redis writes computed during matching but executed only after the DB
+    transaction commits (P0-6).
+
+    The XP-baseline / KC-watermark folds are the dedupe for cumulative
+    counters: advancing them BEFORE the ledger row commits means a failed
+    commit (deadlock, timeout, crash) rolls the row back while the watermark
+    stays advanced — the replay then folds to delta 0 and the credit is gone
+    forever. Passing a collector defers those writes to after the commit;
+    passing ``staged=None`` keeps the historical write-immediately behaviour
+    (tests, ad-hoc callers). Single-consumer assumption: envelopes for one
+    (event, player) are applied sequentially, so a deferred watermark is
+    always flushed before the next envelope that reads it.
+    """
+
+    __slots__ = ("ops",)
+
+    def __init__(self):
+        self.ops = []
+
+    def stage(self, method: str, *args, **kwargs) -> None:
+        self.ops.append((method, args, kwargs))
+
+    def flush(self, redis_conn) -> None:
+        """Execute the staged writes (call ONLY after a successful commit).
+        A failed write here risks a one-off double-count on the next fold —
+        rare and bounded, vs. the guaranteed lost credit of the old order —
+        so it is logged loudly rather than raised."""
+        ops, self.ops = self.ops, []
+        for method, args, kwargs in ops:
+            try:
+                getattr(redis_conn, method)(*args, **kwargs)
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "post-commit Redis write %s%r failed (watermark may lag "
+                    "one submission)", method, args)
+
+
 def _xp_baseline_key(event_id: int, player_id: int, skill: str) -> str:
     return f"events:{event_id}:xpbase:{player_id}:{_norm(skill)}"
 
 
 def _fold_xp_baseline(redis_conn, event_id: int, player_id: int, skill, xp,
-                      seed=None) -> int:
+                      seed=None, staged: Optional[StagedWrites] = None) -> int:
     """Return xp gained since the last stored baseline and advance it.
 
     The first report after join only sets the baseline (delta 0) — PRD D10:
@@ -905,7 +945,16 @@ def _fold_xp_baseline(redis_conn, event_id: int, player_id: int, skill, xp,
     ``seed`` (the player's XP at the event window start, per WOM's snapshot
     history) — when the baseline is unset, the first fold credits from the
     seed instead, so plugin-less players still earn their in-window gains.
+
+    With ``staged`` the baseline advance is deferred to post-commit (P0-6).
     """
+
+    def _write(method, *args, **kwargs):
+        if staged is not None:
+            staged.stage(method, *args, **kwargs)
+        else:
+            getattr(redis_conn, method)(*args, **kwargs)
+
     try:
         xp = int(xp or 0)
     except (TypeError, ValueError):
@@ -916,7 +965,7 @@ def _fold_xp_baseline(redis_conn, event_id: int, player_id: int, skill, xp,
     try:
         prev = redis_conn.get(key)
         if prev is None:
-            redis_conn.set(key, xp, ex=_STATE_KEY_TTL)
+            _write("set", key, xp, ex=_STATE_KEY_TTL)
             try:
                 seed = int(seed)
             except (TypeError, ValueError):
@@ -925,7 +974,7 @@ def _fold_xp_baseline(redis_conn, event_id: int, player_id: int, skill, xp,
         prev = int(prev)
         if xp <= prev:
             return 0
-        redis_conn.set(key, xp, ex=_STATE_KEY_TTL)
+        _write("set", key, xp, ex=_STATE_KEY_TTL)
         return xp - prev
     except Exception:
         return 0
@@ -962,7 +1011,8 @@ def _legacy_kcdedupe_max(redis_conn, event_id: int, task_id: int, player_id: int
 
 
 def _fold_kc_watermark(redis_conn, event_id: int, task_id: int, player_id: int,
-                       kc_abs, *, seed=None, first_credit_offset: int = 0) -> int:
+                       kc_abs, *, seed=None, first_credit_offset: int = 0,
+                       staged: Optional[StagedWrites] = None) -> int:
     """Return kills gained since the stored absolute-KC watermark, advance it.
 
     One watermark per (event, task, player), advanced by BOTH sources of
@@ -974,7 +1024,17 @@ def _fold_kc_watermark(redis_conn, event_id: int, task_id: int, player_id: int,
     crediting +1, as before). Credits already granted through the
     no-kill_count cooldown fallback (``kcfallback`` counter) are subtracted
     from any positive delta so they never double-count.
+
+    With ``staged`` the watermark advance + fallback consume are deferred to
+    post-commit (P0-6).
     """
+
+    def _write(method, *args, **kwargs):
+        if staged is not None:
+            staged.stage(method, *args, **kwargs)
+        else:
+            getattr(redis_conn, method)(*args, **kwargs)
+
     try:
         kc_abs = int(kc_abs)
     except (TypeError, ValueError):
@@ -996,7 +1056,7 @@ def _fold_kc_watermark(redis_conn, event_id: int, task_id: int, player_id: int,
         else:
             base = int(prev)
         delta = max(0, kc_abs - base)
-        redis_conn.set(key, max(kc_abs, base), ex=_STATE_KEY_TTL)
+        _write("set", key, max(kc_abs, base), ex=_STATE_KEY_TTL)
         if delta > 0:
             fb_key = _kc_fallback_key(event_id, task_id, player_id)
             try:
@@ -1007,9 +1067,9 @@ def _fold_kc_watermark(redis_conn, event_id: int, task_id: int, player_id: int,
                 consumed = min(pending, delta)
                 delta -= consumed
                 if pending - consumed > 0:
-                    redis_conn.set(fb_key, pending - consumed, ex=_STATE_KEY_TTL)
+                    _write("set", fb_key, pending - consumed, ex=_STATE_KEY_TTL)
                 else:
-                    redis_conn.delete(fb_key)
+                    _write("delete", fb_key)
         return delta
     except Exception:
         return 0
@@ -1021,13 +1081,17 @@ def _fold_kc_watermark(redis_conn, event_id: int, task_id: int, player_id: int,
 KC_FALLBACK_COOLDOWN_SECONDS = 10
 
 
-def _kc_dedupe(redis_conn, event_id: int, task_id: int, player_id: int, envelope: dict) -> bool:
+def _kc_dedupe(redis_conn, event_id: int, task_id: int, player_id: int,
+               envelope: dict, staged: Optional[StagedWrites] = None) -> bool:
     """True if this drop represents a not-yet-counted kill for a kc task.
 
     Keyed per (npc, kill_count) so multi-item drops from one kill count once.
     When kill_count is unusable (absent, or 0 = the plugin's "unavailable"
     marker), fall back to a per-(task, player) cooldown — the old guid
     fallback counted every stack of a multi-item kill as its own kill.
+
+    With ``staged`` the marker writes are deferred to post-commit (P0-6): a
+    rolled-back apply must not leave the kill marked as already counted.
     """
     data = envelope.get("data") or {}
     try:
@@ -1038,6 +1102,12 @@ def _kc_dedupe(redis_conn, event_id: int, task_id: int, player_id: int, envelope
     try:
         if kill_count is not None and kill_count > 0:
             member = f"{_norm(data.get('npc_name'))}:{kill_count}"
+            if staged is not None:
+                if redis_conn.sismember(key, member):
+                    return False
+                staged.stage("sadd", key, member)
+                staged.stage("expire", key, _STATE_KEY_TTL)
+                return True
             added = redis_conn.sadd(key, member)
             redis_conn.expire(key, _STATE_KEY_TTL)
             return bool(added)
@@ -1046,7 +1116,10 @@ def _kc_dedupe(redis_conn, event_id: int, task_id: int, player_id: int, envelope
         last = redis_conn.get(last_key)
         if last is not None and ts - int(last) < KC_FALLBACK_COOLDOWN_SECONDS:
             return False
-        redis_conn.set(last_key, ts, ex=_STATE_KEY_TTL)
+        if staged is not None:
+            staged.stage("set", last_key, ts, ex=_STATE_KEY_TTL)
+        else:
+            redis_conn.set(last_key, ts, ex=_STATE_KEY_TTL)
         return True
     except Exception:
         # If Redis dedupe is unavailable, fall through — the ledger's unique
@@ -1236,7 +1309,8 @@ def evaluate_bingo_bonuses(session, event: dict, team_id: int,
     if ledger_task_id is None:
         return []
 
-    team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+    team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+            .with_for_update().first())  # P0-7: locked score RMW
     team_name = team.name if team is not None else None
     results = []
     line_notes = []
@@ -1565,9 +1639,14 @@ def _current_leader(session, event_id: int, strict: bool = False):
             .limit(2).all())
     if not rows:
         return None
-    if strict and len(rows) > 1 and int(rows[0].score or 0) == int(rows[1].score or 0):
+    # round(), not int(): loot_sweep scores carry 2dp decimals — truncation
+    # made a 100.8 vs 100.2 overtake read as a tie (no lead-change fires) and
+    # showed truncated scores in the embeds (audit).
+    if strict and len(rows) > 1 and (
+            round(float(rows[0].score or 0), 2)
+            == round(float(rows[1].score or 0), 2)):
         return None
-    return (rows[0].id, int(rows[0].score or 0))
+    return (rows[0].id, round(float(rows[0].score or 0), 2))
 
 
 def _loot_sweep_applied_rows(session, task: dict, team_id) -> list:
@@ -1631,9 +1710,13 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
     player_id = completion.player_id
     config = LootSweepConfig(task.get("config") or {})
 
+    # P0-7: locked read — progress is a read-modify-write shared between the
+    # consumer and webapi confirm/revoke flows; unlocked, one side's update
+    # silently overwrites the other's under REPEATABLE READ.
     progress = (session.query(EventProgress)
                 .filter(EventProgress.task_id == task["id"],
                         EventProgress.team_id == team_id)
+                .with_for_update()
                 .first())
     if progress is None:
         progress = EventProgress(
@@ -1658,7 +1741,8 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
     lead_changed_to = None
     if delta and team_id is not None:
         previous_leader = _current_leader(session, event["id"], strict=True)
-        team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+        team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+                .with_for_update().first())  # P0-7: locked score RMW
         if team is not None:
             team.score = round(float(team.score or 0) + delta, 2)
             team_score = team.score
@@ -1837,9 +1921,13 @@ def _revoke_loot_sweep(session, event: dict, task: dict, team_id, completion) ->
     excludes it; we re-fold the running total and take back the delta."""
     from db.models import EventProgress, EventTeam
 
+    # P0-7: locked read — progress is a read-modify-write shared between the
+    # consumer and webapi confirm/revoke flows; unlocked, one side's update
+    # silently overwrites the other's under REPEATABLE READ.
     progress = (session.query(EventProgress)
                 .filter(EventProgress.task_id == task["id"],
                         EventProgress.team_id == team_id)
+                .with_for_update()
                 .first())
     previous_total = round(float(progress.progress or 0), 2) if progress is not None else 0.0
     new_total = _loot_sweep_score(session, task, team_id)["total"]
@@ -1856,7 +1944,8 @@ def _revoke_loot_sweep(session, event: dict, task: dict, team_id, completion) ->
 
     team_score = None
     if delta and team_id is not None:
-        team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+        team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+                .with_for_update().first())  # P0-7: locked score RMW
         if team is not None:
             team.score = round(float(team.score or 0) + delta, 2)
             team_score = team.score
@@ -1893,9 +1982,13 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
     player_id = completion.player_id
     quantity = int(completion.quantity or 1)
 
+    # P0-7: locked read — progress is a read-modify-write shared between the
+    # consumer and webapi confirm/revoke flows; unlocked, one side's update
+    # silently overwrites the other's under REPEATABLE READ.
     progress = (session.query(EventProgress)
                 .filter(EventProgress.task_id == task["id"],
                         EventProgress.team_id == team_id)
+                .with_for_update()
                 .first())
     if progress is None:
         progress = EventProgress(
@@ -1965,7 +2058,8 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         # Strict leaders only: a tie has no leader, so tying the top score
         # never announces a lead change, while later breaking that tie does.
         previous_leader = _current_leader(session, event["id"], strict=True)
-        team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+        team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+                .with_for_update().first())  # P0-7: locked score RMW
         if team is not None:
             team.score = int(team.score or 0) + points
             team_score = team.score
@@ -2254,6 +2348,16 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
             session.flush()
     except IntegrityError:
         return None  # replay of the same submission — idempotent no-op
+    except DataError:
+        # Out-of-range value (e.g. a quantity beyond the column type before
+        # web58a widened it) — skip THIS row rather than dead-letter the whole
+        # envelope, and say so loudly.
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "Ledger insert out of range: event=%s task=%s team=%s qty=%s",
+            event["id"], task["id"], team_id, quantity)
+        return None
 
     player_name = envelope.get("player_name")
     if status == "pending":
@@ -2292,9 +2396,14 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
                             cells=cells, player_name=player_name)
 
 
-def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict) -> list:
+def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
+                    staged: Optional[StagedWrites] = None) -> list:
     """Evaluate one queue envelope against the matcher state. Returns the list
-    of result dicts (empty when nothing matched). Caller commits."""
+    of result dicts (empty when nothing matched). Caller commits.
+
+    Pass a :class:`StagedWrites` to defer the watermark/baseline/dedupe Redis
+    advances until after that commit (P0-6) — the caller then flushes it on
+    success and simply drops it on rollback."""
     results = []
     try:
         player_id = int(envelope.get("player_id"))
@@ -2366,24 +2475,30 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict) ->
                 if kill_count is not None and kill_count > 0:
                     quantity = _fold_kc_watermark(
                         redis_conn, event_id, task["id"], player_id,
-                        kill_count, first_credit_offset=1)
+                        kill_count, first_credit_offset=1, staged=staged)
                     if quantity <= 0:
                         continue
                 else:
                     # No usable absolute KC: cooldown dedupe as before, and
                     # note the credit so a later absolute fold subtracts it.
-                    if not _kc_dedupe(redis_conn, event_id, task["id"], player_id, envelope):
+                    if not _kc_dedupe(redis_conn, event_id, task["id"],
+                                      player_id, envelope, staged=staged):
                         continue
                     try:
                         fb_key = _kc_fallback_key(event_id, task["id"], player_id)
-                        redis_conn.incr(fb_key)
-                        redis_conn.expire(fb_key, _STATE_KEY_TTL)
+                        if staged is not None:
+                            staged.stage("incr", fb_key)
+                            staged.stage("expire", fb_key, _STATE_KEY_TTL)
+                        else:
+                            redis_conn.incr(fb_key)
+                            redis_conn.expire(fb_key, _STATE_KEY_TTL)
                     except Exception:
                         pass
             elif match["mode"] == "kc_abs":
                 quantity = _fold_kc_watermark(
                     redis_conn, event_id, task["id"], player_id, data.get("kc"),
-                    seed=data.get("kc_start") if wom_seed_ok else None)
+                    seed=data.get("kc_start") if wom_seed_ok else None,
+                    staged=staged)
                 if quantity <= 0:
                     continue
             elif match["mode"] == "xp":
@@ -2391,7 +2506,8 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict) ->
                     xp_delta = _fold_xp_baseline(
                         redis_conn, event_id, player_id,
                         data.get("skill"), data.get("xp"),
-                        seed=data.get("xp_start") if wom_seed_ok else None)
+                        seed=data.get("xp_start") if wom_seed_ok else None,
+                        staged=staged)
                 if xp_delta <= 0:
                     continue
                 quantity = xp_delta
@@ -2462,7 +2578,8 @@ def _unwind_bonuses(session, event: dict, team_id: int) -> list:
         delta += max(int(row.quantity or 0), 0)
         revoked.append(row.note)
     if delta:
-        team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+        team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+                .with_for_update().first())  # P0-7: locked score RMW
         if team is not None:
             team.score = int(team.score or 0) - delta
     return revoked
@@ -2496,7 +2613,8 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
         # just take back exactly the points it granted (stored in quantity).
         team_score = None
         if team_id is not None:
-            team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+            team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+                .with_for_update().first())  # P0-7: locked score RMW
             if team is not None:
                 team.score = int(team.score or 0) - max(int(completion.quantity or 0), 0)
                 team_score = team.score
@@ -2531,9 +2649,13 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
             if (r.source_type or "") != "bonus"
         )
 
+    # P0-7: locked read — progress is a read-modify-write shared between the
+    # consumer and webapi confirm/revoke flows; unlocked, one side's update
+    # silently overwrites the other's under REPEATABLE READ.
     progress = (session.query(EventProgress)
                 .filter(EventProgress.task_id == task["id"],
                         EventProgress.team_id == team_id)
+                .with_for_update()
                 .first())
     was_completed = bool(progress.completed) if progress is not None else False
     threshold = completion_threshold(task)
@@ -2552,7 +2674,8 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
     team_score = None
     points = int(task.get("points") or 0)
     if points and team_id is not None and was_completed != now_completed:
-        team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+        team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+                .with_for_update().first())  # P0-7: locked score RMW
         if team is not None:
             team.score = int(team.score or 0) + (points if now_completed else -points)
             team_score = team.score
@@ -2587,7 +2710,8 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
     if event.get("has_bingo") and team_id is not None:
         revoked_bonuses = _unwind_bonuses(session, event, team_id)
         if revoked_bonuses:
-            team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+            team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+                .with_for_update().first())  # P0-7: locked score RMW
             if team is not None:
                 team_score = int(team.score or 0)
 

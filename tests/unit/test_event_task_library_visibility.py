@@ -95,8 +95,10 @@ def _event(group_id=7):
 
 # ── clean_task_visibility ────────────────────────────────────────────────────
 
-def test_visibility_defaults_public_on_create():
-    assert evr.clean_task_visibility({}) == "public"
+def test_visibility_defaults_private_on_create():
+    # Audit: public-by-default quietly shipped clan-specific labels into the
+    # shared cross-group library — sharing is now the deliberate choice.
+    assert evr.clean_task_visibility({}) == "private"
 
 
 def test_visibility_absent_on_patch_means_leave_alone():

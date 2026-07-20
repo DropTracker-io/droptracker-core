@@ -111,8 +111,9 @@ def _apply(config, prev_counts, curr_counts, matched, message_config=None):
     class _Sess:
         def query(self, model):
             first = progress if model is _Progress else team
-            return SimpleNamespace(
-                filter=lambda *a, **k: SimpleNamespace(first=lambda: first))
+            inner = SimpleNamespace(first=lambda: first)
+            inner.with_for_update = lambda *a, **k: inner  # P0-7 locked reads
+            return SimpleNamespace(filter=lambda *a, **k: inner)
 
         def add(self, *a):
             pass

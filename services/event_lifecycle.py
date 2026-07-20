@@ -25,14 +25,21 @@ is lazy-imported inside functions.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 # One-time "scheduled activation failed" notification guard (per event). The
 # key is deleted when the event finally activates so a later re-schedule can
 # alert again.
 ACTIVATION_FAILED_KEY = "events:sweep:activation-failed:{event_id}"
 _ACTIVATION_FAILED_TTL = 7 * 24 * 3600
+
+# Same one-time guard for a failing scheduled end: the sweep retries every
+# tick until the end succeeds, and the admin channel should hear about it once.
+END_FAILED_KEY = "events:sweep:end-failed:{event_id}"
 
 
 class LifecycleError(Exception):
@@ -175,9 +182,16 @@ def activation_blocker_items(session, event, now: Optional[datetime] = None) -> 
                 if c.task_id is not None and c.task_id not in task_ids
             )
             if unbound:
+                # 1-based row/column labels, not raw 0-indexed Python lists —
+                # "[0, 5]" means nothing to an organizer staring at a grid.
+                if size:
+                    where = ", ".join(
+                        f"row {i // size + 1} col {i % size + 1}" for i in unbound)
+                else:
+                    where = ", ".join(str(i + 1) for i in unbound)
                 blockers.append({
                     "code": "bingo_unbound_cells", "target": "board",
-                    "message": (f"Bingo cell(s) {unbound} are bound to tasks that do not "
+                    "message": (f"Bingo cell(s) at {where} are bound to tasks that do not "
                                 "belong to this event — rebind or free them in the designer."),
                 })
 
@@ -275,8 +289,10 @@ def _board_game_blocker_items(session, event) -> list:
     if unbound:
         blockers.append({
             "code": "board_unbound_pins", "target": "board",
-            "message": (f"Board tile(s) {unbound} pin tasks that do not belong to this "
-                        "event — rebind or clear them in the designer."),
+            "message": ("Board tile(s) "
+                        + ", ".join(f"#{i}" for i in unbound)
+                        + " pin tasks that do not belong to this event — "
+                        "rebind or clear them in the designer."),
         })
     return blockers
 
@@ -550,7 +566,8 @@ def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> in
         for pid in clan_members[team.id]:
             if pid in on_event or pid in multi_clan:
                 continue
-            session.add(EventTeamMember(team_id=team.id, player_id=pid, joined_at=joined_at))
+            session.add(EventTeamMember(team_id=team.id, player_id=pid,
+                                        event_id=event.id, joined_at=joined_at))
             on_event.add(pid)
             added += 1
     if added:
@@ -676,10 +693,15 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
 
 def end_event(session, event, *, actor_user_id=None,
               now: Optional[datetime] = None) -> list:
-    """active -> past. Stamps status/ended_at, enqueues ``event_ended`` with
-    the final standings (top 5), updates the Redis gate and publishes an SSE
-    ``{kind: "ended"}`` frame. Audit-logged as ``event.end``. Returns the
-    standings. Raises :class:`LifecycleError`; the caller owns the commit.
+    """active -> past. The status flip + audit row commit FIRST — a failure in
+    any wrap-up side effect must never leave an announced-as-over event still
+    active and scoring drops — and the Redis gate drops immediately after.
+    Wrap-up (Discord mirror retirement, team-channel retention, final
+    standings, the ``event_ended`` announcement, SSE) then runs best-effort:
+    a failed step is logged and alerted to the admin channel instead of
+    raised. Returns the standings ([] if that step itself failed). Raises
+    :class:`LifecycleError` only for invalid-state transitions, before any
+    mutation.
     """
     from services import event_engine
 
@@ -693,48 +715,94 @@ def end_event(session, event, *, actor_user_id=None,
     before = {"status": event.status, "ended_at": _ts(event.ended_at)}
     event.status = "past"
     event.ended_at = now
-    session.flush()
+    _audit(session, actor_user_id, event, "event.end", before, {
+        "status": "past",
+        "ended_at": _ts(event.ended_at),
+    })
+    # P0-8: make the flip durable before any wrap-up step can throw, then
+    # close the scoring gate. Callers' own commit becomes a no-op.
+    session.commit()
+    _mark_active_in_redis(event.id, False)
+
+    failed_steps: list = []
 
     # Retire the mirrored Discord scheduled event(s): the core bot's
     # reconciler deletes them and drops the rows
     # (services/event_scheduled_events.py).
-    from db.models import EventGuild
+    try:
+        from db.models import EventGuild
 
-    session.query(EventGuild).filter(EventGuild.event_id == event.id).update(
-        {EventGuild.sync_status: "delete_pending"}, synchronize_session=False,
-    )
+        session.query(EventGuild).filter(EventGuild.event_id == event.id).update(
+            {EventGuild.sync_status: "delete_pending"}, synchronize_session=False,
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        failed_steps.append("Discord scheduled-event retirement")
+        log.error("end_event(%s): guild mirror retirement failed",
+                  event.id, exc_info=True)
 
     # Team roles/channels (web53a): apply each scope's retention — 'keep'
     # releases them as-is, 'delete_48h' schedules teardown after the grace
     # window so wrap-up pings still work.
     try:
-        from services.event_team_discord import retire_event_team_discord
-    except ImportError:  # unit-test stubs
-        retire_event_team_discord = None
-    if retire_event_team_discord is not None:
-        retire_event_team_discord(session, event, now=now)
+        try:
+            from services.event_team_discord import retire_event_team_discord
+        except ImportError:  # unit-test stubs
+            retire_event_team_discord = None
+        if retire_event_team_discord is not None:
+            retire_event_team_discord(session, event, now=now)
+            session.commit()
+    except Exception:
+        session.rollback()
+        failed_steps.append("team channel retirement")
+        log.error("end_event(%s): team-discord retirement failed",
+                  event.id, exc_info=True)
 
-    standings = final_standings(session, event.id, limit=5)
-    ev_dict = event_engine._event_to_dict(event)
-    ended_extra = {"standings": standings, "ended_at": _ts(event.ended_at)}
-    # Prize pot (web52a): "🏆 {winner} takes the {pot} pot" (or a split line).
-    winner_name = standings[0].get("name") if standings else None
-    _pot_line = _pot_advertise_line(session, event, None, ended=True, winner=winner_name)
-    if _pot_line:
-        ended_extra["pot_result_line"] = _pot_line
-    event_engine._enqueue_notification(
-        session, "event_ended", ev_dict,
-        _representative_player_id(session, event.id),
-        ended_extra,
-    )
-    _audit(session, actor_user_id, event, "event.end", before, {
-        "status": "past",
-        "ended_at": _ts(event.ended_at),
-        "standings": standings,
-    })
-    session.flush()
+    standings: list = []
+    try:
+        standings = final_standings(session, event.id, limit=5)
+    except Exception:
+        session.rollback()
+        failed_steps.append("final standings")
+        log.error("end_event(%s): final standings failed",
+                  event.id, exc_info=True)
 
-    _mark_active_in_redis(event.id, False)
+    try:
+        ev_dict = event_engine._event_to_dict(event)
+        ended_extra = {"standings": standings, "ended_at": _ts(event.ended_at)}
+        # Prize pot (web52a): "🏆 {winner} takes the {pot} pot" (or a split line).
+        winner_name = standings[0].get("name") if standings else None
+        _pot_line = _pot_advertise_line(session, event, None, ended=True,
+                                        winner=winner_name)
+        if _pot_line:
+            ended_extra["pot_result_line"] = _pot_line
+        event_engine._enqueue_notification(
+            session, "event_ended", ev_dict,
+            _representative_player_id(session, event.id),
+            ended_extra,
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        failed_steps.append("end announcement")
+        log.error("end_event(%s): ended-announcement enqueue failed",
+                  event.id, exc_info=True)
+
+    if failed_steps:
+        # The event IS over (the flip committed) — tell the admin channel the
+        # wrap-up was incomplete so someone can finish those steps by hand.
+        # No NX guard needed: this path runs at most once per event.
+        try:
+            _notify_end_failure(session, None, event,
+                                "the event ended, but wrap-up was incomplete: "
+                                + ", ".join(failed_steps))
+            session.commit()
+        except Exception:
+            session.rollback()
+            log.error("end_event(%s): end-failure notification enqueue failed",
+                      event.id, exc_info=True)
+
     _publish(event.id, {
         "kind": "ended", "event_id": event.id, "name": event.name,
         "standings": standings,
@@ -829,6 +897,31 @@ def _clear_activation_failure(redis_conn, event_id: int) -> None:
         pass
 
 
+def _notify_end_failure(session, redis_conn, event, detail: str) -> None:
+    """Enqueue an admin-channel ``event_end_failed`` notification. With a
+    ``redis_conn`` it is guarded once-per-event (NX key) — the sweep retries a
+    failing end every tick and must not spam; pass ``redis_conn=None`` from
+    paths that already run at most once (post-flip wrap-up failures)."""
+    if redis_conn is not None:
+        try:
+            fresh = redis_conn.set(
+                END_FAILED_KEY.format(event_id=event.id),
+                detail, nx=True, ex=_ACTIVATION_FAILED_TTL,
+            )
+            if not fresh:
+                return  # already notified for this event
+        except Exception:
+            pass
+
+    from services import event_engine
+
+    event_engine._enqueue_notification(
+        session, "event_end_failed", event_engine._event_to_dict(event),
+        _representative_player_id(session, event.id),
+        {"reason": detail, "ends_at": _ts(event.ends_at)},
+    )
+
+
 def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None) -> dict:
     """One scheduler tick: activate due drafts / end due actives through the
     exact same transition functions the routes use. Commits per transition
@@ -866,6 +959,21 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
             except Exception:
                 session.rollback()
             summary["failed"].append({"id": event_id, "detail": exc.detail})
+        except Exception as exc:
+            # One poison event (bad board config, a slow query, an entitlement
+            # hiccup) must not abort the whole sweep — every other due event,
+            # the roster reconcile and the shop refresh still deserve their
+            # tick. Record it, alert the admin channel once, move on.
+            session.rollback()
+            detail = f"unexpected error ({exc.__class__.__name__}: {exc})"
+            log.error("Sweep: activating event %s failed: %s",
+                      event_id, detail, exc_info=True)
+            try:
+                _notify_activation_failure(session, redis_conn, event, detail)
+                session.commit()
+            except Exception:
+                session.rollback()
+            summary["failed"].append({"id": event_id, "detail": detail})
 
     for event_id in due["end"]:
         event = by_id[event_id]
@@ -876,6 +984,20 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
         except LifecycleError as exc:
             session.rollback()
             summary["failed"].append({"id": event_id, "detail": exc.detail})
+        except Exception as exc:
+            # Same poison-event guard as activation — an event that cannot end
+            # keeps scoring until a human intervenes, so alert (once) besides
+            # logging: unlike a failed activation there is no draft to fix.
+            session.rollback()
+            detail = f"unexpected error ({exc.__class__.__name__}: {exc})"
+            log.error("Sweep: ending event %s failed: %s",
+                      event_id, detail, exc_info=True)
+            try:
+                _notify_end_failure(session, redis_conn, event, detail)
+                session.commit()
+            except Exception:
+                session.rollback()
+            summary["failed"].append({"id": event_id, "detail": detail})
 
     # Whole-clan roster reconcile: players who joined a participating clan after
     # a clan_vs_clan event started get their team row on the next tick, and
@@ -891,6 +1013,8 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
                 session.commit()
         except Exception:
             session.rollback()
+            log.error("Sweep: auto-clan roster reconcile failed for event %s",
+                      event.id, exc_info=True)
 
     # Board-game shop stock refresh (web50a): restock due events on the tick so
     # shops refresh even when nobody is actively browsing. maybe_refresh_shop is
@@ -907,5 +1031,7 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
             maybe_refresh_shop(session, event.id)
         except Exception:
             session.rollback()
+            log.error("Sweep: shop refresh failed for event %s",
+                      event.id, exc_info=True)
 
     return summary

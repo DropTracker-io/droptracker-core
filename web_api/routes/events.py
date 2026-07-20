@@ -41,6 +41,7 @@ from datetime import datetime
 from quart import Blueprint, jsonify, request
 from sqlalchemy import func
 from sqlalchemy import or_ as sa_or
+from sqlalchemy.exc import IntegrityError
 
 from db import (
     AuditLog,
@@ -2548,12 +2549,14 @@ async def end_event(event_id: int):
     return private_no_store(jsonify(payload))
 
 
-def clean_task_visibility(body: dict, default: str | None = "public") -> str | None:
+def clean_task_visibility(body: dict, default: str | None = "private") -> str | None:
     """Validated EVENT_TASK_VISIBILITIES value from a request body.
 
-    ``default`` is returned when the key is absent ("public" on create —
-    matching the sitewide default — and None on PATCH, where an absent key
-    means "leave the library copy alone")."""
+    ``default`` is returned when the key is absent ("private" on create —
+    audit: defaulting to public quietly shipped clan-specific labels into the
+    shared cross-group library; sharing is now the deliberate choice — and
+    None on PATCH, where an absent key means "leave the library copy
+    alone")."""
     if "visibility" not in body:
         return default
     visibility = body.get("visibility")
@@ -3493,10 +3496,20 @@ async def join_event(event_id: int):
                 team = min(teams, key=lambda t: (counts.get(t.id, 0), t.id))
 
             # joined_at (default now()) is the credit cutoff (PRD D10).
-            s.add(EventTeamMember(team_id=team.id, player_id=player_id))
+            s.add(EventTeamMember(team_id=team.id, player_id=player_id,
+                                  event_id=event_id))
             # Per-team Discord (web53a): let the bot pick up the roster change.
             _mark_team_discord_dirty(s, event_id, team.id)
-            s.commit()
+            try:
+                s.commit()
+            except IntegrityError:
+                # web59a backstop: a concurrent join (double click / retry)
+                # won the race — that's a success from the player's view.
+                s.rollback()
+                abort_problem(
+                    409, "Already on a team",
+                    "You're already on a team for this event — refresh to "
+                    "see your placement.")
             return team.id
 
     result = await asyncio.to_thread(_apply)
@@ -3602,7 +3615,8 @@ async def admin_add_member(event_id: int, team_id: int):
                                EventLeaderVote.candidate_player_id == player_id))
                  .delete(synchronize_session=False))
                 s.flush()
-            s.add(EventTeamMember(team_id=team_id, player_id=player_id))
+            s.add(EventTeamMember(team_id=team_id, player_id=player_id,
+                                  event_id=event_id))
             s.add(
                 AuditLog(
                     actor_user_id=user_id,
@@ -3615,7 +3629,15 @@ async def admin_add_member(event_id: int, team_id: int):
                 )
             )
             _mark_team_discord_dirty(s, event_id, team_id)
-            s.commit()
+            try:
+                s.commit()
+            except IntegrityError:
+                # web59a backstop: a concurrent add/join placed them first.
+                s.rollback()
+                abort_problem(
+                    409, "Already placed",
+                    "That player was just placed on a team by another "
+                    "action — refresh the roster to see where.")
 
     await asyncio.to_thread(_apply)
     _bump(event_id)
@@ -3744,7 +3766,8 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
                         ),
                     })
                     continue
-                s.add(EventTeamMember(team_id=team_id, player_id=pid))
+                s.add(EventTeamMember(team_id=team_id, player_id=pid,
+                                      event_id=event_id))
                 placed[pid] = team_id
                 added.append({"id": pid, "name": canonical})
 
@@ -3761,7 +3784,18 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
                     )
                 )
                 _mark_team_discord_dirty(s, event_id, team_id)
-                s.commit()
+                try:
+                    s.commit()
+                except IntegrityError:
+                    # web59a backstop: someone placed one of these players
+                    # concurrently. The whole batch rolls back (atomic);
+                    # re-running skips the now-placed names.
+                    s.rollback()
+                    abort_problem(
+                        409, "Roster changed underneath you",
+                        "A player in this list was just placed on a team by "
+                        "another action. Re-run the paste — already-placed "
+                        "names will be skipped.")
             return {"added": added, "skipped": skipped}
 
     result = await asyncio.to_thread(_apply)

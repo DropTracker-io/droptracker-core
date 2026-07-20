@@ -38,6 +38,9 @@ KIND_FOR_TYPE = {
     "event_pending": "admin",
     # Task 21: the scheduler sweep could not activate a scheduled draft.
     "event_activation_failed": "admin",
+    # P0-8: an event's scheduled end failed, or ended with incomplete wrap-up
+    # (standings/announcement/Discord retirement) — an admin should look.
+    "event_end_failed": "admin",
     # G7: players left off the whole-clan teams at activation because they
     # belong to more than one participating clan (need a manual team add).
     "event_multi_clan_skipped": "admin",
@@ -77,6 +80,7 @@ _COLORS = {
     "event_lead_change": 0xFFD700,
     "event_pending": 0xE67E22,
     "event_activation_failed": 0xED4245,
+    "event_end_failed": 0xED4245,
     "event_multi_clan_skipped": 0xFAA61A,  # amber — an admin needs to act
     "event_signup_prompt": 0x5865F2,  # Discord blurple — a call to action
     "event_pot": 0xFFD700,  # gold — the prize pot
@@ -109,6 +113,7 @@ DEFAULT_MESSAGE_TOGGLES = {
     "event_lead_change": True,
     "event_pending": True,
     "event_activation_failed": True,
+    "event_end_failed": True,
     "event_board_turn": True,
     "event_board_roll_prompt": False,  # team-channel first; opt-in for main channels
     # Loot Sweep verbosity: subset + whole-set completions announce by default;
@@ -836,6 +841,20 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             field("Scheduled start", starts)
         if url:
             field("Fix it", f"[Open the event manager]({url})", inline=False)
+
+    elif notification_type == "event_end_failed":
+        spec["title"] = f"⚠️ {event_name} needs attention at the finish"
+        reason = data.get("reason") or "The end-of-event wrap-up did not complete."
+        spec["description"] = (
+            f"Something went wrong while ending the event: {reason}\n"
+            f"Check the final standings and announcements — some may need "
+            f"to be posted by hand."
+        )
+        ends = _fmt_ts(data.get("ends_at"))
+        if ends:
+            field("Scheduled end", ends)
+        if url:
+            field("Review it", f"[Open the event manager]({url})", inline=False)
 
     elif notification_type == "event_multi_clan_skipped":
         count = data.get("skipped_count") or 0

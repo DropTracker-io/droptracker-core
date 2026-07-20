@@ -815,8 +815,10 @@ def _team_discord_payload(s, ev: Event, scope_group_id=None) -> dict:
             "channel_id": str(row.channel_id) if row and row.channel_id else None,
             "channel_kind": row.channel_kind if row else None,
             "sync_status": row.sync_status if row else None,
-            "last_error": (row.last_error if row and row.sync_status == "failed"
-                           else None),
+            # Surfaced whenever set — member-sync 403s (bot role below the
+            # team role) leave the row "synced" but carry an actionable
+            # last_error the leader must see (P0-11).
+            "last_error": row.last_error if row else None,
         })
     return {
         "group_id": scope_group_id,

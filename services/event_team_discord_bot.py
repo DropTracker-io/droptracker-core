@@ -228,6 +228,27 @@ async def _ensure_channel(bot, guild, row, team, config, event) -> None:
         await channel.edit(name=name, reason=PROVISION_REASON)
 
 
+def _friendly_row_error(exc) -> str:
+    """Turn a provisioning exception into something a non-technical clan
+    leader can act on — raw Discord API strings ("403 Forbidden (error code:
+    50013)") read as gibberish in the web UI."""
+    try:
+        from interactions.client import errors as ix_errors
+
+        if isinstance(exc, ix_errors.Forbidden):
+            return ("Discord refused the change (missing permission). Give "
+                    "the DropTracker role 'Manage Roles' and 'Manage "
+                    "Channels' in Server Settings → Roles, and move it above "
+                    "the team roles, then save the Discord settings again.")
+        if isinstance(exc, ix_errors.NotFound):
+            return ("A configured Discord channel or role no longer exists — "
+                    "it may have been deleted. Re-pick it in the Discord "
+                    "settings and save again.")
+    except ImportError:
+        pass
+    return f"Unexpected error: {str(exc)[:180]} — fix and re-save to retry."
+
+
 async def _sync_members(bot, guild, row, desired: set) -> bool:
     """Diff ``desired`` Discord ids against the snapshot the bot last applied
     and add/remove the role + thread membership accordingly. Only ids this
@@ -251,26 +272,35 @@ async def _sync_members(bot, guild, row, desired: set) -> bool:
             thread = None
 
     async def _attempt(coro) -> str:
-        """One member operation -> 'ok' | 'absent' | 'error'. Absent-from-guild
-        (404) and permission-refused (403) are EXPECTED for rosters that
-        include people outside the server — swallowed without a log so they
-        never reach Sentry, and marked handled. Anything ELSE (network blip,
-        5xx, gateway trouble) is transient: the id must NOT be marked handled,
-        or a member silently loses their role forever — exactly what happened
-        when the first sync ran during the 2026-07-17 pool outage."""
+        """One member operation -> 'ok' | 'absent' | 'forbidden' | 'error'.
+
+        Absent-from-guild (404) is EXPECTED for rosters that include people
+        outside the server — swallowed and marked handled (they're picked up
+        on the next dirty pass after joining). Permission-refused (403) is a
+        SERVER MISCONFIGURATION (bot role below the team role — the default
+        for fresh roles — or Manage Roles revoked): the id must NOT be marked
+        handled, or the whole roster silently never gets its role while the
+        UI reads "synced" (audit P0-11); it stays dirty and self-heals the
+        pass after an admin fixes the hierarchy. Anything ELSE (network blip,
+        5xx, gateway trouble) is transient: also not marked handled — exactly
+        what happened when the first sync ran during the 2026-07-17 pool
+        outage."""
         from interactions.client import errors as ix_errors
 
         try:
             await coro
             return "ok"
-        except (ix_errors.NotFound, ix_errors.Forbidden):
+        except ix_errors.NotFound:
             return "absent"
+        except ix_errors.Forbidden:
+            return "forbidden"
         except Exception:
             return "error"
 
     guild_id = int(row.guild_id)
     role_id = int(row.role_id) if row.role_id else None
     had_errors = False
+    had_forbidden = False
 
     for uid in to_add:
         if ops >= MEMBER_OPS_LIMIT:
@@ -284,6 +314,9 @@ async def _sync_members(bot, guild, row, desired: set) -> bool:
         if thread is not None:
             results.append(await _attempt(thread.add_member(int(uid))))
         ops += 1  # every attempted id consumes rate budget, success or not
+        if "forbidden" in results:
+            had_forbidden = True
+            continue  # misconfigured perms — retry once an admin fixes them
         if "error" in results:
             had_errors = True
             continue  # transient — retry on the next members_dirty pass
@@ -301,13 +334,27 @@ async def _sync_members(bot, guild, row, desired: set) -> bool:
         if thread is not None:
             results.append(await _attempt(thread.remove_member(int(uid))))
         ops += 1
+        if "forbidden" in results:
+            had_forbidden = True
+            continue  # keep in state; retried once perms are fixed
         if "error" in results:
             had_errors = True
             continue  # keep in state; retried next pass
         state.discard(uid)
 
     row.member_state = json.dumps(sorted(state))
-    return state == desired and not had_errors
+    if had_forbidden:
+        # Actionable, plain-English surface for the web UI (the raw Discord
+        # error is useless to a non-technical leader).
+        row.last_error = (
+            "Discord refused role/member changes (missing permission). In "
+            "Server Settings → Roles, move the DropTracker role ABOVE the "
+            "team roles and make sure it has 'Manage Roles'. Team pings and "
+            "channel access won't work until then.")
+    converged = state == desired and not had_errors and not had_forbidden
+    if converged and getattr(row, "last_error", None):
+        row.last_error = None
+    return converged
 
 
 async def reconcile_event_team_discord_once(bot, session_factory, redis_client) -> None:
@@ -419,7 +466,7 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                 session.rollback()
                 try:
                     row.sync_status = "failed"
-                    row.last_error = str(exc)[:255]
+                    row.last_error = _friendly_row_error(exc)
                     session.commit()
                 except Exception:
                     session.rollback()

@@ -91,3 +91,4 @@ utils/osrs_api/semantic.py
 .trash-*/
 docs/EVENT_BUYINS_POT_PLAN.md
 scripts/.event_task_stats_cache.json
+.claude/

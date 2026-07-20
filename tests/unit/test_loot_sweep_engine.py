@@ -37,6 +37,9 @@ class _Q:
     def order_by(self, *a):
         return self
 
+    def with_for_update(self, *a, **k):
+        return self
+
     def all(self):
         return list(self._rows)
 
