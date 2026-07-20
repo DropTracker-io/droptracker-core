@@ -56,6 +56,7 @@ from web_api.routes.events import (
     _assert_event_admin,
     _bump,
     _can_view_restricted,
+    _deny_restricted,
     _effective_status,
     _is_event_admin,
     _is_restricted,
@@ -660,6 +661,7 @@ async def get_board(event_id: int):
             ev = _load_board_event(s, event_id, for_write=False)
             if (_is_restricted(ev) and not render_bypass
                     and not _can_view_restricted(s, viewer_id, ev)):
+                _deny_restricted(ev, viewer_id)
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             return _board_payload(s, ev)
 
@@ -1007,6 +1009,7 @@ async def board_png(event_id: int):
             if not ev:
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                _deny_restricted(ev, viewer_id)
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             if _collect_render_inputs(s, ev) is None:
                 abort_problem(404, "No visual board",
@@ -1081,6 +1084,7 @@ async def get_board_shop(event_id: int):
         with db_session() as s:
             ev = _load_board_event(s, event_id, for_write=False)
             if _is_restricted(ev) and not _can_view_restricted(s, user_id, ev):
+                _deny_restricted(ev, user_id)
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             # Team context is optional — spectators still see the catalog. When
             # present it drives per-team cap/bought counts in the item list.

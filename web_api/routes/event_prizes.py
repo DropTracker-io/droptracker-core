@@ -59,6 +59,7 @@ from web_api.routes.events import (
     _assert_event_admin,
     _bump,
     _can_view_restricted,
+    _deny_restricted,
     _is_event_admin,
     _is_restricted,
     _load_event_or_404,
@@ -259,9 +260,11 @@ async def get_pot(event_id: int):
             ev = s.query(Event).filter(Event.id == event_id).first()
             if not ev:
                 return None
-            # Restricted events (draft / private) 404 for outsiders, exactly
-            # like the event detail read.
+            # Restricted events (draft / private): reasoned 403 for signed-in
+            # outsiders, anonymized 404 for anonymous — exactly like the event
+            # detail read.
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                _deny_restricted(ev, viewer_id)
                 return None
             return _pot_payload(s, ev, viewer_id)
 

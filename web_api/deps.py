@@ -59,7 +59,15 @@ def require_claims() -> dict:
     token = session_token()
     claims = verify_session(token) if token else None
     if not claims:
-        abort_problem(401, "Not authenticated", "A valid session is required.")
+        # `code` extension members (here and in the assert_* helpers below,
+        # web57a): a stable machine-readable reason the frontend can branch on
+        # without string-matching the human-readable title/detail.
+        abort_problem(
+            401,
+            "Not authenticated",
+            "A valid session is required.",
+            extra={"code": "auth_required"},
+        )
     return claims
 
 
@@ -207,7 +215,12 @@ def assert_group_admin(
     """Abort 403 unless the user is owner/admin of the group. Returns the role."""
     role = resolve_group_role(s, user_id, group_id, manage_guild_ids, user)
     if not is_group_admin_role(role):
-        abort_problem(403, "Forbidden", "Admin rights on this group are required.")
+        abort_problem(
+            403,
+            "Forbidden",
+            "Admin rights on this group are required.",
+            extra={"code": "group_admin_required"},
+        )
     return role
 
 
@@ -225,7 +238,12 @@ def assert_group_member(
     """
     role = resolve_group_role(s, user_id, group_id, manage_guild_ids, user)
     if role is None:
-        abort_problem(403, "Forbidden", "Group membership is required.")
+        abort_problem(
+            403,
+            "Forbidden",
+            "Group membership is required.",
+            extra={"code": "group_member_required"},
+        )
     return role
 
 
@@ -235,7 +253,12 @@ def is_superadmin(user: Optional[User]) -> bool:
 
 def assert_superadmin(user: Optional[User]) -> None:
     if not is_superadmin(user):
-        abort_problem(403, "Forbidden", "Site staff access is required.")
+        abort_problem(
+            403,
+            "Forbidden",
+            "Site staff access is required.",
+            extra={"code": "staff_required"},
+        )
 
 
 def is_moderator(user: Optional[User]) -> bool:
@@ -245,7 +268,12 @@ def is_moderator(user: Optional[User]) -> bool:
 
 def assert_moderator(user: Optional[User]) -> None:
     if not is_moderator(user):
-        abort_problem(403, "Forbidden", "Moderator access is required.")
+        abort_problem(
+            403,
+            "Forbidden",
+            "Moderator access is required.",
+            extra={"code": "moderator_required"},
+        )
 
 
 def assert_group_entitlement(
@@ -283,6 +311,7 @@ def assert_group_entitlement(
             "Subscription required",
             f"Your group's subscription does not include {label}. "
             "Upgrade on the Subscription tab.",
+            extra={"code": "entitlement_required", "entitlement": entitlement_key},
         )
 
 

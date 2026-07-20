@@ -281,12 +281,43 @@ def _can_view_restricted(s, viewer_id, ev: Event) -> bool:
     MEMBERS of any participating group. Members get the event page (and its
     sign-up panel) as soon as the event exists — so a "the event is coming,
     sign up!" Discord link works before activation, and a private event stays
-    visible to the clan running it. Everyone else sees a 404."""
+    visible to the clan running it. Denials go through
+    :func:`_deny_restricted`: signed-in outsiders get a reasoned 403,
+    anonymous viewers the anonymized 404."""
     if _is_event_admin(s, viewer_id, ev):
         return True
     if viewer_id is None:
         return False
     return bool(participating_group_ids(s, ev) & _member_group_ids(s, viewer_id))
+
+
+def _deny_restricted(ev: Event, viewer_id) -> None:
+    """Deny a restricted (draft/private) event to a viewer who failed
+    :func:`_can_view_restricted`.
+
+    Signed-in viewers get a 403 carrying a machine-readable ``code``
+    (``event_draft`` / ``event_private``) so the site can say WHY instead of a
+    blank 404 (web57a). This deliberately reveals that the event exists to any
+    signed-in account — but nothing else about it. Anonymous viewers RETURN
+    instead of aborting: the caller falls through to its usual
+    missing-resource 404, so logged-out probing still can't distinguish a
+    restricted event from a nonexistent one.
+    """
+    if viewer_id is None:
+        return
+    if _effective_status(ev) == "draft":
+        abort_problem(
+            403,
+            "Event restricted",
+            "This event has not been published yet and is only visible to participants.",
+            extra={"code": "event_draft"},
+        )
+    abort_problem(
+        403,
+        "Event restricted",
+        "This event is private and only visible to participants.",
+        extra={"code": "event_private"},
+    )
 
 
 def _attach_task_tiles(s, tasks: list[dict]) -> None:
@@ -833,8 +864,10 @@ async def get_event(event_id: int):
                 return None
             if _is_restricted(ev) and not render_bypass:
                 # Drafts (pre-publication) and private events: event admins +
-                # members of participating groups only. Everyone else 404s.
+                # members of participating groups only. Signed-in outsiders
+                # get a reasoned 403, anonymous viewers the anonymized 404.
                 if not _can_view_restricted(s, viewer_id, ev):
+                    _deny_restricted(ev, viewer_id)
                     return None
             return _detail(s, ev, viewer_id=viewer_id)
 
@@ -866,6 +899,7 @@ async def get_event_team(event_id: int, team_id: int):
             if not ev:
                 return None
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                _deny_restricted(ev, viewer_id)
                 return None
             all_teams = (
                 s.query(EventTeam)
@@ -1059,6 +1093,7 @@ async def get_task_breakdown(event_id: int, task_id: int):
             if not ev:
                 return None
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                _deny_restricted(ev, viewer_id)
                 return None
             task = (
                 s.query(EventTask)
@@ -1181,6 +1216,7 @@ async def get_loot_sweep_board(event_id: int):
             if not ev:
                 return None
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                _deny_restricted(ev, viewer_id)
                 return None
             tasks = (
                 s.query(EventTask)
@@ -1330,6 +1366,7 @@ async def get_loot_sweep_summary(event_id: int):
                 return None
             if (_is_restricted(ev) and not render_bypass
                     and not _can_view_restricted(s, viewer_id, ev)):
+                _deny_restricted(ev, viewer_id)
                 return None
             tasks = (s.query(EventTask)
                      .filter(EventTask.event_id == event_id, EventTask.type == "loot_sweep")
@@ -1423,6 +1460,7 @@ async def get_loot_sweep_receipts(event_id: int):
             if not ev:
                 return None
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                _deny_restricted(ev, viewer_id)
                 return None
             task = (
                 s.query(EventTask)
@@ -1592,6 +1630,7 @@ async def get_completion_history(event_id: int):
             if not ev:
                 return None
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                _deny_restricted(ev, viewer_id)
                 return None
             is_admin = _is_event_admin(s, viewer_id, ev)
 
