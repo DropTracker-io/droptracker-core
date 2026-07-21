@@ -506,3 +506,162 @@ def test_loot_sweep_unknown_name_still_rejected_without_virtual(_stub_ls):
         _validate({"type": "loot_sweep", "config": {"groups": [
             {"npcs": ["Kree'arra"], "items": [{"item_name": "Armadyl helmutt"}]}]}})
     assert exc.value.status == 422 and "item" in exc.value.title.lower()
+
+
+# ── item_collection source-NPC restriction (source_npcs / item_npcs) ─────────
+# Opt-in: single-item tasks carry config.source_npcs; multi-item tasks carry a
+# flat config.item_npcs map (so it reaches groups/any_path, whose stored item
+# lists are bare name strings).
+
+SOURCE_NPCS = {"Zulrah", "Vet'ion", "Callisto", "Chaos Fanatic"}
+_SRC_NPC_BY_NORM = {n.lower(): n for n in SOURCE_NPCS}
+
+
+@pytest.fixture
+def _stub_src_npcs(monkeypatch):
+    monkeypatch.setattr(
+        etv, "_canonical_npc",
+        lambda s, name: _SRC_NPC_BY_NORM.get((name or "").strip().lower()),
+    )
+
+
+def test_single_item_unrestricted_has_no_config():
+    out = _validate({"type": "item_collection", "target": "Boater", "target_value": 1})
+    assert out["target"] == "Boater"
+    assert out["target_value"] == 1
+    assert out["config"] is None
+
+
+def test_single_item_source_npcs_normalizes(_stub_src_npcs):
+    out = _validate({
+        "type": "item_collection", "target": "armadyl hilt",   # canonicalizes
+        "config": {"source_npcs": ["zulrah", "Vet'ion", "zulrah"]},  # dupe folds
+    })
+    assert out["target"] == "Armadyl hilt"
+    assert out["target_value"] == 1
+    assert _cfg(out) == {"source_npcs": ["Zulrah", "Vet'ion"]}
+
+
+def test_single_item_empty_source_npcs_is_unrestricted(_stub_src_npcs):
+    out = _validate({
+        "type": "item_collection", "target": "Boater",
+        "config": {"source_npcs": []},
+    })
+    assert out["config"] is None
+
+
+def test_single_item_unknown_source_npc_rejected(_stub_src_npcs):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "item_collection", "target": "Boater",
+                   "config": {"source_npcs": ["Zulrah", "Notreal Boss"]}})
+    assert exc.value.status == 422
+    assert "Notreal Boss" in (exc.value.detail or "")
+
+
+def test_single_item_too_many_source_npcs_rejected(_stub_src_npcs):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "item_collection", "target": "Boater",
+                   "config": {"source_npcs": ["Zulrah"] * (etv.MAX_SOURCE_NPCS + 1)}})
+    assert exc.value.status == 422
+
+
+def test_any_of_item_npcs_attached(_stub_src_npcs):
+    out = _validate({
+        "type": "item_collection", "target_value": 1,
+        "config": {"kind": "any_of", "items": ["Boater", "Red boater"],
+                   "item_npcs": {"Boater": ["Zulrah", "Vet'ion"]}},
+    })
+    cfg = _cfg(out)
+    assert cfg["kind"] == "any_of"
+    assert cfg["item_npcs"] == {"Boater": ["Zulrah", "Vet'ion"]}
+
+
+def test_item_npcs_canonicalizes_key_and_values(_stub_src_npcs):
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "all_of", "items": ["Boater", "Red boater"],
+                   "item_npcs": {"boater": ["zulrah"]}},
+    })
+    assert _cfg(out)["item_npcs"] == {"Boater": ["Zulrah"]}
+
+
+def test_item_npcs_for_item_not_in_list_dropped(_stub_src_npcs):
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "all_of", "items": ["Boater"],
+                   "item_npcs": {"Red boater": ["Zulrah"]}},  # not in the list
+    })
+    assert "item_npcs" not in _cfg(out)
+
+
+def test_item_npcs_empty_value_dropped(_stub_src_npcs):
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "all_of", "items": ["Boater"],
+                   "item_npcs": {"Boater": []}},  # unrestricted item
+    })
+    assert "item_npcs" not in _cfg(out)
+
+
+def test_item_npcs_unknown_item_rejected(_stub_src_npcs):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "item_collection",
+                   "config": {"kind": "all_of", "items": ["Boater"],
+                              "item_npcs": {"Nonexistent thing": ["Zulrah"]}}})
+    assert exc.value.status == 422
+
+
+def test_item_npcs_unknown_npc_rejected(_stub_src_npcs):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "item_collection",
+                   "config": {"kind": "all_of", "items": ["Boater"],
+                              "item_npcs": {"Boater": ["Notreal Boss"]}}})
+    assert exc.value.status == 422
+
+
+def test_groups_item_npcs_attached(_stub_src_npcs):
+    # Proves the flat item_npcs map reaches the groups kind (its stored item
+    # lists are bare name strings, so per-entry npcs wouldn't survive).
+    body = json.loads(json.dumps(GODSWORD_BODY))
+    body["config"]["item_npcs"] = {"Godsword shard 1": ["Vet'ion"]}
+    out = _validate(body)
+    cfg = _cfg(out)
+    assert cfg["kind"] == "groups"
+    assert cfg["item_npcs"] == {"Godsword shard 1": ["Vet'ion"]}
+
+
+def test_any_path_item_npcs_attached(_stub_src_npcs):
+    body = json.loads(json.dumps(JUSTICIAR_BODY))
+    body["config"]["item_npcs"] = {"Justiciar faceguard": ["Zulrah"]}
+    out = _validate(body)
+    cfg = _cfg(out)
+    assert cfg["kind"] == "any_path"
+    assert cfg["item_npcs"] == {"Justiciar faceguard": ["Zulrah"]}
+
+
+def test_kind_less_config_with_items_still_rejected(_stub_src_npcs):
+    # Relaxing the kind gate for source_npcs must NOT let a list task that
+    # forgot its 'kind' silently collapse to a single-item task.
+    with pytest.raises(ProblemException) as exc:
+        _validate({
+            "type": "item_collection", "target": "Boater", "target_value": 1,
+            "config": {"items": ["Boater", "Red boater"]},  # no kind
+        })
+    assert exc.value.status == 422
+
+
+def test_config_too_large_rejected(monkeypatch):
+    # 100 items each restricted to 100 long NPC names serializes well past the
+    # config column's ~64KB ceiling -> 422 rather than a 500 on save.
+    monkeypatch.setattr(etv, "_canonical_item", lambda s, n: (n or "").strip() or None)
+    monkeypatch.setattr(etv, "_canonical_npc", lambda s, n: (n or "").strip() or None)
+    items = [f"Item number {i:04d}" for i in range(100)]
+    npcs = [f"Boss with a fairly long name number {j:04d}" for j in range(100)]
+    with pytest.raises(ProblemException) as exc:
+        _validate({
+            "type": "item_collection",
+            "config": {"kind": "all_of", "items": items,
+                       "item_npcs": {it: npcs for it in items}},
+        })
+    assert exc.value.status == 422
+    assert "too large" in (exc.value.title or "").lower()

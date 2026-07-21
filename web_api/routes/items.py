@@ -297,6 +297,9 @@ def _sources(item_id: int) -> dict:
                 "quantity": str(quantity),
                 "rarity": float(rarity),
                 "rolls": int(rolls or 1),
+                # Whether we have tracked-drop history for this NPC — lets the
+                # event task-source picker warn on sources we've never observed.
+                "tracked": bool(_tracked),
             }
         )
     out = {"total": int(total[0] or 0), "npcs": npcs}

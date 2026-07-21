@@ -62,9 +62,20 @@ ITEM_CONFIG_KINDS = ("any_of", "all_of", "point_collection", "assembly", "groups
 MAX_CONFIG_ITEMS = 100
 MAX_CONFIG_GROUPS = 10
 MAX_CONFIG_PATHS = 4
+# Serialized config ceiling — safely under the web_event_tasks.config TEXT
+# column's 65535-byte limit so an oversized item list / source-NPC map is
+# rejected with a 422 rather than truncating or 500-ing on save.
+MAX_CONFIG_BYTES = 60000
 # kc_target may list several NPCs ("kill 50 of any Dagannoth King") via
 # config.npcs — a kill of ANY listed NPC advances the one shared counter.
 MAX_KC_NPCS = 10
+# item_collection tasks may optionally restrict which NPC(s) an item must drop
+# from: config.source_npcs (single-item) / config.item_npcs (per-item map). The
+# picker seeds the restriction with EVERY known wiki drop source of the item
+# (the configurator then prunes), so this cap must clear the item-page source
+# limit (web_api/routes/items.py _SOURCES_LIMIT) or seeding a high-source item
+# would 422 on save.
+MAX_SOURCE_NPCS = 100
 
 # Loot Sweep (loot_sweep kind) config bounds — v2 (nested groups). Kept in sync
 # with services/loot_sweep.py, which can't be imported here (this module's
@@ -135,6 +146,103 @@ def _canonical_npc(s, name: str) -> str | None:
         .first()
     )
     return row[0] if row else None
+
+
+def _validated_source_npcs(s, raw) -> list[str]:
+    """Canonicalize a source-NPC restriction list (``config.source_npcs`` or one
+    value of ``config.item_npcs``); 422 on unknown names. ``None`` -> ``[]``.
+
+    Mirrors the ``loot_value`` / ``kc_target`` NPC validators — the field name
+    ``source_npcs`` matches what ``services.event_engine`` already reads for
+    loot_value."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        abort_problem(422, "Invalid config",
+                      "A source-NPC restriction must be an array of NPC names.")
+    if not raw:
+        return []  # empty selection = unrestricted (the restriction is opt-in)
+    if len(raw) > MAX_SOURCE_NPCS:
+        abort_problem(422, "Invalid config", f"At most {MAX_SOURCE_NPCS} source NPCs.")
+    out, unknown = [], []
+    for n in raw:
+        canonical = _canonical_npc(s, str(n))
+        if not canonical:
+            unknown.append(str(n).strip() or "(empty)")
+        elif canonical not in out:
+            out.append(canonical)
+    if unknown:
+        abort_problem(
+            422, "Unknown NPC(s)",
+            "Not found in the NPC database (exact in-game names required): "
+            + ", ".join(sorted(set(unknown))[:10]),
+        )
+    return out
+
+
+def _config_item_name_set(config: dict) -> set[str]:
+    """Lower-cased set of every item name a normalized item_collection config
+    references (flat ``items``, ``groups[].items``, or ``paths[].groups[].items``).
+    Used to keep an ``item_npcs`` map from naming items outside the task."""
+    names: set[str] = set()
+
+    def _name_of(it):
+        if isinstance(it, str):
+            return it
+        if isinstance(it, dict):
+            return it.get("item_name") or it.get("name")
+        return None
+
+    for it in (config.get("items") or []):
+        n = _name_of(it)
+        if n:
+            names.add(str(n).lower())
+    groups = list(config.get("groups") or [])
+    for path in (config.get("paths") or []):
+        if isinstance(path, dict):
+            groups.extend(path.get("groups") or [])
+    for group in groups:
+        if isinstance(group, dict):
+            for it in (group.get("items") or []):
+                n = _name_of(it)
+                if n:
+                    names.add(str(n).lower())
+    return names
+
+
+def _validated_item_npcs(s, raw, allowed_items: set[str]) -> dict:
+    """Validate a ``config.item_npcs`` map (``{item_name: [npc, ...]}``) used by
+    multi-item item_collection tasks to restrict individual items to specific
+    drop sources. Each key must canonicalize to a known item, each value is a
+    validated source-NPC list. Entries whose item isn't in the task's list are
+    dropped (keeps the form forgiving); unknown item names / NPC names 422.
+    Returns a canonical ``{item_name: [npc, ...]}`` with only non-empty entries."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        abort_problem(422, "Invalid config",
+                      "'item_npcs' must be an object mapping item name to a list of NPC names.")
+    if len(raw) > MAX_CONFIG_ITEMS:
+        abort_problem(422, "Invalid config", f"At most {MAX_CONFIG_ITEMS} source-restricted items.")
+    out: dict = {}
+    unknown_items: list[str] = []
+    for iname, npcs in raw.items():
+        canonical = _canonical_item(s, str(iname))
+        if not canonical:
+            unknown_items.append(str(iname).strip() or "(empty)")
+            continue
+        if canonical.lower() not in allowed_items:
+            continue
+        validated = _validated_source_npcs(s, npcs)
+        if validated:
+            out[canonical] = validated
+    if unknown_items:
+        abort_problem(
+            422, "Unknown item(s)",
+            "A source restriction names an item not in the item database: "
+            + ", ".join(sorted(set(unknown_items))[:10]),
+        )
+    return out
 
 
 def _require_target_value(tv, *, what: str, lo: int = 1, hi: int | None = None) -> int:
@@ -532,7 +640,11 @@ def validate_task_payload(s, body: dict) -> dict:
 
     if ttype == "item_collection":
         kind = (config or {}).get("kind")
-        if config is not None and kind not in ITEM_CONFIG_KINDS:
+        # Optional source-NPC restriction rides in the SAME config object;
+        # captured up front because each branch rebuilds config from scratch.
+        raw_source_npcs = (config or {}).get("source_npcs")
+        raw_item_npcs = (config or {}).get("item_npcs")
+        if kind is not None and kind not in ITEM_CONFIG_KINDS:
             abort_problem(
                 422, "Invalid config",
                 f"Item collection config kind must be one of {list(ITEM_CONFIG_KINDS)}.",
@@ -545,7 +657,7 @@ def validate_task_payload(s, body: dict) -> dict:
             groups, tv = _validated_groups(s, config.get("groups"))
             config = {"kind": "groups", "groups": groups}
             target = ""
-        elif config is not None:
+        elif config is not None and kind is not None:
             config = {
                 "kind": kind,
                 "items": _validated_item_entries(
@@ -562,6 +674,17 @@ def validate_task_payload(s, body: dict) -> dict:
             else:  # point_collection — points threshold to reach
                 tv = _require_target_value(tv, what="Points goal")
         else:
+            # Single item — plain ``target``, no ``kind``. A kind-less config
+            # carrying only source_npcs (the single-item source restriction)
+            # also lands here — but a config that has multi-item structure yet
+            # forgot its ``kind`` is a malformed list task, not a silent narrow.
+            if config is not None and (
+                config.get("items") or config.get("groups") or config.get("paths")
+            ):
+                abort_problem(
+                    422, "Invalid config",
+                    f"Item collection config kind must be one of {list(ITEM_CONFIG_KINDS)}.",
+                )
             canonical = _canonical_item(s, target)
             if not canonical:
                 abort_problem(
@@ -571,6 +694,15 @@ def validate_task_payload(s, body: dict) -> dict:
                 )
             target = canonical
             tv = _require_target_value(tv if tv is not None else 1, what="Quantity")
+            sources = _validated_source_npcs(s, raw_source_npcs)
+            config = {"source_npcs": sources} if sources else None
+        # Per-item source restriction (multi-item kinds): validate the item_npcs
+        # map against the normalized item list and attach it. Single-item tasks
+        # (no kind) use source_npcs above instead.
+        if config is not None and config.get("kind"):
+            item_npcs = _validated_item_npcs(s, raw_item_npcs, _config_item_name_set(config))
+            if item_npcs:
+                config["item_npcs"] = item_npcs
 
     elif ttype in ("kc_target", "pb_target"):
         # kc_target: optionally several NPCs (config.npcs) — a kill of ANY of
@@ -682,8 +814,19 @@ def validate_task_payload(s, body: dict) -> dict:
         target = target[:120]
 
     config = {**(config or {}), **passthrough} or None
+    serialized = json.dumps(config) if config else None
+    # web_event_tasks.config is a MySQL TEXT column (~64KB). A pathological
+    # config (e.g. a 100-item task each restricted to ~100 source NPCs, or a
+    # huge loot_sweep) can overflow it and 500 on save — reject early with a
+    # clear message instead.
+    if serialized is not None and len(serialized) > MAX_CONFIG_BYTES:
+        abort_problem(
+            422, "Configuration too large",
+            "This task's configuration is too large to store — reduce the number of "
+            "items or restricted source NPCs.",
+        )
     return {
         "target": target[:120] or None,
         "target_value": tv,
-        "config": json.dumps(config) if config else None,
+        "config": serialized,
     }

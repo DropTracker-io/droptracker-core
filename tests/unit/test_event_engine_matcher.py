@@ -92,6 +92,97 @@ class TestItemCollection:
         assert m == {"mode": "count", "quantity": 250, "matched_target": "Cannonball"}
 
 
+class TestItemSourceRestriction:
+    """Optional source-NPC restriction (config.source_npcs single / config.item_npcs
+    per-item): a restricted item only credits from a DROP by a listed NPC; a clog
+    (source string, not a "drop from this NPC") never satisfies a restricted item."""
+
+    # ── single item: config.source_npcs ──
+    def _single(self, **kw):
+        return _task(target="Twisted bow", target_value=1,
+                     config={"source_npcs": ["Chambers of Xeric"]}, **kw)
+
+    def test_single_drop_from_allowed_npc_matches(self):
+        m = engine.match_task(self._single(), _env("drop", {
+            "item_name": "Twisted bow", "npc_name": "chambers of xeric", "quantity": 1}))
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "Twisted bow"}
+
+    def test_single_drop_from_other_npc_no_match(self):
+        assert engine.match_task(self._single(), _env("drop", {
+            "item_name": "Twisted bow", "npc_name": "Zulrah", "quantity": 1})) is None
+
+    def test_single_clog_never_matches_when_restricted(self):
+        assert engine.match_task(self._single(), _env("clog", {
+            "item_name": "Twisted bow", "npc_name": "Chambers of Xeric"})) is None
+
+    def test_unrestricted_single_clog_still_matches(self):
+        t = _task(target="Twisted bow", target_value=1, config={})
+        assert engine.match_task(t, _env("clog", {"item_name": "Twisted bow"})) == {
+            "mode": "count", "quantity": 1, "matched_target": "Twisted bow"}
+
+    # ── multi item: config.item_npcs (flat per-item map) ──
+    def _list(self, **kw):
+        return _task(config={
+            "kind": "any_of",
+            "items": [{"item_name": "Twisted bow"}, {"item_name": "Kodai insignia"}],
+            "item_npcs": {"Twisted bow": ["Chambers of Xeric"]},
+        }, target_value=1, **kw)
+
+    def test_list_restricted_item_from_allowed_npc(self):
+        m = engine.match_task(self._list(), _env("drop", {
+            "item_name": "Twisted bow", "npc_name": "Chambers of Xeric", "quantity": 1}))
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "Twisted bow"}
+
+    def test_list_restricted_item_from_other_npc_no_match(self):
+        assert engine.match_task(self._list(), _env("drop", {
+            "item_name": "Twisted bow", "npc_name": "Vorkath", "quantity": 1})) is None
+
+    def test_list_unrestricted_item_from_any_npc(self):
+        # Kodai insignia carries no item_npcs entry -> any source counts.
+        m = engine.match_task(self._list(), _env("drop", {
+            "item_name": "Kodai insignia", "npc_name": "Vorkath", "quantity": 1}))
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "Kodai insignia"}
+
+    def test_list_restricted_item_clog_no_match(self):
+        assert engine.match_task(self._list(), _env("clog", {
+            "item_name": "Twisted bow", "npc_name": "Chambers of Xeric"})) is None
+
+    def test_list_unrestricted_item_clog_still_matches(self):
+        assert engine.match_task(self._list(), _env("clog", {
+            "item_name": "Kodai insignia"})) == {
+            "mode": "count", "quantity": 1, "matched_target": "Kodai insignia"}
+
+    # ── precomputed (state-load) frozensets are honored as-is ──
+    def test_precomputed_index_honored(self):
+        t = _task(config={"kind": "any_of", "items": [{"item_name": "Twisted bow"}]},
+                  item_source_index={"twisted bow": frozenset({"chambers of xeric"})},
+                  task_source_npcs=frozenset())
+        assert engine.match_task(t, _env("drop", {
+            "item_name": "Twisted bow", "npc_name": "Chambers of Xeric"})) == {
+            "mode": "count", "quantity": 1, "matched_target": "Twisted bow"}
+        assert engine.match_task(t, _env("drop", {
+            "item_name": "Twisted bow", "npc_name": "Zulrah"})) is None
+
+    def test_precomputed_task_source_npcs_for_single(self):
+        t = _task(target="Twisted bow", target_value=1, config={},
+                  item_source_index={}, task_source_npcs=frozenset({"chambers of xeric"}))
+        assert engine.match_task(t, _env("drop", {
+            "item_name": "Twisted bow", "npc_name": "Chambers of Xeric"}))["quantity"] == 1
+        assert engine.match_task(t, _env("drop", {
+            "item_name": "Twisted bow", "npc_name": "Kraken"})) is None
+
+    def test_malformed_item_npcs_value_does_not_crash(self):
+        # A non-list npcs value (a bad seed/template/DB-edited config) must not
+        # raise during matching and leaves the item UNRESTRICTED, rather than
+        # wedging the consumer or silently never crediting.
+        for bad in ("Chambers of Xeric", 5, {"x": 1}):
+            t = _task(config={"kind": "any_of", "items": [{"item_name": "Twisted bow"}],
+                              "item_npcs": {"Twisted bow": bad}})
+            m = engine.match_task(t, _env("drop", {
+                "item_name": "Twisted bow", "npc_name": "Vorkath", "quantity": 1}))
+            assert m == {"mode": "count", "quantity": 1, "matched_target": "Twisted bow"}, bad
+
+
 # ── kc_target ─────────────────────────────────────────────────────────────────
 
 class TestKcTarget:

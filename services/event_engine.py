@@ -304,6 +304,60 @@ def item_match_quantity(task: dict, item_name, quantity=1) -> Optional[int]:
     return qty
 
 
+def _norm_npc_set(raw) -> frozenset:
+    """Normalized NPC-name frozenset from a config value. Tolerates a
+    non-list/garbage value (returns empty) so a hand-authored / seeded / template
+    config with a malformed source restriction can never raise during state
+    load and wedge the consumer — the web validator always emits list[str]."""
+    if not isinstance(raw, (list, tuple, set)):
+        return frozenset()
+    return frozenset(_norm(n) for n in raw if _norm(n))
+
+
+def _item_source_index(config: dict) -> dict:
+    """``{normalized item name -> frozenset(normalized npc names)}`` for an
+    ``item_collection`` task's per-item source restriction.
+
+    The restriction lives in ``config.item_npcs`` (a ``{item_name: [npc, ...]}``
+    map — a flat map rather than per-entry ``npcs`` so it works uniformly across
+    every list kind, including ``groups``/``any_path`` whose stored item lists
+    are bare name strings). An item absent from the index is UNRESTRICTED; only
+    items with a non-empty NPC list are included."""
+    out: dict = {}
+    raw = (config or {}).get("item_npcs")
+    if not isinstance(raw, dict):
+        return out
+    for iname, npcs in raw.items():
+        key = _norm(iname)
+        if not key:
+            continue
+        allowed = _norm_npc_set(npcs)
+        if allowed:
+            out[key] = out.get(key, frozenset()) | allowed
+    return out
+
+
+def _item_source_npcs(task: dict, item_name) -> frozenset:
+    """The NPC names a dropped ``item_name`` must come from to credit this
+    ``item_collection`` task, or an empty set when unrestricted.
+
+    Per-item ``config.item_npcs`` wins; a single-item task falls back to the
+    task-level ``config.source_npcs`` (the drop only ever matches ``target``
+    there). Precomputed as ``item_source_index`` / ``task_source_npcs`` at
+    state-load; derived on the fly for hand-built dicts (tests), mirroring the
+    ``_kc_npcs`` pattern."""
+    idx = task.get("item_source_index")
+    task_src = task.get("task_source_npcs")
+    if idx is None and task_src is None:
+        config = task.get("config") or {}
+        idx = _item_source_index(config)
+        task_src = _norm_npc_set(config.get("source_npcs"))
+    allowed = (idx or {}).get(_norm(item_name))
+    if allowed:
+        return allowed
+    return task_src or frozenset()
+
+
 def completion_threshold(task: dict) -> int:
     """Progress value at which the task completes."""
     if task.get("type") in ("pb_target", "skill_target"):
@@ -572,14 +626,22 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
     if task_type == "item_collection":
         if kind not in ("drop", "clog"):
             return None
+        item_name = data.get("item_name")
         qty = data.get("quantity", 1) if kind == "drop" else 1
-        credit = item_match_quantity(task, data.get("item_name"), qty)
+        credit = item_match_quantity(task, item_name, qty)
         if credit is None:
+            return None
+        # Optional source-NPC restriction (config.source_npcs / config.item_npcs).
+        # When set for this item, only a DROP from a listed NPC credits it — a
+        # clog carries a source string but is never a "drop from this NPC", so a
+        # restricted item can't be satisfied by a collection-log unlock.
+        allowed = _item_source_npcs(task, item_name)
+        if allowed and (kind != "drop" or _norm(data.get("npc_name")) not in allowed):
             return None
         # The matched name rides along to the ledger row so all_of/assembly
         # progress can count DISTINCT items rather than folding quantities.
         return {"mode": "count", "quantity": credit,
-                "matched_target": str(data.get("item_name") or "").strip()[:120] or None}
+                "matched_target": str(item_name or "").strip()[:120] or None}
 
     if task_type == "loot_sweep":
         # Loot Sweep (v2). ``loot_sweep_index`` (item key -> {source, npcs}) is
@@ -814,6 +876,13 @@ def _task_to_dict(task) -> dict:
         # off these.
         d["kc_npcs"] = list(_kc_npcs(d))
         d["wom_metrics"] = _task_wom_metrics(task.type, d["kc_npcs"])
+    if task.type == "item_collection":
+        # Precompute the optional source-NPC restriction once per state load:
+        # a per-item index (config.item_npcs) plus the single-item task-level
+        # set (config.source_npcs). Empty => the item is unrestricted (any
+        # source, incl. clog) — the feature is opt-in and a no-op by default.
+        d["item_source_index"] = _item_source_index(d["config"])
+        d["task_source_npcs"] = _norm_npc_set(d["config"].get("source_npcs"))
     if task.type == "loot_sweep":
         # Precompute the matcher's item->allowed-NPC index once per task (the
         # matcher stays pure/cheap; NPC scoping is v2). Guarded: the unit-test

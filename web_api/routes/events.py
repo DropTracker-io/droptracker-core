@@ -19,6 +19,7 @@ global events where group_id is NULL):
   GET    /api/v1/events/meta/items?q=       -> [{ id, name, tracked }]  (task-form autocomplete)
   GET    /api/v1/events/meta/npcs?q=        -> [{ id, name }]
   GET    /api/v1/events/meta/resolve?kind=item|npc&names=a|b -> [{ id, name }]
+  GET    /api/v1/events/meta/item-sources?items=a|b -> [{ item_name, item_id, total, npcs:[{npc_id,name,icon_url,rarity,tracked,...}] }]
   POST   /api/v1/events/{id}/teams          { EventTeamInput } -> { id }
   POST   /api/v1/events/{id}/teams/{teamId}/members   { player_id } -> { ok }
   POST   /api/v1/events/{id}/teams/{teamId}/members/bulk { names } -> { added, skipped }
@@ -2991,6 +2992,44 @@ async def search_npcs():
             return [{"id": i, "name": n} for i, n in rows]
 
     return jsonify(await asyncio.to_thread(_search))
+
+
+@events_bp.get("/events/meta/item-sources")
+async def item_sources():
+    """NPC drop sources for one or more items (session required).
+
+    Backs the task-form "restrict to specific NPC sources" picker: an item
+    task can optionally require the item to drop from a chosen NPC. Sources
+    come from the OSRS Wiki drop table we ingest (``xenforo.dt_npc_loot``, the
+    same data the public item pages show), each flagged ``tracked`` so the
+    picker can warn on NPCs we've never observed dropping. ``items`` is
+    |-separated exact item names (names never contain pipes); unknown names are
+    absent from the response."""
+    current_user_id()
+    names = [n.strip() for n in (request.args.get("items") or "").split("|") if n.strip()]
+    if not names:
+        return jsonify([])
+    names = names[:50]
+
+    def _load():
+        # Lazy import keeps events.py's conftest ``services``-stub isolation and
+        # reuses items.py's 1h in-process per-item cache for the source query.
+        from web_api.routes.items import _sources
+        from db import ItemList
+
+        with db_session() as s:
+            rows = (
+                s.query(func.min(ItemList.item_id), ItemList.item_name)
+                .filter(ItemList.item_name.in_(names), ItemList.noted.is_(False))
+                .group_by(ItemList.item_name)
+                .all()
+            )
+        resolved = [(int(i), n) for i, n in rows]
+        # _sources opens its own db_session, so call it after the resolve
+        # session above has closed rather than nesting.
+        return [{"item_name": n, "item_id": i, **_sources(i)} for i, n in resolved]
+
+    return jsonify(await asyncio.to_thread(_load))
 
 
 @events_bp.delete("/events/<int:event_id>/tasks/<int:task_id>")
