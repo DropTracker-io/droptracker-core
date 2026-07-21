@@ -212,6 +212,25 @@ def _total_level_from_raw_player(player) -> int:
         return 0
 
 
+def _ehb_from_raw_player(player):
+    """Top-level efficient-hours-bossed off a WOM player detail object, or
+    None when absent/garbage (None = unknown, distinct from a real 0.0)."""
+    try:
+        ehb = getattr(player, "ehb", None)
+        return round(float(ehb), 2) if ehb is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _identity_shim(player) -> dict:
+    """The lightweight identity dict cached + returned by check_user_by_*.
+    Extending it is backward-compatible: consumers .get() what they know."""
+    return {
+        "total_level": _total_level_from_raw_player(player),
+        "ehb": _ehb_from_raw_player(player),
+    }
+
+
 def _log_wom_call(action: str, **kwargs):
     if logger.isEnabledFor(logging.INFO):
         logger.info("WOM API call: %s %s", action, kwargs)
@@ -243,7 +262,7 @@ async def check_user_by_username(username: str, *, force_refresh: bool = False) 
                 await _store_player_cache(username, payload, success=False)
                 return payload
             log_slots = _extract_log_slots(player)
-            identity = {"total_level": _total_level_from_raw_player(player)}
+            identity = _identity_shim(player)
             payload = (identity, player.username, player.id, log_slots)
             await _store_player_cache(username, payload, success=True)
             return payload
@@ -284,7 +303,7 @@ async def check_user_by_username(username: str, *, force_refresh: bool = False) 
             return payload
 
         log_slots = _extract_log_slots(player)
-        identity = {"total_level": _total_level_from_raw_player(player)}
+        identity = _identity_shim(player)
         payload = (identity, str(player.username), str(player.id), log_slots)
         await _store_player_cache(username, payload, success=True)
         return payload
@@ -319,7 +338,7 @@ async def check_user_by_id(uid: int, *, force_refresh: bool = False):
                 await _store_player_cache(cache_key, payload, success=False)
                 return payload
             log_slots = _extract_log_slots(player)
-            identity = {"total_level": _total_level_from_raw_player(player)}
+            identity = _identity_shim(player)
             payload = (identity, str(player.username), str(player.id), log_slots)
             await _store_player_cache(cache_key, payload, success=True)
             await _store_player_cache(player.username, payload, success=True)

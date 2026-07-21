@@ -189,6 +189,18 @@ def _extract_total_level_from_wom_player(wom_player) -> int:
         return 0
 
 
+def _extract_ehb_from_wom_player(wom_player):
+    """WOM efficient-hours-bossed from the identity shim (or a raw WOM player
+    detail object); None when unknown — pre-upgrade cache entries lack the key,
+    and None must never overwrite a stored value."""
+    raw = (wom_player.get("ehb") if isinstance(wom_player, dict)
+           else getattr(wom_player, "ehb", None))
+    try:
+        return round(float(raw), 2) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _apply_authoritative_wom_identity(
     db_session,
     player: Player | None,
@@ -198,6 +210,7 @@ def _apply_authoritative_wom_identity(
     total_level: int | None = None,
     log_slots: int | None = None,
     account_hash: str | None = None,
+    ehb: float | None = None,
 ):
     """
     Ensure the local player row reflects WOM's authoritative identity.
@@ -232,6 +245,10 @@ def _apply_authoritative_wom_identity(
 
     if log_slots is not None and int(log_slots) >= 0 and player.log_slots != int(log_slots):
         player.log_slots = int(log_slots)
+        changed = True
+
+    if ehb is not None and float(ehb) >= 0 and (player.ehb is None or float(player.ehb) != float(ehb)):
+        player.ehb = float(ehb)
         changed = True
 
     if account_hash:
@@ -555,6 +572,7 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
     expected_wom_id = None
     wom_log_slots = None
     wom_total_level = None
+    wom_ehb = None
 
     # Fast path: the account hash already maps to a local player whose stored
     # name matches the submitted name and whose WOM identity is already known.
@@ -588,6 +606,7 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
             wom_log_slots = log_slots
             canonical_name = str(resolved_name or player_name)
             wom_total_level = _extract_total_level_from_wom_player(wom_player)
+            wom_ehb = _extract_ehb_from_wom_player(wom_player)
     except (TypeError, ValueError):
         expected_wom_id = None
 
@@ -609,6 +628,7 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
                 account_hash=account_hash if account_hash else None,
                 total_level=total_level,
                 log_slots=wom_log_slots if wom_log_slots is not None else 0,
+                ehb=wom_ehb,
             )
             created = False
             try:
@@ -631,6 +651,7 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
                 total_level=wom_total_level,
                 log_slots=wom_log_slots,
                 account_hash=account_hash if account_hash else None,
+                ehb=wom_ehb,
             )
             if changed:
                 try:
@@ -669,6 +690,8 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
             player.log_slots = wom_log_slots
         if wom_total_level is not None and int(wom_total_level) > 0 and int(player.total_level or 0) != int(wom_total_level):
             player.total_level = int(wom_total_level)
+        if wom_ehb is not None and (player.ehb is None or float(player.ehb) != float(wom_ehb)):
+            player.ehb = float(wom_ehb)
         try:
             session.commit()
         except Exception:
@@ -1115,6 +1138,7 @@ async def create_player(player_name, account_hash, existing_session=None):
 
     canonical_name = str(resolved_name or player_name)
     wom_total_level = _extract_total_level_from_wom_player(wom_player)
+    wom_ehb = _extract_ehb_from_wom_player(wom_player)
     player = db_session.query(Player).filter(Player.wom_id == expected_wom_id).first()
     if not player:
         # Fallback to existing local identity rows and reconcile to authoritative WOM ID.
@@ -1132,6 +1156,7 @@ async def create_player(player_name, account_hash, existing_session=None):
             total_level=wom_total_level,
             log_slots=log_slots,
             account_hash=account_hash,
+            ehb=wom_ehb,
         )
         if changed:
             try:
@@ -1188,6 +1213,7 @@ async def create_player(player_name, account_hash, existing_session=None):
             account_hash=account_hash,
             total_level=total_level,
             log_slots=log_slots if log_slots is not None else 0,
+            ehb=wom_ehb,
         )
         db_session.add(new_player)
         try:

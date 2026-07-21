@@ -406,3 +406,71 @@ class TestGroupHasNotificationChannel:
     def test_whitespace_value_fails(self, mock_session):
         _configure_channels(mock_session, [("channel_id_to_post_loot", "   ")])
         assert self.fn(mock_session, 5, "drop") is False
+
+
+# ── WOM EHB extraction / identity application ────────────────────────────────
+
+class TestExtractEhb:
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from data.submissions.common import _extract_ehb_from_wom_player
+        self.fn = _extract_ehb_from_wom_player
+
+    def test_identity_shim_dict(self):
+        assert self.fn({"total_level": 2100, "ehb": 456.789}) == 456.79
+
+    def test_pre_upgrade_cache_entry_lacks_key(self):
+        # Cached identity dicts written before the upgrade have no "ehb" key —
+        # None (unknown) so a stored value is never overwritten with garbage.
+        assert self.fn({"total_level": 2100}) is None
+
+    def test_garbage_value_is_none(self):
+        assert self.fn({"ehb": "not-a-number"}) is None
+
+    def test_raw_wom_object(self):
+        from types import SimpleNamespace
+        assert self.fn(SimpleNamespace(ehb=12.5)) == 12.5
+
+    def test_none_input(self):
+        assert self.fn(None) is None
+
+    def test_zero_is_a_real_value(self):
+        # A bossless account genuinely has 0.0 EHB — distinct from unknown.
+        assert self.fn({"ehb": 0}) == 0.0
+
+
+class TestApplyIdentityEhb:
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from data.submissions.common import _apply_authoritative_wom_identity
+        self.fn = _apply_authoritative_wom_identity
+
+    def _player(self, **kw):
+        from types import SimpleNamespace
+        base = dict(player_id=1, wom_id=5, player_name="Test",
+                    total_level=2000, log_slots=100, ehb=None, account_hash=None)
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_sets_ehb_when_unknown(self):
+        p = self._player(ehb=None)
+        _, changed = self.fn(MagicMock(), p, 5, ehb=321.5)
+        assert changed is True
+        assert p.ehb == 321.5
+
+    def test_updates_ehb_when_different(self):
+        p = self._player(ehb=100.0)
+        _, changed = self.fn(MagicMock(), p, 5, ehb=105.25)
+        assert changed is True
+        assert p.ehb == 105.25
+
+    def test_equal_ehb_is_not_a_change(self):
+        p = self._player(ehb=100.0)
+        _, changed = self.fn(MagicMock(), p, 5, ehb=100.0)
+        assert changed is False
+
+    def test_none_never_overwrites(self):
+        p = self._player(ehb=100.0)
+        _, changed = self.fn(MagicMock(), p, 5, ehb=None)
+        assert changed is False
+        assert p.ehb == 100.0

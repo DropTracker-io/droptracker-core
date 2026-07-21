@@ -463,6 +463,10 @@ class DatabaseOperations:
                 if log_slots is not None and int(log_slots) >= 0 and int(player.log_slots or 0) != int(log_slots):
                     player.log_slots = int(log_slots)
                     changed = True
+                wom_ehb = wom_player.get("ehb") if isinstance(wom_player, dict) else None
+                if wom_ehb is not None and (player.ehb is None or float(player.ehb) != float(wom_ehb)):
+                    player.ehb = float(wom_ehb)
+                    changed = True
                 if account_hash and not player.account_hash:
                     player.account_hash = account_hash
                     changed = True
@@ -484,6 +488,7 @@ class DatabaseOperations:
                     account_hash=account_hash,
                     total_level=total_level,
                     log_slots=log_slots if log_slots is not None else 0,
+                    ehb=wom_player.get("ehb") if isinstance(wom_player, dict) else None,
                 )
                 session.add(new_player)
                 session.commit()

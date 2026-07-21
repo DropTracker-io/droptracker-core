@@ -13,7 +13,7 @@ Author: joelhalen
 """
 
 from typing import List
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey
 from sqlalchemy import func
 from sqlalchemy.orm import relationship
 
@@ -39,6 +39,7 @@ class Player(Base):
         user_id (int): Foreign key to the associated User
         log_slots (int): Number of collection log slots unlocked
         total_level (int): Total skill level of the player
+        ehb (float): Efficient hours bossed per WOM (None = never fetched)
         date_added (datetime): Timestamp when player was first added
         date_updated (datetime): Timestamp of last update
         hidden (bool): Whether player is hidden from public displays (default: False)
@@ -69,6 +70,9 @@ class Player(Base):
     user_id = Column(Integer, ForeignKey('users.user_id'))
     log_slots = Column(Integer)
     total_level = Column(Integer)
+    # WOM "efficient hours bossed" — refreshed wherever WOM identity data is
+    # already fetched (submission intake, create_player). NULL = never seen.
+    ehb = Column(Float, nullable=True)
     date_added = Column(DateTime, default=func.now())
     date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
     hidden = Column(Boolean, default=False)
@@ -232,10 +236,10 @@ class Player(Base):
         player_rank = redis_client.client.zrank(base_key, self.player_id)
         return player_rank, player_score
 
-    def __init__(self, wom_id, player_name, account_hash, user_id=None, user=None, log_slots=0, total_level=0, group=None, hidden=False):
+    def __init__(self, wom_id, player_name, account_hash, user_id=None, user=None, log_slots=0, total_level=0, group=None, hidden=False, ehb=None):
         """
         Initialize a new Player instance.
-        
+
         Args:
             wom_id (int): Wise Old Man player ID
             player_name (str): OSRS username
@@ -246,6 +250,7 @@ class Player(Base):
             total_level (int, optional): Total skill level. Defaults to 0.
             group (Group, optional): Initial group to associate with. Defaults to None.
             hidden (bool, optional): Whether player should be hidden. Defaults to False.
+            ehb (float, optional): WOM efficient hours bossed. Defaults to None (unknown).
         """
         self.wom_id = wom_id
         self.player_name = player_name
@@ -254,6 +259,7 @@ class Player(Base):
         self.user = user
         self.log_slots = log_slots
         self.total_level = total_level
+        self.ehb = ehb
         self.hidden = hidden
         self.group = group
 
