@@ -1,0 +1,21 @@
+# Daily trigger for droptracker-prune-images.service at ~04:00 UTC.
+#
+# Deliberately hours ahead of droptracker-db-backup.timer (08:30 UTC): the
+# backup aborts unless >= 25 GiB is free, so the prune runs first and clears
+# space for it rather than racing it.
+#
+# Install:  sudo cp deploy/systemd/droptracker-prune-images.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now droptracker-prune-images.timer
+
+[Unit]
+Description=Daily DropTracker drop-screenshot retention pass (~04:00 UTC)
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+RandomizedDelaySec=900
+Persistent=true
+Unit=droptracker-prune-images.service
+
+[Install]
+WantedBy=timers.target

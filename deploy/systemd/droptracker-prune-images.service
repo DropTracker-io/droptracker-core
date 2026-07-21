@@ -1,0 +1,34 @@
+# Daily retention pass over user-uploaded DROP screenshots.
+# Triggered by droptracker-prune-images.timer — do not enable the service itself.
+#
+# Keeps a drop's screenshot only while it is worth >= 1,000,000 gp OR is newer
+# than 30 days; everything else has its file deleted and its `image_url`
+# cleared. Unbounded retention here is what filled the disk to 95% and started
+# failing the nightly DB backup (which aborts below 25 GiB free).
+#
+# Runs as `user` because that owns static/assets/img/user-upload.
+#
+# Manual dry run:  cd /store/droptracker/disc && venv/bin/python -m scripts.prune_drop_images
+# Manual real run: sudo systemctl start droptracker-prune-images.service
+# Watch it:        journalctl -u droptracker-prune-images.service -f
+# Every removal is recorded to logs/prune_drop_images_<ts>.tsv first.
+
+[Unit]
+Description=DropTracker drop-screenshot retention (prune low-value images past 30d)
+Wants=network-online.target
+After=network-online.target mariadb.service mysql.service
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.prune_drop_images --apply
+# The first (backfill) run walks 22 monthly partitions of a 172M-row table.
+# Steady-state runs only touch the thin slice that just aged past 30 days.
+TimeoutStartSec=12h
+# Stay out of prod's way: this is pure cleanup, never urgent.
+Nice=15
+IOSchedulingClass=idle
+
+# Retention knobs (defaults shown; both are script flags):
+#ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.prune_drop_images --apply --min-value 1000000 --retention-days 30
