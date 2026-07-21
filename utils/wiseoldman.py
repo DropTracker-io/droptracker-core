@@ -486,12 +486,26 @@ async def fetch_group_members(
                 _group_member_count[wom_group_id] = wom_expected_count
             name = group_name
             #print(f"Group name: {name}")
+            ehb_updates = 0
             for member in members:
                 player_obj = getattr(member, "player", None)
                 player_name = getattr(player_obj, "display_name", None)
                 member_wom_id = member.player_id
                 existing_player = session.query(Player).filter(Player.wom_id == member_wom_id).first()
                 if existing_player:
+                    # Every membership carries a full WOM player object, so this
+                    # already-paid-for hourly call refreshes EHB for the whole
+                    # clan at no extra API cost (previously discarded). None is
+                    # "unknown" and never overwrites a stored value; the write is
+                    # left pending and committed once after the loop.
+                    member_ehb = _ehb_from_raw_player(player_obj)
+                    if member_ehb is not None and (
+                        existing_player.ehb is None
+                        or float(existing_player.ehb) != member_ehb
+                    ):
+                        existing_player.ehb = member_ehb
+                        ehb_updates += 1
+
                     old_name = existing_player.player_name or ""
                     new_name = player_name or ""
                     # Only update if the names differ beyond hyphen/underscore vs space changes
@@ -531,6 +545,19 @@ async def fetch_group_members(
                         # account hash so they can be tracked in groups right away.
                         _create_player_from_wom_member(session, member_wom_id, player_name, player_obj)
                 user_list.append(member_wom_id)
+            if ehb_updates:
+                # One commit for the whole clan rather than per member. EHB is a
+                # side effect of the membership sync: a failure here must never
+                # cost the caller its member list (the add/remove pass depends
+                # on it), so it's logged and swallowed.
+                try:
+                    session.commit()
+                    logger.info("Refreshed EHB for %s member(s) of WOM group %s",
+                                ehb_updates, wom_group_id)
+                except Exception as ehb_err:
+                    logger.warning("EHB refresh commit failed for WOM group %s: %s",
+                                   wom_group_id, ehb_err)
+                    session.rollback()
             await _store_group_cache(wom_group_id, user_list)
             return user_list
         else:
@@ -566,6 +593,7 @@ def _create_player_from_wom_member(db_session, wom_id: int, player_name: Optiona
         account_hash=temp_hash,
         total_level=total_level,
         log_slots=0,
+        ehb=_ehb_from_raw_player(player_obj),
     )
     db_session.add(new_player)
     try:
