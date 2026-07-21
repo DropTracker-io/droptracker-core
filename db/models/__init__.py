@@ -53,7 +53,7 @@ from .seasonal_combat_achievement import SeasonalCombatAchievementEntry
 from .seasonal_pet import SeasonalPlayerPet
 from .seasonal_quest_completion import SeasonalQuestCompletionEntry
 from .drop_split import DropSplit
-from .web import GroupAdmin, Announcement, AuditLog, DiscordOutbox, DocsPage, SiteRedirect, Suggestion, SuggestionMessage
+from .web import GroupAdmin, GroupEventManager, Announcement, AuditLog, DiscordOutbox, DocsPage, SiteRedirect, Suggestion, SuggestionMessage
 from .badge import Badge, PlayerBadge
 from .subscriptions import (
     SubscriptionTier,
@@ -208,6 +208,7 @@ __all__ = [
     "SeasonalQuestCompletionEntry",
     "DropSplit",
     "GroupAdmin",
+    "GroupEventManager",
     "Announcement",
     "AuditLog",
     "DiscordOutbox",

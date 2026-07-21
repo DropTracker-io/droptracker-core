@@ -57,6 +57,8 @@ from db import (
 from web_api.common import abort_problem, db_session, private_no_store, _rc
 from web_api.deps import (
     current_user_id,
+    event_manager_group_ids,
+    is_event_manager,
     is_superadmin,
     json_body,
     load_user,
@@ -155,6 +157,9 @@ def _assert_any_event_admin(s, user_id: int) -> None:
     grant = s.query(GroupAdmin).filter(GroupAdmin.user_id == user_id).first()
     if grant:
         return
+    # web64a: event managers browse their group's guild/channel lists too.
+    if event_manager_group_ids(s, user_id):
+        return
     abort_problem(403, "Forbidden", "Event admin access is required.")
 
 
@@ -175,12 +180,12 @@ def _targetable_guild_ids(s, user_id: int):
     if is_superadmin(user):
         return None
     allowed = {str(g) for g in manageable_guild_ids(user_id)}
-    # Add the home guilds of groups the user has an explicit web grant on
-    # (bounded to this user's grants — no full-table scan).
-    grant_group_ids = [
+    # Add the home guilds of groups the user has an explicit web grant on, or
+    # manages events for (web64a) — bounded to this user's grants.
+    grant_group_ids = list({
         gid for (gid,) in s.query(GroupAdmin.group_id)
         .filter(GroupAdmin.user_id == user_id).all()
-    ]
+    } | event_manager_group_ids(s, user_id))
     if grant_group_ids:
         for guild_id, in (
             s.query(Group.guild_id)
@@ -227,6 +232,7 @@ def _admin_participating_group_ids(s, user_id: int, ev: Event) -> set[int]:
     return {
         gid for gid in participating_group_ids(s, ev)
         if resolve_group_role(s, user_id, gid, mgids, user=user) in ("owner", "admin")
+        or is_event_manager(s, user_id, gid)
     }
 
 
@@ -239,7 +245,8 @@ def _is_host_admin(s, user_id: int, ev: Event) -> bool:
     if not ev.group_id:
         return False
     role = resolve_group_role(s, user_id, ev.group_id, manageable_guild_ids(user_id), user=user)
-    return role in ("owner", "admin")
+    # web64a: host-group event managers may flip the event-wide Discord knobs too.
+    return role in ("owner", "admin") or is_event_manager(s, user_id, ev.group_id)
 
 
 def _config_payload(s, ev: Event, group_id: int | None = None) -> dict:

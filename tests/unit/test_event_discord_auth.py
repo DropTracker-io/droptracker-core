@@ -41,10 +41,14 @@ class _FakeSession:
 @pytest.fixture
 def patch_user(monkeypatch):
     """Patch load_user/is_superadmin/manageable_guild_ids on the module."""
-    def _apply(*, superadmin=False, manage=frozenset()):
+    def _apply(*, superadmin=False, manage=frozenset(), manager_gids=frozenset()):
         monkeypatch.setattr(ed, "load_user", lambda s, uid: object())
         monkeypatch.setattr(ed, "is_superadmin", lambda user: superadmin)
         monkeypatch.setattr(ed, "manageable_guild_ids", lambda uid: set(manage))
+        # web64a: _targetable_guild_ids also unions in event-manager groups; stub
+        # it to an empty set by default so the scripted session stays aligned.
+        monkeypatch.setattr(ed, "event_manager_group_ids",
+                            lambda s, uid: set(manager_gids))
     return _apply
 
 

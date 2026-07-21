@@ -57,6 +57,36 @@ class GroupAdmin(Base):
     created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
+class GroupEventManager(Base):
+    """Group-scoped 'event manager' grant (web64a): a member the group's admins
+    trust to fully manage the group's EVENTS — create/edit/delete events and
+    their tasks/teams/board/prizes/Discord — WITHOUT any group-admin access
+    (settings, members, subscription, config, appointing others).
+
+    Deliberately a SEPARATE table from ``group_admins`` rather than a new
+    ``role`` value: ``resolve_group_role`` collapses non-owner grants to
+    ``admin`` and dozens of surfaces trust ``role in ('owner','admin')`` for
+    full admin, so a stray enum value would leak admin rights. The event gates
+    (``web_api/deps.is_event_manager`` + ``_assert_event_admin``) consult this
+    table narrowly; ``assert_group_admin`` never does. Grants are web-only —
+    the Discord bot's ``authed_users`` list is untouched.
+    """
+
+    __tablename__ = "group_event_managers"
+    __table_args__ = (
+        UniqueConstraint("group_id", "user_id", name="uix_group_event_manager"),
+        Index("idx_group_event_manager_group", "group_id"),
+        Index("idx_group_event_manager_user", "user_id"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.user_id"), nullable=False)
+    granted_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
 class Announcement(Base):
     """Announcements feature (§10). Web pages are the canonical, SEO-indexed
     source; Discord is a syndication target."""

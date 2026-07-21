@@ -170,26 +170,29 @@ class TestAssertEventAdminStandard:
         evr._assert_event_admin(_S(), 7, None)
         assert calls["user"] == "USER"
 
-    def test_group_checks_events_entitlement(self, monkeypatch):
+    def test_group_delegates_to_event_editor(self, monkeypatch):
+        # web64a: the standard path now routes through assert_event_editor (group
+        # admin OR event manager, + the events entitlement) instead of the
+        # admin-only assert_group_entitlement.
         seen = {}
         monkeypatch.setattr(evr, "load_user", lambda s, uid: "USER")
         monkeypatch.setattr(evr, "manageable_guild_ids", lambda uid: {"g1"})
 
-        def fake_entitlement(s, uid, gid, key, *, manage_guild_ids=None, user=None):
-            seen.update(uid=uid, gid=gid, key=key, manage=manage_guild_ids, user=user)
+        def fake_editor(s, uid, gid, *, manage_guild_ids=None, user=None):
+            seen.update(uid=uid, gid=gid, manage=manage_guild_ids, user=user)
 
-        monkeypatch.setattr(evr, "assert_group_entitlement", fake_entitlement)
+        monkeypatch.setattr(evr, "assert_event_editor", fake_editor)
         evr._assert_event_admin(_S(), 7, 42)
-        assert seen == dict(uid=7, gid=42, key="events", manage={"g1"}, user="USER")
+        assert seen == dict(uid=7, gid=42, manage={"g1"}, user="USER")
 
-    def test_group_entitlement_denial_propagates(self, monkeypatch):
+    def test_group_editor_denial_propagates(self, monkeypatch):
         monkeypatch.setattr(evr, "load_user", lambda s, uid: "USER")
         monkeypatch.setattr(evr, "manageable_guild_ids", lambda uid: set())
 
         def deny(*a, **k):
             evr.abort_problem(403, "Forbidden", "no")
 
-        monkeypatch.setattr(evr, "assert_group_entitlement", deny)
+        monkeypatch.setattr(evr, "assert_event_editor", deny)
         with pytest.raises(ProblemException) as exc:
             evr._assert_event_admin(_S(), 7, 42)
         assert exc.value.status == 403
@@ -198,13 +201,16 @@ class TestAssertEventAdminStandard:
 # ── _is_event_admin: standard/global contract ────────────────────────────────
 
 class TestIsEventAdminStandard:
-    def _patch(self, monkeypatch, *, superadmin=False, role=None):
+    def _patch(self, monkeypatch, *, superadmin=False, role=None, manager=False):
         monkeypatch.setattr(evr, "load_user", lambda s, uid: "USER")
         monkeypatch.setattr(evr, "is_superadmin", lambda user: superadmin)
         monkeypatch.setattr(evr, "manageable_guild_ids", lambda uid: set())
         monkeypatch.setattr(
             evr, "resolve_group_role", lambda s, uid, gid, mg, user=None: role
         )
+        # web64a: _is_event_admin now also consults is_event_manager when the
+        # role isn't owner/admin — stub it off by default for the role gate.
+        monkeypatch.setattr(evr, "is_event_manager", lambda s, uid, gid: manager)
 
     def test_anonymous_is_not_admin(self):
         assert evr._is_event_admin(_S(), None, _event()) is False

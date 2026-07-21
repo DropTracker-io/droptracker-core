@@ -25,6 +25,8 @@ from web_api.common import (
 from web_api.flair import group_flairs
 from web_api.deps import (
     current_user_id,
+    event_manager_group_ids,
+    is_group_admin_role,
     json_body,
     load_user,
     manageable_guild_ids,
@@ -162,15 +164,24 @@ async def get_me():
                     entry["global_rank"] = rank
                 players.append(entry)
 
-            # Groups: union of memberships + admin grants + MANAGE_GUILD guilds.
+            # Groups: union of memberships + admin grants + MANAGE_GUILD guilds
+            # + event-manager grants (web64a).
             group_roles: dict[int, str] = {}
             group_names: dict[int, str] = {}
             for g in user.groups:
                 group_names[g.group_id] = g.group_name
             for ga in s.query(GroupAdmin).filter(GroupAdmin.user_id == user_id).all():
                 group_names.setdefault(ga.group_id, None)
+            mgr_ids = event_manager_group_ids(s, user_id)
+            for gid in mgr_ids:
+                group_names.setdefault(gid, None)
             for gid in list(group_names.keys()):
                 role = resolve_group_role(s, user_id, gid, manage_ids, user=user)
+                # An event manager who isn't otherwise a member still gets the
+                # group listed; floor the role to "member" so the role enum stays
+                # valid (can_manage_events is the real capability signal).
+                if role is None and gid in mgr_ids:
+                    role = "member"
                 if role:
                     group_roles[gid] = role
                     if group_names.get(gid) is None:
@@ -178,7 +189,12 @@ async def get_me():
                         group_names[gid] = grp
 
             groups = [
-                {"id": gid, "name": group_names.get(gid) or f"Group {gid}", "role": role}
+                {
+                    "id": gid,
+                    "name": group_names.get(gid) or f"Group {gid}",
+                    "role": role,
+                    "can_manage_events": is_group_admin_role(role) or gid in mgr_ids,
+                }
                 for gid, role in group_roles.items()
             ]
             # Flair for the user's subscribed groups (one query for all).

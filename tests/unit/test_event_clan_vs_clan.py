@@ -59,9 +59,12 @@ def _wire_participants(monkeypatch, session, user_id=7):
     monkeypatch.setattr(epr, "db_session", lambda: _SessionCM(session))
 
 
-def _patch_roles(monkeypatch, module, *, superadmin=False, roles=None):
-    """resolve_group_role answers from ``roles`` (gid -> role)."""
+def _patch_roles(monkeypatch, module, *, superadmin=False, roles=None,
+                 manager_gids=None):
+    """resolve_group_role answers from ``roles`` (gid -> role); is_event_manager
+    (web64a) answers from ``manager_gids`` (default: nobody)."""
     roles = roles or {}
+    manager_gids = set(manager_gids or ())
     monkeypatch.setattr(module, "load_user", lambda s, uid: "USER")
     monkeypatch.setattr(module, "is_superadmin", lambda user: superadmin)
     monkeypatch.setattr(module, "manageable_guild_ids", lambda uid: set())
@@ -69,6 +72,11 @@ def _patch_roles(monkeypatch, module, *, superadmin=False, roles=None):
         module, "resolve_group_role",
         lambda s, uid, gid, mg, user=None: roles.get(gid),
     )
+    if hasattr(module, "is_event_manager"):
+        monkeypatch.setattr(
+            module, "is_event_manager",
+            lambda s, uid, gid: gid in manager_gids,
+        )
 
 
 # ── participating_group_ids ───────────────────────────────────────────────────
@@ -128,17 +136,19 @@ class TestAssertEventAdminClan:
         monkeypatch.setattr(evr, "assert_group_entitlement", _boom)
         evr._assert_event_admin(_S([(10,), (20,)]), 7, _cvc())  # no raise
 
-    def test_standard_event_object_takes_entitlement_path(self, monkeypatch):
+    def test_standard_event_object_takes_editor_path(self, monkeypatch):
+        # web64a: standard events route through assert_event_editor (admin OR
+        # event manager + the events entitlement), not assert_group_entitlement.
         seen = {}
         monkeypatch.setattr(evr, "load_user", lambda s, uid: "USER")
         monkeypatch.setattr(evr, "manageable_guild_ids", lambda uid: set())
 
-        def fake_entitlement(s, uid, gid, key, *, manage_guild_ids=None, user=None):
-            seen.update(gid=gid, key=key)
+        def fake_editor(s, uid, gid, *, manage_guild_ids=None, user=None):
+            seen.update(gid=gid)
 
-        monkeypatch.setattr(evr, "assert_group_entitlement", fake_entitlement)
+        monkeypatch.setattr(evr, "assert_event_editor", fake_editor)
         evr._assert_event_admin(_S(), 7, _event(group_id=42))
-        assert seen == dict(gid=42, key="events")
+        assert seen == dict(gid=42)
 
 
 # ── _is_event_admin: clan branch ──────────────────────────────────────────────

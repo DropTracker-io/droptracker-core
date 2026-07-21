@@ -17,7 +17,7 @@ from typing import Optional, Set
 
 from quart import request
 
-from db import Group, GroupAdmin, User
+from db import Group, GroupAdmin, GroupEventManager, User
 from utils.redis import redis_client
 from web_api.common import abort_problem
 from web_api.session import verify_session
@@ -205,6 +205,39 @@ def is_group_admin_role(role: Optional[str]) -> bool:
     return role in ("owner", "admin")
 
 
+# --------------------------------------------------------------------------- #
+# Event Manager role (web64a) — group-scoped event-editing WITHOUT group admin.
+# Kept deliberately separate from resolve_group_role / is_group_admin_role: an
+# event manager must NEVER resolve to owner/admin (that would leak the whole
+# group-admin surface). Only the event gates (assert_event_editor / the event
+# route _is_event_admin/_assert_event_admin) consult these; assert_group_admin
+# never does.
+# --------------------------------------------------------------------------- #
+def is_event_manager(s, user_id: int, group_id) -> bool:
+    """True when the user holds a group_event_managers grant on ``group_id``."""
+    if user_id is None or group_id is None:
+        return False
+    return (
+        s.query(GroupEventManager)
+        .filter(GroupEventManager.group_id == group_id,
+                GroupEventManager.user_id == user_id)
+        .first()
+        is not None
+    )
+
+
+def event_manager_group_ids(s, user_id: int) -> Set[int]:
+    """Every group id the user manages events for (drives the /me payload)."""
+    if user_id is None:
+        return set()
+    return {
+        int(gid)
+        for (gid,) in s.query(GroupEventManager.group_id)
+        .filter(GroupEventManager.user_id == user_id)
+        .all()
+    }
+
+
 def assert_group_admin(
     s,
     user_id: int,
@@ -312,6 +345,50 @@ def assert_group_entitlement(
             f"Your group's subscription does not include {label}. "
             "Upgrade on the Subscription tab.",
             extra={"code": "entitlement_required", "entitlement": entitlement_key},
+        )
+
+
+def assert_event_editor(
+    s,
+    user_id: int,
+    group_id: int,
+    *,
+    manage_guild_ids: Optional[Set[str]] = None,
+    user: Optional[User] = None,
+) -> None:
+    """The event-editing gate for a standard/group event (web64a): allow group
+    owners/admins OR group event-managers, and — for BOTH — require the group's
+    ``events`` entitlement.
+
+    Unlike ``assert_group_entitlement`` (which hard-requires group admin), this
+    decouples the role check from the entitlement: an event manager passes the
+    role half without ever satisfying ``assert_group_admin``, but the group must
+    still carry the ``events`` tier. Superadmins bypass everything.
+    """
+    from web_api.entitlements import resolve_group_entitlements
+
+    if user is None:
+        user = load_user(s, user_id)
+    if is_superadmin(user):
+        return
+
+    role = resolve_group_role(s, user_id, group_id, manage_guild_ids, user=user)
+    if not (is_group_admin_role(role) or is_event_manager(s, user_id, group_id)):
+        abort_problem(
+            403,
+            "Forbidden",
+            "You must administer this group or be one of its event managers.",
+            extra={"code": "event_admin_required"},
+        )
+
+    entitlements = resolve_group_entitlements(s, group_id, user=user)
+    if not entitlements.get("events"):
+        abort_problem(
+            403,
+            "Subscription required",
+            "Your group's subscription does not include Events. "
+            "Upgrade on the Subscription tab.",
+            extra={"code": "entitlement_required", "entitlement": "events"},
         )
 
 

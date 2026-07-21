@@ -20,6 +20,8 @@ global events where group_id is NULL):
   GET    /api/v1/events/meta/npcs?q=        -> [{ id, name }]
   GET    /api/v1/events/meta/resolve?kind=item|npc&names=a|b -> [{ id, name }]
   GET    /api/v1/events/meta/item-sources?items=a|b -> [{ item_name, item_id, total, npcs:[{npc_id,name,icon_url,rarity,tracked,...}] }]
+  GET    /api/v1/events/{id}/players        -> event-wide player contribution leaderboard
+  GET    /api/v1/events/{id}/players/{playerId} -> one player's items/tasks/activity
   POST   /api/v1/events/{id}/teams          { EventTeamInput } -> { id }
   POST   /api/v1/events/{id}/teams/{teamId}/members   { player_id } -> { ok }
   POST   /api/v1/events/{id}/teams/{teamId}/members/bulk { names } -> { added, skipped }
@@ -79,12 +81,15 @@ from db import (
 from web_api.common import (abort_problem, db_session, hidden_player_ids, money,
                             parse_page, private_no_store, score_num,
                             with_cache_headers)
+from web_api.event_players import norm_item_name, rank_players, top_items
 from web_api.task_tiles import build_tile, spec_names, tile_spec
 from web_api.deps import (
+    assert_event_editor,
     assert_group_admin,
     assert_group_entitlement,
     assert_superadmin,
     current_user_id,
+    is_event_manager,
     is_superadmin,
     json_body,
     load_user,
@@ -238,12 +243,14 @@ def _is_event_admin(s, viewer_id, ev: Event) -> bool:
         mgids = manageable_guild_ids(viewer_id)
         return any(
             resolve_group_role(s, viewer_id, gid, mgids, user=user) in ("owner", "admin")
+            or is_event_manager(s, viewer_id, gid)
             for gid in participating_group_ids(s, ev)
         )
     if not ev.group_id:
         return False
     role = resolve_group_role(s, viewer_id, ev.group_id, manageable_guild_ids(viewer_id), user=user)
-    return role in ("owner", "admin")
+    # web64a: group event managers administer the group's events too.
+    return role in ("owner", "admin") or is_event_manager(s, viewer_id, ev.group_id)
 
 
 def _member_group_ids(s, viewer_id) -> set[int]:
@@ -732,7 +739,9 @@ async def list_events():
                     for ev in events:
                         if ev.group_id and ev.group_id not in admin_groups:
                             role = resolve_group_role(s, viewer_id, ev.group_id, manage_ids, user=user)
-                            if role in ("owner", "admin"):
+                            # web64a: event managers see their group's drafts too.
+                            if (role in ("owner", "admin")
+                                    or is_event_manager(s, viewer_id, ev.group_id)):
                                 admin_groups.add(ev.group_id)
 
             # Members of a participating group see its drafts too — the
@@ -1070,6 +1079,280 @@ async def get_event_team(event_id: int, team_id: int):
     payload = await asyncio.to_thread(_load)
     if payload is None:
         abort_problem(404, "Team not found", f"No team {team_id} in event {event_id}.")
+    if viewer_id is not None:
+        return private_no_store(jsonify(payload))
+    return with_cache_headers(jsonify(payload), max_age=15)
+
+
+# --- Event-wide player contribution (Players tab) ---------------------------
+
+_PLAYERS_LIMIT = 500          # cap the leaderboard payload (sorted, top kept)
+_PLAYERS_ITEM_PREVIEW = 8     # top contributed items shown per row in the list
+
+
+def _resolve_item_ids(s, names) -> dict[str, int]:
+    """``{normalized item name -> min item_id}`` for a set of item names — the
+    same stack/noted-collapsing resolution _attach_task_tiles uses, so a
+    contributed item's icon (``/img/itemdb/{id}.png``) matches the task tiles.
+    Unknown names are simply absent (the web then renders no icon)."""
+    names = {n for n in names if n}
+    out: dict[str, int] = {}
+    if not names:
+        return out
+    from db import ItemList
+    for item_id, name in (
+        s.query(func.min(ItemList.item_id), ItemList.item_name)
+        .filter(ItemList.item_name.in_(names), ItemList.noted.is_(False))
+        .group_by(ItemList.item_name)
+        .all()
+    ):
+        out[norm_item_name(name)] = int(item_id)
+    return out
+
+
+@events_bp.get("/events/<int:event_id>/players")
+async def get_event_players(event_id: int):
+    """Public event-wide player contribution leaderboard: every player with at
+    least one applied completion (or split points), aggregated ACROSS teams —
+    split points, completions/quantity, distinct tasks contributed, their team,
+    and the items they pulled (with icon ids). Mirrors the team endpoint's
+    restricted-event gating + caching."""
+    viewer_id = optional_user_id()
+
+    def _load():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                _deny_restricted(ev, viewer_id)
+                return None
+
+            task_count = (
+                s.query(func.count(EventTask.id))
+                .filter(EventTask.event_id == event_id).scalar() or 0
+            )
+            participants = (
+                s.query(func.count(EventTeamMember.player_id))
+                .filter(EventTeamMember.event_id == event_id).scalar() or 0
+            )
+
+            # Applied-ledger rollup per player (completions / quantity / tasks).
+            contrib: dict[int, dict] = {}
+            for pid, comps, qty, ntasks in (
+                s.query(EventCompletion.player_id,
+                        func.count(EventCompletion.id),
+                        func.sum(EventCompletion.quantity),
+                        func.count(func.distinct(EventCompletion.task_id)))
+                .filter(EventCompletion.event_id == event_id,
+                        EventCompletion.status.in_(_APPLIED_STATUSES),
+                        EventCompletion.player_id.isnot(None))
+                .group_by(EventCompletion.player_id)
+                .all()
+            ):
+                contrib[pid] = {"completions": int(comps or 0),
+                                "quantity": int(qty or 0),
+                                "tasks": int(ntasks or 0)}
+
+            # Split points across teams (each task's points split by share).
+            points = {
+                pid: float(total or 0)
+                for pid, total in (
+                    s.query(EventPlayerPoints.player_id,
+                            func.sum(EventPlayerPoints.points))
+                    .filter(EventPlayerPoints.event_id == event_id)
+                    .group_by(EventPlayerPoints.player_id)
+                    .all()
+                )
+            }
+
+            pids = set(contrib) | set(points)
+            totals = {
+                "contributors": len(pids),
+                "participants": int(participants),
+                "completions": sum(c["completions"] for c in contrib.values()),
+                "points": round(sum(points.values()), 2),
+                "tasks": int(task_count),
+            }
+            if not pids:
+                return {"event": _summary(ev), "players": [], "totals": totals}
+
+            # Team membership (name/color/role) for the contributors.
+            membership: dict[int, dict] = {}
+            for pid, tid, tname, tcolor, role in (
+                s.query(EventTeamMember.player_id, EventTeamMember.team_id,
+                        EventTeam.name, EventTeam.color, EventTeamMember.role)
+                .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+                .filter(EventTeamMember.event_id == event_id,
+                        EventTeamMember.player_id.in_(pids))
+                .all()
+            ):
+                membership[pid] = {"team_id": tid, "team_name": tname,
+                                   "team_color": tcolor, "role": role}
+
+            names = {
+                pid: name
+                for pid, name in (
+                    s.query(Player.player_id, Player.player_name)
+                    .filter(Player.player_id.in_(pids)).all()
+                )
+            }
+
+            # Top contributed items per player (one grouped query, bucketed).
+            by_pid: dict[int, list] = {}
+            distinct_names: set[str] = set()
+            for pid, mt, qty, drops in (
+                s.query(EventCompletion.player_id, EventCompletion.matched_target,
+                        func.sum(EventCompletion.quantity),
+                        func.count(EventCompletion.id))
+                .filter(EventCompletion.event_id == event_id,
+                        EventCompletion.status.in_(_APPLIED_STATUSES),
+                        EventCompletion.player_id.isnot(None),
+                        EventCompletion.matched_target.isnot(None))
+                .group_by(EventCompletion.player_id, EventCompletion.matched_target)
+                .all()
+            ):
+                distinct_names.add(mt)
+                by_pid.setdefault(pid, []).append(
+                    {"name": mt, "quantity": int(qty or 0), "drops": int(drops or 0)})
+            item_ids = _resolve_item_ids(s, distinct_names)
+            items_by_pid = {
+                pid: top_items(lst, item_ids, _PLAYERS_ITEM_PREVIEW)
+                for pid, lst in by_pid.items()
+            }
+
+            players = rank_players(
+                contrib, points, membership, names, items_by_pid)[:_PLAYERS_LIMIT]
+            return {"event": _summary(ev), "players": players, "totals": totals}
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(404, "Event not found", f"No event {event_id}.")
+    if viewer_id is not None:
+        return private_no_store(jsonify(payload))
+    return with_cache_headers(jsonify(payload), max_age=15)
+
+
+@events_bp.get("/events/<int:event_id>/players/<int:player_id>")
+async def get_event_player(event_id: int, player_id: int):
+    """One player's full contribution to an event: every item they pulled (with
+    icon ids), their per-task contribution + split points, and recent activity.
+    Backs the Players tab's row drill-down."""
+    viewer_id = optional_user_id()
+
+    def _load():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                _deny_restricted(ev, viewer_id)
+                return None
+
+            name = (
+                s.query(Player.player_name)
+                .filter(Player.player_id == player_id).scalar()
+            )
+            mem = (
+                s.query(EventTeamMember.team_id, EventTeam.name,
+                        EventTeam.color, EventTeamMember.role)
+                .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+                .filter(EventTeamMember.event_id == event_id,
+                        EventTeamMember.player_id == player_id)
+                .first()
+            )
+            applied = (
+                s.query(EventCompletion)
+                .filter(EventCompletion.event_id == event_id,
+                        EventCompletion.player_id == player_id,
+                        EventCompletion.status.in_(_APPLIED_STATUSES))
+                .order_by(EventCompletion.id.desc())
+                .all()
+            )
+            if not applied and mem is None:
+                return None  # not a participant and no contribution -> 404
+
+            item_agg: dict[str, list] = {}   # name -> [quantity, drops]
+            task_agg: dict[int, list] = {}    # task_id -> [completions, quantity]
+            for c in applied:
+                q = int(c.quantity or 1)
+                if c.matched_target:
+                    a = item_agg.setdefault(c.matched_target, [0, 0])
+                    a[0] += q
+                    a[1] += 1
+                t = task_agg.setdefault(c.task_id, [0, 0])
+                t[0] += 1
+                t[1] += q
+
+            item_ids = _resolve_item_ids(s, set(item_agg))
+            items = sorted(
+                ({"name": mt, "item_id": item_ids.get(norm_item_name(mt)),
+                  "quantity": q, "drops": d}
+                 for mt, (q, d) in item_agg.items()),
+                key=lambda r: (-r["quantity"], -r["drops"], r["name"].lower()),
+            )
+
+            tpoints = {
+                tid: float(p or 0)
+                for tid, p in (
+                    s.query(EventPlayerPoints.task_id,
+                            func.sum(EventPlayerPoints.points))
+                    .filter(EventPlayerPoints.event_id == event_id,
+                            EventPlayerPoints.player_id == player_id)
+                    .group_by(EventPlayerPoints.task_id).all()
+                )
+            }
+            task_meta = {
+                t.id: (t.label, t.type)
+                for t in s.query(EventTask.id, EventTask.label, EventTask.type)
+                .filter(EventTask.event_id == event_id).all()
+            }
+            tasks = sorted(
+                ({"task_id": tid,
+                  "task_label": task_meta.get(tid, (None, None))[0],
+                  "task_type": task_meta.get(tid, (None, None))[1],
+                  "completions": comps, "quantity": qty,
+                  "points": round(tpoints.get(tid, 0.0), 2)}
+                 for tid, (comps, qty) in task_agg.items()),
+                key=lambda r: (-r["points"], -r["completions"], -r["quantity"]),
+            )
+
+            activity = [
+                {
+                    "id": c.id,
+                    "task_id": c.task_id,
+                    "task_label": task_meta.get(c.task_id, (None, None))[0],
+                    "quantity": int(c.quantity or 1),
+                    "source_type": c.source_type,
+                    "matched_target": c.matched_target,
+                    "created_at": _ts(c.created_at),
+                }
+                for c in applied[:30]
+            ]
+
+            return {
+                "event": _summary(ev),
+                "player": {
+                    "player_id": player_id,
+                    "player_name": name or f"Player {player_id}",
+                    "team_id": mem[0] if mem else None,
+                    "team_name": mem[1] if mem else None,
+                    "team_color": mem[2] if mem else None,
+                    "role": mem[3] if mem else None,
+                    "points": round(sum(tpoints.values()), 2),
+                    "completions": len(applied),
+                    "quantity": sum(int(c.quantity or 1) for c in applied),
+                    "tasks_contributed": len(task_agg),
+                },
+                "items": items,
+                "tasks": tasks,
+                "activity": activity,
+            }
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(404, "Player not found",
+                      f"No contribution for player {player_id} in event {event_id}.")
     if viewer_id is not None:
         return private_no_store(jsonify(payload))
     return with_cache_headers(jsonify(payload), max_age=15)
@@ -1892,21 +2175,22 @@ def _assert_event_admin(s, user_id, ev_or_group_id):
             return
         mgids = manageable_guild_ids(user_id)
         for gid in participating_group_ids(s, ev):
-            if resolve_group_role(s, user_id, gid, mgids, user=user) in ("owner", "admin"):
+            if (resolve_group_role(s, user_id, gid, mgids, user=user) in ("owner", "admin")
+                    or is_event_manager(s, user_id, gid)):
                 return
         abort_problem(403, "Forbidden", "You must administer a participating clan.")
     group_id = ev.group_id if ev is not None else ev_or_group_id
-    # ---- standard/global path, unchanged ----
+    # ---- standard/global path ----
     user = load_user(s, user_id)
     if not group_id:
         # Global events (group_id NULL) are administered by superadmins only.
         assert_superadmin(user)
         return
-    assert_group_entitlement(
+    # web64a: group admins OR event managers, and (for both) the events tier.
+    assert_event_editor(
         s,
         user_id,
         group_id,
-        "events",
         manage_guild_ids=manageable_guild_ids(user_id),
         user=user,
     )

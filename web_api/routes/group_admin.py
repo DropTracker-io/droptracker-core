@@ -34,7 +34,7 @@ from sqlalchemy import func, text
 from quart import Blueprint, jsonify, request
 
 from db import Group, GroupAdmin, GroupConfiguration, Guild, IgnoredPlayer, Player, User
-from db.models import NotifiedSubmission
+from db.models import AuditLog, GroupEventManager, NotifiedSubmission
 from utils.redis import redis_client
 from web_api.common import (
     abort_problem,
@@ -301,6 +301,135 @@ async def remove_authorized_user(group_id: int):
                 abort_problem(404, "Not authorized", "That user is not on the authorized list.")
             s.commit()
             return {"users": _authorized_entries(s, group_id)}
+
+    return jsonify(await asyncio.to_thread(_apply))
+
+
+# --------------------------------------------------------------------------- #
+# Event managers (web64a) — members trusted to fully manage the group's EVENTS
+# without any group-admin access. Web-only (no authed_users / Discord sync).
+# Only real group admins may grant/revoke the role (assert_group_admin), so an
+# event manager can never appoint another. The grant is keyed on a DropTracker
+# user id, so the target must have signed in at least once.
+# --------------------------------------------------------------------------- #
+def _event_manager_entries(s, group_id: int) -> list[dict]:
+    rows = (s.query(GroupEventManager)
+            .filter(GroupEventManager.group_id == group_id).all())
+    if not rows:
+        return []
+    users = {
+        u.user_id: u for u in s.query(User)
+        .filter(User.user_id.in_([r.user_id for r in rows])).all()
+    }
+    out = []
+    for r in rows:
+        u = users.get(r.user_id)
+        out.append({
+            "user_id": r.user_id,
+            "discord_id": str(u.discord_id) if (u and u.discord_id) else None,
+            "username": (u.username if u else None),
+        })
+    out.sort(key=lambda e: (e["username"] or "￿").lower())
+    return out
+
+
+@group_admin_bp.get("/groups/<int:group_id>/event-managers")
+async def list_event_managers(group_id: int):
+    user_id = current_user_id()
+
+    def _load():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+            return {"managers": _event_manager_entries(s, group_id)}
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@group_admin_bp.post("/groups/<int:group_id>/event-managers")
+async def add_event_manager(group_id: int):
+    user_id = current_user_id()
+    body = await json_body()
+    identifier = str(body.get("identifier") or "").strip()
+    if not identifier:
+        abort_problem(422, "Missing identifier", "Provide a Discord ID or DropTracker username.")
+
+    def _apply():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+
+            # Web-only role → the target must be an existing DropTracker user.
+            if identifier.isdigit() and 15 <= len(identifier) <= 20:
+                target_user = s.query(User).filter(User.discord_id == identifier).first()
+                if target_user is None:
+                    abort_problem(
+                        404, "User not found",
+                        "No DropTracker user with that Discord ID has signed in "
+                        "yet — they must sign in to the website once before they "
+                        "can be made an event manager.")
+            else:
+                target_user = (s.query(User)
+                               .filter(func.lower(User.username) == identifier.lower())
+                               .first())
+                if target_user is None:
+                    abort_problem(
+                        404, "User not found",
+                        f"No DropTracker user named '{identifier}'. You can also "
+                        "add someone by their Discord ID.")
+
+            # A full admin already manages events — no separate grant needed.
+            if (s.query(GroupAdmin)
+                    .filter(GroupAdmin.group_id == group_id,
+                            GroupAdmin.user_id == target_user.user_id).first()):
+                abort_problem(409, "Already an admin",
+                              "That user already administers this group and can "
+                              "manage events.")
+            if (s.query(GroupEventManager)
+                    .filter(GroupEventManager.group_id == group_id,
+                            GroupEventManager.user_id == target_user.user_id).first()):
+                abort_problem(409, "Already a manager",
+                              "That user is already an event manager.")
+
+            s.add(GroupEventManager(group_id=group_id, user_id=target_user.user_id,
+                                    granted_by=user_id))
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=group_id,
+                action="group.event_manager.add", target=str(target_user.user_id),
+                after=f"user={target_user.user_id}",
+            ))
+            s.commit()
+            return {"managers": _event_manager_entries(s, group_id)}
+
+    return jsonify(await asyncio.to_thread(_apply))
+
+
+@group_admin_bp.delete("/groups/<int:group_id>/event-managers")
+async def remove_event_manager(group_id: int):
+    user_id = current_user_id()
+    body = await json_body()
+    target_user_id = body.get("user_id")
+    if not isinstance(target_user_id, int) or isinstance(target_user_id, bool):
+        abort_problem(422, "Missing target", "Provide 'user_id'.")
+
+    def _apply():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+            grant = (s.query(GroupEventManager)
+                     .filter(GroupEventManager.group_id == group_id,
+                             GroupEventManager.user_id == int(target_user_id)).first())
+            if grant is None:
+                abort_problem(404, "Not a manager",
+                              "That user is not an event manager of this group.")
+            s.delete(grant)
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=group_id,
+                action="group.event_manager.remove", target=str(target_user_id),
+                after=f"user={target_user_id}",
+            ))
+            s.commit()
+            return {"managers": _event_manager_entries(s, group_id)}
 
     return jsonify(await asyncio.to_thread(_apply))
 

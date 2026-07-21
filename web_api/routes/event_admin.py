@@ -68,6 +68,7 @@ from db import (
 from web_api.common import abort_problem, db_session, parse_page, private_no_store
 from web_api.deps import (
     current_user_id,
+    is_event_manager,
     is_superadmin,
     json_body,
     load_user,
@@ -210,9 +211,11 @@ async def my_pending_reviews():
                 if gid is None:
                     return False
                 if gid not in role_cache:
-                    role_cache[gid] = resolve_group_role(
-                        s, user_id, gid, mgids, user=user)
-                return role_cache[gid] in ("owner", "admin")
+                    # web64a: event managers review their group's pendings too.
+                    role = resolve_group_role(s, user_id, gid, mgids, user=user)
+                    role_cache[gid] = (role in ("owner", "admin")
+                                       or is_event_manager(s, user_id, gid))
+                return role_cache[gid]
 
             out = []
             for event_id, count in counts:
