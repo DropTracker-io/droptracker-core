@@ -60,6 +60,7 @@ from db import (
     AuditLog,
     DiscordOutbox,
     Drop,
+    EventRateLimit,
     EventType,
     EventTypeTestGroup,
     Group,
@@ -465,6 +466,156 @@ async def admin_remove_event_type_test_group(key: str, group_id: int):
     invalidate_cache()
     _audit(actor, "event_type.test_group.remove", key, before=str(group_id))
     return jsonify(row)
+
+
+# --------------------------------------------------------------------------- #
+# Event rate limits (web65a) — per-tier event frequency caps. One rule per
+# (tier, event kind) — or the "*" all-kinds sentinel — capping how many events
+# a group on that tier may activate per rolling window. No rules = unlimited
+# (the events entitlement alone gates access); a >0 rule also grants
+# rate-limited event access to tiers without the entitlement. Enforced by
+# db/event_rate_limits.py at activation.
+# --------------------------------------------------------------------------- #
+def _rate_limit_row(row: EventRateLimit) -> dict:
+    return {
+        "id": int(row.id),
+        "tier_key": row.tier_key,
+        "type_key": row.type_key,
+        "max_events": int(row.max_events),
+        "window_days": int(row.window_days),
+        "enabled": bool(row.enabled),
+    }
+
+
+@admin_bp.get("/admin/event-rate-limits")
+async def admin_list_event_rate_limits():
+    await _require_superadmin()
+
+    def _read():
+        with db_session() as s:
+            rows = (
+                s.query(EventRateLimit)
+                .order_by(EventRateLimit.tier_key, EventRateLimit.type_key)
+                .all()
+            )
+            return [_rate_limit_row(r) for r in rows]
+
+    return private_no_store(jsonify(await asyncio.to_thread(_read)))
+
+
+@admin_bp.put("/admin/event-rate-limits")
+async def admin_put_event_rate_limit():
+    """Upsert one rule, keyed by (tier_key, type_key)."""
+    from db.event_rate_limits import (
+        ALL_TYPES,
+        MAX_EVENTS_CEILING,
+        WINDOW_DAYS_CEILING,
+        invalidate_cache,
+    )
+
+    actor = await _require_superadmin()
+    body = await json_body()
+    tier_key = body.get("tier_key")
+    type_key = body.get("type_key") or ALL_TYPES
+    max_events = body.get("max_events")
+    window_days = body.get("window_days")
+    enabled = body.get("enabled", True)
+    if not isinstance(tier_key, str) or not tier_key:
+        abort_problem(422, "Invalid tier", "'tier_key' is required.")
+    if not isinstance(type_key, str) or not type_key:
+        abort_problem(422, "Invalid event type", "'type_key' must be a string.")
+    if (not isinstance(max_events, int) or isinstance(max_events, bool)
+            or not (0 <= max_events <= MAX_EVENTS_CEILING)):
+        abort_problem(
+            422, "Invalid limit",
+            f"'max_events' must be an integer between 0 and {MAX_EVENTS_CEILING}.",
+        )
+    if (not isinstance(window_days, int) or isinstance(window_days, bool)
+            or not (1 <= window_days <= WINDOW_DAYS_CEILING)):
+        abort_problem(
+            422, "Invalid window",
+            f"'window_days' must be an integer between 1 and {WINDOW_DAYS_CEILING}.",
+        )
+    if not isinstance(enabled, bool):
+        abort_problem(422, "Invalid value", "'enabled' must be a boolean.")
+
+    def _apply():
+        with db_session() as s:
+            tier = (
+                s.query(SubscriptionTier)
+                .filter(SubscriptionTier.key == tier_key)
+                .first()
+            )
+            if tier is None:
+                abort_problem(404, "Unknown tier", f"No subscription tier '{tier_key}'.")
+            if tier.scope != "group":
+                abort_problem(
+                    422, "Invalid tier",
+                    "Event rate limits apply to group tiers only.",
+                )
+            if type_key != ALL_TYPES and not (
+                s.query(EventType.key).filter(EventType.key == type_key).first()
+            ):
+                abort_problem(404, "Unknown event type", f"No event type '{type_key}'.")
+            row = (
+                s.query(EventRateLimit)
+                .filter(
+                    EventRateLimit.tier_key == tier_key,
+                    EventRateLimit.type_key == type_key,
+                )
+                .first()
+            )
+            before = (
+                f"max={row.max_events},days={row.window_days},on={int(row.enabled)}"
+                if row is not None else None
+            )
+            if row is None:
+                row = EventRateLimit(tier_key=tier_key, type_key=type_key,
+                                     max_events=max_events, window_days=window_days,
+                                     enabled=enabled)
+                s.add(row)
+            else:
+                row.max_events = max_events
+                row.window_days = window_days
+                row.enabled = enabled
+            s.commit()
+            return before, _rate_limit_row(row)
+
+    before, row = await asyncio.to_thread(_apply)
+    invalidate_cache()
+    _audit(
+        actor, "event_rate_limit.set", f"{tier_key}:{type_key}",
+        before=before,
+        after=f"max={max_events},days={window_days},on={int(enabled)}",
+    )
+    return jsonify(row)
+
+
+@admin_bp.delete("/admin/event-rate-limits/<int:limit_id>")
+async def admin_delete_event_rate_limit(limit_id: int):
+    from db.event_rate_limits import invalidate_cache
+
+    actor = await _require_superadmin()
+
+    def _apply():
+        with db_session() as s:
+            row = (
+                s.query(EventRateLimit)
+                .filter(EventRateLimit.id == limit_id)
+                .first()
+            )
+            if row is None:
+                abort_problem(404, "Unknown rule", f"No event rate limit #{limit_id}.")
+            target = f"{row.tier_key}:{row.type_key}"
+            before = f"max={row.max_events},days={row.window_days},on={int(row.enabled)}"
+            s.delete(row)
+            s.commit()
+            return target, before
+
+    target, before = await asyncio.to_thread(_apply)
+    invalidate_cache()
+    _audit(actor, "event_rate_limit.delete", target, before=before)
+    return jsonify({"ok": True})
 
 
 # --------------------------------------------------------------------------- #

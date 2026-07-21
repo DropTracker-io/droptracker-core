@@ -987,6 +987,58 @@ class EventTypeTestGroup(Base):
     created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
+# Sentinel type_key on EventRateLimit rows: the rule caps a group's TOTAL
+# events (every kind combined) rather than one kind. A real value (not NULL)
+# so the (tier_key, type_key) unique index actually binds — MySQL unique
+# indexes allow unlimited NULL duplicates.
+EVENT_RATE_LIMIT_ALL_TYPES = "*"
+
+
+class EventRateLimit(Base):
+    """Site-wide per-tier event frequency cap (web65a).
+
+    One row = "groups on subscription tier ``tier_key`` may run at most
+    ``max_events`` events of ``type_key`` per rolling ``window_days`` days".
+    ``type_key`` is an EVENT_KINDS value, or ``"*"``
+    (EVENT_RATE_LIMIT_ALL_TYPES) for the tier's TOTAL cap across every kind.
+
+    Semantics (db/event_rate_limits.py is the read/enforcement side):
+    - No row for a (tier, kind) → that scope is unlimited; the tier's normal
+      ``events`` entitlement + ``events_max_active`` rules stand alone.
+    - Rows bind at ACTIVATION (drafts stay unlimited, matching
+      events_max_active): an event counts against the window the moment it
+      goes live, via ``web_events.activated_at``.
+    - Any enabled row with ``max_events`` > 0 also GRANTS rate-limited event
+      access to tiers whose ``events`` entitlement is off — how the free tier
+      gets "an event every so often" without unlocking the full firehose.
+      With no rows configured (the launch baseline) nothing changes: events
+      stay patron-only.
+
+    Superadmins configure rows on /admin/event-limits; nothing seeds them.
+    """
+
+    __tablename__ = "web_event_rate_limits"
+    __table_args__ = (
+        Index("uq_web_event_rate_limit", "tier_key", "type_key", unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tier_key = Column(String(40), ForeignKey("subscription_tiers.key"), nullable=False)
+    # EVENT_KINDS value or "*" — deliberately NOT an FK to web_event_types
+    # (the sentinel isn't a registry row).
+    type_key = Column(String(24), nullable=False, default=EVENT_RATE_LIMIT_ALL_TYPES)
+    # 0 is meaningful: "none of this kind at all" (an explicit block, distinct
+    # from "no row" = unlimited).
+    max_events = Column(Integer, nullable=False)
+    window_days = Column(Integer, nullable=False)
+    # Off = keep the numbers but stop enforcing/granting (staging a policy
+    # before flipping it on).
+    enabled = Column(Boolean, nullable=False, default=True, server_default="1")
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
 # --------------------------------------------------------------------------- #
 # Board game (web44a) — the dice-board event kind.
 # --------------------------------------------------------------------------- #

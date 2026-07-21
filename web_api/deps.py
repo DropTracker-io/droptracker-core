@@ -383,13 +383,20 @@ def assert_event_editor(
 
     entitlements = resolve_group_entitlements(s, group_id, user=user)
     if not entitlements.get("events"):
-        abort_problem(
-            403,
-            "Subscription required",
-            "Your group's subscription does not include Events. "
-            "Upgrade on the Subscription tab.",
-            extra={"code": "entitlement_required", "entitlement": "events"},
-        )
+        # web65a: a tier without the events entitlement may still hold a
+        # rate-limited grant (an enabled event-rate-limit rule with
+        # max_events > 0) — those groups manage events normally; the
+        # frequency cap binds at activation instead.
+        from db.event_rate_limits import group_has_rate_limited_events
+
+        if not group_has_rate_limited_events(s, group_id):
+            abort_problem(
+                403,
+                "Subscription required",
+                "Your group's subscription does not include Events. "
+                "Upgrade on the Subscription tab.",
+                extra={"code": "entitlement_required", "entitlement": "events"},
+            )
 
 
 # --------------------------------------------------------------------------- #

@@ -135,6 +135,16 @@ if "db.entitlements" not in sys.modules:
     sys.modules["db.entitlements"] = _mod
     _spec.loader.exec_module(_mod)
 
+# db/event_rate_limits.py (web65a) — same shape: stdlib-only module imports,
+# lazy DB access, fail-closed grant helpers. deps/lifecycle import it lazily,
+# so route tests need it resolvable under the stubbed ``db`` package.
+_RATE_LIMITS_PATH = _Path(__file__).resolve().parent.parent / "db" / "event_rate_limits.py"
+if "db.event_rate_limits" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("db.event_rate_limits", _RATE_LIMITS_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["db.event_rate_limits"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # ── SQLAlchemy column expression stub ─────────────────────────────────────────
 # Real SQLAlchemy column attributes implement comparison operators to return
 # BinaryExpression objects.  When tests do `Model.date_added > cutoff`,

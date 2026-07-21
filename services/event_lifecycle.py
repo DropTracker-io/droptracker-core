@@ -214,6 +214,19 @@ def readiness_report(session, event, now: Optional[datetime] = None) -> dict:
     now = now or datetime.now()
     status = getattr(event, "status", None) or "draft"
     items = activation_blocker_items(session, event, now=now)
+    if status == "draft" and getattr(event, "group_id", None):
+        # Tier frequency caps (web65a): a draft whose group has exhausted its
+        # rolling window won't activate (manually or via the scheduled sweep),
+        # so say so here rather than surprising the leader at start time. No
+        # target tab — the fix is waiting or upgrading, not an editor section.
+        from db.event_rate_limits import check_activation_rate_limit, describe_violation
+
+        violation = check_activation_rate_limit(session, event, now=now)
+        if violation is not None:
+            items.append({
+                "code": "tier_rate_limit", "target": "subscription",
+                "message": describe_violation(violation),
+            })
     starts_at = getattr(event, "starts_at", None)
     return {
         "status": status,
@@ -298,21 +311,36 @@ def _board_game_blocker_items(session, event) -> list:
 
 
 def assert_activation_capacity(session, event, user=None) -> None:
-    """Tier concurrency check (PRD D9), enforced at activation only.
+    """Tier capacity checks (PRD D9 + web65a), enforced at activation only.
 
-    Group events: the group's ``status='active'`` event count must be below
-    the ``events_max_active`` entitlement of its tier (superadmin ``user``
-    resolves to effectively-unlimited via the entitlement resolver; the sweep
-    passes no user, so real tier limits apply). Global events skip entirely.
-    Raises :class:`LifecycleError` (403/409).
+    Group events must pass, in order:
+    1. Access — the tier's ``events`` entitlement, OR a rate-limited grant
+       (an enabled ``web_event_rate_limits`` rule with max_events > 0 — how a
+       free tier gets occasional events).
+    2. Concurrency — ``status='active'`` count below ``events_max_active``.
+    3. Frequency — the tier's per-kind / all-kinds rolling-window caps
+       (db/event_rate_limits.py). Nothing configured = unlimited.
+
+    Superadmin ``user`` bypasses all three (the entitlement resolver grants
+    everything; the frequency check is skipped explicitly). The sweep passes
+    no user, so real tier limits apply to scheduled auto-starts. Global
+    events skip entirely. Raises :class:`LifecycleError` (403/409).
     """
     if not event.group_id:
         return  # global events (superadmin-run) are uncapped (PRD §7.1)
 
+    from db.event_rate_limits import (
+        check_activation_rate_limit,
+        describe_violation,
+        group_has_rate_limited_events,
+    )
+    from web_api.deps import is_superadmin
     from web_api.entitlements import resolve_group_entitlements
 
     entitlements = resolve_group_entitlements(session, event.group_id, user=user)
-    if not entitlements.get("events"):
+    if not entitlements.get("events") and not group_has_rate_limited_events(
+        session, event.group_id
+    ):
         raise LifecycleError(
             403, "Subscription required",
             "This group's subscription tier does not include events.",
@@ -333,6 +361,13 @@ def assert_activation_capacity(session, event, user=None) -> None:
             f"subscription tier allows {limit} at a time. End an active event "
             "or upgrade the subscription, then activate this one.",
         )
+
+    if not is_superadmin(user):
+        violation = check_activation_rate_limit(session, event)
+        if violation is not None:
+            raise LifecycleError(
+                409, "Event limit reached", describe_violation(violation)
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
