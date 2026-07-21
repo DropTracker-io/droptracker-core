@@ -226,6 +226,10 @@ EVENT_MESSAGE_TOGGLE_KEYS = (
     # the event's main channels (team channels carry it by default instead —
     # services/event_team_discord.DEFAULT_TEAM_MESSAGE_TOGGLES).
     "event_board_roll_prompt",
+    # Board game (web61a): a team used an offensive/defensive item on a rival
+    # (froze / knocked back / stole / rerolled), or a defense blocked one — so
+    # the PvP layer is visible instead of silently mutating another team's board.
+    "event_board_action",
     # Loot Sweep (loot_sweep kind): three independently-toggleable verbosity
     # levels. Individual item receipts default OFF (a 300-item game-wide sweep
     # would flood the channel); subset + whole-set completions default ON.
@@ -1047,6 +1051,12 @@ class EventBoardConfig(Base):
     # services/boardgame_shop.maybe_refresh_shop.
     shop_refreshed_at = Column(DateTime, nullable=True)
     shop_refreshed_turn = Column(Integer, nullable=True)
+    # web61a: the scheduled wall-clock time of the NEXT time-based shop restock
+    # (refresh_mode 'hours'/'days'). Lets refresh_random jitter each interval to
+    # an unpredictable moment while staying stable between reads. NULL = the
+    # time-based clock has not started (turns mode / no cadence uses the
+    # shop_refreshed_* markers instead). See boardgame_shop.maybe_refresh_shop.
+    shop_next_refresh_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
 

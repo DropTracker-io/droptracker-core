@@ -177,6 +177,10 @@ def shop_refresh_due(mode: str, interval: int, refreshed_at, refreshed_turn,
         if refreshed_at is None:
             return False
         return (now - refreshed_at) >= timedelta(hours=interval)
+    if mode == "days":
+        if refreshed_at is None:
+            return False
+        return (now - refreshed_at) >= timedelta(days=interval)
     if mode == "turns":
         if refreshed_turn is None:
             return False
@@ -192,15 +196,48 @@ def _max_turn(session, event_id: int) -> int:
     return max((int(p.turns_completed or 0) for p in rows), default=0)
 
 
+def _restock_rotation(session, event_id: int) -> None:
+    """Re-open every capped rotation row's stock to its ``stock_per_refresh`` —
+    the items that could sell out return to the shelf. Uncapped items
+    (stock_per_refresh is None) are untouched (they never ran out)."""
+    from db.models import EventShopRotation
+
+    rows = (session.query(EventShopRotation)
+            .filter(EventShopRotation.event_id == event_id)
+            .with_for_update().all())
+    for r in rows:
+        if r.stock_per_refresh is not None:
+            r.stock = r.stock_per_refresh
+
+
+def _time_refresh_delta(mode: str, interval: int, randomize: bool,
+                        rng: Optional[random.Random] = None) -> timedelta:
+    """The wall-clock gap to the next time-based restock. ``randomize`` (the
+    leader's refresh_random) jitters it to 50–150 % of the base so the exact
+    reset moment is unpredictable; otherwise it is exactly ``interval``
+    hours/days."""
+    unit = timedelta(days=1) if mode == "days" else timedelta(hours=1)
+    base = unit * max(1, int(interval))
+    if randomize:
+        factor = (rng or random).uniform(0.5, 1.5)
+        return timedelta(seconds=max(1.0, base.total_seconds() * factor))
+    return base
+
+
 def maybe_refresh_shop(session, event_id: int,
                        settings: Optional[dict] = None) -> bool:
-    """Restock every rotation row's ``stock`` to its ``stock_per_refresh`` when
-    a refresh is due (per ``settings.shop.refresh_mode``/``refresh_interval``).
-    Idempotent + lazy: safe to call from every shop read/buy. Commits its own
-    restock (the read paths that call it — GET shop — do not otherwise commit),
-    so the fresh stock persists. No-op (no commit) when not due. Returns True
-    iff it restocked."""
-    from db.models import EventBoardConfig, EventShopRotation
+    """Restock every capped rotation row to its ``stock_per_refresh`` when a
+    refresh is due, per ``settings.shop`` (refresh_mode turns/hours/days,
+    refresh_interval, refresh_random). Idempotent + lazy: safe to call from
+    every shop read/buy; commits its own restock (read paths don't otherwise
+    commit) so fresh stock persists; no-op (no commit) when not due. Returns
+    True iff it restocked.
+
+    - ``turns``: due when the max team turn advanced ``refresh_interval`` since
+      the last restock (``shop_refreshed_turn``) — deterministic.
+    - ``hours``/``days``: scheduled at ``shop_next_refresh_at`` so a
+      ``refresh_random`` jitter stays stable between reads."""
+    from db.models import EventBoardConfig
 
     settings = settings or load_board_settings(session, event_id)
     shop = settings.get("shop") or {}
@@ -209,54 +246,69 @@ def maybe_refresh_shop(session, event_id: int,
         interval = int(shop.get("refresh_interval") or 0)
     except (TypeError, ValueError):
         interval = 0
-    if mode not in ("turns", "hours") or interval <= 0:
+    if mode not in ("turns", "hours", "days") or interval <= 0:
         return False
+    randomize = bool(shop.get("refresh_random"))
 
     config = (session.query(EventBoardConfig)
               .filter(EventBoardConfig.event_id == event_id).first())
     if config is None:
         return False
     now = datetime.now()
-    current_turn = _max_turn(session, event_id) if mode == "turns" else 0
 
-    # Baseline: the first observation after a refresh cadence is enabled just
-    # starts the clock (no restock) so the interval counts forward from now.
-    if (mode == "hours" and config.shop_refreshed_at is None) or \
-            (mode == "turns" and config.shop_refreshed_turn is None):
+    if mode == "turns":
+        current_turn = _max_turn(session, event_id)
+        # Baseline: the first observation just starts the clock (no restock).
+        if config.shop_refreshed_turn is None:
+            locked = (session.query(EventBoardConfig)
+                      .filter(EventBoardConfig.event_id == event_id)
+                      .with_for_update().first())
+            if locked is not None and locked.shop_refreshed_turn is None:
+                locked.shop_refreshed_turn = current_turn
+                locked.shop_refreshed_at = now
+                session.commit()
+            return False
+        if (current_turn - int(config.shop_refreshed_turn or 0)) < interval:
+            return False
+        # Due: re-check under a row lock (another reader may have beaten us).
         locked = (session.query(EventBoardConfig)
                   .filter(EventBoardConfig.event_id == event_id)
                   .with_for_update().first())
-        if locked is not None and (
-                (mode == "hours" and locked.shop_refreshed_at is None) or
-                (mode == "turns" and locked.shop_refreshed_turn is None)):
+        if locked is None:
+            return False
+        current_turn = _max_turn(session, event_id)
+        if (current_turn - int(locked.shop_refreshed_turn or 0)) < interval:
+            return False
+        _restock_rotation(session, event_id)
+        locked.shop_refreshed_turn = current_turn
+        locked.shop_refreshed_at = now
+        session.commit()
+        return True
+
+    # hours / days — scheduled restock via shop_next_refresh_at (so a random
+    # jitter is picked once and stays stable between reads).
+    if config.shop_next_refresh_at is None:
+        locked = (session.query(EventBoardConfig)
+                  .filter(EventBoardConfig.event_id == event_id)
+                  .with_for_update().first())
+        if locked is not None and locked.shop_next_refresh_at is None:
             locked.shop_refreshed_at = now
-            locked.shop_refreshed_turn = current_turn
+            locked.shop_next_refresh_at = now + _time_refresh_delta(
+                mode, interval, randomize)
             session.commit()
         return False
-
-    if not shop_refresh_due(mode, interval, config.shop_refreshed_at,
-                            config.shop_refreshed_turn, now, current_turn):
+    if now < config.shop_next_refresh_at:
         return False
-
-    # Due: re-check under a row lock (another reader may have beaten us), then
-    # restock every capped rotation row.
     locked = (session.query(EventBoardConfig)
               .filter(EventBoardConfig.event_id == event_id)
               .with_for_update().first())
-    if locked is None:
+    if locked is None or (locked.shop_next_refresh_at is not None
+                          and now < locked.shop_next_refresh_at):
         return False
-    current_turn = _max_turn(session, event_id) if mode == "turns" else 0
-    if not shop_refresh_due(mode, interval, locked.shop_refreshed_at,
-                            locked.shop_refreshed_turn, now, current_turn):
-        return False
-    rows = (session.query(EventShopRotation)
-            .filter(EventShopRotation.event_id == event_id)
-            .with_for_update().all())
-    for r in rows:
-        if r.stock_per_refresh is not None:
-            r.stock = r.stock_per_refresh
+    _restock_rotation(session, event_id)
     locked.shop_refreshed_at = now
-    locked.shop_refreshed_turn = current_turn
+    locked.shop_next_refresh_at = now + _time_refresh_delta(
+        mode, interval, randomize)
     session.commit()
     return True
 
@@ -599,7 +651,8 @@ def use_item(session, redis_conn, event_id: int, team_id: int,
         })
     except Exception:
         pass
-    return {"effect": item.effect, **(result or {})}
+    return {"effect": item.effect, "item_name": item.name, "item_key": item.key,
+            "item_type": item.item_type, **(result or {})}
 
 
 # --------------------------------------------------------------------------- #

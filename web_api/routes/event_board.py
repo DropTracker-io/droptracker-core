@@ -85,8 +85,9 @@ _WIN_RULES = ("finish_tile",)  # P1; threshold/time-boxed variants later
 _WIN_TIEBREAKS = ("score", "coins")
 # Tile-bound effect consumption modes (services/boardgame_effects.BREAK_MODES).
 _EFFECT_BREAK_MODES = ("pass", "land", "both")
-# Per-event shop stock refresh cadence (web50a; DEFAULT_BOARD_SETTINGS.shop).
-_SHOP_REFRESH_MODES = ("none", "turns", "hours")
+# Per-event shop stock refresh cadence (DEFAULT_BOARD_SETTINGS.shop). "days"
+# added web61a for the "restock every X days" ask; "turns"/"hours" predate it.
+_SHOP_REFRESH_MODES = ("none", "turns", "hours", "days")
 
 
 def _clean_int(value, lo, hi, name):
@@ -212,6 +213,8 @@ def _validate_settings_patch(body: dict) -> dict:
         if "refresh_interval" in shop:
             sh["refresh_interval"] = _clean_int(
                 shop["refresh_interval"], 0, 100000, "shop.refresh_interval")
+        if "refresh_random" in shop:
+            sh["refresh_random"] = bool(shop["refresh_random"])
         if sh:
             out["shop"] = sh
 
@@ -335,7 +338,62 @@ def _tile_row(t: EventBoardTile, task_labels: dict) -> dict:
     }
 
 
-def _position_row(s, pos: EventBoardPosition, team: EventTeam) -> dict:
+# Team-bound live effects (target_team_id set) → how the player view labels
+# them. Tile-bound roadblocks are handled by _active_tile_effects; these are the
+# buffs/debuffs that sit on a TEAM (U2 — so a player can see they're frozen,
+# shielded, boosted, …). icon is a plain emoji; kind drives the badge tone.
+_TEAM_EFFECT_META = {
+    "freeze_opponent": ("Frozen", "debuff", "❄️"),
+    "shield": ("Shield armed", "buff", "\U0001F6E1️"),
+    "ward": ("Ward armed", "buff", "\U0001F9FF"),
+    "boost_coins": ("Coin boost", "buff", "✨"),
+    "extra_dice": ("Extra dice", "buff", "\U0001F3B2"),
+    "choose_roll": ("Chosen roll", "buff", "\U0001F3AF"),
+    "coin_toll": ("Coin toll armed", "buff", "\U0001F4B0"),
+}
+
+
+def _team_effects_by_team(s, event_id: int) -> dict:
+    """All active team-bound effects for the event, grouped by target team, so
+    _position_row can attach ``active_effects`` without an N+1 query."""
+    from db.models import EventBoardEffect
+
+    rows = (s.query(EventBoardEffect)
+            .filter(EventBoardEffect.event_id == event_id,
+                    EventBoardEffect.status == "active",
+                    EventBoardEffect.target_team_id.isnot(None),
+                    EventBoardEffect.effect_type.in_(list(_TEAM_EFFECT_META)))
+            .all())
+    grouped: dict = {}
+    for r in rows:
+        grouped.setdefault(int(r.target_team_id), []).append(r)
+    return grouped
+
+
+def _active_effects_for(effect_rows: list) -> list:
+    """Render team-bound effect rows into the compact ``active_effects`` list
+    the board view badges (frozen ❄️ / shield 🛡 / boost ✨ …)."""
+    out = []
+    for e in effect_rows or []:
+        meta = _TEAM_EFFECT_META.get(e.effect_type)
+        if not meta:
+            continue
+        label, kind, icon = meta
+        detail = None
+        if e.effect_type == "freeze_opponent":
+            try:
+                cfg = json.loads(e.effect_config or "{}")
+                remaining = int(cfg.get("remaining", cfg.get("turns", 1)))
+                detail = f"{remaining} roll{'s' if remaining != 1 else ''} left"
+            except (TypeError, ValueError):
+                detail = None
+        out.append({"effect_type": e.effect_type, "label": label,
+                    "kind": kind, "icon": icon, "detail": detail})
+    return out
+
+
+def _position_row(s, pos: EventBoardPosition, team: EventTeam,
+                  effects_by_team: dict = None) -> dict:
     task = None
     if pos.current_task_id:
         t = s.query(EventTask).filter(EventTask.id == pos.current_task_id).first()
@@ -381,6 +439,8 @@ def _position_row(s, pos: EventBoardPosition, team: EventTeam) -> dict:
         "current_task": task,
         "last_roll": last_roll,
         "pending_choice": pending_choice,
+        "active_effects": _active_effects_for(
+            (effects_by_team or {}).get(pos.team_id, [])),
         "mercy_deadline": (int(pos.mercy_deadline.timestamp())
                            if pos.mercy_deadline else None),
     }
@@ -452,6 +512,7 @@ def _board_payload(s, ev) -> dict:
              .filter(EventTeam.event_id == ev.id).all()}
     positions = (s.query(EventBoardPosition)
                  .filter(EventBoardPosition.event_id == ev.id).all())
+    effects_by_team = _team_effects_by_team(s, ev.id)
 
     return {
         "event_id": ev.id,
@@ -462,7 +523,8 @@ def _board_payload(s, ev) -> dict:
         "tiles": [_tile_row(t, task_labels) for t in tiles],
         "finish_idx": finish_idx(tiles),
         "positions": [
-            _position_row(s, p, teams.get(p.team_id)) for p in positions
+            _position_row(s, p, teams.get(p.team_id), effects_by_team)
+            for p in positions
         ],
         "effects": _active_tile_effects(s, ev.id),
     }
@@ -900,6 +962,33 @@ async def roll_board(event_id: int):
                                    settings=settings, acted_by_user_id=user_id)
             if summary is None:
                 abort_problem(409, "Roll unavailable", "The board is not rollable.")
+            # N1: manual rolls announce to Discord too (auto mode already
+            # enqueues event_board_turn from the apply path). Reuses the existing
+            # type + layout; a winning roll also fires its "reached the finish!"
+            # embed. Best-effort — a notification hiccup must not fail the roll.
+            try:
+                from services import event_engine, event_lifecycle as _lc
+
+                rep = _lc._representative_player_id(s, ev.id)
+                if rep is not None:
+                    team_row = (s.query(EventTeam)
+                                .filter(EventTeam.id == team_id).first())
+                    dice = summary.get("dice") or []
+                    event_engine._enqueue_notification(
+                        s, "event_board_turn", event_engine._event_to_dict(ev),
+                        rep, {
+                            "team_id": team_id,
+                            "team_name": getattr(team_row, "name", None),
+                            "dice": dice,
+                            "dice_str": " + ".join(str(d) for d in dice) or "?",
+                            "tile_from": summary.get("from"),
+                            "tile_to": summary.get("to"),
+                            "turn": summary.get("turn"),
+                            "won": bool(summary.get("won")),
+                            "next_task_label": summary.get("task_label"),
+                        })
+            except Exception:
+                pass
             won = bool(summary.get("won"))
             if won:
                 from services import event_lifecycle
@@ -1154,6 +1243,62 @@ async def buy_board_item(event_id: int):
     return private_no_store(jsonify(result))
 
 
+# Offensive effects worth a Discord skirmish post (coin_toll is a self-buff
+# announced on the roll, not a direct attack — omitted here).
+_BOARD_ACTION_VERBS = {
+    "freeze_opponent": "❄️ froze",
+    "knockback": "\U0001F4A5 knocked back",
+    "steal_item": "\U0001F99D stole an item from",
+    "reroll_opponent_task": "\U0001F52E rerolled the task of",
+}
+
+
+def _maybe_enqueue_board_action(s, ev, actor_team_id: int, result: dict) -> None:
+    """Announce an offensive item hit (freeze/knockback/steal/reroll-opponent),
+    or a defense that absorbed one, as event_board_action so the PvP layer is
+    visible on Discord (N2). Best-effort — never fails the item use."""
+    effect = (result or {}).get("effect")
+    target_id = (result or {}).get("target_team_id")
+    if effect not in _BOARD_ACTION_VERBS or not target_id:
+        return
+    try:
+        from services import event_engine, event_lifecycle as _lc
+
+        rep = _lc._representative_player_id(s, ev.id)
+        if rep is None:
+            return
+        names = {
+            t.id: t.name for t in s.query(EventTeam)
+            .filter(EventTeam.id.in_([actor_team_id, int(target_id)])).all()
+        }
+        actor = names.get(actor_team_id) or f"Team {actor_team_id}"
+        victim = names.get(int(target_id)) or f"Team {target_id}"
+        item_name = result.get("item_name") or "an item"
+        if result.get("absorbed"):
+            defense = result.get("absorbed_by") or "a defense"
+            action_line = (f"**{victim}** blocked **{actor}**'s **{item_name}** "
+                           f"with their {defense}! \U0001F6E1️")
+        else:
+            detail = ""
+            if effect == "freeze_opponent" and result.get("frozen_rolls"):
+                detail = f" for **{int(result['frozen_rolls'])}** rolls"
+            elif effect == "knockback" and result.get("tiles"):
+                detail = f" **{int(result['tiles'])}** tiles"
+            action_line = (f"**{actor}** {_BOARD_ACTION_VERBS[effect]} "
+                           f"**{victim}**{detail} with **{item_name}**.")
+        event_engine._enqueue_notification(
+            s, "event_board_action", event_engine._event_to_dict(ev), rep, {
+                "team_id": actor_team_id, "team_name": actor,
+                "target_team_id": int(target_id), "target_team_name": victim,
+                "item_name": item_name, "effect": effect,
+                "absorbed": bool(result.get("absorbed")),
+                "absorbed_by": result.get("absorbed_by"),
+                "action_line": action_line,
+            })
+    except Exception:
+        pass
+
+
 @event_board_bp.post("/events/<int:event_id>/board/items/<int:inventory_id>/use")
 async def use_board_item(event_id: int, inventory_id: int):
     user_id = current_user_id()
@@ -1194,6 +1339,8 @@ async def use_board_item(event_id: int, inventory_id: int):
                 action="event.board.item.use", target=str(ev.id),
                 after=f"team={team_id} inv={inventory_id} fx={result.get('effect')}",
             ))
+            # N2: surface offensive hits / absorbed attacks on Discord.
+            _maybe_enqueue_board_action(s, ev, team_id, result)
             # A movement item (advance / reroll_move) that reaches the finish
             # tile ends the event, mirroring the roll route.
             if result.get("won"):
@@ -1295,6 +1442,7 @@ def _shop_config_payload(s, event_id: int) -> dict:
     return {
         "refresh_mode": shop.get("refresh_mode") or "none",
         "refresh_interval": int(shop.get("refresh_interval") or 0),
+        "refresh_random": bool(shop.get("refresh_random")),
         "items": items,
     }
 

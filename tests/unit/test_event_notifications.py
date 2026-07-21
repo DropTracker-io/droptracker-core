@@ -25,6 +25,7 @@ ALL_TYPES = (
     "event_activation_failed", "event_end_failed", "event_multi_clan_skipped",
     "event_signup_prompt", "event_task_progress",
     "event_board_turn", "event_pot", "event_board_roll_prompt",
+    "event_board_action",
     "event_sweep_item", "event_sweep_group", "event_sweep_set",
 )
 
@@ -49,6 +50,7 @@ class TestKindMapping:
             "event_task_progress": "completions",
             "event_board_turn": "completions",
             "event_board_roll_prompt": "completions",
+            "event_board_action": "completions",
             "event_sweep_item": "completions",
             "event_sweep_group": "completions",
             "event_sweep_set": "completions",

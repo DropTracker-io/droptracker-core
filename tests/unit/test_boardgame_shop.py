@@ -91,7 +91,7 @@ EventShopRotation = _model("EventShopRotation", [
     "available_until_turn"])
 EventBoardConfig = _model("EventBoardConfig", [
     "id", "event_id", "settings", "background_url", "bg_width", "bg_height",
-    "shop_refreshed_at", "shop_refreshed_turn"])
+    "shop_refreshed_at", "shop_refreshed_turn", "shop_next_refresh_at"])
 EventTask = _model("EventTask", [
     "id", "event_id", "type", "label", "target", "target_value", "points",
     "requires_confirmation", "config", "visibility", "difficulty"])
@@ -882,3 +882,31 @@ class TestAvailabilityAndRefresh:
         cfg = EventBoardConfig(event_id=E, settings=None)
         s = FakeSession(EventBoardConfig=[cfg], EventShopRotation=[])
         assert shop.maybe_refresh_shop(s, E, {"shop": {"refresh_mode": "none"}}) is False
+
+    def test_days_mode_baseline_then_restock(self):
+        import datetime as dt
+        cfg = EventBoardConfig(event_id=E, settings=None,
+                               shop_refreshed_at=None, shop_refreshed_turn=None,
+                               shop_next_refresh_at=None)
+        rot = EventShopRotation(id=1, event_id=E, shop_item_id=1,
+                                price_override=None, stock=0, enabled=True,
+                                stock_per_refresh=5, per_team_cap=None)
+        s = FakeSession(EventBoardConfig=[cfg], EventShopRotation=[rot],
+                        EventBoardPosition=[])
+        settings = {"shop": {"refresh_mode": "days", "refresh_interval": 2}}
+        # First observation schedules the next reset ~2 days out (no restock).
+        assert shop.maybe_refresh_shop(s, E, settings) is False
+        assert rot.stock == 0
+        assert cfg.shop_next_refresh_at is not None
+        # Pretend that moment has arrived → restock + reschedule.
+        cfg.shop_next_refresh_at = dt.datetime(2000, 1, 1)
+        assert shop.maybe_refresh_shop(s, E, settings) is True
+        assert rot.stock == 5
+        assert cfg.shop_next_refresh_at > dt.datetime(2000, 1, 1)
+
+    def test_random_jitter_delta_within_band(self):
+        import datetime as dt
+        base = shop._time_refresh_delta("days", 4, False)
+        assert base == dt.timedelta(days=4)
+        jit = shop._time_refresh_delta("days", 4, True, rng=random.Random(1))
+        assert dt.timedelta(days=2) <= jit <= dt.timedelta(days=6)  # 50–150%

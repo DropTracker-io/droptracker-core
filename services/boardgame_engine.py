@@ -56,11 +56,16 @@ DEFAULT_BOARD_SETTINGS = {
         "default": 10,           # tasks with no difficulty
         "starting": 0,
     },
-    # Shop refresh cadence (web50a): "none" = stock never resets; "turns" =
-    # restock every ``refresh_interval`` global turns; "hours" = every
-    # ``refresh_interval`` hours. Defaults keep the pre-web50a behavior (no
-    # refresh, unlimited stock unless a rotation row caps it).
-    "shop": {"enabled": True, "refresh_mode": "none", "refresh_interval": 0},
+    # Shop restock cadence: "none" = stock never resets; "turns" = restock every
+    # ``refresh_interval`` global turns; "hours"/"days" = every that many hours
+    # or days of wall-clock. A restock re-opens every capped item's stock (the
+    # ones that could sell out) to its stock_per_refresh, so bought-out power-ups
+    # return. ``refresh_random`` (time modes only) jitters each interval to a
+    # random moment in 50–150% of the base so players can't time the restock.
+    # Defaults keep the original behavior (no refresh, unlimited stock unless a
+    # rotation row caps it).
+    "shop": {"enabled": True, "refresh_mode": "none", "refresh_interval": 0,
+             "refresh_random": False},
     "items": {
         "enabled_item_ids": None,   # None = all active catalog items
         "disabled_effects": [],

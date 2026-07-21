@@ -60,6 +60,9 @@ KIND_FOR_TYPE = {
     # not need every team's roll nag), the per-team channel default is ON
     # (services/event_team_discord.DEFAULT_TEAM_MESSAGE_TOGGLES).
     "event_board_roll_prompt": "completions",
+    # Board game (web61a): an offensive/defensive item hit a rival (or was
+    # blocked) — the PvP layer made visible.
+    "event_board_action": "completions",
 }
 
 EVENT_NOTIFICATION_TYPES = tuple(KIND_FOR_TYPE)
@@ -87,6 +90,7 @@ _COLORS = {
     "event_task_progress": 0x3498DB,  # informational blue — progress, not victory
     "event_board_turn": 0xF1C40F,  # dice gold — movement on the board
     "event_board_roll_prompt": 0xF1C40F,  # same dice family — a nudge to roll
+    "event_board_action": 0xE74C3C,  # combat red — an item struck a rival
 }
 
 
@@ -116,6 +120,7 @@ DEFAULT_MESSAGE_TOGGLES = {
     "event_end_failed": True,
     "event_board_turn": True,
     "event_board_roll_prompt": False,  # team-channel first; opt-in for main channels
+    "event_board_action": True,  # PvP moments are the point — announce by default
     # Loot Sweep verbosity: subset + whole-set completions announce by default;
     # per-item receipts are opt-in (a game-wide sweep would flood the channel).
     "event_sweep_item": False,
@@ -760,6 +765,17 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             field("Wallet", f"`{int(data['coin_balance'])} coins`")
         if data.get("turn") is not None:
             field("Turn", f"`#{int(data['turn'])}`")
+
+    elif notification_type == "event_board_action":
+        # A precomputed action_line (built at enqueue) keeps both the embed and
+        # the V2 layout renderer to a single, always-present placeholder.
+        if data.get("absorbed"):
+            spec["title"] = "\U0001F6E1️ Attack blocked!"
+        else:
+            spec["title"] = "⚔️ Board skirmish"
+        spec["description"] = (
+            data.get("action_line")
+            or f"**{team or 'A team'}** used **{data.get('item_name') or 'an item'}**.")
 
     elif notification_type == "event_board_roll_prompt":
         spec["title"] = f"\U0001F3B2 {team or 'Your team'} can roll!"

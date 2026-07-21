@@ -305,6 +305,13 @@ DEFAULT_LAYOUTS = {
             _EVENT_BUTTON,
         ],
     },
+    "event_board_action": {
+        "accent_color": "#E74C3C",
+        "blocks": [
+            {"type": "text", "content": "### ⚔️ Board skirmish"},
+            {"type": "text", "content": "{action_line}"},
+        ],
+    },
     "event_board_roll_prompt": {
         "accent_color": "#F1C40F",
         "blocks": [

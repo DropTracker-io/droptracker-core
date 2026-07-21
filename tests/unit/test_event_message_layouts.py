@@ -302,7 +302,7 @@ class TestDefaultLayouts:
             "event_multi_clan_skipped",
             "event_signup_prompt", "event_board",
             "event_board_turn", "event_board_win", "event_pot",
-            "event_board_roll_prompt",
+            "event_board_roll_prompt", "event_board_action",
             "event_sweep_item", "event_sweep_group", "event_sweep_set",
         }
         assert set(ml.DEFAULT_LAYOUTS) == expected
