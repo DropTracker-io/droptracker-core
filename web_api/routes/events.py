@@ -1223,6 +1223,15 @@ async def get_event_players(event_id: int):
 
             players = rank_players(
                 contrib, points, membership, names, items_by_pid)[:_PLAYERS_LIMIT]
+            # Honor the privacy opt-out: a player who hid themselves (or whose
+            # linked user did) is shown as "Hidden player" with no id/link to a
+            # non-admin viewer — same masking the completion-history read uses.
+            if not _is_event_admin(s, viewer_id, ev):
+                hidden = hidden_player_ids()
+                for row in players:
+                    if row["player_id"] in hidden:
+                        row["player_name"] = "Hidden player"
+                        row["player_id"] = None
             return {"event": _summary(ev), "players": players, "totals": totals}
 
     payload = await asyncio.to_thread(_load)
@@ -1247,6 +1256,11 @@ async def get_event_player(event_id: int, player_id: int):
                 return None
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
                 _deny_restricted(ev, viewer_id)
+                return None
+            # Privacy opt-out: a hidden player's drill-down isn't exposed to a
+            # non-admin (the list already masks them to an unlinkable "Hidden
+            # player", so this is only reachable by guessing the id).
+            if not _is_event_admin(s, viewer_id, ev) and player_id in hidden_player_ids():
                 return None
 
             name = (
