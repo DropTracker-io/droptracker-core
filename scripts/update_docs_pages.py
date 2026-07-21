@@ -832,6 +832,114 @@ Use them to make lines more achievable or to give everyone a head start.
 """,
     ),
 
+    "events-board": (
+        "Board game events",
+        "How the dice-board event type works: turns, coins, the power-up shop, and every item.",
+        "Events", 6, """
+# Board game events
+
+A **board game** event turns your task list into a race across a tile board. Every
+team has a game piece; completing the task on your current tile earns **coins** and
+lets you **roll the dice** to move forward. First team to reach the **finish tile**
+wins. Along the way you spend coins in a **power-up shop** to speed yourself up — or
+to sabotage your rivals.
+
+> Board game is a newer event type. If you don't see it when creating an event, ask
+> a DropTracker admin to enable it for your group.
+
+## How a turn works
+
+Play is **not** strictly turn-based — every team plays at the same time, at their
+own pace. Your team's loop is:
+
+1. **Land on a tile.** Each tile has a difficulty (Air ▸ Water ▸ Earth ▸ Fire, easy
+   → elite). Landing rolls a random task of that difficulty from the event's task
+   pool, so different teams get different tasks.
+2. **Complete the task.** Progress is tracked automatically from your drops / KC /
+   collection log, exactly like any other event task.
+3. **Earn coins.** Harder tiles pay more (Air 10 → Fire 50 by default).
+4. **Roll the dice** and move that many tiles forward.
+5. Repeat until someone reaches the finish.
+
+**Auto vs. manual roll.** Your group leader chooses whether the dice roll
+automatically the moment you finish a task, or whether a team member has to press
+**Roll** each turn. Either way, if you ever get stuck the game keeps itself moving —
+rest tiles and stalls are handled for you.
+
+**Stuck on an impossible task?** The optional **mercy rule** auto-completes a task
+that's been open too long (for no coins) so bad luck can't freeze your team.
+
+## Coins & the shop
+
+Coins are a per-event currency — they are **not** real GP and don't affect the
+prize pot. You earn them by completing tasks and spend them in the **shop** on
+power-ups. Buy an item and it goes into your **bag**; use it whenever you like.
+
+- **Cooldowns.** Each item has a *type* (movement, offensive, defensive, economy,
+  utility). Using one item of a type briefly locks the other items of that type —
+  the shop shows when each becomes usable again.
+- **Restocking.** Some events limit an item's stock. If your leader set a restock
+  cadence, the shop refills bought-out items every so many turns/hours/days (at a
+  fixed or random time).
+- **Refunds.** If a leader disables an item after you bought it, its coins are
+  refunded automatically the next time you try to use it.
+
+## Power-up glossary
+
+**Move faster**
+- **Teleport tablet** — jump forward without doing a task.
+- **Extra dice / Chosen roll** — add a die to your next roll, or pick its value.
+- **Reroll move** — undo your last move and roll again.
+
+**Change your task**
+- **Reroll scroll** — swap your current task for another of the same tier.
+- **Escape crystal** — reroll drawing from one tier *easier*.
+- **Choose task** — draw a few candidates and pick one.
+- **Skip token** — finish the current task instantly (no coins).
+
+**Economy**
+- **Coin chest** — triple the coins from your next completed task.
+- **Gloves of Silence** — your next roll tolls coins from every rival you pass.
+
+**Attack a rival** (pick a target team)
+- **Ice barrage** — freeze a team: their next rolls move 0 tiles.
+- **Bandos godsword** — knock a team back several tiles.
+- **Mischievous Rat** — steal a random item from a team's bag.
+- **Intricate pouch** — reroll a rival's current task.
+
+**Defend yourself**
+- **Spirit shield** — absorbs the next attack against you.
+- **Ward scroll / Rat poison** — absorbs specific kinds of attack.
+- **Prayer potion (cleanse)** — clears a freeze and other debuffs off your team.
+- **Dinh's Bulwark** — drop a roadblock on a tile; the next team to cross it is
+  stopped (and may lose a turn).
+
+When you're attacked — frozen, knocked back, robbed — you'll see it on the board and
+in your team's Discord channel, and a badge shows any effect currently on you
+(❄️ frozen, 🛡 shielded, ✨ boosted, and so on).
+
+## For group leaders
+
+Everything is configurable per event from the **Board** and **Board settings**
+sections of your draft:
+
+- **Movement** — dice count/sides or a fixed step; auto or manual roll; who may
+  roll.
+- **Board** — upload art or **generate a board** in one click; set each tile's
+  difficulty (or pin a specific task); choose how tiles render (rune icon / outline
+  / invisible).
+- **Economy** — coins on/off, per-difficulty rewards, starting coins.
+- **Shop** — turn the shop on/off, enable/disable individual items, set prices,
+  stock and per-team caps, and the restock cadence.
+- **Mercy & win** — the anti-stall timer, and the win rule (first to the finish,
+  ties broken by task score).
+
+Set a board's difficulties so every tier you use has tasks in the pool, add at least
+a start and a finish tile, and give each team a piece — then activate. The layout
+locks at activation; settings stay editable.
+""",
+    ),
+
     "events-teams": (
         "Teams, sign-ups & clan vs clan",
         "How players end up on teams, the sign-up pool, and clan-vs-clan events.",
