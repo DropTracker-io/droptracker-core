@@ -52,10 +52,14 @@ from services.boardgame_engine import (
 # choose_task's distinct-tier draw walk this ordering.
 _DIFFICULTY_ORDER = ("air", "water", "earth", "fire")
 
-# Effect types that count as a NEGATIVE effect on the TARGET team — cleared by
-# the cleanse power-up. (coin_toll is armed on the MOVER, never targets a team,
-# so it never matches here; listed for intent/forward-compat.)
-_NEGATIVE_EFFECTS = ("freeze_opponent", "coin_toll")
+# Effect types that count as a NEGATIVE effect ON the target team — cleared by
+# the cleanse power-up. Only freeze_opponent qualifies: it is the sole effect a
+# rival arms against another team (target_team_id == the VICTIM). coin_toll,
+# boost_coins, extra_dice and choose_roll are self-buffs armed with
+# target_team_id == the OWNER, so they must NOT be listed here — cleanse filters
+# on target_team_id == team_id and would otherwise destroy the caster's own
+# armed buff for no benefit (E1). A roadblock stall is lifted separately.
+_NEGATIVE_EFFECTS = ("freeze_opponent",)
 
 
 class ShopError(Exception):
@@ -112,12 +116,16 @@ def _absorb_defense(session, event_id: int, target_team_id: int,
     freeze behavior); wards second."""
     from db.models import EventBoardEffect
 
+    # SH5: lock the defense rows so two simultaneous attacks on the same team
+    # can't both slip past a single shield/ward (each reads it 'active', both
+    # apply). The offensive handlers also lock the target position, so attacks
+    # against one team already serialize; this covers the defense-consume race.
     shield = (session.query(EventBoardEffect)
               .filter(EventBoardEffect.event_id == event_id,
                       EventBoardEffect.target_team_id == target_team_id,
                       EventBoardEffect.effect_type == "shield",
                       EventBoardEffect.status == "active")
-              .first())
+              .with_for_update().first())
     if shield is not None:
         shield.status = "consumed"
         session.flush()
@@ -129,7 +137,7 @@ def _absorb_defense(session, event_id: int, target_team_id: int,
                      EventBoardEffect.target_team_id == target_team_id,
                      EventBoardEffect.effect_type == "ward",
                      EventBoardEffect.status == "active")
-             .all())
+             .with_for_update().all())
     for ward in wards:
         blocks = _cfg(ward.effect_config).get("blocks")
         if not isinstance(blocks, list):
@@ -408,6 +416,14 @@ def buy_item(session, event_id: int, team_id: int, shop_item_id: int,
     if offer is None:
         raise ShopError(404, "Not for sale",
                         "That item is not available in this event's shop.")
+    # SH2: never debit coins for an item whose effect has no live handler — the
+    # UI already greys these out, but a stale/crafted request must not burn coins
+    # on a power-up that can never be used. (All effects are live today; this is
+    # the server-side backstop the client-only check was missing.)
+    if not offer.get("usable_now", True):
+        raise ShopError(409, "Not yet usable",
+                        "That power-up's effect isn't available yet — "
+                        "no coins were spent.")
 
     team = (session.query(EventTeam)
             .filter(EventTeam.id == team_id)
@@ -462,6 +478,29 @@ def buy_item(session, event_id: int, team_id: int, shop_item_id: int,
     return {"inventory_id": inv.id, "coins": new_balance, "price_paid": price}
 
 
+def _refund_unusable(session, event_id: int, team_id: int, inv,
+                     reason: str) -> dict:
+    """Credit a purchase's coins back and close the inventory row when the item
+    can no longer be used — its effect was disabled by the event's kill switch
+    mid-event, or it has no live handler (SH1). Without this, coins sunk into a
+    now-dead item were stranded forever. Returns the use-route result dict."""
+    from db.models import EventTeam
+
+    price = int(getattr(inv, "price_paid", 0) or 0)
+    inv.status = "refunded"
+    inv.used_at = datetime.now()
+    balance = None
+    if price > 0:
+        team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+        if team is not None:
+            balance = award_coins(session, event_id, team, price, "refund",
+                                  ref_type="refund", ref_id=inv.id,
+                                  note=f"unusable:{reason}")
+    session.flush()
+    return {"refunded": True, "reason": reason, "price_refunded": price,
+            "coins": balance}
+
+
 def use_item(session, redis_conn, event_id: int, team_id: int,
              inventory_id: int, user_id: Optional[int],
              target: Optional[dict] = None,
@@ -495,16 +534,20 @@ def use_item(session, redis_conn, event_id: int, team_id: int,
     enabled_ids, disabled_effects = _item_kill_switches(settings)
     if (enabled_ids is not None and item.id not in enabled_ids) or \
             item.effect in disabled_effects:
-        raise ShopError(409, "Item disabled",
-                        "The event's settings have disabled this item.")
+        # The leader disabled this item after the team bought it — refund rather
+        # than strand the coins (SH1). inv was locked FOR UPDATE + re-checked
+        # 'owned' above, so the refund is race-safe.
+        return _refund_unusable(session, event_id, team_id, inv, "disabled")
     # Registry-driven dispatch: an implemented effect has a _use_<key>
     # handler in this module (uniform signature).
     spec = EFFECT_REGISTRY.get(item.effect)
     handler = (globals().get(f"_use_{item.effect}")
                if spec is not None and spec.implemented else None)
     if handler is None:
-        raise ShopError(409, "Not yet usable",
-                        "This power-up's effect arrives in a later update.")
+        # A bought item whose effect has no live handler (unimplemented/removed):
+        # refund instead of dead-ending the coins (SH1). Buying is already gated
+        # on usable_now, so this only fires if an effect is retired mid-event.
+        return _refund_unusable(session, event_id, team_id, inv, "unavailable")
 
     pos = (session.query(EventBoardPosition)
            .filter(EventBoardPosition.team_id == team_id)
@@ -747,8 +790,13 @@ def _use_advance(session, redis_conn, event_id, team_id, pos, item,
         pass
     steps = (rng or random).randint(1, sides)
     start = int(pos.tile_idx or 0)
+    old_task_id = pos.current_task_id
     summary = _move_piece(session, event_id, team_id, pos, tiles, start, steps,
                           settings, rng=rng)
+    # E3: a teleport abandons the current task without completing it — GC the
+    # replaced instance (guarded against a credited completion).
+    if old_task_id and old_task_id != pos.current_task_id:
+        _discard_task_instance(session, event_id, old_task_id)
     session.flush()
     # New instance task (or a finish) = matcher change.
     try:
@@ -828,8 +876,10 @@ def _use_freeze_opponent(session, redis_conn, event_id, team_id, pos, item,
     target_team = int(target_team)
     if target_team == team_id:
         raise ShopError(422, "Bad target", "You cannot freeze your own team.")
+    # SH5: lock the target position (see _resolve_offensive_target).
     tpos = (session.query(EventBoardPosition)
-            .filter(EventBoardPosition.team_id == target_team).first())
+            .filter(EventBoardPosition.team_id == target_team)
+            .with_for_update().first())
     if tpos is None or tpos.event_id != event_id:
         raise ShopError(404, "Bad target", "That team is not on this board.")
     if tpos.status == "finished":
@@ -922,8 +972,11 @@ def _resolve_offensive_target(session, event_id, team_id, target):
     target_team = int(target_team)
     if target_team == team_id:
         raise ShopError(422, "Bad target", "You cannot target your own team.")
+    # SH5: lock the target's position so concurrent offensive uses against the
+    # same team serialize (no double-steal / double-knockback lost updates).
     tpos = (session.query(EventBoardPosition)
-            .filter(EventBoardPosition.team_id == target_team).first())
+            .filter(EventBoardPosition.team_id == target_team)
+            .with_for_update().first())
     if tpos is None or tpos.event_id != event_id:
         raise ShopError(404, "Bad target", "That team is not on this board.")
     if tpos.status == "finished":
@@ -1336,12 +1389,17 @@ def _use_knockback(session, redis_conn, event_id, team_id, pos, item,
     except (TypeError, ValueError):
         pass
     old = int(tpos.tile_idx or 0)
+    old_task_id = tpos.current_task_id
     new = max(0, old - n)
     by_idx = {int(t.idx): t for t in tiles}
     tpos.tile_idx = new
     tpos.blocked_until_turn = None
     assign_tile_task(session, event_id, target_team, by_idx.get(new), tpos,
                      settings, rng=rng)
+    # E3: the task the target was working is abandoned — GC its instance +
+    # progress (guarded against a credited completion) instead of orphaning it.
+    if old_task_id and old_task_id != tpos.current_task_id:
+        _discard_task_instance(session, event_id, old_task_id)
     session.flush()
     try:
         from services.event_engine import publish_event_admin_bump

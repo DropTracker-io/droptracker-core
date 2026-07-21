@@ -9,6 +9,7 @@ import importlib.util
 import os
 import sys
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 _MODULE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -85,6 +86,48 @@ class TestSweepDue:
             NOW,
         )
         assert due == {"activate": [1, 6], "end": [3]}
+
+
+class TestBoardFinishRanking:
+    """W1: board-game standings must rank by who reached the finish tile, then
+    the tiebreak (default score) — NOT by task score alone, which could crown
+    (and pay the prize pot to) a team that never finished."""
+
+    @staticmethod
+    def _team(id, score=0, coins=0, name=None):
+        return SimpleNamespace(id=id, name=name or f"T{id}", score=score, coins=coins)
+
+    @staticmethod
+    def _pos(status="active", tile=0):
+        return SimpleNamespace(status=status, tile_idx=tile)
+
+    def test_finisher_beats_higher_score(self):
+        # T1 finished at the finish tile with a LOWER task score; T2 has a
+        # higher score but is still mid-board. T1 must rank first.
+        teams = [self._team(1, score=10), self._team(2, score=999)]
+        positions = {1: self._pos("finished", 20), 2: self._pos("active", 15)}
+        ranked = lc._rank_board_teams(teams, positions, ["score"])
+        assert [t.id for t in ranked] == [1, 2]
+
+    def test_tie_between_finishers_breaks_by_score(self):
+        teams = [self._team(1, score=30), self._team(2, score=80)]
+        positions = {1: self._pos("finished", 20), 2: self._pos("finished", 20)}
+        ranked = lc._rank_board_teams(teams, positions, ["score"])
+        assert [t.id for t in ranked] == [2, 1]   # both finished → higher score wins
+
+    def test_unfinished_ranked_by_progress_then_tiebreak(self):
+        teams = [self._team(1, score=5), self._team(2, score=5), self._team(3, score=99)]
+        positions = {1: self._pos("active", 12), 2: self._pos("active", 3),
+                     3: self._pos("active", 12)}
+        ranked = lc._rank_board_teams(teams, positions, ["score"])
+        # tile 12 teams (1,3) outrank tile 3 (team 2); among the two, higher score first.
+        assert [t.id for t in ranked] == [3, 1, 2]
+
+    def test_coins_tiebreak_when_configured(self):
+        teams = [self._team(1, score=5, coins=200), self._team(2, score=5, coins=50)]
+        positions = {1: self._pos("finished", 9), 2: self._pos("finished", 9)}
+        ranked = lc._rank_board_teams(teams, positions, ["coins", "score"])
+        assert [t.id for t in ranked] == [1, 2]   # more coins wins the tie
 
 
 class TestLifecycleError:

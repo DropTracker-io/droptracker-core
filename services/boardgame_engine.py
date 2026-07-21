@@ -76,7 +76,11 @@ DEFAULT_BOARD_SETTINGS = {
         },
     },
     "mercy": {"enabled": True, "base_hours": 24, "step_hours": 12},
-    "win": {"rule": "finish_tile", "tiebreak": ["coins", "score"]},
+    # Win = first team to reach the finish tile. ``tiebreak`` breaks ties among
+    # teams that have BOTH finished (or, at a manual end, ranks unfinished teams
+    # after the leader): the ordered token list is applied left→right by
+    # event_lifecycle.final_standings — "score" = task points, "coins" = wallet.
+    "win": {"rule": "finish_tile", "tiebreak": ["score"]},
 }
 
 # Tiles a rolled task may come from must be auto-evaluable — a rolled custom
@@ -341,6 +345,7 @@ def seed_positions(session, event) -> int:
         for p in session.query(EventBoardPosition)
         .filter(EventBoardPosition.event_id == event.id).all()
     }
+    coins_enabled = bool((settings.get("coins") or {}).get("enabled", True))
     starting = 0
     try:
         starting = max(0, int((settings.get("coins") or {}).get("starting") or 0))
@@ -356,9 +361,16 @@ def seed_positions(session, event) -> int:
         session.add(pos)
         session.flush()
         assign_tile_task(session, event.id, team.id, start_tile, pos, settings)
-        if starting:
+        # C4: the coins kill switch also suppresses the starting grant — a
+        # coinless event must not seed a wallet.
+        if starting and coins_enabled:
             award_coins(session, event.id, team, starting, "bonus",
                         ref_type="seed", note="starting coins")
+        # Auto mode: a rest/empty START tile (the usual tile_kind='start')
+        # leaves no live task and nothing to fire the first roll, so the team
+        # would sit forever at tile 0. Advance it off the start (P1a). No-op in
+        # manual mode and when tile 0 already assigned a task.
+        auto_advance(session, None, event.id, team.id, settings)
         seeded += 1
     session.flush()
     return seeded
@@ -412,8 +424,11 @@ def handle_board_completion(session, redis_conn, event: dict, task: dict,
 
     movement = settings.get("movement") or {}
     if (movement.get("trigger") or "manual") == "auto":
-        roll = perform_roll(session, redis_conn, event["id"], team_id,
-                            settings=settings, rng=rng)
+        # auto_advance rolls once and keeps rolling through rest tiles / stalls
+        # so the game can't strand itself (P1a); its last summary's ``won`` flag
+        # is what the consumer checks to end the event on a finish.
+        roll = auto_advance(session, redis_conn, event["id"], team_id,
+                            settings, rng=rng)
         if roll:
             board["roll"] = roll
     return board
@@ -465,15 +480,19 @@ def perform_roll(session, redis_conn, event_id: int, team_id: int,
     if forced is not None:
         faces = [int(forced)]
     else:
-        extra = _consume_extra_dice(session, event_id, team_id)
+        # extra_dice is meaningless in fixed_step mode — check the mode FIRST so
+        # the armed effect (and its type-cooldown) is not burned for nothing
+        # (E2). It is only drained when it can actually add dice.
         movement = settings.get("movement") or {}
-        if extra > 0 and movement.get("mode") != "fixed_step":
-            try:
-                sides = max(2, min(100, int(movement.get("dice_sides") or 6)))
-            except (TypeError, ValueError):
-                sides = 6
-            faces = list(faces) + [
-                (rng or random).randint(1, sides) for _ in range(extra)]
+        if movement.get("mode") != "fixed_step":
+            extra = _consume_extra_dice(session, event_id, team_id)
+            if extra > 0:
+                try:
+                    sides = max(2, min(100, int(movement.get("dice_sides") or 6)))
+                except (TypeError, ValueError):
+                    sides = 6
+                faces = list(faces) + [
+                    (rng or random).randint(1, sides) for _ in range(extra)]
 
     start = int(pos.tile_idx or 0)
     steps = sum(faces)
@@ -520,6 +539,48 @@ def perform_roll(session, redis_conn, event_id: int, team_id: int,
     except Exception:
         pass
     return summary
+
+
+def auto_advance(session, redis_conn, event_id: int, team_id: int,
+                 settings: dict, rng: Optional[random.Random] = None,
+                 max_rolls: int = 200) -> Optional[dict]:
+    """Auto-trigger duty (P1a): keep rolling while the team is *rollable* but
+    has no live task — a rest / empty-pool landing (``awaiting_roll`` with no
+    ``current_task_id``) or a roadblock stall (``blocked``) — so an ``auto``
+    game never dead-ends waiting for a manual roll that can never come (in auto
+    mode the roll route forbids member rolls, and mercy only sweeps ``active``).
+
+    Each iteration makes forward progress or serves exactly one stalled turn, so
+    the loop terminates at a task tile, the finish, or ``max_rolls`` (a guard
+    against an all-rest board). A no-op in ``manual`` mode (the players roll).
+    Returns the LAST roll summary — its ``won`` flag drives the caller's
+    end-event check (handle_board_completion → consumer, mercy_sweep → consumer).
+    ``redis_conn`` may be None (perform_roll publishes through the realtime
+    module's own client), so activation seeding can call this without a handle.
+    """
+    from db.models import EventBoardPosition
+
+    movement = settings.get("movement") or {}
+    if (movement.get("trigger") or "manual") != "auto":
+        return None
+    last: Optional[dict] = None
+    for _ in range(max(1, int(max_rolls))):
+        pos = (session.query(EventBoardPosition)
+               .filter(EventBoardPosition.team_id == team_id).first())
+        if pos is None or pos.event_id != event_id:
+            break
+        # 'active' (a task was drawn) or 'finished' → the chain is done. Only a
+        # taskless awaiting_roll or a blocked stall keeps it going.
+        if pos.status not in ("awaiting_roll", "blocked"):
+            break
+        roll = perform_roll(session, redis_conn, event_id, team_id,
+                            settings=settings, rng=rng)
+        if roll is None:
+            break
+        last = roll
+        if roll.get("won"):
+            break
+    return last
 
 
 def _consume_freeze_charge(session, event_id: int, team_id: int) -> bool:
@@ -878,8 +939,13 @@ def mercy_sweep(session, redis_conn, now: Optional[datetime] = None) -> list:
         pos.current_task_id = None
         pos.mercy_deadline = None
         session.flush()
+        won = False
         movement = settings.get("movement") or {}
         if (movement.get("trigger") or "manual") == "auto":
-            perform_roll(session, redis_conn, ev.id, pos.team_id, settings=settings)
-        swept.append({"event_id": ev.id, "team_id": pos.team_id})
+            # A mercy auto-roll can carry a team across the finish. Surface that
+            # so the caller ends the event — the old single perform_roll here
+            # discarded its summary, leaving a mercy-won game active forever (W2).
+            roll = auto_advance(session, redis_conn, ev.id, pos.team_id, settings)
+            won = bool(roll and roll.get("won"))
+        swept.append({"event_id": ev.id, "team_id": pos.team_id, "won": won})
     return swept

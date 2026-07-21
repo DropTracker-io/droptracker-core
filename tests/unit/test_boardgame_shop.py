@@ -619,6 +619,19 @@ class TestCleanse:
         assert freeze.status == "consumed"
         assert boost.status == "active"   # positive self-buff untouched
 
+    def test_cleanse_leaves_own_coin_toll_buff(self):
+        """E1 regression: coin_toll is armed on the owner (target_team_id ==
+        the caster), so it is a SELF-buff — cleanse must not destroy it."""
+        toll = _eff(id=3, target_team_id=1, effect_type="coin_toll",
+                    effect_config='{"coins_per_team": 25}')
+        pos = _pos(team=1, status="awaiting_roll")
+        s = FakeSession(EventBoardEffect=[toll], EventBoardPosition=[pos],
+                        EventBoardTile=_tiles(10))
+        item = SimpleNamespace(effect="cleanse", effect_config=None)
+        res = shop._use_cleanse(s, None, E, 1, pos, item, _fixed(6))
+        assert "coin_toll" not in res["cleansed"]
+        assert toll.status == "active"
+
 
 # =========================================================================== #
 # choose_task pending pick + apply_task_choice
@@ -761,6 +774,40 @@ class TestBuyCapAndStock:
         with pytest.raises(shop.ShopError) as ei:
             shop.buy_item(s, E, 1, 1, user_id=None)
         assert ei.value.status == 404
+
+
+class TestBuyGateAndRefund:
+    def _session(self, item, *, coins=1000, inventory=(), settings=None):
+        team = EventTeam(id=1, event_id=E, coins=coins)
+        pos = _pos(team=1, status="active", task=100)
+        cfg = EventBoardConfig(event_id=E, settings=settings)
+        return FakeSession(
+            BoardgameShopItem=[item], EventShopRotation=[],
+            EventTeam=[team], EventBoardPosition=[pos], EventBoardConfig=[cfg],
+            EventTeamInventory=list(inventory), EventCoinLedger=[]), team
+
+    def test_buy_gate_rejects_unusable_effect(self):
+        """SH2: an item whose effect has no live handler can't be bought — no
+        coins are burned on a power-up that could never be used."""
+        item = _catalog_item(id=1, effect="not_a_real_effect", cost_coins=100)
+        s, team = self._session(item)
+        with pytest.raises(shop.ShopError) as ei:
+            shop.buy_item(s, E, 1, 1, user_id=None)
+        assert ei.value.status == 409
+        assert team.coins == 1000   # nothing spent
+
+    def test_use_disabled_item_refunds(self):
+        """SH1: an item disabled by the event's kill switch after purchase is
+        refunded on use instead of stranding the coins."""
+        item = _catalog_item(id=1, effect="skip_task", cost_coins=100)
+        inv = EventTeamInventory(id=5, event_id=E, team_id=1, shop_item_id=1,
+                                 status="owned", price_paid=100)
+        settings = json.dumps({"items": {"disabled_effects": ["skip_task"]}})
+        s, team = self._session(item, coins=0, inventory=[inv], settings=settings)
+        res = shop.use_item(s, None, E, 1, 5, user_id=None)
+        assert res["refunded"] is True and res["price_refunded"] == 100
+        assert inv.status == "refunded"
+        assert team.coins == 100   # coins credited back
 
 
 # =========================================================================== #

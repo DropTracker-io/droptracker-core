@@ -161,7 +161,12 @@ BOARDGAME_EFFECTS = (
 )
 
 # web_event_team_inventory.status lifecycle.
-BOARDGAME_INVENTORY_STATUSES = ("owned", "used", "expired")
+#   owned    — bought, unused, in the bag
+#   used     — consumed by its effect
+#   expired  — no longer valid (reserved)
+#   refunded — auto-refunded because the item became unusable (its effect was
+#              disabled mid-event, or has no live handler); coins credited back
+BOARDGAME_INVENTORY_STATUSES = ("owned", "used", "expired", "refunded")
 
 # web_event_effects.status lifecycle.
 BOARDGAME_EFFECT_STATUSES = ("active", "consumed", "expired")

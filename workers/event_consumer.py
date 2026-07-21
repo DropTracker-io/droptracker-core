@@ -205,13 +205,22 @@ def _run_mercy_sweep(r) -> list:
     try:
         swept = boardgame_engine.mercy_sweep(db_session, r)
         db_session.commit()
-        return swept
     except Exception:
         db_session.rollback()
         raise
     finally:
         db_session.close()
         reset_db_connections()
+    # W2: a mercy auto-roll can cross the finish. End those events (own session,
+    # status-guarded) exactly like the completion-driven win path does.
+    for entry in swept:
+        if entry.get("won"):
+            try:
+                _end_won_event(r, entry.get("event_id"))
+            except Exception:
+                log.error("Auto-end after mercy board win failed:\n%s",
+                          traceback.format_exc())
+    return swept
 
 
 def _process_entry(r, state, entry_bytes) -> list:

@@ -343,9 +343,73 @@ def _ts(dt) -> Optional[int]:
     return int(dt.timestamp()) if dt else None
 
 
+def _fmt_score(value) -> float:
+    # int-when-integral so non-loot_sweep standings stay clean
+    f = round(float(value or 0), 2)
+    return int(f) if f == int(f) else f
+
+
+def _rank_board_teams(teams, positions_by_team, tiebreak):
+    """Pure finish-race ordering (best-first, testable without a session):
+    finished teams first, then further-along, then the ``tiebreak`` metric
+    tokens (each descending → best first), then team id for stability.
+    ``positions_by_team`` maps team_id → a position with ``.status`` /
+    ``.tile_idx``; ``tiebreak`` is an ordered subset of ('score', 'coins')."""
+    metrics = {
+        "score": lambda t: float(getattr(t, "score", 0) or 0),
+        "coins": lambda t: float(getattr(t, "coins", 0) or 0),
+    }
+
+    def _key(t):
+        p = positions_by_team.get(t.id)
+        finished = p is not None and getattr(p, "status", None) == "finished"
+        tile = int(getattr(p, "tile_idx", 0) or 0) if p is not None else 0
+        key = [0 if finished else 1, -tile]
+        for tok in tiebreak:
+            fn = metrics.get(tok)
+            if fn is not None:
+                key.append(-fn(t))
+        key.append(t.id)
+        return tuple(key)
+
+    return sorted(teams, key=_key)
+
+
+def _board_final_standings(session, event, limit: int) -> list:
+    """Board-game standings (win.rule finish_tile): rank by who reached the
+    finish, then the configured ``win.tiebreak`` (default task score). Task
+    ``score`` alone — the old ordering — could crown a team that never reached
+    the finish and hand it the prize pot (W1). Ties among finished teams (or the
+    ordering of still-running teams at a manual end) break by the tiebreak
+    tokens applied left→right; 'score' = task points, 'coins' = wallet."""
+    from db.models import EventBoardPosition, EventTeam
+    from services.boardgame_engine import load_board_settings
+
+    settings = load_board_settings(session, event.id)
+    tiebreak = (settings.get("win") or {}).get("tiebreak")
+    if not isinstance(tiebreak, list) or not tiebreak:
+        tiebreak = ["score"]
+
+    teams = (session.query(EventTeam)
+             .filter(EventTeam.event_id == event.id).all())
+    positions = {
+        p.team_id: p for p in session.query(EventBoardPosition)
+        .filter(EventBoardPosition.event_id == event.id).all()
+    }
+    ordered = _rank_board_teams(teams, positions, tiebreak)[:limit]
+    return [{"team_id": t.id, "name": t.name, "score": _fmt_score(t.score)}
+            for t in ordered]
+
+
 def final_standings(session, event_id: int, limit: int = 5) -> list:
-    """[{team_id, name, score}] best-first."""
-    from db.models import EventTeam
+    """[{team_id, name, score}] best-first. Board-game events rank by the
+    finish-line race (see :func:`_board_final_standings`); every other event
+    ranks by task score."""
+    from db.models import Event, EventTeam
+
+    event = session.query(Event).filter(Event.id == event_id).first()
+    if event is not None and getattr(event, "kind", None) == "board_game":
+        return _board_final_standings(session, event, limit)
 
     rows = (
         session.query(EventTeam)
@@ -354,10 +418,8 @@ def final_standings(session, event_id: int, limit: int = 5) -> list:
         .limit(limit)
         .all()
     )
-    return [{"team_id": t.id, "name": t.name,
-         # int-when-integral so non-loot_sweep standings stay clean
-         "score": (lambda f: int(f) if f == int(f) else f)(round(float(t.score or 0), 2))}
-        for t in rows]
+    return [{"team_id": t.id, "name": t.name, "score": _fmt_score(t.score)}
+            for t in rows]
 
 
 def _pot_advertise_line(session, event, team_count, *, ended=False, winner=None):

@@ -81,6 +81,8 @@ _MOVEMENT_TRIGGERS = ("auto", "manual")
 _MANUAL_ROLLERS = ("team", "group_admin", "either")
 _TILE_RENDER_MODES = ("rune", "invisible", "outline")
 _WIN_RULES = ("finish_tile",)  # P1; threshold/time-boxed variants later
+# Ordered tiebreak metrics for a finish_tile race (event_lifecycle.final_standings).
+_WIN_TIEBREAKS = ("score", "coins")
 # Tile-bound effect consumption modes (services/boardgame_effects.BREAK_MODES).
 _EFFECT_BREAK_MODES = ("pass", "land", "both")
 # Per-event shop stock refresh cadence (web50a; DEFAULT_BOARD_SETTINGS.shop).
@@ -302,6 +304,15 @@ def _validate_settings_patch(body: dict) -> dict:
                 abort_problem(422, "Invalid settings",
                               f"win.rule must be one of {list(_WIN_RULES)}.")
             w["rule"] = win["rule"]
+        if "tiebreak" in win:
+            tb = win["tiebreak"]
+            if (not isinstance(tb, list) or not tb or len(tb) > len(_WIN_TIEBREAKS)
+                    or any(t not in _WIN_TIEBREAKS for t in tb)
+                    or len(set(tb)) != len(tb)):
+                abort_problem(422, "Invalid settings",
+                              "win.tiebreak must be a non-empty ordered list of "
+                              f"distinct tokens from {list(_WIN_TIEBREAKS)}.")
+            w["tiebreak"] = tb
         if w:
             out["win"] = w
 

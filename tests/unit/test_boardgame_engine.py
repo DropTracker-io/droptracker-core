@@ -612,3 +612,69 @@ class TestRollSSEFrame:
         assert len(rolls) == 1
         assert rolls[0]["from"] == 0 and rolls[0]["to"] == 6
         assert rolls[0]["dice"] == [6]
+
+
+def _team_effect(effect_type, team=TEAM, status="active", config=None, eid=88):
+    return SimpleNamespace(
+        id=eid, event_id=EVENT_ID, source_team_id=team, target_team_id=team,
+        target_tile_idx=None, effect_type=effect_type,
+        effect_config=json.dumps(config) if config is not None else None,
+        status=status,
+    )
+
+
+class TestAutoAdvance:
+    """auto_advance (P1a): an auto game must never dead-end on a rest/empty
+    landing or a roadblock stall, since members can't manually roll in auto
+    mode and mercy only sweeps 'active'."""
+
+    def _auto(self, step=6, trigger="auto"):
+        return bg.board_settings({"movement": {"mode": "fixed_step",
+                                               "fixed_step": step,
+                                               "trigger": trigger}})
+
+    def test_auto_mode_chains_rest_tiles_to_finish(self, board_models):
+        pos = _pos()  # awaiting_roll at the start tile, no task (rest board)
+        s = FakeSession(positions=[pos], tiles=_tiles(), effects=[])
+        last = bg.auto_advance(s, None, EVENT_ID, TEAM, self._auto())
+        assert last is not None and last["won"] is True
+        assert pos.tile_idx == 9 and pos.status == "finished"
+
+    def test_manual_mode_is_a_noop(self, board_models):
+        pos = _pos()
+        s = FakeSession(positions=[pos], tiles=_tiles(), effects=[])
+        assert bg.auto_advance(s, None, EVENT_ID, TEAM,
+                               self._auto(trigger="manual")) is None
+        assert pos.tile_idx == 0 and pos.status == "awaiting_roll"
+
+    def test_auto_serves_a_roadblock_stall_then_continues(self, board_models):
+        block = _roadblock(3, behavior={"break_on": "pass", "stall_turns": 1})
+        pos = _pos()
+        s = FakeSession(positions=[pos], tiles=_tiles(), effects=[block])
+        last = bg.auto_advance(s, None, EVENT_ID, TEAM, self._auto())
+        # 0->3 blocked; the next attempt serves the stall; then 3->9 finish.
+        assert last["won"] is True and pos.status == "finished"
+
+
+class TestExtraDiceFixedStep:
+    """E2: an armed extra_dice must not be burned in fixed_step mode (where it
+    can add nothing) — only drained when it can actually add dice."""
+
+    def test_fixed_step_does_not_consume_extra_dice(self, board_models):
+        eff = _team_effect("extra_dice", config={"extra_dice": 2})
+        pos = _pos()
+        s = FakeSession(positions=[pos], tiles=_tiles(), effects=[eff])
+        summary = bg.perform_roll(s, None, EVENT_ID, TEAM,
+                                  settings=_fixed(3))
+        assert eff.status == "active"   # NOT burned for nothing
+        assert summary["dice"] == [3]   # no extra dice added
+
+    def test_dice_mode_consumes_extra_dice(self, board_models):
+        eff = _team_effect("extra_dice", config={"extra_dice": 1})
+        pos = _pos()
+        s = FakeSession(positions=[pos], tiles=_tiles(), effects=[eff])
+        settings = bg.board_settings({"movement": {"dice_count": 1, "dice_sides": 6}})
+        summary = bg.perform_roll(s, None, EVENT_ID, TEAM, settings=settings,
+                                  rng=random.Random(1))
+        assert eff.status == "consumed"     # drained in dice mode
+        assert len(summary["dice"]) == 2    # 1 base + 1 extra die
