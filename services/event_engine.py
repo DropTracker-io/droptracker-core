@@ -33,8 +33,10 @@ v1 evaluation semantics (task doc table):
   group must be satisfied, e.g. all godsword shards + any one hilt).
   Progress unit = quantity; ``any_of`` completes at ``target_value``
   qualifying drops (default 1).
-- ``kc_target`` — drop from the target NPC; each qualifying kill counts once
-  (deduped by ``(npc, kill_count)`` per player via Redis).
+- ``kc_target`` — drop from the target NPC (or ANY of ``config.npcs`` on a
+  multi-NPC task); each qualifying kill counts once (deduped by
+  ``(npc, kill_count)`` per player via Redis; multi-NPC tasks keep their
+  absolute-KC watermarks per NPC).
 - ``pb_target`` — pb for the target boss with time ≤ target_value seconds;
   completes on first match.
 - ``xp_target`` — xp gained in the target skill since the first report after
@@ -175,6 +177,50 @@ def _norm(value) -> str:
     if value is None:
         return ""
     return " ".join(str(value).strip().lower().split())
+
+
+def _kc_npcs(task: dict) -> tuple:
+    """Normalized NPC names a ``kc_target`` counts: the single ``target``,
+    extended by ``config.npcs`` (multi-NPC tasks — a kill of ANY listed NPC
+    advances the one shared counter). Precomputed as ``kc_npcs`` on state-load
+    task dicts; derived on the fly otherwise (hand-built dicts in tests)."""
+    pre = task.get("kc_npcs")
+    if pre is not None:
+        return tuple(pre)
+    names = [task.get("target")]
+    config = task.get("config") or {}
+    if isinstance(config, dict):
+        names.extend(config.get("npcs") or [])
+    out: list = []
+    for name in names:
+        norm = _norm(name)
+        if norm and norm not in out:
+            out.append(norm)
+    return tuple(out)
+
+
+def _kc_wom_metrics(task: dict) -> dict:
+    """``{wom metric slug -> normalized NPC name}`` for a ``kc_target``.
+    Precomputed as ``wom_metrics`` at state-load; falls back to the legacy
+    single ``wom_metric`` field (pre-upgrade dicts / tests)."""
+    metrics = task.get("wom_metrics")
+    if isinstance(metrics, dict):
+        return metrics
+    metric = task.get("wom_metric")
+    if metric:
+        return {metric: _norm(task.get("target"))}
+    return {}
+
+
+def _kc_state_scope(task: dict, npc_norm: str):
+    """Redis key scope for a kc task's absolute-KC state (watermark / dedupe /
+    fallback counters). Single-NPC tasks keep the bare task id — the legacy
+    key shape, so live state survives an upgrade — while multi-NPC tasks track
+    per NPC (each NPC has its own independent kill counter, so one shared
+    watermark would swallow the smaller counts)."""
+    if len(_kc_npcs(task)) <= 1:
+        return task["id"]
+    return f"{task['id']}:{npc_norm.replace(' ', '_')}"
 
 
 def parse_task_config(raw) -> dict:
@@ -572,13 +618,16 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
             # WOM reconciler envelope: absolute boss KC keyed by WOM metric
             # slug (precomputed on the task dict at state-load time).
             # Quantity (the watermark delta) is resolved later, like xp.
-            metric = task.get("wom_metric")
-            if not metric or metric != str(data.get("boss_metric") or "").strip().lower():
+            metric = str(data.get("boss_metric") or "").strip().lower()
+            if not metric or metric not in _kc_wom_metrics(task):
                 return None
             return {"mode": "kc_abs", "quantity": 0}
         if kind != "drop":
             return None
-        if _norm(data.get("npc_name")) != _norm(task.get("target")) or not task.get("target"):
+        # A kill of ANY of the task's NPCs counts (config.npcs extends the
+        # single target — e.g. "50 Dagannoth Kings" across Rex/Prime/Supreme).
+        npcs = _kc_npcs(task)
+        if not npcs or _norm(data.get("npc_name")) not in npcs:
             return None
         return {"mode": "kc", "quantity": 1}
 
@@ -729,16 +778,21 @@ def _event_to_dict(event) -> dict:
     }
 
 
-def _task_wom_metric(task_type, target) -> Optional[str]:
-    """WOM metric slug for a kc_target's NPC target (None when WOM has no
-    hiscores metric for it — that task stays plugin-only)."""
-    if task_type != "kc_target" or not target:
-        return None
-    try:
-        from utils.wiseoldman import wom_boss_metric
-        return wom_boss_metric(target)
-    except Exception:
-        return None
+def _task_wom_metrics(task_type, npcs) -> dict:
+    """``{wom metric slug -> normalized NPC name}`` for a kc_target's NPC set
+    (NPCs without a WOM hiscores metric are absent — those stay plugin-only)."""
+    if task_type != "kc_target" or not npcs:
+        return {}
+    out: dict = {}
+    for npc in npcs:
+        try:
+            from utils.wiseoldman import wom_boss_metric
+            slug = wom_boss_metric(npc)
+        except Exception:
+            slug = None
+        if slug:
+            out[slug] = npc
+    return out
 
 
 def _task_to_dict(task) -> dict:
@@ -752,9 +806,14 @@ def _task_to_dict(task) -> dict:
         "points": int(task.points or 0),
         "requires_confirmation": bool(task.requires_confirmation),
         "config": parse_task_config(task.config),
-        "wom_metric": _task_wom_metric(task.type, task.target),
         "difficulty": getattr(task, "difficulty", None),
     }
+    if task.type == "kc_target":
+        # Precompute the NPC set (target + config.npcs) and its WOM metrics
+        # once per state load — the matcher and the WOM reconciler both key
+        # off these.
+        d["kc_npcs"] = list(_kc_npcs(d))
+        d["wom_metrics"] = _task_wom_metrics(task.type, d["kc_npcs"])
     if task.type == "loot_sweep":
         # Precompute the matcher's item->allowed-NPC index once per task (the
         # matcher stays pure/cheap; NPC scoping is v2). Guarded: the unit-test
@@ -993,11 +1052,13 @@ def _seed_allowed(joined_at, window_start) -> bool:
     return joined_at <= window_start
 
 
-def _kc_fallback_key(event_id: int, task_id: int, player_id: int) -> str:
+def _kc_fallback_key(event_id: int, task_id, player_id: int) -> str:
+    # ``task_id`` is the bare task id, or a per-NPC scope ("id:npc") for
+    # multi-NPC kc tasks (see _kc_state_scope).
     return f"events:{event_id}:kcfallback:{task_id}:{player_id}"
 
 
-def _legacy_kcdedupe_max(redis_conn, event_id: int, task_id: int, player_id: int) -> int:
+def _legacy_kcdedupe_max(redis_conn, event_id: int, task_id, player_id: int) -> int:
     """Max kill_count already credited via the pre-watermark ``kcdedupe`` set
     (deploy transition: don't re-credit kills counted under the old scheme)."""
     try:
@@ -1015,14 +1076,16 @@ def _legacy_kcdedupe_max(redis_conn, event_id: int, task_id: int, player_id: int
     return best
 
 
-def _fold_kc_watermark(redis_conn, event_id: int, task_id: int, player_id: int,
+def _fold_kc_watermark(redis_conn, event_id: int, task_id, player_id: int,
                        kc_abs, *, seed=None, first_credit_offset: int = 0,
                        staged: Optional[StagedWrites] = None) -> int:
     """Return kills gained since the stored absolute-KC watermark, advance it.
 
-    One watermark per (event, task, player), advanced by BOTH sources of
-    absolute KC — plugin drops' ``kill_count`` and WOM hiscores — so whichever
-    is ahead wins and the other folds to 0 (the double-count guard).
+    One watermark per (event, task-scope, player) — ``task_id`` is the bare
+    task id, or a per-NPC scope for multi-NPC kc tasks (_kc_state_scope) —
+    advanced by BOTH sources of absolute KC — plugin drops' ``kill_count`` and
+    WOM hiscores — so whichever is ahead wins and the other folds to 0 (the
+    double-count guard).
 
     First observation: baseline = ``seed`` (WOM's window-start KC) when given,
     else ``kc_abs - first_credit_offset`` (offset 1 keeps a first plugin drop
@@ -1086,10 +1149,13 @@ def _fold_kc_watermark(redis_conn, event_id: int, task_id: int, player_id: int,
 KC_FALLBACK_COOLDOWN_SECONDS = 10
 
 
-def _kc_dedupe(redis_conn, event_id: int, task_id: int, player_id: int,
+def _kc_dedupe(redis_conn, event_id: int, task_id, player_id: int,
                envelope: dict, staged: Optional[StagedWrites] = None) -> bool:
     """True if this drop represents a not-yet-counted kill for a kc task.
 
+    ``task_id`` may carry a per-NPC scope for multi-NPC kc tasks (so the
+    no-kill_count cooldown of one NPC never swallows a near-simultaneous kill
+    of another, e.g. two Dagannoth Kings inside 10s).
     Keyed per (npc, kill_count) so multi-item drops from one kill count once.
     When kill_count is unusable (absent, or 0 = the plugin's "unavailable"
     marker), fall back to a per-(task, player) cooldown — the old guid
@@ -2487,24 +2553,28 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
                            and data.get("target_event_id") == event_id
                            and _seed_allowed(joined_at, event["window_start"]))
             if match["mode"] == "kc":
+                # Multi-NPC kc tasks keep absolute-KC state PER NPC — each
+                # NPC's kill_count is its own counter, so one shared
+                # watermark would swallow the lower counts.
+                kc_scope = _kc_state_scope(task, _norm(data.get("npc_name")))
                 try:
                     kill_count = int(data.get("kill_count"))
                 except (TypeError, ValueError):
                     kill_count = None
                 if kill_count is not None and kill_count > 0:
                     quantity = _fold_kc_watermark(
-                        redis_conn, event_id, task["id"], player_id,
+                        redis_conn, event_id, kc_scope, player_id,
                         kill_count, first_credit_offset=1, staged=staged)
                     if quantity <= 0:
                         continue
                 else:
                     # No usable absolute KC: cooldown dedupe as before, and
                     # note the credit so a later absolute fold subtracts it.
-                    if not _kc_dedupe(redis_conn, event_id, task["id"],
+                    if not _kc_dedupe(redis_conn, event_id, kc_scope,
                                       player_id, envelope, staged=staged):
                         continue
                     try:
-                        fb_key = _kc_fallback_key(event_id, task["id"], player_id)
+                        fb_key = _kc_fallback_key(event_id, kc_scope, player_id)
                         if staged is not None:
                             staged.stage("incr", fb_key)
                             staged.stage("expire", fb_key, _STATE_KEY_TTL)
@@ -2514,8 +2584,11 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
                     except Exception:
                         pass
             elif match["mode"] == "kc_abs":
+                metric = str(data.get("boss_metric") or "").strip().lower()
+                kc_scope = _kc_state_scope(
+                    task, _kc_wom_metrics(task).get(metric) or "")
                 quantity = _fold_kc_watermark(
-                    redis_conn, event_id, task["id"], player_id, data.get("kc"),
+                    redis_conn, event_id, kc_scope, player_id, data.get("kc"),
                     seed=data.get("kc_start") if wom_seed_ok else None,
                     staged=staged)
                 if quantity <= 0:

@@ -287,6 +287,68 @@ def test_pet_category_empty_list_rejected():
     assert exc.value.status == 422
 
 
+# ── kc_target (single + multi-NPC via config.npcs) ────────────────────────────
+
+KC_NPCS = {"Dagannoth Rex", "Dagannoth Prime", "Dagannoth Supreme", "Zulrah"}
+_KC_BY_NORM = {n.lower(): n for n in KC_NPCS}
+
+
+@pytest.fixture
+def _stub_kc_npcs(monkeypatch):
+    monkeypatch.setattr(
+        etv, "_canonical_npc",
+        lambda s, name: _KC_BY_NORM.get((name or "").strip().lower()),
+    )
+
+
+def test_kc_single_target_stays_config_free(_stub_kc_npcs):
+    out = _validate({"type": "kc_target", "target": "zulrah", "target_value": 50})
+    assert out == {"target": "Zulrah", "target_value": 50, "config": None}
+
+
+def test_kc_multi_npc_normalizes(_stub_kc_npcs):
+    out = _validate({
+        "type": "kc_target", "target_value": 50,
+        "config": {"npcs": ["dagannoth rex", "Dagannoth Prime",
+                            "DAGANNOTH SUPREME", "Dagannoth Rex"]},  # dupe folds
+    })
+    assert out["target"] == "Dagannoth Rex"  # first NPC doubles as the target
+    assert out["target_value"] == 50
+    assert _cfg(out) == {"npcs": ["Dagannoth Rex", "Dagannoth Prime",
+                                  "Dagannoth Supreme"]}
+
+
+def test_kc_single_entry_list_collapses_to_target(_stub_kc_npcs):
+    out = _validate({"type": "kc_target", "target_value": 10,
+                     "config": {"npcs": ["zulrah"]}})
+    assert out == {"target": "Zulrah", "target_value": 10, "config": None}
+
+
+def test_kc_unknown_npc_in_list_rejected(_stub_kc_npcs):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "kc_target", "target_value": 10,
+                   "config": {"npcs": ["Zulrah", "Notreal the Fake"]}})
+    assert exc.value.status == 422
+    assert "Notreal the Fake" in exc.value.detail
+
+
+def test_kc_empty_or_oversized_list_rejected(_stub_kc_npcs):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "kc_target", "target_value": 10, "config": {"npcs": []}})
+    assert exc.value.status == 422
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "kc_target", "target_value": 10,
+                   "config": {"npcs": ["Zulrah"] * (etv.MAX_KC_NPCS + 1)}})
+    assert exc.value.status == 422
+
+
+def test_pb_target_ignores_npcs_config(_stub_kc_npcs):
+    # pb_target stays single-NPC: a stray npcs list must not leak into config.
+    out = _validate({"type": "pb_target", "target": "Zulrah", "target_value": 70,
+                     "config": {"npcs": ["Dagannoth Rex"]}})
+    assert out == {"target": "Zulrah", "target_value": 70, "config": None}
+
+
 # ── loot_sweep v2 (nested groups + NPC scoping + batched decay) ───────────────
 
 KNOWN_NPCS = {"Kree'arra", "Ahrim the Blighted", "Dharok the Wretched",

@@ -113,6 +113,55 @@ class TestKcTarget:
         assert engine.match_task(t, _env("drop", {"npc_name": ""})) is None
 
 
+class TestKcTargetMultiNpc:
+    """config.npcs extends the target — a kill of ANY listed NPC counts."""
+
+    def _dks(self, **kw):
+        return _task(
+            type="kc_target", target="Dagannoth Rex", target_value=50,
+            config={"npcs": ["Dagannoth Rex", "Dagannoth Prime", "Dagannoth Supreme"]},
+            **kw)
+
+    def test_any_listed_npc_matches(self):
+        t = self._dks()
+        for npc in ("Dagannoth Rex", "dagannoth PRIME", "Dagannoth Supreme"):
+            m = engine.match_task(t, _env("drop", {"npc_name": npc, "kill_count": 3}))
+            assert m == {"mode": "kc", "quantity": 1}, npc
+
+    def test_unlisted_npc_no_match(self):
+        assert engine.match_task(
+            self._dks(), _env("drop", {"npc_name": "Zulrah"})) is None
+
+    def test_precomputed_kc_npcs_wins_over_config(self):
+        # State-load dicts carry kc_npcs; the matcher must honor them as-is.
+        t = _task(type="kc_target", target="Dagannoth Rex", target_value=50,
+                  kc_npcs=["dagannoth rex", "dagannoth prime"])
+        assert engine.match_task(
+            t, _env("drop", {"npc_name": "Dagannoth Prime"})) == {"mode": "kc", "quantity": 1}
+        assert engine.match_task(
+            t, _env("drop", {"npc_name": "Dagannoth Supreme"})) is None
+
+    def test_state_scope_single_npc_is_bare_task_id(self):
+        # Legacy key shape: deployed single-NPC watermarks must survive.
+        t = _task(id=42, type="kc_target", target="Zulrah")
+        assert engine._kc_state_scope(t, "zulrah") == 42
+
+    def test_state_scope_multi_npc_is_per_npc(self):
+        t = self._dks()
+        t["id"] = 42
+        assert engine._kc_state_scope(t, "dagannoth prime") == "42:dagannoth_prime"
+        assert (engine._kc_state_scope(t, "dagannoth rex")
+                != engine._kc_state_scope(t, "dagannoth prime"))
+
+    def test_wom_kc_matches_any_precomputed_metric(self):
+        t = self._dks(wom_metrics={"dagannoth_rex": "dagannoth rex",
+                                   "dagannoth_prime": "dagannoth prime"})
+        m = engine.match_task(t, _env("wom_kc", {"boss_metric": "dagannoth_prime", "kc": 120}))
+        assert m == {"mode": "kc_abs", "quantity": 0}
+        assert engine.match_task(
+            t, _env("wom_kc", {"boss_metric": "dagannoth_supreme", "kc": 9})) is None
+
+
 # ── pb_target ─────────────────────────────────────────────────────────────────
 
 class TestPbTarget:

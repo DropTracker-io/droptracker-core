@@ -62,6 +62,9 @@ ITEM_CONFIG_KINDS = ("any_of", "all_of", "point_collection", "assembly", "groups
 MAX_CONFIG_ITEMS = 100
 MAX_CONFIG_GROUPS = 10
 MAX_CONFIG_PATHS = 4
+# kc_target may list several NPCs ("kill 50 of any Dagannoth King") via
+# config.npcs — a kill of ANY listed NPC advances the one shared counter.
+MAX_KC_NPCS = 10
 
 # Loot Sweep (loot_sweep kind) config bounds — v2 (nested groups). Kept in sync
 # with services/loot_sweep.py, which can't be imported here (this module's
@@ -570,17 +573,36 @@ def validate_task_payload(s, body: dict) -> dict:
             tv = _require_target_value(tv if tv is not None else 1, what="Quantity")
 
     elif ttype in ("kc_target", "pb_target"):
-        canonical = _canonical_npc(s, target)
-        if not canonical:
+        # kc_target: optionally several NPCs (config.npcs) — a kill of ANY of
+        # them counts toward the one kill-count goal. pb_target stays single.
+        npcs_raw = (config or {}).get("npcs") if ttype == "kc_target" else None
+        if npcs_raw is not None:
+            if not isinstance(npcs_raw, list) or not npcs_raw:
+                abort_problem(422, "Invalid config",
+                              "'npcs' must be a non-empty array of NPC names.")
+            if len(npcs_raw) > MAX_KC_NPCS:
+                abort_problem(422, "Invalid config",
+                              f"At most {MAX_KC_NPCS} NPCs per kill-count task.")
+        names = [str(n) for n in npcs_raw] if npcs_raw is not None else [target]
+        canonical_npcs, unknown = [], []
+        for name in names:
+            canonical = _canonical_npc(s, name)
+            if not canonical:
+                unknown.append(str(name).strip() or "(empty)")
+            elif canonical not in canonical_npcs:
+                canonical_npcs.append(canonical)
+        if unknown:
             abort_problem(
-                422, "Unknown NPC",
-                f"'{target or '(empty)'}' is not in the NPC database — the exact "
-                "in-game NPC name is required.",
+                422, "Unknown NPC(s)",
+                "Not found in the NPC database (exact in-game names required): "
+                + ", ".join(sorted(set(unknown))[:10]),
             )
-        target = canonical
+        target = canonical_npcs[0]
         what = "Kill count" if ttype == "kc_target" else "Target time (seconds)"
         tv = _require_target_value(tv, what=what)
-        config = None
+        # A single-NPC list collapses to plain target semantics (config-free),
+        # so the engine's legacy per-task KC state keys stay stable.
+        config = {"npcs": canonical_npcs} if len(canonical_npcs) > 1 else None
 
     elif ttype in ("xp_target", "skill_target"):
         skill = _SKILL_BY_NORM.get(target.lower())

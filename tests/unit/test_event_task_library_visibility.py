@@ -264,6 +264,40 @@ def test_custom_task_with_same_name_is_a_copy():
     assert out == "public"
 
 
+def test_private_save_never_touches_own_public_preset():
+    # Library-copy independence: a template copied from the picker lands as a
+    # private task; editing that task (a private re-save under the preset's
+    # name) must leave the group's shared PUBLIC preset untouched — not
+    # rewrite its requirements, and not unshare it.
+    own_public = FakeLibraryItem(
+        id=7, name="Collect a Twisted bow", source="group", group_id=7,
+        visibility="public", type="item_collection", target="Twisted bow",
+        target_value=1, config=None, default_points=25,
+    )
+    s = _S([[own_public]])  # only the name-keyed lookup runs
+    out = evr.save_task_to_library(
+        s, _event(group_id=7), _task(target="Scythe of vitur", points=99), "private")
+    assert out == "private"
+    assert s.added == []
+    assert own_public.visibility == "public"
+    assert own_public.target == "Twisted bow"
+    assert own_public.default_points == 25
+
+
+def test_private_save_still_updates_own_private_preset():
+    own_private = FakeLibraryItem(
+        id=8, name="Collect a Twisted bow", source="group", group_id=7,
+        visibility="private", type="item_collection", target="Twisted bow",
+        target_value=1, config=None, default_points=1,
+    )
+    s = _S([[own_private], [own_private]])
+    out = evr.save_task_to_library(s, _event(group_id=7), _task(points=50), "private")
+    assert out == "private"
+    assert s.added == []
+    assert own_private.default_points == 50
+    assert own_private.visibility == "private"
+
+
 def test_updating_own_row_does_not_dedupe_against_itself():
     own = FakeLibraryItem(
         id=7, name="Collect a Twisted bow", source="group", group_id=7,

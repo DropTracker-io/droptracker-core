@@ -129,9 +129,14 @@ def _relevant_metrics(state, event_id) -> tuple[dict, set]:
                 log.warning("Event %s task %s: no WOM metric for skill %r",
                             event_id, task.get("id"), target)
         elif ttype == "kc_target":
-            slug = task.get("wom_metric")
-            if slug:
-                bosses.add(slug)
+            # Multi-NPC tasks (config.npcs) carry one metric per NPC in
+            # ``wom_metrics``; legacy dicts fall back to the single field.
+            metrics = task.get("wom_metrics")
+            slugs = set(metrics) if isinstance(metrics, dict) else set()
+            if not slugs and task.get("wom_metric"):
+                slugs.add(task["wom_metric"])
+            if slugs:
+                bosses.update(slugs)
             else:
                 log.info("Event %s task %s: no WOM metric for NPC %r (plugin-only)",
                          event_id, task.get("id"), target)

@@ -2674,6 +2674,10 @@ def save_task_to_library(s, ev: Event, task: EventTask, visibility: str) -> str:
       saves nothing — the picker row already exists.
     - Saving a same-requirements task under a new name as "public" is demoted
       to a private, group-only preset instead of a second public copy.
+    - A "private" save never adopts a same-named PUBLIC row: library copies
+      land in events as private tasks, so an edit of such a copy must stay
+      independent of the shared template other clans already picked — only a
+      deliberate "public" save updates the public preset.
 
     Returns the visibility actually stored so callers can mirror it onto the
     task row (it may differ from the requested one via the demotion rule)."""
@@ -2705,6 +2709,13 @@ def save_task_to_library(s, ev: Event, task: EventTask, visibility: str) -> str:
         )
         .first()
     )
+    if (row is not None and visibility == "private"
+            and (row.visibility or "public") == "public"):
+        # Editing an event task must not silently rewrite (or unshare) the
+        # group's same-named PUBLIC preset — that's the shared template other
+        # clans copy from. The task keeps its private visibility; the preset
+        # only changes on an explicit "public" save.
+        return visibility
 
     # Requirement duplicates among presets this group's picker already shows:
     # public rows from anywhere, plus the group's own. Target/type matching
