@@ -189,12 +189,20 @@ async def list_tiers():
     scope = request.args.get("scope", "group")
     if scope not in ("group", "user", "all"):
         abort_problem(422, "Invalid scope", "scope must be 'group', 'user' or 'all'.")
+    # Free ($0) tiers are the implicit fallback plan for unsubscribed groups
+    # (see db/entitlements._FALLBACK_TIER_KEYS), not a purchasable product —
+    # hide them from public listings by default so they never render as a
+    # checkout option. Admin surfaces (event limits, tier manager) opt in with
+    # ?include_free=1 to configure them.
+    include_free = request.args.get("include_free", "").lower() in ("1", "true", "yes")
 
     def _load():
         with db_session() as s:
             q = s.query(SubscriptionTier).filter(SubscriptionTier.active == True)  # noqa: E712
             if scope != "all":
                 q = q.filter(SubscriptionTier.scope == scope)
+            if not include_free:
+                q = q.filter(SubscriptionTier.price_cents > 0)
             tiers = q.order_by(SubscriptionTier.price_cents.asc()).all()
             return [_serialize_tier(t) for t in tiers]
 
