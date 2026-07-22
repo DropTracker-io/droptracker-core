@@ -1,8 +1,9 @@
 import asyncio
+import hashlib
 import os
+import re
 import aiohttp
 import github
-import schedule
 import time
 from github import Github
 # NOTE: never import the module-global scoped session here. This module runs in
@@ -13,21 +14,53 @@ from github import Github
 # 2026-07-16 incident. Use short-lived `with Session()` blocks instead.
 from db.models import GroupConfiguration, Webhook, NewWebhook, Session, WebhookPendingDeletion
 from dotenv import load_dotenv
-from interactions import IntervalTrigger, Task
 import json
 from utils.encrypter import encrypt_webhook, decrypt_webhook
-from utils.logger import LoggerClient
 from datetime import datetime, timedelta
 from db.app_logger import AppLogger
 load_dotenv()
-
-logger = LoggerClient()
 
 app_logger = AppLogger()
 
 total_hooks = 0
 
 updates = []
+
+# Published dated files: {YYYYMMDD}.json / {YYYYMMDD}-1.json (webhook chunks)
+# and {YYYYMMDD}-k.txt (encryption key). The updater creates today's and
+# tomorrow's on each run and prunes anything older than STALE_AFTER_DAYS —
+# clients only ever read today's files, so week-old ones are dead weight that
+# previously accumulated forever (800+ files by 2026-07).
+DATED_FILE_RE = re.compile(r"^(\d{8})(?:-1)?\.json$|^(\d{8})-k\.txt$")
+STALE_AFTER_DAYS = 7
+
+
+def _git_blob_sha(content: str) -> str:
+    """Git blob sha1 for text content — lets deterministic files (item id
+    lists, news) be change-compared against a directory listing without
+    fetching each file's body."""
+    data = content.encode("utf-8")
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _stale_dated_paths(paths, today_str: str, keep_days: int = STALE_AFTER_DAYS):
+    """The dated content files (see DATED_FILE_RE) more than ``keep_days``
+    before ``today_str`` (YYYYMMDD). Non-dated paths are never returned."""
+    cutoff = datetime.strptime(today_str, "%Y%m%d") - timedelta(days=keep_days)
+    stale = []
+    for path in paths:
+        name = path.rsplit("/", 1)[-1]
+        match = DATED_FILE_RE.match(name)
+        if not match:
+            continue
+        date_str = match.group(1) or match.group(2)
+        try:
+            file_date = datetime.strptime(date_str, "%Y%m%d")
+        except ValueError:
+            continue
+        if file_date < cutoff:
+            stale.append(path)
+    return stale
 
 class GithubPagesUpdater:
     def __init__(self):
@@ -48,21 +81,24 @@ class GithubPagesUpdater:
         # Log the repo and file path for verification
         # print(f"Repo: {repo_name}")
 
-    def fetch_webhooks_from_database(self, limit=80):
+    def fetch_webhooks_from_database(self, limit=120):
         """
         Fetch the webhook URLs from the database and format them as a list of URLs.
-        
+
         Args:
             limit: Maximum number of webhooks to fetch
-            
+
         Returns:
             list of encrypted webhooks
         """
         try:
             with Session() as s:
+                # Deterministic order: an unordered LIMIT can shuffle which
+                # rows are picked between runs, which would read as a webhook
+                # "change" and trigger a pointless publish.
                 main_urls = [
                     w.webhook_url
-                    for w in s.query(Webhook).limit(limit).all()
+                    for w in s.query(Webhook).order_by(Webhook.webhook_id.asc()).limit(limit).all()
                     if w.webhook_url
                 ]
             main_encrypted = []
@@ -111,212 +147,175 @@ class GithubPagesUpdater:
             # Re-raise the exception to be handled by the caller
             raise
 
-    def find_files_by_name(self, path="", file_name=""):
-        """
-        Search the repository for files with the specified file name.
-        :param path: The path to start searching from (empty for root).
-        :param file_name: The name of the file to search for.
-        :return: A list of file paths matching the specified file name.
-        """
-        matching_files = []
-
-        try:
-            # print(f"Searching for files named '{file_name}' in repository: {self.repo.full_name}, path: {path or 'root'}")
-            contents = self.repo.get_contents(path)  # Get contents of the specified path
-
-            for content_file in contents:
-                if content_file.type == "dir":
-                    # Recursively search in subdirectories
-                    matching_files += self.find_files_by_name(content_file.path, file_name)
-                elif content_file.name == file_name:
-                    # If the file name matches, add to the list
-                    print(f"Found file: {content_file.path}")
-                    matching_files.append(content_file.path)
-
-        except github.GithubException as e:
-            # print(f"Failed to search files: {e}")
-            if isinstance(e, github.GithubException):
-                print(f"Error response from GitHub: {e.data}")
-
-        return matching_files
-
-    def list_repo_files(self, path=""):
-        """
-        List all files in the repository starting from a specific path.
-        :param path: The path in the repository to start listing files from (e.g., 'content/'). Leave empty for root.
-        """
-        try:
-            # print(f"Listing files in repository: {self.repo.full_name}, path: {path or 'root'}")
-            contents = self.repo.get_contents(path)  # Get contents of the specified path
-            if not contents:
-                print("No files found.")
-                return
-            
-            for content_file in contents:
-                if content_file.type == "dir":
-                    # print(f"Directory: {content_file.path}")
-                    # Recursively list files in subdirectories
-                    self.list_repo_files(content_file.path)
-                # print(f"File: {content_file.path}")
-
-        except Exception as e:
-            print(f"Failed to list files: {e}")
-            if isinstance(e, github.GithubException):
-                # print(f"Error response from GitHub: {e.data}")
-                pass
-
     async def update_github_pages(self, watchdog=None):
-        global total_hooks, updates
+        global total_hooks
 
         with Session() as s:
-            ex_hooks = s.query(Webhook).count()
-        
-        print("Loading initial total webhook data & sending update...")
-        total_hooks = ex_hooks
-        # Check only the webhooks we'll use
-        await check_limited_webhooks(80, watchdog)
+            total_hooks = s.query(Webhook).count()
+
+        # Liveness-check the webhooks we are about to publish (dead ones are
+        # deleted from the DB, so the fetch below only sees working hooks).
+        await check_limited_webhooks(120, watchdog)
         await asyncio.to_thread(self._update_github_pages)
+
+    def _webhook_set_changed(self, content_file, new_chunk) -> bool:
+        """True when a published webhook file's DECRYPTED url set differs from
+        the candidate chunk. Ciphertexts can't be compared directly — Fernet
+        re-encryption produces different bytes for identical urls every run,
+        which is exactly the bug that used to commit \"changes\" every cycle."""
+        if content_file is None:
+            return True
+        try:
+            old_list = json.loads(content_file.decoded_content.decode("utf-8"))
+        except Exception:
+            return True
+        if not isinstance(old_list, list) or len(old_list) != len(new_chunk):
+            return True
+
+        def _decrypt_all(encrypted_list):
+            out = set()
+            for entry in encrypted_list:
+                try:
+                    out.add(decrypt_webhook(entry))
+                except Exception:
+                    return None
+            return out
+
+        old_set = _decrypt_all(old_list)
+        new_set = _decrypt_all(new_chunk)
+        return old_set is None or new_set is None or old_set != new_set
+
+    def _item_list_contents(self):
+        """The deterministic plugin id-list files: ``valued_items.txt`` (active
+        value-override ids, always force-screenshotted) and
+        ``untradeable_items.txt`` (curated notable untradeables, toggle-gated).
+        Publishing them here keeps both in lockstep with the database / curated
+        source without a manual content-repo commit."""
+        out = []
+        try:
+            from db.models import ItemValueOverride
+
+            with Session() as s:
+                rows = (
+                    s.query(ItemValueOverride.item_id)
+                    .filter(ItemValueOverride.active.is_(True),
+                            ItemValueOverride.item_id.isnot(None))
+                    .all()
+                )
+            ids = sorted({int(r[0]) for r in rows})
+            if ids:
+                out.append(("content/valued_items.txt", ",".join(str(i) for i in ids)))
+        except Exception as e:
+            print(f"Failed to build valued_items.txt content: {e}")
+        try:
+            from scripts.export_untradeable_items import NOTABLE_UNTRADEABLES
+
+            ids = sorted({int(item_id) for item_id, _name in NOTABLE_UNTRADEABLES})
+            if ids:
+                out.append(("content/untradeable_items.txt", ",".join(str(i) for i in ids)))
+        except Exception as e:
+            print(f"Failed to build untradeable_items.txt content: {e}")
+        return out
 
     def _update_github_pages(self):
         """
-        Fetch the latest webhooks from the database and update all matching GitHub Pages files.
-        Also updates news and encryption key files in the same commit.
+        Publish the latest webhook/news/key/item-list content, committing ONLY
+        when something actually changed. One ``content/`` listing replaces the
+        recursive repo walks the old implementation did on every run, and every
+        file is change-gated (decrypt-compare for webhook files, blob-sha
+        compare for deterministic text) so a no-change cycle makes zero commits
+        and triggers zero GitHub Pages builds. Stale dated files are pruned in
+        the same commit.
         """
-        # List repository files to debug the file path issue
-        self.list_repo_files()
-        
-        # Collect all files that need to be updated
+        try:
+            listing = {f.path: f for f in self.repo.get_contents("content", ref=self.branch)}
+        except github.GithubException as e:
+            print(f"Failed to list content/: {e}")
+            listing = {}
+
         files_to_update = []
-        
-        # Add news file if needed
-        news_file = self._prepare_news_update()
+
+        news_file = self._prepare_news_update(listing)
         if news_file:
             files_to_update.append(news_file)
-        
-        # Add encryption key file if needed
-        encryption_key_file = self._prepare_encryption_key_update()
+
+        encryption_key_file = self._prepare_encryption_key_update(listing)
         if encryption_key_file:
             files_to_update.append(encryption_key_file)
-        
-        # Fetch webhook URLs from the database (limited to 80)
-        try:    
-            encrypted_webhooks = self.fetch_webhooks_from_database(limit=80)
+
+        try:
+            encrypted_webhooks = self.fetch_webhooks_from_database(limit=120)
         except Exception as e:
             print(f"Error fetching webhook URLs from the database: {e}")
             return
-        
-        # Check if we have enough webhooks
+
         if len(encrypted_webhooks) < 30:
             print("Generated list is too short:", len(encrypted_webhooks))
             return
-        
-        # Split webhooks into chunks of 40 for different files
-        webhook_chunks = []
+
         chunk_size = 40
-        for i in range(0, len(encrypted_webhooks), chunk_size):
-            webhook_chunks.append(encrypted_webhooks[i:i + chunk_size])
-        
-        file_exists = False  # If it doesn't exist we need to initially create it
+        webhook_chunks = [encrypted_webhooks[i:i + chunk_size]
+                          for i in range(0, len(encrypted_webhooks), chunk_size)]
 
-        # Update core.json file with first chunk
-        if webhook_chunks:
-            core_json_content = json.dumps(webhook_chunks[0], indent=4)
-            
-            for file_path in self.find_files_by_name(file_name=self.new_file):
-                file_exists = True
-                try:
-                    file = self.repo.get_contents(file_path, ref=self.branch)
-                    old_content = file.decoded_content.decode('utf-8')
-                    if "{" in old_content:
-                        old_json = json.loads(old_content)
-                    else:
-                        old_json = []
-                        
-                    # Check if content has changed
-                    changes_detected = len(old_json) != len(webhook_chunks[0])
-                    if not changes_detected:
-                        github_webhooks_set = set()
-                        db_webhooks_set = set()
-                        for webhook in old_json:
-                            try:
-                                decrypted_webhook = decrypt_webhook(webhook)
-                                github_webhooks_set.add(decrypted_webhook)
-                            except Exception as e:
-                                print(f"Error decrypting webhook from GitHub: {e}")
-                        for encrypted_webhook in webhook_chunks[0]:
-                            try:
-                                decrypted_webhook = decrypt_webhook(encrypted_webhook)
-                                db_webhooks_set.add(decrypted_webhook)
-                            except Exception as e:
-                                print(f"Error decrypting webhook from database: {e}")
-                        changes_detected = github_webhooks_set != db_webhooks_set
-                        
-                    if changes_detected:
-                        files_to_update.append((file_path, core_json_content))
-                        added = len(webhook_chunks[0]) - len(old_json)
-                        print(f"Webhook changes detected. Updating with {added} new webhooks.")
-                    else:
-                        print(f"No GitHub webhook changes detected. Skipping update.")
-                except github.GithubException as e:
-                    print(f"Failed to update GitHub Pages for {file_path}: {e}")
-                except Exception as e:
-                    print(f"Unexpected error: {e}")
-                    raise e
-            
-            if not file_exists:
-                files_to_update.append((self.new_file, core_json_content))
+        now = datetime.now()
+        today_str = now.strftime("%Y%m%d")
+        tomorrow_str = (now + timedelta(days=1)).strftime("%Y%m%d")
 
-        # Store encrypted webhooks in the database
-        with Session() as s:
-            s.query(NewWebhook).delete()
-            for webhook_hash in encrypted_webhooks:
-                s.add(NewWebhook(webhook_hash=webhook_hash))
-            s.commit()
+        # {date}.json is what UrlManager.loadEndpoints reads; tomorrow's copy
+        # covers the midnight rollover. {date}-1.json is the replenishment set
+        # fetchNewList falls back to when the primary set is failing — it was
+        # never published before this rewrite, so that path 404'd.
+        primary_chunk = webhook_chunks[1] if len(webhook_chunks) > 1 else webhook_chunks[0]
+        targets = {
+            "content/core.json": webhook_chunks[0],
+            f"content/{today_str}.json": primary_chunk,
+            f"content/{tomorrow_str}.json": primary_chunk,
+        }
+        if len(webhook_chunks) > 2:
+            targets[f"content/{today_str}-1.json"] = webhook_chunks[2]
+            targets[f"content/{tomorrow_str}-1.json"] = webhook_chunks[2]
 
-        # Also create a date-based backup file with second chunk if available
-        if len(webhook_chunks) > 1:
-            # Get current date and tomorrow's date
-            current_date = datetime.now()
-            tomorrow_date = current_date + timedelta(days=1)
-            
-            # Format dates for filenames
-            current_date_str = current_date.strftime("%Y%m%d")
-            tomorrow_date_str = tomorrow_date.strftime("%Y%m%d")
-            
-            # Create paths for both dates
-            current_backup_file = f"content/{current_date_str}.json"
-            tomorrow_backup_file = f"content/{tomorrow_date_str}.json"
-            
-            # Check if files exist
-            current_file_paths = self.find_files_by_name(file_name=f"{current_date_str}.json")
-            tomorrow_file_paths = self.find_files_by_name(file_name=f"{tomorrow_date_str}.json")
-            
-            backup_json_content = json.dumps(webhook_chunks[1], indent=4)
-            
-            # Add current date file if it doesn't exist
-            if current_file_paths:
-                files_to_update.append((current_file_paths[0], backup_json_content))
-            else:
-                files_to_update.append((current_backup_file, backup_json_content))
-                
-            # Add tomorrow's date file if it doesn't exist
-            if tomorrow_file_paths:
-                files_to_update.append((tomorrow_file_paths[0], backup_json_content))
-            else:
-                files_to_update.append((tomorrow_backup_file, backup_json_content))
+        webhook_files_changed = 0
+        for file_path, chunk in targets.items():
+            if self._webhook_set_changed(listing.get(file_path), chunk):
+                files_to_update.append((file_path, json.dumps(chunk, indent=4)))
+                webhook_files_changed += 1
 
-        # Only perform the commit if there are files to update
-        if files_to_update:
-            self.update_multiple_files(
-                files_to_update,
-                commit_message="Updating files based on changes in the database.",
-                branch=self.branch
-            )
+        # Mirror the published set in the database, but only when it moved.
+        if webhook_files_changed:
+            with Session() as s:
+                s.query(NewWebhook).delete()
+                for webhook_hash in encrypted_webhooks:
+                    s.add(NewWebhook(webhook_hash=webhook_hash))
+                s.commit()
 
-    def _prepare_news_update(self):
+        for file_path, content in self._item_list_contents():
+            existing = listing.get(file_path)
+            if existing is None or existing.sha != _git_blob_sha(content):
+                files_to_update.append((file_path, content))
+
+        deletions = _stale_dated_paths(listing.keys(), today_str)
+
+        if not files_to_update and not deletions:
+            print("GitHub Pages content unchanged; skipping commit.")
+            return
+
+        print(f"Committing {len(files_to_update)} file update(s)"
+              + (f" + {len(deletions)} stale deletion(s)" if deletions else "")
+              + f" ({webhook_files_changed} webhook file(s) changed).")
+        self.update_multiple_files(
+            files_to_update,
+            commit_message="Update published content (webhooks/news/key/item lists).",
+            branch=self.branch,
+            deletions=deletions,
+        )
+
+    def _prepare_news_update(self, listing=None):
         """
         Prepare the news file update but don't commit it yet.
         Returns a tuple of (file_path, content) if an update is needed, None otherwise.
+        ``listing`` is the pre-fetched ``content/`` directory dict; change
+        detection compares blob shas so no per-file fetch is needed.
         """
         with Session() as session:
             current_news_data = session.query(GroupConfiguration).where(GroupConfiguration.group_id == 2,
@@ -324,31 +323,28 @@ class GithubPagesUpdater:
             if current_news_data:
                 news_content = f"{current_news_data.config_value}" if current_news_data.config_value and current_news_data.config_value != "" else current_news_data.long_value if current_news_data.long_value and current_news_data.long_value != "" else ""
                 news_file_path = "content/news.txt"
-                
-                # Check if file exists and content has changed
-                try:
-                    file = self.repo.get_contents(news_file_path, ref=self.branch)
-                    old_content = file.decoded_content.decode('utf-8')
-                    if old_content != news_content:
-                        print(f"News content has changed. Updating {news_file_path}")
-                        return (news_file_path, news_content)
-                    else:
-                        print(f"No news content changes. Skipping update.")
-                        return None
-                except github.GithubException as e:
-                    if e.status == 404:
-                        # File doesn't exist, create it
-                        print(f"News file doesn't exist. Creating {news_file_path}")
-                        return (news_file_path, news_content)
-                    else:
-                        print(f"Error checking news file: {e}")
-                        return None
+
+                existing = (listing or {}).get(news_file_path)
+                if listing is None:
+                    try:
+                        existing = self.repo.get_contents(news_file_path, ref=self.branch)
+                    except github.GithubException as e:
+                        if e.status != 404:
+                            print(f"Error checking news file: {e}")
+                            return None
+                        existing = None
+                if existing is None or existing.sha != _git_blob_sha(news_content):
+                    print(f"News content has changed. Updating {news_file_path}")
+                    return (news_file_path, news_content)
+                return None
         return None
 
-    def _prepare_encryption_key_update(self):
+    def _prepare_encryption_key_update(self, listing=None):
         """
         Prepare the encryption key file update but don't commit it yet.
         Returns a tuple of (file_path, content) if an update is needed, None otherwise.
+        ``listing`` is the pre-fetched ``content/`` directory dict (existence
+        checks only — key files are never rewritten once created).
         """
         with Session() as session:
             current_encryption_key = session.query(GroupConfiguration).where(GroupConfiguration.group_id == 2,
@@ -380,31 +376,27 @@ class GithubPagesUpdater:
                     
                     encryption_key_content = new_key
                 
-                # Check if today's file exists
+                def _exists(path):
+                    if listing is not None:
+                        return path in listing
+                    try:
+                        self.repo.get_contents(path, ref=self.branch)
+                        return True
+                    except github.GithubException as e:
+                        if e.status == 404:
+                            return False
+                        raise
+
                 try:
-                    self.repo.get_contents(current_key_file, ref=self.branch)
-                    print(f"Today's encryption key file already exists. Skipping update.")
-                except github.GithubException as e:
-                    if e.status == 404:
-                        # File doesn't exist, create it
+                    if not _exists(current_key_file):
                         print(f"Creating today's encryption key file: {current_key_file}")
                         return (current_key_file, encryption_key_content)
-                    else:
-                        print(f"Error checking encryption key file: {e}")
-                        return None
-                
-                # Check if tomorrow's file exists
-                try:
-                    self.repo.get_contents(tomorrow_key_file, ref=self.branch)
-                    print(f"Tomorrow's encryption key file already exists. Skipping update.")
-                except github.GithubException as e:
-                    if e.status == 404:
-                        # File doesn't exist, create it
+                    if not _exists(tomorrow_key_file):
                         print(f"Creating tomorrow's encryption key file: {tomorrow_key_file}")
                         return (tomorrow_key_file, encryption_key_content)
-                    else:
-                        print(f"Error checking encryption key file: {e}")
-                        return None
+                except github.GithubException as e:
+                    print(f"Error checking encryption key file: {e}")
+                    return None
         return None
 
     def _is_valid_fernet_key(self, key):
@@ -503,13 +495,14 @@ class GithubPagesUpdater:
             print(f"Unexpected error updating {file_path}: {e}")
             return False
 
-    def update_multiple_files(self, files_to_update, commit_message, branch="main"):
+    def update_multiple_files(self, files_to_update, commit_message, branch="main", deletions=None):
         """
         Update multiple files in a single commit to avoid multiple GitHub Pages builds.
 
         :param files_to_update: List of tuples (file_path, new_content)
         :param commit_message: Commit message for the update
         :param branch: Branch to update (default: main)
+        :param deletions: Optional list of file paths to delete in the same commit
         """
         repo = self.repo
 
@@ -518,7 +511,7 @@ class GithubPagesUpdater:
         latest_commit = repo.get_git_commit(ref.object.sha)
         base_tree = repo.get_git_tree(latest_commit.tree.sha)
 
-        # 2. Create blobs for each file
+        # 2. Create blobs for each file (sha=None in a tree element deletes the path)
         element_list = []
         for file_path, new_content in files_to_update:
             blob = repo.create_git_blob(new_content, "utf-8")
@@ -529,6 +522,15 @@ class GithubPagesUpdater:
                 sha=blob.sha
             )
             element_list.append(element)
+        for file_path in (deletions or []):
+            element_list.append(github.InputGitTreeElement(
+                path=file_path,
+                mode="100644",
+                type="blob",
+                sha=None
+            ))
+        if not element_list:
+            return
 
         # 3. Create a new tree
         new_tree = repo.create_git_tree(element_list, base_tree)

@@ -511,8 +511,11 @@ async def github_update_loop():
         except Exception as e:
             print(f"Error in GitHub update loop: {e}")
 
-        # Sleep with periodic heartbeats (1 hour = 3600 seconds)
-        await sleep_with_watchdog_heartbeats(3600)
+        # Re-check every 10 minutes; the 30-minute Redis gate above sets the
+        # effective publish cadence. Runs are cheap now — the updater commits
+        # only when the published content actually changed (this loop is the
+        # ONLY publisher; heartbeat's competing 15-minute task was removed).
+        await sleep_with_watchdog_heartbeats(600)
 
 # Background task for player updates
 @app.before_serving

@@ -24,7 +24,6 @@ init_sentry("droptracker-heartbeat")
 # Set up more detailed logging
 # logging.basicConfig(level=logging.DEBUG)
 import os
-from utils.github import GithubPagesUpdater
 bot_token = os.getenv("HEARTBEAT_BOT_TOKEN")
 bot = interactions.Client(token=bot_token)
 
@@ -487,13 +486,9 @@ async def check_missing_webhooks():
     session.commit()
     print(f"Added {total_added} missing webhooks to the database")
 
-@Task.create(IntervalTrigger(minutes=15))
-async def github_update_loop():
-    updater = GithubPagesUpdater()
-    try:
-        await updater.update_github_pages()
-    except Exception as e:
-        print(f"Error updating GitHub Pages: {e}")
+## GitHub Pages publishing now has a single writer: the change-gated
+## github_update_loop in data/player_total_updater.py. The 15-minute publisher
+## that lived here raced it and (before change-gating) committed every cycle.
 
 
 @Task.create(IntervalTrigger(minutes=30))
@@ -576,7 +571,6 @@ async def on_startup():
     # Start ongoing maintenance tasks
     check_missing_webhooks.start()
     pending_deletion_cleanup_loop.start()
-    github_update_loop.start()
     # Only attempt creations for channels we know need a webhook
     await run_channel_deletes()
     run_channel_deletes.start()
