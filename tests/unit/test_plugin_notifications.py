@@ -15,6 +15,8 @@ import json
 import os
 import sys
 
+import pytest
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -29,6 +31,13 @@ def _load(module_name, *path_parts):
 
 pn = _load("_plugin_notifications_under_test", "services", "plugin_notifications.py")
 en = _load("_event_notifications_for_pn_test", "services", "event_notifications.py")
+
+# _task_screenshot_names lazy-imports services.event_engine / services.loot_sweep.
+# Other test files register mocks under those names, so load the real modules
+# once under private names and swap them in around each TestTaskScreenshotNames
+# test (see the fixture on the class).
+_real_engine = _load("_event_engine_for_pn_test", "services", "event_engine.py")
+_real_loot_sweep = _load("_loot_sweep_for_pn_test", "services", "loot_sweep.py")
 
 
 class FakePipeline:
@@ -439,3 +448,50 @@ class TestMarkObtainedRequirements:
     def test_empty_collected_is_noop(self):
         reqs = pn.mark_obtained_requirements(self._reqs(), {"kind": "all_of"}, set())
         assert all("obtained" not in r for r in reqs)
+
+
+class TestTaskScreenshotNames:
+    @pytest.fixture(autouse=True)
+    def _real_engine_modules(self):
+        saved = {name: sys.modules.get(name)
+                 for name in ("services.event_engine", "services.loot_sweep")}
+        sys.modules["services.event_engine"] = _real_engine
+        sys.modules["services.loot_sweep"] = _real_loot_sweep
+        yield
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+    def test_item_collection_target_and_items(self):
+        names = pn._task_screenshot_names(
+            "item_collection", "Dark Claw",
+            {"items": [{"item_name": "Unsired"}, "Blood quartz"]})
+        assert names == {"dark claw", "unsired", "blood quartz"}
+
+    def test_item_collection_any_of_and_groups(self):
+        config = {
+            "any_of": ["Hydra's Eye", {"item_name": "Hydra's Fang"}],
+            "groups": [{"mode": "all_of", "items": [{"item_name": "Ice quartz"}]}],
+        }
+        names = pn._task_screenshot_names("item_collection", None, config)
+        assert names == {"hydra's eye", "hydra's fang", "ice quartz"}
+
+    def test_loot_sweep_drop_entries_only(self):
+        config = {"groups": [{
+            "name": "g", "npcs": ["Zulrah"],
+            "items": [{"name": "Tanzanite mutagen", "source": "drop"},
+                      {"name": "Snakeling", "source": "pet"}],
+        }]}
+        names = pn._task_screenshot_names("loot_sweep", None, config)
+        assert "tanzanite mutagen" in names
+        assert "snakeling" not in names
+
+    def test_non_item_types_empty(self):
+        assert pn._task_screenshot_names("kc_target", "Zulrah", {}) == set()
+        assert pn._task_screenshot_names("pb_target", "Zulrah", {}) == set()
+
+    def test_bad_config_never_raises(self):
+        assert pn._task_screenshot_names("item_collection", None, None) == set()
+        assert pn._task_screenshot_names("loot_sweep", None, {"groups": "junk"}) == set()

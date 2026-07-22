@@ -575,6 +575,53 @@ def _batch_task_tiles(session, task_rows) -> dict:
     return tiles
 
 
+def _task_screenshot_names(task_type, target, config: dict) -> set:
+    """Normalized item names a task can be credited by — the pool the plugin
+    force-screenshots for proof while the task is incomplete. Pure; config is
+    an already-parsed dict. Only item-bearing task types contribute:
+
+    - ``item_collection``: the single ``target`` plus every listed name
+      (``items`` / ``any_of`` / ``groups`` / ``paths``),
+    - ``loot_sweep``: every drop-sourced matcher key (pet entries credit from
+      pet submissions, which carry their own screenshot config).
+    """
+    names: set = set()
+    try:
+        if task_type == "item_collection":
+            from services.event_engine import _config_item_entries, _norm
+
+            names.update(_config_item_entries(config or {}).keys())
+            target_norm = _norm(target)
+            if target_norm:
+                names.add(target_norm)
+        elif task_type == "loot_sweep":
+            from services.loot_sweep import LootSweepConfig
+
+            index = LootSweepConfig(config or {}).matcher_index()
+            names.update(k for k, v in index.items()
+                         if (v or {}).get("source") == "drop")
+    except Exception as e:
+        print(f"[plugin_notifications] screenshot-name extract failed: {e}")
+    names.discard("")
+    return names
+
+
+def _resolve_item_ids(session, names: set) -> list:
+    """Item ids for a set of normalized item names (all variants of a name —
+    noted/duplicate ids included, so the dropped id always matches client-side).
+    MySQL's case-insensitive collation lets the indexed ``IN`` do the matching."""
+    if not names:
+        return []
+    from db.models import ItemList
+
+    rows = (
+        session.query(ItemList.item_id)
+        .filter(ItemList.item_name.in_(sorted(names)))
+        .all()
+    )
+    return sorted({int(r[0]) for r in rows})
+
+
 def compose_event_state(session, player_id) -> dict:
     """The plugin's HUD/Events-tab state: one entry per active event the
     player is rostered in. All composition happens here so the client stays a
@@ -592,6 +639,7 @@ def compose_event_state(session, player_id) -> dict:
     )
 
     entries = []
+    screenshot_names: set = set()
     for _member, team, event in rows:
         teams = (
             session.query(EventTeam)
@@ -714,6 +762,29 @@ def compose_event_state(session, player_id) -> dict:
         except Exception as e:
             print(f"[plugin_notifications] credited-item lookup failed: {e}")
 
+        # Items the plugin should force-screenshot for proof: everything an
+        # incomplete task can still be credited by, minus what the team has
+        # already banked for that task. Resolved to ids once, after all events.
+        for task_row in task_rows:
+            state = progress_by_task.get(task_row.id) or {}
+            if state.get("completed"):
+                continue
+            try:
+                raw_config = task_row.config
+                if isinstance(raw_config, dict):
+                    task_config = raw_config
+                elif raw_config:
+                    task_config = json.loads(raw_config)
+                else:
+                    task_config = {}
+                if not isinstance(task_config, dict):
+                    task_config = {}
+            except Exception:
+                task_config = {}
+            screenshot_names.update(
+                _task_screenshot_names(task_row.type, task_row.target, task_config)
+                - (collected_by_task.get(task_row.id) or set()))
+
         # The full task list: powers the plugin's task picker (click a task to
         # track it on the HUD instead of the server's focus pick), tooltips
         # explaining each task's requirements, and per-task progress rows.
@@ -817,7 +888,13 @@ def compose_event_state(session, player_id) -> dict:
             },
             "standings": standings,
         })
-    return {"events": entries}
+
+    screenshot_item_ids: list = []
+    try:
+        screenshot_item_ids = _resolve_item_ids(session, screenshot_names)
+    except Exception as e:
+        print(f"[plugin_notifications] screenshot-id resolve failed: {e}")
+    return {"events": entries, "screenshot_item_ids": screenshot_item_ids}
 
 
 def player_has_active_event(session, player_id) -> bool:
