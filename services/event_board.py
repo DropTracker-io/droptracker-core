@@ -245,7 +245,9 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
             # render failure keeps the full text standings.
             if getattr(event, "kind", None) == "loot_sweep" and board_img is not None:
                 top_n = min(top_n, 3)
-            layout = _apply_top_n(load_layout(session, event.group_id, "event_board"), top_n)
+            layout = _apply_top_n(
+                load_layout(session, event.group_id, "event_board", event_id=event.id),
+                top_n)
             # Threads/announcement channels can't host a LAUNCH_ACTIVITY
             # callback — render an Activity Link URL button (client-side
             # launch) instead.

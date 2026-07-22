@@ -921,7 +921,11 @@ class EventMessageLayout(Base):
 
     __tablename__ = "web_event_message_layouts"
     __table_args__ = (
-        Index("uq_web_event_msg_layout", "group_id", "message_type", unique=True),
+        # _v2: the widened (…, event_id) unique replaced the web41a two-column
+        # index under a new name — the group_id FK needs a supporting index at
+        # every moment of the migration, so it was create-new-then-drop-old.
+        Index("uq_web_event_msg_layout_v2", "group_id", "message_type", "event_id",
+              unique=True),
         {"extend_existing": True},
     )
 
@@ -929,6 +933,12 @@ class EventMessageLayout(Base):
     # Group 1 = the template group whose rows are the seeded system defaults
     # (scripts/seed_event_message_layouts.py) — same convention as group_embeds.
     group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=False, default=1)
+    # web66a: 0 = a group-level layout; a real event id = a one-event override
+    # (stored under the event's host group, template group 1 for global events)
+    # resolved ahead of the group default. A 0 sentinel, not NULL — MySQL
+    # unique indexes admit unlimited NULL duplicates. No FK (0 references no
+    # row); rows are cleaned up with the event's delete cascade.
+    event_id = Column(Integer, nullable=False, default=0, server_default="0")
     message_type = Column(String(32), nullable=False)  # EVENT_MESSAGE_LAYOUT_TYPES
     # Container accent bar, "#RRGGBB"; NULL = no accent.
     accent_color = Column(String(7), nullable=True)

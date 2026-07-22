@@ -32,6 +32,7 @@ from web_api.routes.event_admin import event_admin_bp
 from web_api.routes.event_audit import event_audit_bp
 from web_api.routes.event_board import event_board_bp
 from web_api.routes.event_discord import event_discord_bp
+from web_api.routes.event_layouts import event_layouts_bp
 from web_api.routes.event_participants import event_participants_bp
 from web_api.routes.event_prizes import event_prizes_bp
 from web_api.routes.event_templates import event_templates_bp
@@ -164,6 +165,7 @@ def create_app() -> Quart:
     app.register_blueprint(event_audit_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_board_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_discord_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(event_layouts_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_participants_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_prizes_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_templates_bp, url_prefix=API_PREFIX)

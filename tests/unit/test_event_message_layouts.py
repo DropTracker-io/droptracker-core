@@ -744,3 +744,139 @@ class TestLootSweepMessages:
         assert en.should_send_event_message(cfg, "event_sweep_item") is False
         assert en.should_send_event_message(cfg, "event_sweep_group") is True
         assert en.should_send_event_message(cfg, "event_sweep_set") is True
+
+
+# ── web66a: per-event resolution candidates + save-time validation ───────────
+
+class TestLayoutCandidates:
+    def test_group_default_only(self):
+        assert ml.layout_candidates(5, None, True) == [(5, 0), (1, 0)]
+        assert ml.layout_candidates(5, 0, True) == [(5, 0), (1, 0)]
+
+    def test_unentitled_group_skips_group_rows(self):
+        assert ml.layout_candidates(5, None, False) == [(1, 0)]
+        # ...including its per-event override — a lapsed subscription reverts
+        # the whole event to the system defaults.
+        assert ml.layout_candidates(5, 42, False) == [(1, 0)]
+
+    def test_event_override_first(self):
+        assert ml.layout_candidates(5, 42, True) == [(5, 42), (5, 0), (1, 0)]
+
+    def test_global_event_overrides_live_on_template_group(self):
+        assert ml.layout_candidates(None, 42, False) == [(1, 42), (1, 0)]
+        assert ml.layout_candidates(0, 42, False) == [(1, 42), (1, 0)]
+
+    def test_template_group_itself(self):
+        assert ml.layout_candidates(1, None, False) == [(1, 0)]
+        assert ml.layout_candidates(1, 42, False) == [(1, 42), (1, 0)]
+
+    def test_garbage_event_id(self):
+        assert ml.layout_candidates(5, "x", True) == [(5, 0), (1, 0)]
+
+
+class TestValidateLayoutSpec:
+    def test_valid_default_layouts(self):
+        # Every shipped default must pass its own validator.
+        for message_type, layout in ml.DEFAULT_LAYOUTS.items():
+            assert ml.validate_layout_spec(layout) == [], message_type
+
+    def test_not_a_dict(self):
+        assert ml.validate_layout_spec([]) == ["Layout must be an object."]
+
+    def test_empty_blocks(self):
+        assert "at least one block" in ml.validate_layout_spec({"blocks": []})[0]
+
+    def test_bad_accent(self):
+        errs = ml.validate_layout_spec(
+            {"accent_color": "gold", "blocks": [{"type": "separator"}]})
+        assert any("accent_color" in e for e in errs)
+        assert ml.validate_layout_spec(
+            {"accent_color": "#FFD700", "blocks": [{"type": "separator"}]}) == []
+
+    def test_unknown_block_type(self):
+        errs = ml.validate_layout_spec({"blocks": [{"type": "video"}]})
+        assert any("unknown type 'video'" in e for e in errs)
+
+    def test_text_needs_content(self):
+        errs = ml.validate_layout_spec({"blocks": [{"type": "text"}]})
+        assert any("content is required" in e for e in errs)
+
+    def test_text_too_long(self):
+        errs = ml.validate_layout_spec(
+            {"blocks": [{"type": "text", "content": "x" * (ml.MAX_TEXT_LEN + 1)}]})
+        assert any("at most" in e for e in errs)
+
+    def test_too_many_blocks(self):
+        blocks = [{"type": "text", "content": "hi"}] * (ml.MAX_BLOCKS + 1)
+        errs = ml.validate_layout_spec({"blocks": blocks})
+        assert any(f"At most {ml.MAX_BLOCKS} blocks" in e for e in errs)
+
+    def test_section_thumbnail_token_ok_plain_string_not(self):
+        ok = {"blocks": [{"type": "section", "content": "c", "thumbnail": "{proof_url}"}]}
+        assert ml.validate_layout_spec(ok) == []
+        bad = {"blocks": [{"type": "section", "content": "c", "thumbnail": "not a url"}]}
+        assert any("http(s) URL" in e for e in ml.validate_layout_spec(bad))
+
+    def test_standings_limit_range(self):
+        bad = {"blocks": [{"type": "standings", "limit": 40}]}
+        assert any("1–25" in e for e in ml.validate_layout_spec(bad))
+        assert ml.validate_layout_spec(
+            {"blocks": [{"type": "standings", "limit": 10, "title": "**Top**"}]}) == []
+
+    def test_buttons_validation(self):
+        assert any("at least one button" in e for e in ml.validate_layout_spec(
+            {"blocks": [{"type": "buttons", "buttons": []}]}))
+        assert any("needs a label" in e for e in ml.validate_layout_spec(
+            {"blocks": [{"type": "buttons", "buttons": [{"url": "https://x.io"}]}]}))
+        assert any("needs a 'url'" in e for e in ml.validate_layout_spec(
+            {"blocks": [{"type": "buttons", "buttons": [{"label": "Go"}]}]}))
+        assert ml.validate_layout_spec(
+            {"blocks": [{"type": "buttons", "buttons": [
+                {"label": "Go", "url": "{event_url}"},
+                {"label": "Open", "launch": True, "view": "review"},
+            ]}]}) == []
+        too_many = [{"label": "b", "url": "https://x.io"}] * (ml.MAX_BUTTONS + 1)
+        assert any("per row" in e for e in ml.validate_layout_spec(
+            {"blocks": [{"type": "buttons", "buttons": too_many}]}))
+
+
+class TestEditorMeta:
+    def test_type_meta_covers_every_layout_type(self):
+        # TYPE_META must stay in lockstep with EVENT_MESSAGE_LAYOUT_TYPES
+        # (db/models/events.py) — compare against the seeded default set,
+        # which the seed script asserts matches the canonical tuple.
+        for key in ml.DEFAULT_LAYOUTS:
+            if key == "event_multi_clan_skipped":
+                continue  # code-default only, not editable (not in the type list)
+            assert key in ml.TYPE_META, key
+        for key in ml.TYPE_META:
+            assert key in ml.DEFAULT_LAYOUTS, key
+
+    def test_every_type_token_documented(self):
+        for token in ml._COMMON_TOKENS:
+            assert token in ml.TOKEN_DOCS, token
+        for key, meta in ml.TYPE_META.items():
+            for token in meta.get("tokens") or ():
+                assert token in ml.TOKEN_DOCS, f"{key}:{token}"
+
+    def test_default_layout_tokens_are_documented_for_their_type(self):
+        # Every {token} referenced by a type's default layout must appear in
+        # that type's advertised token list (else the editor's docs lie).
+        import re as _re
+
+        for key, meta in ml.TYPE_META.items():
+            allowed = set(ml._COMMON_TOKENS) | set(meta.get("tokens") or ())
+            blob = __import__("json").dumps(ml.DEFAULT_LAYOUTS[key])
+            for token in set(_re.findall(r"\{([a-z_]+)\}", blob)):
+                if token == "event_id":
+                    continue  # structural (launch buttons), not a text token
+                assert token in allowed, f"{key} default uses undocumented {{{token}}}"
+
+    def test_standings_capability_matches_defaults(self):
+        # Types whose default layout renders a standings block must advertise
+        # the capability (senders pass standings for exactly these).
+        for key, meta in ml.TYPE_META.items():
+            has_block = any(
+                b.get("type") == "standings" for b in ml.DEFAULT_LAYOUTS[key]["blocks"])
+            if has_block:
+                assert meta.get("standings") is True, key

@@ -441,8 +441,393 @@ DEFAULT_LAYOUTS = {
 
 
 # --------------------------------------------------------------------------- #
-# Loader (group row -> group 1 row -> code default)
+# Editor metadata (web66a): validation limits, token docs and per-type
+# capabilities, served to the web layout editor by
+# web_api/routes/event_layouts.py GET /event-layouts/meta. Kept next to
+# DEFAULT_LAYOUTS so a new token/type is added in one file.
 # --------------------------------------------------------------------------- #
+MAX_BLOCKS = 15
+MAX_TEXT_LEN = 2000
+MAX_TITLE_LEN = 200
+MAX_URL_LEN = 500
+MAX_BUTTONS = 5
+MAX_LABEL_LEN = 80
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_BLOCK_TYPES = ("text", "section", "separator", "standings", "buttons")
+
+# {token: {"help", "sample"}} — the sample values drive the editor's live
+# preview ("fill with sample data"), so they should read like a real event.
+TOKEN_DOCS = {
+    "event_name": {"help": "The event's name", "sample": "Summer Loot Sweep"},
+    "event_url": {"help": "Link to the event page on droptracker.io",
+                  "sample": "https://www.droptracker.io/events/42"},
+    "description": {"help": "The event's description",
+                    "sample": "Six weeks of loot-fueled chaos across the whole clan."},
+    "starts_at": {"help": "Start time (rendered as a Discord timestamp)",
+                  "sample": "July 22, 2026 5:00 PM"},
+    "ends_at": {"help": "End time (rendered as a Discord timestamp)",
+                "sample": "August 5, 2026 5:00 PM"},
+    "team_count": {"help": "Number of teams in the event", "sample": "8"},
+    "team_name": {"help": "The team this message is about", "sample": "Team Bandos"},
+    "player_name": {"help": "The player who triggered this message", "sample": "Zezima"},
+    "task_label": {"help": "The task's display name", "sample": "Bandos chestplate"},
+    "points": {"help": "Points awarded", "sample": "25"},
+    "bonus_points": {"help": "Bonus points awarded", "sample": "50"},
+    "team_score": {"help": "The team's total score", "sample": "120"},
+    "received_line": {"help": "The item that finished the task and how much of the "
+                              "requirement it filled (drops when the task is named "
+                              "after the item)",
+                      "sample": "**Bandos chestplate** — filled the whole requirement"},
+    "team_total_line": {"help": "Running team total (non-bingo events)",
+                        "sample": "**Team total** `120 pts`"},
+    "completed_by_line": {"help": "\"Completed by\" line (single contributor)",
+                          "sample": "**Completed by** `Zezima`"},
+    "contributors_block": {"help": "Ranked contributor breakdown (several contributors)",
+                           "sample": "**Contributors**\n\U0001F947 **Zezima** `3`\n\U0001F948 **Durial321** `1`"},
+    "contributors_line": {"help": "Compact comma-joined contributor list",
+                          "sample": "**Zezima** `3`, **Durial321** `1`"},
+    "bingo_stats": {"help": "Team board summary (bingo events)",
+                    "sample": "**Total tiles completed** `5`\n**Total points earned** `120 pts`\n**Team position** #1/8 teams"},
+    "completion_icon": {"help": "Icon URL for the received item (falls back to the task icon)",
+                        "sample": "https://www.droptracker.io/img/itemdb/11832.png"},
+    "task_icon": {"help": "Icon URL for the task's target item/NPC/skill",
+                  "sample": "https://www.droptracker.io/img/itemdb/11832.png"},
+    "proof_url": {"help": "Proof screenshot URL",
+                  "sample": "https://www.droptracker.io/img/proofs/sample.png"},
+    "review_url": {"help": "Link to the pending-review queue",
+                   "sample": "https://www.droptracker.io/groups/2/events/42"},
+    "milestone_pct": {"help": "The milestone percentage just crossed", "sample": "50"},
+    "progress_bar": {"help": "Text progress meter", "sample": "▰▰▰▰▰▱▱▱▱▱"},
+    "progress": {"help": "Current progress (abbreviated K/M/B)", "sample": "5.00M"},
+    "target": {"help": "The task's target (abbreviated K/M/B)", "sample": "10.00M"},
+    "cell_label": {"help": "The bingo tile's label", "sample": "B2 — Bandos chestplate"},
+    "cell_list": {"help": "List of bingo tiles involved", "sample": "**B2 — Bandos chestplate**"},
+    "cell_plural": {"help": "\"s\" when several tiles are involved, empty otherwise",
+                    "sample": ""},
+    "line_summary": {"help": "Which full line(s) the team completed",
+                     "sample": "completed a full line — **Row 2**"},
+    "lead_via_line": {"help": "The drop that took the lead (Loot Sweep only)",
+                      "sample": "-# with **Twisted bow** (`+120 pts`)"},
+    "dice_str": {"help": "The dice roll", "sample": "3 + 4"},
+    "tile_from": {"help": "Board tile moved from", "sample": "12"},
+    "tile_to": {"help": "Board tile landed on", "sample": "19"},
+    "turn": {"help": "The team's turn number", "sample": "7"},
+    "next_task_label": {"help": "The next task drawn for the team", "sample": "Zulrah kill"},
+    "coins_awarded": {"help": "Coins earned this turn", "sample": "3"},
+    "coin_balance": {"help": "The team's coin wallet after the turn", "sample": "11"},
+    "action_line": {"help": "What happened in the board skirmish",
+                    "sample": "**Team Bandos** froze **Team Zamorak** for 2 turns"},
+    "roll_thanks_line": {"help": "\" (thanks **player**)\" credit on the roll prompt",
+                         "sample": " (thanks **Zezima**)"},
+    "reason": {"help": "Why the lifecycle step failed", "sample": "no team has any members"},
+    "pot_started_line": {"help": "Prize-pot line on the start announcement (drops when "
+                                 "the pot is off or not advertised)",
+                         "sample": "\U0001F4B0 **250M GP** prize pot on the line!"},
+    "pot_result_line": {"help": "Prize-pot result line on the end announcement",
+                        "sample": "\U0001F3C6 **Team Bandos** takes the **250M GP** pot!"},
+    "pot_announce_line": {"help": "The pot advertisement line",
+                          "sample": "The pot stands at **250M GP** — buy-ins open until the start."},
+    "pot_contributors_block": {"help": "Pot contributor list",
+                               "sample": "**Contributors**\n**Zezima** `100M`\n**Durial321** `50M`"},
+    "pot_line": {"help": "Prize-pot line on the live board",
+                 "sample": "\U0001F4B0 Prize pot: **250M GP**"},
+    "signup_instructions": {"help": "How to sign up (matches the event's formation mode)",
+                            "sample": "Pick your account, then choose your team."},
+    "board_status_line": {"help": "The live board's status line",
+                          "sample": "Day 3 of 14 — 12 tasks completed"},
+    "tasks_summary": {"help": "Task-completion summary on the live board",
+                      "sample": "✅ 12/25 tasks completed"},
+    "updated_ts": {"help": "When the live board last refreshed",
+                   "sample": "July 22, 2026 5:04 PM"},
+    "received_display": {"help": "The received item (with quantity when stacked)",
+                         "sample": "3× Zenyte shard"},
+    "received_points": {"help": "Points scored by this receipt", "sample": "4.5"},
+    "sweep_npc_line": {"help": "Which NPC dropped it", "sample": "-# from **Zulrah**"},
+    "sweep_copies_line": {"help": "Scoring copies so far for this item",
+                          "sample": "-# `2/3` scoring copies • next `+2.25`"},
+    "sweep_group_progress_line": {"help": "Progress through the item's subset",
+                                  "sample": "**Zulrah uniques** ▰▰▰▱▱▱▱▱▱▱ `2/6 items`"},
+    "sweep_set_total_line": {"help": "The set's running total",
+                             "sample": "-# Set running total `48.75 pts`"},
+    "sweep_by_line": {"help": "Who received it", "sample": "-# by **Zezima**"},
+    "group_label": {"help": "The completed subset's label", "sample": "Zulrah uniques"},
+    "sweep_group_again_line": {"help": "Repeat-completion note (bonus decays)",
+                               "sample": "-# Completed ×2 — the bonus decays each time"},
+    "sweep_bonus": {"help": "The subset/set completion bonus", "sample": "25"},
+    "sweep_standing_line": {"help": "Team total + position",
+                            "sample": "**Team total** `120.5 pts` • `#1/8`"},
+    "sweep_set_again_suffix": {"help": "\" (×n)\" on repeat set sweeps", "sample": ""},
+}
+
+# Tokens available on every message type (the notification_context basics).
+_COMMON_TOKENS = ("event_name", "event_url", "description", "starts_at", "ends_at")
+
+# {message_type: {"label", "group", "description", "tokens", "standings"}} —
+# ``tokens`` extends _COMMON_TOKENS; ``standings`` marks the types whose
+# senders pass real standings (a standings block anywhere else renders "No
+# teams yet."). Order here is the editor's display order.
+TYPE_META = {
+    "event_started": {
+        "label": "Event started", "group": "Lifecycle",
+        "description": "Posted to the announcements channel when the event goes live.",
+        "tokens": ("team_count", "pot_started_line"), "standings": False,
+    },
+    "event_ended": {
+        "label": "Event ended", "group": "Lifecycle",
+        "description": "The wrap-up announcement with final standings.",
+        "tokens": ("pot_result_line",), "standings": True,
+    },
+    "event_activation_failed": {
+        "label": "Activation failed", "group": "Lifecycle",
+        "description": "Admin alert: the scheduled start passed but the event could not activate.",
+        "tokens": ("reason",), "standings": False,
+    },
+    "event_end_failed": {
+        "label": "End failed", "group": "Lifecycle",
+        "description": "Admin alert: something went wrong while ending the event.",
+        "tokens": ("reason",), "standings": False,
+    },
+    "event_completion": {
+        "label": "Task completion", "group": "Progress",
+        "description": "A team completed a task.",
+        "tokens": ("team_name", "player_name", "task_label", "points", "received_line",
+                   "team_total_line", "completed_by_line", "contributors_block",
+                   "contributors_line", "bingo_stats", "completion_icon", "task_icon",
+                   "cell_label", "cell_list", "cell_plural", "proof_url"),
+        "standings": False,
+    },
+    "event_task_progress": {
+        "label": "Task progress", "group": "Progress",
+        "description": "A team crossed a progress milestone on a task.",
+        "tokens": ("team_name", "player_name", "task_label", "milestone_pct",
+                   "progress_bar", "progress", "target", "task_icon"),
+        "standings": False,
+    },
+    "event_line": {
+        "label": "Bingo line bonus", "group": "Progress",
+        "description": "A team completed a full bingo line.",
+        "tokens": ("team_name", "line_summary", "bonus_points", "cell_list", "cell_plural"),
+        "standings": False,
+    },
+    "event_blackout": {
+        "label": "Bingo blackout", "group": "Progress",
+        "description": "A team completed the entire bingo board.",
+        "tokens": ("team_name", "bonus_points"), "standings": False,
+    },
+    "event_lead_change": {
+        "label": "Lead change", "group": "Progress",
+        "description": "A new team took the overall lead.",
+        "tokens": ("team_name", "task_label", "lead_via_line"), "standings": True,
+    },
+    "event_pending": {
+        "label": "Completion pending review", "group": "Progress",
+        "description": "A submission needs an admin's confirmation before it counts.",
+        "tokens": ("team_name", "player_name", "task_label", "proof_url", "review_url"),
+        "standings": False,
+    },
+    "event_sweep_item": {
+        "label": "Sweep: item received", "group": "Loot Sweep",
+        "description": "A team received a scoring item (very chatty — off by default).",
+        "tokens": ("team_name", "player_name", "received_display", "received_points",
+                   "sweep_npc_line", "sweep_copies_line", "sweep_group_progress_line",
+                   "sweep_set_total_line", "sweep_by_line", "completion_icon"),
+        "standings": False,
+    },
+    "event_sweep_group": {
+        "label": "Sweep: subset completed", "group": "Loot Sweep",
+        "description": "A team completed one subset of the sweep.",
+        "tokens": ("team_name", "group_label", "sweep_group_again_line", "sweep_bonus",
+                   "sweep_standing_line", "contributors_block", "completion_icon"),
+        "standings": False,
+    },
+    "event_sweep_set": {
+        "label": "Sweep: full set", "group": "Loot Sweep",
+        "description": "A team swept the entire set.",
+        "tokens": ("team_name", "task_label", "sweep_set_again_suffix", "sweep_bonus",
+                   "sweep_standing_line", "contributors_block", "completion_icon"),
+        "standings": False,
+    },
+    "event_board_turn": {
+        "label": "Board: turn", "group": "Board game",
+        "description": "A team rolled the dice and moved.",
+        "tokens": ("team_name", "player_name", "dice_str", "tile_from", "tile_to",
+                   "turn", "next_task_label", "coins_awarded", "coin_balance"),
+        "standings": False,
+    },
+    "event_board_win": {
+        "label": "Board: victory", "group": "Board game",
+        "description": "A team crossed the finish line.",
+        "tokens": ("team_name", "dice_str"), "standings": False,
+    },
+    "event_board_roll_prompt": {
+        "label": "Board: roll prompt", "group": "Board game",
+        "description": "\"Task done — roll the dice\" nudge.",
+        "tokens": ("team_name", "task_label", "roll_thanks_line", "coins_awarded",
+                   "coin_balance"),
+        "standings": False,
+    },
+    "event_board_action": {
+        "label": "Board: skirmish", "group": "Board game",
+        "description": "A team used an item on a rival (or a defense blocked one).",
+        "tokens": ("team_name", "action_line"), "standings": False,
+    },
+    "event_signup_prompt": {
+        "label": "Sign-up prompt", "group": "Announcements",
+        "description": "The interactive sign-up post (the Sign up button is always attached).",
+        "tokens": ("signup_instructions",), "standings": False,
+    },
+    "event_pot": {
+        "label": "Prize pot", "group": "Announcements",
+        "description": "The manual \"advertise the pot\" post.",
+        "tokens": ("pot_announce_line", "pot_contributors_block"), "standings": False,
+    },
+    "event_board": {
+        "label": "Live standings board", "group": "Live board",
+        "description": "The auto-refreshing standings message in the leaderboard channel.",
+        "tokens": ("board_status_line", "tasks_summary", "pot_line", "updated_ts"),
+        "standings": True,
+    },
+}
+
+# Sample standings for the editor preview (matches standings_lines() input).
+SAMPLE_STANDINGS = [
+    {"name": "Team Bandos", "score": 120},
+    {"name": "Team Zamorak", "score": 95},
+    {"name": "Team Saradomin", "score": 80},
+]
+
+
+def validate_layout_spec(layout) -> list:
+    """Validate one layout document (``{"accent_color"?, "blocks": [...]}``)
+    for saving; returns a list of human-readable problems (empty = valid).
+
+    This is the save-time gate for the web editor — stricter than the
+    renderer, which tolerates anything (and the notification sender falls
+    back to the legacy embed on a render error anyway). Stdlib-only, like
+    the rest of the module's pure layer."""
+    errors = []
+    if not isinstance(layout, dict):
+        return ["Layout must be an object."]
+
+    accent = layout.get("accent_color")
+    if accent not in (None, "") and (
+            not isinstance(accent, str) or not _HEX_COLOR_RE.match(accent)):
+        errors.append("accent_color must be a hex color like #FFD700.")
+
+    blocks = layout.get("blocks")
+    if not isinstance(blocks, list) or not blocks:
+        errors.append("The layout needs at least one block.")
+        return errors
+    if len(blocks) > MAX_BLOCKS:
+        errors.append(f"At most {MAX_BLOCKS} blocks are allowed.")
+
+    def check_text(value, what, i, required=True, limit=MAX_TEXT_LEN):
+        if value is None or value == "":
+            if required:
+                errors.append(f"Block #{i + 1}: {what} is required.")
+            return
+        if not isinstance(value, str):
+            errors.append(f"Block #{i + 1}: {what} must be a string.")
+        elif len(value) > limit:
+            errors.append(f"Block #{i + 1}: {what} must be at most {limit} characters.")
+
+    def check_url(value, what, i):
+        if value is None or value == "":
+            return
+        if not isinstance(value, str):
+            errors.append(f"Block #{i + 1}: {what} must be a string.")
+            return
+        if len(value) > MAX_URL_LEN:
+            errors.append(f"Block #{i + 1}: {what} must be at most {MAX_URL_LEN} characters.")
+        elif not _TOKEN_RE.search(value) and not value.lower().startswith(
+                ("http://", "https://")):
+            errors.append(
+                f"Block #{i + 1}: {what} must be an http(s) URL or contain a "
+                "token like {proof_url}.")
+
+    for i, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            errors.append(f"Block #{i + 1} must be an object.")
+            continue
+        kind = block.get("type")
+        if kind not in _BLOCK_TYPES:
+            errors.append(
+                f"Block #{i + 1}: unknown type '{kind}' "
+                f"(valid: {', '.join(_BLOCK_TYPES)}).")
+            continue
+        if kind == "text":
+            check_text(block.get("content"), "content", i)
+        elif kind == "section":
+            check_text(block.get("content"), "content", i)
+            check_url(block.get("thumbnail"), "thumbnail", i)
+        elif kind == "standings":
+            limit = block.get("limit")
+            if limit is not None and (
+                    not isinstance(limit, int) or isinstance(limit, bool)
+                    or not 1 <= limit <= 25):
+                errors.append(f"Block #{i + 1}: standings limit must be 1–25.")
+            check_text(block.get("title"), "title", i, required=False,
+                       limit=MAX_TITLE_LEN)
+        elif kind == "buttons":
+            buttons = block.get("buttons")
+            if not isinstance(buttons, list) or not buttons:
+                errors.append(f"Block #{i + 1}: a buttons block needs at least one button.")
+                continue
+            if len(buttons) > MAX_BUTTONS:
+                errors.append(f"Block #{i + 1}: at most {MAX_BUTTONS} buttons per row.")
+            for j, btn in enumerate(buttons):
+                if not isinstance(btn, dict):
+                    errors.append(f"Block #{i + 1} button #{j + 1} must be an object.")
+                    continue
+                label = btn.get("label")
+                if not isinstance(label, str) or not label.strip():
+                    errors.append(f"Block #{i + 1} button #{j + 1} needs a label.")
+                elif len(label) > MAX_LABEL_LEN:
+                    errors.append(
+                        f"Block #{i + 1} button #{j + 1}: label must be at most "
+                        f"{MAX_LABEL_LEN} characters.")
+                if btn.get("launch"):
+                    view = btn.get("view")
+                    if view is not None and (not isinstance(view, str) or len(view) > 32):
+                        errors.append(
+                            f"Block #{i + 1} button #{j + 1}: 'view' must be a short string.")
+                else:
+                    url = btn.get("url")
+                    if not url:
+                        errors.append(
+                            f"Block #{i + 1} button #{j + 1} needs a 'url' "
+                            "(or 'launch': true).")
+                    else:
+                        check_url(url, f"button #{j + 1} url", i)
+    return errors
+
+
+# --------------------------------------------------------------------------- #
+# Loader (event row -> group row -> group 1 row -> code default)
+# --------------------------------------------------------------------------- #
+def layout_candidates(group_id, event_id, entitled: bool) -> list:
+    """The ``(group_id, event_id)`` row keys to try, highest priority first
+    (pure — the unit-testable half of :func:`load_layout`'s resolution).
+
+    A per-event override lives under the event's host group (template group
+    for global events) and obeys the same entitlement gate as the group's
+    default row, so a lapsed subscription reverts the whole event."""
+    try:
+        eid = int(event_id or 0)
+    except (TypeError, ValueError):
+        eid = 0
+    candidates = []
+    if eid:
+        owner = group_id if (group_id and group_id != TEMPLATE_GROUP_ID) else TEMPLATE_GROUP_ID
+        if owner == TEMPLATE_GROUP_ID or entitled:
+            candidates.append((owner, eid))
+    if group_id and group_id != TEMPLATE_GROUP_ID and entitled:
+        candidates.append((group_id, 0))
+    candidates.append((TEMPLATE_GROUP_ID, 0))
+    return candidates
+
+
 def _parse_layout_row(row) -> Optional[dict]:
     try:
         layout = json.loads(row.layout)
@@ -455,43 +840,50 @@ def _parse_layout_row(row) -> Optional[dict]:
     return layout
 
 
-def load_layout(session, group_id, message_type: str) -> dict:
-    """The effective layout for one (group, message type).
+def load_layout(session, group_id, message_type: str, event_id=None) -> dict:
+    """The effective layout for one (group, message type[, event]).
 
-    The group's own row wins only when the group has the ``custom_embeds``
-    entitlement (same premium gate as custom embeds — layouts are the same
-    perk, component-shaped); otherwise the template group's row; otherwise
-    the code default. Corrupt rows fall through rather than break sends."""
+    Resolution (web66a): the event's own override row -> the group's row ->
+    the template group's row -> the code default. Group-scoped rows (both the
+    per-event override and the group default) win only when the group has the
+    ``custom_embeds`` entitlement (same premium gate as custom embeds —
+    layouts are the same perk, component-shaped), so a lapsed subscription
+    reverts every event to the system defaults. Per-event overrides live
+    under the event's host group — template group 1 for global events, whose
+    overrides need no entitlement (superadmin-authored). Corrupt rows fall
+    through rather than break sends."""
     from db.models import EventMessageLayout
 
     default = DEFAULT_LAYOUTS.get(message_type) or {"blocks": []}
     if session is None:
         return default
 
-    candidates = [TEMPLATE_GROUP_ID]
+    entitled = False
     if group_id and group_id != TEMPLATE_GROUP_ID:
         try:
             from db.entitlements import has_custom_embeds
 
-            if has_custom_embeds(group_id):
-                candidates.insert(0, group_id)
+            entitled = has_custom_embeds(group_id)
         except Exception:
-            pass
+            entitled = False
+
+    candidates = layout_candidates(group_id, event_id, entitled)
 
     try:
         rows = (
             session.query(EventMessageLayout)
             .filter(
-                EventMessageLayout.group_id.in_(candidates),
+                EventMessageLayout.group_id.in_({gid for gid, _ in candidates}),
                 EventMessageLayout.message_type == message_type,
+                EventMessageLayout.event_id.in_({e for _, e in candidates}),
             )
             .all()
         )
     except Exception:
         return default
-    by_group = {r.group_id: r for r in rows}
-    for gid in candidates:
-        row = by_group.get(gid)
+    by_key = {(r.group_id, getattr(r, "event_id", 0) or 0): r for r in rows}
+    for key in candidates:
+        row = by_key.get(key)
         if row is not None:
             layout = _parse_layout_row(row)
             if layout is not None:
@@ -703,6 +1095,7 @@ def render_event_components(
     extra_rows=None,
     allow_launch: bool = True,
     image_ref: Optional[str] = None,
+    event_id=None,
 ) -> list:
     """One-stop: load the effective layout, resolve it, build components.
 
@@ -717,7 +1110,8 @@ def render_event_components(
     # otherwise render as an ordinary dice move (audit).
     if message_type == "event_board_turn" and context.get("board_won"):
         message_type = "event_board_win"
-    layout = load_layout(session, group_id, message_type)
+    layout = load_layout(session, group_id, message_type,
+                         event_id=event_id or (context or {}).get("event_id"))
     enabled = deeplink_enabled()
     footer = event_footer_line(
         context.get("event_name"),

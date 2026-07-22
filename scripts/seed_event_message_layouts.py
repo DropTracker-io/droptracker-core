@@ -40,7 +40,10 @@ def seed(session=None, force: bool = False, types=None) -> dict:
     existing = {
         row.message_type: row
         for row in session.query(EventMessageLayout)
-        .filter(EventMessageLayout.group_id == TEMPLATE_GROUP_ID)
+        # event_id 0 = the group-level template rows; global events' per-event
+        # overrides also live on group 1 (web66a) and must not be clobbered.
+        .filter(EventMessageLayout.group_id == TEMPLATE_GROUP_ID,
+                EventMessageLayout.event_id == 0)
         .all()
     }
     for message_type in EVENT_MESSAGE_LAYOUT_TYPES:
