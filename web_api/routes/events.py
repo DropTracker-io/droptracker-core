@@ -22,6 +22,7 @@ global events where group_id is NULL):
   GET    /api/v1/events/meta/item-sources?items=a|b -> [{ item_name, item_id, total, npcs:[{npc_id,name,icon_url,rarity,tracked,...}] }]
   GET    /api/v1/events/{id}/players        -> event-wide player contribution leaderboard
   GET    /api/v1/events/{id}/players/{playerId} -> one player's items/tasks/activity
+  GET    /api/v1/events/{id}/teams          -> standings rollup (items/GP/contributors per team)
   POST   /api/v1/events/{id}/teams          { EventTeamInput } -> { id }
   POST   /api/v1/events/{id}/teams/{teamId}/members   { player_id } -> { ok }
   POST   /api/v1/events/{id}/teams/{teamId}/members/bulk { names } -> { added, skipped }
@@ -81,6 +82,7 @@ from db import (
 from web_api.common import (abort_problem, db_session, hidden_player_ids, money,
                             parse_page, private_no_store, score_num,
                             with_cache_headers)
+from web_api.event_loot import loot_gp_by_player
 from web_api.event_players import norm_item_name, rank_players, top_items
 from web_api.task_tiles import build_tile, spec_names, tile_spec
 from web_api.deps import (
@@ -896,6 +898,10 @@ async def get_event(event_id: int):
 # rejected/revoked rows are excluded from public team activity).
 _APPLIED_STATUSES = ("auto", "confirmed", "manual")
 
+_TEAM_ITEMS_LIMIT = 60        # full item gallery on the team-detail page
+_TEAMS_ITEM_PREVIEW = 8       # per-team item strip on the Teams tab rollup
+_TEAMS_TOP_CONTRIBUTORS = 3   # contributor chips per team on the Teams tab
+
 
 @events_bp.get("/events/<int:event_id>/teams/<int:team_id>")
 async def get_event_team(event_id: int, team_id: int):
@@ -964,6 +970,10 @@ async def get_event_team(event_id: int, team_id: int):
                 )
             }
 
+            # Event-window loot GP for the roster (all sources) — the team
+            # figure is the roster sum; both fail open to zeros.
+            roster_pids = [m.player_id for m, _ in member_rows]
+            loot_gp = loot_gp_by_player(s, ev, roster_pids)
             members = [
                 {
                     "player_id": m.player_id,
@@ -973,9 +983,28 @@ async def get_event_team(event_id: int, team_id: int):
                     "completions": contrib.get(m.player_id, {}).get("completions", 0),
                     "quantity": contrib.get(m.player_id, {}).get("quantity", 0),
                     "points": round(ppoints.get(m.player_id, 0.0), 2),
+                    "loot_gp": money(loot_gp.get(m.player_id, 0)),
                 }
                 for m, player_name in member_rows
             ]
+
+            # Everything the team pulled to earn points: the applied ledger
+            # (already loaded) aggregated by item, icons via the same
+            # resolution the task tiles use. Capped for payload sanity.
+            team_item_agg: dict[str, list] = {}   # name -> [quantity, drops]
+            for c in applied:
+                if not c.matched_target:
+                    continue
+                a = team_item_agg.setdefault(c.matched_target, [0, 0])
+                a[0] += int(c.quantity or 1)
+                a[1] += 1
+            team_item_ids = _resolve_item_ids(s, set(team_item_agg))
+            team_items = sorted(
+                ({"name": mt, "item_id": team_item_ids.get(norm_item_name(mt)),
+                  "quantity": q, "drops": d}
+                 for mt, (q, d) in team_item_agg.items()),
+                key=lambda r: (-r["quantity"], -r["drops"], r["name"].lower()),
+            )[:_TEAM_ITEMS_LIMIT]
 
             # Leadership context for the roster UI: the viewer's own player on
             # THIS team (if any), their role, and their live election vote.
@@ -1069,8 +1098,11 @@ async def get_event_team(event_id: int, team_id: int):
                     "rank": rank,
                     "team_count": len(all_teams),
                     "member_count": len(members),
+                    "coins": int(getattr(team, "coins", 0) or 0),
+                    "loot_gp": money(sum(loot_gp.values())),
                 },
                 "members": members,
+                "items": team_items,
                 "tasks": tasks,
                 "activity": activity,
                 "viewer": viewer_block,
@@ -1079,6 +1111,161 @@ async def get_event_team(event_id: int, team_id: int):
     payload = await asyncio.to_thread(_load)
     if payload is None:
         abort_problem(404, "Team not found", f"No team {team_id} in event {event_id}.")
+    if viewer_id is not None:
+        return private_no_store(jsonify(payload))
+    return with_cache_headers(jsonify(payload), max_age=15)
+
+
+# --- Teams rollup (Teams tab) ------------------------------------------------
+
+
+@events_bp.get("/events/<int:event_id>/teams")
+async def get_event_teams(event_id: int):
+    """Public standings rollup for the Teams tab: every team with rank/score,
+    tasks-done, prize-pot share, event-window loot GP (roster total), the top
+    items its members pulled to earn points, and its top contributors. One
+    self-sufficient payload so the tab needs no side fetches; kind-agnostic
+    (board-game coins/pieces ride along when present)."""
+    viewer_id = optional_user_id()
+
+    def _load():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                _deny_restricted(ev, viewer_id)
+                return None
+
+            all_teams = (
+                s.query(EventTeam)
+                .filter(EventTeam.event_id == event_id)
+                .order_by(EventTeam.score.desc(), EventTeam.id.asc())
+                .all()
+            )
+            task_count = (
+                s.query(func.count(EventTask.id))
+                .filter(EventTask.event_id == event_id).scalar() or 0
+            )
+
+            # Roster: pids per team (for GP sums + member counts).
+            roster_by_team: dict[int, list[int]] = {}
+            for pid, tid in (
+                s.query(EventTeamMember.player_id, EventTeamMember.team_id)
+                .filter(EventTeamMember.event_id == event_id)
+                .all()
+            ):
+                roster_by_team.setdefault(tid, []).append(pid)
+            all_pids = {p for pids in roster_by_team.values() for p in pids}
+            loot_gp = loot_gp_by_player(s, ev, all_pids)
+
+            # Tasks completed per team.
+            done_by_team = {
+                tid: int(done or 0)
+                for tid, done in (
+                    s.query(EventProgress.team_id, func.count(EventProgress.id))
+                    .filter(EventProgress.event_id == event_id,
+                            EventProgress.completed.is_(True))
+                    .group_by(EventProgress.team_id)
+                    .all()
+                )
+            }
+
+            # Items each team pulled to earn points (applied ledger, bucketed).
+            items_by_team: dict[int, list] = {}
+            distinct_names: set[str] = set()
+            for tid, mt, qty, drops in (
+                s.query(EventCompletion.team_id, EventCompletion.matched_target,
+                        func.sum(EventCompletion.quantity),
+                        func.count(EventCompletion.id))
+                .filter(EventCompletion.event_id == event_id,
+                        EventCompletion.status.in_(_APPLIED_STATUSES),
+                        EventCompletion.team_id.isnot(None),
+                        EventCompletion.matched_target.isnot(None))
+                .group_by(EventCompletion.team_id, EventCompletion.matched_target)
+                .all()
+            ):
+                distinct_names.add(mt)
+                items_by_team.setdefault(tid, []).append(
+                    {"name": mt, "quantity": int(qty or 0), "drops": int(drops or 0)})
+            item_ids = _resolve_item_ids(s, distinct_names)
+
+            # Top contributors per team (split points), names resolved once.
+            points_rows = (
+                s.query(EventPlayerPoints.team_id, EventPlayerPoints.player_id,
+                        func.sum(EventPlayerPoints.points))
+                .filter(EventPlayerPoints.event_id == event_id,
+                        EventPlayerPoints.team_id.isnot(None))
+                .group_by(EventPlayerPoints.team_id, EventPlayerPoints.player_id)
+                .all()
+            )
+            points_by_team: dict[int, list] = {}
+            for tid, pid, pts in points_rows:
+                points_by_team.setdefault(tid, []).append((pid, float(pts or 0)))
+            contributor_pids = {pid for _, pid, _ in points_rows}
+            names = {
+                pid: name
+                for pid, name in (
+                    s.query(Player.player_id, Player.player_name)
+                    .filter(Player.player_id.in_(contributor_pids)).all()
+                )
+            } if contributor_pids else {}
+            hidden = (set() if _is_event_admin(s, viewer_id, ev)
+                      else hidden_player_ids())
+
+            pot = None
+            try:
+                from web_api.event_prizes import pot_summary
+
+                pot = pot_summary(s, ev, team_count=len(all_teams))
+            except Exception:
+                pot = None
+
+            teams = []
+            for rank, tm in enumerate(all_teams, start=1):
+                pids = roster_by_team.get(tm.id, [])
+                top_contribs = sorted(points_by_team.get(tm.id, []),
+                                      key=lambda r: -r[1])[:_TEAMS_TOP_CONTRIBUTORS]
+                teams.append({
+                    "id": tm.id,
+                    "name": tm.name,
+                    "score": score_num(tm.score),
+                    "rank": rank,
+                    "group_id": getattr(tm, "group_id", None),
+                    "color": getattr(tm, "color", None),
+                    "coins": int(getattr(tm, "coins", 0) or 0),
+                    "piece_item_id": getattr(tm, "piece_item_id", None),
+                    "member_count": len(pids),
+                    "tasks_done": done_by_team.get(tm.id, 0),
+                    "loot_gp": money(sum(loot_gp.get(p, 0) for p in pids)),
+                    "pot_total": money((pot or {}).get("per_team", {}).get(tm.id, 0)),
+                    "items": top_items(items_by_team.get(tm.id, []), item_ids,
+                                       _TEAMS_ITEM_PREVIEW),
+                    "top_contributors": [
+                        {
+                            "player_id": None if pid in hidden else pid,
+                            "player_name": ("Hidden player" if pid in hidden
+                                            else names.get(pid) or f"Player {pid}"),
+                            "points": round(pts, 2),
+                        }
+                        for pid, pts in top_contribs
+                    ],
+                })
+
+            return {
+                "event": _summary(ev),
+                "teams": teams,
+                "totals": {
+                    "teams": len(teams),
+                    "players": len(all_pids),
+                    "tasks": int(task_count),
+                    "loot_gp": money(sum(loot_gp.values())),
+                },
+            }
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(404, "Event not found", f"No event {event_id}.")
     if viewer_id is not None:
         return private_no_store(jsonify(payload))
     return with_cache_headers(jsonify(payload), max_age=15)
@@ -1166,29 +1353,34 @@ async def get_event_players(event_id: int):
                 )
             }
 
-            pids = set(contrib) | set(points)
-            totals = {
-                "contributors": len(pids),
-                "participants": int(participants),
-                "completions": sum(c["completions"] for c in contrib.values()),
-                "points": round(sum(points.values()), 2),
-                "tasks": int(task_count),
-            }
-            if not pids:
-                return {"event": _summary(ev), "players": [], "totals": totals}
-
-            # Team membership (name/color/role) for the contributors.
+            # Team membership (name/color/role) for the WHOLE roster — rostered
+            # players with zero contributions still get a row (their
+            # event-window loot GP is meaningful even before they score).
             membership: dict[int, dict] = {}
             for pid, tid, tname, tcolor, role in (
                 s.query(EventTeamMember.player_id, EventTeamMember.team_id,
                         EventTeam.name, EventTeam.color, EventTeamMember.role)
                 .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
-                .filter(EventTeamMember.event_id == event_id,
-                        EventTeamMember.player_id.in_(pids))
+                .filter(EventTeamMember.event_id == event_id)
                 .all()
             ):
                 membership[pid] = {"team_id": tid, "team_name": tname,
                                    "team_color": tcolor, "role": role}
+
+            pids = set(contrib) | set(points) | set(membership)
+            # Total loot GP over the event window (all sources, not just
+            # task-credited drops) — decorative, fails open to zeros.
+            loot_gp = loot_gp_by_player(s, ev, pids)
+            totals = {
+                "contributors": len(set(contrib) | set(points)),
+                "participants": int(participants),
+                "completions": sum(c["completions"] for c in contrib.values()),
+                "points": round(sum(points.values()), 2),
+                "tasks": int(task_count),
+                "loot_gp": money(sum(loot_gp.values())),
+            }
+            if not pids:
+                return {"event": _summary(ev), "players": [], "totals": totals}
 
             names = {
                 pid: name
@@ -1222,7 +1414,8 @@ async def get_event_players(event_id: int):
             }
 
             players = rank_players(
-                contrib, points, membership, names, items_by_pid)[:_PLAYERS_LIMIT]
+                contrib, points, membership, names, items_by_pid,
+                loot_gp=loot_gp)[:_PLAYERS_LIMIT]
             # Honor the privacy opt-out: a player who hid themselves (or whose
             # linked user did) is shown as "Hidden player" with no id/link to a
             # non-admin viewer — same masking the completion-history read uses.
@@ -1232,6 +1425,8 @@ async def get_event_players(event_id: int):
                     if row["player_id"] in hidden:
                         row["player_name"] = "Hidden player"
                         row["player_id"] = None
+            for row in players:  # raw int -> Money envelope at the boundary
+                row["loot_gp"] = money(row["loot_gp"])
             return {"event": _summary(ev), "players": players, "totals": totals}
 
     payload = await asyncio.to_thread(_load)
@@ -1357,6 +1552,9 @@ async def get_event_player(event_id: int, player_id: int):
                     "completions": len(applied),
                     "quantity": sum(int(c.quantity or 1) for c in applied),
                     "tasks_contributed": len(task_agg),
+                    "loot_gp": money(
+                        loot_gp_by_player(s, ev, [player_id]).get(player_id, 0)
+                    ),
                 },
                 "items": items,
                 "tasks": tasks,
@@ -2758,10 +2956,14 @@ def _cascade_delete_event(s, ev: Event) -> None:
     # the per-team role/channel rows (web53a — real roles/channels likewise
     # already queued on the orphan list by the caller).
     from db import EventTeamDiscord
+    from db.models import EventMessageLayout
 
     _wipe(EventChannel, EventChannel.event_id == event_id)
     _wipe(EventGuild, EventGuild.event_id == event_id)
     _wipe(EventTeamDiscord, EventTeamDiscord.event_id == event_id)
+    # Per-event message-layout overrides (web66a; event_id 0 rows are the
+    # group-level layouts and are untouched — event_id here is a real id).
+    _wipe(EventMessageLayout, EventMessageLayout.event_id == event_id)
 
     # The tasks + teams those children referenced, then the participants.
     _wipe(EventTask, EventTask.event_id == event_id)
@@ -3226,6 +3428,43 @@ async def search_items():
     return jsonify(await asyncio.to_thread(_search))
 
 
+@events_bp.get("/events/meta/pets")
+async def search_pets():
+    """Pet-name autocomplete for the task form (session required).
+
+    Names come from the pet taxonomy (``utils/osrs_pets``) so anything offered
+    is guaranteed to validate as a pet; ids come from the item DB (every pet
+    has a same-named inventory item) purely for the itemdb icons."""
+    current_user_id()
+    q = (request.args.get("q") or "").strip().lower()
+    if len(q) < 2:
+        return jsonify([])
+
+    def _search():
+        from utils.osrs_pets import PET_DISPLAY_BY_NORM
+        from db import ItemList
+
+        names = sorted(
+            {n for n in PET_DISPLAY_BY_NORM.values() if q in n.lower()},
+            key=lambda n: (len(n), n),
+        )[:15]
+        if not names:
+            return []
+        with db_session() as s:
+            rows = (
+                s.query(func.min(ItemList.item_id), ItemList.item_name)
+                .filter(ItemList.item_name.in_(names), ItemList.noted.is_(False))
+                .group_by(ItemList.item_name)
+                .all()
+            )
+        id_by_name = {n: int(i) for i, n in rows}
+        # Every current pet resolves to an item row; skip any future outlier
+        # rather than break the picker's id contract.
+        return [{"id": id_by_name[n], "name": n} for n in names if n in id_by_name]
+
+    return jsonify(await asyncio.to_thread(_search))
+
+
 @events_bp.get("/events/meta/resolve")
 async def resolve_meta_names():
     """Resolve exact item/NPC names to their game ids (session required).
@@ -3276,6 +3515,7 @@ async def search_npcs():
 
     def _search():
         from db import NpcList
+        from web_api.routes.npc_source_aliases import alias_search_entries
 
         with db_session() as s:
             # Multi-form bosses repeat a name (one row per form) — dedupe.
@@ -3287,9 +3527,86 @@ async def search_npcs():
                 .limit(15)
                 .all()
             )
-            return [{"id": i, "name": n} for i, n in rows]
+        # Source aliases ("Wintertodt" for its reward containers) lead the
+        # list — task validators expand them back to the real recorded names.
+        entries = alias_search_entries(q)
+        entries.extend({"id": i, "name": n} for i, n in rows)
+        return entries[:15]
 
     return jsonify(await asyncio.to_thread(_search))
+
+
+_NPC_DROPS_LIMIT = 200
+_PLACEHOLDER_ITEM = re.compile(r"^Item \d+$")
+
+
+@events_bp.get("/events/meta/npc-drops")
+async def npc_drop_items():
+    """Item names on one NPC's drop table (session required).
+
+    Backs the task form's "import a boss's drops" helper: pick a boss, get its
+    droppable items to bulk-add to an item list. Sources mirror the public
+    drop-table page — the wiki table, then the boss family's table, then items
+    actually observed dropping (the last-drops registry, which covers activity
+    sources with no wiki rows at all, e.g. Wintertodt's reward containers).
+    Each entry carries ``tracked`` (same semantics as /events/meta/items) so
+    the picker can warn on items never seen in the drop history."""
+    current_user_id()
+    raw = (request.args.get("npc_id") or "").strip()
+    if not raw.isdigit():
+        abort_problem(422, "Invalid npc_id", "npc_id must be an integer.")
+    npc_id = int(raw)
+
+    def _load():
+        # Lazy imports keep events.py's conftest ``services``-stub isolation
+        # and reuse the npc page's table readers (wiki + family + observed).
+        from db import NpcList, PlayerItemHourlyTotals
+        from web_api.routes.npcs import (
+            _family_table_rows,
+            _observed_table_rows,
+            _wiki_table_rows,
+        )
+
+        with db_session() as s:
+            npc = s.query(NpcList).filter(NpcList.npc_id == npc_id).first()
+            if not npc:
+                abort_problem(404, "Unknown NPC", f"No NPC with id {npc_id}.")
+            rows = _wiki_table_rows(s, npc_id)
+            if not rows:
+                rows = _family_table_rows(s, npc_id, npc.npc_name)
+            if not rows:
+                rows, _last, _status, _build = _observed_table_rows(
+                    s, npc_id, npc.npc_name
+                )
+            out, seen = [], set()
+            # Unnoted rows first so the per-name dedupe keeps the id whose
+            # itemdb icon players recognise.
+            for item_id, item_name, _qty, noted, _rarity, _rolls in sorted(
+                rows, key=lambda r: bool(r[3])
+            ):
+                name = str(item_name or "").strip()
+                key = name.lower()
+                if not name or key in seen or _PLACEHOLDER_ITEM.match(name):
+                    continue
+                seen.add(key)
+                # Indexed LIMIT'd probe, mirroring /events/meta/items: tasks
+                # match by name, so flag names never seen in the drop history.
+                observed = (
+                    s.query(PlayerItemHourlyTotals.item_id)
+                    .filter(PlayerItemHourlyTotals.item_id == int(item_id))
+                    .limit(RECEIVABLE_MIN_ROWS)
+                    .all()
+                )
+                out.append({
+                    "id": int(item_id),
+                    "name": name,
+                    "tracked": len(observed) >= RECEIVABLE_MIN_ROWS,
+                })
+                if len(out) >= _NPC_DROPS_LIMIT:
+                    break
+            return out
+
+    return jsonify(await asyncio.to_thread(_load))
 
 
 @events_bp.get("/events/meta/item-sources")

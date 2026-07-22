@@ -63,3 +63,31 @@ def test_rank_players_includes_points_only_and_ledger_only_players():
 def test_rank_players_missing_name_falls_back():
     rows = rank_players({5: {"completions": 1, "quantity": 1, "tasks": 1}}, {}, {}, {}, {})
     assert rows[0]["player_name"] == "Player 5"
+
+
+def test_rank_players_includes_rostered_players_without_contributions():
+    # A rostered player with no ledger rows / points still gets a row (their
+    # event-window loot GP is meaningful before they score).
+    membership = {9: {"team_id": 1, "team_name": "Alpha", "team_color": None,
+                      "role": None}}
+    rows = rank_players({}, {}, membership, {9: "Newbie"}, {},
+                        loot_gp={9: 1_500_000})
+    assert len(rows) == 1
+    assert rows[0]["player_id"] == 9
+    assert rows[0]["points"] == 0.0 and rows[0]["completions"] == 0
+    assert rows[0]["loot_gp"] == 1_500_000
+
+
+def test_rank_players_gp_breaks_ties_before_name():
+    contrib = {}
+    membership = {1: {"team_id": 1}, 2: {"team_id": 1}}
+    rows = rank_players(contrib, {}, membership, {1: "Aaa", 2: "Zzz"}, {},
+                        loot_gp={1: 100, 2: 900})
+    # Equal points/completions/quantity -> higher GP first despite name order.
+    assert [r["player_id"] for r in rows] == [2, 1]
+
+
+def test_rank_players_defaults_gp_to_zero_without_map():
+    rows = rank_players({1: {"completions": 1, "quantity": 1, "tasks": 1}},
+                        {}, {}, {}, {})
+    assert rows[0]["loot_gp"] == 0

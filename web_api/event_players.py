@@ -30,17 +30,22 @@ def top_items(rows: list[dict], item_ids: dict, limit: int) -> list[dict]:
 
 
 def rank_players(contrib: dict, points: dict, membership: dict,
-                 names: dict, items_by_pid: dict) -> list[dict]:
+                 names: dict, items_by_pid: dict,
+                 loot_gp: dict | None = None) -> list[dict]:
     """Merge the per-player rollups into leaderboard rows.
 
-    Every player id present in the applied-ledger rollup (``contrib``) or the
-    split-points map (``points``) becomes one row, enriched with team membership
-    + name + their top contributed items. Sorted by points, then completions,
-    then quantity, then name — the same contribution ordering the team roster
-    uses (event-team-view.tsx).
+    Every player id present in the applied-ledger rollup (``contrib``), the
+    split-points map (``points``), or the roster (``membership``) becomes one
+    row — rostered players with zero contributions still appear (they carry
+    the event-window loot GP figure). Enriched with team membership + name +
+    top contributed items + ``loot_gp`` (raw int; the route wraps it in the
+    Money envelope). Sorted by points, then completions, then quantity, then
+    loot GP, then name — the same contribution ordering the team roster uses
+    (event-team-view.tsx), with GP ordering the otherwise-tied tail.
     """
+    loot_gp = loot_gp or {}
     rows = []
-    for pid in set(contrib) | set(points):
+    for pid in set(contrib) | set(points) | set(membership):
         agg = contrib.get(pid) or {}
         mem = membership.get(pid) or {}
         rows.append({
@@ -54,8 +59,9 @@ def rank_players(contrib: dict, points: dict, membership: dict,
             "completions": int(agg.get("completions", 0)),
             "quantity": int(agg.get("quantity", 0)),
             "tasks_contributed": int(agg.get("tasks", 0)),
+            "loot_gp": int(loot_gp.get(pid, 0)),
             "items": items_by_pid.get(pid, []),
         })
     rows.sort(key=lambda r: (-r["points"], -r["completions"], -r["quantity"],
-                             (r["player_name"] or "").lower()))
+                             -r["loot_gp"], (r["player_name"] or "").lower()))
     return rows
