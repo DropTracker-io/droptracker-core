@@ -19,6 +19,7 @@ from interactions import (
 )
 from sqlalchemy import delete
 from db.clan_sync import insert_xf_group
+from db.group_creation import create_web_group
 from db.models import (
     Session, User, Group, Guild, GroupConfiguration, GroupEmbed, GroupPatreon, 
     GroupRecentDrops, NotificationQueue, NotifiedSubmission, PlayerPoints, Webhook, 
@@ -74,126 +75,60 @@ class ClanCommands(Extension):
         if await is_admin(ctx):
             user = session.query(User).filter(User.discord_id == ctx.author.id).first()
             if not user:
+                # Bot-side creation keeps the Discord "registered" role + DM
+                # flow; the shared service only mirrors the DB portion.
                 await try_create_user(ctx=ctx)
-            user = session.query(User).filter(User.discord_id == ctx.author.id).first()
-            
-            guild = session.query(Guild).filter(Guild.guild_id == ctx.guild_id).first()
-            if not guild:
-                guild = Guild(guild_id=str(ctx.guild_id), date_added=datetime.now())
-                session.add(guild)
-                session.commit()
-            else:
-                if guild.group_id != None:
-                    group = session.query(Group).filter(Group.group_id == guild.group_id).first()
-                    if group and group.wom_id == wom_id:
-                        return await ctx.send(f"You have already registered this group with the DropTracker! Please continue to [the website](https://www.droptracker.io/groups/{group.group_id}) to configure your group.")
-                    # Otherwise the group wom id was different than the one they provided
-                    return await ctx.send(f"This Discord server is already associated with a DropTracker group (using wom id {group.wom_id}).\\n" + 
-                                        "If this is a mistake, please reach out in Discord", ephemeral=True)
-        
-            group = session.query(Group).filter(Group.wom_id == wom_id).first()
-            if group:
-                return await ctx.send(f"This WOM group (`{wom_id}`) already exists in our database.\\n" + 
+
+            # Shared creation logic (also behind the website wizard + legacy
+            # XF intake): guild/WOM conflict checks, group + config-template
+            # clone, group_admins owner seed, XF mirror, ticker, initial WOM
+            # membership sync.
+            result = await create_web_group(
+                group_name=group_name,
+                wom_id=wom_id,
+                guild_id=str(ctx.guild_id),
+                owner_discord_id=str(ctx.author_id),
+                owner_username=ctx.author.username if ctx.author else None,
+            )
+            status = result.get("status")
+
+            if status == "already_registered":
+                return await ctx.send(f"You have already registered this group with the DropTracker! Please continue to [the website](https://www.droptracker.io/groups/{result.get('group_id')}) to configure your group.")
+            if status == "guild_conflict":
+                return await ctx.send(f"This Discord server is already associated with a DropTracker group (using wom id {result.get('wom_id')}).\\n" +
+                                    "If this is a mistake, please reach out in Discord", ephemeral=True)
+            if status == "wom_conflict":
+                return await ctx.send(f"This WOM group (`{wom_id}`) already exists in our database.\\n" +
                                     "Please reach out in our Discord server if this appears to be a mistake.",
                                     ephemeral=True)
-            else:
-                # Create the group but don't commit yet
-                group = Group(group_name=group_name, wom_id=wom_id, guild_id=guild.guild_id)
-                session.add(group)
-                print("Created a group")
-                user.add_group(group)
-                
-                # Initialize these variables with defaults
-                total_members = 0
-                try:
-                    session.commit()
-                    print(f"Successfully committed group {group.group_id}")
-                except Exception as e:
-                    session.rollback()
-                    print(f"Failed to commit group: {e}")
-                    return await ctx.send(f"Unable to create your group due to a database error.\\n" + 
-                                        f"Please try again later or reach out in the DropTracker Discord server.",
-                                        ephemeral=True)
-                    
-            # Now assign the group_id to the guild and commit
-            guild.group_id = group.group_id
-            try:
-                session.commit()
-                print(f"Successfully linked guild {guild.guild_id} to group {group.group_id}")
-            except Exception as e:
-                session.rollback()
-                print(f"Error linking guild to group: {e}")
+            if status == "invalid_name":
+                return await ctx.send(f"Group names must be 1-30 characters long. Please try again with a shorter name.",
+                                    ephemeral=True)
+            if status == "invalid_wom":
+                return await ctx.send(f"Please enter your WOM group ID with no commas or special characters. It should be only 3-6 digits long.")
+            if status != "created":
+                return await ctx.send(f"Unable to create your group due to a database error.\\n" +
+                                    f"Please try again later or reach out in the DropTracker Discord server.",
+                                    ephemeral=True)
 
-            # Site-wide ticker (rt:feed): announce the new group. Best-effort.
-            try:
-                from services.realtime import publish_feed_group_created
-
-                publish_feed_group_created(group.group_id, group_name)
-            except Exception as e:
-                print(f"Ticker group-created publish failed: {e}")
-                
-            # Create success embed with proper variable handling
-            try:
-                embed = Embed(title="New group created",
-                            description=f"Your group has been created (ID: `{group.group_id}`)!")
-                embed.add_field(name=f"WOM group `{group.wom_id}` is now assigned to your Discord server `{group.guild_id}`",
-                                value=f"<a:loading:1180923500836421715> Please wait while we initialize some other things for you...",
-                                inline=False)
-            except NameError as e:
-                print(f"Variable error in embed creation: {e}")
-                # Fallback embed
-                embed = Embed(title="New group created",
-                            description=f"Your Group has been created (ID: `{group.group_id}`).")
-                embed.add_field(name=f"WOM group `{group.wom_id}` is now assigned to your Discord server",
-                                value=f"<a:loading:1180923500836421715> Please wait while we initialize some other things for you...",
-                                inline=False)
+            embed = Embed(title="New group created",
+                        description=f"Your group has been created (ID: `{result.get('group_id')}`)!")
+            embed.add_field(name=f"WOM group `{result.get('wom_id')}` is now assigned to your Discord server `{result.get('guild_id')}`",
+                            value=f"<a:loading:1180923500836421715> Please wait while we initialize some other things for you...",
+                            inline=False)
             embed.set_footer(f"https://www.droptracker.io/discord")
-            
-            try:
-                await insert_xf_group(group)
-            except Exception as e:
-                print(f"Error inserting group into XenForo: {e}")
-                session.rollback()
-                
+
             await ctx.send(f"Success!\\n", embed=embed, ephemeral=True)
-            
-            # Set up default configurations
-            default_config = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == 1).all()
-            new_config = []
-            for option in default_config:
-                option_value = option.config_value
-                if option.config_key == "clan_name":
-                    option_value = group_name
-                if option.config_key == "authed_users":
-                    authed_list = []
-                    authed_list.append(str(ctx.author_id))
-                    # Format as a proper JSON array of strings
-                    option_value = json.dumps(authed_list)
-                default_option = GroupConfiguration(
-                    group_id=group.group_id,
-                    config_key=option.config_key,
-                    config_value=option_value,
-                    updated_at=datetime.now(),
-                    group=group
-                )
-                new_config.append(default_option)
-                
-            try:
-                session.add_all(new_config)
-                session.commit()
-                print(f"Successfully created {len(new_config)} configuration entries for group {group.group_id}")
-            except Exception as e:
-                session.rollback()
-                print("Error occured trying to save configs:", e)
-                # Don't return here - group is already created, just warn about configs
-                await ctx.send(f"⚠️ Your group was created successfully, but there was an issue setting up default configurations.\\n" + 
+
+            if "could not be applied" in (result.get("message") or ""):
+                await ctx.send(f"⚠️ Your group was created successfully, but there was an issue setting up default configurations.\\n" +
                               f"Please visit the website to configure your group settings manually: https://www.droptracker.io/login",
                               ephemeral=True)
-                              
+
             await ctx.send(f"To continue setting up, please [sign in on the website](https://www.droptracker.io/login) using your Discord account.",
                             ephemeral=True)
         else:
-            await ctx.send(f"You do not have the necessary permissions to use this command inside of this Discord server.\\n" + 
+            await ctx.send(f"You do not have the necessary permissions to use this command inside of this Discord server.\\n" +
                            "Please ask the server owner to execute this command.",
                            ephemeral=True)
 

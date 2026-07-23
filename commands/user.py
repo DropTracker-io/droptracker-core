@@ -12,16 +12,28 @@ Author: joelhalen
 """
 
 import json
+from datetime import datetime
 from secrets import token_hex
 from data.submissions import try_create_player
 from interactions import AutocompleteContext, SlashContext, Embed, OptionType, Extension, slash_command, slash_option
 from db.models import Session, User, Group, Guild, Player, UserConfiguration, session, PlayerPoints
+from db.player_claims import claim_player, unclaim_player
 from services.components import build_help_components
 from services.points import award_points_to_player
 from utils.format import format_time_since_update, get_command_id, get_player_by_claim_rsn
 from utils.wiseoldman import check_user_by_username
 from .utils import try_create_user, is_admin, is_user_authorized
 from sqlalchemy import func
+
+
+def _time_since_iso(claimed_at):
+    """ISO timestamp (service result) -> the command's relative-time phrase."""
+    if not claimed_at:
+        return ""
+    try:
+        return format_time_since_update(datetime.fromisoformat(claimed_at))
+    except Exception:
+        return ""
 
 
 class UserCommands(Extension):
@@ -381,107 +393,61 @@ class UserCommands(Extension):
         """
         self._refresh_session()
         user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
-        group = None
         if not user:
+            # Bot-side creation keeps the Discord "registered" role + DM flow;
+            # the shared service would only do the DB portion.
             await try_create_user(ctx=ctx)
-            user = session.query(User).filter(User.discord_id == ctx.author.id).first()
-            
-        if ctx.guild:
-            guild_id = ctx.guild.id
-            group = session.query(Group).filter(Group.guild_id.ilike(guild_id)).first()
-        if not group:
-            group = session.query(Group).filter_by(group_id=2).first()
 
-        player = get_player_by_claim_rsn(session, Player, rsn)
+        # Shared mutation logic (also behind the website/Activity claim flow).
+        result = claim_player(
+            rsn,
+            discord_id=str(ctx.user.id),
+            username=ctx.user.username,
+            guild_id=ctx.guild.id if ctx.guild else None,
+        )
+        status = result["status"]
 
-        if not player:
+        if status == "not_found":
             embed = Embed(title="Player not found!",
                           description=f"`{rsn}` was not yet found in our database.\n" +
-                          f"A player must have first used our plugin to be claimed on Discord.\n" + 
-                          "To fix:\n" + 
-                          "1. Install the [DropTracker Plugin](https://www.droptracker.io/runelite) on RuneLite\n" + 
-                          "2. Receive some loot, or another achievement in-game with the plugin enabled\n" + 
+                          f"A player must have first used our plugin to be claimed on Discord.\n" +
+                          "To fix:\n" +
+                          "1. Install the [DropTracker Plugin](https://www.droptracker.io/runelite) on RuneLite\n" +
+                          "2. Receive some loot, or another achievement in-game with the plugin enabled\n" +
                           f"3. Then, try using </claim-rsn:{await get_command_id(self.bot, 'claim-rsn')}> again!\n\n" +
-                          "-# P.S.: It is highly recommended that you [enable API connections](https://www.droptracker.io/wiki/why-api) in our plugin's " + 
+                          "-# P.S.: It is highly recommended that you [enable API connections](https://www.droptracker.io/wiki/why-api) in our plugin's " +
                           "configuration for the most robust tracking accuracy!")
             return await ctx.send(embeds=embed,ephemeral=True)
-            # try:
-            #     wom_data = await check_user_by_username(rsn)
-            # except Exception as e:
-            #     print("Couldn't get player data. e:", e)
-            #     return await ctx.send(f"An error occurred claiming your account.\\n" +
-            #                           "Try again later, or reach out in our Discord server",
-            #                           ephemeral=True)
-            # if wom_data:
-            #     player, player_name, player_id, log_slots = wom_data
-            #     try:
-            #         print("Creating a player with user ID", user.user_id, "associated with it")
-            #         # Create the Player with a temporary acc hash for now
-            #         if group:
-            #             new_player = Player(wom_id=player_id, 
-            #                                 player_name=rsn, 
-            #                                 user_id=str(user.user_id), 
-            #                                 user=user, 
-            #                                 log_slots=log_slots,    
-            #                                 group=group,
-            #                                 account_hash=None)
-            #         else:
-            #             new_player = Player(wom_id=player_id, 
-            #                                 player_name=rsn, 
-            #                                 user_id=str(user.user_id), 
-            #                                 log_slots=log_slots,
-            #                                 account_hash=None,
-            #                                 user=user)
-            #         session.add(new_player)
-            #         session.commit()
-            #         user_players = session.query(Player).filter(Player.user_id == user.user_id).all()
-            #         if len(user_players) == 1:
-            #             award_points_to_player(player_id=user_players[0].player_id, amount=10, source=f'Claimed account: {rsn}', expires_in_days=60)
-            #     except Exception as e:
-            #         print(f"Could not create a new player:", e)
-            #         session.rollback()
-            #     finally:
-            #         if player_id is not None:
-
-            #             return await ctx.send(f"Your account ({player_name}), with ID `{player_id}` has " +
-            #                              "been added to the database & associated with your Discord account.",ephemeral=True)
-            #         else:
-            #             return await ctx.send(f"An error occurred while attempting to register your account. Please try again, or [reach out in Discord](https://www.droptracker.io/discord)",ephemeral=True)
-            # else:
-            #     return await ctx.send(f"Your account was not found in the WiseOldMan database.\\n" +
-            #                          f"You could try to manually update your account on their website by [clicking here](https://www.wiseoldman.net/players/{rsn}), then try again, or wait a bit.")
+        joined_time = _time_since_iso(result.get("claimed_at"))
+        if status == "claimed_by_other":
+            owner_discord_id = result.get("owner_discord_id")
+            await ctx.send(f"Uh-oh!\\n" +
+                        f"It looks like somebody else may have claimed your account {joined_time}!\\n" +
+                        f"<@{owner_discord_id}> (discord id: {owner_discord_id}) currently owns it in our database.\\n" +
+                        "If this is some type of mistake, please reach out in our discord server:\\n" +
+                        "https://www.droptracker.io/discord",
+                        ephemeral=True)
+        elif status == "already_yours":
+            await ctx.send(f"It looks like you've already claimed this account ({result.get('player_name')}) {joined_time}\\n" +
+                        "\\nSomething not seem right?\\n" +
+                        "Please reach out in our discord server:\\n" +
+                        "https://www.droptracker.io/discord",
+                        ephemeral=True)
+        elif status == "claimed":
+            embed = Embed(title="Success!",
+                          description=f"Your in-game name has been successfully associated with your Discord account.\n" +
+                          "That's it!")
+            if result.get("group_id") and result["group_id"] != 2:
+                embed.add_field(name="Group", value=f"You've been added to **{result.get('group_name')}**.", inline=False)
+            embed.add_field(name=f"What's next?",value=f"If you'd like, you can [register an account on our website](https://www.droptracker.io/register) to stay informed " +
+                            "on updates & to make your voice heard relating to bugs & suggestions.",inline=False)
+            embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
+            embed.set_footer(text="Powered by the DropTracker | https://www.droptracker.io/")
+            await ctx.send(embed=embed)
         else:
-            joined_time = format_time_since_update(player.date_added)
-            if player.user:
-                user: User = player.user
-                if str(user.discord_id) != str(ctx.user.id):
-                    await ctx.send(f"Uh-oh!\\n" +
-                                f"It looks like somebody else may have claimed your account {joined_time}!\\n" +
-                                f"<@{player.user.discord_id}> (discord id: {player.user.discord_id}) currently owns it in our database.\\n" + 
-                                "If this is some type of mistake, please reach out in our discord server:\\n" + 
-                                "https://www.droptracker.io/discord",
-                                ephemeral=True)
-                else:
-                    await ctx.send(f"It looks like you've already claimed this account ({player.player_name}) {joined_time}\\n" + 
-                                "\\nSomething not seem right?\\n" +
-                                "Please reach out in our discord server:\\n" + 
-                                "https://www.droptracker.io/discord",
-                                ephemeral=True)
-            else:
-                player.user = user
-                if group and group not in player.groups:
-                    player.add_group(group)
-                session.commit()
-                embed = Embed(title="Success!",
-                              description=f"Your in-game name has been successfully associated with your Discord account.\n" +
-                              "That's it!")
-                if group and group.group_id != 2:
-                    embed.add_field(name="Group", value=f"You've been added to **{group.group_name}**.", inline=False)
-                embed.add_field(name=f"What's next?",value=f"If you'd like, you can [register an account on our website](https://www.droptracker.io/register) to stay informed " +
-                                "on updates & to make your voice heard relating to bugs & suggestions.",inline=False)
-                embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
-                embed.set_footer(text="Powered by the DropTracker | https://www.droptracker.io/")
-                await ctx.send(embed=embed)
+            await ctx.send(f"An error occurred claiming your account.\n" +
+                           "Try again later, or reach out in our Discord server",
+                           ephemeral=True)
     
     @slash_command(name="unclaim-rsn",
                     description="Remove a RuneScape account name from your Discord account")
@@ -509,32 +475,31 @@ class UserCommands(Extension):
             return await ctx.send("You don't have any accounts associated with your Discord account.",
                                   ephemeral=True)
 
-        player = get_player_by_claim_rsn(session, Player, rsn)
+        # Shared mutation logic (also behind the website unclaim endpoint).
+        result = unclaim_player(discord_id=str(ctx.user.id), rsn=rsn)
+        status = result["status"]
 
-        if not player:
+        if status == "not_found":
             return await ctx.send(
                 f"`{rsn}` was not found in our database.",
                 ephemeral=True
             )
 
-        if not player.user or str(player.user.discord_id) != str(ctx.user.id):
+        if status == "not_yours":
             return await ctx.send(
-                f"`{player.player_name}` is not currently claimed by your Discord account.",
+                f"`{result.get('player_name')}` is not currently claimed by your Discord account.",
                 ephemeral=True
             )
 
-        # Remove player from all groups before clearing the user association
-        groups_to_remove = list(player.groups)
-        for group in groups_to_remove:
-            player.remove_group(group)
-
-        player.user = None
-        player.user_id = None
-        session.commit()
+        if status != "unclaimed":
+            return await ctx.send(
+                "An error occurred while unclaiming your account. Please try again later.",
+                ephemeral=True
+            )
 
         embed = Embed(
             title="Account unclaimed",
-            description=f"`{player.player_name}` has been removed from your Discord account.\n"
+            description=f"`{result.get('player_name')}` has been removed from your Discord account.\n"
                         "You can re-claim it at any time using "
                         f"</claim-rsn:{await get_command_id(self.bot, 'claim-rsn')}>."
         )
