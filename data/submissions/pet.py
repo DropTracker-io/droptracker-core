@@ -98,6 +98,18 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
             session, source, player_id, player_name, use_external_session
         )
         debug_print(f"NPC resolved - ID: {npc_id}, Name: {npc_name}")
+    else:
+        # Skilling pets carry no NPC/boss source and the plugin doesn't send one.
+        # Attribute the skill as the source for display, but do NOT run it through
+        # NPC resolution — a skill is not an npc_list entry (would mint a bogus row
+        # and queue a "new_npc" notification).
+        from utils.osrs_pets import skilling_pet_source
+
+        skill_source = skilling_pet_source(pet_name)
+        if skill_source:
+            source = skill_source
+            npc_name = skill_source
+            debug_print(f"Skilling pet source attributed: {source}")
 
     from db import PlayerPet
 

@@ -69,3 +69,26 @@ def test_all_pets_vs_every_pet():
     # ALL_PETS (default) omits misc; EVERY_PET includes it.
     assert pets._norm("Chompy chick") not in pets.ALL_PETS
     assert pets._norm("Chompy chick") in pets.EVERY_PET
+
+
+def test_skilling_pet_source_maps_skill():
+    assert pets.skilling_pet_source("Beaver") == "Woodcutting"
+    assert pets.skilling_pet_source("Rock golem") == "Mining"
+    assert pets.skilling_pet_source("baby chinchompa") == "Hunter"   # case-insensitive
+    assert pets.skilling_pet_source("Quetzin") == "Hunter"
+    assert pets.skilling_pet_source("Soup") == "Sailing"
+
+
+def test_skilling_pet_source_none_for_non_skilling():
+    # Boss pets and unknowns get no skill source (attributed via NPC instead).
+    assert pets.skilling_pet_source("Baby mole") is None
+    assert pets.skilling_pet_source("Not a pet") is None
+
+
+def test_every_skilling_category_pet_has_a_source_except_herbi():
+    # Guards against a new skilling pet landing in the taxonomy without a source
+    # mapping. Herbi is intentionally excluded (plugin sends Herbiboar as an NPC).
+    for norm_name in pets.PET_CATEGORIES["skilling"]:
+        if norm_name == pets._norm("Herbi"):
+            continue
+        assert norm_name in pets.SKILLING_PET_SKILL, f"{norm_name} missing a skill source"
