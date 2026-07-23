@@ -63,6 +63,32 @@ EVERY_PET = frozenset().union(*PET_CATEGORIES.values())
 PET_DISPLAY_BY_NORM = {_norm(n): n for cat in _CATEGORIES.values() for n in cat}
 
 
+# Skilling pets -> the skill they're obtained from. Used to attribute a pet's
+# ``source`` server-side: skilling pets have no NPC/boss, and the plugin does not
+# send a source for them. This is a display string, NOT an NpcList entry, so it
+# must never be run through NPC resolution. Keeping it here (the pet SSOT) means a
+# new skilling pet needs one backend edit, not a plugin release.
+_SKILLING_PET_SKILL = {
+    "Baby chinchompa": "Hunter",
+    "Beaver": "Woodcutting",
+    "Giant squirrel": "Agility",
+    "Heron": "Fishing",
+    "Quetzin": "Hunter",
+    "Rift guardian": "Runecraft",
+    "Rock golem": "Mining",
+    "Rocky": "Thieving",
+    "Soup": "Sailing",
+    "Tangleroot": "Farming",
+}
+SKILLING_PET_SKILL = {_norm(k): v for k, v in _SKILLING_PET_SKILL.items()}
+
+
+def skilling_pet_source(pet_name: str):
+    """Skill a skilling pet is obtained from (display string), or None if the pet
+    isn't a mapped skilling pet. Not an NPC — do not resolve against ``npc_list``."""
+    return SKILLING_PET_SKILL.get(_norm(pet_name))
+
+
 def pet_categories() -> tuple[str, ...]:
     """All selectable category keys (includes ``misc`` — a task may opt in)."""
     return tuple(_CATEGORIES.keys())
