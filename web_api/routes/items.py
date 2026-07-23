@@ -19,7 +19,7 @@ import asyncio
 import time
 
 from quart import Blueprint, jsonify
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from db import ItemList, Player
 from utils.ge_value import get_true_item_value
@@ -54,6 +54,16 @@ _STATS_LOCK_TTL = 300
 _RECENT_LIMIT = 15
 _TOP_RECEIVERS_LIMIT = 10
 _SOURCES_LIMIT = 100
+
+# Tracked-drop fallback for _sources: the wiki table (dt_npc_loot) misses whole
+# activity sources (e.g. Wintertodt's reward cart has zero wiki rows), so NPCs
+# we've actually OBSERVED dropping the item are unioned in. The scan samples at
+# most this many drop rows (ix_drops_item_id) so ultra-common items stay
+# bounded, and a source only qualifies past both thresholds — filtering
+# one-off misattributions (a "Bird nest" that once reported a dragon axe).
+_TRACKED_SOURCE_SCAN_ROWS = 50_000
+_TRACKED_SOURCE_MIN_DROPS = 5
+_TRACKED_SOURCE_MIN_PLAYERS = 3
 
 
 def _rc():
@@ -251,8 +261,50 @@ def _recent_drops(item_id: int) -> list:
     return out
 
 
+def _observed_source_rows(s, item_id: int) -> list[tuple[int, str, int]]:
+    """``(npc_id, npc_name, drop_count)`` for NPCs we've actually observed
+    dropping this item, most-seen first — the wiki-gap fallback feeding
+    :func:`_sources`. Samples at most ``_TRACKED_SOURCE_SCAN_ROWS`` drop rows
+    (bounded on ultra-common items) and applies the min-drops / min-players
+    thresholds so one-off misattributed drops don't invent a source."""
+    rows = s.execute(
+        text("SELECT npc_id, player_id FROM drops WHERE item_id = :iid LIMIT :lim"),
+        {"iid": item_id, "lim": _TRACKED_SOURCE_SCAN_ROWS},
+    ).fetchall()
+    drops_by_npc: dict[int, int] = {}
+    players_by_npc: dict[int, set] = {}
+    for npc_id, player_id in rows:
+        if npc_id is None:
+            continue
+        nid = int(npc_id)
+        drops_by_npc[nid] = drops_by_npc.get(nid, 0) + 1
+        players_by_npc.setdefault(nid, set()).add(player_id)
+    qualifying = [
+        nid
+        for nid, count in drops_by_npc.items()
+        if count >= _TRACKED_SOURCE_MIN_DROPS
+        and len(players_by_npc[nid]) >= _TRACKED_SOURCE_MIN_PLAYERS
+    ]
+    if not qualifying:
+        return []
+    names = dict(
+        s.execute(
+            text("SELECT npc_id, npc_name FROM npc_list WHERE npc_id IN :ids")
+            .bindparams(bindparam("ids", expanding=True)),
+            {"ids": qualifying},
+        ).fetchall()
+    )
+    out = [(nid, names[nid], drops_by_npc[nid]) for nid in qualifying if nid in names]
+    out.sort(key=lambda r: -r[2])
+    return out
+
+
 def _sources(item_id: int) -> dict:
-    """NPCs whose wiki drop table includes this item, rarest first."""
+    """NPCs that drop this item: the wiki drop table (rarest first) unioned
+    with observed tracked-drop sources the wiki table misses, alias groups
+    (e.g. Wintertodt's two reward containers) collapsed to one entry."""
+    from web_api.routes.npc_source_aliases import alias_group_for_member
+
     key = f"item:sources:{item_id}"
     cached = cache_get(key, _SOURCES_TTL)
     if cached is not None:
@@ -280,6 +332,7 @@ def _sources(item_id: int) -> dict:
             ),
             {"iid": item_id, "lim": _SOURCES_LIMIT},
         ).fetchall()
+        observed = _observed_source_rows(s, item_id)
 
     # Multi-id bosses replicate their wiki table per variant id (e.g. Vorkath
     # 8060/8061) — collapse duplicates by name, keeping the rarest-first row.
@@ -302,7 +355,48 @@ def _sources(item_id: int) -> dict:
                 "tracked": bool(_tracked),
             }
         )
-    out = {"total": int(total[0] or 0), "npcs": npcs}
+    # Wiki-gap fallback: sources we've observed dropping the item but the wiki
+    # table doesn't know. Rarity 0 renders as "—" (no wiki rate to show).
+    extra = 0
+    for npc_id, npc_name, _count in observed:
+        if npc_name in seen_names or len(npcs) >= _SOURCES_LIMIT:
+            continue
+        seen_names.add(npc_name)
+        extra += 1
+        npcs.append(
+            {
+                "npc_id": int(npc_id),
+                "name": npc_name,
+                "icon_url": f"{IMG_BASE}/npcdb/{npc_id}.png",
+                "quantity": "1",
+                "rarity": 0.0,
+                "rolls": 1,
+                "tracked": True,
+            }
+        )
+    # Collapse alias-group members ("Reward cart (Wintertodt)" + "Supply crate
+    # (Wintertodt)") into one display entry. `members` carries the real names so
+    # the source-restriction picker stores what drops actually record.
+    collapsed, seen_alias = [], set()
+    for entry in npcs:
+        group = alias_group_for_member(entry["name"])
+        if group is None:
+            collapsed.append(entry)
+            continue
+        if group["name"] in seen_alias:
+            extra -= 1  # merged away
+            continue
+        seen_alias.add(group["name"])
+        collapsed.append(
+            {
+                **entry,
+                "npc_id": int(group["npc_id"]),
+                "name": group["name"],
+                "icon_url": f"{IMG_BASE}/npcdb/{group['npc_id']}.png",
+                "members": list(group["members"]),
+            }
+        )
+    out = {"total": int(total[0] or 0) + max(extra, 0), "npcs": collapsed}
     cache_set(key, out)
     return out
 

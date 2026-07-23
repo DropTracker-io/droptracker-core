@@ -30,7 +30,7 @@ import json
 import time
 
 from quart import Blueprint, jsonify, request
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from db import NpcList, Player
 from utils.npc_names import npc_family_tiers, npc_slug_sql_expr
@@ -426,20 +426,89 @@ def _family_table_rows(s, npc_id: int, npc_name: str):
     return []
 
 
+def _alias_member_npc_ids(s, npc_name: str) -> list[int]:
+    """``npc_list`` ids of every member of ``npc_name``'s source-alias group
+    (e.g. Wintertodt's two reward containers), ``[]`` when it isn't in one."""
+    from web_api.routes.npc_source_aliases import alias_group_for_member
+
+    group = alias_group_for_member(npc_name)
+    if group is None:
+        return []
+    rows = s.execute(
+        text("SELECT npc_id FROM npc_list WHERE npc_name IN :names")
+        .bindparams(bindparam("names", expanding=True)),
+        {"names": list(group["members"])},
+    ).fetchall()
+    return [int(r[0]) for r in rows]
+
+
+def _observed_table_rows(s, npc_id: int, npc_name: str):
+    """Fallback "drop table" for NPCs with no wiki rows anywhere in their
+    family: every item we've OBSERVED dropping from them, straight from the
+    last-drops registry (which doubles as the observed-item set — e.g.
+    Wintertodt's reward containers have no ``dt_npc_loot`` rows at all, yet
+    425k tracked drops). Alias-group members are unioned so either container's
+    loot shows on both pages.
+
+    Returns ``(rows, last_drops, status, build_ids)``: rows in the wiki-row
+    shape ``(item_id, name, quantity, noted, rarity, rolls)`` with rarity 0
+    (renders "—"; there is no wiki rate), most-recently-seen first, and
+    ``build_ids`` = member ids whose registry is still cold (caller fires the
+    background builds)."""
+    ids = _alias_member_npc_ids(s, npc_name) or [npc_id]
+    if npc_id not in ids:
+        ids.insert(0, npc_id)
+    merged: dict = {}
+    build_ids: list[int] = []
+    for nid in ids:
+        latest, status = _last_drops_for(s, nid)
+        if status != "ready":
+            build_ids.append(nid)
+            continue
+        for iid, entry in latest.items():
+            cur = merged.get(iid)
+            if cur is None or (entry.get("ts") or 0) > (cur.get("ts") or 0):
+                merged[iid] = entry
+    status = "building" if build_ids else "ready"
+    if not merged:
+        return [], {}, status, build_ids
+    meta = {
+        int(item_id): (item_name, bool(noted))
+        for item_id, item_name, noted in s.execute(
+            text("SELECT item_id, item_name, noted FROM items WHERE item_id IN :ids")
+            .bindparams(bindparam("ids", expanding=True)),
+            {"ids": list(merged.keys())},
+        ).fetchall()
+    }
+    rows = []
+    for iid, entry in sorted(merged.items(), key=lambda kv: -(kv[1].get("ts") or 0)):
+        name, noted = meta.get(int(iid), (f"Item {iid}", False))
+        rows.append((iid, name, "1", noted, 0.0, 1))
+    return rows, merged, status, build_ids
+
+
 @npcs_bp.get("/npcs/<int:npc_id>/drop-table")
 async def npc_drop_table(npc_id: int):
     """Wiki drop table + who most recently received each item from this NPC."""
 
     def _load():
+        build_ids: list[int] = []
         with db_session() as s:
             npc_name = _npc_or_404(npc_id, s).npc_name
             rows = _wiki_table_rows(s, npc_id)
             if not rows:
                 rows = _family_table_rows(s, npc_id, npc_name)
 
-            # No wiki table → nothing to annotate; skip the registry entirely
-            # (a cold build on a busy NPC is minutes of scanning for nothing).
-            last_drops, status = _last_drops_for(s, npc_id) if rows else ({}, "ready")
+            if rows:
+                last_drops, status = _last_drops_for(s, npc_id)
+                if status != "ready":
+                    build_ids = [npc_id]
+            else:
+                # No wiki table anywhere in the family — synthesize the table
+                # from observed tracked drops instead (registry-backed).
+                rows, last_drops, status, build_ids = _observed_table_rows(
+                    s, npc_id, npc_name
+                )
             hidden = hidden_player_ids()
             names = _player_names(
                 s,
@@ -488,12 +557,16 @@ async def npc_drop_table(npc_id: int):
             "name": npc_name,
             "items": items,
             "last_drops_status": status,
+            "_build_ids": build_ids,
         }
 
     payload = await asyncio.to_thread(_load)
+    build_ids = payload.pop("_build_ids", None) or [npc_id]
     if payload["last_drops_status"] == "building":
-        # Fire the cold build once; subsequent requests see "ready".
-        asyncio.get_running_loop().create_task(_build_registry_background(npc_id))
+        # Fire the cold build(s) once; subsequent requests see "ready". An
+        # alias-group fallback may need several member registries built.
+        for nid in build_ids:
+            asyncio.get_running_loop().create_task(_build_registry_background(nid))
     # Short cache while building so clients pick the annotations up quickly.
     max_age = 15 if payload["last_drops_status"] == "building" else 120
     return with_cache_headers(jsonify(payload), max_age=max_age)
