@@ -446,7 +446,19 @@ def describe_task(task: dict) -> tuple:
         total = len(reqs)
         capped = reqs[:REQUIREMENTS_LIMIT]
         extra = f" (+{total - len(capped)} more)" if total > len(capped) else ""
-        if not reqs:
+        # Metric alternatives of an any_path config ("boss pet OR 5,000 GWD
+        # kills") — summarized into the sentence; they carry no item rows.
+        metric_bits = []
+        for path in config.get("paths") or []:
+            if not isinstance(path, dict) or not path.get("metric"):
+                continue
+            npcs = [str(n).strip() for n in (path.get("npcs") or []) if str(n).strip()]
+            at = f" at {', '.join(npcs[:4])}" if npcs else ""
+            if path["metric"] == "kc":
+                metric_bits.append(f"{_fmt_num(path.get('need'))} kills{at}")
+            else:
+                metric_bits.append(f"{_fmt_num(path.get('need'))} GP of drops{at}")
+        if not reqs and not metric_bits:
             if target and isinstance(tv, int) and tv > 1:
                 return f"Obtain {tv}× {target}.", []
             if target:
@@ -463,7 +475,13 @@ def describe_task(task: dict) -> tuple:
         elif kind == "groups":
             desc = f"Complete every listed item requirement{extra}."
         elif kind == "any_path":
-            desc = f"Complete any one of the listed item paths{extra}."
+            ors = " OR ".join(metric_bits)
+            if reqs and metric_bits:
+                desc = f"Complete any one path: the listed items OR {ors}{extra}."
+            elif metric_bits:
+                desc = f"Complete any one path: {ors}."
+            else:
+                desc = f"Complete any one of the listed item paths{extra}."
         elif isinstance(tv, int) and tv > 1:
             desc = f"Collect any {tv} of the {total} listed items{extra}."
         else:

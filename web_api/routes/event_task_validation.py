@@ -16,6 +16,7 @@ import os
 
 from db import ItemList, NpcList
 from web_api.common import abort_problem
+from web_api.routes.npc_source_aliases import expand_source_names
 
 # Hosts a loot_sweep group image may come from — our own upload CDN + site.
 # Arbitrary external URLs are rejected (admins can only point at images we host).
@@ -62,6 +63,8 @@ ITEM_CONFIG_KINDS = ("any_of", "all_of", "point_collection", "assembly", "groups
 MAX_CONFIG_ITEMS = 100
 MAX_CONFIG_GROUPS = 10
 MAX_CONFIG_PATHS = 4
+# point_collection per-item weight ceiling (same bound as loot_sweep items).
+MAX_ITEM_POINTS = 1_000_000
 # Serialized config ceiling — safely under the web_event_tasks.config TEXT
 # column's 65535-byte limit so an oversized item list / source-NPC map is
 # rejected with a 422 rather than truncating or 500-ing on save.
@@ -102,6 +105,12 @@ LOOT_SWEEP_MAX_BONUS_MAX = 100
 # any_path progress is tracked as a percentage of the closest-to-done path
 # (paths differ in size, so a raw item count would be meaningless).
 ANY_PATH_THRESHOLD = 100
+
+# Metric alternatives an any_path path may be instead of an item checklist
+# ("boss pet OR 5,000 GWD kills"). Kept in sync with
+# services.event_engine.PATH_METRICS, which can't be imported here (the unit
+# conftest stubs the whole ``services`` package).
+PATH_METRICS = ("kc", "loot_value")
 
 # Non-semantic config keys preserved verbatim across validation (the bingo
 # designer's auto-created marker — see event_admin._BINGO_AUTO_KEY).
@@ -166,11 +175,14 @@ def _validated_source_npcs(s, raw) -> list[str]:
         abort_problem(422, "Invalid config", f"At most {MAX_SOURCE_NPCS} source NPCs.")
     out, unknown = [], []
     for n in raw:
-        canonical = _canonical_npc(s, str(n))
-        if not canonical:
-            unknown.append(str(n).strip() or "(empty)")
-        elif canonical not in out:
-            out.append(canonical)
+        # A display alias ("Wintertodt") expands to the real recorded source
+        # names, so stored configs only ever hold names drops actually carry.
+        for real in expand_source_names(str(n)):
+            canonical = _canonical_npc(s, real)
+            if not canonical:
+                unknown.append(str(real).strip() or "(empty)")
+            elif canonical not in out:
+                out.append(canonical)
     if unknown:
         abort_problem(
             422, "Unknown NPC(s)",
@@ -245,6 +257,19 @@ def _validated_item_npcs(s, raw, allowed_items: set[str]) -> dict:
     return out
 
 
+def _pet_name_request_set(raw) -> set[str]:
+    """Lower-cased names the client flagged as pets (``config.pet_items``);
+    422 on a malformed value. Names not actually present in the item list are
+    simply ignored downstream (forgiving, like ``item_npcs``)."""
+    if raw is None:
+        return set()
+    if not isinstance(raw, list) or not all(isinstance(n, str) for n in raw):
+        abort_problem(422, "Invalid config", "'pet_items' must be an array of pet names.")
+    if len(raw) > MAX_CONFIG_ITEMS:
+        abort_problem(422, "Invalid config", f"At most {MAX_CONFIG_ITEMS} pet items.")
+    return {n.strip().lower() for n in raw if n.strip()}
+
+
 def _require_target_value(tv, *, what: str, lo: int = 1, hi: int | None = None) -> int:
     if not isinstance(tv, int) or isinstance(tv, bool) or tv < lo or (hi is not None and tv > hi):
         bounds = f"an integer ≥ {lo}" if hi is None else f"an integer between {lo} and {hi}"
@@ -269,12 +294,20 @@ def _parse_config(raw) -> dict | None:
     abort_problem(422, "Invalid config", "Task config must be a JSON object or string.")
 
 
-def _validated_item_entries(s, items, *, with_points: bool) -> list[dict]:
+def _validated_item_entries(s, items, *, with_points: bool,
+                            pet_names: set[str] | None = None,
+                            found_pets: dict | None = None) -> list[dict]:
+    """Canonicalize one item list. Names the client flagged as pets
+    (``pet_names``, lower-cased) validate against the pet taxonomy instead of
+    the item DB; each resolved pet lands in ``found_pets`` (lower -> canonical)
+    so the caller can rebuild a canonical ``config.pet_items``."""
     if not isinstance(items, list) or not items:
         abort_problem(422, "Invalid config", "Item list config requires a non-empty 'items' array.")
     if len(items) > MAX_CONFIG_ITEMS:
         abort_problem(422, "Invalid config", f"At most {MAX_CONFIG_ITEMS} items per task.")
-    out, unknown = [], []
+    from utils.osrs_pets import canonical_pet_name
+
+    out, unknown, unknown_pets = [], [], []
     for it in items:
         if isinstance(it, str):
             name, entry = it, {}
@@ -283,18 +316,34 @@ def _validated_item_entries(s, items, *, with_points: bool) -> list[dict]:
             entry = it
         else:
             abort_problem(422, "Invalid config", "Each config item must be a name or object.")
-        canonical = _canonical_item(s, name)
+        if pet_names and str(name).strip().lower() in pet_names:
+            canonical = canonical_pet_name(name)
+            if not canonical:
+                unknown_pets.append(str(name).strip() or "(empty)")
+                continue
+            if found_pets is not None:
+                found_pets[canonical.lower()] = canonical
+        else:
+            canonical = _canonical_item(s, name)
         if not canonical:
             unknown.append(str(name).strip() or "(empty)")
             continue
         row = {"item_name": canonical}
         if with_points:
+            # Whole-number weights only (mirrors _validated_ls_item): the UI
+            # used to allow decimals, so round anything historical/stale up
+            # into an int ≥ 1.
             try:
-                pts = float(entry.get("points") or 1)
+                pts = int(round(float(entry.get("points") or 1)))
             except (TypeError, ValueError):
-                pts = 1.0
-            row["points"] = max(pts, 0.1)
+                pts = 1
+            row["points"] = min(max(pts, 1), MAX_ITEM_POINTS)
         out.append(row)
+    if unknown_pets:
+        abort_problem(
+            422, "Unknown pet(s)",
+            "Not a known OSRS pet: " + ", ".join(sorted(set(unknown_pets))[:10]),
+        )
     if unknown:
         abort_problem(
             422,
@@ -305,7 +354,8 @@ def _validated_item_entries(s, items, *, with_points: bool) -> list[dict]:
     return out
 
 
-def _validated_groups(s, groups) -> tuple[list[dict], int]:
+def _validated_groups(s, groups, *, pet_names: set[str] | None = None,
+                      found_pets: dict | None = None) -> tuple[list[dict], int]:
     """Validate a ``kind: "groups"`` config: every group is its own all-of or
     any-of item requirement, and the task completes when all groups are
     satisfied (e.g. a godsword: ALL three shards + ANY one hilt).
@@ -329,7 +379,8 @@ def _validated_groups(s, groups) -> tuple[list[dict], int]:
         if mode not in ("all_of", "any_of"):
             abort_problem(422, "Invalid config",
                           f"Group {gi}: mode must be 'all_of' or 'any_of'.")
-        entries = _validated_item_entries(s, group.get("items"), with_points=False)
+        entries = _validated_item_entries(s, group.get("items"), with_points=False,
+                                          pet_names=pet_names, found_pets=found_pets)
         names = [e["item_name"] for e in entries]
         for name in names:
             key = name.lower()
@@ -355,11 +406,68 @@ def _validated_groups(s, groups) -> tuple[list[dict], int]:
     return out, total_need
 
 
-def _validated_paths(s, paths) -> tuple[list[dict], int]:
+def _validated_metric_path(s, path: dict, pi: int) -> dict:
+    """Validate one METRIC path of an any_path config: a KC or loot-value
+    alternative to an item checklist ("boss pet OR 5,000 GWD kills").
+
+    ``kc`` needs at least one NPC (a kill of any listed NPC counts, kc_target
+    semantics) and a kill-count ``need``; ``loot_value`` folds drop GP toward
+    a GP ``need``, optionally restricted to source NPCs.
+    """
+    metric = path.get("metric")
+    npcs_raw = path.get("npcs")
+    if isinstance(npcs_raw, str):
+        npcs_raw = [npcs_raw]
+    if npcs_raw is not None and not isinstance(npcs_raw, list):
+        abort_problem(422, "Invalid config", f"Path {pi}: 'npcs' must be a list of NPC names.")
+    if metric == "kc":
+        if not npcs_raw:
+            abort_problem(422, "Invalid config",
+                          f"Path {pi}: a kill-count path needs at least one NPC.")
+        if len(npcs_raw) > MAX_KC_NPCS:
+            abort_problem(422, "Invalid config",
+                          f"Path {pi}: at most {MAX_KC_NPCS} NPCs per kill-count path.")
+        need = _require_target_value(path.get("need"), what=f"Path {pi} kill count")
+    elif metric == "loot_value":
+        if npcs_raw is not None and len(npcs_raw) > MAX_SOURCE_NPCS:
+            abort_problem(422, "Invalid config",
+                          f"Path {pi}: at most {MAX_SOURCE_NPCS} source NPCs.")
+        need = _require_target_value(path.get("need"), what=f"Path {pi} GP goal")
+    else:
+        abort_problem(422, "Invalid config",
+                      f"Path {pi}: metric must be one of {list(PATH_METRICS)}.")
+    canonical_npcs, unknown = [], []
+    for name in (npcs_raw or []):
+        # Source aliases ("Wintertodt") expand to the recorded drop-source
+        # names, mirroring the kc_target / loot_value validators.
+        for real in expand_source_names(str(name)):
+            canonical = _canonical_npc(s, real)
+            if not canonical:
+                unknown.append(str(real).strip() or "(empty)")
+            elif canonical not in canonical_npcs:
+                canonical_npcs.append(canonical)
+    if unknown:
+        abort_problem(
+            422, "Unknown NPC(s)",
+            "Not found in the NPC database (exact in-game names required): "
+            + ", ".join(sorted(set(unknown))[:10]),
+        )
+    norm: dict = {"metric": metric, "need": need}
+    if canonical_npcs:
+        norm["npcs"] = canonical_npcs
+    label = path.get("label")
+    if isinstance(label, str) and label.strip():
+        norm["label"] = label.strip()[:80]
+    return norm
+
+
+def _validated_paths(s, paths, *, pet_names: set[str] | None = None,
+                     found_pets: dict | None = None) -> tuple[list[dict], int]:
     """Validate a ``kind: "any_path"`` config: each path is its own
-    groups-style requirement set and the task completes when ANY path is
-    satisfied — "dryness protection" tasks (suggestion #52), e.g. the full
-    Justiciar set OR any 5 Justiciar items.
+    groups-style requirement set — or a METRIC goal (``metric: "kc"`` /
+    ``"loot_value"``) — and the task completes when ANY path is satisfied.
+    "Dryness protection" tasks (suggestion #52): the full Justiciar set OR
+    any 5 Justiciar items; or "Godwars boss pet OR 5,000 Godwars kills".
 
     Items may repeat across paths (the same drop advances every path that
     lists it) but not within one path (enforced per-path by
@@ -378,7 +486,11 @@ def _validated_paths(s, paths) -> tuple[list[dict], int]:
     for pi, path in enumerate(paths, start=1):
         if not isinstance(path, dict):
             abort_problem(422, "Invalid config", f"Path {pi} must be an object.")
-        groups, _need = _validated_groups(s, path.get("groups"))
+        if path.get("metric") is not None:
+            out.append(_validated_metric_path(s, path, pi))
+            continue
+        groups, _need = _validated_groups(s, path.get("groups"),
+                                          pet_names=pet_names, found_pets=found_pets)
         total_items += sum(len(g["items"]) for g in groups)
         if total_items > MAX_CONFIG_ITEMS:
             abort_problem(422, "Invalid config",
@@ -640,28 +752,36 @@ def validate_task_payload(s, body: dict) -> dict:
 
     if ttype == "item_collection":
         kind = (config or {}).get("kind")
-        # Optional source-NPC restriction rides in the SAME config object;
-        # captured up front because each branch rebuilds config from scratch.
+        # Optional source-NPC restriction and pet flags ride in the SAME config
+        # object; captured up front because each branch rebuilds it from scratch.
         raw_source_npcs = (config or {}).get("source_npcs")
         raw_item_npcs = (config or {}).get("item_npcs")
+        # Names in the list that are PETS (credited from pet submissions, not
+        # drops/clogs). Validated against the pet taxonomy during entry
+        # canonicalization; found_pets collects the canonical spellings.
+        pet_names = _pet_name_request_set((config or {}).get("pet_items"))
+        found_pets: dict = {}
         if kind is not None and kind not in ITEM_CONFIG_KINDS:
             abort_problem(
                 422, "Invalid config",
                 f"Item collection config kind must be one of {list(ITEM_CONFIG_KINDS)}.",
             )
         if config is not None and kind == "any_path":
-            paths, tv = _validated_paths(s, config.get("paths"))
+            paths, tv = _validated_paths(s, config.get("paths"),
+                                         pet_names=pet_names, found_pets=found_pets)
             config = {"kind": "any_path", "paths": paths}
             target = ""
         elif config is not None and kind == "groups":
-            groups, tv = _validated_groups(s, config.get("groups"))
+            groups, tv = _validated_groups(s, config.get("groups"),
+                                           pet_names=pet_names, found_pets=found_pets)
             config = {"kind": "groups", "groups": groups}
             target = ""
         elif config is not None and kind is not None:
             config = {
                 "kind": kind,
                 "items": _validated_item_entries(
-                    s, config.get("items"), with_points=(kind == "point_collection")
+                    s, config.get("items"), with_points=(kind == "point_collection"),
+                    pet_names=pet_names, found_pets=found_pets,
                 ),
             }
             target = ""
@@ -698,9 +818,13 @@ def validate_task_payload(s, body: dict) -> dict:
             config = {"source_npcs": sources} if sources else None
         # Per-item source restriction (multi-item kinds): validate the item_npcs
         # map against the normalized item list and attach it. Single-item tasks
-        # (no kind) use source_npcs above instead.
+        # (no kind) use source_npcs above instead. Pets are excluded — they have
+        # no drop source, and their canonical names land in config.pet_items.
         if config is not None and config.get("kind"):
-            item_npcs = _validated_item_npcs(s, raw_item_npcs, _config_item_name_set(config))
+            if found_pets:
+                config["pet_items"] = sorted(found_pets.values())
+            allowed_items = _config_item_name_set(config) - set(found_pets.keys())
+            item_npcs = _validated_item_npcs(s, raw_item_npcs, allowed_items)
             if item_npcs:
                 config["item_npcs"] = item_npcs
 
@@ -718,11 +842,14 @@ def validate_task_payload(s, body: dict) -> dict:
         names = [str(n) for n in npcs_raw] if npcs_raw is not None else [target]
         canonical_npcs, unknown = [], []
         for name in names:
-            canonical = _canonical_npc(s, name)
-            if not canonical:
-                unknown.append(str(name).strip() or "(empty)")
-            elif canonical not in canonical_npcs:
-                canonical_npcs.append(canonical)
+            # kc_target lists support "a kill of ANY counts", so a source alias
+            # ("Wintertodt") expands to its member NPCs. pb_target stays exact.
+            for real in expand_source_names(name) if ttype == "kc_target" else [name]:
+                canonical = _canonical_npc(s, real)
+                if not canonical:
+                    unknown.append(str(real).strip() or "(empty)")
+                elif canonical not in canonical_npcs:
+                    canonical_npcs.append(canonical)
         if unknown:
             abort_problem(
                 422, "Unknown NPC(s)",
@@ -751,14 +878,16 @@ def validate_task_payload(s, body: dict) -> dict:
         tv = _require_target_value(tv, what="GP goal")
         sources = []
         for name in ((config or {}).get("source_npcs") or ([target] if target else [])):
-            canonical = _canonical_npc(s, str(name))
-            if not canonical:
-                abort_problem(
-                    422, "Unknown NPC",
-                    f"'{str(name).strip() or '(empty)'}' is not in the NPC database — the "
-                    "exact in-game NPC name is required.",
-                )
-            sources.append(canonical)
+            for real in expand_source_names(str(name)):
+                canonical = _canonical_npc(s, real)
+                if not canonical:
+                    abort_problem(
+                        422, "Unknown NPC",
+                        f"'{str(real).strip() or '(empty)'}' is not in the NPC database — the "
+                        "exact in-game NPC name is required.",
+                    )
+                if canonical not in sources:
+                    sources.append(canonical)
         target = ""
         config = {"source_npcs": sources} if sources else None
 

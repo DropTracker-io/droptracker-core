@@ -146,11 +146,13 @@ class _Row:
     """EventCompletion stand-in for the rollup queries (needs .id for the
     include-dedupe check)."""
 
-    def __init__(self, matched_target=None, quantity=1, source_type="drop", rid=1):
+    def __init__(self, matched_target=None, quantity=1, source_type="drop", rid=1,
+                 note=None):
         self.id = rid
         self.matched_target = matched_target
         self.quantity = quantity
         self.source_type = source_type
+        self.note = note
 
 
 class TestRowAdvancesProgress:
@@ -175,6 +177,32 @@ class TestRowAdvancesProgress:
         task = {"id": 3, "type": "item_collection", "target_value": 5, "config": {}}
         s = _Session([])
         assert engine._row_advances_progress(s, task, 4, _Row("Bones", rid=None)) is True
+
+    # any_path metric paths: the percent rollup floors, so a 1-kill row on a
+    # 5,000-KC path never moves the integer — it must still record (progress
+    # re-folds from ledger rows; a dropped row is credit lost forever).
+    GWD_OR = {
+        "id": 3, "type": "item_collection", "target_value": 100,
+        "config": {"kind": "any_path", "paths": [
+            {"groups": [{"mode": "any_of", "need": 1, "items": ["Armadyl hilt"]}]},
+            {"metric": "kc", "npcs": ["Kree'arra"], "need": 500},
+        ]},
+    }
+
+    def test_metric_row_advances_below_its_paths_need(self):
+        s = _Session([_Row(None, quantity=200, note="path:1", rid=10)])
+        candidate = _Row(None, quantity=1, note="path:1", rid=None)
+        assert engine._row_advances_progress(s, self.GWD_OR, 4, candidate) is True
+
+    def test_metric_row_is_dead_weight_once_need_met(self):
+        s = _Session([_Row(None, quantity=500, note="path:1", rid=10)])
+        candidate = _Row(None, quantity=1, note="path:1", rid=None)
+        assert engine._row_advances_progress(s, self.GWD_OR, 4, candidate) is False
+
+    def test_metric_row_for_unknown_path_is_dropped(self):
+        s = _Session([])
+        candidate = _Row(None, quantity=1, note="path:9", rid=None)
+        assert engine._row_advances_progress(s, self.GWD_OR, 4, candidate) is False
 
 
 class TestClogEchoDedupe:

@@ -32,7 +32,12 @@ v1 evaluation semantics (task doc table):
   point weight; ``groups`` combines all-of/any-of sub-requirements — every
   group must be satisfied, e.g. all godsword shards + any one hilt).
   Progress unit = quantity; ``any_of`` completes at ``target_value``
-  qualifying drops (default 1).
+  qualifying drops (default 1). ``any_path`` paths may also be METRIC paths
+  (``{"metric": "kc"|"loot_value", "npcs": [...], "need": N}``) — "boss pet
+  OR 5,000 GWD kills"; each metric path folds its own tagged ledger rows
+  (``note`` = ``path:<idx>``, guid suffixed ``#p<idx>``) with kc_target-style
+  watermark dedupe / loot_value GP fold, and one submission may advance an
+  item path and several metric paths at once (:func:`match_task_all`).
 - ``kc_target`` — drop from the target NPC (or ANY of ``config.npcs`` on a
   multi-NPC task); each qualifying kill counts once (deduped by
   ``(npc, kill_count)`` per player via Redis; multi-NPC tasks keep their
@@ -223,6 +228,95 @@ def _kc_state_scope(task: dict, npc_norm: str):
     return f"{task['id']}:{npc_norm.replace(' ', '_')}"
 
 
+# ── any_path metric paths (v2: "boss pet OR 5,000 KC") ────────────────────────
+
+# Path metrics an any_path config may carry besides item groups. ``kc`` counts
+# kills of the path's NPCs (kc_target semantics: watermark + dedupe, WOM
+# reconciliation); ``loot_value`` folds drop GP (optionally NPC-scoped).
+PATH_METRICS = ("kc", "loot_value")
+
+_PATH_NOTE_PREFIX = "path:"
+
+
+def _path_note(idx: int) -> str:
+    """Engine-written ledger tag binding a metric row to its config path."""
+    return f"{_PATH_NOTE_PREFIX}{int(idx)}"
+
+
+def _row_path_idx(row) -> Optional[int]:
+    """Metric-path index a ledger row was recorded for, parsed from the
+    engine's ``note`` tag (``path:N``); None for item/manual/bonus rows.
+    Reject/revoke may overwrite ``note`` with an admin note — those rows are
+    already excluded from every fold, so the tag never needs to survive."""
+    note = getattr(row, "note", None)
+    if not isinstance(note, str) or not note.startswith(_PATH_NOTE_PREFIX):
+        return None
+    try:
+        return int(note[len(_PATH_NOTE_PREFIX):])
+    except (TypeError, ValueError):
+        return None
+
+
+def _path_need(path: dict) -> int:
+    try:
+        return max(int(path.get("need") or 0), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _metric_paths_from_config(config: dict, resolve_wom: bool = False) -> tuple:
+    """Normalized metric-path entries of an ``any_path`` config:
+    ``({"idx", "metric", "npcs": frozenset, "need"[, "wom_metrics"]}, ...)``.
+    ``idx`` is the position in ``config.paths`` (item paths keep their slots).
+    ``resolve_wom`` additionally maps each kc path's NPCs to WOM hiscores
+    metrics (state-load only — it does name lookups)."""
+    out = []
+    for idx, path in enumerate((config or {}).get("paths") or []):
+        if not isinstance(path, dict) or path.get("metric") not in PATH_METRICS:
+            continue
+        entry = {"idx": idx, "metric": path["metric"],
+                 "npcs": _norm_npc_set(path.get("npcs")), "need": _path_need(path)}
+        if resolve_wom and path["metric"] == "kc":
+            entry["wom_metrics"] = _task_wom_metrics("kc_target", entry["npcs"])
+        out.append(entry)
+    return tuple(out)
+
+
+def _metric_paths(task: dict) -> tuple:
+    """The task's metric paths (precomputed as ``metric_paths`` at state load
+    — with WOM metrics resolved; derived on the fly for hand-built dicts,
+    without them, mirroring ``_kc_npcs``). Empty for non-any_path tasks."""
+    pre = task.get("metric_paths")
+    if pre is not None:
+        return tuple(pre)
+    if _list_kind(task) != "any_path":
+        return ()
+    return _metric_paths_from_config(task.get("config") or {})
+
+
+def _match_kc_scope(task: dict, match: dict, npc_norm: str):
+    """Redis key scope for the absolute-KC state behind a kc/kc_abs match.
+    kc_target tasks keep their legacy shapes (:func:`_kc_state_scope`); a
+    metric-path match scopes per (task, path, NPC) — each path is its own
+    counter and each NPC keeps its own independent watermark."""
+    path_idx = match.get("path")
+    if path_idx is None:
+        return _kc_state_scope(task, npc_norm)
+    return f"{task['id']}:p{int(path_idx)}:{npc_norm.replace(' ', '_')}"
+
+
+def _match_wom_npc(task: dict, match: dict, metric: str) -> str:
+    """Normalized NPC name behind a ``wom_kc`` envelope's boss metric, resolved
+    against the matched scope (the task's map, or the matched path's)."""
+    path_idx = match.get("path")
+    if path_idx is None:
+        return _kc_wom_metrics(task).get(metric) or ""
+    for path in _metric_paths(task):
+        if path["idx"] == path_idx:
+            return (path.get("wom_metrics") or {}).get(metric) or ""
+    return ""
+
+
 def parse_task_config(raw) -> dict:
     """Parse an ``EventTask.config`` JSON payload; {} on any failure."""
     if not raw:
@@ -302,6 +396,25 @@ def item_match_quantity(task: dict, item_name, quantity=1) -> Optional[int]:
             points = 1.0
         return max(int(round(points * qty)), 1)
     return qty
+
+
+def _config_pet_names(config: dict) -> frozenset:
+    """Normalized names in an item-list config flagged as PETS
+    (``config.pet_items``): they credit from a ``pet`` submission by name and
+    are excluded from drop/clog matching. Tolerates garbage (empty set)."""
+    raw = (config or {}).get("pet_items")
+    if not isinstance(raw, (list, tuple)):
+        return frozenset()
+    return frozenset(_norm(n) for n in raw if _norm(n))
+
+
+def _task_pet_names(task: dict) -> frozenset:
+    """The task's pet-flagged item names (precomputed at state load; derived
+    on the fly for hand-built dicts, mirroring ``_item_source_npcs``)."""
+    pets = task.get("pet_name_set")
+    if pets is None:
+        pets = _config_pet_names(task.get("config") or {})
+    return pets
 
 
 def _norm_npc_set(raw) -> frozenset:
@@ -533,16 +646,44 @@ def _anypath_progress_from_rows(rows, config: dict, threshold: int) -> int:
     the closest-to-done path scaled to the threshold (validation pins
     target_value to 100). Floor rounding means the threshold is hit exactly
     when some path's own need is fully met, never one drop early.
+
+    Metric paths (``{"metric": "kc"|"loot_value", "need": N}``) fold the
+    quantities of their own tagged rows (``note`` = ``path:<idx>``); item
+    paths fold only the untagged rows — so a 5,000-KC path can never leak
+    kills into a sibling item checklist, or vice versa. Untagged WILDCARD
+    rows (manual awards, no matched item) count on the task's percent scale:
+    item paths absorb them inside the grouped fold as before, and metric
+    paths add them as percent points — which is what keeps the admin
+    "mark complete" award (quantity = threshold − done) completing a
+    metric-only task exactly like any other.
     """
+    item_rows = []
+    tagged: dict = {}
+    wildcard = 0
+    for r in rows:
+        idx = _row_path_idx(r)
+        if idx is None:
+            item_rows.append(r)
+            if ((getattr(r, "source_type", None) or "") != "bonus"
+                    and not _norm(getattr(r, "matched_target", None))):
+                wildcard += max(int(getattr(r, "quantity", 1) or 1), 1)
+        elif (getattr(r, "source_type", None) or "") != "bonus":
+            tagged[idx] = tagged.get(idx, 0) + max(int(getattr(r, "quantity", 1) or 1), 1)
     best = 0
-    for path in (config.get("paths") or []):
+    for pi, path in enumerate(config.get("paths") or []):
         if not isinstance(path, dict):
             continue
-        need = sum(n for _mode, _names, n in _parse_requirement_groups(path))
-        if need <= 0:
-            continue
-        got = _grouped_progress_from_rows(rows, path, need)
-        best = max(best, (got * threshold) // need)
+        if path.get("metric") in PATH_METRICS:
+            need = _path_need(path)
+            got = min(tagged.get(pi, 0), need)
+            pct = min((got * threshold) // need + wildcard, threshold)
+        else:
+            need = sum(n for _mode, _names, n in _parse_requirement_groups(path))
+            if need <= 0:
+                continue
+            got = _grouped_progress_from_rows(item_rows, path, need)
+            pct = (got * threshold) // need
+        best = max(best, pct)
     return min(best, threshold)
 
 
@@ -624,9 +765,25 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
     data = envelope.get("data") or {}
 
     if task_type == "item_collection":
-        if kind not in ("drop", "clog"):
+        if kind not in ("drop", "clog", "pet"):
             return None
+        pets = _task_pet_names(task)
+        if kind == "pet":
+            # A pet mixed into the item list (config.pet_items) credits from
+            # its pet submission by name — mirroring loot_sweep's pet entries.
+            raw_name = data.get("pet_name") or data.get("item_name")
+            if not raw_name or _norm(raw_name) not in pets:
+                return None
+            credit = item_match_quantity(task, raw_name, 1)
+            if credit is None:
+                return None
+            return {"mode": "count", "quantity": credit,
+                    "matched_target": str(raw_name).strip()[:120] or None}
         item_name = data.get("item_name")
+        # A pet-flagged name only ever credits from its `pet` submission — a
+        # same-named drop/clog row would double-credit alongside it.
+        if pets and _norm(item_name) in pets:
+            return None
         qty = data.get("quantity", 1) if kind == "drop" else 1
         credit = item_match_quantity(task, item_name, qty)
         if credit is None:
@@ -771,6 +928,48 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
     return None
 
 
+def match_task_all(task: dict, envelope: dict) -> list:
+    """Every match one envelope produces against one task (pure; no I/O).
+
+    Single-outcome tasks defer to :func:`match_task`. An ``any_path`` task
+    with metric paths can credit several paths from ONE submission — the drop
+    that advances an item path is also a kill for a KC path and GP for a
+    loot-value path ("paths race independently") — so each qualifying metric
+    path yields its own match dict carrying ``path`` (the config path index
+    the apply layer tags the ledger row with).
+    """
+    matches = []
+    base = match_task(task, envelope)
+    if base is not None:
+        matches.append(base)
+    metric_paths = _metric_paths(task)
+    if not metric_paths:
+        return matches
+    kind = envelope.get("kind")
+    data = envelope.get("data") or {}
+    if kind == "drop":
+        npc = _norm(data.get("npc_name"))
+        try:
+            value = int(data.get("total_value") or 0)
+        except (TypeError, ValueError):
+            value = 0
+        for path in metric_paths:
+            if path["metric"] == "kc":
+                if npc and npc in path["npcs"]:
+                    matches.append({"mode": "kc", "quantity": 1, "path": path["idx"]})
+            elif path["metric"] == "loot_value" and value > 0:
+                if path["npcs"] and npc not in path["npcs"]:
+                    continue
+                matches.append({"mode": "count", "quantity": value, "path": path["idx"]})
+    elif kind == "wom_kc":
+        metric = str(data.get("boss_metric") or "").strip().lower()
+        if metric:
+            for path in metric_paths:
+                if path["metric"] == "kc" and metric in (path.get("wom_metrics") or {}):
+                    matches.append({"mode": "kc_abs", "quantity": 0, "path": path["idx"]})
+    return matches
+
+
 def accepts_submission_source(event: dict, envelope: dict) -> bool:
     """Whether the event's submission_policy admits this envelope's intake
     path (pure; no I/O). Only ``api_only`` rejects; a missing ``used_api``
@@ -883,6 +1082,19 @@ def _task_to_dict(task) -> dict:
         # source, incl. clog) — the feature is opt-in and a no-op by default.
         d["item_source_index"] = _item_source_index(d["config"])
         d["task_source_npcs"] = _norm_npc_set(d["config"].get("source_npcs"))
+        # Names in the list flagged as pets (config.pet_items): credited from
+        # `pet` submissions, never from drops/clogs.
+        d["pet_name_set"] = _config_pet_names(d["config"])
+        # any_path metric paths (KC / loot-value alternatives): normalized
+        # once per state load, KC paths with their WOM boss metrics resolved.
+        # The merged slug map rides in ``wom_metrics`` so the reconciler can
+        # plan hiscores KC for these tasks exactly like kc_target's.
+        d["metric_paths"] = list(_metric_paths_from_config(d["config"], resolve_wom=True))
+        merged_wom: dict = {}
+        for p in d["metric_paths"]:
+            merged_wom.update(p.get("wom_metrics") or {})
+        if merged_wom:
+            d["wom_metrics"] = merged_wom
     if task.type == "loot_sweep":
         # Precompute the matcher's item->allowed-NPC index once per task (the
         # matcher stays pure/cheap; NPC scoping is v2). Guarded: the unit-test
@@ -2372,6 +2584,33 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
     return result
 
 
+def _metric_path_room(session, task: dict, team_id, idx: int) -> bool:
+    """Whether an any_path metric path can still absorb progress (its raw fold
+    sits below its own need). The percent rollup floors, so "would the integer
+    move" is the wrong question for metric rows — a 1-kill row on a 5,000-KC
+    path must record even though the task percentage doesn't budge (progress
+    re-folds from ledger rows; a dropped row is credit lost forever)."""
+    from db.models import EventCompletion
+
+    paths = (task.get("config") or {}).get("paths") or []
+    if not (0 <= idx < len(paths)) or not isinstance(paths[idx], dict):
+        return False
+    need = _path_need(paths[idx])
+    rows = (
+        session.query(EventCompletion)
+        .filter(EventCompletion.task_id == task["id"],
+                EventCompletion.team_id == team_id,
+                EventCompletion.status.in_(("auto", "confirmed", "manual")))
+        .all()
+    )
+    got = sum(
+        max(int(r.quantity or 1), 1) for r in rows
+        if _row_path_idx(r) == idx
+        and (getattr(r, "source_type", None) or "") != "bonus"
+    )
+    return got < need
+
+
 def _row_advances_progress(session, task: dict, team_id, candidate) -> bool:
     """Would this (unsaved) ledger row move the (task, team) rollup at all?
 
@@ -2390,6 +2629,9 @@ def _row_advances_progress(session, task: dict, team_id, candidate) -> bool:
     elif kind == "groups":
         helper = _grouped_item_progress
     elif kind == "any_path":
+        idx = _row_path_idx(candidate)
+        if idx is not None:
+            return _metric_path_room(session, task, team_id, idx)
         helper = _anypath_item_progress
     else:
         return True
@@ -2453,10 +2695,17 @@ def _dedupe_clog_echo(session, task: dict, team_id, player_id,
 def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
                  player_id: int, quantity: int, envelope: dict,
                  cells: Optional[list] = None,
-                 matched_target: Optional[str] = None) -> Optional[dict]:
+                 matched_target: Optional[str] = None,
+                 path_idx: Optional[int] = None) -> Optional[dict]:
     """Insert the ledger row for a match (idempotent on
     (task, team, submission_guid)); apply effects unless it needs
     confirmation. Returns a result dict, or None on duplicate replay.
+
+    ``path_idx`` marks a metric-path match (any_path v2): the row is tagged
+    with the path (``note`` = ``path:<idx>``) so the percent rollup folds it
+    into the right path, and its guid gets a ``#p<idx>`` suffix — one envelope
+    may legitimately write the item row AND one row per qualifying metric
+    path, which the bare (task, team, guid) unique index would block.
 
     Rows that can no longer contribute are NOT recorded: once the (task,
     team) rollup is completed — or the specific matched item is already
@@ -2480,6 +2729,10 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
     data = envelope.get("data") or {}
     status = completion_status(event, task, envelope)
     guid = envelope.get("guid")
+    if guid and path_idx is not None:
+        # Truncate the base BEFORE suffixing so a long guid (the WOM
+        # reconciler's composite keys) can never shed the path marker.
+        guid = f"{str(guid)[:60]}#p{int(path_idx)}"
     proof = data.get("image_url") or None
     completion = EventCompletion(
         event_id=event["id"],
@@ -2493,6 +2746,7 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
         submission_guid=str(guid)[:64] if guid else None,
         proof_url=str(proof)[:255] if proof else None,
         matched_target=matched_target,
+        note=_path_note(path_idx) if path_idx is not None else None,
     )
     if not _row_advances_progress(session, task, team_id, completion):
         return None  # matched item already satisfied — contributes nothing
@@ -2610,74 +2864,77 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
                 continue
             if bingo_board and task["id"] not in state.cells_by_task:
                 continue
-            match = match_task(task, envelope)
-            if match is None:
-                continue
-            quantity = match["quantity"]
-            data = envelope.get("data") or {}
-            # WOM envelopes carry the window-start value; seeding from it is
-            # only valid for the event whose window produced it, and only for
-            # players who were in before the window opened (PRD D10).
-            wom_seed_ok = (data.get("source") == "wom"
-                           and data.get("target_event_id") == event_id
-                           and _seed_allowed(joined_at, event["window_start"]))
-            if match["mode"] == "kc":
-                # Multi-NPC kc tasks keep absolute-KC state PER NPC — each
-                # NPC's kill_count is its own counter, so one shared
-                # watermark would swallow the lower counts.
-                kc_scope = _kc_state_scope(task, _norm(data.get("npc_name")))
-                try:
-                    kill_count = int(data.get("kill_count"))
-                except (TypeError, ValueError):
-                    kill_count = None
-                if kill_count is not None and kill_count > 0:
+            # One envelope may yield several matches on ONE task (any_path v2:
+            # the drop that advances an item path is also a kill for a KC path
+            # and GP for a loot-value path) — each records its own ledger row.
+            for match in match_task_all(task, envelope):
+                quantity = match["quantity"]
+                data = envelope.get("data") or {}
+                # WOM envelopes carry the window-start value; seeding from it
+                # is only valid for the event whose window produced it, and
+                # only for players in before the window opened (PRD D10).
+                wom_seed_ok = (data.get("source") == "wom"
+                               and data.get("target_event_id") == event_id
+                               and _seed_allowed(joined_at, event["window_start"]))
+                if match["mode"] == "kc":
+                    # Multi-NPC kc tasks keep absolute-KC state PER NPC — each
+                    # NPC's kill_count is its own counter, so one shared
+                    # watermark would swallow the lower counts. Metric-path
+                    # matches scope per (task, path, NPC) on top.
+                    kc_scope = _match_kc_scope(task, match, _norm(data.get("npc_name")))
+                    try:
+                        kill_count = int(data.get("kill_count"))
+                    except (TypeError, ValueError):
+                        kill_count = None
+                    if kill_count is not None and kill_count > 0:
+                        quantity = _fold_kc_watermark(
+                            redis_conn, event_id, kc_scope, player_id,
+                            kill_count, first_credit_offset=1, staged=staged)
+                        if quantity <= 0:
+                            continue
+                    else:
+                        # No usable absolute KC: cooldown dedupe as before, and
+                        # note the credit so a later absolute fold subtracts it.
+                        if not _kc_dedupe(redis_conn, event_id, kc_scope,
+                                          player_id, envelope, staged=staged):
+                            continue
+                        try:
+                            fb_key = _kc_fallback_key(event_id, kc_scope, player_id)
+                            if staged is not None:
+                                staged.stage("incr", fb_key)
+                                staged.stage("expire", fb_key, _STATE_KEY_TTL)
+                            else:
+                                redis_conn.incr(fb_key)
+                                redis_conn.expire(fb_key, _STATE_KEY_TTL)
+                        except Exception:
+                            pass
+                elif match["mode"] == "kc_abs":
+                    metric = str(data.get("boss_metric") or "").strip().lower()
+                    kc_scope = _match_kc_scope(
+                        task, match, _match_wom_npc(task, match, metric))
                     quantity = _fold_kc_watermark(
-                        redis_conn, event_id, kc_scope, player_id,
-                        kill_count, first_credit_offset=1, staged=staged)
+                        redis_conn, event_id, kc_scope, player_id, data.get("kc"),
+                        seed=data.get("kc_start") if wom_seed_ok else None,
+                        staged=staged)
                     if quantity <= 0:
                         continue
-                else:
-                    # No usable absolute KC: cooldown dedupe as before, and
-                    # note the credit so a later absolute fold subtracts it.
-                    if not _kc_dedupe(redis_conn, event_id, kc_scope,
-                                      player_id, envelope, staged=staged):
+                elif match["mode"] == "xp":
+                    if xp_delta is None:
+                        xp_delta = _fold_xp_baseline(
+                            redis_conn, event_id, player_id,
+                            data.get("skill"), data.get("xp"),
+                            seed=data.get("xp_start") if wom_seed_ok else None,
+                            staged=staged)
+                    if xp_delta <= 0:
                         continue
-                    try:
-                        fb_key = _kc_fallback_key(event_id, kc_scope, player_id)
-                        if staged is not None:
-                            staged.stage("incr", fb_key)
-                            staged.stage("expire", fb_key, _STATE_KEY_TTL)
-                        else:
-                            redis_conn.incr(fb_key)
-                            redis_conn.expire(fb_key, _STATE_KEY_TTL)
-                    except Exception:
-                        pass
-            elif match["mode"] == "kc_abs":
-                metric = str(data.get("boss_metric") or "").strip().lower()
-                kc_scope = _kc_state_scope(
-                    task, _kc_wom_metrics(task).get(metric) or "")
-                quantity = _fold_kc_watermark(
-                    redis_conn, event_id, kc_scope, player_id, data.get("kc"),
-                    seed=data.get("kc_start") if wom_seed_ok else None,
-                    staged=staged)
-                if quantity <= 0:
-                    continue
-            elif match["mode"] == "xp":
-                if xp_delta is None:
-                    xp_delta = _fold_xp_baseline(
-                        redis_conn, event_id, player_id,
-                        data.get("skill"), data.get("xp"),
-                        seed=data.get("xp_start") if wom_seed_ok else None,
-                        staged=staged)
-                if xp_delta <= 0:
-                    continue
-                quantity = xp_delta
-            outcome = record_match(
-                session, redis_conn, event, task, team_id, player_id,
-                quantity, envelope, cells=state.cells_by_task.get(task["id"]),
-                matched_target=match.get("matched_target"))
-            if outcome is not None:
-                results.append(outcome)
+                    quantity = xp_delta
+                outcome = record_match(
+                    session, redis_conn, event, task, team_id, player_id,
+                    quantity, envelope, cells=state.cells_by_task.get(task["id"]),
+                    matched_target=match.get("matched_target"),
+                    path_idx=match.get("path"))
+                if outcome is not None:
+                    results.append(outcome)
     return results
 
 

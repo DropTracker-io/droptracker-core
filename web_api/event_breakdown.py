@@ -75,14 +75,19 @@ def _display(name_norm: str, icons: dict) -> str:
 
 def _ledger_stats(rows) -> tuple[dict, set, int]:
     """(qty_by_norm_name, distinct_norm_names, wildcard_qty) from applied rows,
-    excluding bonus rows (mirrors the engine rollups)."""
-    from services.event_engine import _norm
+    excluding bonus rows (mirrors the engine rollups). Metric-path rows
+    (any_path KC/GP alternatives, tagged ``note: path:N``) are excluded too —
+    their quantities belong to their own path, not the item checklists, and
+    a 1.2M-GP row must never read as a 1.2M-item wildcard award."""
+    from services.event_engine import _norm, _row_path_idx
 
     qty: dict = {}
     distinct: set = set()
     wildcard = 0
     for r in rows:
         if (getattr(r, "source_type", None) or "") == _BONUS:
+            continue
+        if _row_path_idx(r) is not None:
             continue
         name = _norm(getattr(r, "matched_target", None))
         q = max(int(getattr(r, "quantity", 1) or 1), 1)
@@ -228,26 +233,54 @@ def build_task_breakdown(task: dict, tile: dict | None, rows, progress_row,
         ]
 
     elif is_item_task and kind == "any_path":
+        from services.event_engine import PATH_METRICS, _path_need, _row_path_idx
+
+        # Metric-path rows are path-scoped (note: path:N): fold each path's
+        # tagged quantities, mirroring _anypath_progress_from_rows.
+        tagged: dict = {}
+        for r in rows:
+            p_idx = _row_path_idx(r)
+            if p_idx is None or (getattr(r, "source_type", None) or "") == _BONUS:
+                continue
+            tagged[p_idx] = tagged.get(p_idx, 0) + max(int(getattr(r, "quantity", 1) or 1), 1)
         paths_out: list[dict] = []
         best_idx, best_pct = -1, -1
         for pi, path in enumerate(config.get("paths") or []):
             if not isinstance(path, dict):
                 continue
-            pgroups = []
-            need_total = got_total = 0
-            for mode, names, need in _parse_requirement_groups(path):
-                g = _group_from_names(mode, names, need, qty_by, icons, entries)
-                need_total += need
-                got_total += g["obtained"]
-                pgroups.append(g)
-            pct = int(got_total * 100 // need_total) if need_total else 0
-            paths_out.append({
-                "label": path.get("label") or f"Path {len(paths_out) + 1}",
-                "groups": pgroups, "need": need_total, "got": got_total,
-                "pct": pct, "closest": False,
-            })
-            if pct > best_pct:
-                best_pct, best_idx = pct, len(paths_out) - 1
+            if path.get("metric") in PATH_METRICS:
+                unit = "KC" if path["metric"] == "kc" else "GP"
+                need_total = _path_need(path)
+                got_total = min(tagged.get(pi, 0), need_total)
+                npc_names = [str(n).strip() for n in (path.get("npcs") or [])
+                             if str(n).strip()]
+                entry = {
+                    "label": path.get("label") or f"{need_total:,} {unit}",
+                    "groups": [],
+                    "need": need_total, "got": got_total,
+                    "pct": int(got_total * 100 // need_total),
+                    "closest": False,
+                    "metric": path["metric"], "unit": unit,
+                    "npcs": [{"name": n, "icon": icons.get(_norm(n))}
+                             for n in npc_names],
+                }
+            else:
+                pgroups = []
+                need_total = got_total = 0
+                for mode, names, need in _parse_requirement_groups(path):
+                    g = _group_from_names(mode, names, need, qty_by, icons, entries)
+                    need_total += need
+                    got_total += g["obtained"]
+                    pgroups.append(g)
+                entry = {
+                    "label": path.get("label") or f"Path {len(paths_out) + 1}",
+                    "groups": pgroups, "need": need_total, "got": got_total,
+                    "pct": int(got_total * 100 // need_total) if need_total else 0,
+                    "closest": False,
+                }
+            paths_out.append(entry)
+            if entry["pct"] > best_pct:
+                best_pct, best_idx = entry["pct"], len(paths_out) - 1
         if 0 <= best_idx < len(paths_out):
             paths_out[best_idx]["closest"] = True
         out["structure"] = "paths"
@@ -369,6 +402,13 @@ def _annotate_pending(out: dict, task: dict, tile, rows, pending_rows, team,
         for base_g, proj_g in zip(base_p.get("groups") or [],
                                   proj_p.get("groups") or []):
             _diff_group(base_g, proj_g)
+        # Path-level overlay (metric paths have no item rows to carry it).
+        delta = int(proj_p.get("got") or 0) - int(base_p.get("got") or 0)
+        if delta > 0:
+            base_p["pending"] = delta
+        if (int(proj_p.get("pct") or 0) >= 100
+                and int(base_p.get("pct") or 0) < 100):
+            base_p["pending_satisfied"] = True
     if out.get("meter") and projected.get("meter"):
         delta = (int(projected["meter"].get("progress") or 0)
                  - int(out["meter"].get("progress") or 0))

@@ -379,10 +379,12 @@ class TestHelpers:
 
 class _Row:
     """Minimal EventCompletion stand-in for the pure rollup."""
-    def __init__(self, matched_target=None, quantity=1, source_type="drop"):
+    def __init__(self, matched_target=None, quantity=1, source_type="drop",
+                 note=None):
         self.matched_target = matched_target
         self.quantity = quantity
         self.source_type = source_type
+        self.note = note
 
 
 class TestDistinctItemProgress:
@@ -559,6 +561,164 @@ class TestAnyPathProgress:
             [_Row("Justiciar faceguard")],
             {"kind": "any_path", "paths": ["nonsense", {"groups": []}]},
             ANY_PATH_THRESHOLD) == 0
+
+
+# ── any_path metric paths (v2: "boss pet OR 5,000 KC / 10M GP") ──────────────
+
+GWD_OR = {
+    "kind": "any_path",
+    "paths": [
+        {"label": "Any GWD hilt",
+         "groups": [{"mode": "any_of", "need": 1,
+                     "items": ["Armadyl hilt", "Bandos hilt"]}]},
+        {"label": "500 GWD kills", "metric": "kc",
+         "npcs": ["Kree'arra", "General Graardor"], "need": 500},
+        {"label": "10M from GWD", "metric": "loot_value",
+         "npcs": ["Kree'arra", "General Graardor"], "need": 10_000_000},
+    ],
+}
+
+
+class TestMetricPathMatching:
+    def test_drop_from_listed_npc_matches_kc_and_gp_paths(self):
+        t = _task(config=GWD_OR)
+        matches = engine.match_task_all(t, _env("drop", {
+            "item_name": "Rune platebody", "quantity": 1,
+            "npc_name": "Kree'arra", "total_value": 39_000}))
+        # Not a listed item → no item match; both metric paths credit.
+        assert matches == [
+            {"mode": "kc", "quantity": 1, "path": 1},
+            {"mode": "count", "quantity": 39_000, "path": 2},
+        ]
+
+    def test_listed_item_drop_matches_all_three_paths(self):
+        t = _task(config=GWD_OR)
+        matches = engine.match_task_all(t, _env("drop", {
+            "item_name": "Armadyl hilt", "quantity": 1,
+            "npc_name": "Kree'arra", "total_value": 25_000_000}))
+        assert [(m["mode"], m.get("path")) for m in matches] == [
+            ("count", None), ("kc", 1), ("count", 2)]
+        assert matches[0]["matched_target"] == "Armadyl hilt"
+
+    def test_drop_from_unlisted_npc_ignores_metric_paths(self):
+        t = _task(config=GWD_OR)
+        assert engine.match_task_all(t, _env("drop", {
+            "item_name": "Rune platebody", "quantity": 1,
+            "npc_name": "Zulrah", "total_value": 39_000})) == []
+
+    def test_zero_value_drop_still_counts_the_kill(self):
+        t = _task(config=GWD_OR)
+        assert engine.match_task_all(t, _env("drop", {
+            "item_name": "Ashes", "quantity": 1,
+            "npc_name": "General Graardor", "total_value": 0})) == [
+            {"mode": "kc", "quantity": 1, "path": 1}]
+
+    def test_unscoped_gp_path_takes_any_drop(self):
+        cfg = {"kind": "any_path", "paths": [
+            {"groups": [{"mode": "any_of", "need": 1, "items": ["Armadyl hilt"]}]},
+            {"metric": "loot_value", "need": 1_000_000},
+        ]}
+        assert engine.match_task_all(_task(config=cfg), _env("drop", {
+            "item_name": "Rune platebody", "npc_name": "Zulrah",
+            "total_value": 5_000})) == [
+            {"mode": "count", "quantity": 5_000, "path": 1}]
+
+    def test_wom_kc_matches_kc_path_via_precomputed_metrics(self):
+        # State-load dicts carry resolved wom metrics per kc path; the
+        # reconciler's absolute-KC envelope folds through the path watermark.
+        t = _task(config=GWD_OR, metric_paths=[
+            {"idx": 1, "metric": "kc", "need": 500,
+             "npcs": frozenset({"kree'arra", "general graardor"}),
+             "wom_metrics": {"kreearra": "kree'arra"}},
+            {"idx": 2, "metric": "loot_value", "need": 10_000_000,
+             "npcs": frozenset({"kree'arra", "general graardor"})},
+        ])
+        assert engine.match_task_all(t, _env("wom_kc", {
+            "boss_metric": "kreearra", "kc": 210})) == [
+            {"mode": "kc_abs", "quantity": 0, "path": 1}]
+        # A boss outside the path's metric map stays unmatched.
+        assert engine.match_task_all(t, _env("wom_kc", {
+            "boss_metric": "zulrah", "kc": 99})) == []
+
+    def test_non_any_path_task_defers_to_single_match(self):
+        t = _task(type="kc_target", target="Zulrah", target_value=50)
+        env = _env("drop", {"item_name": "x", "npc_name": "Zulrah"})
+        assert engine.match_task_all(t, env) == [engine.match_task(t, env)]
+
+    def test_pet_submission_credits_pet_flagged_item_path_only(self):
+        cfg = {"kind": "any_path", "pet_items": ["Pet kree'arra"], "paths": [
+            {"groups": [{"mode": "any_of", "need": 1, "items": ["Pet kree'arra"]}]},
+            {"metric": "kc", "npcs": ["Kree'arra"], "need": 500},
+        ]}
+        matches = engine.match_task_all(
+            _task(config=cfg), _env("pet", {"pet_name": "Pet kree'arra"}))
+        assert len(matches) == 1
+        assert matches[0]["mode"] == "count" and "path" not in matches[0]
+
+    def test_match_kc_scope_is_per_path_and_npc(self):
+        t = _task(config=GWD_OR)
+        assert engine._match_kc_scope(
+            t, {"mode": "kc", "path": 1}, "kree'arra") == "1:p1:kree'arra"
+        # kc_target matches (no path) keep the legacy shapes.
+        kc = _task(type="kc_target", target="Zulrah", config={})
+        assert engine._match_kc_scope(kc, {"mode": "kc"}, "zulrah") == 1
+
+
+class TestMetricPathProgress:
+    def test_kc_rows_fold_into_their_own_path(self):
+        rows = [_Row(None, quantity=250, note="path:1")]
+        assert engine._anypath_progress_from_rows(rows, GWD_OR, ANY_PATH_THRESHOLD) == 50
+
+    def test_metric_rows_never_leak_into_item_paths(self):
+        # 3 kills = 0% (floored); a wildcard leak would score the 1-hilt path 100.
+        rows = [_Row(None, quantity=3, note="path:1")]
+        assert engine._anypath_progress_from_rows(rows, GWD_OR, ANY_PATH_THRESHOLD) == 0
+
+    def test_item_rows_do_not_feed_metric_paths(self):
+        cfg = {"kind": "any_path", "paths": [
+            {"metric": "kc", "npcs": ["Kree'arra"], "need": 2},
+            {"metric": "loot_value", "need": 1_000_000},
+        ]}
+        rows = [_Row("Armadyl hilt", quantity=5)]
+        assert engine._anypath_progress_from_rows(rows, cfg, ANY_PATH_THRESHOLD) == 0
+
+    def test_wildcard_awards_are_percent_points_on_metric_paths(self):
+        # Manual awards carry no path tag; on the percent-scaled task they
+        # advance metric paths as percent points — the admin "mark complete"
+        # award (threshold − done) must finish a metric-only task.
+        cfg = {"kind": "any_path", "paths": [
+            {"metric": "kc", "npcs": ["Kree'arra"], "need": 5000},
+            {"metric": "loot_value", "need": 1_000_000},
+        ]}
+        partial = [_Row(None, quantity=5, source_type="manual")]
+        assert engine._anypath_progress_from_rows(partial, cfg, ANY_PATH_THRESHOLD) == 5
+        complete = [_Row(None, quantity=2500, note="path:0"),   # 50% of the KC path
+                    _Row(None, quantity=50, source_type="manual")]
+        assert engine._anypath_progress_from_rows(complete, cfg, ANY_PATH_THRESHOLD) == 100
+
+    def test_gp_path_completes_at_need(self):
+        rows = [_Row(None, quantity=6_000_000, note="path:2"),
+                _Row(None, quantity=4_000_000, note="path:2")]
+        assert engine._anypath_progress_from_rows(rows, GWD_OR, ANY_PATH_THRESHOLD) == 100
+
+    def test_mixed_progress_takes_the_closest_path(self):
+        rows = [_Row("Bandos hilt"),                      # item path done (100)
+                _Row(None, quantity=100, note="path:1")]  # kc 20%
+        assert engine._anypath_progress_from_rows(rows, GWD_OR, ANY_PATH_THRESHOLD) == 100
+
+    def test_untagged_wildcards_still_credit_item_paths(self):
+        rows = [_Row(None, quantity=1, source_type="manual")]
+        assert engine._anypath_progress_from_rows(rows, GWD_OR, ANY_PATH_THRESHOLD) == 100
+
+    def test_bonus_rows_ignored_even_when_tagged(self):
+        rows = [_Row(None, quantity=500, source_type="bonus", note="path:1")]
+        assert engine._anypath_progress_from_rows(rows, GWD_OR, ANY_PATH_THRESHOLD) == 0
+
+    def test_row_path_idx_parsing(self):
+        assert engine._row_path_idx(_Row(note="path:2")) == 2
+        assert engine._row_path_idx(_Row(note="path:x")) is None
+        assert engine._row_path_idx(_Row(note="an admin note")) is None
+        assert engine._row_path_idx(_Row()) is None
 
 
 # ── kc dedupe: kill_count keying + cooldown fallback ─────────────────────────
@@ -822,3 +982,56 @@ class TestPetCollection:
     def test_missing_pet_name(self):
         t = _task(type="pet_collection", target=None, config={})
         assert engine.match_task(t, _env("pet", {})) is None
+
+
+# ── pets mixed into item_collection lists (config.pet_items) ──────────────────
+
+class TestItemListPets:
+    """Names flagged in ``config.pet_items`` credit from a `pet` submission by
+    name and NEVER from a same-named drop/clog (which would double-credit
+    alongside the pet echo). Unflagged lists ignore pet submissions entirely."""
+
+    PET_LIST = {"kind": "all_of",
+                "items": ["Dragon axe", "Phoenix"],
+                "pet_items": ["Phoenix"]}
+
+    def test_pet_submission_credits_flagged_name(self):
+        t = _task(config=dict(self.PET_LIST), target_value=2)
+        m = engine.match_task(t, _env("pet", {"pet_name": "phoenix"}))
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "phoenix"}
+
+    def test_pet_submission_ignores_unflagged_name(self):
+        t = _task(config=dict(self.PET_LIST), target_value=2)
+        assert engine.match_task(t, _env("pet", {"pet_name": "Dragon axe"})) is None
+
+    def test_drop_and_clog_skip_pet_flagged_name(self):
+        t = _task(config=dict(self.PET_LIST), target_value=2)
+        assert engine.match_task(t, _env("drop", {"item_name": "Phoenix", "quantity": 1})) is None
+        assert engine.match_task(t, _env("clog", {"item_name": "Phoenix"})) is None
+
+    def test_plain_item_still_credits_from_drop(self):
+        t = _task(config=dict(self.PET_LIST), target_value=2)
+        m = engine.match_task(t, _env("drop", {"item_name": "Dragon axe", "quantity": 1}))
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "Dragon axe"}
+
+    def test_pet_submission_without_flags_no_match(self):
+        t = _task(config={"kind": "all_of", "items": ["Dragon axe"]}, target_value=1)
+        assert engine.match_task(t, _env("pet", {"pet_name": "Dragon axe"})) is None
+
+    def test_pet_weight_in_point_collection(self):
+        t = _task(config={"kind": "point_collection",
+                          "items": [{"item_name": "Zulrah's scales", "points": 1},
+                                    {"item_name": "Pet snakeling", "points": 50}],
+                          "pet_items": ["Pet snakeling"]},
+                  target_value=100)
+        m = engine.match_task(t, _env("pet", {"pet_name": "Pet snakeling"}))
+        assert m == {"mode": "count", "quantity": 50, "matched_target": "Pet snakeling"}
+
+    def test_pet_in_groups_config(self):
+        t = _task(config={"kind": "groups",
+                          "groups": [{"mode": "all_of", "items": ["Kq head"]},
+                                     {"mode": "any_of", "need": 1, "items": ["Kalphite princess"]}],
+                          "pet_items": ["Kalphite princess"]},
+                  target_value=2)
+        m = engine.match_task(t, _env("pet", {"pet_name": "Kalphite princess"}))
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "Kalphite princess"}

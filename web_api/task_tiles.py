@@ -120,10 +120,27 @@ def _config_items(config: dict) -> list[dict]:
     return out
 
 
+def _metric_path_npcs(config: dict) -> list[str]:
+    """Ordered, de-duplicated NPC names of an any_path config's metric paths
+    (KC / loot-value alternatives) — they become boss icons on the tile."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for path in config.get("paths") or []:
+        if not isinstance(path, dict) or not path.get("metric"):
+            continue
+        for name in path.get("npcs") or []:
+            key = _norm(name)
+            if key and key not in seen:
+                seen.add(key)
+                out.append(str(name).strip())
+    return out
+
+
 def _item_collection_spec(task: dict, config: dict) -> dict:
     items = _config_items(config)
     tv = task.get("target_value")
-    if not items:
+    metric_npcs = _metric_path_npcs(config)
+    if not items and not metric_npcs:
         # Single-target collection: "Collect 3× Twisted bow".
         target = (task.get("target") or "").strip()
         item = {"name": target} if target else None
@@ -149,7 +166,11 @@ def _item_collection_spec(task: dict, config: dict) -> dict:
         badge = "COMBO"
     elif kind == "any_path":
         badge = "EITHER OR"
-    return {"badge": badge, "value": value, "items": items, "npcs": [], "skills": []}
+        # A GP-only path set with no item paths still deserves an icon.
+        if not items and not metric_npcs:
+            items = [{"name": "Coins", "item_id": COINS_ITEM_ID}]
+    return {"badge": badge, "value": value, "items": items,
+            "npcs": metric_npcs, "skills": []}
 
 
 def tile_spec(task: dict) -> dict:

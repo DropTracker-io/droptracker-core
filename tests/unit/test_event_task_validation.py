@@ -237,6 +237,99 @@ def test_any_path_rejects_unknown_items():
     assert exc.value.status == 422
 
 
+# ── any_path metric paths ("boss pet OR 5,000 KC / GP goals") ─────────────────
+
+PATH_NPCS = {"Kree'arra", "General Graardor", "Zulrah"}
+_PATH_NPC_BY_NORM = {n.lower(): n for n in PATH_NPCS}
+
+
+@pytest.fixture
+def _stub_path_npcs(monkeypatch):
+    monkeypatch.setattr(
+        etv, "_canonical_npc",
+        lambda s, name: _PATH_NPC_BY_NORM.get((name or "").strip().lower()),
+    )
+
+
+def test_metric_paths_normalize(_stub_path_npcs):
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "any_path", "paths": [
+            {"label": "Any hilt",
+             "groups": [{"mode": "any_of", "need": 1, "items": ["Armadyl hilt"]}]},
+            {"label": "Grind it", "metric": "kc",
+             "npcs": ["kree'arra", "GENERAL GRAARDOR", "Kree'arra"], "need": 5000},
+            {"metric": "loot_value", "npcs": ["zulrah"], "need": 10_000_000},
+        ]},
+    })
+    cfg = _cfg(out)
+    assert out["target_value"] == etv.ANY_PATH_THRESHOLD
+    kc = cfg["paths"][1]
+    assert kc == {"metric": "kc", "need": 5000, "label": "Grind it",
+                  "npcs": ["Kree'arra", "General Graardor"]}
+    gp = cfg["paths"][2]
+    assert gp == {"metric": "loot_value", "need": 10_000_000, "npcs": ["Zulrah"]}
+
+
+def test_metric_only_or_task_is_valid(_stub_path_npcs):
+    # "5,000 KC OR 10M GP" with no item path at all.
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "any_path", "paths": [
+            {"metric": "kc", "npcs": ["Kree'arra"], "need": 5000},
+            {"metric": "loot_value", "need": 10_000_000},
+        ]},
+    })
+    cfg = _cfg(out)
+    assert [p["metric"] for p in cfg["paths"]] == ["kc", "loot_value"]
+    assert "npcs" not in cfg["paths"][1]  # unscoped GP path stays unscoped
+
+
+def test_kc_path_requires_npcs_and_need(_stub_path_npcs):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "item_collection",
+                   "config": {"kind": "any_path", "paths": [
+                       {"metric": "kc", "need": 100},
+                       {"metric": "loot_value", "need": 1},
+                   ]}})
+    assert "at least one NPC" in (exc.value.detail or "")
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "item_collection",
+                   "config": {"kind": "any_path", "paths": [
+                       {"metric": "kc", "npcs": ["Kree'arra"]},
+                       {"metric": "loot_value", "need": 1},
+                   ]}})
+    assert exc.value.status == 422
+
+
+def test_metric_path_rejects_unknown_npc_and_metric(_stub_path_npcs):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "item_collection",
+                   "config": {"kind": "any_path", "paths": [
+                       {"metric": "kc", "npcs": ["Notreal the Fake"], "need": 5},
+                       {"metric": "loot_value", "need": 1},
+                   ]}})
+    assert "Notreal the Fake" in (exc.value.detail or "")
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "item_collection",
+                   "config": {"kind": "any_path", "paths": [
+                       {"metric": "xp", "need": 5},
+                       {"metric": "loot_value", "need": 1},
+                   ]}})
+    assert "metric" in (exc.value.detail or "")
+
+
+def test_kc_path_rejects_oversized_npc_list(_stub_path_npcs):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "item_collection",
+                   "config": {"kind": "any_path", "paths": [
+                       {"metric": "kc", "need": 5,
+                        "npcs": ["Zulrah"] * (etv.MAX_KC_NPCS + 1)},
+                       {"metric": "loot_value", "need": 1},
+                   ]}})
+    assert exc.value.status == 422
+
+
 # ── pet_collection ────────────────────────────────────────────────────────────
 # Pet names resolve against the real utils.osrs_pets taxonomy (a pure leaf
 # module — not stubbed), so these use genuine in-game pet names.
@@ -648,6 +741,149 @@ def test_kind_less_config_with_items_still_rejected(_stub_src_npcs):
             "config": {"items": ["Boater", "Red boater"]},  # no kind
         })
     assert exc.value.status == 422
+
+
+# ── NPC source aliases ("Wintertodt" → its reward containers) ─────────────────
+# Display aliases are accepted on write and expanded to the real recorded
+# source names, so configs only ever hold names the engine can match drops by.
+
+ALIAS_NPCS = {"Reward cart (Wintertodt)", "Supply crate (Wintertodt)", "Zulrah"}
+_ALIAS_NPC_BY_NORM = {n.lower(): n for n in ALIAS_NPCS}
+
+
+@pytest.fixture
+def _stub_alias_npcs(monkeypatch):
+    monkeypatch.setattr(
+        etv, "_canonical_npc",
+        lambda s, name: _ALIAS_NPC_BY_NORM.get((name or "").strip().lower()),
+    )
+
+
+def test_source_npcs_alias_expands_to_members(_stub_alias_npcs):
+    out = _validate({
+        "type": "item_collection", "target": "Boater",
+        "config": {"source_npcs": ["Wintertodt"]},
+    })
+    assert _cfg(out) == {"source_npcs": ["Reward cart (Wintertodt)",
+                                         "Supply crate (Wintertodt)"]}
+
+
+def test_source_npcs_alias_dedupes_against_member(_stub_alias_npcs):
+    out = _validate({
+        "type": "item_collection", "target": "Boater",
+        "config": {"source_npcs": ["Supply crate (Wintertodt)", "Wintertodt"]},
+    })
+    assert sorted(_cfg(out)["source_npcs"]) == [
+        "Reward cart (Wintertodt)", "Supply crate (Wintertodt)"]
+
+
+def test_kc_target_alias_expands_to_multi_npc(_stub_alias_npcs):
+    out = _validate({"type": "kc_target", "target": "Wintertodt", "target_value": 50})
+    assert out["target"] == "Reward cart (Wintertodt)"
+    assert _cfg(out) == {"npcs": ["Reward cart (Wintertodt)",
+                                  "Supply crate (Wintertodt)"]}
+
+
+def test_loot_value_alias_expands(_stub_alias_npcs):
+    out = _validate({"type": "loot_value", "target_value": 1_000_000,
+                     "config": {"source_npcs": ["Wintertodt"]}})
+    assert _cfg(out) == {"source_npcs": ["Reward cart (Wintertodt)",
+                                         "Supply crate (Wintertodt)"]}
+
+
+def test_pb_target_does_not_expand_alias(_stub_alias_npcs):
+    # pb_target is single-NPC; the alias isn't a real NPC there → 422.
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "pb_target", "target": "Wintertodt", "target_value": 70})
+    assert exc.value.status == 422
+
+
+# ── pets mixed into item lists (config.pet_items) ─────────────────────────────
+# Names flagged as pets validate against the pet taxonomy (not the item DB),
+# canonicalize, and are excluded from the item_npcs source map.
+
+def test_pet_items_canonicalize_and_persist():
+    out = _validate({
+        "type": "item_collection", "target_value": 1,
+        "config": {"kind": "any_of", "items": ["Boater", "baby mole"],
+                   "pet_items": ["baby mole"]},
+    })
+    cfg = _cfg(out)
+    assert [i["item_name"] for i in cfg["items"]] == ["Boater", "Baby mole"]
+    assert cfg["pet_items"] == ["Baby mole"]
+
+
+def test_pet_items_unknown_pet_rejected():
+    with pytest.raises(ProblemException) as exc:
+        _validate({
+            "type": "item_collection", "target_value": 1,
+            "config": {"kind": "any_of", "items": ["Boater", "Fakepet"],
+                       "pet_items": ["Fakepet"]},
+        })
+    assert exc.value.status == 422
+    assert "pet" in exc.value.title.lower()
+
+
+def test_pet_items_stale_flag_ignored():
+    # A pet_items name not actually in the list is dropped, not an error.
+    out = _validate({
+        "type": "item_collection", "target_value": 1,
+        "config": {"kind": "any_of", "items": ["Boater", "Red boater"],
+                   "pet_items": ["Baby mole"]},
+    })
+    assert "pet_items" not in _cfg(out)
+
+
+def test_pet_items_malformed_rejected():
+    with pytest.raises(ProblemException) as exc:
+        _validate({
+            "type": "item_collection", "target_value": 1,
+            "config": {"kind": "any_of", "items": ["Boater", "Red boater"],
+                       "pet_items": "Baby mole"},
+        })
+    assert exc.value.status == 422
+
+
+def test_pet_items_excluded_from_item_npcs(_stub_src_npcs):
+    # A source restriction on a pet-flagged name is silently dropped — pets
+    # have no drop source.
+    out = _validate({
+        "type": "item_collection", "target_value": 2,
+        "config": {"kind": "all_of", "items": ["Boater", "Baby mole"],
+                   "pet_items": ["Baby mole"],
+                   "item_npcs": {"Boater": ["Zulrah"]}},
+    })
+    cfg = _cfg(out)
+    assert cfg["item_npcs"] == {"Boater": ["Zulrah"]}
+    assert cfg["pet_items"] == ["Baby mole"]
+
+
+def test_pet_items_in_groups_and_paths():
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "groups",
+                   "groups": [{"mode": "all_of", "items": ["Boater"]},
+                              {"mode": "any_of", "items": ["Baby mole"]}],
+                   "pet_items": ["Baby mole"]},
+    })
+    cfg = _cfg(out)
+    assert cfg["groups"][1]["items"] == ["Baby mole"]
+    assert cfg["pet_items"] == ["Baby mole"]
+
+
+# ── point_collection weights are whole numbers ────────────────────────────────
+
+def test_point_collection_weights_round_to_int():
+    out = _validate({
+        "type": "item_collection", "target_value": 100,
+        "config": {"kind": "point_collection",
+                   "items": [{"item_name": "Boater", "points": 2.4},
+                             {"item_name": "Red boater", "points": 0.2},
+                             {"item_name": "Orange boater", "points": 50}]},
+    })
+    pts = {i["item_name"]: i["points"] for i in _cfg(out)["items"]}
+    assert pts == {"Boater": 2, "Red boater": 1, "Orange boater": 50}
+    assert all(isinstance(p, int) for p in pts.values())
 
 
 def test_config_too_large_rejected(monkeypatch):

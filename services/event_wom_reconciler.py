@@ -118,9 +118,9 @@ def _relevant_metrics(state, event_id) -> tuple[dict, set]:
     skills, bosses = {}, set()
     for task in state.tasks_by_event.get(event_id, []):
         ttype, target = task.get("type"), task.get("target")
-        if not target:
-            continue
         if ttype in ("xp_target", "skill_target"):
+            if not target:
+                continue
             key = str(target).strip().lower()
             slug = wom_skill_metric(key)
             if slug:
@@ -129,6 +129,8 @@ def _relevant_metrics(state, event_id) -> tuple[dict, set]:
                 log.warning("Event %s task %s: no WOM metric for skill %r",
                             event_id, task.get("id"), target)
         elif ttype == "kc_target":
+            if not target:
+                continue
             # Multi-NPC tasks (config.npcs) carry one metric per NPC in
             # ``wom_metrics``; legacy dicts fall back to the single field.
             metrics = task.get("wom_metrics")
@@ -140,6 +142,13 @@ def _relevant_metrics(state, event_id) -> tuple[dict, set]:
             else:
                 log.info("Event %s task %s: no WOM metric for NPC %r (plugin-only)",
                          event_id, task.get("id"), target)
+        else:
+            # any_path metric paths (item_collection): KC paths resolve their
+            # NPCs to boss metrics at state load, merged into ``wom_metrics``
+            # (services.event_engine._task_to_dict). Target is empty here.
+            metrics = task.get("wom_metrics")
+            if isinstance(metrics, dict) and metrics:
+                bosses.update(metrics)
     return skills, bosses
 
 
