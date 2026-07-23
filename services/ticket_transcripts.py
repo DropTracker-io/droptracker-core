@@ -40,6 +40,15 @@ TICKET_IMG_ROOT = os.path.join(_REPO_ROOT, "static", "assets", "img", "tickets")
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
+# A message whose content is nothing but mention tokens (+ whitespace). The
+# ticket system posts these as throwaway "ghost pings" to notify the opposing
+# party and deletes them immediately; they must never land in the transcript.
+_MENTION_TOKEN = re.compile(r"<@[!&]?\d+>")
+
+
+def _is_pure_mention_content(content: str) -> bool:
+    return bool(content) and not _MENTION_TOKEN.sub("", content).strip()
+
 
 def _safe_filename(name: str) -> str:
     name = _SAFE_NAME.sub("_", os.path.basename(name or "file"))
@@ -124,6 +133,11 @@ async def upsert_message(ticket: Ticket, message, *, session=None) -> Optional[b
         # Nothing displayable (e.g. bare embeds from the bot's own panels).
         if getattr(author, "bot", False):
             return False
+    if getattr(author, "bot", False) and _is_pure_mention_content(content):
+        # Throwaway ghost-ping from the ticket system (see ticket_system.py):
+        # notifies the opposing party, then self-deletes. Keep it out of the
+        # archive regardless of the delete-vs-mirror race.
+        return False
     own_session = session is None
     s = session or Session()
     try:
@@ -170,6 +184,10 @@ async def upsert_message(ticket: Ticket, message, *, session=None) -> Optional[b
             if live is not None:
                 live.last_reply_uid = str(author.id)
                 live.date_updated = datetime.now()
+                # Any human reply cancels a pending inactivity auto-close and
+                # restarts the 5-day clock (date_updated above is that clock).
+                if live.inactivity_warned_at is not None:
+                    live.inactivity_warned_at = None
         s.commit()
         return True
     except Exception as e:  # noqa: BLE001

@@ -19,6 +19,10 @@ class Ticket(Base):
     subject = Column(String(255), nullable=True)
     date_closed = Column(DateTime, nullable=True)
     closed_by = Column(Integer, ForeignKey('users.user_id'), nullable=True)
+    # Inactivity auto-close (web67a). Set when the 5-day idle warning is posted;
+    # cleared the moment a human replies (which restarts the 5-day clock). While
+    # non-NULL the ticket is in the 24h grace window before auto-archive.
+    inactivity_warned_at = Column(DateTime, nullable=True)
 
 
 class TicketMessage(Base):

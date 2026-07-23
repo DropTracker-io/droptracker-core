@@ -1,10 +1,10 @@
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 import interactions
 from sqlalchemy import text
-from interactions import ActionRow, Button, ButtonStyle, ComponentContext, Embed, Extension, IntervalTrigger, OverwriteType, Permissions, Task, slash_command, slash_option, OptionType, SlashContext, listen
+from interactions import ActionRow, AllowedMentions, Button, ButtonStyle, ComponentContext, Embed, Extension, IntervalTrigger, OverwriteType, Permissions, Task, slash_command, slash_option, OptionType, SlashContext, listen
 from interactions.api.events import MessageCreate, MessageUpdate, Component, Startup
 from interactions.models import (
     ContainerComponent,
@@ -26,6 +26,45 @@ from utils.format import format_number
 from utils.redis import redis_client
 
 SUPPORT_ROLE_ID = 1176291872143052831
+# Same role ids the close-permission checks use — a message author holding any
+# of these counts as "staff" for the opposing-party ping.
+STAFF_ROLE_IDS = {1342871954885050379, 1176291872143052831}
+
+# Inactivity lifecycle: warn once a ticket has been idle this long, then
+# auto-archive it this much later unless a human reply resets the clock.
+INACTIVITY_WARN_AFTER = timedelta(days=5)
+INACTIVITY_CLOSE_AFTER = timedelta(hours=24)
+
+
+def _author_has_staff_role(author) -> bool:
+    """True if the message author carries one of the ticket staff roles."""
+    for role in (getattr(author, "roles", None) or []):
+        try:
+            if int(getattr(role, "id", role)) in STAFF_ROLE_IDS:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _inactivity_decision(status, last_activity, warned_at, now):
+    """Pure sweep decision — returns 'warn', 'close', or None.
+
+    * open, never warned, idle beyond INACTIVITY_WARN_AFTER      -> 'warn'
+    * open, warned, INACTIVITY_CLOSE_AFTER elapsed since the warn -> 'close'
+    A human reply clears ``warned_at`` (in ticket_transcripts.upsert_message),
+    so the 'close' branch only fires when nobody replied in the grace window.
+    """
+    if status != "open":
+        return None
+    if warned_at is None:
+        if last_activity is not None and last_activity < now - INACTIVITY_WARN_AFTER:
+            return "warn"
+        return None
+    if warned_at < now - INACTIVITY_CLOSE_AFTER:
+        return "close"
+    return None
+
 
 _LOGO_MEDIA = UnfurledMediaItem(url="https://www.droptracker.io/img/droptracker-small.gif")
 
@@ -275,6 +314,7 @@ class Tickets(Extension):
         self._started = True
         self._refresh_ticket_cache()
         self.process_ticket_maintenance.start()
+        self.process_ticket_inactivity.start()
         print(f"[tickets] extension started; tracking {len(self.ticket_channel_cache)} open ticket channels")
         # Sync history for all open tickets (idempotent) — heals any gap from
         # downtime and seeds transcripts for tickets that predate archiving.
@@ -341,16 +381,150 @@ class Tickets(Extension):
                 reason="closed from the web dashboard",
             )
 
+    @Task.create(IntervalTrigger(minutes=5))
+    async def process_ticket_inactivity(self):
+        """Warn on tickets idle > 5 days, then auto-archive 24h later.
+
+        Unlike the ghost pings, the warning message is left in place so both
+        parties can read it. A single human reply (handled in
+        ticket_transcripts.upsert_message) clears the warning and restarts the
+        5-day clock; only tickets that stay silent through the 24h grace window
+        are archived + closed.
+        """
+        now = datetime.now()
+        to_warn = []   # (ticket_id, channel_id, created_by)
+        to_close = []  # ticket_id
+        s = Session()
+        try:
+            for t in s.query(Ticket).filter(Ticket.status == "open").all():
+                decision = _inactivity_decision(
+                    t.status, t.date_updated or t.date_added, t.inactivity_warned_at, now
+                )
+                if decision == "warn":
+                    to_warn.append((t.ticket_id, t.channel_id, t.created_by))
+                elif decision == "close":
+                    to_close.append(t.ticket_id)
+        except Exception as e:
+            print(f"[tickets] inactivity scan failed: {e}")
+        finally:
+            s.close()
+
+        for ticket_id, channel_id, created_by in to_warn:
+            try:
+                await self._warn_inactive(ticket_id, channel_id, created_by)
+            except Exception as e:
+                print(f"[tickets] inactivity warn failed ({ticket_id}): {e}")
+
+        for ticket_id in to_close:
+            # Re-check under a fresh read: a reply may have landed since the
+            # scan (which would have cleared the warning flag).
+            recheck = Session()
+            try:
+                row = (
+                    recheck.query(Ticket.status, Ticket.inactivity_warned_at)
+                    .filter(Ticket.ticket_id == ticket_id)
+                    .first()
+                )
+                still_due = (
+                    _inactivity_decision(row[0], None, row[1], datetime.now()) == "close"
+                    if row is not None
+                    else False
+                )
+            except Exception as e:
+                print(f"[tickets] inactivity close re-check failed ({ticket_id}): {e}")
+                still_due = False
+            finally:
+                recheck.close()
+            if not still_due:
+                continue
+            await close_and_archive(
+                self.bot,
+                ticket_id,
+                closed_by_user_id=None,
+                closed_by_name="DropTracker (auto-close)",
+                reason="closed automatically after 5 days of inactivity with no reply to the warning",
+            )
+
+    async def _warn_inactive(self, ticket_id: int, channel_id, created_by):
+        """Post the 5-day idle warning (pinging both parties) and mark the ticket."""
+        opener_discord_id = self._opener_discord_id(created_by)
+        opener_ping = f"<@{opener_discord_id}> " if opener_discord_id else ""
+        close_ts = int(time.time() + INACTIVITY_CLOSE_AFTER.total_seconds())
+        content = (
+            "⏰ **This ticket has been inactive for 5 days.**\n\n"
+            f"{opener_ping}<@&{SUPPORT_ROLE_ID}> — if this still needs attention, "
+            f"please reply here before <t:{close_ts}:F> (<t:{close_ts}:R>). "
+            "Otherwise it will be **automatically archived and closed** to keep the "
+            "queue tidy.\n\n-# A single reply keeps it open and resets the timer for another 5 days."
+        )
+        allowed = AllowedMentions(
+            roles=[str(SUPPORT_ROLE_ID)],
+            users=[str(opener_discord_id)] if opener_discord_id else [],
+        )
+        try:
+            channel = await self.bot.fetch_channel(int(channel_id))
+        except Exception as e:
+            if "404" in str(e) or "Unknown Channel" in str(e):
+                await self._reap_orphaned(ticket_id)
+                return
+            print(f"[tickets] inactivity warn fetch_channel failed ({ticket_id}): {e}")
+            return
+        if channel is None:
+            # Channel deleted out-of-band — reap the orphaned open row instead
+            # of warning into the void on every sweep.
+            await self._reap_orphaned(ticket_id)
+            return
+        await channel.send(content, allowed_mentions=allowed)
+        # Only enter the grace window once the warning is actually posted.
+        s = Session()
+        try:
+            live = s.query(Ticket).filter(Ticket.ticket_id == ticket_id).first()
+            if live is not None and live.status == "open" and live.inactivity_warned_at is None:
+                live.inactivity_warned_at = datetime.now()
+                s.commit()
+        except Exception as e:
+            s.rollback()
+            print(f"[tickets] inactivity warn state update failed ({ticket_id}): {e}")
+        finally:
+            s.close()
+
+    async def _reap_orphaned(self, ticket_id: int):
+        """Close an open ticket whose Discord channel no longer exists.
+
+        close_and_archive already treats a 404 channel as 'nothing left to
+        archive' and just flips the row to closed, so this simply keeps the
+        DB from carrying ghost-open rows that would 404 on every sweep.
+        """
+        await close_and_archive(
+            self.bot,
+            ticket_id,
+            closed_by_user_id=None,
+            closed_by_name="DropTracker (auto-close)",
+            reason="channel no longer exists (auto-reaped during inactivity sweep)",
+        )
+
+    def _opener_discord_id(self, created_by):
+        """Discord id (str) of the ticket opener, or None."""
+        s = Session()
+        try:
+            row = s.query(User.discord_id).filter(User.user_id == created_by).first()
+            return str(row[0]) if row and row[0] else None
+        except Exception as e:
+            print(f"[tickets] opener lookup failed (user {created_by}): {e}")
+            return None
+        finally:
+            s.close()
+
     @listen(MessageCreate)
     async def _mirror_ticket_message(self, event: MessageCreate):
-        await self._mirror(event.message)
+        await self._mirror(event.message, is_edit=False)
 
     @listen(MessageUpdate)
     async def _mirror_ticket_edit(self, event: MessageUpdate):
         if event.after is not None:
-            await self._mirror(event.after)
+            await self._mirror(event.after, is_edit=True)
 
-    async def _mirror(self, message):
+    async def _mirror(self, message, *, is_edit=False):
         if message is None or getattr(message, "channel", None) is None:
             return
         ticket_id = self.ticket_channel_cache.get(str(message.channel.id))
@@ -364,10 +538,78 @@ class Tickets(Extension):
             local_session.expunge(ticket)
         finally:
             local_session.close()
+        # Snapshot the pending-auto-close state before upsert_message clears it.
+        was_pending_autoclose = ticket.inactivity_warned_at is not None
         try:
             await upsert_message(ticket, message)
         except Exception as e:
             print(f"Error mirroring ticket message: {e}")
+        # Edits only mirror; the notify + keep-open reactions are for new,
+        # human-authored messages only.
+        if is_edit:
+            return
+        author = getattr(message, "author", None)
+        if author is None or getattr(author, "bot", False):
+            return
+        try:
+            await self._notify_opposing(ticket, message)
+        except Exception as e:
+            print(f"[tickets] notify-opposing failed (ticket {ticket_id}): {e}")
+        if was_pending_autoclose:
+            # This reply cancelled the pending auto-close (upsert_message already
+            # cleared the flag + reset the clock) — confirm it, and leave the
+            # note in place so it's readable.
+            try:
+                await message.channel.send(
+                    "✅ Reply received — this ticket will stay open. The inactivity timer has been reset."
+                )
+            except Exception as e:
+                print(f"[tickets] keep-open confirmation failed (ticket {ticket_id}): {e}")
+
+    async def _notify_opposing(self, ticket, message):
+        """Ghost-ping the *other* side of the conversation, then delete the ping.
+
+        Opener speaks -> ping the support role. Staff speaks -> ping the opener.
+        A brief message is sent purely to fire the notification, then removed so
+        the channel stays clean (see the pure-mention skip in ticket_transcripts).
+        """
+        author = message.author
+        opener_discord_id = self._opener_discord_id(ticket.created_by)
+        author_is_opener = (
+            opener_discord_id is not None and str(author.id) == str(opener_discord_id)
+        )
+        if author_is_opener:
+            await self._ghost_ping(
+                message.channel,
+                f"<@&{SUPPORT_ROLE_ID}>",
+                AllowedMentions(roles=[str(SUPPORT_ROLE_ID)]),
+            )
+        elif _author_has_staff_role(author):
+            if opener_discord_id:
+                await self._ghost_ping(
+                    message.channel,
+                    f"<@{opener_discord_id}>",
+                    AllowedMentions(users=[str(opener_discord_id)]),
+                )
+        else:
+            # Anyone who isn't the opener and isn't staff is on the "needs help"
+            # side — notify staff.
+            await self._ghost_ping(
+                message.channel,
+                f"<@&{SUPPORT_ROLE_ID}>",
+                AllowedMentions(roles=[str(SUPPORT_ROLE_ID)]),
+            )
+
+    async def _ghost_ping(self, channel, content: str, allowed: AllowedMentions):
+        try:
+            ping = await channel.send(content, allowed_mentions=allowed)
+        except Exception as e:
+            print(f"[tickets] ghost-ping send failed: {e}")
+            return
+        try:
+            await ping.delete()
+        except Exception as e:
+            print(f"[tickets] ghost-ping delete failed: {e}")
     @slash_command(name="close",
                    description="Close a ticket")
     async def close_ticket(self, ctx: SlashContext):
