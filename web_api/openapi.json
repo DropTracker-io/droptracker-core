@@ -25,6 +25,9 @@
     },
     {
       "name": "me"
+    },
+    {
+      "name": "meta"
     }
   ],
   "paths": {
@@ -674,6 +677,230 @@
           },
           "404": {
             "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/me/players/claim-preview": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "operationId": "claimPreview",
+        "summary": "Read-only claim status for an RSN (as-you-type feedback)",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "rsn",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "guild_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Discord guild context (Activity launch guild); resolves the group a claim would attach to."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Claim status for the RSN.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaimPreview"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/me/players/claim": {
+      "post": {
+        "tags": [
+          "me"
+        ],
+        "operationId": "claimRsn",
+        "summary": "Claim an RSN for the current user (mirrors Discord /claim-rsn)",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "rsn"
+                ],
+                "properties": {
+                  "rsn": {
+                    "type": "string"
+                  },
+                  "guild_id": {
+                    "type": "string",
+                    "description": "Optional Discord guild context (Activity launch guild)."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Claim outcome (expected non-success outcomes are statuses, not errors).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaimResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/me/players/{playerId}/claim": {
+      "delete": {
+        "tags": [
+          "me"
+        ],
+        "operationId": "unclaimPlayer",
+        "summary": "Unclaim an owned player (removes group memberships gained via claiming)",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "playerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Unclaimed; returns the caller's refreshed linked accounts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "players"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "players": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "name"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "integer"
+                          },
+                          "name": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/me/guilds": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "operationId": "getMyGuilds",
+        "summary": "Discord servers the caller can manage (group wizard picker)",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manageable guilds with DropTracker linkage.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MyGuilds"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/meta/bot-invite": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "operationId": "getBotInvite",
+        "summary": "Discord bot invite info (public)",
+        "responses": {
+          "200": {
+            "description": "Bot application id and invite URL.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BotInvite"
+                }
+              }
+            }
           }
         }
       }
@@ -2744,6 +2971,208 @@
             "type": "integer",
             "default": 0,
             "description": "Icons dropped past the server-side cap; render as a +N chip."
+          }
+        }
+      },
+      "ClaimStatus": {
+        "type": "string",
+        "enum": [
+          "not_found",
+          "claimable",
+          "claimed",
+          "claimed_by_other",
+          "already_yours"
+        ],
+        "description": "Outcome of an RSN claim/preview. Mirrors the Discord /claim-rsn rules: players are created by plugin submissions only; claimed accounts are refused (disputes via support tickets)."
+      },
+      "ClaimPreview": {
+        "type": "object",
+        "required": [
+          "status",
+          "player",
+          "group"
+        ],
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/ClaimStatus"
+          },
+          "player": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "required": [
+              "id",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          },
+          "group": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "required": [
+              "id",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "description": "Group the claim would attach the player to (guild context only; the global fallback group is omitted)."
+          }
+        }
+      },
+      "ClaimResult": {
+        "type": "object",
+        "required": [
+          "status",
+          "player",
+          "group",
+          "players"
+        ],
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/ClaimStatus"
+          },
+          "player": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "required": [
+              "id",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          },
+          "group": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "required": [
+              "id",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "description": "Group the player was attached to (claimed status only; the global fallback group is omitted)."
+          },
+          "players": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "name"
+              ],
+              "properties": {
+                "id": {
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The caller's refreshed linked accounts."
+          }
+        }
+      },
+      "ManageableGuild": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "has_group"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "has_group": {
+            "type": "boolean"
+          },
+          "group_id": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "MyGuilds": {
+        "type": "object",
+        "required": [
+          "guilds",
+          "cached"
+        ],
+        "properties": {
+          "guilds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManageableGuild"
+            }
+          },
+          "cached": {
+            "type": "boolean",
+            "description": "False when the login-time guild cache is cold (pre-existing session or declined guilds scope)."
+          }
+        }
+      },
+      "BotInvite": {
+        "type": "object",
+        "required": [
+          "client_id",
+          "invite_url"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "permissions": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invite_url": {
+            "type": "string"
           }
         }
       }

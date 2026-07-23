@@ -31,8 +31,9 @@ from utils.redis import redis_client
 from web_api.common import abort_problem, db_session
 from web_api.deps import (
     SESSION_COOKIE,
+    cache_manageable_guild_meta,
     cache_manageable_guilds,
-    extract_manageable_guilds,
+    extract_manageable_guild_meta,
     session_token,
 )
 from web_api.session import mint_session, revoke_session
@@ -132,10 +133,13 @@ def _find_or_create_user(discord_id: str, display_name: str) -> int:
         return user.user_id
 
 
-async def _fetch_manageable_guilds(access_token: str) -> set:
-    """Best-effort fetch of guilds the user can manage (never fails login)."""
+async def _fetch_manageable_guilds(access_token: str) -> list:
+    """Best-effort fetch of the guilds the user can manage (never fails login).
+
+    Returns ``{id, name, icon}`` dicts; callers derive the ids-only set from it.
+    """
     if not access_token:
-        return set()
+        return []
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
@@ -143,10 +147,10 @@ async def _fetch_manageable_guilds(access_token: str) -> set:
                 headers={"Authorization": f"Bearer {access_token}"},
             )
         if resp.status_code == 200:
-            return extract_manageable_guilds(resp.json())
+            return extract_manageable_guild_meta(resp.json())
     except Exception:
         pass
-    return set()
+    return []
 
 
 @auth_bp.post("/auth/discord")
@@ -173,9 +177,12 @@ async def auth_discord():
 
     # Cache display profile + manageable guilds for /me and role derivation.
     cache_profile(user_id, discord_id, display_name, avatar)
-    guild_ids = await _fetch_manageable_guilds(access_token)
-    if guild_ids:
-        cache_manageable_guilds(user_id, guild_ids)
+    guild_meta = await _fetch_manageable_guilds(access_token)
+    if guild_meta:
+        # web:guilds:{uid} (ids only) feeds role derivation — shape frozen.
+        cache_manageable_guilds(user_id, {g["id"] for g in guild_meta})
+        # web:guildmeta:{uid} adds names/icons for the wizard's server picker.
+        cache_manageable_guild_meta(user_id, guild_meta)
 
     token = mint_session(user_id)
     return jsonify({"session_token": token})

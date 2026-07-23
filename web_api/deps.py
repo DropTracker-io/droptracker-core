@@ -134,19 +134,68 @@ def manageable_guild_ids(user_id: int) -> Set[str]:
 def extract_manageable_guilds(discord_guilds: list) -> Set[str]:
     """From Discord's ``/users/@me/guilds`` payload, the guild ids the user can
     manage (owner or MANAGE_GUILD)."""
-    out: Set[str] = set()
+    return {g["id"] for g in extract_manageable_guild_meta(discord_guilds)}
+
+
+def extract_manageable_guild_meta(discord_guilds: list) -> list:
+    """From Discord's ``/users/@me/guilds`` payload, ``{id, name, icon}`` dicts
+    for the guilds the user can manage (owner or MANAGE_GUILD)."""
+    out: list = []
+    seen: Set[str] = set()
     for g in discord_guilds or []:
         try:
             gid = str(g.get("id"))
-            if g.get("owner"):
-                out.add(gid)
+            if gid in seen:
                 continue
-            perms = int(g.get("permissions", 0))
-            if perms & _MANAGE_GUILD:
-                out.add(gid)
+            manageable = bool(g.get("owner"))
+            if not manageable:
+                perms = int(g.get("permissions", 0))
+                manageable = bool(perms & _MANAGE_GUILD)
+            if manageable:
+                seen.add(gid)
+                out.append({
+                    "id": gid,
+                    "name": str(g.get("name") or ""),
+                    "icon": g.get("icon") or None,
+                })
         except Exception:
             continue
     return out
+
+
+# Parallel cache holding {id, name, icon} for the same manageable guilds. The
+# ids-only ``web:guilds:{uid}`` payload is parsed by role derivation on every
+# request and must NOT change shape; names/icons live here instead (backs the
+# group wizard's server picker via GET /me/guilds).
+_GUILDMETA_CACHE_PREFIX = "web:guildmeta:"
+
+
+def cache_manageable_guild_meta(user_id: int, guilds: list) -> None:
+    conn = _rc()
+    if conn is None:
+        return
+    try:
+        conn.setex(
+            f"{_GUILDMETA_CACHE_PREFIX}{user_id}",
+            _GUILDS_CACHE_TTL,
+            json.dumps(guilds),
+        )
+    except Exception:
+        pass
+
+
+def manageable_guild_meta(user_id: int) -> list:
+    conn = _rc()
+    if conn is None:
+        return []
+    try:
+        raw = conn.get(f"{_GUILDMETA_CACHE_PREFIX}{user_id}")
+        if not raw:
+            return []
+        data = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
 
 
 # --------------------------------------------------------------------------- #

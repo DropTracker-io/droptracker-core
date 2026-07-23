@@ -17,13 +17,12 @@ Parity:
     Discord command itself is unchanged.
 """
 
-import asyncio
 import hmac
 import os
 from datetime import timedelta
 from functools import wraps
 
-from quart import Blueprint, current_app, jsonify, request
+from quart import Blueprint, jsonify, request
 from quart_cors import route_cors
 from quart_rate_limiter import rate_limit
 
@@ -43,6 +42,7 @@ _STATUS_HTTP = {
     "guild_conflict": 409,
     "wom_conflict": 409,
     "invalid_wom": 400,
+    "invalid_name": 400,
     "db_error": 500,
 }
 
@@ -58,28 +58,6 @@ def _extract_request_key() -> str:
     if auth_header.lower().startswith("bearer "):
         return auth_header[7:].strip()
     return (request.headers.get("X-API-Key", "") or "").strip()
-
-
-async def _run_initial_wom_sync(wom_id: int):
-    """Background task: perform the first WOM membership sync for a new group.
-
-    Runs after the create response has been returned so the wizard stays snappy;
-    by the time the owner views their lootboard it will be populated. Best-effort
-    only - failures are logged and swallowed.
-    """
-    try:
-        from db.ops import sync_group_from_wom_with_stats
-
-        result = await sync_group_from_wom_with_stats(wom_id=int(wom_id))
-        if result.get("on_cooldown"):
-            print(f"[group_create] Initial WOM sync skipped (cooldown) for wom_id={wom_id}")
-        else:
-            print(
-                f"[group_create] Initial WOM sync done for wom_id={wom_id}: "
-                f"+{len(result.get('added', []))} members"
-            )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[group_create] Initial WOM sync failed for wom_id={wom_id}: {exc}")
 
 
 async def _bot_in_guild(guild_id: str):
@@ -211,12 +189,15 @@ async def create_group():
         )
 
     try:
+        # The service schedules the initial WOM membership sync itself (all
+        # creation paths, cooldown-guarded) when initial_sync is truthy.
         result = await create_web_group(
             group_name=group_name,
             wom_id=wom_id,
             guild_id=guild_id,
             owner_discord_id=owner_discord_id,
             owner_username=owner_username,
+            initial_sync=bool(initial_sync),
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[group_create] Unexpected error: {exc}")
@@ -230,18 +211,6 @@ async def create_group():
             ),
             500,
         )
-
-    # On success, kick off a non-blocking initial WOM membership sync so the
-    # group's lootboard is populated shortly after creation.
-    if result.get("success") and result.get("status") == "created" and initial_sync:
-        synced_wom_id = result.get("wom_id")
-        if synced_wom_id:
-            try:
-                current_app.add_background_task(_run_initial_wom_sync, int(synced_wom_id))
-            except Exception as exc:  # noqa: BLE001
-                # Fall back to a detached task if the app helper is unavailable.
-                print(f"[group_create] Could not schedule initial sync: {exc}")
-                asyncio.ensure_future(_run_initial_wom_sync(int(synced_wom_id)))
 
     http_code = _STATUS_HTTP.get(result.get("status", ""), 200 if result.get("success") else 400)
     return jsonify(result), http_code

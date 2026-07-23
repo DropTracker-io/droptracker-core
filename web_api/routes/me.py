@@ -30,6 +30,7 @@ from web_api.deps import (
     json_body,
     load_user,
     manageable_guild_ids,
+    manageable_guild_meta,
     resolve_group_role,
 )
 from web_api.routes.auth import get_cached_profile
@@ -241,6 +242,49 @@ def _lookup_group_name(s, group_id: int):
 
     g = s.query(Group).filter(Group.group_id == group_id).first()
     return g.group_name if g else None
+
+
+@me_bp.get("/me/guilds")
+async def my_guilds():
+    """Discord servers the caller can manage, for the group wizard's picker.
+
+    Backed by the ``web:guildmeta:{uid}`` cache written at login. An empty list
+    with ``cached: false`` means the cache is cold (pre-existing session or
+    declined guilds scope) — the frontend keeps its paste-a-server-id fallback.
+    """
+    user_id = current_user_id()
+    meta = manageable_guild_meta(user_id)
+
+    def _load():
+        from db import Guild
+
+        ids = [str(g.get("id")) for g in meta if g.get("id")]
+        linked: dict[str, int] = {}
+        if ids:
+            with db_session() as s:
+                for row in s.query(Guild).filter(Guild.guild_id.in_(ids)).all():
+                    if row.group_id is not None:
+                        linked[str(row.guild_id)] = row.group_id
+        guilds = []
+        for g in meta:
+            gid = str(g.get("id") or "")
+            if not gid:
+                continue
+            icon = g.get("icon")
+            guilds.append({
+                "id": gid,
+                "name": g.get("name") or f"Server {gid}",
+                "icon_url": (
+                    f"https://cdn.discordapp.com/icons/{gid}/{icon}.png" if icon else None
+                ),
+                "has_group": gid in linked,
+                "group_id": linked.get(gid),
+            })
+        guilds.sort(key=lambda g: (g["name"] or "").lower())
+        return guilds
+
+    guilds = await asyncio.to_thread(_load)
+    return private_no_store(jsonify({"guilds": guilds, "cached": bool(meta)}))
 
 
 @me_bp.get("/me/settings")

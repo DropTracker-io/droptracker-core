@@ -168,6 +168,21 @@ class TestGuildPerms:
         ]
         assert extract_manageable_guilds(guilds) == {"111", "222"}
 
+    def test_extract_manageable_guild_meta(self):
+        from web_api.deps import extract_manageable_guild_meta
+
+        guilds = [
+            {"id": "111", "name": "Owned", "icon": "abc", "owner": True, "permissions": 0},
+            {"id": "222", "name": "Managed", "icon": None, "owner": False, "permissions": 0x20},
+            {"id": "333", "name": "Member", "owner": False, "permissions": 0x400},
+            {"id": "111", "name": "Owned dupe", "owner": True, "permissions": 0},
+        ]
+        meta = extract_manageable_guild_meta(guilds)
+        assert meta == [
+            {"id": "111", "name": "Owned", "icon": "abc"},
+            {"id": "222", "name": "Managed", "icon": None},
+        ]
+
     def test_group_admin_role_predicate(self):
         from web_api.deps import is_group_admin_role
 
@@ -241,6 +256,11 @@ class TestApp:
             ("post", "/api/v1/groups/1/wom-sync"),
             ("get", "/api/v1/groups/1/diagnostics"),
             ("post", "/api/v1/groups"),
+            ("get", "/api/v1/groups/guild-status/123456789"),
+            ("get", "/api/v1/me/guilds"),
+            ("get", "/api/v1/me/players/claim-preview"),
+            ("post", "/api/v1/me/players/claim"),
+            ("delete", "/api/v1/me/players/1/claim"),
             ("get", "/api/v1/groups/1/subscription"),
             ("post", "/api/v1/groups/1/subscription/checkout"),
             ("post", "/api/v1/groups/1/announcements"),
@@ -268,6 +288,17 @@ class TestApp:
         for path in ["/api/v1/subscriptions/tiers", "/api/v1/events", "/api/v1/announcements"]:
             r = await client.get(path)
             assert r.status_code != 401, f"{path} unexpectedly gated"
+
+    async def test_bot_invite_is_public(self, client, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_CLIENT_ID", "424242")
+        monkeypatch.delenv("DISCORD_BOT_INVITE_PERMISSIONS", raising=False)
+        r = await client.get("/api/v1/meta/bot-invite")
+        assert r.status_code == 200
+        body = await r.get_json()
+        assert body["client_id"] == "424242"
+        assert body["permissions"] is None
+        assert body["invite_url"].startswith("https://discord.com/oauth2/authorize?")
+        assert "client_id=424242" in body["invite_url"]
 
 
 class TestProfileStatHelpers:

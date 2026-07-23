@@ -831,6 +831,17 @@ async def guild_status(guild_id: str):
     user_id = current_user_id()
     guild_id = str(guild_id)
 
+    # ?refresh=1 — drop the cached bot-presence result before probing, so the
+    # wizard's "I invited the bot" poll flips within one probe instead of
+    # waiting out the 300s cache.
+    if str(request.args.get("refresh") or "") in ("1", "true"):
+        conn = _rc()
+        if conn is not None:
+            try:
+                conn.delete(f"bot_in_guild:{guild_id}")
+            except Exception:
+                pass
+
     def _load():
         with db_session() as s:
             guild = s.query(Guild).filter(Guild.guild_id == guild_id).first()
@@ -868,8 +879,8 @@ async def create_group():
     guild_id = str(body.get("guild_id") or "").strip()
     discord_url = (body.get("discord_url") or "").strip()
 
-    if not (1 <= len(name) <= 100):
-        abort_problem(422, "Invalid name", "Group name must be 1–100 characters.")
+    if not (1 <= len(name) <= 30):
+        abort_problem(422, "Invalid name", "Group name must be 1–30 characters.")
     if not isinstance(wom_id, int) or wom_id <= 0:
         abort_problem(422, "Invalid wom_id", "'wom_id' must be a positive integer.")
     if not guild_id:
@@ -908,36 +919,38 @@ async def create_group():
             abort_problem(409, "Group already exists", result.get("message"))
         if status == "invalid_wom":
             abort_problem(422, "Invalid WOM id", result.get("message"))
+        if status == "invalid_name":
+            abort_problem(422, "Invalid name", result.get("message"))
         abort_problem(500, "Group creation failed", result.get("message"))
 
     new_group_id = result.get("group_id")
 
-    # Seed the caller as owner + persist discord_url (best-effort).
+    # group_admins owner seeding now happens inside create_web_group (all
+    # creation paths). Persist the web-only discord_url config (best-effort).
     def _post_create():
+        if not discord_url:
+            return
         with db_session() as s:
-            existing = (
-                s.query(GroupAdmin)
-                .filter(GroupAdmin.group_id == new_group_id, GroupAdmin.user_id == user_id)
+            row = (
+                s.query(GroupConfiguration)
+                .filter(
+                    GroupConfiguration.group_id == new_group_id,
+                    GroupConfiguration.config_key == "discord_url",
+                )
                 .first()
             )
-            if not existing:
-                s.add(GroupAdmin(group_id=new_group_id, user_id=user_id, role="owner"))
-            if discord_url:
-                row = (
-                    s.query(GroupConfiguration)
-                    .filter(
-                        GroupConfiguration.group_id == new_group_id,
-                        GroupConfiguration.config_key == "discord_url",
-                    )
-                    .first()
-                )
-                if row:
-                    row.config_value = discord_url
-                else:
-                    s.add(GroupConfiguration(
-                        group_id=new_group_id, config_key="discord_url", config_value=discord_url
-                    ))
+            if row:
+                row.config_value = discord_url
+            else:
+                s.add(GroupConfiguration(
+                    group_id=new_group_id, config_key="discord_url", config_value=discord_url
+                ))
             s.commit()
 
     await asyncio.to_thread(_post_create)
-    return jsonify({"id": new_group_id})
+    return jsonify({
+        "id": new_group_id,
+        "name": result.get("group_name") or name,
+        "wom_id": result.get("wom_id"),
+        "guild_id": result.get("guild_id"),
+    })

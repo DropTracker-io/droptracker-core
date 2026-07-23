@@ -2,20 +2,16 @@
 Shared group-creation service.
 
 This module centralizes the logic required to register a brand new DropTracker
-group so that it can be invoked from more than one place (currently the Discord
-``/create-group`` slash command and the website's web-based creation wizard).
-
-IMPORTANT - parity with the Discord bot:
-    The behavior here is a faithful, 1:1 replica of
-    ``ClanCommands.create_group_cmd`` in ``commands.py``. The Discord command
-    itself is intentionally left untouched; this module exists so the *website*
-    can produce an identical result without going through Discord. If you change
-    the creation flow, keep both paths in sync.
+group. It is the SINGLE implementation behind every creation path: the Discord
+``/create-group`` slash command (``ClanCommands.create_group_cmd``), the
+website wizard (``web_api`` ``POST /groups``), and the legacy XenForo intake
+(``api/routes/group_create.py``). Change the creation flow here and every
+surface picks it up.
 
 The function is deliberately *context free* - it accepts plain primitives
 (Discord IDs as strings/ints) instead of an ``interactions`` ``SlashContext`` so
 that it can run inside the Quart API process without importing the Discord bot
-stack.
+stack. Presentation (embeds, HTTP codes) stays with the callers.
 
 Author: DropTracker
 """
@@ -32,12 +28,16 @@ from sqlalchemy.exc import IntegrityError
 from db.clan_sync import insert_xf_group
 from db.models import (
     Group,
+    GroupAdmin,
     GroupConfiguration,
     Guild,
     User,
     UserConfiguration,
     session,
 )
+
+# Hard cap enforced by the ``groups.group_name`` column (String(30)).
+MAX_GROUP_NAME_LEN = 30
 
 # Template group whose configuration rows are cloned onto every new group.
 # This mirrors the Discord bot, which copies all rows from ``group_id = 1``.
@@ -77,6 +77,7 @@ class GroupCreationResult(TypedDict, total=False):
         ``guild_conflict``      - the guild already owns a *different* group.
         ``wom_conflict``        - the WOM id is already registered to another group.
         ``invalid_wom``         - the supplied WOM id was not a valid integer.
+        ``invalid_name``        - the group name is empty or longer than 30 chars.
         ``db_error``            - an unexpected database error occurred.
     """
 
@@ -84,6 +85,7 @@ class GroupCreationResult(TypedDict, total=False):
     status: str
     message: str
     group_id: Optional[int]
+    group_name: Optional[str]
     wom_id: Optional[int]
     guild_id: Optional[str]
 
@@ -204,6 +206,55 @@ def _clone_group_configurations(group: Group, group_name: str, owner_discord_id:
     return len(new_config)
 
 
+def _seed_group_admin_owner(group: Group, user: User) -> None:
+    """Seed the creator as the group's ``group_admins`` owner (idempotent).
+
+    Runs on every creation path (bot command, web wizard, legacy XF intake) so
+    the creator can always administer their group on the website. Best-effort:
+    the ``authed_users`` config remains the bot-side auth source regardless.
+    """
+    try:
+        existing = (
+            session.query(GroupAdmin)
+            .filter(
+                GroupAdmin.group_id == group.group_id,
+                GroupAdmin.user_id == user.user_id,
+            )
+            .first()
+        )
+        if not existing:
+            session.add(
+                GroupAdmin(group_id=group.group_id, user_id=user.user_id, role="owner")
+            )
+            session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        print(f"[create_web_group] Failed to seed group_admins owner: {exc}")
+
+
+async def _run_initial_wom_sync(wom_id: int) -> None:
+    """Background task: perform the first WOM membership sync for a new group.
+
+    Runs after the create result has been returned so callers stay snappy; by
+    the time the owner views their lootboard it will be populated. Best-effort
+    only — failures are logged and swallowed, and the sync helper's own
+    cooldown guard makes double-fires safe.
+    """
+    try:
+        from db.ops import sync_group_from_wom_with_stats
+
+        result = await sync_group_from_wom_with_stats(wom_id=int(wom_id))
+        if result.get("on_cooldown"):
+            print(f"[create_web_group] Initial WOM sync skipped (cooldown) for wom_id={wom_id}")
+        else:
+            print(
+                f"[create_web_group] Initial WOM sync done for wom_id={wom_id}: "
+                f"+{len(result.get('added', []))} members"
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[create_web_group] Initial WOM sync failed for wom_id={wom_id}: {exc}")
+
+
 async def create_web_group(
     *,
     group_name: str,
@@ -211,6 +262,7 @@ async def create_web_group(
     guild_id,
     owner_discord_id,
     owner_username: Optional[str] = None,
+    initial_sync: bool = True,
 ) -> GroupCreationResult:
     """Create a new DropTracker group on behalf of a website user.
 
@@ -225,10 +277,26 @@ async def create_web_group(
             becomes the sole entry in the group's ``authed_users``.
         owner_username: Optional Discord username, used only if we have to create
             the owner's DropTracker user account on the fly.
+        initial_sync: Schedule a background WOM membership sync after creation
+            (default True) so the group's lootboard populates without waiting
+            for the scheduled sync.
 
     Returns:
         A :class:`GroupCreationResult` describing the outcome.
     """
+    # --- Validate the group name against the column limit ---
+    group_name = (group_name or "").strip()
+    if not (1 <= len(group_name) <= MAX_GROUP_NAME_LEN):
+        return GroupCreationResult(
+            success=False,
+            status="invalid_name",
+            message=f"Group name must be 1–{MAX_GROUP_NAME_LEN} characters.",
+            group_id=None,
+            group_name=None,
+            wom_id=None,
+            guild_id=str(guild_id) if guild_id is not None else None,
+        )
+
     # --- Validate WOM id (the bot coerces to int) ---
     try:
         wom_id = int(wom_id)
@@ -337,6 +405,9 @@ async def create_web_group(
         session.rollback()
         print(f"[create_web_group] Failed to link guild to group: {exc}")
 
+    # --- Seed the creator as the web-side owner (all creation paths) ---
+    _seed_group_admin_owner(group, user)
+
     # Site-wide ticker (rt:feed): announce the new group. Best-effort.
     try:
         from services.realtime import publish_feed_group_created
@@ -352,29 +423,33 @@ async def create_web_group(
         print(f"[create_web_group] Error inserting group into XenForo: {exc}")
 
     # --- Clone the default configuration from the template group ---
+    config_warning = None
     try:
         _clone_group_configurations(group, group_name, owner_discord_id)
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         print(f"[create_web_group] Error creating default configs: {exc}")
         # The group itself exists; surface a soft warning rather than failing.
-        return GroupCreationResult(
-            success=True,
-            status="created",
-            message=(
-                "Your group was created, but default settings could not be applied "
-                "automatically. You can configure them on the website."
-            ),
-            group_id=group.group_id,
-            wom_id=wom_id,
-            guild_id=guild_id,
+        config_warning = (
+            "Your group was created, but default settings could not be applied "
+            "automatically. You can configure them on the website."
         )
+
+    # --- Kick off a non-blocking initial WOM membership sync ---
+    if initial_sync:
+        try:
+            import asyncio
+
+            asyncio.get_running_loop().create_task(_run_initial_wom_sync(wom_id))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[create_web_group] Could not schedule initial WOM sync: {exc}")
 
     return GroupCreationResult(
         success=True,
         status="created",
-        message="Your group has been created successfully.",
+        message=config_warning or "Your group has been created successfully.",
         group_id=group.group_id,
+        group_name=group_name,
         wom_id=wom_id,
         guild_id=guild_id,
     )
