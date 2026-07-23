@@ -205,6 +205,48 @@ class TestRowAdvancesProgress:
         assert engine._row_advances_progress(s, self.GWD_OR, 4, candidate) is False
 
 
+class TestVestigeChainDedupe:
+    """_dedupe_vestige_chain — one player's ring/ring/vestige/clog chain
+    credits a (task, team, vestige) once, no time window. The fake session
+    stands for the SQL-side task/team/player/status filters; the name and
+    source_type checks are python-side."""
+
+    TASK = {"id": 7, "type": "item_collection", "target_value": 2,
+            "config": {"kind": "any_of",
+                       "items": ["Ultor vestige", "Venator vestige"]}}
+
+    def test_second_ring_credit_is_blocked(self):
+        s = _Session([_Row("Ultor vestige", rid=10)])
+        assert engine._dedupe_vestige_chain(
+            s, self.TASK, 4, 9, "drop", "Ultor vestige") is False
+
+    def test_vestige_clog_weeks_after_ring_is_blocked(self):
+        # Outside the 10-minute drop↔clog echo window — the chain rule has none.
+        s = _Session([_Row("Ultor vestige", rid=10)])
+        assert engine._dedupe_vestige_chain(
+            s, self.TASK, 4, 9, "clog", "ultor  VESTIGE") is False
+
+    def test_a_different_vestige_still_credits(self):
+        s = _Session([_Row("Ultor vestige", rid=10)])
+        assert engine._dedupe_vestige_chain(
+            s, self.TASK, 4, 9, "drop", "Venator vestige") is True
+
+    def test_manual_awards_do_not_block(self):
+        s = _Session([_Row("Ultor vestige", source_type="manual", rid=10)])
+        assert engine._dedupe_vestige_chain(
+            s, self.TASK, 4, 9, "drop", "Ultor vestige") is True
+
+    def test_non_vestige_items_unaffected(self):
+        s = _Session([_Row("Bones", rid=10)])
+        assert engine._dedupe_vestige_chain(
+            s, self.TASK, 4, 9, "drop", "Bones") is True
+
+    def test_first_credit_passes(self):
+        s = _Session([])
+        assert engine._dedupe_vestige_chain(
+            s, self.TASK, 4, 9, "drop", "Ultor vestige") is True
+
+
 class TestClogEchoDedupe:
     """_dedupe_clog_echo — one physical acquisition must credit an
     item_collection task once, whichever of its drop/clog submissions lands

@@ -721,6 +721,79 @@ class TestMetricPathProgress:
         assert engine._row_path_idx(_Row()) is None
 
 
+# ── DT2 vestige pity rolls (Gold ring counts as the vestige) ──────────────────
+
+class TestVestigeRings:
+    def test_ring_credits_target_vestige_one_unit_per_drop(self):
+        # The second successful roll drops a 2-ring STACK — still one vestige.
+        t = _task(target="Ultor vestige", target_value=1)
+        m = engine.match_task(t, _env("drop", {
+            "item_name": "Gold ring", "quantity": 2, "npc_name": "Vardorvis"}))
+        assert m == {"mode": "count", "quantity": 1,
+                     "matched_target": "Ultor vestige"}
+
+    def test_ring_from_awakened_variant_counts(self):
+        t = _task(target="Venator vestige")
+        m = engine.match_task(t, _env("drop", {
+            "item_name": "Gold ring", "quantity": 1,
+            "npc_name": "Leviathan (Awakened)"}))
+        assert m is not None and m["matched_target"] == "Venator vestige"
+
+    def test_ring_from_the_wrong_boss_does_not_credit(self):
+        t = _task(target="Ultor vestige")
+        assert engine.match_task(t, _env("drop", {
+            "item_name": "Gold ring", "quantity": 1,
+            "npc_name": "The Leviathan"})) is None
+
+    def test_ring_ignored_when_no_vestige_listed(self):
+        t = _task(target="Abyssal whip")
+        assert engine.match_task(t, _env("drop", {
+            "item_name": "Gold ring", "quantity": 2, "npc_name": "Vardorvis"})) is None
+
+    def test_listed_gold_ring_keeps_literal_stack_semantics(self):
+        # A task genuinely about gold rings is untouched by the alias.
+        t = _task(config={"kind": "any_of", "items": ["Gold ring"]}, target_value=5)
+        m = engine.match_task(t, _env("drop", {
+            "item_name": "Gold ring", "quantity": 2, "npc_name": "Vardorvis"}))
+        assert m == {"mode": "count", "quantity": 2, "matched_target": "Gold ring"}
+
+    def test_ring_credits_vestige_in_any_of_list_case_insensitive(self):
+        t = _task(config={"kind": "any_of",
+                          "items": ["Ultor vestige", "Magus vestige"]},
+                  target_value=2)
+        m = engine.match_task(t, _env("drop", {
+            "item_name": "gold RING", "quantity": 2, "npc_name": "duke sucellus"}))
+        assert m == {"mode": "count", "quantity": 1,
+                     "matched_target": "Magus vestige"}
+
+    def test_ring_credits_point_collection_at_the_vestige_weight(self):
+        t = _task(config={"kind": "point_collection",
+                          "items": [{"item_name": "Bellator vestige", "points": 40}]},
+                  target_value=100)
+        m = engine.match_task(t, _env("drop", {
+            "item_name": "Gold ring", "quantity": 2, "npc_name": "The Whisperer"}))
+        assert m == {"mode": "count", "quantity": 40,
+                     "matched_target": "Bellator vestige"}
+
+    def test_clog_gold_ring_never_aliases(self):
+        # Rings have no vestige clog: only DROPS carry the pity signal.
+        t = _task(target="Ultor vestige")
+        assert engine.match_task(t, _env("clog", {
+            "item_name": "Gold ring", "npc_name": "Vardorvis"})) is None
+
+    def test_ring_credits_vestige_inside_any_path_item_path(self):
+        cfg = {"kind": "any_path", "paths": [
+            {"groups": [{"mode": "any_of", "need": 1, "items": ["Ultor vestige"]}]},
+            {"metric": "kc", "npcs": ["Vardorvis"], "need": 500},
+        ]}
+        matches = engine.match_task_all(_task(config=cfg), _env("drop", {
+            "item_name": "Gold ring", "quantity": 2, "npc_name": "Vardorvis",
+            "total_value": 0}))
+        assert [(m["mode"], m.get("path"), m.get("matched_target"))
+                for m in matches] == [("count", None, "Ultor vestige"),
+                                      ("kc", 1, None)]
+
+
 # ── kc dedupe: kill_count keying + cooldown fallback ─────────────────────────
 
 class _FakeRedis:

@@ -38,6 +38,10 @@ v1 evaluation semantics (task doc table):
   (``note`` = ``path:<idx>``, guid suffixed ``#p<idx>``) with kc_target-style
   watermark dedupe / loot_value GP fold, and one submission may advance an
   item path and several metric paths at once (:func:`match_task_all`).
+  DT2 vestiges: a Gold ring dropped by the vestige's boss credits a task
+  that lists the vestige AS that vestige, one unit per drop (2-ring stacks
+  are the same roll chain), deduped once per (task, team, player, vestige)
+  across rings/vestige/clog (:data:`VESTIGE_BOSSES`).
 - ``kc_target`` — drop from the target NPC (or ANY of ``config.npcs`` on a
   multi-NPC task); each qualifying kill counts once (deduped by
   ``(npc, kill_count)`` per player via Redis; multi-NPC tasks keep their
@@ -471,6 +475,42 @@ def _item_source_npcs(task: dict, item_name) -> frozenset:
     return task_src or frozenset()
 
 
+# ── DT2 vestige pity rolls ("gold ring" progress drops) ──────────────────────
+# A vestige takes three successful invisible rolls; the first two drop 1× and
+# 2× Gold ring instead of the vestige. For events, a ring dropped by the
+# vestige's boss counts AS that vestige when the task lists it (hitting the
+# roll is the achievement) — one unit regardless of stack size (the 2-ring
+# stack is the SAME vestige's second roll), deduped so one player's
+# ring/ring/vestige chain credits a task once (_dedupe_vestige_chain).
+VESTIGE_RING_NAME = "gold ring"
+# Canonical vestige display name -> normalized names of the one boss that
+# drops it (awakened variants included). Verified against recorded drops.
+VESTIGE_BOSSES = {
+    "Ultor vestige": frozenset({"vardorvis", "vardorvis (awakened)"}),
+    "Magus vestige": frozenset({"duke sucellus", "duke sucellus (awakened)"}),
+    "Venator vestige": frozenset({"the leviathan", "leviathan (awakened)"}),
+    "Bellator vestige": frozenset({"the whisperer", "whisperer (awakened)",
+                                   "the whisperer (awakened)"}),
+}
+_VESTIGE_NORMS = frozenset(name.lower() for name in VESTIGE_BOSSES)
+
+
+def _ring_vestige_for_task(task: dict, item_name, npc_name) -> Optional[str]:
+    """The vestige display name a Gold-ring DROP credits on this task, or
+    None. Applies only when the ring itself isn't a listed item (the caller
+    checks — a literal gold-ring task keeps normal stack semantics), the
+    source NPC is a vestige's boss, and the task lists/targets that vestige."""
+    if _norm(item_name) != VESTIGE_RING_NAME:
+        return None
+    npc = _norm(npc_name)
+    if not npc:
+        return None
+    for display, bosses in VESTIGE_BOSSES.items():
+        if npc in bosses and item_match_quantity(task, display, 1) is not None:
+            return display
+    return None
+
+
 def completion_threshold(task: dict) -> int:
     """Progress value at which the task completes."""
     if task.get("type") in ("pb_target", "skill_target"):
@@ -787,7 +827,19 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
         qty = data.get("quantity", 1) if kind == "drop" else 1
         credit = item_match_quantity(task, item_name, qty)
         if credit is None:
-            return None
+            # DT2 pity rolls: a Gold ring DROPPED by a vestige's boss credits
+            # the task AS that vestige — one unit regardless of stack size
+            # (the 2-ring stack is the same vestige's second roll, not two).
+            # Only when the ring itself isn't listed: a literal gold-ring
+            # task keeps normal quantity semantics.
+            vestige = (_ring_vestige_for_task(task, item_name, data.get("npc_name"))
+                       if kind == "drop" else None)
+            if vestige is None or (pets and _norm(vestige) in pets):
+                return None
+            item_name = vestige
+            credit = item_match_quantity(task, vestige, 1)
+            if credit is None:
+                return None
         # Optional source-NPC restriction (config.source_npcs / config.item_npcs).
         # When set for this item, only a DROP from a listed NPC credits it — a
         # clog carries a source string but is never a "drop from this NPC", so a
@@ -2692,6 +2744,44 @@ def _dedupe_clog_echo(session, task: dict, team_id, player_id,
     return remaining if remaining > 0 else None
 
 
+def _dedupe_vestige_chain(session, task: dict, team_id, player_id, kind,
+                          matched_target) -> bool:
+    """True when this vestige credit may record; False when the player's
+    ring/vestige chain already credited it (item_collection only).
+
+    The DT2 pity mechanic makes the 1-ring, 2-ring and vestige drops (plus
+    the vestige's clog echo) sightings of the SAME vestige-in-progress,
+    spread over days — so one (task, team, player, vestige) credits ONCE,
+    with no time window (unlike the 10-minute drop↔clog echo). Trade-off: a
+    second full vestige cycle by the same player inside one event won't
+    auto-credit again (astronomically rare; admins can award manually —
+    manual rows neither block nor are blocked here).
+    """
+    if task.get("type") != "item_collection" or player_id is None:
+        return True
+    if kind not in ("drop", "clog"):
+        return True
+    target_norm = _norm(matched_target)
+    if target_norm not in _VESTIGE_NORMS:
+        return True
+    from db.models import EventCompletion
+
+    prior = (
+        session.query(EventCompletion)
+        .filter(EventCompletion.task_id == task["id"],
+                EventCompletion.team_id == team_id,
+                EventCompletion.player_id == player_id,
+                EventCompletion.source_type.in_(("drop", "clog")),
+                EventCompletion.status.in_(("auto", "confirmed", "manual", "pending")))
+        .all()
+    )
+    return not any(
+        _norm(r.matched_target) == target_norm
+        and (r.source_type or "") in ("drop", "clog")
+        for r in prior
+    )
+
+
 def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
                  player_id: int, quantity: int, envelope: dict,
                  cells: Optional[list] = None,
@@ -2721,6 +2811,11 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
     if progress_row is not None and progress_row.completed:
         return None
 
+    # Vestige chain (rings + vestige + its clog = one acquisition, no time
+    # window) — strictly stronger than the drop↔clog echo below for these.
+    if not _dedupe_vestige_chain(session, task, team_id, player_id,
+                                 envelope.get("kind"), matched_target):
+        return None
     quantity = _dedupe_clog_echo(session, task, team_id, player_id,
                                  envelope.get("kind"), matched_target, quantity)
     if quantity is None:
