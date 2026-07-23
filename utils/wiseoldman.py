@@ -521,11 +521,12 @@ async def fetch_group_members(
                     # correct this before the removal pass runs.
                     player_by_name = None
                     if player_name:
-                        player_by_name = (
-                            session.query(Player)
-                            .filter(Player.player_name == player_name)
-                            .first()
-                        )
+                        # Normalised, ghost-excluding lookup. OSRS names are
+                        # space/underscore/hyphen-insensitive, so exact-string
+                        # matching missed "lm_Brad" vs "lm Brad" and minted a
+                        # duplicate wom_temp twin. Reusing the existing real row
+                        # here is what prevents the split-identity bug.
+                        player_by_name = _find_real_player_by_normalized_name(session, player_name)
                         if player_by_name is not None and player_by_name.wom_id != member_wom_id:
                             logger.info(
                                 "Correcting stale WOM ID for player '%s': %s -> %s",
@@ -566,6 +567,39 @@ async def fetch_group_members(
         print("Couldn't find WOM group members... Error:", e)
         return []
 
+def _find_real_player_by_normalized_name(db_session, player_name: Optional[str]) -> Optional[Player]:
+    """Return the single non-ghost Player whose display name is OSRS-equivalent
+    to ``player_name`` (space/underscore/hyphen- and case-insensitive), or None.
+
+    OSRS treats spaces, underscores and hyphens as equivalent in display names,
+    so "lm_Brad" and "lm Brad" are the same account. WOM-import stubs
+    (account_hash ``wom_temp_*``) are excluded so we only ever reuse a real,
+    plugin-authed identity. Returns None unless EXACTLY ONE non-ghost row
+    matches, so a recycled RSN shared by two different accounts is never
+    silently collapsed onto the wrong one.
+    """
+    if not player_name:
+        return None
+    target = normalize_player_display_equivalence(player_name)
+    # Cheap candidate net: exact plus space/underscore/hyphen swaps. The
+    # authoritative equivalence check is done in Python below.
+    variants = {player_name}
+    for a in (" ", "_", "-"):
+        for b in (" ", "_", "-"):
+            variants.add(player_name.replace(a, b))
+    candidates = (
+        db_session.query(Player)
+        .filter(Player.player_name.in_(list(variants)))
+        .all()
+    )
+    real_matches = [
+        p for p in candidates
+        if normalize_player_display_equivalence(p.player_name or "") == target
+        and not str(p.account_hash or "").startswith("wom_temp_")
+    ]
+    return real_matches[0] if len(real_matches) == 1 else None
+
+
 def _create_player_from_wom_member(db_session, wom_id: int, player_name: Optional[str], player_obj=None) -> Optional[Player]:
     """Create a Player record for a WOM group member with no local account.
 
@@ -576,6 +610,15 @@ def _create_player_from_wom_member(db_session, wom_id: int, player_name: Optiona
     existing = db_session.query(Player).filter(Player.account_hash == temp_hash).first()
     if existing:
         return existing
+    # Never mint a duplicate stub for an account that already exists under its
+    # real (plugin-authed) identity — reuse it so clan memberships attach to the
+    # row that actually receives drops rather than to an orphan ghost. Bounded to
+    # a unique non-ghost name match so a recycled RSN can't merge two accounts.
+    real_twin = _find_real_player_by_normalized_name(db_session, player_name)
+    if real_twin is not None:
+        logger.info("Reusing existing player '%s' (id=%s) for WOM member wom_id=%s instead of a wom_temp stub",
+                    real_twin.player_name, real_twin.player_id, wom_id)
+        return real_twin
 
     total_level = 0
     try:
