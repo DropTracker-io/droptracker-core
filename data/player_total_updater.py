@@ -274,15 +274,20 @@ async def update():
     # Check if player was recently updated
     current_time = time.time()
     if player_id in recently_updated:
-        last_update = recently_updated[player_id]
-        time_since_update = current_time - last_update
-        with Session() as session:
-            player = session.query(Player).filter(Player.player_id == player_id).first()
-            if player:
-                player.date_updated = datetime.now()
-                session.commit()
-        
+        time_since_update = current_time - recently_updated[player_id]
         if time_since_update < UPDATE_COOLDOWN:
+            # Within cooldown: a full Redis rebuild ran <1h ago (recorded in the
+            # in-memory recently_updated map), so skip the redundant rebuild.
+            #
+            # Do NOT bump player.date_updated here. That column is the stale-player
+            # sweep's "oldest first" ordering key (see update_players / ORDER BY
+            # date_updated ASC), and only a real rebuild may advance it — on success
+            # below, or via _requeue_failed_player after a failure. Bumping it on a
+            # skip would push the player to the back of the sweep queue on every
+            # /update call, so an intake-time Redis-write miss (drop in MySQL but
+            # never folded into Redis) would never self-heal via the periodic
+            # refresh. The cooldown itself lives entirely in recently_updated, so
+            # skipping the bump leaves it fully intact.
             minutes_ago = int(time_since_update / 60)
             return {"status": "skipped", "reason": f"Updated {minutes_ago} minutes ago"}
     
