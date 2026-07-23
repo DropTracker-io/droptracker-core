@@ -34,8 +34,9 @@ EVENT_TASK_TYPES = (
     "pb_target",
     "skill_target",
     "loot_value",
-    # Pet acquisition — a specific pet by name, or "any pet" / a pet category
-    # (boss/skilling/raids/…) resolved via utils.osrs_pets. See event_engine.
+    # Pet acquisition — a specific pet by name, "any pet" / a pet category
+    # (boss/skilling/raids/…) resolved via utils.osrs_pets, or an explicit
+    # config.pets allow list (customized category preset). See event_engine.
     "pet_collection",
     # Loot Sweep (loot_sweep kind): one task per boss/"set". Each config item
     # awards points that DECAY per successive team receipt, capped per item;

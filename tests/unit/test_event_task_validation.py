@@ -380,6 +380,47 @@ def test_pet_category_empty_list_rejected():
     assert exc.value.status == 422
 
 
+def test_pet_list_canonicalizes_dedupes_and_sorts():
+    # Customized category preset: explicit allow list of pet names.
+    out = _validate({
+        "type": "pet_collection",
+        "config": {"pets": ["beaver", "Baby mole", "BEAVER"]},
+    })
+    assert _cfg(out) == {"pets": ["Baby mole", "Beaver"]}
+    assert out["target"] is None
+    assert out["target_value"] == 1
+
+
+def test_pet_list_allows_misc_pets():
+    # Listing a misc pet is deliberate — allowed, like a specific-pet target.
+    out = _validate({
+        "type": "pet_collection",
+        "config": {"pets": ["Chompy chick", "Vorki"]},
+    })
+    assert _cfg(out) == {"pets": ["Chompy chick", "Vorki"]}
+
+
+def test_pet_list_unknown_pet_rejected():
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "pet_collection", "config": {"pets": ["Baby mole", "Dinosaur"]}})
+    assert exc.value.status == 422
+
+
+def test_pet_list_empty_rejected():
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "pet_collection", "config": {"pets": []}})
+    assert exc.value.status == 422
+
+
+def test_pet_list_with_categories_rejected():
+    with pytest.raises(ProblemException) as exc:
+        _validate({
+            "type": "pet_collection",
+            "config": {"pets": ["Baby mole"], "categories": ["boss"]},
+        })
+    assert exc.value.status == 422
+
+
 # ── kc_target (single + multi-NPC via config.npcs) ────────────────────────────
 
 KC_NPCS = {"Dagannoth Rex", "Dagannoth Prime", "Dagannoth Supreme", "Zulrah"}

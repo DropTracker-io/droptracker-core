@@ -53,9 +53,11 @@ v1 evaluation semantics (task doc table):
 - ``skill_target`` — experience report for the target skill with
   level ≥ target_value; completes on first match.
 - ``pet_collection`` — pet submission (``kind == "pet"``). A ``target`` names
-  one specific pet; otherwise ``config.categories`` (a list like
-  ``["boss"]``) gates by pet category via :mod:`utils.osrs_pets`, and an
-  absent/empty list means "any pet" (the default set, misc excluded).
+  one specific pet; ``config.pets`` (canonical names) is an explicit allow
+  list (a category preset the builder customized — misc pets count when
+  listed); otherwise ``config.categories`` (a list like ``["boss"]``) gates
+  by pet category via :mod:`utils.osrs_pets`, and an absent/empty list means
+  "any pet" (the default set, misc excluded).
   Progress unit = 1 per new pet; ``target_value`` is the count to collect
   (default 1 → completes on the first qualifying pet).
 - ``ehp_target``/``ehb_target``/``custom`` — not auto-evaluated (Task 18
@@ -1083,6 +1085,13 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
         if target:
             # Specific pet: exact name match (any category, incl. misc).
             if _norm(pet_name) != _norm(target):
+                return None
+        elif (task.get("config") or {}).get("pets"):
+            # Explicit pet list (category preset the builder customized):
+            # name membership, like N specific pets. Misc pets count when
+            # listed — listing one is as deliberate as targeting it.
+            listed = (task.get("config") or {}).get("pets")
+            if _norm(pet_name) not in {_norm(p) for p in listed}:
                 return None
         else:
             # Category / any-pet: membership resolved from the live taxonomy.

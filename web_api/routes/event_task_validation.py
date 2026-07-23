@@ -934,9 +934,33 @@ def validate_task_payload(s, body: dict) -> dict:
             tv = _require_target_value(tv if tv is not None else 1, what="Quantity")
             config = None
         else:
-            # Category / any-pet: validate the requested category keys, if any.
+            # Explicit pet list (a category preset the builder customized —
+            # add/remove individual pets). Names snap to canonical spellings;
+            # misc pets are allowed (listing one is deliberate, like a
+            # specific-pet target).
+            pets = (config or {}).get("pets")
             categories = (config or {}).get("categories")
-            if categories is not None:
+            if pets is not None and categories is not None:
+                abort_problem(422, "Invalid config",
+                              "Provide either 'pets' or 'categories', not both.")
+            if pets is not None:
+                if not isinstance(pets, list) or not pets:
+                    abort_problem(422, "Invalid config",
+                                  "'pets' must be a non-empty array of pet names.")
+                canonical_pets, seen = [], set()
+                for name in pets:
+                    canonical = canonical_pet_name(str(name))
+                    if not canonical:
+                        abort_problem(
+                            422, "Unknown pet",
+                            f"'{str(name).strip() or '(empty)'}' is not a known OSRS pet.",
+                        )
+                    if canonical not in seen:
+                        seen.add(canonical)
+                        canonical_pets.append(canonical)
+                config = {"pets": sorted(canonical_pets)}
+            # Category / any-pet: validate the requested category keys, if any.
+            elif categories is not None:
                 if not isinstance(categories, list) or not categories:
                     abort_problem(422, "Invalid config",
                                   "'categories' must be a non-empty array of pet categories.")

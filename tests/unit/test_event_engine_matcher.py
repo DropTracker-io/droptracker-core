@@ -1104,6 +1104,23 @@ class TestPetCollection:
         t = _task(type="pet_collection", target=None, config={"categories": ["misc"]})
         assert engine.match_task(t, _env("pet", {"pet_name": "Chompy chick"})) is not None
 
+    def test_pet_list_membership(self):
+        # Explicit allow list (customized category preset): only listed names.
+        t = _task(type="pet_collection", target=None,
+                  config={"pets": ["Baby mole", "Beaver"]})
+        assert engine.match_task(t, _env("pet", {"pet_name": "Baby mole"})) is not None
+        assert engine.match_task(t, _env("pet", {"pet_name": "Vorki"})) is None
+
+    def test_pet_list_case_insensitive(self):
+        t = _task(type="pet_collection", target=None, config={"pets": ["baby MOLE"]})
+        m = engine.match_task(t, _env("pet", {"pet_name": "Baby mole"}))
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "Baby mole"}
+
+    def test_pet_list_includes_misc_when_listed(self):
+        # Listing a misc pet is deliberate — it counts (unlike bare any-pet).
+        t = _task(type="pet_collection", target=None, config={"pets": ["Chompy chick"]})
+        assert engine.match_task(t, _env("pet", {"pet_name": "Chompy chick"})) is not None
+
     def test_wrong_kind_no_match(self):
         t = _task(type="pet_collection", target="Baby mole")
         assert engine.match_task(t, _env("drop", {"item_name": "Baby mole"})) is None

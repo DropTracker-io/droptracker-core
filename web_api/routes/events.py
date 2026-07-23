@@ -3490,6 +3490,42 @@ async def search_pets():
     return jsonify(await asyncio.to_thread(_search))
 
 
+@events_bp.get("/events/meta/pet-categories")
+async def pet_category_catalog():
+    """Full pet taxonomy for the task builder (session required).
+
+    Every category with its member pets, so the form can seed a customizable
+    pet list from a category preset (and preview what a category covers).
+    Names come from ``utils/osrs_pets``; ids from the item DB purely for the
+    itemdb icons (``id`` is null for a pet with no same-named item row —
+    unlike the autocomplete, a preset must never silently drop a pet)."""
+    current_user_id()
+
+    def _catalog():
+        from utils.osrs_pets import PET_DISPLAY_BY_NORM, pet_categories, pets_in_category
+        from db import ItemList
+
+        names_by_cat = {
+            cat: sorted(PET_DISPLAY_BY_NORM[n] for n in pets_in_category(cat))
+            for cat in pet_categories()
+        }
+        all_names = sorted({n for names in names_by_cat.values() for n in names})
+        with db_session() as s:
+            rows = (
+                s.query(func.min(ItemList.item_id), ItemList.item_name)
+                .filter(ItemList.item_name.in_(all_names), ItemList.noted.is_(False))
+                .group_by(ItemList.item_name)
+                .all()
+            )
+        id_by_name = {n: int(i) for i, n in rows}
+        return [
+            {"key": cat, "pets": [{"id": id_by_name.get(n), "name": n} for n in names]}
+            for cat, names in names_by_cat.items()
+        ]
+
+    return jsonify(await asyncio.to_thread(_catalog))
+
+
 @events_bp.get("/events/meta/resolve")
 async def resolve_meta_names():
     """Resolve exact item/NPC names to their game ids (session required).
