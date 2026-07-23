@@ -998,6 +998,45 @@ async def billing_webhook():
         with db_session() as s:
             meta = obj.get("metadata") or {}
 
+            # Race hardening: checkout.session.completed is the only event that
+            # CREATES a leg, and Stripe may deliver customer.subscription.* /
+            # invoice.paid *before* it (dropped as no-ops → NULL renewal date +
+            # missing first-invoice ledger row). Pull authoritative state
+            # straight from Stripe so a new row is complete regardless of
+            # sibling-event ordering.
+            checkout_state = (
+                billing.fetch_subscription_state(obj.get("subscription"))
+                if etype == "checkout.session.completed"
+                else None
+            )
+
+            def _finalize(rec):
+                if not checkout_state:
+                    return
+                if checkout_state.get("status"):
+                    rec.status = checkout_state["status"]
+                if checkout_state.get("current_period_end"):
+                    rec.current_period_end = checkout_state["current_period_end"]
+                rec.cancel_at_period_end = bool(checkout_state.get("cancel_at_period_end"))
+
+            def _record_first_invoice(**fields):
+                # Idempotent via the invoice's external_id — harmless if the
+                # invoice.paid webhook already recorded (or later records) it.
+                if not checkout_state:
+                    return
+                inv = checkout_state.get("invoice")
+                if not inv:
+                    return
+                record_payment(
+                    provider="stripe",
+                    amount_cents=inv["amount_cents"],
+                    currency=inv["currency"],
+                    external_id=inv["external_id"],
+                    paid_at=inv["paid_at"],
+                    notify=True,
+                    **fields,
+                )
+
             # ---- User-scoped supporter subscription ----
             if meta.get("scope") == "user":
                 user_id = None
@@ -1016,7 +1055,14 @@ async def billing_webhook():
                     amt = _extract_amount_cents()
                     if amt:
                         sub.amount_cents = amt
+                    _finalize(sub)
                     s.commit()
+                    _record_first_invoice(
+                        scope="user",
+                        user_id=sub.user_id,
+                        subscription_id=sub.id,
+                        tier_key=sub.tier_key,
+                    )
                     _invalidate_user_entitlements(user_id)
                 return
 
@@ -1045,7 +1091,14 @@ async def billing_webhook():
                         amt = _extract_amount_cents()
                         if amt:
                             usub.amount_cents = amt
+                        _finalize(usub)
                         s.commit()
+                        _record_first_invoice(
+                            scope="user",
+                            user_id=usub.user_id,
+                            subscription_id=usub.id,
+                            tier_key=usub.tier_key,
+                        )
                         _invalidate_user_entitlements(usub.user_id)
                         return
 
@@ -1078,7 +1131,15 @@ async def billing_webhook():
                     leg.user_id = int(meta["payer_user_id"])
                 except (ValueError, TypeError):
                     pass
+            _finalize(leg)
             s.commit()
+            _record_first_invoice(
+                scope="group",
+                group_id=leg.group_id,
+                user_id=leg.user_id,
+                subscription_id=leg.id,
+                tier_key=leg.tier_key,
+            )
 
     await asyncio.to_thread(_record_ledger)
     await asyncio.to_thread(_apply)

@@ -295,6 +295,53 @@ def verify_webhook(payload: bytes, signature: str):
     return event if isinstance(event, dict) else None
 
 
+def fetch_subscription_state(subscription_id: Optional[str]) -> Optional[dict]:
+    """Read authoritative subscription state straight from Stripe (read-only).
+
+    Used by the webhook to hydrate a freshly-created leg on
+    ``checkout.session.completed`` instead of depending on the sibling
+    ``customer.subscription.*`` / ``invoice.paid`` events. Stripe delivers
+    those with no ordering guarantee, so they can arrive *before* the leg row
+    exists — the handler no-ops them and returns 200, and Stripe never retries.
+    That left new legs with a NULL ``current_period_end`` (blank renewal date)
+    and no first-invoice ledger row until the next billing cycle.
+
+    Returns a dict with ``status``, ``current_period_end`` (datetime|None),
+    ``cancel_at_period_end`` and ``invoice`` (the latest invoice's ledger
+    fields, or None), or None when Stripe is unavailable / the lookup fails so
+    callers keep their previous behaviour.
+    """
+    stripe = _stripe()
+    if stripe is None or not subscription_id:
+        return None
+    try:
+        sub = json.loads(
+            str(stripe.Subscription.retrieve(subscription_id, expand=["latest_invoice"]))
+        )
+    except Exception:
+        return None
+    # Stripe API 2025-03+ moved current_period_end off the Subscription object
+    # onto its items; fall back accordingly.
+    items = (sub.get("items") or {}).get("data") or [{}]
+    cpe = sub.get("current_period_end") or items[0].get("current_period_end")
+    invoice = None
+    inv = sub.get("latest_invoice")
+    if isinstance(inv, dict) and inv.get("amount_paid") and inv.get("status") == "paid":
+        paid_ts = ((inv.get("status_transitions") or {}).get("paid_at")) or inv.get("created")
+        invoice = {
+            "external_id": str(inv.get("id")),
+            "amount_cents": int(inv.get("amount_paid")),
+            "currency": inv.get("currency") or "USD",
+            "paid_at": datetime.fromtimestamp(int(paid_ts)) if paid_ts else None,
+        }
+    return {
+        "status": sub.get("status"),
+        "current_period_end": datetime.fromtimestamp(int(cpe)) if cpe else None,
+        "cancel_at_period_end": bool(sub.get("cancel_at_period_end")),
+        "invoice": invoice,
+    }
+
+
 def ensure_provider_price(tier) -> Optional[str]:
     """On tier create/update, ensure a provider price exists. Returns the price
     id (or None for manual). Best-effort; failures leave provider_price_id
