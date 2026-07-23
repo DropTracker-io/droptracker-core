@@ -349,7 +349,8 @@ def _publish_pending_update(s, ev, comp) -> None:
             except (ValueError, TypeError):
                 config = None
         proj = pending_projection(
-            s, {"id": task.id, "target_value": task.target_value,
+            s, {"id": task.id, "type": task.type,
+                "target_value": task.target_value,
                 "config": config}, comp.team_id)
         frame = {
             "kind": "pending", "event_id": ev.id, "task_id": comp.task_id,
@@ -508,7 +509,8 @@ async def award_completion(event_id: int):
                 # 1/50 and completes nothing). Locked read (P0-10): a
                 # concurrent award/confirm must not both see the same "left".
                 eng = _engine()
-                threshold = eng.completion_threshold(eng._task_to_dict(task))
+                # Team-aware: whole_team pb thresholds scale to the roster.
+                threshold = eng.effective_threshold(s, eng._task_to_dict(task), team_id)
                 current = (
                     s.query(EventProgress)
                     .filter(EventProgress.task_id == task_id,

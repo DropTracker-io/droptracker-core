@@ -511,14 +511,73 @@ def _ring_vestige_for_task(task: dict, item_name, npc_name) -> Optional[str]:
     return None
 
 
+# pb_target completion requirements (config {"mode", "need"}):
+# - "times":          the time must be beaten ``need`` times (every qualifying
+#                     kill counts — teammates on one kill each count, a player
+#                     may repeat; default, need 1 = the legacy first-match).
+# - "unique_players": ``need`` DIFFERENT players must each beat it once.
+# - "whole_team":     every rostered member of the team must beat it — the
+#                     threshold is the team's size, resolved per team at apply
+#                     time (:func:`effective_threshold`).
+PB_COMPLETION_MODES = ("times", "unique_players", "whole_team")
+
+
+def _pb_mode(task: dict) -> tuple:
+    """``(mode, need)`` of a pb_target's completion requirement. Config-less
+    tasks are ``("times", 1)`` — the legacy complete-on-first-match. Accepts
+    raw (string) configs so route-built task dicts resolve correctly."""
+    config = parse_task_config(task.get("config"))
+    mode = config.get("mode")
+    if mode not in PB_COMPLETION_MODES:
+        mode = "times"
+    try:
+        need = max(int(config.get("need") or 1), 1)
+    except (TypeError, ValueError):
+        need = 1
+    return mode, need
+
+
 def completion_threshold(task: dict) -> int:
-    """Progress value at which the task completes."""
-    if task.get("type") in ("pb_target", "skill_target"):
+    """Progress value at which the task completes.
+
+    ``whole_team`` pb tasks return 1 here — their real threshold is the
+    team's roster size, which a pure task dict can't know. Every completion
+    DECISION runs through :func:`effective_threshold` (apply / revoke /
+    projection / manual award); this pure fallback only reaches display
+    paths that lack a team."""
+    if task.get("type") == "pb_target":
+        mode, need = _pb_mode(task)
+        return need if mode in ("times", "unique_players") else 1
+    if task.get("type") == "skill_target":
         return 1
     try:
         return max(int(task.get("target_value") or 0), 1)
     except (TypeError, ValueError):
         return 1
+
+
+def effective_threshold(session, task: dict, team_id) -> int:
+    """:func:`completion_threshold`, resolving ``whole_team`` pb tasks against
+    the team's actual roster: explicit ``EventTeamMember`` rows, else — for
+    auto-clan fallback teams, which keep no roster rows — the clan's current
+    member count (the same source the matcher credits from)."""
+    if (task.get("type") != "pb_target" or team_id is None
+            or _pb_mode(task)[0] != "whole_team"):
+        return completion_threshold(task)
+    from db.models import EventTeam, EventTeamMember
+
+    n = (session.query(EventTeamMember)
+         .filter(EventTeamMember.team_id == team_id).count())
+    if not n:
+        team = session.query(EventTeam).filter(EventTeam.id == team_id).first()
+        if team is not None and getattr(team, "auto_clan", False) and team.group_id:
+            from db.models.associations import user_group_association
+
+            n = (session.query(user_group_association.c.player_id)
+                 .filter(user_group_association.c.group_id == team.group_id,
+                         user_group_association.c.player_id.isnot(None))
+                 .distinct().count())
+    return max(int(n or 0), 1)
 
 
 # Continuous-metric task types whose plugin progress fan-out is stepped: every
@@ -541,6 +600,13 @@ def _list_kind(task: dict) -> Optional[str]:
     """Item-list config kind (any_of/all_of/point_collection/assembly/groups/any_path), if any."""
     config = task.get("config") or {}
     return config.get("kind") if isinstance(config, dict) else None
+
+
+def _pb_distinct_players(task: dict) -> bool:
+    """Whether this pb task's rollup counts DISTINCT players (unique_players /
+    whole_team) rather than folding qualifying-kill quantities."""
+    return (task.get("type") == "pb_target"
+            and _pb_mode(task)[0] in ("unique_players", "whole_team"))
 
 
 def _distinct_item_progress(session, task: dict, team_id, include=None) -> int:
@@ -579,6 +645,43 @@ def _distinct_progress_from_rows(rows, threshold: int) -> int:
         else:
             wildcard += max(int(getattr(r, "quantity", 1) or 1), 1)
     return min(len(distinct) + wildcard, threshold)
+
+
+def _distinct_players_from_rows(rows, threshold: int) -> int:
+    """One unit per DISTINCT contributing player (pb unique_players /
+    whole_team rollups) — a grinder's tenth sub-threshold kill is still one
+    player. Player-less manual wildcard rows count their quantity each (the
+    admin mark-complete escape hatch), capped at the threshold."""
+    players: set = set()
+    wildcard = 0
+    for r in rows:
+        if (getattr(r, "source_type", None) or "") == "bonus":
+            continue
+        pid = getattr(r, "player_id", None)
+        if pid is not None:
+            players.add(pid)
+        else:
+            wildcard += max(int(getattr(r, "quantity", 1) or 1), 1)
+    return min(len(players) + wildcard, threshold)
+
+
+def _distinct_player_progress(session, task: dict, team_id, threshold: int,
+                              include=None) -> int:
+    """pb unique_players / whole_team rollup over the applied ledger
+    (mirrors :func:`_distinct_item_progress`; ``include`` folds a row not yet
+    visible to the applied-status query)."""
+    from db.models import EventCompletion
+
+    rows = list(
+        session.query(EventCompletion)
+        .filter(EventCompletion.task_id == task["id"],
+                EventCompletion.team_id == team_id,
+                EventCompletion.status.in_(("auto", "confirmed", "manual")))
+        .all()
+    )
+    if include is not None and all(r.id != include.id for r in rows):
+        rows.append(include)
+    return _distinct_players_from_rows(rows, threshold)
 
 
 def _grouped_item_progress(session, task: dict, team_id, include=None) -> int:
@@ -750,8 +853,15 @@ def pending_projection(session, task: dict, team_id) -> Optional[dict]:
     if not pending_rows:
         return None
     applied_rows = [r for r in rows if r.status != "pending"]
-    threshold = completion_threshold(task)
+    threshold = effective_threshold(session, task, team_id)
     kind = _list_kind(task)
+    if _pb_distinct_players(task):
+        return {
+            "applied": _distinct_players_from_rows(applied_rows, threshold),
+            "projected": _distinct_players_from_rows(rows, threshold),
+            "pending_count": len(pending_rows),
+            "pending_complete": _distinct_players_from_rows(rows, threshold) >= threshold,
+        }
     if kind == "loot_sweep":
         # "applied"/"projected" are running POINT totals here (loot_sweep never
         # completes, so pending_complete is always False).
@@ -914,7 +1024,14 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
             return None
         if time_ms <= 0 or target_seconds <= 0 or time_ms > target_seconds * 1000:
             return None
-        return {"mode": "first", "quantity": 1}
+        # Legacy single-shot completes on the first qualifying kill; the
+        # times / unique_players / whole_team requirements count every
+        # qualifying kill (teammates on one kill each count — the rollup
+        # decides whether repeats by one player advance progress).
+        mode, need = _pb_mode(task)
+        if mode == "times" and need <= 1:
+            return {"mode": "first", "quantity": 1}
+        return {"mode": "count", "quantity": 1}
 
     if task_type == "xp_target":
         if kind != "experience":
@@ -1956,7 +2073,8 @@ def _award_contribution_points(session, event: dict, task: dict, team_id,
 def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id,
                             player_name, previous: int, current: int,
                             proof_url: Optional[str] = None,
-                            matched_target: Optional[str] = None) -> None:
+                            matched_target: Optional[str] = None,
+                            threshold: Optional[int] = None) -> None:
     """Enqueue an ``event_task_progress`` notification when the event's
     message_config asks for one ('all': every increment; 'milestones': only
     when a 25/50/75% threshold was crossed). Completion itself is announced
@@ -1982,7 +2100,9 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
     if current <= previous:
         return
 
-    target_threshold = completion_threshold(task)
+    # Callers with team context pass the effective threshold (whole_team pb
+    # tasks scale to the roster); the pure fallback covers the rest.
+    target_threshold = threshold if threshold is not None else completion_threshold(task)
     base_payload = {
         "task_id": task["id"],
         "task_label": task.get("label"),
@@ -2426,7 +2546,15 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
             pass  # unit-test stubs
         except Exception:
             pass
-    if _list_kind(task) in ("all_of", "assembly"):
+    # whole_team pb thresholds depend on the team's roster — resolve once and
+    # use it for the completion decision AND every frame/payload target.
+    threshold = effective_threshold(session, task, team_id)
+    if _pb_distinct_players(task):
+        # Distinct-player semantics: a grinder re-beating the time is still
+        # one player; recompute from the applied ledger like all_of items.
+        progress.progress = _distinct_player_progress(
+            session, task, team_id, threshold, include=completion)
+    elif _list_kind(task) in ("all_of", "assembly"):
         # Distinct-item semantics: recompute from the applied ledger instead
         # of folding quantity (which let one big stack complete the set).
         progress.progress = _distinct_item_progress(session, task, team_id, include=completion)
@@ -2444,11 +2572,11 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         "team_id": team_id,
         "player_id": player_id,
         "progress": progress.progress,
-        "target": completion_threshold(task),
+        "target": threshold,
     }
 
     newly_completed = (not already_completed
-                       and progress.progress >= completion_threshold(task))
+                       and progress.progress >= threshold)
     if not newly_completed:
         # Once completed, further ledger rows still record but don't
         # re-complete or re-score.
@@ -2462,7 +2590,8 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
                 session, event, task, team_id, player_id, player_name,
                 previous_progress, int(progress.progress or 0),
                 proof_url=completion.proof_url,
-                matched_target=completion.matched_target)
+                matched_target=completion.matched_target,
+                threshold=threshold)
         return result
 
     progress.completed = True
@@ -2606,7 +2735,7 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
             "received_item": completion.matched_target,
             "received_qty": int(completion.quantity or 0),
             "contributed": max(int(progress.progress or 0) - int(previous_progress or 0), 0),
-            "target": completion_threshold(task),
+            "target": threshold,
         })
     # Bingo events summarize the team's board standing on completion (total
     # tiles done / team position) instead of naming the single tile marked.
@@ -2670,6 +2799,12 @@ def _row_advances_progress(session, task: dict, team_id, candidate) -> bool:
     listed item is already satisfied, another copy of it is dead weight. For
     plain count/kc/xp folds every row advances progress until the threshold
     (the completed gate in :func:`record_match` handles the rest)."""
+    if _pb_distinct_players(task):
+        # A player who already beat the time is dead weight on a repeat kill.
+        threshold = effective_threshold(session, task, team_id)
+        return (_distinct_player_progress(session, task, team_id, threshold,
+                                          include=candidate)
+                > _distinct_player_progress(session, task, team_id, threshold))
     kind = _list_kind(task)
     if kind == "loot_sweep":
         # Dead weight once the item is capped AND no new set completes — the
@@ -3143,7 +3278,10 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
     if _list_kind(task) == "loot_sweep":
         return _revoke_loot_sweep(session, event, task, team_id, completion)
 
-    if _list_kind(task) in ("all_of", "assembly"):
+    if _pb_distinct_players(task):
+        new_progress = _distinct_player_progress(
+            session, task, team_id, effective_threshold(session, task, team_id))
+    elif _list_kind(task) in ("all_of", "assembly"):
         # Distinct-item semantics (the revoked row is already excluded — its
         # status flipped before this recompute).
         new_progress = _distinct_item_progress(session, task, team_id)
@@ -3171,7 +3309,7 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
                 .with_for_update()
                 .first())
     was_completed = bool(progress.completed) if progress is not None else False
-    threshold = completion_threshold(task)
+    threshold = effective_threshold(session, task, team_id)
     now_completed = new_progress >= threshold if new_progress > 0 else False
     if progress is None:
         if new_progress <= 0:

@@ -402,7 +402,7 @@ def _position_row(s, pos: EventBoardPosition, team: EventTeam,
                         .filter(EventProgress.task_id == t.id,
                                 EventProgress.team_id == pos.team_id)
                         .first())
-            from services.event_engine import completion_threshold
+            from services.event_engine import effective_threshold
 
             task = {
                 "id": t.id,
@@ -410,8 +410,11 @@ def _position_row(s, pos: EventBoardPosition, team: EventTeam,
                 "type": t.type,
                 "difficulty": t.difficulty,
                 "progress": int(progress.progress or 0) if progress else 0,
-                "target": completion_threshold({
-                    "type": t.type, "target_value": t.target_value}),
+                # Config included so counted goals (pb times/unique modes)
+                # show their real target; team-aware for whole_team.
+                "target": effective_threshold(s, {
+                    "type": t.type, "target_value": t.target_value,
+                    "config": t.config}, pos.team_id),
             }
     last_roll = None
     if pos.last_roll:

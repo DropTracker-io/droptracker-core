@@ -179,12 +179,16 @@ def _contributors(rows, player_names: dict, ts) -> list[dict]:
 
 def build_task_breakdown(task: dict, tile: dict | None, rows, progress_row,
                          team: dict, player_names: dict, ts,
-                         pending_rows=None) -> dict:
+                         pending_rows=None, target_override: int | None = None) -> dict:
     """Assemble the full per-(task, team) breakdown payload.
 
     ``rows`` are the applied ``EventCompletion`` rows for this (task, team)
     (status in auto/confirmed/manual); ``progress_row`` is the authoritative
     ``EventProgress`` rollup (or None); ``ts`` converts a datetime to an epoch.
+
+    ``target_override`` is the caller's team-aware effective threshold
+    (whole_team pb tasks scale to the roster — the pure fallback here can't
+    know the team). Callers with a session should always pass it.
 
     ``pending_rows`` (web53a) are the team's pending-review ledger rows: when
     present, the breakdown is built a second time with them folded in and the
@@ -203,7 +207,9 @@ def build_task_breakdown(task: dict, tile: dict | None, rows, progress_row,
     config = parse_task_config(task.get("config"))
     kind = config.get("kind")
     ttype = task.get("type")
-    target_val = completion_threshold({"type": ttype, "target_value": task.get("target_value")})
+    target_val = (int(target_override) if target_override else
+                  completion_threshold({"type": ttype, "config": config,
+                                        "target_value": task.get("target_value")}))
     icons = _icon_lookup(tile)
     qty_by, _distinct, wildcard = _ledger_stats(rows)
 
@@ -335,12 +341,24 @@ def build_task_breakdown(task: dict, tile: dict | None, rows, progress_row,
 
     else:
         # Non-item task: a single progress meter (no per-item checklist).
+        # pb_target stays a binary pass/fail only in its legacy single-shot
+        # form; the counted requirements (times / unique_players /
+        # whole_team) meter toward their target in kills or players.
+        unit = _METER_UNITS.get(ttype, "")
+        binary = ttype == "skill_target"
+        if ttype == "pb_target":
+            from services.event_engine import _pb_mode
+
+            mode, _need = _pb_mode({"config": config})
+            binary = target_val <= 1 and mode == "times"
+            if not binary:
+                unit = "times" if mode == "times" else "players"
         out["structure"] = "meter"
         out["meter"] = {
             "progress": prog,
             "target": target_val,
-            "unit": _METER_UNITS.get(ttype, ""),
-            "binary": ttype in ("pb_target", "skill_target"),
+            "unit": unit,
+            "binary": binary,
             "label": task.get("target") or task.get("label"),
             "target_value": task.get("target_value"),
         }
@@ -363,12 +381,16 @@ def _annotate_pending(out: dict, task: dict, tile, rows, pending_rows, team,
 
     from services.event_engine import (
         _anypath_progress_from_rows,
+        _distinct_players_from_rows,
         _distinct_progress_from_rows,
         _grouped_progress_from_rows,
+        _pb_distinct_players,
     )
 
     combined = list(rows) + list(pending_rows)
-    if kind in ("all_of", "assembly"):
+    if _pb_distinct_players({"type": task.get("type"), "config": config}):
+        proj_val = _distinct_players_from_rows(combined, target_val)
+    elif kind in ("all_of", "assembly"):
         proj_val = _distinct_progress_from_rows(combined, target_val)
     elif kind == "groups":
         proj_val = _grouped_progress_from_rows(combined, config, target_val)
@@ -382,7 +404,7 @@ def _annotate_pending(out: dict, task: dict, tile, rows, pending_rows, team,
     projected = build_task_breakdown(
         task, tile, combined,
         SimpleNamespace(progress=proj_val, completed=False),
-        team, player_names, ts,
+        team, player_names, ts, target_override=target_val,
     )
 
     def _diff_group(base_g: dict, proj_g: dict) -> None:

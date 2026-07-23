@@ -442,6 +442,41 @@ def test_pb_target_ignores_npcs_config(_stub_kc_npcs):
     assert out == {"target": "Zulrah", "target_value": 70, "config": None}
 
 
+# ── pb completion requirements (times / unique_players / whole_team) ─────────
+
+def test_pb_times_mode_normalizes(_stub_kc_npcs):
+    out = _validate({"type": "pb_target", "target": "Zulrah", "target_value": 70,
+                     "config": {"mode": "times", "need": 5}})
+    assert json.loads(out["config"]) == {"mode": "times", "need": 5}
+    # ×1 collapses to the legacy config-free single-shot.
+    out = _validate({"type": "pb_target", "target": "Zulrah", "target_value": 70,
+                     "config": {"mode": "times", "need": 1}})
+    assert out["config"] is None
+
+
+def test_pb_unique_players_mode_kept_even_at_one(_stub_kc_npcs):
+    out = _validate({"type": "pb_target", "target": "Zulrah", "target_value": 70,
+                     "config": {"mode": "unique_players", "need": 1}})
+    assert json.loads(out["config"]) == {"mode": "unique_players", "need": 1}
+
+
+def test_pb_whole_team_strips_need(_stub_kc_npcs):
+    out = _validate({"type": "pb_target", "target": "Zulrah", "target_value": 70,
+                     "config": {"mode": "whole_team", "need": 99}})
+    assert json.loads(out["config"]) == {"mode": "whole_team"}
+
+
+def test_pb_bad_mode_or_need_rejected(_stub_kc_npcs):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "pb_target", "target": "Zulrah", "target_value": 70,
+                   "config": {"mode": "nonsense"}})
+    assert "PB completion mode" in (exc.value.detail or "")
+    for bad_need in (0, "five", etv.MAX_PB_NEED + 1):
+        with pytest.raises(ProblemException):
+            _validate({"type": "pb_target", "target": "Zulrah", "target_value": 70,
+                       "config": {"mode": "times", "need": bad_need}})
+
+
 # ── loot_sweep v2 (nested groups + NPC scoping + batched decay) ───────────────
 
 KNOWN_NPCS = {"Kree'arra", "Ahrim the Blighted", "Dharok the Wretched",

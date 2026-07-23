@@ -112,6 +112,12 @@ ANY_PATH_THRESHOLD = 100
 # conftest stubs the whole ``services`` package).
 PATH_METRICS = ("kc", "loot_value")
 
+# pb_target completion requirements (config {"mode", "need"}): beat the time
+# N times / N unique players each beat it / every rostered team member beats
+# it. Mirrors services.event_engine.PB_COMPLETION_MODES (same import caveat).
+PB_COMPLETION_MODES = ("times", "unique_players", "whole_team")
+MAX_PB_NEED = 500
+
 # Non-semantic config keys preserved verbatim across validation (the bingo
 # designer's auto-created marker — see event_admin._BINGO_AUTO_KEY).
 _PASSTHROUGH_KEYS = ("bingo_auto",)
@@ -859,9 +865,31 @@ def validate_task_payload(s, body: dict) -> dict:
         target = canonical_npcs[0]
         what = "Kill count" if ttype == "kc_target" else "Target time (seconds)"
         tv = _require_target_value(tv, what=what)
-        # A single-NPC list collapses to plain target semantics (config-free),
-        # so the engine's legacy per-task KC state keys stay stable.
-        config = {"npcs": canonical_npcs} if len(canonical_npcs) > 1 else None
+        if ttype == "pb_target":
+            # Completion requirement: beat it N times / N unique players /
+            # the whole team. Absent (or times ×1) keeps the legacy
+            # config-free complete-on-first-match task.
+            mode = (config or {}).get("mode")
+            if mode is not None and mode not in PB_COMPLETION_MODES:
+                abort_problem(
+                    422, "Invalid config",
+                    f"PB completion mode must be one of {list(PB_COMPLETION_MODES)}.")
+            if mode == "whole_team":
+                config = {"mode": "whole_team"}
+            elif mode in ("times", "unique_players"):
+                need = _require_target_value(
+                    (config or {}).get("need", 1),
+                    what="Times to beat it" if mode == "times" else "Unique players",
+                    hi=MAX_PB_NEED)
+                config = ({"mode": mode, "need": need}
+                          if mode == "unique_players" or need > 1 else None)
+            else:
+                config = None
+        else:
+            # A single-NPC list collapses to plain target semantics
+            # (config-free), so the engine's legacy per-task KC state keys
+            # stay stable.
+            config = {"npcs": canonical_npcs} if len(canonical_npcs) > 1 else None
 
     elif ttype in ("xp_target", "skill_target"):
         skill = _SKILL_BY_NORM.get(target.lower())

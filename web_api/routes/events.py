@@ -552,7 +552,23 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
         }
 
     # Per-team per-task rollups: lets the public page render 35/50-style
-    # progress bars instead of only final team scores.
+    # progress bars instead of only final team scores. Each row carries its
+    # team-aware ``target`` (whole_team pb tasks scale to the roster; the
+    # client's pure threshold mirror can't know that).
+    progress_rows = s.query(EventProgress).filter(EventProgress.event_id == ev.id).all()
+    row_targets: dict = {}
+    try:
+        from services.event_engine import effective_threshold
+
+        task_by_id = {t["id"]: t for t in tasks}
+        for p in progress_rows:
+            t = task_by_id.get(p.task_id)
+            if t is not None:
+                row_targets[(p.task_id, p.team_id)] = effective_threshold(
+                    s, {"type": t.get("type"), "target_value": t.get("target_value"),
+                        "config": t.get("config")}, p.team_id)
+    except ImportError:  # unit-test stubs
+        pass
     base["progress"] = [
         {
             "task_id": p.task_id,
@@ -560,8 +576,10 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             "progress": int(p.progress or 0),
             "completed": bool(p.completed),
             "completed_at": _ts(p.completed_at),
+            **({"target": row_targets[(p.task_id, p.team_id)]}
+               if (p.task_id, p.team_id) in row_targets else {}),
         }
-        for p in s.query(EventProgress).filter(EventProgress.event_id == ev.id).all()
+        for p in progress_rows
     ]
 
     # Pending-review overlay (web53a): which (task, team) pairs hold pending
@@ -589,7 +607,8 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
                 except (ValueError, TypeError):
                     config = None
             task_dicts[t["id"]] = {
-                "id": t["id"], "target_value": t["target_value"], "config": config,
+                "id": t["id"], "type": t.get("type"),
+                "target_value": t["target_value"], "config": config,
             }
         overlay: dict[tuple[int, int], dict] = {}
         for task_id, pteam_id in pending_pairs or ():
@@ -1672,10 +1691,16 @@ async def get_task_breakdown(event_id: int, task_id: int):
                 ):
                     player_names[pid] = name
 
+            # Team-aware threshold (whole_team pb tasks scale to the roster).
+            from services.event_engine import effective_threshold
+
+            target_override = effective_threshold(
+                s, {"type": task.type, "target_value": task.target_value,
+                    "config": task.config}, team.id)
             return build_task_breakdown(
                 task_dict, task_dict.get("tile"), rows, progress_row,
                 {"id": team.id, "name": team.name}, player_names, _ts,
-                pending_rows=pending_rows,
+                pending_rows=pending_rows, target_override=target_override,
             )
 
     payload = await asyncio.to_thread(_load)

@@ -195,8 +195,22 @@ def tile_spec(task: dict) -> dict:
                 "npcs": [target] if target else []}
 
     if task_type == "pb_target":
-        return {**empty, "badge": "KILL TIME",
-                "value": f"sub {_fmt_time(tv)}" if tv else None,
+        value = f"sub {_fmt_time(tv)}" if tv else None
+        # Completion requirement (config {"mode", "need"}): counted goals
+        # show their multiplier / audience on the tile.
+        mode = config.get("mode")
+        if value and mode == "whole_team":
+            value += " · whole team"
+        elif value and mode == "unique_players":
+            value += f" · {_fmt_num(config.get('need') or 1)} players"
+        elif value and mode == "times":
+            try:
+                need = int(config.get("need") or 1)
+            except (TypeError, ValueError):
+                need = 1
+            if need > 1:
+                value += f" ×{need}"
+        return {**empty, "badge": "KILL TIME", "value": value,
                 "npcs": [target] if target else []}
 
     if task_type == "xp_target":

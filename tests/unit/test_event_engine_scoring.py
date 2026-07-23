@@ -54,6 +54,12 @@ class _Q:
     def all(self):
         return list(self._rows)
 
+    def distinct(self):
+        return self
+
+    def count(self):
+        return len(self._rows)
+
     def delete(self, synchronize_session=False):
         n = len(self._rows)
         self._rows.clear()
@@ -147,12 +153,13 @@ class _Row:
     include-dedupe check)."""
 
     def __init__(self, matched_target=None, quantity=1, source_type="drop", rid=1,
-                 note=None):
+                 note=None, player_id=None):
         self.id = rid
         self.matched_target = matched_target
         self.quantity = quantity
         self.source_type = source_type
         self.note = note
+        self.player_id = player_id
 
 
 class TestRowAdvancesProgress:
@@ -203,6 +210,58 @@ class TestRowAdvancesProgress:
         s = _Session([])
         candidate = _Row(None, quantity=1, note="path:9", rid=None)
         assert engine._row_advances_progress(s, self.GWD_OR, 4, candidate) is False
+
+
+class TestPbEffectiveThreshold:
+    """effective_threshold — whole_team pb tasks scale to the roster; every
+    other task passes through the pure completion_threshold. The fake session
+    returns its row list for the member query (each row = one member)."""
+
+    WHOLE = {"id": 9, "type": "pb_target", "target": "Zulrah", "target_value": 70,
+             "config": {"mode": "whole_team"}}
+
+    def test_roster_size_is_the_threshold(self):
+        s = _Session([_Row(rid=1), _Row(rid=2), _Row(rid=3)])
+        assert engine.effective_threshold(s, self.WHOLE, 4) == 3
+
+    def test_empty_roster_floors_to_one(self):
+        s = _Session([])
+        assert engine.effective_threshold(s, self.WHOLE, 4) == 1
+
+    def test_teamless_context_falls_back_pure(self):
+        assert engine.effective_threshold(_Session([]), self.WHOLE, None) == 1
+
+    def test_other_tasks_pass_through(self):
+        times = {"id": 9, "type": "pb_target", "target_value": 70,
+                 "config": {"mode": "times", "need": 5}}
+        assert engine.effective_threshold(_Session([_Row()]), times, 4) == 5
+        kc = {"type": "kc_target", "target_value": 50}
+        assert engine.effective_threshold(_Session([]), kc, 4) == 50
+
+
+class TestPbUniqueAdvance:
+    """_row_advances_progress on unique-player pb rollups: a player who
+    already beat the time is dead weight on a repeat kill."""
+
+    UNIQ = {"id": 8, "type": "pb_target", "target": "Zulrah", "target_value": 70,
+            "config": {"mode": "unique_players", "need": 3}}
+
+    def test_repeat_player_is_dead_weight(self):
+        s = _Session([_Row(rid=10, player_id=5)])
+        assert engine._row_advances_progress(
+            s, self.UNIQ, 4, _Row(rid=None, player_id=5)) is False
+
+    def test_new_player_advances(self):
+        s = _Session([_Row(rid=10, player_id=5)])
+        assert engine._row_advances_progress(
+            s, self.UNIQ, 4, _Row(rid=None, player_id=6)) is True
+
+    def test_times_mode_always_advances(self):
+        times = {"id": 8, "type": "pb_target", "target": "Zulrah",
+                 "target_value": 70, "config": {"mode": "times", "need": 5}}
+        s = _Session([_Row(rid=10, player_id=5)])
+        assert engine._row_advances_progress(
+            s, times, 4, _Row(rid=None, player_id=5)) is True
 
 
 class TestVestigeChainDedupe:

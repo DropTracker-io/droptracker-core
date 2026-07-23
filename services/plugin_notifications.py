@@ -491,8 +491,20 @@ def describe_task(task: dict) -> tuple:
     if task_type == "kc_target":
         return (f"Reach {_fmt_num(tv)} kills at {target or 'the target boss'}.", [])
     if task_type == "pb_target":
-        return (f"Beat a personal best of {_fmt_time(tv)} at "
-                f"{target or 'the target boss'}.", [])
+        boss = target or "the target boss"
+        time_s = _fmt_time(tv)
+        mode = config.get("mode")
+        try:
+            need = int(config.get("need") or 1)
+        except (TypeError, ValueError):
+            need = 1
+        if mode == "whole_team":
+            return (f"Every player on the team must beat {time_s} at {boss}.", [])
+        if mode == "unique_players":
+            return (f"{need} different players must each beat {time_s} at {boss}.", [])
+        if mode == "times" and need > 1:
+            return (f"Beat {time_s} at {boss} {need} times — repeat kills count.", [])
+        return (f"Beat a personal best of {time_s} at {boss}.", [])
     if task_type == "xp_target":
         skill = target.capitalize() if target else "the target skill"
         return f"Gain {_fmt_num(tv)} {skill} XP as a team.", []

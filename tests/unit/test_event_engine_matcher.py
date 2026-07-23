@@ -380,11 +380,12 @@ class TestHelpers:
 class _Row:
     """Minimal EventCompletion stand-in for the pure rollup."""
     def __init__(self, matched_target=None, quantity=1, source_type="drop",
-                 note=None):
+                 note=None, player_id=None):
         self.matched_target = matched_target
         self.quantity = quantity
         self.source_type = source_type
         self.note = note
+        self.player_id = player_id
 
 
 class TestDistinctItemProgress:
@@ -792,6 +793,61 @@ class TestVestigeRings:
         assert [(m["mode"], m.get("path"), m.get("matched_target"))
                 for m in matches] == [("count", None, "Ultor vestige"),
                                       ("kc", 1, None)]
+
+
+# ── pb completion requirements (times / unique_players / whole_team) ─────────
+
+class TestPbCompletionModes:
+    def _pb_env(self, ms=65_000):
+        return _env("pb", {"npc_name": "Zulrah", "time_ms": ms})
+
+    def test_legacy_stays_first_mode(self):
+        t = _task(type="pb_target", target="Zulrah", target_value=70, config={})
+        assert engine.match_task(t, self._pb_env()) == {"mode": "first", "quantity": 1}
+
+    def test_times_one_stays_first_mode(self):
+        t = _task(type="pb_target", target="Zulrah", target_value=70,
+                  config={"mode": "times", "need": 1})
+        assert engine.match_task(t, self._pb_env()) == {"mode": "first", "quantity": 1}
+
+    def test_counted_modes_are_count_matches(self):
+        for cfg in ({"mode": "times", "need": 5},
+                    {"mode": "unique_players", "need": 3},
+                    {"mode": "whole_team"}):
+            t = _task(type="pb_target", target="Zulrah", target_value=70, config=cfg)
+            assert engine.match_task(t, self._pb_env()) == {"mode": "count", "quantity": 1}
+
+    def test_slow_kill_still_no_match(self):
+        t = _task(type="pb_target", target="Zulrah", target_value=70,
+                  config={"mode": "times", "need": 5})
+        assert engine.match_task(t, self._pb_env(ms=71_000)) is None
+
+    def test_threshold_per_mode(self):
+        assert engine.completion_threshold(
+            {"type": "pb_target", "target_value": 70}) == 1
+        assert engine.completion_threshold(
+            {"type": "pb_target", "target_value": 70,
+             "config": {"mode": "times", "need": 5}}) == 5
+        assert engine.completion_threshold(
+            {"type": "pb_target", "target_value": 70,
+             "config": {"mode": "unique_players", "need": 4}}) == 4
+        # whole_team resolves per team at apply time; the pure fallback is 1.
+        assert engine.completion_threshold(
+            {"type": "pb_target", "target_value": 70,
+             "config": {"mode": "whole_team"}}) == 1
+
+    def test_pb_mode_parses_string_configs_and_garbage(self):
+        assert engine._pb_mode(
+            {"config": '{"mode": "unique_players", "need": 3}'}) == ("unique_players", 3)
+        assert engine._pb_mode({"config": None}) == ("times", 1)
+        assert engine._pb_mode({"config": {"mode": "nonsense", "need": "x"}}) == ("times", 1)
+
+    def test_distinct_players_fold(self):
+        rows = [_Row(player_id=1), _Row(player_id=1), _Row(player_id=2),
+                _Row(None, quantity=2, source_type="manual"),  # admin wildcard
+                _Row(player_id=9, source_type="bonus")]
+        assert engine._distinct_players_from_rows(rows, 10) == 4
+        assert engine._distinct_players_from_rows(rows, 3) == 3
 
 
 # ── kc dedupe: kill_count keying + cooldown fallback ─────────────────────────
