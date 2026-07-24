@@ -54,6 +54,7 @@ from .seasonal_pet import SeasonalPlayerPet
 from .seasonal_quest_completion import SeasonalQuestCompletionEntry
 from .drop_split import DropSplit
 from .web import GroupAdmin, GroupEventManager, Announcement, AuditLog, DiscordOutbox, DocsPage, SiteRedirect, Suggestion, SuggestionMessage
+from .knowledgebase import KBDocument, KBChunk, KBIngestState, KB_SOURCE_TYPES
 from .badge import Badge, PlayerBadge
 from .subscriptions import (
     SubscriptionTier,
@@ -218,6 +219,10 @@ __all__ = [
     "SiteRedirect",
     "Suggestion",
     "SuggestionMessage",
+    "KBDocument",
+    "KBChunk",
+    "KBIngestState",
+    "KB_SOURCE_TYPES",
     "Badge",
     "PlayerBadge",
     "SubscriptionTier",

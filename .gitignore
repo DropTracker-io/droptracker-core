@@ -92,3 +92,7 @@ utils/osrs_api/semantic.py
 docs/EVENT_BUYINS_POT_PLAN.md
 scripts/.event_task_stats_cache.json
 .claude/
+
+# Local fastembed model cache (kb01a) — ~65MB of downloaded ONNX weights,
+# repopulated on demand. Path is configurable via KB_EMBED_CACHE.
+.fastembed_cache/

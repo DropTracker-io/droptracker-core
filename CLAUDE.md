@@ -49,6 +49,7 @@ Production runs as **systemd units** (`/etc/systemd/system/droptracker-*.service
 | `droptracker-heartbeat` | `bots/heartbeat.py` | Uptime heartbeat bot | — |
 | `droptracker-events` | `workers/event_consumer.py` | Events v2: drains `events:submissions`, applies task/bingo/team progress | — |
 | `droptracker-webhook-consumer` | `workers/webhook_consumer.py` | Drains `webhook:queue` (idles unless `WEBHOOK_QUEUE_MODE=true`) | — |
+| `droptracker-adminbot` | `bots/adminbot.py` | Owner-only admin/KB bot (`/ask`, `/kb-search`, `/kb-sync`, `/lookup`, gated `/sql`). Runs as `debian` (not `user`) because answer synthesis shells out to the Claude Code CLI whose subscription auth lives in `/home/debian/.claude` | — |
 
 Canonical unit files live in `deploy/systemd/` (install with `cp` + `daemon-reload`, see its README). Dev API runs on port **31324** via `droptracker-api-dev` systemd unit (disabled by default, same `.env` as prod).
 
@@ -299,6 +300,20 @@ Stored in `group_configurations` table (key-value per group):
 
 ---
 
+## Knowledgebase + Owner-Only Admin Bot (kb01a)
+
+Discord content is mined into a searchable knowledgebase, served by a separate owner-only admin bot. Zero-added-API-cost design: answer synthesis shells out to the **Claude Code CLI** (`claude -p --tools ""`, subscription auth — `ANTHROPIC_API_KEY` is deliberately stripped from the subprocess env), and semantic search uses **local fastembed** vectors (CPU/ONNX, `KB_EMBEDDINGS=off` degrades to keyword-only).
+
+- **Tables:** `kb_documents` / `kb_chunks` (FULLTEXT on `content` — first FULLTEXT index in this schema) / `kb_ingest_state` (`db/models/knowledgebase.py`, migration `kb01a`).
+- **Sources:** mirrored ticket transcripts (`ticket_messages`, no Discord calls), suggestions/bugs forums, chat channels in `KB_CHAT_CHANNEL_IDS`, and repo docs (`docs/*.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`).
+- **Mining:** `services/kb/miner.py`; one-shot backfill via `python -m scripts.kb_mine`. Discord mining uses **REST-only login** (`Client.login()`, no gateway) so the `HALL_OF_FAME_BOT_TOKEN` can be borrowed without touching the live `droptracker-hof` gateway session; close with `bot.http.close()` (`bot.stop()` raises without a gateway). Ongoing sync: the admin bot's `/kb-sync` on its own token.
+- **Retrieval:** `services/kb/retriever.py` — MariaDB `MATCH…AGAINST` + cosine over packed float32 BLOBs, merged with reciprocal-rank fusion.
+- **Investigations:** `services/kb/investigator.py` — `/ask` routes questions between KB RAG and **agentic read-only DB investigation**: the model plans up to 3 SELECTs against a curated schema card (+1 refinement round), every statement passes `services/kb/sql_guard.py` (the same SELECT-only validator behind `/sql`) and runs AUTOCOMMIT + `max_statement_time=10` + session READ ONLY, capped at 50 rows. Executed SQL is shown in the reply embed and audited. Mined Discord content is never shown to the SQL-planning stage (prompt-injection isolation).
+- **Admin bot:** `bots/adminbot.py` + `commands/adminbot_cmds.py` (loaded ONLY by the admin bot — deliberately **not** exported from `commands/__init__.py`, which the public core bot loads wholesale). Every command is owner-gated (`WEB_SUPERADMIN_DISCORD_IDS` ∪ `User.is_superadmin`), ephemeral, and audited to `audit_log` (`adminbot.*` actions). `/sql` is read-only-validated and disabled until `KB_ALLOW_SQL=true`.
+- **Env keys:** `ADMIN_BOT_TOKEN`, `ADMIN_BOT_GUILD_IDS`, `KB_CHAT_CHANNEL_IDS`, `KB_EMBEDDINGS`, `KB_EMBED_MODEL`, `KB_EMBED_CACHE`, `CLAUDE_CLI_PATH`, `KB_CLAUDE_MODEL`, `KB_CLAUDE_TIMEOUT`, `KB_ALLOW_SQL`.
+
+---
+
 ## Development Setup
 
 ```bash
@@ -355,3 +370,4 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`.
 | Website auth/session | `web_api/session.py` (JWT), `web_api/routes/auth.py` (Discord OAuth) |
 | Live drop feed / SSE | `services/realtime.py` (publish), `web_api/routes/realtime.py` (stream) |
 | Subscriptions / PayPal | `web_api/billing.py`, `web_api/routes/subscriptions.py`, `web_api/routes/paypal_ipn.py` |
+| Knowledgebase / owner admin bot | `services/kb/`, `bots/adminbot.py`, `commands/adminbot_cmds.py`, `scripts/kb_mine.py` |

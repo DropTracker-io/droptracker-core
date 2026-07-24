@@ -107,3 +107,9 @@ stripe==15.3.0
 
 # Monitoring (optional at runtime - utils/sentry.py no-ops without SENTRY_DSN)
 sentry-sdk==2.64.0
+
+# Knowledgebase (kb01a) — local semantic embeddings (CPU/ONNX, no torch).
+# Optional at runtime: services/kb degrades to keyword-only FULLTEXT retrieval
+# when these are absent or KB_EMBEDDINGS=off.
+fastembed==0.8.0
+numpy==2.4.6
