@@ -80,8 +80,8 @@ from db import (
     user_group_association,
 )
 from web_api.common import (abort_problem, db_session, hidden_player_ids, money,
-                            parse_page, private_no_store, score_num,
-                            with_cache_headers)
+                            parse_page, player_month_totals, private_no_store,
+                            score_num, with_cache_headers)
 from web_api.event_loot import loot_gp_by_player
 from web_api.event_players import norm_item_name, rank_players, top_items
 from web_api.task_tiles import build_tile, spec_names, tile_spec
@@ -4851,7 +4851,17 @@ async def list_event_signups(event_id: int):
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev)
-            return list_pool(s, ev)
+            rows = list_pool(s, ev)
+        # Enrich with each player's current-month loot from Redis (batched,
+        # outside the DB session so no connection is held during Redis I/O).
+        # Pairs with the EHB / total-level joined by list_pool so admins can
+        # gauge a signed-up player's ability at a glance. Emitted as the
+        # standard `{value, value_formatted}` money envelope like every other
+        # loot figure in the contract.
+        totals = player_month_totals([r["player_id"] for r in rows])
+        for r in rows:
+            r["monthly_loot"] = money(totals.get(r["player_id"], 0))
+        return rows
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
 
@@ -4885,6 +4895,42 @@ async def assign_signup(event_id: int):
                 before=None, after=f"team:{team_id}",
             ))
             _mark_team_discord_dirty(s, event_id, team_id)
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify({"ok": True}))
+
+
+@events_bp.post("/events/<int:event_id>/signups/unassign")
+async def unassign_signup(event_id: int):
+    """Move a signed-up player back to the pool: drop their team placement but
+    keep the sign-up (undo a mis-assignment without withdrawing them)."""
+    user_id = current_user_id()
+    body = await json_body()
+    player_id = body.get("player_id")
+    if not isinstance(player_id, int):
+        abort_problem(422, "Invalid body", "'player_id' must be an integer.")
+
+    def _apply():
+        from services.event_signup import SignupError, unassign_from_pool
+
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            _assert_roster_open(ev)
+            try:
+                unassign_from_pool(s, ev, player_id)
+            except SignupError as exc:
+                abort_problem(exc.status, exc.title, exc.detail)
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id,
+                event_id=ev.id,
+                action="event.signup.unassign",
+                target=f"web_events.{event_id}.player.{player_id}",
+                before=None, after="team:none",
+            ))
+            _mark_team_discord_dirty(s, event_id)
             s.commit()
 
     await asyncio.to_thread(_apply)

@@ -289,11 +289,19 @@ def _team_counts(session, team_ids: list) -> dict:
 # ---------------------------------------------------------------------------- #
 def list_pool(session, ev) -> list:
     """The sign-up pool with each player's current team placement (None while
-    unassigned). Ordered by sign-up time."""
+    unassigned) plus the roster-building context an admin sorts on:
+    ``ehb`` (WOM efficient hours bossed) and ``total_level`` off the Player.
+    Ordered by sign-up time.
+
+    Monthly loot is *not* joined here — it lives in Redis, not the DB — so the
+    Web API layer enriches each row with ``monthly_loot`` on top of this result
+    (see ``web_api.common.player_month_totals``). Keeping this function DB-only
+    lets the bot share it without pulling in the web layer."""
     from db.models import EventSignup, EventTeam, EventTeamMember, Group, Player
 
     rows = (
-        session.query(EventSignup, Player.player_name, Group.group_name)
+        session.query(EventSignup, Player.player_name, Group.group_name,
+                      Player.ehb, Player.total_level)
         .join(Player, Player.player_id == EventSignup.player_id)
         .outerjoin(Group, Group.group_id == EventSignup.group_id)
         .filter(EventSignup.event_id == ev.id)
@@ -302,7 +310,7 @@ def list_pool(session, ev) -> list:
     )
     if not rows:
         return []
-    pids = [s.player_id for s, _, _ in rows]
+    pids = [s.player_id for s, *_ in rows]
     # Current placement for each signed-up player on THIS event.
     placement = dict(
         session.query(EventTeamMember.player_id, EventTeamMember.team_id)
@@ -319,8 +327,10 @@ def list_pool(session, ev) -> list:
             "team_id": placement.get(s.player_id),
             "source": s.source,
             "signed_up_at": int(s.created_at.timestamp()) if s.created_at else None,
+            "ehb": round(float(ehb), 1) if ehb is not None else None,
+            "total_level": int(total_level) if total_level is not None else None,
         }
-        for s, pname, gname in rows
+        for s, pname, gname, ehb, total_level in rows
     ]
 
 
@@ -373,6 +383,26 @@ def assign_from_pool(session, ev, player_id: int, team_id: int) -> None:
             raise SignupError(422, "Wrong clan",
                               "That team belongs to a different clan than the player.")
     _place(session, ev.id, player_id, team_id)
+
+
+def unassign_from_pool(session, ev, player_id: int) -> None:
+    """Move a signed-up player back to the pool: drop their team placement on
+    this event but KEEP the sign-up (unlike :func:`remove_signup`, which
+    withdraws them entirely). Lets an admin undo a mis-assignment without
+    forcing the player to sign up again. No-op if they hold no placement. The
+    caller owns the commit."""
+    from db.models import EventTeam, EventTeamMember
+
+    if not _signed_up(session, ev, player_id):
+        raise SignupError(404, "Not in the pool", "That player has not signed up for this event.")
+    memberships = (
+        session.query(EventTeamMember)
+        .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+        .filter(EventTeam.event_id == ev.id, EventTeamMember.player_id == player_id)
+        .all()
+    )
+    for m in memberships:
+        session.delete(m)
 
 
 def randomize_pool(session, ev, group_id: Optional[int] = None) -> dict:

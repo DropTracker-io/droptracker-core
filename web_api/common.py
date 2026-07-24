@@ -171,6 +171,60 @@ def player_month_total(player_id: int, partition: Optional[int] = None) -> int:
         return 0
 
 
+def player_month_totals(player_ids: Iterable[int],
+                        partition: Optional[int] = None) -> dict:
+    """Batched :func:`player_month_total`: ``{player_id: gp}`` for many players in
+    two Redis round-trips (one pipeline of per-player GETs, one pipeline of
+    leaderboard ZSCOREs for the keys that were missing) instead of 2·N.
+
+    Same source and fallback as the single-player version, so the numbers match
+    the leaderboard exactly. Any id that can't be resolved maps to ``0``. Ideal
+    for enriching a whole sign-up pool at once without N sequential lookups.
+    """
+    ids = [int(p) for p in player_ids]
+    if not ids:
+        return {}
+    if partition is None:
+        partition = get_current_partition()
+    conn = _rc()
+    if conn is None:
+        return {pid: 0 for pid in ids}
+
+    out: dict = {}
+    missing: list = []
+    try:
+        pipe = conn.pipeline()
+        for pid in ids:
+            pipe.get(f"player:{pid}:{partition}:total_loot")
+        raw_vals = pipe.execute()
+    except Exception:
+        return {pid: 0 for pid in ids}
+    for pid, raw in zip(ids, raw_vals):
+        if raw is None:
+            missing.append(pid)
+            continue
+        try:
+            out[pid] = int(float(raw))
+        except Exception:  # noqa: BLE001 — match single-getter's blanket guard
+            out[pid] = 0
+
+    if missing:
+        try:
+            key = leaderboard_key(partition)
+            pipe = conn.pipeline()
+            for pid in missing:
+                pipe.zscore(key, pid)
+            scores = pipe.execute()
+        except Exception:
+            scores = [None] * len(missing)
+        for pid, score in zip(missing, scores):
+            try:
+                out[pid] = int(float(score)) if score is not None else 0
+            except Exception:  # noqa: BLE001 — match single-getter's blanket guard
+                out[pid] = 0
+    return out
+
+
 def player_list_loot_sum(player_ids: Iterable[int], partition: Optional[int] = None) -> int:
     total = 0
     for pid in player_ids:
