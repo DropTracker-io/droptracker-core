@@ -492,6 +492,14 @@ async def fetch_group_members(
                 player_name = getattr(player_obj, "display_name", None)
                 member_wom_id = member.player_id
                 existing_player = session.query(Player).filter(Player.wom_id == member_wom_id).first()
+                if existing_player is not None and _is_wom_import_stub(existing_player):
+                    # A stub is holding an id that belongs to a real, plugin-authed
+                    # row. Hand it back before the membership pass runs, or every
+                    # clan on this roster attaches to the stub (see the docstring).
+                    healed = _heal_stub_onto_real_twin(
+                        session, existing_player, player_name, member_wom_id)
+                    if healed is not None:
+                        existing_player = healed
                 if existing_player:
                     # Every membership carries a full WOM player object, so this
                     # already-paid-for hourly call refreshes EHB for the whole
@@ -598,6 +606,64 @@ def _find_real_player_by_normalized_name(db_session, player_name: Optional[str])
         and not str(p.account_hash or "").startswith("wom_temp_")
     ]
     return real_matches[0] if len(real_matches) == 1 else None
+
+
+def _is_wom_import_stub(player) -> bool:
+    """True for a WOM-roster stub row (temporary ``wom_temp_*`` account hash)."""
+    return str(getattr(player, "account_hash", "") or "").startswith("wom_temp_")
+
+
+def _heal_stub_onto_real_twin(db_session, stub, player_name: Optional[str],
+                              member_wom_id: int) -> Optional[Player]:
+    """Hand a WOM-import stub's id back to the real row that shares its name.
+
+    Group membership attaches by ``players.wom_id`` (``db/ops.py``
+    ``sync_group_from_wom`` selects members with ``Player.wom_id.in_(...)``), so
+    whichever row holds the id collects the clans. When a stub holds it while the
+    real, plugin-authed account exists under a *different* id, every clan on the
+    roster lands on the stub — and the real row, the one the player's DropTracker
+    account is linked to and the one event sign-up resolves, is left out of them.
+
+    The create-time guard in ``_create_player_from_wom_member`` cannot repair this:
+    once the stub exists it matches by ``wom_id`` first and is treated as canonical
+    forever, so the split is permanent and keeps widening with each sync. Moving the
+    id puts the real row back on the id-match fast path.
+
+    Deliberately narrow: this frees and transfers the id and nothing else. The
+    stub's own rows (drops, completions, memberships) need the 46-table
+    reassignment in ``scripts/merge_ghost_players.py``; migrating them from a
+    background sync is not safe. The stub is left inert with a NULL ``wom_id`` and
+    logged at WARNING so the leftover pair is easy to find and clean up.
+
+    Returns the real row when the id was transferred, else None.
+
+    Recycled-RSN caveat: a name freed and taken by someone else would move the id
+    onto the previous owner's row. ``_find_real_player_by_normalized_name`` already
+    bounds that (unique non-stub match only), and the stale-id correction below
+    takes exactly the same bet on the roster being authoritative for who holds a
+    name right now.
+    """
+    real = _find_real_player_by_normalized_name(db_session, player_name)
+    if real is None or real.player_id == stub.player_id:
+        return None
+    try:
+        # players.wom_id is UNIQUE — the stub has to release it first.
+        stub.wom_id = None
+        db_session.flush()
+        real.wom_id = member_wom_id
+        db_session.commit()
+    except Exception as heal_err:
+        logger.warning("Failed to move WOM id %s from stub %s to real player %s: %s",
+                       member_wom_id, stub.player_id, real.player_id, heal_err)
+        db_session.rollback()
+        return None
+    logger.warning(
+        "Healed split identity for '%s': moved wom_id %s from WOM-import stub "
+        "player_id=%s to real player_id=%s. The stub still holds its own rows — "
+        "merge it with scripts/merge_ghost_players.py.",
+        real.player_name, member_wom_id, stub.player_id, real.player_id,
+    )
+    return real
 
 
 def _create_player_from_wom_member(db_session, wom_id: int, player_name: Optional[str], player_obj=None) -> Optional[Player]:

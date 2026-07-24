@@ -329,3 +329,92 @@ def test_provisioned_stub_player_gets_ehb(wom_env):
     assert row is not None
     assert row.account_hash == "wom_temp_999"
     assert row.ehb == 21.5
+
+
+# ── healing a split identity ─────────────────────────────────────────────────
+#
+# Group membership attaches by players.wom_id (db/ops.py sync_group_from_wom), so
+# a stub holding the roster's id silently collects every clan while the real,
+# linked row gets none of them — which is what blocks event sign-up. The
+# create-time guard can't undo it: the stub matches by wom_id first, so the split
+# is permanent until the id is moved back.
+
+
+def _by_id(env, player_id):
+    s = env.Session()
+    try:
+        return s.query(env.Player).filter(env.Player.player_id == player_id).first()
+    finally:
+        s.close()
+
+
+def test_stub_holding_the_id_hands_it_back_to_the_real_twin(wom_env):
+    # The exact Brondt shape: real row pinned to a WOM id the rosters never report,
+    # stub squatting on the live one.
+    _seed(wom_env, player_id=3, wom_id=796802, player_name="Brondt",
+          account_hash="7042295242696540318", ehb=0.0)
+    _seed(wom_env, player_id=5755906, wom_id=169385, player_name="Brondt",
+          account_hash="wom_temp_169385", ehb=1758.51)
+    wom_env.memberships.append(_membership(169385, "Brondt", 1758.51))
+
+    ids = _sync(wom_env)
+
+    assert ids == [169385]
+    assert _by_id(wom_env, 3).wom_id == 169385, "real row must end up holding the id"
+    assert _by_id(wom_env, 5755906).wom_id is None, "stub must release the unique id"
+    # The membership pass keys off wom_id, so the real row is now the one that
+    # joins the clan — the whole point of the heal.
+    assert _read(wom_env, 169385).player_id == 3
+
+
+def test_heal_carries_the_ehb_onto_the_real_row(wom_env):
+    _seed(wom_env, player_id=3, wom_id=796802, player_name="Brondt",
+          account_hash="7042295242696540318", ehb=0.0)
+    _seed(wom_env, player_id=5755906, wom_id=169385, player_name="Brondt",
+          account_hash="wom_temp_169385", ehb=1758.51)
+    wom_env.memberships.append(_membership(169385, "Brondt", 1758.51))
+
+    _sync(wom_env)
+
+    assert _by_id(wom_env, 3).ehb == 1758.51
+
+
+def test_stub_with_no_real_twin_is_left_alone(wom_env):
+    """Most stubs are legitimate — a roster member who has never used the plugin."""
+    _seed(wom_env, player_id=900, wom_id=555, player_name="Loner",
+          account_hash="wom_temp_555", ehb=12.0)
+    wom_env.memberships.append(_membership(555, "Loner", 12.0))
+
+    _sync(wom_env)
+
+    assert _by_id(wom_env, 900).wom_id == 555
+
+
+def test_stub_is_not_stolen_when_the_name_is_ambiguous(wom_env):
+    """Two real rows share the name, so we can't tell which owns the account.
+    Guessing would move a live id onto the wrong player — leave it for a human."""
+    _seed(wom_env, player_id=10, wom_id=1, player_name="Twin", account_hash="hash-a")
+    _seed(wom_env, player_id=11, wom_id=2, player_name="Twin", account_hash="hash-b")
+    _seed(wom_env, player_id=12, wom_id=333, player_name="Twin",
+          account_hash="wom_temp_333")
+    wom_env.memberships.append(_membership(333, "Twin", 5.0))
+
+    _sync(wom_env)
+
+    assert _by_id(wom_env, 12).wom_id == 333
+    assert _by_id(wom_env, 10).wom_id == 1
+    assert _by_id(wom_env, 11).wom_id == 2
+
+
+def test_heal_matches_across_space_underscore_spelling(wom_env):
+    """OSRS treats 'lm_Brad' and 'lm Brad' as the same name."""
+    _seed(wom_env, player_id=20, wom_id=4242, player_name="lm Brad",
+          account_hash="real-hash")
+    _seed(wom_env, player_id=21, wom_id=3170694, player_name="lm_Brad",
+          account_hash="wom_temp_3170694")
+    wom_env.memberships.append(_membership(3170694, "lm_Brad", 9.0))
+
+    _sync(wom_env)
+
+    assert _by_id(wom_env, 20).wom_id == 3170694
+    assert _by_id(wom_env, 21).wom_id is None

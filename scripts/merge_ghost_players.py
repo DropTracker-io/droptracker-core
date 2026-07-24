@@ -37,11 +37,25 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-# (ghost_player_id, real_player_id, real_user_id_or_None, label)
+# (ghost_player_id, real_player_id, real_user_id_or_None, adopt_wom_id_or_None, label)
+#
+# adopt_wom_id: the WOM id the REAL row should end up carrying. Set it when the
+# real row's stored wom_id is dead on WOM's side while the ghost carries the id
+# the clan rosters actually report — leaving the stale id in place is what makes
+# the account re-ghost (see merge_pair step 8). None leaves players.wom_id alone.
 PAIRS = [
-    (5755309, 3, 3, "Brondt (ghost wom 169385 -> real 3, Discord brondt_)"),
-    (5754005, 5754170, None, "solo novelli (ghost wom 2606248 -> real 5754170)"),
-    (5755171, 5753485, None, "lm_Brad -> lm Brad (space/underscore, ghost wom 3170694 -> real 5753485)"),
+    # --- already merged 2026-07-23; kept for provenance, re-running them is a no-op ---
+    (5755309, 3, 3, None, "Brondt (ghost wom 169385 -> real 3, Discord brondt_)"),
+    (5754005, 5754170, None, None, "solo novelli (ghost wom 2606248 -> real 5754170)"),
+    (5755171, 5753485, None, None, "lm_Brad -> lm Brad (space/underscore, ghost wom 3170694 -> real 5753485)"),
+    # --- 2026-07-24: the two remaining split pairs, both stale-wom_id re-ghosts ---
+    # Brondt re-ghosted 2026-07-23 13:23 despite the create-time fix. Real row 3 was
+    # pinned to wom 796802, which WOM resolves to an empty "unknown" record (0 exp,
+    # combat level 3, no snapshot since 2022) — so the roster sync never matched him
+    # by id. The ghost carries the live account (747M exp, updated daily).
+    (5755906, 3, 3, 169385, "Brondt (ghost wom 169385 -> real 3; real held dead wom 796802)"),
+    # Same shape: real row 5755813 holds wom 3259035, which WOM 404s outright.
+    (5755787, 5755813, None, 3145894, "Tril22 (ghost wom 3145894 -> real 5755813; real held nonexistent wom 3259035)"),
 ]
 
 # Tables handled with bespoke unique-key dedup; excluded from the generic reassign.
@@ -97,7 +111,7 @@ def count_refs(cur, columns, pid):
     return total
 
 
-def merge_pair(cur, ghost, real, real_uid, columns, log):
+def merge_pair(cur, ghost, real, real_uid, adopt_wom_id, columns, log):
     # Guard: ghost must be a wom_temp stub; real must exist and not be a stub.
     cur.execute("SELECT player_id, player_name, account_hash FROM players WHERE player_id=%s", (ghost,))
     g = cur.fetchone()
@@ -179,6 +193,30 @@ def merge_pair(cur, ghost, real, real_uid, columns, log):
     # 7) Delete the ghost (guarded).
     cur.execute("DELETE FROM players WHERE player_id=%s AND account_hash LIKE 'wom_temp_%%'", (ghost,))
     log.append(f"  deleted ghost player row: {cur.rowcount}")
+
+    # 8) Adopt the roster-authoritative WOM id.
+    #    Merging alone does NOT stop the account re-ghosting. fetch_group_members
+    #    matches members by players.wom_id first; when the real row's id is one WOM
+    #    no longer resolves, that lookup always misses and every sync falls through
+    #    to the name-fallback path — the fragile path that minted the ghost. Moving
+    #    the real row onto the id the rosters actually report puts it back on the
+    #    id-match fast path. players.wom_id is UNIQUE, so this MUST run after the
+    #    ghost row (which holds that id) is deleted.
+    if adopt_wom_id is not None:
+        cur.execute("SELECT wom_id FROM players WHERE player_id=%s", (real,))
+        row = cur.fetchone()
+        old_wom = row["wom_id"] if row else None
+        if old_wom == adopt_wom_id:
+            log.append(f"  wom_id: real already on {adopt_wom_id}, no change")
+        else:
+            cur.execute("SELECT player_id FROM players WHERE wom_id=%s AND player_id<>%s",
+                        (adopt_wom_id, real))
+            clash = cur.fetchone()
+            if clash:
+                raise RuntimeError(
+                    f"ABORT: wom_id {adopt_wom_id} still held by player {clash['player_id']}")
+            cur.execute("UPDATE players SET wom_id=%s WHERE player_id=%s", (adopt_wom_id, real))
+            log.append(f"  wom_id: real {real} moved {old_wom} -> {adopt_wom_id}")
     return "merged"
 
 
@@ -198,12 +236,12 @@ def main():
         with conn.cursor() as cur:
             columns = all_reference_columns(cur)
             print(f"{len(columns)} player_id reference columns. Mode: {'APPLY' if args.apply else 'DRY-RUN'}\n")
-            for ghost, real, real_uid, label in pairs:
+            for ghost, real, real_uid, adopt_wom_id, label in pairs:
                 log = [f"PAIR: {label}", f"  ghost={ghost} real={real}"]
                 # snapshot for audit/reversibility before mutating
                 snap = count_refs(cur, columns, ghost)
                 try:
-                    result = merge_pair(cur, ghost, real, real_uid, columns, log)
+                    result = merge_pair(cur, ghost, real, real_uid, adopt_wom_id, columns, log)
                     if args.apply:
                         conn.commit(); log.append("  COMMITTED")
                     else:
