@@ -77,6 +77,7 @@ from web_api.deps import (
 )
 from web_api.routes.events import (
     _assert_event_admin,
+    _assert_event_not_past,
     _bump,
     _detail,
     _effective_status,
@@ -625,11 +626,15 @@ async def revoke_completion(event_id: int):
 async def update_task(event_id: int, task_id: int):
     user_id = current_user_id()
     body = await json_body()
+    retro = body.get("retro")
+    if retro is not None and retro not in ("recompute", "keep"):
+        abort_problem(422, "Invalid retro", "'retro' must be 'recompute' or 'keep'.")
 
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev)
+            _assert_event_not_past(ev)
             task = (
                 s.query(EventTask)
                 .filter(EventTask.id == task_id, EventTask.event_id == event_id)
@@ -641,6 +646,8 @@ async def update_task(event_id: int, task_id: int):
                 "label": task.label, "points": int(task.points or 0),
                 "target": task.target, "target_value": task.target_value,
                 "visibility": task.visibility,
+                "config": task.config or None,
+                "requires_confirmation": bool(task.requires_confirmation),
             }
             if "label" in body:
                 label = (body.get("label") or "").strip()
@@ -712,19 +719,73 @@ async def update_task(event_id: int, task_id: int):
                 "label": task.label, "points": int(task.points or 0),
                 "target": task.target, "target_value": task.target_value,
                 "visibility": task.visibility,
+                "config": task.config or None,
+                "requires_confirmation": bool(task.requires_confirmation),
             }
+
+            # ── Live-edit retroactivity (web68a) ─────────────────────────────
+            # A scoring-affecting edit on an ACTIVE event with recorded rows
+            # must say what happens to the past: "recompute" re-folds every
+            # (task, team) rollup against the new goal/points (awarding AND
+            # revoking); "keep" leaves recorded state alone and applies
+            # forward-only. Forward-only kinds (manual types, board-game) have
+            # no recomputable ledger, so no choice is demanded there.
+            scoring_keys = ("target", "target_value", "config", "points")
+            scoring_affecting = any(
+                _before_task[k] != _after_task[k] for k in scoring_keys
+            )
+            forward_only = (
+                task.type in ("custom", "ehp_target", "ehb_target")
+                or (getattr(ev, "kind", None) or "standard") == "board_game"
+            )
+            recompute_summary = None
+            if scoring_affecting and _effective_status(ev) == "active":
+                has_rows = (
+                    s.query(EventProgress.id)
+                    .filter(EventProgress.task_id == task.id).first() is not None
+                    or s.query(EventCompletion.id)
+                    .filter(EventCompletion.task_id == task.id,
+                            EventCompletion.status.in_(APPLIED_STATUSES))
+                    .first() is not None
+                )
+                if retro == "recompute" and forward_only:
+                    abort_problem(
+                        422, "Cannot recompute",
+                        "This task type has no automatic progress to recompute "
+                        "— the change applies going forward only.",
+                        extra={"code": "forward_only"})
+                if has_rows and not forward_only and retro is None:
+                    abort_problem(
+                        422, "Retro choice required",
+                        "This change affects recorded progress on a live event. "
+                        "Pass retro='recompute' to re-score existing progress "
+                        "against the new goal, or retro='keep' to leave it and "
+                        "apply the change going forward.",
+                        extra={"code": "retro_required"})
+                if has_rows and retro == "recompute":
+                    s.flush()  # the engine re-reads the task row post-edit
+                    recompute_summary = _engine().recompute_task_rollups(
+                        s, ev, task, old_points=_before_task["points"])
+
             if _after_task != _before_task:
-                # A mid-event points/goal edit silently rescores — record it so
-                # the audit log can explain a task's point total (web57a).
+                # Record the edit — and, on a live event, the maker's retro
+                # choice + per-team score deltas — so the audit log can explain
+                # any task's point total (web57a/web68a).
+                after_payload = dict(_after_task)
+                if scoring_affecting and _effective_status(ev) == "active":
+                    after_payload["retro"] = retro or (
+                        "forward_only" if forward_only else "none")
+                if recompute_summary is not None:
+                    after_payload["recompute"] = recompute_summary["teams"]
                 s.add(AuditLog(
                     actor_user_id=user_id, group_id=ev.group_id, event_id=event_id,
                     action="event.task.update",
                     target=f"web_event_tasks.{task.id}",
                     before=json.dumps(_before_task),
-                    after=json.dumps(_after_task),
+                    after=json.dumps(after_payload, default=str),
                 ))
             s.commit()
-            return {
+            payload = {
                 "id": task.id,
                 "type": task.type,
                 "label": task.label,
@@ -735,6 +796,9 @@ async def update_task(event_id: int, task_id: int):
                 "visibility": task.visibility or "public",
                 "config": task.config or None,
             }
+            if recompute_summary is not None:
+                payload["recompute"] = recompute_summary
+            return payload
 
     payload = await asyncio.to_thread(_apply)
     _bump(event_id)
@@ -758,6 +822,10 @@ def _assert_board_editable(ev) -> None:
     Until then the gate is "not started": draft, or never explicitly
     activated and the scheduled start (if any) is still in the future.
     Task 21's explicit activation naturally tightens this to draft-only.
+
+    Board-game (dice) layouts keep this strict lock even with live edits
+    enabled (web68a): piece positions FK the tiles, so replacing the layout
+    mid-game would strand pieces. Board *settings* stay live-tunable.
     """
     if ev.status == "draft":
         return
@@ -767,6 +835,18 @@ def _assert_board_editable(ev) -> None:
         409, "Event has started",
         "The bingo board is locked once the event starts.",
     )
+
+
+def _assert_bingo_board_editable(ev) -> None:
+    """The bingo-board variant of :func:`_assert_board_editable` (web68a):
+    the per-event ``allow_live_edits`` toggle unlocks the board while the
+    event is ACTIVE. The live-replace path already reconciles cell
+    completions and line/blackout bonuses (``reconcile_bingo_bonuses``), so a
+    mid-event board change keeps scores honest. Past events stay locked —
+    frozen records."""
+    if _effective_status(ev) == "active" and bool(getattr(ev, "allow_live_edits", False)):
+        return
+    _assert_board_editable(ev)
 
 
 def _merged_auto_config(raw) -> str:
@@ -910,7 +990,7 @@ async def put_bingo_board(event_id: int):
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev)
-            _assert_board_editable(ev)
+            _assert_bingo_board_editable(ev)
 
             # Resolve library presets up front.
             lib_ids = {c["library_item_id"] for c in cells_in if c.get("library_item_id") is not None}

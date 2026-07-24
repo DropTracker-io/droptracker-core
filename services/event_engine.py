@@ -3355,6 +3355,37 @@ def _unwind_bonuses(session, event: dict, team_id: int) -> list:
     return revoked
 
 
+def _derive_applied_progress(session, task: dict, team_id) -> float:
+    """One (task, team) rollup value derived purely from the SURVIVING applied
+    ledger rows (``auto``/``confirmed``/``manual``) + the task config — never
+    from the stored ``EventProgress`` value. Shared by :func:`revoke_ledger_row`
+    and :func:`recompute_task_rollups` so "what does the ledger say now?" has a
+    single source of truth. Not for loot_sweep (its stateless fold lives in
+    ``_loot_sweep_score``)."""
+    from db.models import EventCompletion
+
+    if _pb_distinct_players(task):
+        return _distinct_player_progress(
+            session, task, team_id, effective_threshold(session, task, team_id))
+    if _list_kind(task) in ("all_of", "assembly"):
+        # Distinct-item semantics (revoked rows are already excluded — their
+        # status flipped before this recompute).
+        return _distinct_item_progress(session, task, team_id)
+    if _list_kind(task) == "groups":
+        return _grouped_item_progress(session, task, team_id)
+    if _list_kind(task) == "any_path":
+        return _anypath_item_progress(session, task, team_id)
+    survivors = (session.query(EventCompletion)
+                 .filter(EventCompletion.task_id == task["id"],
+                         EventCompletion.team_id == team_id,
+                         EventCompletion.status.in_(("auto", "confirmed", "manual")))
+                 .all())
+    return sum(
+        max(int(r.quantity or 1), 1) for r in survivors
+        if (r.source_type or "") != "bonus"
+    )
+
+
 def revoke_ledger_row(session, completion) -> Optional[dict]:
     """Recompute (task, team) state after a ledger row was revoked (Task 18).
 
@@ -3400,27 +3431,7 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
     if _list_kind(task) == "loot_sweep":
         return _revoke_loot_sweep(session, event, task, team_id, completion)
 
-    if _pb_distinct_players(task):
-        new_progress = _distinct_player_progress(
-            session, task, team_id, effective_threshold(session, task, team_id))
-    elif _list_kind(task) in ("all_of", "assembly"):
-        # Distinct-item semantics (the revoked row is already excluded — its
-        # status flipped before this recompute).
-        new_progress = _distinct_item_progress(session, task, team_id)
-    elif _list_kind(task) == "groups":
-        new_progress = _grouped_item_progress(session, task, team_id)
-    elif _list_kind(task) == "any_path":
-        new_progress = _anypath_item_progress(session, task, team_id)
-    else:
-        survivors = (session.query(EventCompletion)
-                     .filter(EventCompletion.task_id == task["id"],
-                             EventCompletion.team_id == team_id,
-                             EventCompletion.status.in_(("auto", "confirmed", "manual")))
-                     .all())
-        new_progress = sum(
-            max(int(r.quantity or 1), 1) for r in survivors
-            if (r.source_type or "") != "bonus"
-        )
+    new_progress = _derive_applied_progress(session, task, team_id)
 
     # P0-7: locked read — progress is a read-modify-write shared between the
     # consumer and webapi confirm/revoke flows; unlocked, one side's update
@@ -3501,3 +3512,219 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
     _publish(event["id"], frame)
     return {"progress": new_progress, "completed": now_completed,
             "team_score": team_score, "revoked_bonuses": revoked_bonuses}
+
+
+def recompute_task_rollups(session, event_row, task_row, *,
+                           old_points: Optional[int] = None) -> dict:
+    """Re-fold every (task, team) rollup after a LIVE task edit (web68a).
+
+    The caller has already mutated + flushed the task row (new target/config/
+    points) and owns the commit. Per team, this re-derives progress from the
+    surviving applied ledger rows against the NEW goal, flips ``completed`` in
+    either direction, adjusts ``EventTeam.score`` under the same row locks the
+    consumer uses, rewrites/deletes per-player contribution points, syncs
+    bingo-cell completions, and finally reconciles line/blackout bonuses
+    event-wide. Publishes one ``kind:"recompute"`` SSE frame per touched team.
+    Returns ``{"teams": {team_id: {...}}, "bonuses": {...}}`` for the caller's
+    audit row / API response.
+
+    ``old_points``: the task's points value BEFORE the edit — when provided
+    and a rollup STAYS completed, the team score absorbs the (new − old)
+    delta so past awards match the new value.
+
+    Raises ``ValueError("forward_only")`` for kinds with no recomputable
+    ledger: manual-only types (custom/ehp_target/ehb_target) and board-game
+    events (progress is entangled with turn state — coins/rolls must never
+    be retro-granted).
+
+    Concurrency: the same ``with_for_update`` progress/team locks as
+    ``apply_ledger_row``/``revoke_ledger_row``, iterated in ascending team
+    order, so a concurrent consumer apply blocks until our commit and then
+    increments on top of the new base. The worker matches with its OLD task
+    snapshot until the caller's post-commit ``_bump`` lands (sub-second
+    typical, 30 s worst) — a row matched under the old goal in that window
+    is an ordinary applied row, individually revocable via the existing
+    revoke flow.
+    """
+    from db.models import (EventBingoCell, EventBingoCompletion,
+                           EventCompletion, EventPlayerPoints, EventProgress,
+                           EventTeam)
+
+    event = _event_to_dict(event_row)
+    task = _task_to_dict(task_row)
+
+    if task.get("type") in ("custom", "ehp_target", "ehb_target") or \
+            (event.get("kind") or "standard") == "board_game":
+        raise ValueError("forward_only")
+
+    applied = ("auto", "confirmed", "manual")
+    team_ids = {
+        tid for (tid,) in session.query(EventProgress.team_id)
+        .filter(EventProgress.task_id == task["id"]).all()
+    }
+    team_ids |= {
+        tid for (tid,) in session.query(EventCompletion.team_id)
+        .filter(EventCompletion.task_id == task["id"],
+                EventCompletion.status.in_(applied),
+                EventCompletion.team_id.isnot(None))
+        .distinct().all()
+    }
+
+    cell_ids = []
+    if event.get("has_bingo"):
+        cell_ids = [c.id for c in session.query(EventBingoCell)
+                    .filter(EventBingoCell.task_id == task["id"]).all()]
+
+    new_points = int(task.get("points") or 0)
+    is_sweep = _list_kind(task) == "loot_sweep"
+    teams_summary: dict = {}
+
+    for team_id in sorted(t for t in team_ids if t is not None):
+        # P0-7: locked read — same progress→team lock order as apply/revoke.
+        progress = (session.query(EventProgress)
+                    .filter(EventProgress.task_id == task["id"],
+                            EventProgress.team_id == team_id)
+                    .with_for_update()
+                    .first())
+        was_completed = bool(progress.completed) if progress is not None else False
+
+        if is_sweep:
+            # Stateless refold — Loot Sweep never "completes"; the running
+            # total IS the score (mirror _revoke_loot_sweep's arithmetic).
+            previous_total = (round(float(progress.progress or 0), 2)
+                              if progress is not None else 0.0)
+            new_total = _loot_sweep_score(session, task, team_id)["total"]
+            delta = round(new_total - previous_total, 2)
+            if progress is None:
+                if new_total <= 0:
+                    continue
+                progress = EventProgress(event_id=event["id"], task_id=task["id"],
+                                         team_id=team_id, progress=0, completed=False)
+                session.add(progress)
+            progress.progress = new_total
+            progress.completed = False
+            team_score = None
+            if delta:
+                team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+                        .with_for_update().first())  # P0-7: locked score RMW
+                if team is not None:
+                    team.score = round(float(team.score or 0) + delta, 2)
+                    team_score = team.score
+            _award_contribution_points(
+                session, event, task, team_id,
+                _task_contributors(session, task["id"], team_id), new_total)
+            teams_summary[team_id] = {
+                "progress": new_total, "completed": False,
+                "was_completed": was_completed, "score_delta": delta,
+                "team_score": team_score,
+            }
+            continue
+
+        new_progress = _derive_applied_progress(session, task, team_id)
+        threshold = effective_threshold(session, task, team_id)
+        now_completed = new_progress >= threshold if new_progress > 0 else False
+        if progress is None:
+            if new_progress <= 0:
+                continue
+            progress = EventProgress(event_id=event["id"], task_id=task["id"],
+                                     team_id=team_id, progress=0, completed=False)
+            session.add(progress)
+        progress.progress = new_progress
+        progress.completed = now_completed
+        if now_completed and not was_completed:
+            # Honest timeline: when the surviving ledger last advanced, not
+            # "when an admin edited the goal".
+            last = (session.query(EventCompletion.created_at)
+                    .filter(EventCompletion.task_id == task["id"],
+                            EventCompletion.team_id == team_id,
+                            EventCompletion.status.in_(applied))
+                    .order_by(EventCompletion.created_at.desc())
+                    .first())
+            progress.completed_at = (last[0] if last and last[0] else datetime.now())
+        elif not now_completed:
+            progress.completed_at = None
+
+        score_delta = 0
+        if was_completed != now_completed and new_points:
+            score_delta += new_points if now_completed else -new_points
+        elif (was_completed and now_completed and old_points is not None
+              and int(old_points) != new_points):
+            score_delta += new_points - int(old_points)
+        team_score = None
+        if score_delta:
+            team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+                    .with_for_update().first())  # P0-7: locked score RMW
+            if team is not None:
+                team.score = int(team.score or 0) + score_delta
+                team_score = team.score
+
+        # Per-player contribution points follow the completed flag (Task 18
+        # semantics): complete → idempotent rewrite at the NEW points value;
+        # no longer complete → rows deleted.
+        if now_completed:
+            _award_contribution_points(
+                session, event, task, team_id,
+                _task_contributors(session, task["id"], team_id), new_points)
+        elif was_completed:
+            (session.query(EventPlayerPoints)
+             .filter(EventPlayerPoints.task_id == task["id"],
+                     EventPlayerPoints.team_id == team_id)
+             .delete(synchronize_session=False))
+
+        # Bingo cells follow the completed flag; bonuses reconcile once,
+        # event-wide, after the loop.
+        if cell_ids:
+            if was_completed and not now_completed:
+                (session.query(EventBingoCompletion)
+                 .filter(EventBingoCompletion.cell_id.in_(cell_ids),
+                         EventBingoCompletion.team_id == team_id)
+                 .delete(synchronize_session=False))
+            elif now_completed and not was_completed:
+                existing = {
+                    row.cell_id
+                    for row in session.query(EventBingoCompletion)
+                    .filter(EventBingoCompletion.cell_id.in_(cell_ids),
+                            EventBingoCompletion.team_id == team_id).all()
+                }
+                for cid in cell_ids:
+                    if cid not in existing:
+                        session.add(EventBingoCompletion(
+                            cell_id=cid, team_id=team_id, player_id=None))
+
+        teams_summary[team_id] = {
+            "progress": new_progress, "target": threshold,
+            "completed": now_completed, "was_completed": was_completed,
+            "score_delta": score_delta, "team_score": team_score,
+        }
+
+    session.flush()
+    # One event-wide bonus reconcile: unwinds lines the new state no longer
+    # holds, awards ones it now satisfies; adjusts team scores itself.
+    bonuses = reconcile_bingo_bonuses(session, event_row)
+
+    # Publish AFTER the reconcile so each frame carries the team's final score.
+    touched = set(teams_summary) | set(bonuses)
+    if touched:
+        scores = dict(
+            session.query(EventTeam.id, EventTeam.score)
+            .filter(EventTeam.id.in_(touched)).all()
+        )
+        for team_id in sorted(touched):
+            entry = teams_summary.get(team_id, {})
+            frame = {"kind": "recompute", "event_id": event["id"],
+                     "task_id": task["id"], "team_id": team_id}
+            if "progress" in entry:
+                frame["progress"] = entry["progress"]
+                frame["completed"] = entry["completed"]
+            if "target" in entry:
+                frame["target"] = entry["target"]
+            if team_id in scores:
+                frame["team_score"] = scores[team_id]
+                if team_id in teams_summary:
+                    teams_summary[team_id]["team_score"] = scores[team_id]
+            b = bonuses.get(team_id)
+            if b:
+                frame["bonuses"] = b
+            _publish(event["id"], frame)
+
+    return {"teams": teams_summary, "bonuses": bonuses}

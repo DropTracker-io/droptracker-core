@@ -183,6 +183,18 @@ def _effective_status(ev: Event) -> str:
     return "active"
 
 
+def _assert_event_not_past(ev: Event) -> None:
+    """Structural edits (tasks, teams) are allowed while draft or active but
+    blocked once past — an ended event is a frozen record (web68a; mirrors
+    ``_assert_roster_open`` for rosters). Mid-event edits stay first-class:
+    they propagate to the live matcher via ``_bump`` and, for scoring-affecting
+    task changes, carry an explicit ``retro`` choice."""
+    if _effective_status(ev) == "past":
+        abort_problem(409, "Event has ended",
+                      "This event is over — its tasks and teams can no longer be changed.",
+                      extra={"code": "event_past"})
+
+
 def _summary(ev: Event) -> dict:
     return {
         "id": ev.id,
@@ -204,6 +216,7 @@ def _summary(ev: Event) -> dict:
         "bonus_blackout_points": int(ev.bonus_blackout_points or 0),
         "leadership": _leadership(ev),
         "per_group_discord": bool(getattr(ev, "per_group_discord", False)),
+        "allow_live_edits": bool(getattr(ev, "allow_live_edits", False)),
         "activated_at": _ts(ev.activated_at),
         "ended_at": _ts(ev.ended_at),
     }
@@ -2540,6 +2553,7 @@ async def create_event():
                 has_bingo=False,
                 formation_mode=formation_mode,
                 requires_confirmation=bool(body.get("requires_confirmation")),
+                allow_live_edits=bool(body.get("allow_live_edits")),
                 submission_policy=submission_policy,
                 join_code=join_code or None,
                 discord_guild_id=discord_guild_id,
@@ -2593,6 +2607,7 @@ def _event_settings_snapshot(ev) -> dict:
         "bonus_line_points": int(getattr(ev, "bonus_line_points", 0) or 0),
         "bonus_blackout_points": int(getattr(ev, "bonus_blackout_points", 0) or 0),
         "buyins_enabled": bool(getattr(ev, "buyins_enabled", False)),
+        "allow_live_edits": bool(getattr(ev, "allow_live_edits", False)),
         "starts_at": starts_at.isoformat() if starts_at else None,
         "ends_at": ends_at.isoformat() if ends_at else None,
     }
@@ -2701,6 +2716,11 @@ async def update_event(event_id: int):
             if "requires_confirmation" in body:
                 # Event-level force: all completions queue for review (PRD D3).
                 ev.requires_confirmation = bool(body.get("requires_confirmation"))
+            if "allow_live_edits" in body:
+                # web68a: opt-in mid-event editability (unlocks the bingo board
+                # while active). Flippable at any status — the settings-snapshot
+                # diff below audits every change.
+                ev.allow_live_edits = bool(body.get("allow_live_edits"))
             if "submission_policy" in body:
                 # null = reset to the default (manual submissions need review).
                 policy = body.get("submission_policy") or "confirm_non_api"
@@ -3332,6 +3352,7 @@ async def add_task(event_id: int):
             if not ev:
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             _assert_event_admin(s, user_id, ev)
+            _assert_event_not_past(ev)
             normalized = validate_task_payload(s, body)
             task = EventTask(
                 event_id=event_id,
@@ -3719,8 +3740,18 @@ async def delete_task(event_id: int, task_id: int):
     tasks on template-created events undeletable). Bound cells survive as
     labeled, unbound cells (rebindable in the designer, same as a skipped
     template task); the task's ledger/progress rows are removed and any points
-    it granted are taken back from team scores."""
+    it granted are taken back from team scores.
+
+    ``?retro=keep_scores`` (web68a, active events): the change-maker chose to
+    let teams KEEP the points this task already granted — the score
+    subtraction is skipped while every task-keyed child row is still removed
+    (the FKs demand it, so the per-player breakdown for this task is gone
+    either way). Default (``revoke``) is the full unwind."""
     user_id = current_user_id()
+    retro = request.args.get("retro") or "revoke"
+    if retro not in ("revoke", "keep_scores"):
+        abort_problem(422, "Invalid retro",
+                      "'retro' must be 'revoke' or 'keep_scores'.")
 
     def _apply():
         with db_session() as s:
@@ -3728,6 +3759,7 @@ async def delete_task(event_id: int, task_id: int):
             if not ev:
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             _assert_event_admin(s, user_id, ev)
+            _assert_event_not_past(ev)
             task = (
                 s.query(EventTask)
                 .filter(EventTask.id == task_id, EventTask.event_id == event_id)
@@ -3740,6 +3772,8 @@ async def delete_task(event_id: int, task_id: int):
             # Take back points the task granted: a completed (task, team)
             # rollup awarded task.points, and applied bonus rows written
             # against this task's id store their granted points in quantity.
+            # keep_scores: record the would-be deltas for the audit row but
+            # leave every team score standing.
             deltas: dict[int, int] = {}
             points = int(task.points or 0)
             if points:
@@ -3759,10 +3793,11 @@ async def delete_task(event_id: int, task_id: int):
             ):
                 if c.team_id is not None:
                     deltas[c.team_id] = deltas.get(c.team_id, 0) + max(int(c.quantity or 0), 0)
-            for team_id_, delta in deltas.items():
-                team = s.query(EventTeam).filter(EventTeam.id == team_id_).first()
-                if team is not None:
-                    team.score = max(round(float(team.score or 0) - delta, 2), 0)
+            if retro != "keep_scores":
+                for team_id_, delta in deltas.items():
+                    team = s.query(EventTeam).filter(EventTeam.id == team_id_).first()
+                    if team is not None:
+                        team.score = max(round(float(team.score or 0) - delta, 2), 0)
 
             # Unbind the task's bingo cells — the labeled cell stays on the
             # board (rebindable), but its completions go with the binding.
@@ -3804,6 +3839,16 @@ async def delete_task(event_id: int, task_id: int):
              .update({EventBoardPosition.current_task_id: None},
                      synchronize_session=False))
             s.delete(task)
+            if retro != "keep_scores" and bool(ev.has_bingo):
+                # Deleting this task's cell bindings can break lines that
+                # OTHER tasks' bonuses were standing on — re-derive every
+                # team's bonus set from the post-delete board (web68a; this
+                # also fixes the pre-existing stale-line-bonus gap). Skipped
+                # for keep_scores, which keeps granted points by definition.
+                s.flush()
+                from services.event_engine import reconcile_bingo_bonuses
+
+                reconcile_bingo_bonuses(s, ev)
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
@@ -3811,7 +3856,7 @@ async def delete_task(event_id: int, task_id: int):
                 action="event.task.delete",
                 target=f"web_events.{event_id}.task.{task_id}",
                 before=f"label:{task_label}",
-                after=None,
+                after=json.dumps({"retro": retro, "score_deltas": deltas}),
             ))
             s.commit()
 
@@ -3834,6 +3879,7 @@ async def add_team(event_id: int):
             if not ev:
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             _assert_event_admin(s, user_id, ev)
+            _assert_event_not_past(ev)
             # clan_vs_clan: every team belongs to an accepted participant clan.
             # Standard/global teams stay unbound (group_id NULL).
             team_group_id = None

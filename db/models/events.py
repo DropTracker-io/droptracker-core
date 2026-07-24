@@ -370,6 +370,11 @@ class Event(Base):
     # NULL = feature off. Desired state materializes into
     # web_event_team_discord rows; only the core bot touches Discord.
     team_discord_config = Column(Text, nullable=True)
+    # Live edits (web68a): opt-in toggle letting event admins keep editing the
+    # bingo board after activation (the one structural surface locked once an
+    # event starts). Settable in the wizard and flippable at any status via
+    # PATCH /events; every flip lands in the event.settings.update audit diff.
+    allow_live_edits = Column(Boolean, nullable=False, default=False, server_default="0")
     activated_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
