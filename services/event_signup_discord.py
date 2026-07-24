@@ -42,6 +42,15 @@ _ACCT = "evtsignup_acct:"
 _TEAM = "evtsignup_team:"
 
 
+def _is_editing(ctx) -> bool:
+    """True when this interaction was deferred to EDIT its origin message (the
+    select-menu steps, whose origin is the user's private ephemeral picker) —
+    vs. the initial button on the public sign-up message, which must open a
+    NEW ephemeral message instead. Drives edit_origin-vs-send throughout so
+    every step properly resolves its own interaction."""
+    return bool(getattr(ctx, "editing_origin", False))
+
+
 def _linked_players(discord_id) -> list:
     """The user's linked OSRS accounts (id, name), or [] if not signed up."""
     user = session.query(User).filter(User.discord_id == str(discord_id)).first()
@@ -139,7 +148,11 @@ class EventSignupButtons(Extension):
         values = list(getattr(ctx, "values", None) or [])
         if not values:
             return
-        await ctx.defer(ephemeral=True, edit_origin=True)
+        # Edit the ephemeral picker in place (DEFERRED_UPDATE_MESSAGE). The
+        # previous `defer(ephemeral=True, edit_origin=True)` raised ValueError
+        # ("Cannot use ephemeral and edit_origin together") the moment a user
+        # picked an account, so sign-up never committed.
+        await ctx.defer(edit_origin=True)
         session.expire_all()
         ev = _load_event(event_id)
         if not ev:
@@ -159,14 +172,17 @@ class EventSignupButtons(Extension):
             if len(teams) > 1:
                 options = [StringSelectOption(label=t.name[:100], value=str(t.id))
                            for t in teams[:25]]
-                await ctx.send(
-                    content=f"Which team should **{player.player_name}** join?",
-                    components=[ActionRow(StringSelectMenu(
-                        *options, placeholder="Choose a team…",
-                        custom_id=f"{_TEAM}{ev.id}:{player_id}",
-                    ))],
-                    ephemeral=True,
-                )
+                content = f"Which team should **{player.player_name}** join?"
+                components = [ActionRow(StringSelectMenu(
+                    *options, placeholder="Choose a team…",
+                    custom_id=f"{_TEAM}{ev.id}:{player_id}",
+                ))]
+                # Edit the ephemeral picker in place when we came from a select
+                # menu; open a fresh ephemeral when we came from the button.
+                if _is_editing(ctx):
+                    await ctx.edit_origin(content=content, components=components, embeds=[])
+                else:
+                    await ctx.send(content=content, components=components, ephemeral=True)
                 return
         # auto_assign / signup_pool / self_join-with-one-team → finalize now.
         await self._commit_signup(ctx, ev, player, team_id=None)
@@ -176,7 +192,7 @@ class EventSignupButtons(Extension):
         values = list(getattr(ctx, "values", None) or [])
         if not values:
             return
-        await ctx.defer(ephemeral=True, edit_origin=True)
+        await ctx.defer(edit_origin=True)
         session.expire_all()
         ev = _load_event(event_id)
         if not ev:
@@ -235,6 +251,17 @@ class EventSignupButtons(Extension):
             pass
 
     async def _reply(self, ctx, message: str) -> None:
+        """Resolve the interaction: edit the ephemeral picker in place when we
+        deferred to edit its origin (select-menu steps), else send a fresh
+        ephemeral (button step). Falls back to a followup send so the user
+        always hears back even if the in-place edit fails."""
+        if _is_editing(ctx):
+            try:
+                await ctx.edit_origin(content=message, embeds=[], components=[])
+                return
+            except Exception:
+                log.debug("event signup: edit_origin failed, falling back to send",
+                          exc_info=True)
         try:
             await ctx.send(message, ephemeral=True)
         except Exception:
