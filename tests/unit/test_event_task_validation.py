@@ -1041,3 +1041,41 @@ def test_config_too_large_rejected(monkeypatch):
         })
     assert exc.value.status == 422
     assert "too large" in (exc.value.title or "").lower()
+
+
+# ── goal magnitude (web69a) ──────────────────────────────────────────────────
+# target_value is BIGINT, so multi-billion goals must validate rather than
+# reach MySQL as an out-of-range INT (error 1264 -> a 500 on save).
+
+def test_loot_value_accepts_multi_billion_gp():
+    # The reported failure: "Obtain 5b in Value from All Drops", no source NPC.
+    out = _validate({"type": "loot_value", "target_value": 5_000_000_000})
+    assert out["target_value"] == 5_000_000_000
+    assert out["config"] is None  # no NPC restriction = any drop counts
+
+
+def test_any_path_loot_value_leg_accepts_multi_billion_gp(_stub_path_npcs):
+    # The same GP goal reached through an any_path metric leg.
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "any_path", "paths": [
+            {"metric": "kc", "npcs": ["Kree'arra"], "need": 5000},
+            {"metric": "loot_value", "need": 3_000_000_000},
+        ]},
+    })
+    gp = [p for p in _cfg(out)["paths"] if p.get("metric") == "loot_value"][0]
+    assert gp["need"] == 3_000_000_000
+
+
+def test_target_value_past_js_safe_integer_rejected():
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "loot_value", "target_value": etv.MAX_TARGET_VALUE + 1})
+    assert exc.value.status == 422
+    assert "target value" in (exc.value.title or "").lower()
+
+
+def test_bounded_goal_keeps_its_own_ceiling():
+    # A goal with a tighter bound is unaffected by MAX_TARGET_VALUE.
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "skill_target", "target": "Attack", "target_value": 120})
+    assert exc.value.status == 422

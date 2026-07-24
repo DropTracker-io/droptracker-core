@@ -3344,6 +3344,18 @@ async def add_task(event_id: int):
             f"difficulty must be one of {list(EVENT_TASK_DIFFICULTIES)} or null.",
         )
 
+    # Bounded here, not at the ORM: points is INT, so an out-of-range payout
+    # would reach MySQL as an unhandled 1264 and 500 (see MAX_TASK_POINTS).
+    # Mirrors the same check on the task PATCH route.
+    from web_api.routes.event_task_validation import MAX_TASK_POINTS
+
+    points = body.get("points") or 0
+    if not isinstance(points, int) or isinstance(points, bool) or not (0 <= points <= MAX_TASK_POINTS):
+        abort_problem(
+            422, "Invalid points",
+            f"'points' must be an integer between 0 and {MAX_TASK_POINTS:,}.",
+        )
+
     def _apply():
         from web_api.routes.event_task_validation import validate_task_payload
 
@@ -3358,7 +3370,7 @@ async def add_task(event_id: int):
                 event_id=event_id,
                 type=ttype,
                 label=label,
-                points=int(body.get("points") or 0),
+                points=points,
                 requires_confirmation=bool(body.get("requires_confirmation")),
                 visibility=visibility,
                 difficulty=difficulty,

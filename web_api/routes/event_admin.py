@@ -691,9 +691,15 @@ async def update_task(event_id: int, task_id: int):
                 task.target_value = normalized["target_value"]
                 task.config = normalized["config"]
             if "points" in body:
+                from web_api.routes.event_task_validation import MAX_TASK_POINTS
+
                 points = body.get("points")
-                if not isinstance(points, int) or isinstance(points, bool) or points < 0:
-                    abort_problem(422, "Invalid points", "'points' must be a non-negative integer.")
+                if (not isinstance(points, int) or isinstance(points, bool)
+                        or not (0 <= points <= MAX_TASK_POINTS)):
+                    abort_problem(
+                        422, "Invalid points",
+                        f"'points' must be an integer between 0 and {MAX_TASK_POINTS:,}.",
+                    )
                 task.points = points
             if "requires_confirmation" in body:
                 task.requires_confirmation = bool(body.get("requires_confirmation"))

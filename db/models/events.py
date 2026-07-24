@@ -390,7 +390,11 @@ class EventTask(Base):
     type = Column(String(24), nullable=False)
     label = Column(String(255), nullable=False)
     target = Column(String(120), nullable=True)
-    target_value = Column(Integer, nullable=True)
+    # BigInteger (web69a): loot_value goals are raw GP, and a multi-billion GP
+    # target blew past signed-INT 2.147B — the INSERT died with MySQL 1264
+    # rather than a readable error (same lesson as ``EventCompletion.quantity``,
+    # P1-7, which this is compared against).
+    target_value = Column(BigInteger, nullable=True)
     points = Column(Integer, nullable=False, default=0)
     requires_confirmation = Column(Boolean, nullable=False, default=False)  # per-task flag (PRD D3)
     config = Column(Text, nullable=True)  # JSON: any_of/assembly/point_collection item lists etc.
@@ -845,7 +849,7 @@ class EventTaskLibraryItem(Base):
     description = Column(Text, nullable=True)
     type = Column(String(24), nullable=False)  # EVENT_TASK_TYPES
     target = Column(String(120), nullable=True)
-    target_value = Column(Integer, nullable=True)
+    target_value = Column(BigInteger, nullable=True)  # BigInteger — see EventTask.target_value
     default_points = Column(Integer, nullable=False, default=0)
     difficulty = Column(String(24), nullable=True)  # air|water|earth|fire (legacy tiers)
     config = Column(Text, nullable=True)  # JSON: item lists / semantics

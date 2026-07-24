@@ -63,8 +63,18 @@ ITEM_CONFIG_KINDS = ("any_of", "all_of", "point_collection", "assembly", "groups
 MAX_CONFIG_ITEMS = 100
 MAX_CONFIG_GROUPS = 10
 MAX_CONFIG_PATHS = 4
+# Ceiling for any task goal without a tighter bound of its own. web_event_tasks
+# .target_value is BIGINT (web69a), so the real limit is the JS-safe integer —
+# the web UI carries goals as JS numbers and would lose precision past this.
+# Comfortably clears the largest legitimate goals (multi-billion GP loot_value
+# targets); goals with a real-world cap of their own pass an explicit `hi`.
+MAX_TARGET_VALUE = 2**53 - 1
 # point_collection per-item weight ceiling (same bound as loot_sweep items).
 MAX_ITEM_POINTS = 1_000_000
+# Task payout ceiling. Unlike target_value, web_event_tasks.points stays INT —
+# no event scores in the billions — so this must stay under signed-INT max or
+# the INSERT 500s on MySQL 1264 instead of returning a 422.
+MAX_TASK_POINTS = 1_000_000_000
 # Serialized config ceiling — safely under the web_event_tasks.config TEXT
 # column's 65535-byte limit so an oversized item list / source-NPC map is
 # rejected with a 422 rather than truncating or 500-ing on save.
@@ -279,9 +289,21 @@ def _pet_name_request_set(raw) -> set[str]:
 
 
 def _require_target_value(tv, *, what: str, lo: int = 1, hi: int | None = None) -> int:
-    if not isinstance(tv, int) or isinstance(tv, bool) or tv < lo or (hi is not None and tv > hi):
-        bounds = f"an integer ≥ {lo}" if hi is None else f"an integer between {lo} and {hi}"
-        abort_problem(422, "Invalid target value", f"{what} must be {bounds}.")
+    """Coerce-check a task goal, 422 on anything out of range.
+
+    Goals with no bound of their own still get ``MAX_TARGET_VALUE``: the column
+    is BIGINT (web69a) but the web UI round-trips these as JS numbers, so
+    anything past 2**53-1 would silently lose precision. Before web69a there was
+    no ceiling at all and an over-INT goal (e.g. a 5B GP ``loot_value``) reached
+    MySQL as an unhandled 1264 — a 500 instead of this message.
+    """
+    ceiling = MAX_TARGET_VALUE if hi is None else hi
+    if not isinstance(tv, int) or isinstance(tv, bool) or tv < lo or tv > ceiling:
+        abort_problem(
+            422,
+            "Invalid target value",
+            f"{what} must be an integer between {lo:,} and {ceiling:,}.",
+        )
     return tv
 
 
