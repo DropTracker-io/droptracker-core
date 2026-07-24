@@ -13,10 +13,13 @@ folds to zero.
 Reconciliation is enabled automatically for any event whose group(s) have
 ``groups.wom_id`` set; the ``event_wom_reconciliation`` group config key
 force-disables it. Freshness (WOM snapshots only advance when a player gets
-updated on WOM) is handled at key moments only: event activation and a lead
+updated on WOM) comes from key-moment passes (event activation and a lead
 window before the event ends — via the group-wide ``update-all`` endpoint when
 the group configured its ``wom_verification_code``, else a budgeted
-per-player ``update_player`` pass.
+per-player ``update_player`` pass) plus an activity-tiered rotation: only
+participants actually progressing on event-relevant metrics stay on a fast
+update cadence; idle participants back off exponentially (see the constants
+below — WOM asked us to stop mass-updating players daily, 2026-07).
 
 Hosted by ``workers/event_consumer.py`` (same asyncio loop as the queue
 drain); all DB access goes through short-lived sessions in worker threads.
@@ -24,6 +27,7 @@ drain); all DB access goes through short-lived sessions in worker threads.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -40,17 +44,22 @@ WOM_RECONCILE_SECONDS = int(os.getenv("WOM_RECONCILE_SECONDS", "300"))
 WOM_EVENT_UPDATE_BUDGET = int(os.getenv("WOM_EVENT_UPDATE_BUDGET", "10"))
 WOM_UPDATE_ALL_LEAD_SECONDS = int(os.getenv("WOM_UPDATE_ALL_LEAD_SECONDS", "1800"))
 
-# Continuous freshness rotation: every reconcile cycle, the stalest event
-# participants get a forced WOM update so hiscores-based progress stops
-# depending on organic updates. The per-player refresh interval scales with
-# roster size — updates/minute stays ~= 60/SECONDS_PER_PLAYER regardless of
-# how big the event is — and a per-cycle cap bounds any single cycle's spend
-# on the shared WOM budget (the rest of the app uses the same limiter).
-WOM_EVENT_UPDATE_SECONDS_PER_PLAYER = int(os.getenv("WOM_EVENT_UPDATE_SECONDS_PER_PLAYER", "9"))
-WOM_EVENT_UPDATE_MIN_INTERVAL = int(os.getenv("WOM_EVENT_UPDATE_MIN_INTERVAL", "900"))
-WOM_EVENT_UPDATE_MAX_INTERVAL = int(os.getenv("WOM_EVENT_UPDATE_MAX_INTERVAL", "3600"))
-WOM_EVENT_UPDATE_MAX_PER_CYCLE = int(os.getenv("WOM_EVENT_UPDATE_MAX_PER_CYCLE", "40"))
-# Retry pacing after a failed / rate-skipped update attempt.
+# Activity-tiered freshness rotation: every reconcile cycle, participants who
+# are actually progressing on event-relevant metrics rotate through forced WOM
+# updates at a roster-scaled cadence (MIN/MAX clamp below), while participants
+# whose snapshots keep showing no relevant gains — and ones whose updates keep
+# failing (unranked / rename limbo) — back off exponentially from
+# IDLE_BASE_INTERVAL to IDLE_MAX_INTERVAL. The per-cycle cap bounds the worst
+# case at MAX_PER_CYCLE per ~5-min cycle (~1.4k WOM calls/day at 5, down from
+# ~10k with the old always-on rotation that WOM asked us to stop).
+WOM_EVENT_UPDATE_SECONDS_PER_PLAYER = int(os.getenv("WOM_EVENT_UPDATE_SECONDS_PER_PLAYER", "60"))
+WOM_EVENT_UPDATE_MIN_INTERVAL = int(os.getenv("WOM_EVENT_UPDATE_MIN_INTERVAL", "1800"))
+WOM_EVENT_UPDATE_MAX_INTERVAL = int(os.getenv("WOM_EVENT_UPDATE_MAX_INTERVAL", "10800"))
+WOM_EVENT_UPDATE_MAX_PER_CYCLE = int(os.getenv("WOM_EVENT_UPDATE_MAX_PER_CYCLE", "5"))
+WOM_EVENT_IDLE_BASE_INTERVAL = int(os.getenv("WOM_EVENT_IDLE_BASE_INTERVAL", "3600"))
+WOM_EVENT_IDLE_MAX_INTERVAL = int(os.getenv("WOM_EVENT_IDLE_MAX_INTERVAL", "86400"))
+# Floor for retry pacing after a failed / rate-skipped update attempt (the
+# idle backoff from the player's failure-bumped streak usually exceeds it).
 _UPDATE_FAIL_COOLDOWN_SECONDS = 900
 _STATE_KEY_TTL = 60 * 86400
 
@@ -70,6 +79,11 @@ def _womfinal_key(event_id: int) -> str:
 
 def _womupdall_key(event_id: int, stage: str) -> str:
     return f"events:{event_id}:womupdall:{stage}"
+
+
+def _womact_key(event_id: int) -> str:
+    """Per-event activity ledger hash: player_id -> "epoch:streak:sig"."""
+    return f"events:{event_id}:womact"
 
 
 def _parse_wom_ts(value) -> Optional[int]:
@@ -414,7 +428,8 @@ async def _reconcile_target(redis_conn, target: ReconcileTarget, *,
 def _new_stats() -> dict:
     return {"targets": 0, "groups_fetched": 0, "group_fetch_failures": 0,
             "players_emitted": 0, "players_stale": 0, "players_unmatched": 0,
-            "envelopes": 0, "updates_requested": 0, "update_candidates": 0}
+            "envelopes": 0, "updates_requested": 0, "update_candidates": 0,
+            "players_active": 0, "players_idle": 0}
 
 
 async def reconcile_once(state, redis_conn, now: Optional[datetime] = None) -> dict:
@@ -436,6 +451,8 @@ async def reconcile_once(state, redis_conn, now: Optional[datetime] = None) -> d
                                                 max_updates=update_cap)
             stats["updates_requested"] += fresh["player_updates"]
             stats["update_candidates"] += fresh["candidates"]
+            stats["players_active"] += fresh["active"]
+            stats["players_idle"] += fresh["idle"]
             update_cap -= fresh["player_updates"]
     return stats
 
@@ -459,29 +476,50 @@ async def final_reconcile(state, redis_conn, event_id: int) -> Optional[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Freshness (key moments only): update-all / budgeted update_player
+# Freshness: key-moment update-all passes + activity-tiered update_player
+# rotation. "Active" = the participant's event-relevant metrics moved between
+# their last two observed WOM snapshots; everyone else decays to IDLE_MAX.
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _update_interval(participant_count: int) -> int:
-    """Per-player WOM refresh interval for a roster of this size.
+def _active_interval(active_count: int) -> int:
+    """Per-player WOM refresh interval for the roster's active cohort.
 
     Scales linearly so the steady-state update rate is roster-independent
-    (~60/SECONDS_PER_PLAYER calls per minute): a 4-player event refreshes
-    everyone every MIN_INTERVAL; a 400-player event settles near MAX."""
-    interval = max(1, participant_count) * WOM_EVENT_UPDATE_SECONDS_PER_PLAYER
+    (~60/SECONDS_PER_PLAYER calls per minute when saturated): a handful of
+    active players refresh every MIN_INTERVAL; hundreds settle near MAX."""
+    interval = max(1, active_count) * WOM_EVENT_UPDATE_SECONDS_PER_PLAYER
     return max(WOM_EVENT_UPDATE_MIN_INTERVAL,
                min(WOM_EVENT_UPDATE_MAX_INTERVAL, interval))
 
 
-def _select_update_candidates(target: ReconcileTarget, rows: list,
-                              now_epoch: int, min_stale: int) -> list:
-    """Participants due a forced WOM update, from this cycle's bulk-gained
-    rows (pure; cooldown filtering happens at request time).
+def _idle_interval(idle_streak: int, active_interval: int) -> int:
+    """Refresh interval for a participant ``idle_streak`` consecutive
+    no-progress observations (or failed update attempts) deep. Doubles from
+    the base each step, never faster than the active cadence, capped at
+    IDLE_MAX_INTERVAL — a firmly idle signup costs ~1 WOM update/day."""
+    if idle_streak <= 0:
+        return active_interval
+    backoff = WOM_EVENT_IDLE_BASE_INTERVAL << min(idle_streak - 1, 12)
+    return min(max(backoff, active_interval), WOM_EVENT_IDLE_MAX_INTERVAL)
 
-    Participants absent from the rows have NO snapshot inside the event
-    window — maximally stale, they sort first (after the stub-first split).
-    Returns sorted [(prio, updated_epoch, player_id, username)]."""
-    known = {}
+
+def _row_signature(row: dict, relevant_slugs: set) -> str:
+    """Stable digest of a bulk-gained row's end values for the event-relevant
+    metrics. Two snapshots with the same digest ⇒ no event-relevant progress
+    (gains in unrelated skills don't count as event activity)."""
+    parts = sorted(
+        f"{m.get('metric')}:{m.get('end')}"
+        for m in (row.get("data") or [])
+        if isinstance(m, dict) and m.get("metric") in relevant_slugs)
+    if not parts:
+        return ""
+    return hashlib.sha1("|".join(parts).encode()).hexdigest()[:12]
+
+
+def _latest_row_by_participant(target: ReconcileTarget, rows: list) -> dict:
+    """Latest-snapshot bulk-gained row per matched participant:
+    {player_id: (updated_epoch, username, row)}."""
+    latest = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -492,10 +530,69 @@ def _select_update_candidates(target: ReconcileTarget, rows: list,
         player_id = entry[0]
         updated = _parse_wom_ts(player_obj.get("updatedAt")) or 0
         username = player_obj.get("username") or entry[1]
-        prev = known.get(player_id)
+        prev = latest.get(player_id)
         if prev is None or updated > prev[0]:
-            known[player_id] = (updated, username, entry[3])
+            latest[player_id] = (updated, username, row)
+    return latest
 
+
+def _decode(value):
+    return value.decode() if isinstance(value, bytes) else value
+
+
+def _observe_activity(redis_conn, target: ReconcileTarget, latest: dict) -> dict:
+    """Fold this cycle's snapshots into the per-event activity ledger.
+
+    A snapshot newer than the recorded one either resets the idle streak (the
+    relevant-metric signature changed — the player is progressing) or
+    increments it (WOM re-scraped them and nothing event-relevant moved).
+    Returns the full ledger as {player_id: (epoch, streak, sig)}; participants
+    never observed in-window simply have no entry (streak 0 ⇒ active tier, so
+    everyone gets a baseline update early in the event)."""
+    key = _womact_key(target.event_id)
+    stored = {}
+    try:
+        for field, value in (redis_conn.hgetall(key) or {}).items():
+            try:
+                epoch_s, streak_s, sig = (_decode(value).split(":", 2) + ["", ""])[:3]
+                stored[int(_decode(field))] = (int(epoch_s or 0), int(streak_s or 0), sig)
+            except (TypeError, ValueError):
+                continue
+    except Exception:
+        log.exception("womact read failed for event %s", target.event_id)
+    relevant = set(target.skills.values()) | set(target.boss_metrics)
+    changed = {}
+    for player_id, (updated, _username, row) in latest.items():
+        epoch, streak, sig = stored.get(player_id, (0, 0, ""))
+        if not updated or updated <= epoch:
+            continue
+        new_sig = _row_signature(row, relevant)
+        streak = 0 if new_sig != sig else streak + 1
+        stored[player_id] = (updated, streak, new_sig)
+        changed[str(player_id)] = f"{updated}:{streak}:{new_sig}"
+    try:
+        if changed:
+            redis_conn.hset(key, mapping=changed)
+        redis_conn.expire(key, _STATE_KEY_TTL)
+    except Exception:
+        log.exception("womact write failed for event %s", target.event_id)
+    return stored
+
+
+def _select_update_candidates(target: ReconcileTarget, latest: dict,
+                              activity: dict, now_epoch: int, *,
+                              active_interval: int,
+                              flat_min_stale: Optional[int] = None) -> list:
+    """Participants due a forced WOM update (pure; cooldown filtering happens
+    at request time).
+
+    Tiered mode (default): active participants — idle streak 0, which
+    includes anyone never observed in-window — are due after the
+    roster-scaled active interval; idle participants after their exponential
+    backoff. Flat mode (key-moment passes pass ``flat_min_stale``): everyone
+    staler than the bar is due, streaks ignored. Returns sorted
+    [(prio, updated_epoch, player_id, username, success_cooldown)] — stubs
+    first, then active before idle, stalest first within each tier."""
     out, seen = [], set()
     for entry in list(target.participants_by_wom.values()) + \
             list(target.participants_by_name.values()):
@@ -503,25 +600,43 @@ def _select_update_candidates(target: ReconcileTarget, rows: list,
         if player_id in seen:
             continue
         seen.add(player_id)
-        updated, username, stub = known.get(player_id) or (0, player_name, is_stub)
-        if not username or now_epoch - updated < min_stale:
+        updated, username, _row = latest.get(player_id) or (0, player_name, None)
+        epoch, streak, _sig = activity.get(player_id, (0, 0, ""))
+        updated = max(updated, epoch)
+        if not username:
             continue
-        out.append((0 if stub else 1, updated, player_id, username))
+        if flat_min_stale is not None:
+            interval = flat_min_stale
+            prio = 0 if is_stub else 1
+        else:
+            interval = _idle_interval(streak, active_interval)
+            prio = 0 if is_stub else (1 if streak == 0 else 2)
+        if now_epoch - updated < interval:
+            continue
+        out.append((prio, updated, player_id, username,
+                    max(300, int(interval * 0.9))))
     out.sort()
     return out
 
 
 async def _request_updates(redis_conn, candidates: list, *, max_updates: int,
-                           success_cooldown: int) -> int:
+                           act_key: str, activity: dict, latest: dict,
+                           active_interval: int) -> int:
     """Sequentially force-update up to ``max_updates`` candidates. Sequential
     means we only ever hold one shared-limiter slot, so the rest of the app's
     WOM traffic interleaves fairly; three consecutive failures (WOM down or
-    limiter backlogged) abort the batch until next cycle."""
+    limiter backlogged) abort the batch until next cycle.
+
+    Failed attempts bump the player's idle streak so unrankable / rename-limbo
+    accounts back off exponentially instead of burning the cap every cycle.
+    Successful updates of participants who never appear in bulk-gained rows
+    (event participants outside the WOM group — their updates can't feed
+    reconciliation at all) bump the streak too, decaying them to ~1/day."""
     from utils.wiseoldman import request_player_update
 
     updated = 0
     consecutive_failures = 0
-    for _prio, _seen, player_id, username in candidates:
+    for _prio, _seen, player_id, username, cooldown in candidates:
         if updated >= max_updates or consecutive_failures >= 3:
             break
         cooldown_key = f"wom:eventupd:{player_id}"
@@ -531,9 +646,19 @@ async def _request_updates(redis_conn, candidates: list, *, max_updates: int,
         except Exception:
             pass
         ok = await request_player_update(username)
+        if not ok or player_id not in latest:
+            epoch, streak, sig = activity.get(player_id, (0, 0, ""))
+            streak += 1
+            activity[player_id] = (epoch, streak, sig)
+            try:
+                redis_conn.hset(act_key, str(player_id), f"{epoch}:{streak}:{sig}")
+            except Exception:
+                pass
+            backoff = _idle_interval(streak, active_interval)
+            cooldown = (max(300, int(backoff * 0.9)) if ok
+                        else max(_UPDATE_FAIL_COOLDOWN_SECONDS, backoff))
         try:
-            redis_conn.set(cooldown_key, 1, ex=(
-                success_cooldown if ok else _UPDATE_FAIL_COOLDOWN_SECONDS))
+            redis_conn.set(cooldown_key, 1, ex=cooldown)
         except Exception:
             pass
         if ok:
@@ -550,10 +675,11 @@ async def _freshness_for_target(redis_conn, target: ReconcileTarget, rows: list,
                                 use_update_all: bool = False) -> dict:
     """One freshness pass: optional group-wide update-all (needs the group's
     verification code; only touches members >24h stale — WOM's rule), then the
-    per-player rotation from this cycle's bulk-gained rows."""
+    activity-tiered per-player rotation from this cycle's bulk-gained rows."""
     from utils.wiseoldman import UPDATE_ALL_BADCODE_PREFIX, request_group_update_all
 
-    out = {"update_all": 0, "player_updates": 0, "candidates": 0}
+    out = {"update_all": 0, "player_updates": 0, "candidates": 0,
+           "active": 0, "idle": 0}
     if use_update_all:
         for _group_id, wom_gid, code in target.wom_groups:
             if not code:
@@ -569,19 +695,27 @@ async def _freshness_for_target(redis_conn, target: ReconcileTarget, rows: list,
                     log.info("WOM update-all queued for group %s (event %s): %s",
                              wom_gid, target.event_id, message)
 
+    latest = _latest_row_by_participant(target, rows)
+    activity = _observe_activity(redis_conn, target, latest)
     if max_updates <= 0:
         return out
-    participant_count = len({e[0] for e in target.participants_by_wom.values()}
-                            | {e[0] for e in target.participants_by_name.values()})
-    if min_stale is None:
-        min_stale = _update_interval(participant_count)
-    candidates = _select_update_candidates(target, rows, int(time.time()), min_stale)
+    participant_ids = ({e[0] for e in target.participants_by_wom.values()}
+                       | {e[0] for e in target.participants_by_name.values()})
+    out["idle"] = sum(1 for pid in participant_ids
+                      if activity.get(pid, (0, 0, ""))[1] > 0)
+    out["active"] = len(participant_ids) - out["idle"]
+    active_interval = _active_interval(out["active"])
+    # Candidate cooldowns sit slightly under each player's interval so they
+    # are due again by the cycle after their snapshot ages past it, not one
+    # full cycle later.
+    candidates = _select_update_candidates(
+        target, latest, activity, int(time.time()),
+        active_interval=active_interval, flat_min_stale=min_stale)
     out["candidates"] = len(candidates)
-    # Cooldown slightly under the interval so a player is due again by the
-    # cycle after their snapshot ages past it, not one full cycle later.
     out["player_updates"] = await _request_updates(
         redis_conn, candidates, max_updates=max_updates,
-        success_cooldown=max(300, int(min_stale * 0.9)))
+        act_key=_womact_key(target.event_id), activity=activity,
+        latest=latest, active_interval=active_interval)
     return out
 
 
