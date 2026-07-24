@@ -377,6 +377,8 @@ def _requirement_entries(config: dict) -> list:
                 if isinstance(group, dict):
                     for it in group.get("items") or []:
                         _add(it)
+            for it in path.get("items") or []:  # points path: weighted item list
+                _add(it)
     return out
 
 
@@ -450,7 +452,14 @@ def describe_task(task: dict) -> tuple:
         # kills") — summarized into the sentence; they carry no item rows.
         metric_bits = []
         for path in config.get("paths") or []:
-            if not isinstance(path, dict) or not path.get("metric"):
+            if not isinstance(path, dict):
+                continue
+            if path.get("kind") == "points":
+                # Points path ("Full set OR 500 pts of listed items") — its
+                # weighted items ride in the shared requirements list above.
+                metric_bits.append(f"{_fmt_num(path.get('need'))} pts of listed items")
+                continue
+            if not path.get("metric"):
                 continue
             npcs = [str(n).strip() for n in (path.get("npcs") or []) if str(n).strip()]
             at = f" at {', '.join(npcs[:4])}" if npcs else ""

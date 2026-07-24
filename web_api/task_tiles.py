@@ -117,6 +117,8 @@ def _config_items(config: dict) -> list[dict]:
                 if isinstance(group, dict):
                     for it in group.get("items") or []:
                         _add(it)
+            for it in path.get("items") or []:  # points path: flat weighted list
+                _add(it)
     return out
 
 

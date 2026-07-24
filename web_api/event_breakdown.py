@@ -239,7 +239,13 @@ def build_task_breakdown(task: dict, tile: dict | None, rows, progress_row,
         ]
 
     elif is_item_task and kind == "any_path":
-        from services.event_engine import PATH_METRICS, _path_need, _row_path_idx
+        from services.event_engine import (
+            PATH_METRICS,
+            _is_points_path,
+            _path_need,
+            _path_point_weights,
+            _row_path_idx,
+        )
 
         # Metric-path rows are path-scoped (note: path:N): fold each path's
         # tagged quantities, mirroring _anypath_progress_from_rows.
@@ -269,6 +275,29 @@ def build_task_breakdown(task: dict, tile: dict | None, rows, progress_row,
                     "metric": path["metric"], "unit": unit,
                     "npcs": [{"name": n, "icon": icons.get(_norm(n))}
                              for n in npc_names],
+                }
+            elif _is_points_path(path):
+                # Points path: a weighted item checklist raced toward a pts
+                # goal (rendered as a "points" group, like a flat
+                # point_collection — task-detail already handles the mode).
+                need_total = _path_need(path)
+                weights = _path_point_weights(path)
+                pitems = [_item_row(nn, icons, qty_by, {"points": w})
+                          for nn, w in weights.items()]
+                got_total = min(
+                    sum(w * int(qty_by.get(nn, 0)) for nn, w in weights.items()),
+                    need_total)
+                entry = {
+                    "label": path.get("label") or f"{need_total:,} pts",
+                    "groups": [{
+                        "mode": "points", "need": need_total,
+                        "obtained": got_total,
+                        "satisfied": got_total >= need_total,
+                        "unit": "pts", "items": pitems,
+                    }],
+                    "need": need_total, "got": got_total,
+                    "pct": int(got_total * 100 // need_total) if need_total else 0,
+                    "closest": False,
                 }
             else:
                 pgroups = []

@@ -211,6 +211,43 @@ class TestRowAdvancesProgress:
         candidate = _Row(None, quantity=1, note="path:9", rid=None)
         assert engine._row_advances_progress(s, self.GWD_OR, 4, candidate) is False
 
+    # Untagged item/points rows use per-path room, NOT the closest-path
+    # percentage — a trailing path must never lose credit (progress re-folds
+    # from the ledger; a dropped row is gone forever).
+    SET_OR_POINTS = {
+        "id": 3, "type": "item_collection", "target_value": 100,
+        "config": {"kind": "any_path", "paths": [
+            {"groups": [{"mode": "all_of",
+                         "items": ["Bandos chestplate", "Bandos tassets",
+                                   "Bandos boots"]}]},
+            {"kind": "points", "need": 500,
+             "items": [{"item_name": "Bandos hilt", "points": 250}]},
+        ]},
+    }
+
+    def test_trailing_points_path_still_records_when_set_leads(self):
+        # Set path leads at 2/3 (66%); a hilt only puts the points path at 50%,
+        # so the closest-path percentage doesn't move — but the row must record.
+        s = _Session([_Row("Bandos chestplate", rid=10),
+                      _Row("Bandos tassets", rid=11)])
+        candidate = _Row("Bandos hilt", rid=None)
+        assert engine._row_advances_progress(s, self.SET_OR_POINTS, 4, candidate) is True
+
+    def test_points_item_dead_weight_once_goal_met(self):
+        s = _Session([_Row("Bandos hilt", quantity=2, rid=10)])  # 500 pts, capped
+        candidate = _Row("Bandos hilt", rid=None)
+        assert engine._row_advances_progress(s, self.SET_OR_POINTS, 4, candidate) is False
+
+    def test_duplicate_set_item_dead_weight(self):
+        s = _Session([_Row("Bandos chestplate", rid=10)])
+        candidate = _Row("Bandos chestplate", rid=None)  # dup, no path advances
+        assert engine._row_advances_progress(s, self.SET_OR_POINTS, 4, candidate) is False
+
+    def test_wildcard_manual_award_always_records(self):
+        s = _Session([_Row("Bandos hilt", quantity=2, rid=10)])  # points capped
+        candidate = _Row(None, quantity=50, source_type="manual", rid=None)
+        assert engine._row_advances_progress(s, self.SET_OR_POINTS, 4, candidate) is True
+
 
 class TestPbEffectiveThreshold:
     """effective_threshold — whole_team pb tasks scale to the roster; every

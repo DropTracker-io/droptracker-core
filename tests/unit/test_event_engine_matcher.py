@@ -564,6 +564,73 @@ class TestAnyPathProgress:
             ANY_PATH_THRESHOLD) == 0
 
 
+# ── any_path points paths (v2: "Full set OR 500 pts of listed items") ────────
+
+# The full Bandos set OR 500 pts of listed items (weighted). Threshold percent.
+BANDOS_POINTS = {
+    "kind": "any_path",
+    "paths": [
+        {"label": "Full set",
+         "groups": [{"mode": "all_of",
+                     "items": ["Bandos chestplate", "Bandos tassets",
+                               "Bandos boots"]}]},
+        {"label": "500 points", "kind": "points", "need": 500,
+         "items": [{"item_name": "Bandos hilt", "points": 250},
+                   {"item_name": "Bandos chestplate", "points": 50}]},
+    ],
+}
+
+
+class TestPointsPathProgress:
+    def test_points_path_items_are_matchable(self):
+        # The base item match fires for a points-path-only item (config kind is
+        # any_path, so it credits the raw quantity — the weight is folded later).
+        task = _task(config=BANDOS_POINTS)
+        assert engine.item_match_quantity(task, "Bandos hilt") == 1
+        assert engine.item_match_quantity(task, "bandos  HILT", 2) == 2
+        assert engine.item_match_quantity(task, "Abyssal whip") is None
+
+    def test_points_fold_weights_each_row(self):
+        rows = [_Row("Bandos hilt"), _Row("Bandos chestplate", quantity=2)]
+        weights = engine._path_point_weights(BANDOS_POINTS["paths"][1])
+        assert engine._points_fold(rows, weights) == 250 + 50 * 2
+
+    def test_progress_is_the_closest_path_percentage(self):
+        # One hilt = 250/500 pts on the points path (50%); the set path has 0/3
+        # of its OTHER pieces but 1/3 of the chestplate... hilt isn't in the set,
+        # so the set stays 0 → points path leads at 50%.
+        rows = [_Row("Bandos hilt")]
+        assert engine._anypath_progress_from_rows(
+            rows, BANDOS_POINTS, ANY_PATH_THRESHOLD) == 50
+
+    def test_points_path_completes_at_goal(self):
+        rows = [_Row("Bandos hilt", quantity=2)]  # 500 pts exactly
+        assert engine._anypath_progress_from_rows(
+            rows, BANDOS_POINTS, ANY_PATH_THRESHOLD) == 100
+
+    def test_points_never_completes_one_drop_early(self):
+        rows = [_Row("Bandos hilt")]  # 250/500 pts
+        assert engine._anypath_progress_from_rows(
+            rows, BANDOS_POINTS, ANY_PATH_THRESHOLD) < 100
+
+    def test_a_shared_item_advances_both_paths(self):
+        # The chestplate is on both paths: 1/3 of the set (33%) and 50 pts (10%).
+        rows = [_Row("Bandos chestplate")]
+        assert engine._anypath_progress_from_rows(
+            rows, BANDOS_POINTS, ANY_PATH_THRESHOLD) == 33
+
+    def test_wildcard_manual_award_completes_points_path(self):
+        # A manual mark-complete award rides the percent scale (like a metric).
+        rows = [_Row(None, quantity=100, source_type="manual")]
+        assert engine._anypath_progress_from_rows(
+            rows, BANDOS_POINTS, ANY_PATH_THRESHOLD) == 100
+
+    def test_bonus_rows_ignored(self):
+        rows = [_Row("Bandos hilt", quantity=5, source_type="bonus")]
+        assert engine._anypath_progress_from_rows(
+            rows, BANDOS_POINTS, ANY_PATH_THRESHOLD) == 0
+
+
 # ── any_path metric paths (v2: "boss pet OR 5,000 KC / 10M GP") ──────────────
 
 GWD_OR = {

@@ -330,6 +330,70 @@ def test_kc_path_rejects_oversized_npc_list(_stub_path_npcs):
     assert exc.value.status == 422
 
 
+# ── any_path points paths ("Full set OR 500 pts of listed items") ─────────────
+
+def test_points_path_normalizes_weights_and_goal():
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "any_path", "paths": [
+            {"label": "Full set",
+             "groups": [{"mode": "all_of",
+                         "items": ["Justiciar faceguard", "Justiciar chestguard",
+                                   "Justiciar legguards"]}]},
+            {"label": "500 points", "kind": "points", "need": 500,
+             "items": [{"item_name": "Armadyl hilt", "points": 50},
+                       {"item_name": "Bandos hilt", "points": 3.6}]},
+        ]},
+    })
+    cfg = _cfg(out)
+    pts = cfg["paths"][1]
+    assert pts["kind"] == "points" and pts["need"] == 500
+    assert pts["label"] == "500 points"
+    # Whole-number weights (3.6 rounds to 4), each entry canonicalized.
+    assert pts["items"] == [
+        {"item_name": "Armadyl hilt", "points": 50},
+        {"item_name": "Bandos hilt", "points": 4},
+    ]
+    assert out["target_value"] == etv.ANY_PATH_THRESHOLD
+    assert out["target"] is None
+
+
+def test_points_path_defaults_weight_to_one():
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "any_path", "paths": [
+            {"groups": [{"mode": "any_of", "items": ["Boater"]}]},
+            {"kind": "points", "need": 10, "items": ["Red boater", "Orange boater"]},
+        ]},
+    })
+    assert _cfg(out)["paths"][1]["items"] == [
+        {"item_name": "Red boater", "points": 1},
+        {"item_name": "Orange boater", "points": 1},
+    ]
+
+
+def test_points_path_requires_goal_and_items():
+    for path in ({"kind": "points", "items": [{"item_name": "Boater", "points": 2}]},
+                 {"kind": "points", "need": 5, "items": []}):
+        with pytest.raises(ProblemException) as exc:
+            _validate({"type": "item_collection",
+                       "config": {"kind": "any_path", "paths": [
+                           path, {"groups": [{"mode": "any_of", "items": ["Boater"]}]},
+                       ]}})
+        assert exc.value.status == 422
+
+
+def test_points_path_rejects_unknown_items():
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "item_collection",
+                   "config": {"kind": "any_path", "paths": [
+                       {"kind": "points", "need": 5,
+                        "items": [{"item_name": "Nonexistent thing", "points": 1}]},
+                       {"groups": [{"mode": "any_of", "items": ["Boater"]}]},
+                   ]}})
+    assert exc.value.status == 422
+
+
 # ── pet_collection ────────────────────────────────────────────────────────────
 # Pet names resolve against the real utils.osrs_pets taxonomy (a pure leaf
 # module — not stubbed), so these use genuine in-game pet names.

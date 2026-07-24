@@ -200,7 +200,8 @@ def _validated_source_npcs(s, raw) -> list[str]:
 
 def _config_item_name_set(config: dict) -> set[str]:
     """Lower-cased set of every item name a normalized item_collection config
-    references (flat ``items``, ``groups[].items``, or ``paths[].groups[].items``).
+    references (flat ``items``, ``groups[].items``, ``paths[].groups[].items``,
+    or a points path's flat ``paths[].items``).
     Used to keep an ``item_npcs`` map from naming items outside the task."""
     names: set[str] = set()
 
@@ -211,20 +212,21 @@ def _config_item_name_set(config: dict) -> set[str]:
             return it.get("item_name") or it.get("name")
         return None
 
-    for it in (config.get("items") or []):
-        n = _name_of(it)
-        if n:
-            names.add(str(n).lower())
+    def _add(items):
+        for it in (items or []):
+            n = _name_of(it)
+            if n:
+                names.add(str(n).lower())
+
+    _add(config.get("items"))
     groups = list(config.get("groups") or [])
     for path in (config.get("paths") or []):
         if isinstance(path, dict):
             groups.extend(path.get("groups") or [])
+            _add(path.get("items"))  # points path: flat weighted item list
     for group in groups:
         if isinstance(group, dict):
-            for it in (group.get("items") or []):
-                n = _name_of(it)
-                if n:
-                    names.add(str(n).lower())
+            _add(group.get("items"))
     return names
 
 
@@ -467,13 +469,34 @@ def _validated_metric_path(s, path: dict, pi: int) -> dict:
     return norm
 
 
+def _validated_points_path(s, path: dict, pi: int, *,
+                           pet_names: set[str] | None = None,
+                           found_pets: dict | None = None) -> dict:
+    """Validate one POINTS path of an any_path config: the ``point_collection``
+    mode as an either-or branch — a flat weighted item list raced toward a
+    points ``need`` ("Full set OR 500 pts of listed items"). Each item carries
+    a whole-number weight (``MAX_ITEM_POINTS`` ceiling); the path completes
+    when the team's weighted total reaches the goal.
+    """
+    entries = _validated_item_entries(s, path.get("items"), with_points=True,
+                                      pet_names=pet_names, found_pets=found_pets)
+    need = _require_target_value(path.get("need"), what=f"Path {pi} points goal")
+    norm: dict = {"kind": "points", "items": entries, "need": need}
+    label = path.get("label")
+    if isinstance(label, str) and label.strip():
+        norm["label"] = label.strip()[:80]
+    return norm
+
+
 def _validated_paths(s, paths, *, pet_names: set[str] | None = None,
                      found_pets: dict | None = None) -> tuple[list[dict], int]:
     """Validate a ``kind: "any_path"`` config: each path is its own
     groups-style requirement set — or a METRIC goal (``metric: "kc"`` /
-    ``"loot_value"``) — and the task completes when ANY path is satisfied.
+    ``"loot_value"``) or a POINTS goal (``kind: "points"``, a weighted item
+    race) — and the task completes when ANY path is satisfied.
     "Dryness protection" tasks (suggestion #52): the full Justiciar set OR
-    any 5 Justiciar items; or "Godwars boss pet OR 5,000 Godwars kills".
+    any 5 Justiciar items; or "Godwars boss pet OR 5,000 Godwars kills"; or
+    "Full set OR 500 pts of listed items".
 
     Items may repeat across paths (the same drop advances every path that
     lists it) but not within one path (enforced per-path by
@@ -494,6 +517,15 @@ def _validated_paths(s, paths, *, pet_names: set[str] | None = None,
             abort_problem(422, "Invalid config", f"Path {pi} must be an object.")
         if path.get("metric") is not None:
             out.append(_validated_metric_path(s, path, pi))
+            continue
+        if path.get("kind") == "points":
+            pp = _validated_points_path(s, path, pi,
+                                        pet_names=pet_names, found_pets=found_pets)
+            total_items += len(pp["items"])
+            if total_items > MAX_CONFIG_ITEMS:
+                abort_problem(422, "Invalid config",
+                              f"At most {MAX_CONFIG_ITEMS} items per task.")
+            out.append(pp)
             continue
         groups, _need = _validated_groups(s, path.get("groups"),
                                           pet_names=pet_names, found_pets=found_pets)

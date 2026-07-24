@@ -37,7 +37,11 @@ v1 evaluation semantics (task doc table):
   OR 5,000 GWD kills"; each metric path folds its own tagged ledger rows
   (``note`` = ``path:<idx>``, guid suffixed ``#p<idx>``) with kc_target-style
   watermark dedupe / loot_value GP fold, and one submission may advance an
-  item path and several metric paths at once (:func:`match_task_all`).
+  item path and several metric paths at once (:func:`match_task_all`). A
+  POINTS path (``{"kind": "points", "items": [{item_name, points}], "need":
+  N}``) is the ``point_collection`` mode as an either-or branch — "Full set
+  OR 500 pts of listed items" — folding its listed items' weighted quantities
+  from the shared untagged rows toward a points goal.
   DT2 vestiges: a Gold ring dropped by the vestige's boss credits a task
   that lists the vestige AS that vestige, one unit per drop (2-ring stacks
   are the same roll chain), deduped once per (task, team, player, vestige)
@@ -372,6 +376,14 @@ def _config_item_entries(config: dict) -> dict:
     for path in (config.get("paths") or []):
         if isinstance(path, dict):
             _add_group_items(path.get("groups"))
+            # Points paths (any_path alternative: "500 pts of listed items")
+            # carry a flat weighted item list — register the names so the base
+            # item match fires. The weight is applied at fold time, not here.
+            for it in (path.get("items") or []):
+                name = _norm(it if isinstance(it, str)
+                             else (it or {}).get("item_name") or (it or {}).get("name"))
+                if name:
+                    entries.setdefault(name, None)
     return entries
 
 
@@ -784,6 +796,51 @@ def _anypath_item_progress(session, task: dict, team_id, include=None) -> int:
                                        completion_threshold(task))
 
 
+def _is_points_path(path) -> bool:
+    """A POINTS path is an untagged any_path alternative whose flat item list
+    carries per-item weights and a ``need`` points goal (``kind: "points"``) —
+    the ``point_collection`` mode as an either-or branch ("Full set OR 500 pts
+    of listed items"). Distinct from metric paths (tagged kc/loot_value) and
+    from item-checklist paths (``groups``)."""
+    return isinstance(path, dict) and path.get("kind") == "points"
+
+
+def _path_point_weights(path: dict) -> dict:
+    """``{normalized item name -> integer point weight (≥1)}`` for a points
+    path (``items: [{item_name, points}]``). Bare-string items weigh 1."""
+    out: dict = {}
+    for it in (path.get("items") or []):
+        if isinstance(it, dict):
+            name = _norm(it.get("item_name") or it.get("name"))
+            if not name:
+                continue
+            try:
+                weight = int(round(float(it.get("points") or 1)))
+            except (TypeError, ValueError):
+                weight = 1
+            out[name] = max(weight, 1)
+        elif isinstance(it, str):
+            name = _norm(it)
+            if name:
+                out[name] = 1
+    return out
+
+
+def _points_fold(rows, weights: dict) -> int:
+    """Weighted point total of untagged item rows for a points path — each
+    row's matched-item weight times its quantity (mirrors point_collection).
+    Wildcard (no matched item) and bonus rows contribute nothing here; wildcard
+    manual awards ride the task's percent scale in :func:`_anypath_progress_from_rows`."""
+    total = 0
+    for r in rows:
+        if (getattr(r, "source_type", None) or "") == "bonus":
+            continue
+        name = _norm(getattr(r, "matched_target", None))
+        if name and name in weights:
+            total += weights[name] * max(int(getattr(r, "quantity", 1) or 1), 1)
+    return total
+
+
 def _anypath_progress_from_rows(rows, config: dict, threshold: int) -> int:
     """Pure core of :func:`_anypath_item_progress` (unit-testable).
 
@@ -793,14 +850,16 @@ def _anypath_progress_from_rows(rows, config: dict, threshold: int) -> int:
     when some path's own need is fully met, never one drop early.
 
     Metric paths (``{"metric": "kc"|"loot_value", "need": N}``) fold the
-    quantities of their own tagged rows (``note`` = ``path:<idx>``); item
-    paths fold only the untagged rows — so a 5,000-KC path can never leak
-    kills into a sibling item checklist, or vice versa. Untagged WILDCARD
-    rows (manual awards, no matched item) count on the task's percent scale:
-    item paths absorb them inside the grouped fold as before, and metric
-    paths add them as percent points — which is what keeps the admin
-    "mark complete" award (quantity = threshold − done) completing a
-    metric-only task exactly like any other.
+    quantities of their own tagged rows (``note`` = ``path:<idx>``); item and
+    points paths fold only the untagged rows — so a 5,000-KC path can never
+    leak kills into a sibling item checklist, or vice versa. A POINTS path
+    (``{"kind": "points", "items": [...], "need": N}``) weights each untagged
+    item row by its point value (like a metric goal on the percent scale).
+    Untagged WILDCARD rows (manual awards, no matched item) count on the task's
+    percent scale: item paths absorb them inside the grouped fold as before,
+    and metric/points paths add them as percent points — which is what keeps
+    the admin "mark complete" award (quantity = threshold − done) completing a
+    metric-only or points-only task exactly like any other.
     """
     item_rows = []
     tagged: dict = {}
@@ -821,6 +880,10 @@ def _anypath_progress_from_rows(rows, config: dict, threshold: int) -> int:
         if path.get("metric") in PATH_METRICS:
             need = _path_need(path)
             got = min(tagged.get(pi, 0), need)
+            pct = min((got * threshold) // need + wildcard, threshold)
+        elif _is_points_path(path):
+            need = _path_need(path)
+            got = min(_points_fold(item_rows, _path_point_weights(path)), need)
             pct = min((got * threshold) // need + wildcard, threshold)
         else:
             need = sum(n for _mode, _names, n in _parse_requirement_groups(path))
@@ -2801,6 +2864,54 @@ def _metric_path_room(session, task: dict, team_id, idx: int) -> bool:
     return got < need
 
 
+def _anypath_untagged_room(session, task: dict, team_id, candidate) -> bool:
+    """Whether an UNTAGGED any_path item row (item-checklist or points path)
+    still advances SOME path's own capped progress.
+
+    Item and points paths share the untagged row pool but each has its own
+    ``need``, so the global percentage (the closest path) is the wrong gate: a
+    drop for a TRAILING path must still record or its credit is lost forever
+    (progress re-folds from the ledger; a dropped row can never come back).
+    Mirrors :func:`_metric_path_room` for tagged metric rows — per-path room,
+    not "does the overall percentage move".
+
+    A WILDCARD manual award (no matched item) always records — the admin
+    mark-complete escape hatch, folded on the percent scale like a metric row."""
+    if ((getattr(candidate, "source_type", None) or "") != "bonus"
+            and not _norm(getattr(candidate, "matched_target", None))):
+        return True
+    from db.models import EventCompletion
+
+    rows = [
+        r for r in (
+            session.query(EventCompletion)
+            .filter(EventCompletion.task_id == task["id"],
+                    EventCompletion.team_id == team_id,
+                    EventCompletion.status.in_(("auto", "confirmed", "manual")))
+            .all()
+        )
+        if _row_path_idx(r) is None  # untagged item rows only
+    ]
+    with_cand = rows + [candidate]
+    for path in ((task.get("config") or {}).get("paths") or []):
+        if not isinstance(path, dict) or path.get("metric") in PATH_METRICS:
+            continue
+        if _is_points_path(path):
+            need = _path_need(path)
+            weights = _path_point_weights(path)
+            before = min(_points_fold(rows, weights), need)
+            after = min(_points_fold(with_cand, weights), need)
+        else:
+            need = sum(n for _m, _nm, n in _parse_requirement_groups(path))
+            if need <= 0:
+                continue
+            before = _grouped_progress_from_rows(rows, path, need)
+            after = _grouped_progress_from_rows(with_cand, path, need)
+        if after > before:
+            return True
+    return False
+
+
 def _row_advances_progress(session, task: dict, team_id, candidate) -> bool:
     """Would this (unsaved) ledger row move the (task, team) rollup at all?
 
@@ -2828,7 +2939,9 @@ def _row_advances_progress(session, task: dict, team_id, candidate) -> bool:
         idx = _row_path_idx(candidate)
         if idx is not None:
             return _metric_path_room(session, task, team_id, idx)
-        helper = _anypath_item_progress
+        # Untagged item/points rows: per-path room, not the closest-path
+        # percentage (a trailing path must never lose credit).
+        return _anypath_untagged_room(session, task, team_id, candidate)
     else:
         return True
     return (helper(session, task, team_id, include=candidate)
