@@ -67,6 +67,19 @@ KIND_FOR_TYPE = {
 
 EVENT_NOTIFICATION_TYPES = tuple(KIND_FOR_TYPE)
 
+# The only types still deliverable once an event's status is "past". An end —
+# scheduled or manually cut short — makes the end announcement the last
+# player-facing message: queued stragglers, video-deferred completions and
+# failed-send retries are marked skipped at send time
+# (services/notification_service) instead of trickling out after the
+# "it's over" post. Admin failure notices stay deliverable — they exist to
+# report on the end itself.
+POST_END_ALLOWED_TYPES = (
+    "event_ended",
+    "event_end_failed",
+    "event_activation_failed",
+)
+
 _MEDALS = ("\U0001F947", "\U0001F948", "\U0001F949")  # gold / silver / bronze
 
 # Embed accent colors, keeping the drop-embed visual language (0x00ff00 green

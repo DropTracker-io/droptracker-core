@@ -97,6 +97,16 @@ ACTIVE_EVENTS_KEY = "events:active"        # set of active event ids (gate)
 # window and producers stop pushing — otherwise a dead consumer + an active
 # event would LPUSH events:submissions unboundedly (a Redis-memory incident).
 ACTIVE_EVENTS_TTL_SECONDS = 180
+# Per-event "it's over" tombstone, stamped the moment an event ends (manual or
+# scheduled — services/event_lifecycle._mark_active_in_redis). The matcher's
+# state snapshot can stay stale for up to STATE_REFRESH_SECONDS after an end,
+# and for a PREMATURE manual end the window check can't help (ends_at is
+# still in the future) — the tombstone is what makes an end take effect
+# immediately instead of after the next refresh. Deliberately a negative
+# gate: absence means "process normally", so a lost key (Redis restart) can
+# only reopen the ≤30s race, never silently drop earned credit.
+ENDED_TOMBSTONE_KEY = "events:ended:{event_id}"
+ENDED_TOMBSTONE_TTL_SECONDS = 48 * 3600
 ADMIN_BUMP_CHANNEL = "rt:event-admin"      # pubsub bump on event/task/roster mutations
 
 _STATE_KEY_TTL = 60 * 60 * 24 * 60         # 60 days for xp-baseline / kc-dedupe keys
@@ -142,6 +152,43 @@ def queue_submission(kind: str, player_id, guid, data: dict,
         conn.lpush(QUEUE_KEY, json.dumps(envelope, default=str))
     except Exception:
         pass
+
+
+def set_ended_tombstone(redis_conn, event_id) -> None:
+    """Stamp the per-event ended tombstone (see ``ENDED_TOMBSTONE_KEY``).
+    Best-effort — the DB status flip is the durable record."""
+    if redis_conn is None:
+        return
+    try:
+        redis_conn.set(
+            ENDED_TOMBSTONE_KEY.format(event_id=int(event_id)),
+            int(time.time()), ex=ENDED_TOMBSTONE_TTL_SECONDS,
+        )
+    except Exception:
+        pass
+
+
+def clear_ended_tombstone(redis_conn, event_id) -> None:
+    if redis_conn is None:
+        return
+    try:
+        redis_conn.delete(ENDED_TOMBSTONE_KEY.format(event_id=int(event_id)))
+    except Exception:
+        pass
+
+
+def is_event_ended(redis_conn, event_id) -> bool:
+    """True when ``event_id`` carries the ended tombstone. Fail-open: any
+    doubt (no conn, Redis error, test stub without ``exists``) reads as "not
+    ended" — the DB-derived matcher state stays authoritative, and a skipped
+    envelope is consumed, so a false positive here would drop earned credit."""
+    if redis_conn is None:
+        return False
+    try:
+        return bool(int(redis_conn.exists(
+            ENDED_TOMBSTONE_KEY.format(event_id=int(event_id)))))
+    except Exception:
+        return False
 
 
 def publish_event_admin_bump(event_id: Optional[int] = None) -> None:
@@ -3180,6 +3227,12 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
     for event_id, team_id, joined_at in memberships:
         event = state.events.get(event_id)
         if event is None:
+            continue
+        # Hard stop on end: ``state`` can be up to a refresh-interval stale,
+        # and after a PREMATURE manual end the window check below can't catch
+        # it (ends_at is still in the future) — an ended event must not keep
+        # scoring or notifying off the stale snapshot.
+        if is_event_ended(redis_conn, event_id):
             continue
         # PRD D10: joined_at is the credit cutoff; window rules (A5) freeze
         # evaluation outside the active window.

@@ -59,6 +59,16 @@ class TestKindMapping:
     def test_all_families_covered(self):
         assert set(en.EVENT_NOTIFICATION_TYPES) == set(ALL_TYPES)
 
+    def test_post_end_allowlist(self):
+        # Once an event is "past" (scheduled OR manually cut short), the end
+        # announcement must be the last player-facing message — only the end
+        # post itself and the admin failure notices remain deliverable; the
+        # sender skips everything else at send time.
+        assert set(en.POST_END_ALLOWED_TYPES) == {
+            "event_ended", "event_end_failed", "event_activation_failed",
+        }
+        assert set(en.POST_END_ALLOWED_TYPES) <= set(en.EVENT_NOTIFICATION_TYPES)
+
 
 # ── channel resolution + fallbacks ───────────────────────────────────────────
 

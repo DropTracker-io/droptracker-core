@@ -286,6 +286,10 @@ def main():
             if event_id is not None:
                 r.srem(event_engine.ACTIVE_EVENTS_KEY, int(event_id))
                 r.delete(f"rt:event:{event_id}")
+                # end_event stamped the ended tombstone; a leftover under a
+                # reused event id would falsely gate a later run's matching.
+                r.delete(event_engine.ENDED_TOMBSTONE_KEY.format(
+                    event_id=int(event_id)))
         except Exception:
             pass
 

@@ -374,6 +374,16 @@ async def confirm_completion(event_id: int, completion_id: int):
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev)
+            # An ended event (manual premature ends included) processes no
+            # further completions — confirming would award points and post
+            # notifications after the final standings went out. Reject stays
+            # available for bookkeeping.
+            if ev.status == "past":
+                abort_problem(
+                    409, "Event has ended",
+                    "This event is over — pending completions can no longer "
+                    "be confirmed. Reject them (or leave them) for the record.",
+                )
             comp = _load_completion_or_404(s, event_id, completion_id, for_update=True)
             if comp.status != "pending":
                 abort_problem(
@@ -445,7 +455,8 @@ async def reject_completion(event_id: int, completion_id: int):
 
 
 # --------------------------------------------------------------------------- #
-# Manual award / revoke (always available to event admins — PRD D3/D10)
+# Manual award / revoke (event admins — PRD D3/D10; awards stop once the
+# event has ended, revoke stays available for post-event corrections)
 # --------------------------------------------------------------------------- #
 @event_admin_bp.post("/events/<int:event_id>/award")
 async def award_completion(event_id: int):
@@ -489,6 +500,13 @@ async def award_completion(event_id: int):
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev)
+            # Ended = over: a manual award would move the standings (and post
+            # completion notifications) after the winner was announced.
+            if ev.status == "past":
+                abort_problem(
+                    409, "Event has ended",
+                    "This event is over — completions can no longer be awarded.",
+                )
             task = (
                 s.query(EventTask)
                 .filter(EventTask.id == task_id, EventTask.event_id == event_id)

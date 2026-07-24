@@ -940,6 +940,12 @@ class _FakeRedis:
     def set(self, key, value, ex=None):
         self.kv[key] = str(value)
 
+    def exists(self, key):
+        return 1 if key in self.kv else 0
+
+    def delete(self, key):
+        self.kv.pop(key, None)
+
 
 class TestKcDedupe:
     def test_same_kill_count_counts_once(self):
@@ -1076,6 +1082,49 @@ class TestBingoBoardScoping:
         import pytest
         with pytest.raises(AttributeError):
             engine.handle_envelope(None, _FakeRedis(), state, env)
+
+
+# ── ended-event tombstone: an end (manual included) stops matching NOW ───────
+
+class TestEndedTombstone:
+    """The matcher state snapshot can be a refresh-interval stale, and a
+    PREMATURE manual end can't rely on the window check (ends_at is still in
+    the future) — the Redis tombstone stamped by end_event is what makes the
+    end take effect immediately. session=None proves a gated envelope is
+    skipped before any DB work."""
+
+    def _state(self):
+        return engine.MatcherState(
+            events={10: _event()},
+            tasks_by_event={10: [_task(target="Twisted bow")]},
+            participants={5: [(10, 77, None)]},
+        )
+
+    def test_tombstoned_event_is_skipped(self):
+        r = _FakeRedis()
+        engine.set_ended_tombstone(r, 10)
+        env = _env("drop", {"item_name": "Twisted bow", "quantity": 1})
+        assert engine.handle_envelope(None, r, self._state(), env) == []
+
+    def test_clearing_the_tombstone_reopens_matching(self):
+        r = _FakeRedis()
+        engine.set_ended_tombstone(r, 10)
+        engine.clear_ended_tombstone(r, 10)
+        env = _env("drop", {"item_name": "Twisted bow", "quantity": 1})
+        import pytest
+        # Reaches record_match (needs a real session) → not gated.
+        with pytest.raises(AttributeError):
+            engine.handle_envelope(None, r, self._state(), env)
+
+    def test_fails_open_without_exists_support(self):
+        # A conn that can't answer (stub, Redis error) must read as "not
+        # ended" — a false positive here would consume the envelope and drop
+        # earned credit.
+        class _NoExists:
+            pass
+
+        assert engine.is_event_ended(_NoExists(), 10) is False
+        assert engine.is_event_ended(None, 10) is False
 
 
 # ── WOM reconciler envelopes (kind=wom_kc, source=wom) ───────────────────────

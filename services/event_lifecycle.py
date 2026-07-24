@@ -498,18 +498,24 @@ def _representative_player_id(session, event_id: int) -> Optional[int]:
 
 def _mark_active_in_redis(event_id: int, active: bool) -> None:
     """Immediate ``events:active`` gate update (the worker's periodic matcher
-    refresh reconciles the set from the DB anyway). Best-effort."""
+    refresh reconciles the set from the DB anyway), plus the per-event ended
+    tombstone: stamped on deactivation so the consumer's still-stale matcher
+    snapshot stops scoring/notifying the event the moment it ends (a
+    premature manual end can't rely on the window check — its ends_at is
+    still in the future), cleared on activation. Best-effort."""
     try:
-        from services.event_engine import ACTIVE_EVENTS_KEY
+        from services import event_engine
         from utils.redis import redis_client
 
         conn = getattr(redis_client, "client", None)
         if conn is None:
             return
         if active:
-            conn.sadd(ACTIVE_EVENTS_KEY, int(event_id))
+            conn.sadd(event_engine.ACTIVE_EVENTS_KEY, int(event_id))
+            event_engine.clear_ended_tombstone(conn, event_id)
         else:
-            conn.srem(ACTIVE_EVENTS_KEY, int(event_id))
+            conn.srem(event_engine.ACTIVE_EVENTS_KEY, int(event_id))
+            event_engine.set_ended_tombstone(conn, event_id)
     except Exception:
         pass
 

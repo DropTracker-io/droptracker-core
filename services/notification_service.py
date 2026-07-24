@@ -31,6 +31,7 @@ from utils import osrs_api
 from services.contribution_notifications import format_money
 from services.event_notifications import (
     EVENT_NOTIFICATION_TYPES,
+    POST_END_ALLOWED_TYPES,
     effective_message_config,
     event_ping_role_ids,
     event_url,
@@ -1698,6 +1699,18 @@ class NotificationService:
             if not event:
                 notification.status = 'failed'
                 notification.error_message = f"Unknown event {event_id}"
+                db_session.commit()
+                return
+
+            # An ended event is over — manual premature ends included. The end
+            # announcement is the last player-facing message; everything else
+            # still queued (backlog, video-deferred completions, failed-send
+            # retries) is skipped rather than trickling out after the
+            # "it's over" post.
+            if event.status == "past" and notification_type not in POST_END_ALLOWED_TYPES:
+                notification.status = 'skipped'
+                notification.error_message = 'skipped: event has ended'
+                notification.processed_at = datetime.now()
                 db_session.commit()
                 return
 
