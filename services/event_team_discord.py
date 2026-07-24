@@ -107,8 +107,14 @@ DEFAULT_TEAM_DISCORD_CONFIG = {
     "channels_enabled": False,
     "roles_enabled": False,
     # Snowflake of a FORUM channel: when set, team channels are auto-created
-    # threads inside it instead of guild text channels.
+    # threads inside it instead of guild text channels. WARNING: Discord
+    # threads have no per-thread permissions, so every team can read every
+    # other team's thread — use category_channel_id for private team channels.
     "forum_channel_id": None,
+    # Snowflake of a CATEGORY channel: when set (and no forum), each team's
+    # text channel is created INSIDE this category, so per-team permission
+    # overwrites (role-restricted) actually isolate teams from one another.
+    "category_channel_id": None,
     # EVENT_TEAM_DISCORD_RETENTIONS — what happens on natural event end.
     "retention": "delete_48h",
     # Whether team captains (leadership feature) may edit their own team's
@@ -130,6 +136,7 @@ def effective_team_discord_config(raw_json) -> dict:
         "channels_enabled": DEFAULT_TEAM_DISCORD_CONFIG["channels_enabled"],
         "roles_enabled": DEFAULT_TEAM_DISCORD_CONFIG["roles_enabled"],
         "forum_channel_id": None,
+        "category_channel_id": None,
         "retention": DEFAULT_TEAM_DISCORD_CONFIG["retention"],
         "captain_config": DEFAULT_TEAM_DISCORD_CONFIG["captain_config"],
         "teams": {},
@@ -148,6 +155,9 @@ def effective_team_discord_config(raw_json) -> dict:
     forum = data.get("forum_channel_id")
     if isinstance(forum, (str, int)) and str(forum).isdigit():
         config["forum_channel_id"] = str(forum)
+    category = data.get("category_channel_id")
+    if isinstance(category, (str, int)) and str(category).isdigit():
+        config["category_channel_id"] = str(category)
     if data.get("retention") in ("delete_48h", "keep"):
         config["retention"] = data["retention"]
     teams = data.get("teams")

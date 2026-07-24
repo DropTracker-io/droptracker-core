@@ -192,6 +192,10 @@ async def _ensure_channel(bot, guild, row, team, config, event) -> None:
         return
 
     name = channel_name_for_team(team.name)
+    # Optional parent CATEGORY: text channels created inside it inherit its
+    # place in the tree AND keep their per-team overwrites, so teams are truly
+    # isolated (unlike threads). None = created at guild root, as before.
+    category_id = config.get("category_channel_id")
     if channel is None:
         overwrites = []
         if row.role_id:
@@ -219,13 +223,23 @@ async def _ensure_channel(bot, guild, row, team, config, event) -> None:
         channel = await guild.create_text_channel(
             name=name,
             topic=f"DropTracker team channel — {team.name}",
+            category=int(category_id) if category_id else interactions.MISSING,
             permission_overwrites=overwrites or interactions.MISSING,
             reason=PROVISION_REASON,
         )
         row.channel_id = str(channel.id)
         row.channel_kind = "text"
-    elif getattr(channel, "name", None) != name:
-        await channel.edit(name=name, reason=PROVISION_REASON)
+    else:
+        if getattr(channel, "name", None) != name:
+            await channel.edit(name=name, reason=PROVISION_REASON)
+        # Category was added/changed after the channel already existed: move it
+        # (a bad/deleted category id must not wedge the sync — best effort).
+        if category_id and str(getattr(channel, "parent_id", "") or "") != str(category_id):
+            try:
+                await channel.edit(parent_id=int(category_id), reason=PROVISION_REASON)
+            except Exception as exc:
+                print(f"[team-discord] channel {row.channel_id}: could not move "
+                      f"to category {category_id}: {exc}")
 
 
 def _friendly_row_error(exc) -> str:

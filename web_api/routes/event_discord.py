@@ -833,6 +833,7 @@ def _team_discord_payload(s, ev: Event, scope_group_id=None) -> dict:
         "channels_enabled": config["channels_enabled"],
         "roles_enabled": config["roles_enabled"],
         "forum_channel_id": config["forum_channel_id"],
+        "category_channel_id": config["category_channel_id"],
         "retention": config["retention"],
         "captain_config": config["captain_config"],
         "teams": team_states,
@@ -868,9 +869,12 @@ async def get_event_team_discord(event_id: int):
 async def put_event_team_discord(event_id: int):
     """Replace one scope's team-discord config. Body mirrors the effective
     config shape: ``{group_id?, channels_enabled, roles_enabled,
-    forum_channel_id, retention, captain_config, teams: {"<team_id>":
-    {"role", "channel"}}}``. Saving immediately (re)materializes the desired
-    ``web_event_team_discord`` rows — the bot provisions within ~30s."""
+    forum_channel_id, category_channel_id, retention, captain_config, teams:
+    {"<team_id>": {"role", "channel"}}}``. ``forum_channel_id`` = threads (no
+    per-thread perms); ``category_channel_id`` = per-team text channels inside
+    that category (role-restricted, private). Saving immediately
+    (re)materializes the desired ``web_event_team_discord`` rows — the bot
+    provisions within ~30s."""
     from services.event_team_discord import (
         effective_team_discord_config,
         sync_event_team_discord,
@@ -896,6 +900,11 @@ async def put_event_team_discord(event_id: int):
         forum_channel_id = _clean_snowflake(forum_channel_id, "forum_channel_id")
     else:
         forum_channel_id = None
+    category_channel_id = body.get("category_channel_id")
+    if category_channel_id not in (None, ""):
+        category_channel_id = _clean_snowflake(category_channel_id, "category_channel_id")
+    else:
+        category_channel_id = None
     raw_teams = body.get("teams")
     if raw_teams is not None and not isinstance(raw_teams, dict):
         abort_problem(422, "Invalid teams",
@@ -942,6 +951,29 @@ async def put_event_team_discord(event_id: int):
                 else:
                     _request_channel_refresh(guild_id)
 
+            # Category target must actually be a CATEGORY channel of that guild
+            # (same warm-cache-only validation as the forum target above).
+            if category_channel_id and guild_id:
+                cached = _guild_channels(guild_id)
+                if cached is not None:
+                    known = {str(c.get("id")): c for c in cached}
+                    entry = known.get(category_channel_id)
+                    if entry is None:
+                        _request_channel_refresh(guild_id)
+                        abort_problem(
+                            422, "Channel not in guild",
+                            "The category isn't in the bot's list of this "
+                            "server's channels. If you just created it, wait a "
+                            "moment and save again; otherwise check the id.")
+                    if entry.get("type") != "category":
+                        abort_problem(
+                            422, "Not a category",
+                            "Per-team channels need a CATEGORY target — pick a "
+                            "channel category, or leave it empty to create "
+                            "channels at the server root.")
+                else:
+                    _request_channel_refresh(guild_id)
+
             # Only known team ids, only this scope's teams (clan scopes may
             # not toggle another clan's teams).
             valid_q = s.query(EventTeam.id).filter(EventTeam.event_id == ev.id)
@@ -979,6 +1011,8 @@ async def put_event_team_discord(event_id: int):
                     merged[key] = bool(body[key])
             if "forum_channel_id" in body:
                 merged["forum_channel_id"] = forum_channel_id
+            if "category_channel_id" in body:
+                merged["category_channel_id"] = category_channel_id
             if retention is not None:
                 merged["retention"] = retention
             merged_teams = {k: dict(v) for k, v in current.get("teams", {}).items()}
@@ -999,10 +1033,10 @@ async def put_event_team_discord(event_id: int):
                     f".group.{scope_group_id}" if scope_group_id is not None else ""),
                 before=json.dumps({k: before[k] for k in (
                     "channels_enabled", "roles_enabled", "forum_channel_id",
-                    "retention", "captain_config")}),
+                    "category_channel_id", "retention", "captain_config")}),
                 after=json.dumps({k: after[k] for k in (
                     "channels_enabled", "roles_enabled", "forum_channel_id",
-                    "retention", "captain_config")}),
+                    "category_channel_id", "retention", "captain_config")}),
             ))
             s.commit()
             return after

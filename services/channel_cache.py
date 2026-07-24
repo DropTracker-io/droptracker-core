@@ -7,6 +7,7 @@ of a dozen text channels):
 
     {"id", "name", "position", "type": "text"}
     {"id", "name", "position", "type": "forum"}
+    {"id", "name", "position", "type": "category"}
     {"id", "name", "position", "type": "thread", "parent_id": "<forum/text id>"}
 
 Threads are emitted immediately after their parent channel, so consumers that
@@ -38,6 +39,11 @@ def shape_channel_cache(raw_channels: Iterable, threads: Iterable) -> List[dict]
             ctype = "text"
         elif kind == "GuildForum":
             ctype = "forum"
+        elif kind == "GuildCategory":
+            # Surfaced so the website can offer a category picker for per-team
+            # channels (private, unlike forum threads). Categories aren't
+            # messageable, so notification-destination pickers must skip them.
+            ctype = "category"
         else:
             continue
         channels.append(

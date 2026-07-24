@@ -66,6 +66,18 @@ class TestEffectiveConfig:
         assert config["forum_channel_id"] is None
         assert config["channels_enabled"] is False
 
+    def test_category_channel_id_normalizes(self):
+        # Per-team private channels live under this category (int or str id).
+        assert etd.effective_team_discord_config(
+            '{"category_channel_id": 987654}')["category_channel_id"] == "987654"
+        assert etd.effective_team_discord_config(
+            '{"category_channel_id": "111"}')["category_channel_id"] == "111"
+
+    def test_category_channel_id_defaults_and_rejects_garbage(self):
+        assert etd.effective_team_discord_config(None)["category_channel_id"] is None
+        assert etd.effective_team_discord_config(
+            '{"category_channel_id": "not-a-number"}')["category_channel_id"] is None
+
 
 # ── per-team flags & toggles ─────────────────────────────────────────────────
 

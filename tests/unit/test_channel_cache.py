@@ -32,6 +32,10 @@ class GuildPublicThread(SimpleNamespace):
     pass
 
 
+class GuildCategory(SimpleNamespace):
+    pass
+
+
 def _channel(cls, id, name, position):
     return cls(id=id, name=name, position=position)
 
@@ -59,6 +63,22 @@ def test_text_and_forum_channels_typed_and_position_sorted():
 def test_non_messageable_channel_kinds_are_excluded():
     out = shape_channel_cache([_channel(GuildVoice, 9, "voice", 0)], [])
     assert out == []
+
+
+def test_categories_are_typed_for_the_per_team_channel_picker():
+    # Categories surface so the website can offer a category target for
+    # per-team (permissioned) channels — distinct from forums/text/threads.
+    out = shape_channel_cache(
+        [
+            _channel(GuildCategory, 5, "Teams", 0),
+            _channel(GuildText, 6, "general", 1),
+        ],
+        [],
+    )
+    assert [(c["id"], c["type"]) for c in out] == [
+        ("5", "category"),
+        ("6", "text"),
+    ]
 
 
 def test_threads_follow_their_parent_sorted_by_name():
