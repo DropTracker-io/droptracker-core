@@ -210,6 +210,7 @@ def evaluate_daily_champion(session, badge: Badge, day: str, dry_run: bool = Fal
         return 1
     return 0
 
+
 def _visible_player_ids(session, player_ids: List[int]) -> set:
     """Subset of ``player_ids`` a public board would actually show.
 
@@ -232,17 +233,20 @@ def _visible_player_ids(session, player_ids: List[int]) -> set:
     return {int(pid) for pid, p_hidden, u_hidden in rows if not p_hidden and not u_hidden}
 
 
-def _held_by(session, badge: Badge, slot_key: str) -> Optional[int]:
-    """Player id currently holding ``slot_key`` for ``badge``, if any."""
-    row = (
-        session.query(PlayerBadge.player_id)
-        .filter(
-            PlayerBadge.badge_id == badge.badge_id,
-            PlayerBadge.group_key == 0,
-            PlayerBadge.active_key == slot_key,
-        )
-        .first()
+def _held_by(session, badge: Badge, slot_key: str,
+             include_history: bool = False) -> Optional[int]:
+    """Player id occupying ``slot_key`` for ``badge``, if any.
+
+    ``include_history`` matches ``award_badge``'s rule for automatic awards,
+    where *any* row — including a lost or revoked one — keeps the slot taken.
+    """
+    q = session.query(PlayerBadge.player_id).filter(
+        PlayerBadge.badge_id == badge.badge_id,
+        PlayerBadge.group_key == 0,
     )
+    q = q.filter(PlayerBadge.slot_key == slot_key) if include_history \
+        else q.filter(PlayerBadge.active_key == slot_key)
+    row = q.first()
     return int(row[0]) if row else None
 
 
@@ -310,8 +314,8 @@ def evaluate_global_champion(session, badge: Badge, dry_run: bool = False,
 
     context = {"period": period, "loot": loot}
     if dry_run:
-        holder = _held_by(session, badge, period)
-        if holder == player_id or (not held and holder is not None):
+        holder = _held_by(session, badge, period, include_history=not held)
+        if holder is not None and (not held or holder == player_id):
             return 0
         _log(f"DRY-RUN {badge.key} [{period}]: player {player_id} takes it with "
              f"{loot:,} gp (held by {holder if holder is not None else 'nobody'})")
@@ -601,7 +605,10 @@ def run_badge_cycle(dry_run: bool = False, days: Optional[List[str]] = None,
                         session, badge, dry_run, period=token
                     )
 
-        if not dry_run and days is None and day_list:
+        # Only advance the marker when the day-scoped families actually ran —
+        # an `only=` run (leaders/records) must not mark days as completed that
+        # no daily-champion or streak evaluation ever saw.
+        if not dry_run and days is None and only is None and day_list:
             redis_client.client.set(LAST_COMPLETED_DAY_KEY, day_list[-1])
     finally:
         session.close()

@@ -42,13 +42,30 @@ _MAX_ROW_BADGES = 6
 IMG_BASE = "https://www.droptracker.io/img"
 
 
+def _ctx_recency(context) -> str:
+    """Sortable "which award is newer" token from an award's context.
+
+    Day-scoped badges carry ``day`` ("20260704"), the loot leaders carry the
+    partition token ``period`` ("202607"). Both are zero-padded, and only
+    awards of the *same* badge key are ever compared, so a plain string
+    compare orders them correctly.
+    """
+    ctx = context if isinstance(context, dict) else {}
+    return str(ctx.get("day") or ctx.get("period") or "")
+
+
 def _badge_priority(semantic: str, key: str) -> int:
-    # Held records first, then streaks, then repeatable permanents (daily).
-    if semantic == "held":
+    # Global loot leaders first — there is exactly one per board, and a row is
+    # capped at _MAX_ROW_BADGES, so a record-heavy #1 would otherwise push its
+    # own crown into the overflow. Then held records, streaks, and repeatable
+    # permanents (daily champion).
+    if key.startswith("global_loot_leader"):
         return 0
-    if key.startswith("loot_streak"):
+    if semantic == "held":
         return 1
-    return 2
+    if key.startswith("loot_streak"):
+        return 2
+    return 3
 
 
 def _compact_badges_for(ids: list[int]) -> dict[int, list[dict]]:
@@ -110,14 +127,12 @@ def _compact_badges_for(ids: list[int]) -> dict[int, list[dict]]:
         if semantic != "held":
             # Collapse repeats of the same permanent badge into one chip,
             # keeping the most recent context. Backfilled awards can share an
-            # awarded_at second, so compare the context day rather than
-            # trusting row order.
+            # awarded_at second, so compare the context's own period/day token
+            # rather than trusting row order.
             for c in chips:
                 if c["key"] == key:
                     c["count"] = c.get("count", 1) + 1
-                    prev_day = str((c.get("context") or {}).get("day") or "")
-                    new_day = str((context or {}).get("day") or "")
-                    if new_day > prev_day:
+                    if _ctx_recency(context) > _ctx_recency(c.get("context")):
                         c["context"] = context
                     break
             else:

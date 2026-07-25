@@ -24,6 +24,9 @@ cannot take part in the dedupe (NULL group_id = global badge).
     daily champion  -> the day token ("20260704"): one winner per day
     streak / manual -> "p:{player_id}": once per player (revoke frees it)
     boss record     -> "npc:{npc_id}:{team_size}": one active holder per slot
+    loot leader     -> the partition token ("all" / "202607"): one leader per
+                       board — held (live crown) or permanent (month-end
+                       trophy), per this row's ``semantic``
 """
 from __future__ import annotations
 
