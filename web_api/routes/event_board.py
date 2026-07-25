@@ -15,9 +15,10 @@
                                                  admins rolling on behalf)
 
 Auth mirrors the bingo board: writes require the event admin gate; reads are
-public once the event is visible (restricted events — drafts or private:
-participants/admins only via events._can_view_restricted). The board layout
-locks when the event starts — settings stay live-tunable by design.
+public once the event is visible (private events: participants/admins only via
+events._can_view_restricted — a public draft's board reads publicly, so the
+pre-start Discord link shows the real board). The board layout locks when the
+event starts — settings stay live-tunable by design.
 """
 from __future__ import annotations
 

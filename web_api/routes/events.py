@@ -325,23 +325,36 @@ def _member_group_ids(s, viewer_id) -> set[int]:
 
 
 def _is_restricted(ev: Event) -> bool:
-    """Whether ``ev`` is hidden from the general public — either it's still a
-    draft (pre-publication) or an admin marked it ``private`` (permanent). Both
-    limit the audience to the same set: event admins + participating-group
-    members (see :func:`_can_view_restricted`)."""
-    if _effective_status(ev) == "draft":
-        return True
+    """Whether ``ev``'s CONTENT is hidden from the general public — i.e. an
+    admin marked it ``private``, which limits the audience to event admins +
+    participating-group members (see :func:`_can_view_restricted`).
+
+    Being a draft is deliberately NOT restricting (web74a). A public draft is
+    readable by direct link so the "the event is coming, here's the board —
+    sign up!" Discord link opens for everyone, signed in or not; it is only
+    kept OUT of the public listing (see :func:`_is_unlisted`). Clans that want
+    their board secret before the start use ``visibility='private'``, which
+    hides drafts exactly as before."""
     return (getattr(ev, "visibility", None) or "public") == "private"
 
 
+def _is_unlisted(ev: Event) -> bool:
+    """Whether ``ev`` is kept off the PUBLIC events list. Two reasons, one
+    answer: it's private (hidden outright), or it's a draft that hasn't
+    started — listing every unstarted event would bury the live ones. Unlisted
+    is weaker than restricted: a public draft still serves its own page to
+    anyone holding the link. Event admins and participating-group members see
+    both kinds in their listing regardless."""
+    return _effective_status(ev) == "draft" or _is_restricted(ev)
+
+
 def _can_view_restricted(s, viewer_id, ev: Event) -> bool:
-    """Audience for a restricted event (draft OR private): event admins, plus
-    MEMBERS of any participating group. Members get the event page (and its
-    sign-up panel) as soon as the event exists — so a "the event is coming,
-    sign up!" Discord link works before activation, and a private event stays
-    visible to the clan running it. Denials go through
-    :func:`_deny_restricted`: signed-in outsiders get a reasoned 403,
-    anonymous viewers the anonymized 404."""
+    """Audience for a restricted (private) event, and for the listing of an
+    unlisted one: event admins, plus MEMBERS of any participating group.
+    Members get the event page (and its sign-up panel) as soon as the event
+    exists, so a private event stays visible to the clan running it. Denials
+    go through :func:`_deny_restricted`: signed-in outsiders get a reasoned
+    403, anonymous viewers the anonymized 404."""
     if _is_event_admin(s, viewer_id, ev):
         return True
     if viewer_id is None:
@@ -350,26 +363,23 @@ def _can_view_restricted(s, viewer_id, ev: Event) -> bool:
 
 
 def _deny_restricted(ev: Event, viewer_id) -> None:
-    """Deny a restricted (draft/private) event to a viewer who failed
+    """Deny a restricted (private) event to a viewer who failed
     :func:`_can_view_restricted`.
 
     Signed-in viewers get a 403 carrying a machine-readable ``code``
-    (``event_draft`` / ``event_private``) so the site can say WHY instead of a
-    blank 404 (web57a). This deliberately reveals that the event exists to any
-    signed-in account — but nothing else about it. Anonymous viewers RETURN
-    instead of aborting: the caller falls through to its usual
-    missing-resource 404, so logged-out probing still can't distinguish a
-    restricted event from a nonexistent one.
+    (``event_private``) so the site can say WHY instead of a blank 404
+    (web57a). This deliberately reveals that the event exists to any signed-in
+    account — but nothing else about it. Anonymous viewers RETURN instead of
+    aborting: the caller falls through to its usual missing-resource 404, so
+    logged-out probing still can't distinguish a restricted event from a
+    nonexistent one.
+
+    Privacy is the only denial reason left since web74a made public drafts
+    publicly readable — a private draft is denied for being private, which is
+    the durable reason (it stays denied once it goes live).
     """
     if viewer_id is None:
         return
-    if _effective_status(ev) == "draft":
-        abort_problem(
-            403,
-            "Event restricted",
-            "This event has not been published yet and is only visible to participants.",
-            extra={"code": "event_draft"},
-        )
     abort_problem(
         403,
         "Event restricted",
@@ -819,12 +829,15 @@ async def list_events():
             out = []
             for ev in events:
                 eff = _effective_status(ev)
-                # Restricted = draft (pre-publication) OR private (permanent):
-                # both are limited to admins + participating-group members.
-                if _is_restricted(ev) and not viewer_is_superadmin and (
+                # Unlisted = draft (not started yet) OR private: both stay out
+                # of an outsider's listing, and both stay in the listing of
+                # admins + participating-group members. A public draft is still
+                # readable at its own URL — this only keeps the list to events
+                # that are actually live (web74a).
+                if _is_unlisted(ev) and not viewer_is_superadmin and (
                         not ev.group_id or ev.group_id not in admin_groups):
                     if not (member_groups & participating_group_ids(s, ev)):
-                        # clan-vs-clan restricted events are also visible to
+                        # clan-vs-clan unlisted events are also listed for
                         # admins of any accepted participant (mode check first:
                         # standard events take the fast `continue` with no extra
                         # queries; guild-derived admins aren't in member_groups).
@@ -942,9 +955,10 @@ async def get_event(event_id: int):
             if not ev:
                 return None
             if _is_restricted(ev) and not render_bypass:
-                # Drafts (pre-publication) and private events: event admins +
-                # members of participating groups only. Signed-in outsiders
-                # get a reasoned 403, anonymous viewers the anonymized 404.
+                # Private events: event admins + members of participating
+                # groups only. Signed-in outsiders get a reasoned 403,
+                # anonymous viewers the anonymized 404. Public drafts are NOT
+                # restricted — the direct link opens for anyone (web74a).
                 if not _can_view_restricted(s, viewer_id, ev):
                     _deny_restricted(ev, viewer_id)
                     return None
