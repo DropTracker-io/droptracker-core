@@ -243,6 +243,10 @@ EVENT_MESSAGE_TOGGLE_KEYS = (
 # every queue type above plus the persistent live-standings board message.
 EVENT_MESSAGE_LAYOUT_TYPES = EVENT_MESSAGE_TOGGLE_KEYS + (
     "event_signup_prompt",
+    # web70a — layout-only key (like event_board_win): what a posted sign-up
+    # prompt is re-rendered into once sign-ups close, with the button gone.
+    # Never queued; edited over the original prompt message in place.
+    "event_signup_closed",
     "event_board",
     # Prize pot (web52a) — the manual "advertise the pot now" post. Admin
     # action, no verbosity toggle (absent from EVENT_MESSAGE_TOGGLE_KEYS).
@@ -375,6 +379,12 @@ class Event(Base):
     # event starts). Settable in the wizard and flippable at any status via
     # PATCH /events; every flip lands in the event.settings.update audit diff.
     allow_live_edits = Column(Boolean, nullable=False, default=False, server_default="0")
+    # Late sign-ups (web70a): OFF (default) closes self sign-ups the moment the
+    # event begins — the Discord prompt retires its button, the join panel and
+    # the API refuse. ON restores the pre-web70a behaviour: players may still
+    # enter mid-event, right up to the end. Admins can always place players
+    # manually either way (the roster stays open until the event is past).
+    allow_late_signups = Column(Boolean, nullable=False, default=False, server_default="0")
     activated_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
@@ -557,6 +567,40 @@ class EventSignup(Base):
     # How the sign-up arrived, for the admin pool view: "web" | "discord".
     source = Column(String(16), nullable=False, default="web", server_default="web")
     created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+class EventSignupMessage(Base):
+    """A sign-up prompt the bot posted to Discord (web70a).
+
+    The "Sign up" post is an ordinary queued notification, so nothing used to
+    remember where it landed — and a prompt whose sign-ups had closed kept
+    showing its button forever. One row per (event, message) is written by
+    services/notification_service.py as each destination send succeeds; the
+    core bot's retire sweep (services/event_signup_prompt.py) edits those
+    messages into the closed layout, drops the button and stamps
+    ``closed_at``. Same shape as the leaderboard board post: post once, edit
+    in place, give up quietly if the message is gone.
+    """
+
+    __tablename__ = "web_event_signup_messages"
+    __table_args__ = (
+        Index("uq_web_evt_signup_msg", "event_id", "message_id", unique=True),
+        Index("idx_web_evt_signup_msg_open", "closed_at", "event_id"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    channel_id = Column(String(32), nullable=False)
+    message_id = Column(String(32), nullable=False)
+    # Which clan's channel this landed in (per-group clan-vs-clan fan-out);
+    # NULL for the event's shared/host destination.
+    group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=True)
+    posted_at = Column(DateTime, default=func.now(), nullable=False)
+    # When the prompt was retired (button removed). NULL = still live; the
+    # sweep only looks at NULL rows. Also stamped when the message turns out
+    # to be deleted, so a vanished post stops being retried.
+    closed_at = Column(DateTime, nullable=True)
 
 
 class EventBingoCell(Base):

@@ -136,6 +136,11 @@ def _event(**kw):
         submission_policy="all", join_code=None, discord_guild_id=None,
         board_size=5, bonus_line_points=0, bonus_blackout_points=0,
         activated_at=None, ended_at=None, mode="standard",
+        # These fixtures are about join *mechanics* on a running event. Since
+        # web70a a started event closes self sign-ups unless it opted into late
+        # ones, so the factory opts in; the window itself is covered by
+        # TestJoinSignupWindow below.
+        allow_late_signups=True,
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -323,6 +328,35 @@ class TestJoinEventStandard:
         _wire(monkeypatch, s)
         r = await client.post("/api/v1/events/1/join", json={"player_id": 3, "team_id": 1})
         assert r.status_code == 403
+
+
+class TestJoinSignupWindow:
+    """web70a: a started event stops taking self sign-ups unless it allows late
+    ones — the site refusing in step with the Discord prompt losing its button.
+    The refusal lands before any player/eligibility query (the scripted session
+    would fail the run if one were issued)."""
+
+    async def test_started_event_refuses_by_default(self, client, monkeypatch):
+        s = _S([_event(allow_late_signups=False)])
+        _wire(monkeypatch, s)
+        r = await client.post("/api/v1/events/1/join", json={"player_id": 3, "team_id": 1})
+        assert r.status_code == 409
+        assert (await r.get_json())["code"] == "signups_closed"
+
+    async def test_scheduled_event_before_start_still_joins(self, client, monkeypatch):
+        ev = _event(allow_late_signups=False, status="draft",
+                    starts_at=datetime.now() + timedelta(days=1))
+        s = _S([ev], [_player()], [(1,)], [], [_team(1), _team(2)])
+        _wire(monkeypatch, s)
+        r = await client.post("/api/v1/events/1/join", json={"player_id": 3, "team_id": 2})
+        assert r.status_code == 200
+
+    async def test_late_signups_event_still_joins(self, client, monkeypatch):
+        s = _S([_event(allow_late_signups=True)], [_player()], [(1,)], [],
+               [_team(1), _team(2)])
+        _wire(monkeypatch, s)
+        r = await client.post("/api/v1/events/1/join", json={"player_id": 3, "team_id": 2})
+        assert r.status_code == 200
 
 
 class TestAddTeamStandard:

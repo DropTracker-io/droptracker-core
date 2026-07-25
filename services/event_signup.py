@@ -47,6 +47,49 @@ def is_self_signup_mode(ev) -> bool:
     return (getattr(ev, "formation_mode", None) or "admin_assign") in EVENT_SELF_SIGNUP_MODES
 
 
+def event_started(ev, now: Optional[datetime] = None) -> bool:
+    """Has the event begun? Activation is authoritative (a manual activate can
+    beat the schedule); an unactivated draft whose ``starts_at`` has passed
+    counts too, since the lifecycle sweep is about to activate it anyway."""
+    now = now or datetime.now()
+    if getattr(ev, "status", None) in ("active", "past"):
+        return True
+    starts_at = getattr(ev, "starts_at", None)
+    return bool(starts_at and starts_at <= now)
+
+
+def signup_close_at(ev):
+    """When self sign-ups stop being accepted, as a datetime — or None when
+    that isn't known yet (an unscheduled draft closes at whatever moment an
+    admin activates it). Late sign-ups on: the event's own end."""
+    if getattr(ev, "allow_late_signups", False):
+        return getattr(ev, "ends_at", None)
+    return getattr(ev, "activated_at", None) or getattr(ev, "starts_at", None)
+
+
+def signups_closed(ev, now: Optional[datetime] = None) -> Optional[str]:
+    """The user-visible reason self sign-ups are shut, or None while open.
+
+    Two gates: the event is over (always closing), or the event has begun and
+    ``allow_late_signups`` is off (web70a — the default). Admin placement is a
+    separate surface and stays open until the event is past.
+    """
+    now = now or datetime.now()
+    ends_at = getattr(ev, "ends_at", None)
+    if getattr(ev, "status", None) == "past" or (ends_at and ends_at < now):
+        return "This event is over — sign-ups are closed."
+    if not getattr(ev, "allow_late_signups", False) and event_started(ev, now):
+        return "Sign-ups closed when the event began."
+    return None
+
+
+def assert_signups_open(ev, now: Optional[datetime] = None) -> None:
+    """:func:`signups_closed` as a guard. Raises :class:`SignupError` 409."""
+    reason = signups_closed(ev, now)
+    if reason:
+        raise SignupError(409, "Sign-ups closed", reason)
+
+
 def _is_clan_vs_clan(ev) -> bool:
     return (getattr(ev, "mode", None) or "standard") == "clan_vs_clan"
 
@@ -184,8 +227,9 @@ def perform_signup(session, ev, player, user_id: int, team_id: Optional[int] = N
                    source: str = "web", join_code: Optional[str] = None) -> dict:
     """Sign ``player`` (a Player owned by ``user_id``) up for ``ev``.
 
-    Enforces: roster open, self-signup mode, eligibility, join code (self_join),
-    one RSN per user. Then, by formation mode:
+    Enforces: sign-ups still open (:func:`signups_closed` — over, or begun
+    without ``allow_late_signups``), self-signup mode, eligibility, join code
+    (self_join), one RSN per user. Then, by formation mode:
       • signup_pool → records a sign-up with no team (admins sort later);
       • self_join   → requires/uses ``team_id`` (auto when the player's clan has
         exactly one team);
@@ -194,12 +238,13 @@ def perform_signup(session, ev, player, user_id: int, team_id: Optional[int] = N
     The caller owns the commit.
     """
     formation = getattr(ev, "formation_mode", None) or "admin_assign"
-    status = getattr(ev, "status", None)
-    if status == "past" or (ev.ends_at and ev.ends_at < datetime.now()):
-        raise SignupError(409, "Event is over", "Sign-ups for this event are closed.")
     if not is_self_signup_mode(ev):
         raise SignupError(403, "Sign-ups closed",
                           "This event's teams are set by its admins.")
+    # Over, or begun without late sign-ups enabled (web70a). Checked after the
+    # mode so an admin-assigned event keeps its precise "admins place players"
+    # answer rather than a window message it never had.
+    assert_signups_open(ev)
     if formation == "self_join" and ev.join_code:
         if not isinstance(join_code, str) or join_code.strip() != ev.join_code:
             raise SignupError(403, "Join code required", "The join code is missing or wrong.")

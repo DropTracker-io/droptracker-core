@@ -121,6 +121,14 @@ class EventSignupButtons(Extension):
         if not ev or not sus.is_self_signup_mode(ev):
             await self._reply(ctx, "Sign-ups for this event aren't open.")
             return
+        # The prompt is a Discord message that outlives the sign-up window: the
+        # retire sweep normally strips this button the moment the event begins,
+        # but a message it couldn't edit (deleted channel, lost perms, bot down)
+        # must not still take entries. Re-check here, always.
+        closed = sus.signups_closed(ev)
+        if closed:
+            await self._reply(ctx, f"\U0001F512 **{ev.name}** — {closed}")
+            return
         players = _linked_players(ctx.user.id)
         if not players:
             await _need_account_link(ctx)

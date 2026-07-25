@@ -1754,6 +1754,9 @@ class NotificationService:
                     destinations.append({
                         "channel_id": cid,
                         "ping": dest["group_id"] == event.group_id,
+                        # Which clan this destination belongs to — recorded
+                        # alongside a posted sign-up prompt (web70a).
+                        "group_id": dest["group_id"],
                     })
                 skip_reason = 'skipped: no participating clan wants this message'
             else:
@@ -1925,7 +1928,10 @@ class NotificationService:
             )
 
             async def _send_to(channel, ping_text):
-                """One destination: Components-V2 layout, embed fallback."""
+                """One destination: Components-V2 layout, embed fallback.
+
+                Returns the sent message so the caller can remember it (the
+                sign-up prompt has to be editable later — web70a)."""
                 allowed = interactions.AllowedMentions(parse=["roles"]) if ping_text else None
                 # Preferred path: the group's Components-V2 layout
                 # (services/event_message_layouts.py — group row falls back to
@@ -1952,10 +1958,9 @@ class NotificationService:
                     )
                     send_kwargs = {"files": image_attachment} if image_attachment else {}
                     if allowed:
-                        await channel.send(components=components,
-                                           allowed_mentions=allowed, **send_kwargs)
-                    else:
-                        await channel.send(components=components, **send_kwargs)
+                        return await channel.send(components=components,
+                                                  allowed_mentions=allowed, **send_kwargs)
+                    return await channel.send(components=components, **send_kwargs)
                 except interactions.errors.Forbidden:
                     raise
                 except Exception as render_error:
@@ -1971,10 +1976,9 @@ class NotificationService:
                     if image_attachment:
                         send_kwargs["files"] = image_attachment
                     if ping_text:
-                        await channel.send(content=ping_text, embed=embed,
-                                           allowed_mentions=allowed, **send_kwargs)
-                    else:
-                        await channel.send(embed=embed, **send_kwargs)
+                        return await channel.send(content=ping_text, embed=embed,
+                                                  allowed_mentions=allowed, **send_kwargs)
+                    return await channel.send(embed=embed, **send_kwargs)
 
             # Deliver to every destination; per-group events keep going when
             # one clan's channel is broken (their misconfig must not silence
@@ -1995,8 +1999,16 @@ class NotificationService:
                         dest_ping = f"<@&{dest['team_role']}>"
                     else:
                         dest_ping = None
-                    await _send_to(channel, dest_ping)
+                    sent_message = await _send_to(channel, dest_ping)
                     sent_count += 1
+                    # Remember the sign-up prompt so the bot can come back and
+                    # retire its button when sign-ups close (web70a) — without
+                    # this the post advertises a window it no longer honours.
+                    if notification_type == "event_signup_prompt" and sent_message is not None:
+                        from services.event_signup_prompt import record_prompt
+
+                        record_prompt(db_session, event.id, dest["channel_id"],
+                                      sent_message.id, dest.get("group_id"))
                 except interactions.errors.Forbidden:
                     if len(destinations) == 1:
                         raise
@@ -2025,6 +2037,15 @@ class NotificationService:
                 await refresh_after_notification(self.bot, db_session, event, notification_type)
             except Exception:
                 pass  # refresh_event_board logs its own errors
+
+            # The event just started (or ended): retire any sign-up prompt
+            # still showing its button (web70a). Same guarded shape as the
+            # board refresh — upkeep must never rewrite the 'sent' status.
+            try:
+                from services.event_signup_prompt import close_after_notification
+                await close_after_notification(self.bot, db_session, event, notification_type)
+            except Exception:
+                pass  # close_signup_prompts logs its own errors
         except interactions.errors.Forbidden:
             raise  # process_notification_with_session handles missing perms
         except Exception as e:

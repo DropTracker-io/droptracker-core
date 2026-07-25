@@ -412,7 +412,28 @@ DEFAULT_LAYOUTS = {
                 "type": "text",
                 "content": "{signup_instructions}\n-# One account per person. Not linked yet? Sign in at droptracker.io first.",
             },
-            {"type": "text", "content": "**Sign-ups close** {ends_at}"},
+            # web70a: the real deadline — the event's start unless the event
+            # allows late sign-ups, in which case it is the event's end. The
+            # old copy always pointed at {ends_at}, promising a window that
+            # had in fact shut when the event began.
+            {"type": "text", "content": "**Sign-ups close** {signup_close_at}"},
+        ],
+    },
+    # The same post after sign-ups close (web70a): the retire sweep edits this
+    # layout over the original prompt message and drops the button, so a live
+    # "Sign up" control never outlives the window it advertised.
+    "event_signup_closed": {
+        "accent_color": "#4E5058",
+        "blocks": [
+            {"type": "text", "content": "## \U0001F512 Sign-ups closed — {event_name}"},
+            {"type": "text", "content": "{signup_closed_line}"},
+            {
+                "type": "buttons",
+                "buttons": [
+                    {"label": "\U0001F4F2 Open the event", "launch": True},
+                    {"label": "View on droptracker.io", "url": "{event_url}"},
+                ],
+            },
         ],
     },
     "event_board": {
@@ -534,6 +555,11 @@ TOKEN_DOCS = {
                  "sample": "\U0001F4B0 Prize pot: **250M GP**"},
     "signup_instructions": {"help": "How to sign up (matches the event's formation mode)",
                             "sample": "Pick your account, then choose your team."},
+    "signup_close_at": {"help": "When sign-ups close — the event's start, or its end "
+                                "when the event allows late sign-ups (Discord timestamp)",
+                        "sample": "July 22, 2026 5:00 PM"},
+    "signup_closed_line": {"help": "Why the sign-up post is closed (shown on the retired prompt)",
+                           "sample": "The event is underway — sign-ups closed July 22, 2026 5:00 PM."},
     "board_status_line": {"help": "The live board's status line",
                           "sample": "Day 3 of 14 — 12 tasks completed"},
     "tasks_summary": {"help": "Task-completion summary on the live board",
@@ -675,7 +701,13 @@ TYPE_META = {
     "event_signup_prompt": {
         "label": "Sign-up prompt", "group": "Announcements",
         "description": "The interactive sign-up post (the Sign up button is always attached).",
-        "tokens": ("signup_instructions",), "standings": False,
+        "tokens": ("signup_instructions", "signup_close_at"), "standings": False,
+    },
+    "event_signup_closed": {
+        "label": "Sign-up prompt (closed)", "group": "Announcements",
+        "description": "What the sign-up post becomes once sign-ups close — the button "
+                       "is removed and the message is edited in place.",
+        "tokens": ("signup_closed_line",), "standings": False,
     },
     "event_pot": {
         "label": "Prize pot", "group": "Announcements",
@@ -1110,6 +1142,10 @@ def render_event_components(
     # otherwise render as an ordinary dice move (audit).
     if message_type == "event_board_turn" and context.get("board_won"):
         message_type = "event_board_win"
+    # Same flip for the sign-up post once its window shuts (web70a): the retire
+    # sweep re-renders the original message through the closed layout.
+    if message_type == "event_signup_prompt" and context.get("signups_closed"):
+        message_type = "event_signup_closed"
     layout = load_layout(session, group_id, message_type,
                          event_id=event_id or (context or {}).get("event_id"))
     enabled = deeplink_enabled()
@@ -1307,7 +1343,7 @@ def notification_context(notification_type: str, data: dict) -> dict:
     elif notification_type == "event_board_roll_prompt":
         context["roll_thanks_line"] = ""
 
-    if notification_type == "event_signup_prompt":
+    if notification_type in ("event_signup_prompt", "event_signup_closed"):
         context["signup_instructions"] = {
             "self_join": "Pick your account, then choose your team.",
             "auto_assign": "Pick your account — you'll be placed on a team automatically.",
@@ -1315,6 +1351,16 @@ def notification_context(notification_type: str, data: dict) -> dict:
                            "admins will sort teams later.",
         }.get(data.get("formation_mode"), "Pick your account to enter.")
         context.setdefault("description", "This event is open for sign-ups!")
+        # When the window shuts (web70a). Falls back to the event's end so a
+        # legacy payload (queued before this field existed) still renders its
+        # deadline line instead of dropping it.
+        put("signup_close_at",
+            _fmt_ts(data.get("signup_close_at") or data.get("ends_at")))
+        # Set by the retire sweep only — flips the whole message to the closed
+        # layout in render_event_components.
+        if data.get("signups_closed"):
+            context["signups_closed"] = True
+            put("signup_closed_line", data.get("signup_closed_line"))
 
     # Loot Sweep verbosity messages (services.event_engine loot_sweep enrichment).
     # Compose the enriched detail lines here so an absent field drops only its

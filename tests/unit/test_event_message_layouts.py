@@ -300,7 +300,7 @@ class TestDefaultLayouts:
             "event_blackout", "event_lead_change", "event_pending",
             "event_activation_failed", "event_end_failed",
             "event_multi_clan_skipped",
-            "event_signup_prompt", "event_board",
+            "event_signup_prompt", "event_signup_closed", "event_board",
             "event_board_turn", "event_board_win", "event_pot",
             "event_board_roll_prompt", "event_board_action",
             "event_sweep_item", "event_sweep_group", "event_sweep_set",
@@ -331,8 +331,13 @@ class TestDefaultLayouts:
             "event_multi_clan_skipped": {"event_id": 7, "event_name": "E",
                                          "skipped_players": "`Zed`, `Bob`",
                                          "skipped_count": 2},
+            # No signup_close_at: a prompt queued before web70a, whose close
+            # line must still resolve off the event's end.
             "event_signup_prompt": {"event_id": 7, "event_name": "E",
                                     "formation_mode": "self_join", "ends_at": 1700003600},
+            "event_signup_closed": {"event_id": 7, "event_name": "E",
+                                    "signups_closed": True,
+                                    "signup_closed_line": "The event is underway."},
             "event_board_turn": {"event_id": 7, "event_name": "E", "team_name": "Reds",
                                  "dice": [3, 4], "dice_str": "3 + 4", "tile_from": 0,
                                  "tile_to": 7, "turn": 2, "next_task_label": "Get a whip",
@@ -379,6 +384,49 @@ class TestDefaultLayouts:
             standings=[{"name": "A", "score": 1}])
         joined = " ".join(b.get("content", "") for b in spec["blocks"] if "content" in b)
         assert "Live • 4 teams" in joined and "**A** — `1 pts`" in joined
+
+
+class TestSignupPromptLayouts:
+    """web70a: the sign-up post's deadline line, and what it becomes when the
+    window shuts (button dropped, closed layout swapped in)."""
+
+    def test_close_line_prefers_signup_close_at(self):
+        context = ml.notification_context("event_signup_prompt", {
+            "event_id": 7, "event_name": "E", "formation_mode": "self_join",
+            "signup_close_at": 1700000000, "ends_at": 1700003600})
+        spec = ml.render_message_spec(
+            ml.DEFAULT_LAYOUTS["event_signup_prompt"], context)
+        joined = " ".join(b.get("content", "") for b in spec["blocks"] if "content" in b)
+        assert "Sign-ups close" in joined
+        assert "1700000000" in joined and "1700003600" not in joined
+
+    def test_legacy_payload_falls_back_to_event_end(self):
+        context = ml.notification_context("event_signup_prompt", {
+            "event_id": 7, "event_name": "E", "formation_mode": "self_join",
+            "ends_at": 1700003600})
+        assert "1700003600" in context["signup_close_at"]
+
+    def test_closed_context_flips_the_layout(self):
+        context = ml.notification_context("event_signup_prompt", {
+            "event_id": 7, "event_name": "E", "signups_closed": True,
+            "signup_closed_line": "The event is underway."})
+        assert context["signups_closed"] is True
+        spec = ml.render_message_spec(
+            ml.DEFAULT_LAYOUTS["event_signup_closed"], context)
+        joined = " ".join(b.get("content", "") for b in spec["blocks"] if "content" in b)
+        assert "Sign-ups closed" in joined and "The event is underway." in joined
+        # Whatever the closed post carries, it is never a sign-up control: the
+        # only buttons are links to the event page.
+        buttons = [b for b in spec["blocks"] if b["type"] == "buttons"]
+        for block in buttons:
+            for button in block["buttons"]:
+                assert button.get("url") or button.get("launch")
+
+    def test_open_prompt_does_not_flip(self):
+        context = ml.notification_context("event_signup_prompt", {
+            "event_id": 7, "event_name": "E", "formation_mode": "self_join",
+            "signup_close_at": 1700000000})
+        assert "signups_closed" not in context
 
 
 class TestNotificationContext:

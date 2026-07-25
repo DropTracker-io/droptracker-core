@@ -58,6 +58,7 @@ from db import (
     EventPlayerPoints,
     EventProgress,
     EventSignup,
+    EventSignupMessage,
     EventTask,
     EventTeam,
     EventTeamMember,
@@ -217,9 +218,36 @@ def _summary(ev: Event) -> dict:
         "leadership": _leadership(ev),
         "per_group_discord": bool(getattr(ev, "per_group_discord", False)),
         "allow_live_edits": bool(getattr(ev, "allow_live_edits", False)),
+        # Sign-up window (web70a): the toggle, plus the derived answers the
+        # join panel and the sign-up post both read — sign-ups close when the
+        # event starts unless allow_late_signups is on.
+        "allow_late_signups": bool(getattr(ev, "allow_late_signups", False)),
+        "signups_open": _signups_open(ev),
+        "signups_close_at": _ts(_signup_close_at(ev)),
         "activated_at": _ts(ev.activated_at),
         "ended_at": _ts(ev.ended_at),
     }
+
+
+def _signups_open(ev: Event) -> bool:
+    from services.event_signup import signups_closed
+
+    return signups_closed(ev) is None
+
+
+def _signup_close_at(ev: Event):
+    from services.event_signup import signup_close_at
+
+    return signup_close_at(ev)
+
+
+def _assert_signups_open(ev: Event) -> None:
+    """Self sign-up gate (web70a) — the roster may still be open to admins."""
+    from services.event_signup import signups_closed
+
+    reason = signups_closed(ev)
+    if reason:
+        abort_problem(409, "Sign-ups closed", reason, extra={"code": "signups_closed"})
 
 
 def _leadership(ev: Event) -> dict:
@@ -2554,6 +2582,7 @@ async def create_event():
                 formation_mode=formation_mode,
                 requires_confirmation=bool(body.get("requires_confirmation")),
                 allow_live_edits=bool(body.get("allow_live_edits")),
+                allow_late_signups=bool(body.get("allow_late_signups")),
                 submission_policy=submission_policy,
                 join_code=join_code or None,
                 discord_guild_id=discord_guild_id,
@@ -2608,6 +2637,7 @@ def _event_settings_snapshot(ev) -> dict:
         "bonus_blackout_points": int(getattr(ev, "bonus_blackout_points", 0) or 0),
         "buyins_enabled": bool(getattr(ev, "buyins_enabled", False)),
         "allow_live_edits": bool(getattr(ev, "allow_live_edits", False)),
+        "allow_late_signups": bool(getattr(ev, "allow_late_signups", False)),
         "starts_at": starts_at.isoformat() if starts_at else None,
         "ends_at": ends_at.isoformat() if ends_at else None,
     }
@@ -2721,6 +2751,13 @@ async def update_event(event_id: int):
                 # while active). Flippable at any status — the settings-snapshot
                 # diff below audits every change.
                 ev.allow_live_edits = bool(body.get("allow_live_edits"))
+            if "allow_late_signups" in body:
+                # web70a: keep self sign-ups open after the event begins. Off by
+                # default — the sign-up window normally ends at the start, and
+                # the posted Discord prompt retires its button then. Flipping it
+                # ON mid-event reopens sign-ups; the retired prompt is not
+                # re-posted (post a fresh one from Event → Discord).
+                ev.allow_late_signups = bool(body.get("allow_late_signups"))
             if "submission_policy" in body:
                 # null = reset to the default (manual submissions need review).
                 policy = body.get("submission_policy") or "confirm_non_api"
@@ -2993,6 +3030,10 @@ def _cascade_delete_event(s, ev: Event) -> None:
     # Rosters / votes / signups. Team members hang off teams (no event_id).
     _wipe(EventLeaderVote, EventLeaderVote.event_id == event_id)
     _wipe(EventSignup, EventSignup.event_id == event_id)
+    # Posted sign-up prompts (web70a). The Discord messages themselves go with
+    # the channel/event teardown the caller already queued; these rows only
+    # exist so the bot could find them, and their FK would block the delete.
+    _wipe(EventSignupMessage, EventSignupMessage.event_id == event_id)
     if team_ids:
         _wipe(EventTeamMember, EventTeamMember.team_id.in_(team_ids))
 
@@ -4266,6 +4307,9 @@ async def join_event(event_id: int):
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_roster_open(ev)
+            # Self sign-ups shut when the event begins unless it allows late
+            # ones (web70a); admin placement is unaffected (roster_open above).
+            _assert_signups_open(ev)
             _load_owned_player(s, player_id, user_id)
             _assert_player_eligible(s, ev, player_id)
 
@@ -5088,6 +5132,8 @@ async def post_signup_message(event_id: int):
 
         from db.models import EventChannel, NotificationQueue
 
+        from services.event_signup import signup_close_at, signups_closed
+
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev)
@@ -5095,6 +5141,11 @@ async def post_signup_message(event_id: int):
                 abort_problem(422, "Sign-ups closed",
                               "Set the event to let players sign up first "
                               "(self-join, auto-assign, or sign-up pool).")
+            # Don't post a button nobody can use (web70a).
+            shut = signups_closed(ev)
+            if shut:
+                abort_problem(409, "Sign-ups closed", shut,
+                              extra={"code": "signups_closed"})
             channel = (
                 s.query(EventChannel)
                 .filter(EventChannel.event_id == event_id,
@@ -5114,6 +5165,10 @@ async def post_signup_message(event_id: int):
                 "formation_mode": ev.formation_mode,
                 "description": ev.description or None,
                 "ends_at": _ts(ev.ends_at),
+                # When the button stops working — the event's start, or its end
+                # when late sign-ups are allowed (web70a). Drives the post's
+                # "Sign-ups close …" line.
+                "signup_close_at": _ts(signup_close_at(ev)),
                 # Nonce so repeated posts don't collide on the notification
                 # queue's unique (type, player, group, data) index.
                 "posted_at": int(_dt2.now().timestamp()),

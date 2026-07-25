@@ -83,10 +83,13 @@ def main():
                 player_id=pid, group_id=gid, user_id=uid))
 
         # ── Clan-vs-clan event in signup_pool mode ───────────────────────────
+        # allow_late_signups: this scenario signs players up while the event is
+        # already running, which web70a closes by default (sign-ups end at the
+        # start unless the event opts in). The window itself is unit-tested.
         ev = Event(name="SU pool", status="active", group_id=host.group_id,
                    mode="clan_vs_clan", formation_mode="signup_pool",
                    starts_at=now - timedelta(hours=1), ends_at=now + timedelta(days=1),
-                   has_bingo=False, board_size=5)
+                   has_bingo=False, board_size=5, allow_late_signups=True)
         session.add(ev); session.flush()
         session.add_all([
             EventGroup(event_id=ev.id, group_id=host.group_id, role="host",

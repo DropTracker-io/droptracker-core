@@ -24,8 +24,12 @@ _spec.loader.exec_module(sus)
 
 
 def _ev(**kw):
+    # allow_late_signups on by default so these fixtures exercise the guard
+    # under test rather than web70a's window (a started event closes sign-ups
+    # otherwise); TestSignupWindow covers the window itself.
     base = dict(id=1, mode="standard", formation_mode="self_join", status="active",
-                group_id=5, ends_at=None, join_code=None)
+                group_id=5, starts_at=None, ends_at=None, join_code=None,
+                activated_at=None, allow_late_signups=True)
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -76,6 +80,69 @@ class TestPerformSignupGuards:
         assert exc.value.status == 403
 
 
+class TestSignupWindow:
+    """web70a: self sign-ups close when the event begins unless the event opted
+    into late sign-ups. This is what retires the Discord prompt's button."""
+
+    def _modes(self, monkeypatch):
+        import types
+        fake = types.ModuleType("db.models")
+        fake.EVENT_SELF_SIGNUP_MODES = ("self_join", "auto_assign", "signup_pool")
+        monkeypatch.setitem(sys.modules, "db.models", fake)
+
+    def test_scheduled_event_before_start_is_open(self):
+        ev = _ev(status="draft", allow_late_signups=False,
+                 starts_at=datetime.now() + timedelta(days=1))
+        assert sus.signups_closed(ev) is None
+        assert not sus.event_started(ev)
+
+    def test_active_event_closes_by_default(self):
+        ev = _ev(status="active", allow_late_signups=False)
+        assert sus.signups_closed(ev) == "Sign-ups closed when the event began."
+
+    def test_draft_past_its_start_time_closes(self):
+        # The lifecycle sweep is about to activate it; don't take entries in
+        # the gap.
+        ev = _ev(status="draft", allow_late_signups=False,
+                 starts_at=datetime.now() - timedelta(minutes=5))
+        assert sus.signups_closed(ev) is not None
+
+    def test_late_signups_keeps_a_running_event_open(self):
+        ev = _ev(status="active", allow_late_signups=True,
+                 ends_at=datetime.now() + timedelta(days=1))
+        assert sus.signups_closed(ev) is None
+
+    def test_late_signups_still_closes_at_the_end(self):
+        ev = _ev(status="active", allow_late_signups=True,
+                 ends_at=datetime.now() - timedelta(minutes=1))
+        assert sus.signups_closed(ev) == "This event is over — sign-ups are closed."
+
+    def test_close_time_is_the_start_by_default(self):
+        starts = datetime.now() + timedelta(hours=2)
+        ends = starts + timedelta(days=3)
+        assert sus.signup_close_at(
+            _ev(allow_late_signups=False, starts_at=starts, ends_at=ends)) == starts
+        # Activation wins over the schedule (an admin may start it early).
+        activated = datetime.now()
+        assert sus.signup_close_at(
+            _ev(allow_late_signups=False, starts_at=starts, ends_at=ends,
+                activated_at=activated)) == activated
+
+    def test_close_time_is_the_end_with_late_signups(self):
+        ends = datetime.now() + timedelta(days=3)
+        assert sus.signup_close_at(
+            _ev(allow_late_signups=True, starts_at=datetime.now(), ends_at=ends)) == ends
+
+    def test_perform_signup_refuses_a_started_event(self, monkeypatch):
+        self._modes(monkeypatch)
+        player = SimpleNamespace(player_id=3)
+        with pytest.raises(sus.SignupError) as exc:
+            sus.perform_signup(None, _ev(status="active", allow_late_signups=False),
+                               player, 7)
+        assert exc.value.status == 409
+        assert "began" in exc.value.detail
+
+
 class TestMultiClanGuard:
     """G7: a player in more than one participating clan can't self/auto sign up."""
 
@@ -122,6 +189,7 @@ class TestMultiClanGuard:
         with pytest.raises(sus.SignupError) as exc:
             sus.perform_signup(None, _ev(mode="clan_vs_clan"), player, 7)
         assert exc.value.status == 409
+        assert "clan" in exc.value.detail  # the multi-clan guard, not the window
 
 
 class TestSignupError:

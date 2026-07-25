@@ -374,6 +374,20 @@ async def event_board_updates():
         print(f"Event board sweep error: {e}")
 
 
+@Task.create(IntervalTrigger(minutes=2))
+async def event_signup_prompt_retire():
+    """Sign-up prompts (services/event_signup_prompt.py): once an event's
+    sign-up window shuts, edit its posted "Sign up" message into the closed
+    layout and drop the button. The start announcement triggers this inline;
+    the sweep catches muted announcements, manual activations, toggles flipped
+    off and anything missed while the bot was down."""
+    try:
+        from services.event_signup_prompt import run_signup_prompt_sweep
+        await run_signup_prompt_sweep(bot)
+    except Exception as e:
+        print(f"Event sign-up prompt sweep error: {e}")
+
+
 @Task.create(IntervalTrigger(minutes=8))
 async def lootboard_updates():
     try:
@@ -575,6 +589,7 @@ async def create_tasks():
     reconcile_event_team_discord.start()
     event_team_board_posts.start()
     event_board_updates.start()
+    event_signup_prompt_retire.start()
     badge_cycle.start()
     # Lootboard POSTING is user-visible and must stay with the interval tasks
     # above — NEVER gated behind the multi-minute, rate-limited guild-cache /

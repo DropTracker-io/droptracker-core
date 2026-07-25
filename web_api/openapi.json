@@ -1125,6 +1125,21 @@
             "type": "integer",
             "default": 0
           },
+          "allow_late_signups": {
+            "type": "boolean",
+            "default": false,
+            "description": "Keep self sign-ups open after the event begins. Off by default: sign-ups close at the start, and the posted Discord sign-up prompt drops its button then."
+          },
+          "signups_open": {
+            "type": "boolean",
+            "default": true,
+            "description": "Derived: is the self sign-up window open right now? POST /events/{id}/join refuses with 409 (code 'signups_closed') when false."
+          },
+          "signups_close_at": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Derived, unix seconds: when sign-ups close — the event's start, or its end when allow_late_signups is set. Null when unscheduled (it closes at activation)."
+          },
           "activated_at": {
             "type": "integer",
             "nullable": true
