@@ -117,16 +117,61 @@ class TestTeamFlags:
 # ── channel naming ───────────────────────────────────────────────────────────
 
 class TestChannelName:
-    def test_slugified_with_prefix(self):
-        assert etd.channel_name_for_team("The Reds!") == "team-the-reds"
-        assert etd.channel_name_for_team("  A  B  ") == "team-a-b"
+    def test_slugified_with_icon_prefix(self):
+        assert etd.channel_name_for_team("The Reds!") == "🟢┃the-reds"
+        assert etd.channel_name_for_team("  A  B  ") == "🟢┃a-b"
 
     def test_empty_falls_back(self):
-        assert etd.channel_name_for_team("") == "team-team"
-        assert etd.channel_name_for_team("!!!") == "team-team"
+        assert etd.channel_name_for_team("") == "🟢┃team"
+        assert etd.channel_name_for_team("!!!") == "🟢┃team"
 
     def test_capped_length(self):
         assert len(etd.channel_name_for_team("x" * 300)) <= 90
+
+    def test_icon_rotates_by_index_without_a_color(self):
+        names = [etd.channel_name_for_team("t", None, i) for i in range(8)]
+        icons = [n[0] for n in names]
+        assert icons[:7] == list(etd.TEAM_CHANNEL_ICONS)
+        assert len(set(icons[:7])) == 7   # every sibling team differs
+        assert icons[7] == icons[0]       # wraps past the palette
+
+    def test_icon_matches_the_team_accent_color(self):
+        # The four colors real events actually use, named as a person would.
+        assert etd.channel_name_for_team("Blue Team", "#0000e0") == "🔵┃blue-team"
+        assert etd.channel_name_for_team("Red Team", "#e00000") == "🔴┃red-team"
+        assert etd.channel_name_for_team("Green Team", "#00b900") == "🟢┃green-team"
+        assert etd.channel_name_for_team("Yellow Team", "#ffff00") == "🟡┃yellow-team"
+
+    def test_color_beats_the_index_rotation(self):
+        # Index would have said 🔴; the team's own color wins.
+        assert etd.channel_name_for_team("Purple", "#8000ff", 1) == "🟣┃purple"
+
+
+class TestTeamChannelIcon:
+    def test_named_hues(self):
+        assert etd.team_channel_icon("#ff8000") == "🟠"
+        assert etd.team_channel_icon("#ff0080") == "🟣"   # magenta reads purple
+        assert etd.team_channel_icon("#00ffff") == "🔵"   # cyan reads blue
+
+    def test_grays_and_unusable_values_fall_back(self):
+        assert etd.team_channel_icon("#ffffff") == "⚪"
+        assert etd.team_channel_icon("#000000") == "⚪"
+        assert etd.team_channel_icon("#808080") == "⚪"
+        # Junk / missing color drops to the index rotation, never raises.
+        assert etd.team_channel_icon(None, 2) == etd.TEAM_CHANNEL_ICONS[2]
+        assert etd.team_channel_icon("not-a-color", 2) == etd.TEAM_CHANNEL_ICONS[2]
+        assert etd.team_channel_icon("#zzzzzz", 2) == etd.TEAM_CHANNEL_ICONS[2]
+
+
+class TestThreadName:
+    def test_keeps_the_real_name(self):
+        # Forum threads aren't slugified by Discord — only the icon is added.
+        assert etd.thread_name_for_team("Blue Team", "#0000e0") == "🔵┃Blue Team"
+        assert etd.thread_name_for_team("  A  B  ", None, 1) == "🔴┃A  B"
+
+    def test_empty_falls_back_and_caps(self):
+        assert etd.thread_name_for_team("") == "🟢┃Team"
+        assert len(etd.thread_name_for_team("x" * 300)) <= 100
 
 
 # ── notification-destination gating (pure parts) ─────────────────────────────

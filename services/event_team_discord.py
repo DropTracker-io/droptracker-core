@@ -252,8 +252,91 @@ def team_task_progress_mode(config: dict, team_id, inherited=None) -> str:
     return entry.get("task_progress", fallback)
 
 
-def channel_name_for_team(name: str) -> str:
-    """Discord-safe channel name from a team name (lowercase, dashes)."""
+# --------------------------------------------------------------------------- #
+# Channel naming
+# --------------------------------------------------------------------------- #
+# Every auto-created team channel leads with a colored circle
+# ("🔵┃blue-team"), so a server with several teams reads as a color-coded list
+# instead of a wall of "team-…". The order here is the fallback rotation for
+# teams with no accent color; a team that HAS one gets the matching circle.
+TEAM_CHANNEL_ICONS = ("🟢", "🔴", "🔵", "🟡", "🟠", "🟣", "⚪")
+
+# Icon/name separator: U+2503 (heavy vertical bar), the Discord-convention
+# divider. It survives channel-name normalization untouched, unlike a space.
+TEAM_CHANNEL_SEPARATOR = "┃"
+
+# Hue bands (degrees, upper bound exclusive) as a person would NAME a color,
+# not where the emoji's own hue happens to sit: Twemoji's blue circle is a
+# light sky blue (206°) that pure blue (#0000e0, 240°) is FARTHER from than
+# the purple circle is, so nearest-center matching would put a "Blue Team" on
+# 🟣. Bands keep the obvious answer obvious. Red owns both ends of the wheel.
+_ICON_HUE_BANDS = (
+    (15.0, "🔴"),
+    (45.0, "🟠"),
+    (70.0, "🟡"),
+    (160.0, "🟢"),
+    (250.0, "🔵"),
+    (345.0, "🟣"),
+    (360.0, "🔴"),
+)
+
+# Below this saturation a color has no nameable hue (grays, near-black,
+# near-white) and falls to the neutral circle.
+_ICON_MIN_SATURATION = 0.15
+
+
+def _icon_for_color(color) -> Optional[str]:
+    """Colored circle matching an admin-set "#rrggbb" accent, or None when the
+    team has no (usable) color."""
+    if not isinstance(color, str):
+        return None
+    value = color.strip().lstrip("#")
+    if len(value) != 6:
+        return None
+    try:
+        red, green, blue = (int(value[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    except ValueError:
+        return None
+    import colorsys
+
+    hue, _light, saturation = colorsys.rgb_to_hls(red, green, blue)
+    if saturation < _ICON_MIN_SATURATION:
+        return "⚪"
+    degrees = (hue * 360) % 360
+    for upper, icon in _ICON_HUE_BANDS:
+        if degrees < upper:
+            return icon
+    return "🔴"
+
+
+def team_channel_icon(color=None, index: int = 0) -> str:
+    """The circle that leads a team's channel name: matched to the team's
+    accent color when one is set — so the channel icon, the team role's color
+    and the web UI's team dot all agree — else rotated through
+    :data:`TEAM_CHANNEL_ICONS` by the team's ordinal (see
+    :func:`team_icon_index`) so sibling teams stay distinguishable."""
+    return (_icon_for_color(color)
+            or TEAM_CHANNEL_ICONS[index % len(TEAM_CHANNEL_ICONS)])
+
+
+def team_icon_index(session, event_id: int, team_id) -> int:
+    """A team's ordinal within its event (creation order — stable across
+    renames, recolors and roster edits), used as the fallback icon rotation."""
+    from db.models import EventTeam
+
+    ids = [tid for (tid,) in (session.query(EventTeam.id)
+                              .filter(EventTeam.event_id == event_id)
+                              .order_by(EventTeam.id.asc())
+                              .all())]
+    try:
+        return ids.index(team_id)
+    except ValueError:
+        return 0
+
+
+def channel_name_for_team(name: str, color=None, index: int = 0) -> str:
+    """Discord-safe TEXT channel name from a team name: colored circle, bar,
+    slugified team name (lowercase, dashes) — "🔵┃blue-team"."""
     out = []
     prev_dash = False
     for ch in (name or "").strip().lower():
@@ -264,7 +347,15 @@ def channel_name_for_team(name: str) -> str:
             out.append("-")
             prev_dash = True
     slug = "".join(out).strip("-") or "team"
-    return ("team-" + slug)[:90]
+    icon = team_channel_icon(color, index)
+    return (icon + TEAM_CHANNEL_SEPARATOR + slug)[:90]
+
+
+def thread_name_for_team(name: str, color=None, index: int = 0) -> str:
+    """Same icon treatment for forum-thread team channels — threads keep the
+    team's real name (Discord doesn't slugify them): "🔵┃Blue Team"."""
+    icon = team_channel_icon(color, index)
+    return (icon + TEAM_CHANNEL_SEPARATOR + ((name or "").strip() or "Team"))[:100]
 
 
 # --------------------------------------------------------------------------- #

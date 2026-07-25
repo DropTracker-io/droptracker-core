@@ -152,12 +152,18 @@ def _channel_intro(event, team) -> str:
             f"pinned board post below tracks your live progress.")
 
 
-async def _ensure_channel(bot, guild, row, team, config, event) -> None:
+async def _ensure_channel(bot, guild, row, team, config, event,
+                          icon_index: int = 0) -> None:
     """Create/rename the team channel: a thread in the configured forum, or a
     private text channel visible to the team role (public when roles are off).
-    Writes row.channel_id / row.channel_kind back."""
+    Both are named with the team's colored circle up front ("🔵┃blue-team");
+    ``icon_index`` is the team's ordinal, used only when the team has no
+    accent color to match. Writes row.channel_id / row.channel_kind back."""
     import interactions
-    from services.event_team_discord import channel_name_for_team
+    from services.event_team_discord import (
+        channel_name_for_team,
+        thread_name_for_team,
+    )
 
     forum_id = config.get("forum_channel_id")
     desired_kind = "thread" if forum_id else "text"
@@ -178,7 +184,8 @@ async def _ensure_channel(bot, guild, row, team, config, event) -> None:
             row.channel_id = None
 
     if desired_kind == "thread":
-        name = team.name[:100]
+        name = thread_name_for_team(team.name, getattr(team, "color", None),
+                                    icon_index)
         if channel is None:
             forum = await bot.fetch_channel(int(forum_id))
             if forum is None or not hasattr(forum, "create_post"):
@@ -191,7 +198,8 @@ async def _ensure_channel(bot, guild, row, team, config, event) -> None:
             await channel.edit(name=name, reason=PROVISION_REASON)
         return
 
-    name = channel_name_for_team(team.name)
+    name = channel_name_for_team(team.name, getattr(team, "color", None),
+                                 icon_index)
     # Optional parent CATEGORY: text channels created inside it inherit its
     # place in the tree AND keep their per-team overwrites, so teams are truly
     # isolated (unlike threads). None = created at guild root, as before.
@@ -383,7 +391,11 @@ async def reconcile_event_team_discord_once(bot, session_factory, redis_client) 
 
 async def _reconcile_pass(bot, session_factory, redis_client) -> None:
     from db.models import Event, EventTeam, EventTeamDiscord
-    from services.event_team_discord import team_discord_scopes, team_flags
+    from services.event_team_discord import (
+        team_discord_scopes,
+        team_flags,
+        team_icon_index,
+    )
 
     await drain_team_discord_orphans(bot, redis_client)
 
@@ -448,8 +460,9 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                         await _delete_discord_objects(bot, row.guild_id, row.role_id, None)
                         row.role_id = None
                     if flags["channel"]:
-                        await _ensure_channel(bot, guild, row, team,
-                                              scope["config"], event)
+                        await _ensure_channel(
+                            bot, guild, row, team, scope["config"], event,
+                            icon_index=team_icon_index(session, event.id, team.id))
                     elif row.channel_id:
                         await _delete_discord_objects(bot, None, None, row.channel_id)
                         row.channel_id = None
