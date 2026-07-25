@@ -2,7 +2,14 @@
 (web_api/event_players.py). No DB — inputs are the already-fetched rollups."""
 from __future__ import annotations
 
-from web_api.event_players import norm_item_name, rank_players, top_items
+from web_api.event_players import (
+    count_contributions,
+    is_metric_task,
+    norm_item_name,
+    rank_players,
+    task_contributions,
+    top_items,
+)
 
 
 def test_norm_item_name_collapses_case_and_whitespace():
@@ -91,3 +98,47 @@ def test_rank_players_defaults_gp_to_zero_without_map():
     rows = rank_players({1: {"completions": 1, "quantity": 1, "tasks": 1}},
                         {}, {}, {}, {})
     assert rows[0]["loot_gp"] == 0
+
+
+# --- Contribution counting (metric tasks collapse their update spam) ---------
+
+
+def test_metric_tasks_collapse_to_one_contribution():
+    # 50 kills toward one kc task, 12 xp updates toward one xp task: each run
+    # is a single ongoing contribution, not 50 / 12 of them.
+    assert task_contributions("kc_target", 50) == 1
+    assert task_contributions("xp_target", 12) == 1
+    assert task_contributions("loot_value", 7) == 1
+    assert task_contributions("skill_target", 3) == 1
+
+
+def test_acquisition_tasks_count_every_ledger_row():
+    # Three items pulled on three different nights is three contributions.
+    assert task_contributions("item_collection", 3) == 3
+    assert task_contributions("pet_collection", 2) == 2
+    assert task_contributions("pb_target", 4) == 4
+    assert task_contributions("loot_sweep", 9) == 9
+
+
+def test_task_contributions_zero_rows_is_zero():
+    assert task_contributions("kc_target", 0) == 0
+    assert task_contributions("item_collection", 0) == 0
+    assert task_contributions("kc_target", -1) == 0
+
+
+def test_unknown_task_type_counts_per_row():
+    # An unmapped / missing type must not silently swallow contributions.
+    assert task_contributions(None, 4) == 4
+    assert task_contributions("brand_new_type", 4) == 4
+    assert is_metric_task("brand_new_type") is False
+
+
+def test_count_contributions_mixes_task_types():
+    # 40 kc rows on task 1 -> 1; 3 item rows on task 2 -> 3; 9 xp rows -> 1.
+    rows_by_task = {1: 40, 2: 3, 3: 9}
+    task_types = {1: "kc_target", 2: "item_collection", 3: "xp_target"}
+    assert count_contributions(rows_by_task, task_types) == 5
+
+
+def test_count_contributions_empty():
+    assert count_contributions({}, {}) == 0

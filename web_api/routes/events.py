@@ -84,7 +84,13 @@ from web_api.common import (abort_problem, db_session, hidden_player_ids, money,
                             parse_page, player_month_totals, private_no_store,
                             score_num, with_cache_headers)
 from web_api.event_loot import loot_gp_by_player
-from web_api.event_players import norm_item_name, rank_players, top_items
+from web_api.event_players import (
+    count_contributions,
+    norm_item_name,
+    rank_players,
+    task_contributions,
+    top_items,
+)
 from web_api.task_tiles import build_tile, spec_names, tile_spec
 from web_api.deps import (
     assert_event_editor,
@@ -959,6 +965,8 @@ async def get_event(event_id: int):
 _APPLIED_STATUSES = ("auto", "confirmed", "manual")
 
 _TEAM_ITEMS_LIMIT = 60        # full item gallery on the team-detail page
+_MEMBER_ITEM_PREVIEW = 12     # item strip inside one roster row's breakdown
+_MEMBER_TASK_PREVIEW = 12     # per-task rows inside one roster row's breakdown
 _TEAMS_ITEM_PREVIEW = 8       # per-team item strip on the Teams tab rollup
 _TEAMS_TOP_CONTRIBUTORS = 3   # contributor chips per team on the Teams tab
 
@@ -1007,14 +1015,68 @@ async def get_event_team(event_id: int, team_id: int):
                 .order_by(EventCompletion.id.desc())
                 .all()
             )
-            # Per-member contribution rollup from the applied ledger.
-            contrib: dict[int, dict[str, int]] = {}
+            # Task rows are needed before the roster rollup so a member's
+            # contribution count can respect the task's type (metric tasks
+            # collapse their update spam — see web_api/event_players).
+            task_rows = s.query(EventTask).filter(EventTask.event_id == event_id).all()
+            task_labels = {t.id: t.label for t in task_rows}
+            task_types = {t.id: t.type for t in task_rows}
+
+            # Per-member contribution rollup from the applied ledger: rows per
+            # task (folded into contributions below), total quantity, the
+            # newest row, and the items they personally pulled.
+            contrib: dict[int, dict] = {}
             for c in applied:
                 if c.player_id is None:
                     continue
-                row = contrib.setdefault(c.player_id, {"completions": 0, "quantity": 0})
-                row["completions"] += 1
+                row = contrib.setdefault(
+                    c.player_id,
+                    {"rows_by_task": {}, "quantity": 0, "last": None, "items": {}},
+                )
+                t = row["rows_by_task"].setdefault(c.task_id, [0, 0])  # [rows, quantity]
+                t[0] += 1
+                t[1] += int(c.quantity or 1)
                 row["quantity"] += int(c.quantity or 1)
+                # `applied` is newest-first, so the first row wins.
+                if row["last"] is None:
+                    row["last"] = c
+                if c.matched_target:
+                    a = row["items"].setdefault(c.matched_target, [0, 0])
+                    a[0] += int(c.quantity or 1)
+                    a[1] += 1
+
+            # Everything the team pulled to earn points, aggregated by item —
+            # icons via the same resolution the task tiles use. One id lookup
+            # covers both the team gallery and the per-member strips.
+            team_item_agg: dict[str, list] = {}   # name -> [quantity, drops]
+            for c in applied:
+                if not c.matched_target:
+                    continue
+                a = team_item_agg.setdefault(c.matched_target, [0, 0])
+                a[0] += int(c.quantity or 1)
+                a[1] += 1
+            team_item_ids = _resolve_item_ids(s, set(team_item_agg))
+            team_items = sorted(
+                ({"name": mt, "item_id": team_item_ids.get(norm_item_name(mt)),
+                  "quantity": q, "drops": d}
+                 for mt, (q, d) in team_item_agg.items()),
+                key=lambda r: (-r["quantity"], -r["drops"], r["name"].lower()),
+            )[:_TEAM_ITEMS_LIMIT]
+
+            def _last_contribution(c) -> dict | None:
+                """The member's newest applied ledger row, shaped for the
+                roster's "what they did last" line."""
+                if c is None:
+                    return None
+                return {
+                    "task_id": c.task_id,
+                    "task_label": task_labels.get(c.task_id),
+                    "task_type": task_types.get(c.task_id),
+                    "quantity": int(c.quantity or 1),
+                    "source_type": c.source_type,
+                    "matched_target": c.matched_target,
+                    "created_at": _ts(c.created_at),
+                }
 
             # Contribution points: each completed task's points split across
             # its contributors by net share (web_event_player_points, floats).
@@ -1034,37 +1096,42 @@ async def get_event_team(event_id: int, team_id: int):
             # figure is the roster sum; both fail open to zeros.
             roster_pids = [m.player_id for m, _ in member_rows]
             loot_gp = loot_gp_by_player(s, ev, roster_pids)
-            members = [
-                {
+            members = []
+            for m, player_name in member_rows:
+                agg = contrib.get(m.player_id) or {}
+                rows_by_task = agg.get("rows_by_task") or {}
+                members.append({
                     "player_id": m.player_id,
                     "player_name": player_name or f"Player {m.player_id}",
                     "joined_at": _ts(m.joined_at),
                     "role": getattr(m, "role", None),
-                    "completions": contrib.get(m.player_id, {}).get("completions", 0),
-                    "quantity": contrib.get(m.player_id, {}).get("quantity", 0),
+                    "completions": count_contributions(
+                        {tid: n for tid, (n, _q) in rows_by_task.items()}, task_types
+                    ),
+                    "quantity": int(agg.get("quantity", 0)),
+                    "tasks_contributed": len(rows_by_task),
                     "points": round(ppoints.get(m.player_id, 0.0), 2),
                     "loot_gp": money(loot_gp.get(m.player_id, 0)),
-                }
-                for m, player_name in member_rows
-            ]
-
-            # Everything the team pulled to earn points: the applied ledger
-            # (already loaded) aggregated by item, icons via the same
-            # resolution the task tiles use. Capped for payload sanity.
-            team_item_agg: dict[str, list] = {}   # name -> [quantity, drops]
-            for c in applied:
-                if not c.matched_target:
-                    continue
-                a = team_item_agg.setdefault(c.matched_target, [0, 0])
-                a[0] += int(c.quantity or 1)
-                a[1] += 1
-            team_item_ids = _resolve_item_ids(s, set(team_item_agg))
-            team_items = sorted(
-                ({"name": mt, "item_id": team_item_ids.get(norm_item_name(mt)),
-                  "quantity": q, "drops": d}
-                 for mt, (q, d) in team_item_agg.items()),
-                key=lambda r: (-r["quantity"], -r["drops"], r["name"].lower()),
-            )[:_TEAM_ITEMS_LIMIT]
+                    "last_contribution": _last_contribution(agg.get("last")),
+                    "items": top_items(
+                        [{"name": mt, "quantity": q, "drops": d}
+                         for mt, (q, d) in (agg.get("items") or {}).items()],
+                        team_item_ids,
+                        _MEMBER_ITEM_PREVIEW,
+                    ),
+                    # Per-task split of what they did, richest first — backs the
+                    # roster's expandable contribution breakdown.
+                    "tasks": sorted(
+                        ({"task_id": tid,
+                          "task_label": task_labels.get(tid),
+                          "task_type": task_types.get(tid),
+                          "contributions": task_contributions(task_types.get(tid), n),
+                          "quantity": qty}
+                         for tid, (n, qty) in rows_by_task.items()),
+                        key=lambda r: (-r["contributions"], -r["quantity"],
+                                       (r["task_label"] or "").lower()),
+                    )[:_MEMBER_TASK_PREVIEW],
+                })
 
             # Leadership context for the roster UI: the viewer's own player on
             # THIS team (if any), their role, and their live election vote.
@@ -1094,7 +1161,6 @@ async def get_event_team(event_id: int, team_id: int):
                         "is_admin": _is_event_admin(s, viewer_id, ev),
                     }
 
-            task_rows = s.query(EventTask).filter(EventTask.event_id == event_id).all()
             prog_by_task = {
                 p.task_id: p
                 for p in s.query(EventProgress).filter(
@@ -1120,7 +1186,6 @@ async def get_event_team(event_id: int, team_id: int):
                 })
             _attach_task_tiles(s, tasks)
 
-            task_labels = {t.id: t.label for t in task_rows}
             player_names = {m.player_id: name for (m, name) in member_rows}
             missing_pids = {
                 c.player_id for c in applied[:50]
@@ -1385,21 +1450,28 @@ async def get_event_players(event_id: int):
             )
 
             # Applied-ledger rollup per player (completions / quantity / tasks).
+            # Grouped per (player, task) with the task's type so a metric task's
+            # stream of progress rows folds into ONE contribution.
             contrib: dict[int, dict] = {}
-            for pid, comps, qty, ntasks in (
+            for pid, tid, ttype, comps, qty in (
                 s.query(EventCompletion.player_id,
+                        EventCompletion.task_id,
+                        EventTask.type,
                         func.count(EventCompletion.id),
-                        func.sum(EventCompletion.quantity),
-                        func.count(func.distinct(EventCompletion.task_id)))
+                        func.sum(EventCompletion.quantity))
+                .join(EventTask, EventTask.id == EventCompletion.task_id)
                 .filter(EventCompletion.event_id == event_id,
                         EventCompletion.status.in_(_APPLIED_STATUSES),
                         EventCompletion.player_id.isnot(None))
-                .group_by(EventCompletion.player_id)
+                .group_by(EventCompletion.player_id, EventCompletion.task_id,
+                          EventTask.type)
                 .all()
             ):
-                contrib[pid] = {"completions": int(comps or 0),
-                                "quantity": int(qty or 0),
-                                "tasks": int(ntasks or 0)}
+                row = contrib.setdefault(
+                    pid, {"completions": 0, "quantity": 0, "tasks": 0})
+                row["completions"] += task_contributions(ttype, comps or 0)
+                row["quantity"] += int(qty or 0)
+                row["tasks"] += 1
 
             # Split points across teams (each task's points split by share).
             points = {
@@ -1542,7 +1614,7 @@ async def get_event_player(event_id: int, player_id: int):
                 return None  # not a participant and no contribution -> 404
 
             item_agg: dict[str, list] = {}   # name -> [quantity, drops]
-            task_agg: dict[int, list] = {}    # task_id -> [completions, quantity]
+            task_agg: dict[int, list] = {}    # task_id -> [ledger rows, quantity]
             for c in applied:
                 q = int(c.quantity or 1)
                 if c.matched_target:
@@ -1576,13 +1648,17 @@ async def get_event_player(event_id: int, player_id: int):
                 for t in s.query(EventTask.id, EventTask.label, EventTask.type)
                 .filter(EventTask.event_id == event_id).all()
             }
+            # A metric task's stream of progress rows is ONE contribution; item
+            # tasks stay one per ledger row (web_api/event_players).
             tasks = sorted(
                 ({"task_id": tid,
                   "task_label": task_meta.get(tid, (None, None))[0],
                   "task_type": task_meta.get(tid, (None, None))[1],
-                  "completions": comps, "quantity": qty,
+                  "completions": task_contributions(
+                      task_meta.get(tid, (None, None))[1], rows),
+                  "quantity": qty,
                   "points": round(tpoints.get(tid, 0.0), 2)}
-                 for tid, (comps, qty) in task_agg.items()),
+                 for tid, (rows, qty) in task_agg.items()),
                 key=lambda r: (-r["points"], -r["completions"], -r["quantity"]),
             )
 
@@ -1609,7 +1685,7 @@ async def get_event_player(event_id: int, player_id: int):
                     "team_color": mem[2] if mem else None,
                     "role": mem[3] if mem else None,
                     "points": round(sum(tpoints.values()), 2),
-                    "completions": len(applied),
+                    "completions": sum(t["completions"] for t in tasks),
                     "quantity": sum(int(c.quantity or 1) for c in applied),
                     "tasks_contributed": len(task_agg),
                     "loot_gp": money(

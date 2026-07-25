@@ -16,6 +16,52 @@ def norm_item_name(name: str) -> str:
     return " ".join((name or "").strip().lower().split())
 
 
+# --- Contributions ----------------------------------------------------------
+# A "contribution" is one act of pushing a task forward, which is NOT the same
+# as one applied ledger row.
+#
+# Tasks that track a rising METRIC (xp gained, kills, GP looted, a level) write
+# a ledger row per update: 50 Vorkath kills is 50 rows, and an xp task collects
+# a row every time the plugin reports a delta. To a player that is one ongoing
+# contribution to one task, so those rows collapse to a single contribution per
+# (player, task).
+#
+# Tasks that credit a discrete ACQUISITION — an item, a pet, a personal best —
+# keep one contribution per row: pulling two of the required items on two
+# different nights really is two separate contributions.
+METRIC_TASK_TYPES = frozenset({
+    "xp_target",
+    "kc_target",
+    "skill_target",
+    "loot_value",
+    "ehp_target",
+    "ehb_target",
+})
+
+
+def is_metric_task(task_type) -> bool:
+    """True when repeated ledger rows on this task type are progress updates
+    toward one number rather than separate acquisitions."""
+    return str(task_type or "") in METRIC_TASK_TYPES
+
+
+def task_contributions(task_type, rows: int) -> int:
+    """Contributions represented by ``rows`` applied ledger rows on ONE task by
+    ONE player — the whole run collapses to 1 for metric tasks."""
+    rows = int(rows or 0)
+    if rows <= 0:
+        return 0
+    return 1 if is_metric_task(task_type) else rows
+
+
+def count_contributions(rows_by_task: dict, task_types: dict) -> int:
+    """Total contributions for one player from ``{task_id: ledger row count}``
+    and a ``{task_id: task type}`` lookup (unknown types count per row)."""
+    return sum(
+        task_contributions(task_types.get(tid), n) for tid, n in rows_by_task.items()
+    )
+
+
 def top_items(rows: list[dict], item_ids: dict, limit: int) -> list[dict]:
     """Order one player's contributed-item rows (``{name, quantity, drops}``) by
     quantity desc, attach ``item_id`` from a ``{normalized name -> id}`` map
