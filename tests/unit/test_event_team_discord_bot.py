@@ -56,6 +56,19 @@ class TestParseColor:
         assert bot_mod._parse_color(None) is None
 
 
+class TestRoleColorValue:
+    def test_reads_an_interactions_color_object(self):
+        # interactions.Role.color is a Color, and int(Color) raises — reading
+        # it wrong failed every re-sync of a team that had an accent color.
+        role = SimpleNamespace(color=SimpleNamespace(value=0x00B900))
+        assert bot_mod._role_color_value(role) == 0x00B900
+
+    def test_plain_int_and_missing_color(self):
+        assert bot_mod._role_color_value(SimpleNamespace(color=0xFF0000)) == 0xFF0000
+        assert bot_mod._role_color_value(SimpleNamespace(color=None)) == 0
+        assert bot_mod._role_color_value(SimpleNamespace()) == 0
+
+
 class TestExpectedMemberErrorFilter:
     """The bots/main.py logging filter — re-implemented check against the
     exact record shapes interactions emits (kept in sync by string contract)."""

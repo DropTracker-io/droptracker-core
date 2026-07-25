@@ -55,6 +55,15 @@ def _parse_color(value):
     return None
 
 
+def _role_color_value(role) -> int:
+    """A fetched role's color as a plain int. ``Role.color`` is an
+    ``interactions.Color``, which is NOT int()-able (``int(Color)`` raises
+    TypeError) — doing that blew up every re-sync of a team that HAD an accent
+    color, marking the row 'failed' while colorless teams sailed through."""
+    color = getattr(role, "color", None)
+    return int(getattr(color, "value", color) or 0)
+
+
 def _desired_member_ids(session, team_id) -> set:
     """Discord user ids of the team's current roster (players whose owning
     user linked a Discord account)."""
@@ -132,7 +141,7 @@ async def _ensure_role(guild, row, team) -> None:
     edits = {}
     if role.name != team.name[:100]:
         edits["name"] = team.name[:100]
-    if color is not None and int(getattr(role, "color", 0) or 0) != color:
+    if color is not None and _role_color_value(role) != color:
         edits["color"] = color
     if edits:
         await role.edit(**edits)  # Role.edit takes no audit reason in 5.x
