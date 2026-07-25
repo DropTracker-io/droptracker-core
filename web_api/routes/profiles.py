@@ -7,9 +7,13 @@ GET /api/v1/groups/{id}/members?page=
 from __future__ import annotations
 
 import asyncio
+import json
+import zlib
+from contextlib import contextmanager
 from datetime import datetime
 
 from sqlalchemy import or_, text
+from sqlalchemy.exc import OperationalError
 from quart import Blueprint, jsonify, request
 
 from db import (
@@ -206,6 +210,24 @@ def _build_submissions(rows, s, partition, player_names: dict | None = None):
 # large tables.
 # --------------------------------------------------------------------------- #
 _STATS_TTL = 120.0
+
+# Loot tracker, all-time mode (`?partition=all`): the fold of every month the
+# account has, so it gets a much longer in-process TTL than a single month, and
+# a server-side execution cap below the engine's 30s `read_timeout` (with the
+# error codes MariaDB reports when it wins that race).
+_ALL_TIME = "all"
+_ALL_TIME_TTL = 900.0
+_STATEMENT_TIMEOUT_SECONDS = 25
+_TIMEOUT_ERR_CODES = {1969, 3024, 2013}
+# Per-month NPC boxes, cached in Redis (shared by both workers, survives a
+# restart) because an all-time fold reads every month of an account. A settled
+# month is immutable, so it is held for days; only the live month is re-read.
+# The floor matches `_parse_loot_partition`'s, so a bad `drops` row can never
+# turn one request into years of empty month queries.
+_MONTH_CACHE_PREFIX = "pstats:lootbox:"
+_SETTLED_MONTH_CACHE_TTL = 7 * 24 * 3600
+_CURRENT_MONTH_CACHE_TTL = 120
+_EARLIEST_SUPPORTED_PARTITION = 202001
 
 
 def _previous_partition(partition: int) -> int:
@@ -511,6 +533,87 @@ def _partition_bounds(partition: int) -> tuple[str, str]:
     return f"{year:04d}-{month:02d}-01 00:00:00", f"{ny:04d}-{nm:02d}-01 00:00:00"
 
 
+def _parse_loot_partition(raw: str, current: int):
+    """Resolve the loot tracker's ``partition`` query param.
+
+    Returns ``(partition, all_time, error)``. ``all`` selects the whole account;
+    its ``partition`` is still the current month, which is the newest month the
+    payload covers (and what the client falls back to when leaving all-time).
+    ``error`` is a human-readable message when the param is unusable.
+    """
+    if (raw or "").strip().lower() == _ALL_TIME:
+        return current, True, None
+    try:
+        partition = int(raw) if raw else current
+    except ValueError:
+        return None, False, "partition must be YYYYMM or 'all'"
+    year, month = divmod(partition, 100)
+    if not (2020 <= year <= 2100 and 1 <= month <= 12) or partition > current:
+        return None, False, "partition must be a valid YYYYMM month, not in the future"
+    return partition, False, None
+
+
+def _month_cache_get(key: str):
+    """A cached month's NPC boxes, or None. Redis is a nicety here — every miss
+    (including a dead connection) just re-reads the month from `drops`."""
+    conn = _rc()
+    if conn is None:
+        return None
+    try:
+        raw = conn.get(key)
+        return json.loads(zlib.decompress(raw)) if raw else None
+    except Exception:
+        return None
+
+
+def _month_cache_set(key: str, npc_list, ttl: int) -> None:
+    """Store a month's NPC boxes. Compressed: a busy account's month is a few
+    hundred KB of very repetitive JSON, and every month of every account that
+    opens the all-time view lands here."""
+    conn = _rc()
+    if conn is None:
+        return
+    try:
+        blob = zlib.compress(json.dumps(npc_list, separators=(",", ":")).encode("utf-8"))
+        conn.setex(key, int(ttl), blob)
+    except Exception:
+        pass
+
+
+def _is_timeout_error(err: OperationalError) -> bool:
+    """MariaDB statement-timeout / lost-connection codes (see `_statement_timeout`)."""
+    try:
+        return err.orig.args[0] in _TIMEOUT_ERR_CODES
+    except (AttributeError, IndexError, TypeError):
+        return False
+
+
+@contextmanager
+def _statement_timeout(s, *, enabled: bool, seconds: int = _STATEMENT_TIMEOUT_SECONDS):
+    """Bound server-side execution of the statements in the block (all-time only).
+
+    The shared engine sets ``connect_args.read_timeout=30`` (db/models/base.py):
+    a query that outruns it dies as an unhandled 500 *and* keeps scanning
+    server-side after the client gave up. Capping a few seconds below that makes
+    MariaDB abort it first (errno 1969), which the route turns into a clean 503.
+    Folding months keeps each statement far under the cap; this is the backstop
+    for an account whose single month is pathological. Sessions come from a
+    shared pool, so the cap is always reset on exit — a query killed by the
+    timeout leaves the connection usable.
+    """
+    if not enabled:
+        yield
+        return
+    s.execute(text(f"SET SESSION max_statement_time = {int(seconds)}"))
+    try:
+        yield
+    finally:
+        try:
+            s.execute(text("SET SESSION max_statement_time = 0"))
+        except Exception:
+            pass
+
+
 def _earliest_loot_partition(s, player_id: int):
     """First YYYYMM with tracked drops for this player (for the month picker).
 
@@ -532,21 +635,186 @@ def _earliest_loot_partition(s, player_id: int):
     return int(row[0]) if row and row[0] else None
 
 
+def _month_npc_boxes(s, player_id: int, partition: int, current: int):
+    """One month of a player's drops as NPC boxes — the unit BOTH loot-tracker
+    views are built from (all-time is the fold of every month, see
+    `_fold_npc_boxes`).
+
+    Cached in Redis so the two hypercorn workers share the work and it survives
+    a restart: a settled month can never change, so it is held for days, while
+    the live month gets the same short TTL as the in-process payload cache.
+    """
+    cache_key = f"{_MONTH_CACHE_PREFIX}{player_id}:{partition}"
+    cached = _month_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    # A `partition = :p` equality made the optimiser index-merge-intersect
+    # ix_drops_player_id with ix_drops_partition, and the partition side spans
+    # the whole month across every player (tens of millions of rows) — 3-4s
+    # here, 30s+ (read-timeout 500s) for large accounts. The equivalent
+    # ``date_added`` range pins the (player_id, date_added) composite for a
+    # single bounded seek.
+    start_dt, end_dt = _partition_bounds(partition)
+    bounds = {"pid": player_id, "start": start_dt, "end": end_dt}
+    item_rows = s.execute(text(
+        "SELECT d.npc_id, n.npc_name, d.item_id, i.item_name, "
+        "       SUM(d.quantity) AS qty, SUM(d.value * d.quantity) AS loot, "
+        "       COUNT(*) AS drop_count, "
+        "       MIN(d.date_added) AS first_at, MAX(d.date_added) AS last_at "
+        "FROM drops d FORCE INDEX (ix_drops_player_id_date_added) "
+        "JOIN npc_list n ON n.npc_id = d.npc_id "
+        "JOIN items i ON i.item_id = d.item_id "
+        "WHERE d.player_id = :pid AND d.date_added >= :start AND d.date_added < :end "
+        "GROUP BY d.npc_id, n.npc_name, d.item_id, i.item_name"
+    ), bounds).fetchall()
+
+    # "Kills" the way the old XenForo widget counted them: distinct drop
+    # timestamps per NPC (multi-item kills share one timestamp).
+    kill_rows = s.execute(text(
+        "SELECT d.npc_id, COUNT(DISTINCT d.date_added) "
+        "FROM drops d FORCE INDEX (ix_drops_player_id_date_added) "
+        "WHERE d.player_id = :pid AND d.date_added >= :start AND d.date_added < :end "
+        "  AND d.npc_id IS NOT NULL "
+        "GROUP BY d.npc_id"
+    ), bounds).fetchall()
+    kills = {int(npc_id): int(cnt) for npc_id, cnt in kill_rows}
+
+    def _ts(dt) -> int | None:
+        """DB datetime -> unix seconds (None-safe)."""
+        try:
+            return int(dt.timestamp()) if dt is not None else None
+        except Exception:
+            return None
+
+    npcs = {}
+    for npc_id, npc_name, item_id, item_name, qty, loot, drop_count, first_at, last_at in item_rows:
+        npc = npcs.setdefault(int(npc_id), {
+            "npc_id": int(npc_id),
+            "name": npc_name,
+            "kills": kills.get(int(npc_id), 0),
+            "total_value": 0,
+            "items": [],
+        })
+        loot = int(loot or 0)
+        npc["total_value"] += loot
+        item = {
+            "item_id": int(item_id),
+            "name": item_name,
+            "quantity": int(qty or 0),
+            "loot": money(loot),
+            "drops": int(drop_count or 0),
+        }
+        # Optional detail for the web item tooltip; omitted when NULL so
+        # the payload stays backwards compatible.
+        first_ts, last_ts = _ts(first_at), _ts(last_at)
+        if first_ts is not None:
+            item["first_ts"] = first_ts
+        if last_ts is not None:
+            item["last_ts"] = last_ts
+        npc["items"].append(item)
+
+    npc_list = sorted(npcs.values(), key=lambda x: x["total_value"], reverse=True)
+    for npc in npc_list:
+        npc["items"].sort(key=lambda x: x["loot"]["value"], reverse=True)
+        npc["loot"] = money(npc.pop("total_value"))
+
+    _month_cache_set(
+        cache_key,
+        npc_list,
+        _CURRENT_MONTH_CACHE_TTL if partition >= current else _SETTLED_MONTH_CACHE_TTL,
+    )
+    return npc_list
+
+
+def _fold_npc_boxes(months):
+    """Merge per-month NPC boxes (oldest first) into one all-time list.
+
+    Kills sum cleanly across months because a kill's distinct ``date_added``
+    belongs to exactly one month, so no drop event is ever counted twice.
+    """
+    npcs: dict[int, dict] = {}
+    for npc_list in months:
+        for src in npc_list:
+            npc = npcs.setdefault(int(src["npc_id"]), {
+                "npc_id": int(src["npc_id"]),
+                "name": src["name"],
+                "kills": 0,
+                "total_value": 0,
+                "items": {},
+            })
+            npc["kills"] += int(src.get("kills") or 0)
+            npc["total_value"] += int(src["loot"]["value"])
+            for item in src["items"]:
+                merged = npc["items"].setdefault(int(item["item_id"]), {
+                    "item_id": int(item["item_id"]),
+                    "name": item["name"],
+                    "quantity": 0,
+                    "value": 0,
+                    "drops": 0,
+                })
+                merged["quantity"] += int(item.get("quantity") or 0)
+                merged["value"] += int(item["loot"]["value"])
+                merged["drops"] += int(item.get("drops") or 0)
+                first_ts, last_ts = item.get("first_ts"), item.get("last_ts")
+                if first_ts is not None:
+                    merged["first_ts"] = min(first_ts, merged.get("first_ts", first_ts))
+                if last_ts is not None:
+                    merged["last_ts"] = max(last_ts, merged.get("last_ts", last_ts))
+
+    out = []
+    for npc in sorted(npcs.values(), key=lambda x: x["total_value"], reverse=True):
+        items = []
+        for item in sorted(npc["items"].values(), key=lambda x: x["value"], reverse=True):
+            entry = {
+                "item_id": item["item_id"],
+                "name": item["name"],
+                "quantity": item["quantity"],
+                "loot": money(item.pop("value")),
+                "drops": item["drops"],
+            }
+            for key in ("first_ts", "last_ts"):
+                if key in item:
+                    entry[key] = item[key]
+            items.append(entry)
+        out.append({
+            "npc_id": npc["npc_id"],
+            "name": npc["name"],
+            "kills": npc["kills"],
+            "loot": money(npc["total_value"]),
+            "items": items,
+        })
+    return out
+
+
+def _months_between(earliest: int, current: int):
+    """Every YYYYMM from `earliest` to `current` inclusive, oldest first."""
+    months = []
+    partition = max(int(earliest), _EARLIEST_SUPPORTED_PARTITION)
+    while partition <= current:
+        months.append(partition)
+        year, month = divmod(partition, 100)
+        partition = (year + 1) * 100 + 1 if month >= 12 else partition + 1
+    return months
+
+
 @profiles_bp.get("/players/<int:player_id>/loot")
 async def player_loot(player_id: int):
-    """RuneLite-style loot tracker: one month of the player's drops grouped by
-    NPC, with item stacks. Reads `drops` directly via a bounded ``date_added``
-    range on the (player_id, date_added) composite index — a single player-month
-    seek, not an index-merge over the whole month's partition index."""
-    raw = request.args.get("partition", "")
+    """RuneLite-style loot tracker: the player's drops grouped by NPC, with item
+    stacks — one month by default, or the whole account with ``?partition=all``.
+
+    Both views are built from the same per-month read (`_month_npc_boxes`), a
+    bounded ``date_added`` seek. All-time folds every month the account has
+    rather than issuing one unbounded lifetime scan: the totals are identical,
+    but each statement stays small (the lifetime version measured 15-24s on the
+    biggest accounts, close enough to the engine's 30s read timeout to 500), and
+    every month it touches lands in a shared cache that the month view and the
+    next all-time build both reuse.
+    """
     current = period_to_partition("all")
-    try:
-        partition = int(raw) if raw else current
-    except ValueError:
-        return problem(400, "Bad partition", "partition must be YYYYMM")
-    year, month = divmod(partition, 100)
-    if not (2020 <= year <= 2100 and 1 <= month <= 12) or partition > current:
-        return problem(400, "Bad partition", "partition must be a valid YYYYMM month, not in the future")
+    partition, all_time, err = _parse_loot_partition(request.args.get("partition", ""), current)
+    if err:
+        return problem(400, "Bad partition", err)
 
     def _load():
         with db_session() as s:
@@ -558,94 +826,45 @@ async def player_loot(player_id: int):
 
             # v2: items also carry drop count + first/last received timestamps
             # (rich item tooltips). Key bumped so stale v1 payloads never serve.
-            cache_key = f"pstats:loot2:{player_id}:{partition}"
-            cached = cache_get(cache_key, _STATS_TTL)
+            cache_key = f"pstats:loot2:{player_id}:{_ALL_TIME if all_time else partition}"
+            cached = cache_get(cache_key, _ALL_TIME_TTL if all_time else _STATS_TTL)
             if cached is not None:
                 return cached
 
-            # A `partition = :p` equality made the optimiser index-merge-
-            # intersect ix_drops_player_id with ix_drops_partition, and the
-            # partition side spans the whole month across every player (tens of
-            # millions of rows) — 3-4s here, 30s+ (read-timeout 500s) for large
-            # accounts. The equivalent ``date_added`` range pins the
-            # (player_id, date_added) composite for a single bounded seek.
-            start_dt, end_dt = _partition_bounds(partition)
-            bounds = {"pid": player_id, "start": start_dt, "end": end_dt}
-            item_rows = s.execute(text(
-                "SELECT d.npc_id, n.npc_name, d.item_id, i.item_name, "
-                "       SUM(d.quantity) AS qty, SUM(d.value * d.quantity) AS loot, "
-                "       COUNT(*) AS drop_count, "
-                "       MIN(d.date_added) AS first_at, MAX(d.date_added) AS last_at "
-                "FROM drops d FORCE INDEX (ix_drops_player_id_date_added) "
-                "JOIN npc_list n ON n.npc_id = d.npc_id "
-                "JOIN items i ON i.item_id = d.item_id "
-                "WHERE d.player_id = :pid AND d.date_added >= :start AND d.date_added < :end "
-                "GROUP BY d.npc_id, n.npc_name, d.item_id, i.item_name"
-            ), bounds).fetchall()
-
-            # "Kills" the way the old XenForo widget counted them: distinct
-            # drop timestamps per NPC (multi-item kills share one timestamp).
-            kill_rows = s.execute(text(
-                "SELECT d.npc_id, COUNT(DISTINCT d.date_added) "
-                "FROM drops d FORCE INDEX (ix_drops_player_id_date_added) "
-                "WHERE d.player_id = :pid AND d.date_added >= :start AND d.date_added < :end "
-                "  AND d.npc_id IS NOT NULL "
-                "GROUP BY d.npc_id"
-            ), bounds).fetchall()
-            kills = {int(npc_id): int(cnt) for npc_id, cnt in kill_rows}
-
-            def _ts(dt) -> int | None:
-                """DB datetime -> unix seconds (None-safe)."""
-                try:
-                    return int(dt.timestamp()) if dt is not None else None
-                except Exception:
-                    return None
-
-            npcs = {}
-            for npc_id, npc_name, item_id, item_name, qty, loot, drop_count, first_at, last_at in item_rows:
-                npc = npcs.setdefault(int(npc_id), {
-                    "npc_id": int(npc_id),
-                    "name": npc_name,
-                    "kills": kills.get(int(npc_id), 0),
-                    "total_value": 0,
-                    "items": [],
-                })
-                loot = int(loot or 0)
-                npc["total_value"] += loot
-                item = {
-                    "item_id": int(item_id),
-                    "name": item_name,
-                    "quantity": int(qty or 0),
-                    "loot": money(loot),
-                    "drops": int(drop_count or 0),
-                }
-                # Optional detail for the web item tooltip; omitted when NULL so
-                # the payload stays backwards compatible.
-                first_ts, last_ts = _ts(first_at), _ts(last_at)
-                if first_ts is not None:
-                    item["first_ts"] = first_ts
-                if last_ts is not None:
-                    item["last_ts"] = last_ts
-                npc["items"].append(item)
-
-            npc_list = sorted(npcs.values(), key=lambda x: x["total_value"], reverse=True)
-            for npc in npc_list:
-                npc["items"].sort(key=lambda x: x["loot"]["value"], reverse=True)
-                npc["loot"] = money(npc.pop("total_value"))
+            earliest = _earliest_loot_partition(s, player_id) or partition
+            with _statement_timeout(s, enabled=all_time):
+                if all_time:
+                    npc_list = _fold_npc_boxes(
+                        _month_npc_boxes(s, player_id, month, current)
+                        for month in _months_between(earliest, current)
+                    )
+                else:
+                    npc_list = _month_npc_boxes(s, player_id, partition, current)
 
             payload = {
                 "player_id": player_id,
                 "partition": partition,
-                "earliest_partition": _earliest_loot_partition(s, player_id) or partition,
+                "earliest_partition": earliest,
+                "all_time": all_time,
                 "npcs": npc_list,
             }
             cache_set(cache_key, payload)
             return payload
 
-    payload = await asyncio.to_thread(_load)
+    try:
+        payload = await asyncio.to_thread(_load)
+    except OperationalError as err:
+        if not _is_timeout_error(err):
+            raise
+        return problem(
+            503,
+            "Loot history too large",
+            "This account has too much tracked loot to summarise all at once. "
+            "Browse it a month at a time instead.",
+        )
     if payload is None:
         return problem(404, "Player not found", f"No player with id {player_id}")
-    return with_cache_headers(jsonify(payload), max_age=60)
+    return with_cache_headers(jsonify(payload), max_age=300 if all_time else 60)
 
 
 @profiles_bp.get("/groups/by-guild/<guild_id>")

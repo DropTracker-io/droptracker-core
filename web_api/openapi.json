@@ -371,7 +371,7 @@
           "players"
         ],
         "operationId": "getPlayerLoot",
-        "summary": "Player loot tracker (drops grouped by NPC for one month)",
+        "summary": "Player loot tracker (drops grouped by NPC, one month or all-time)",
         "parameters": [
           {
             "$ref": "#/components/parameters/PlayerId"
@@ -380,9 +380,10 @@
             "name": "partition",
             "in": "query",
             "required": false,
-            "description": "YYYYMM month to show; defaults to the current month.",
+            "description": "YYYYMM month to show, or `all` for the player's whole account; defaults to the current month.",
             "schema": {
-              "type": "integer"
+              "type": "string",
+              "pattern": "^(all|[0-9]{6})$"
             }
           }
         ],
@@ -401,6 +402,9 @@
             "$ref": "#/components/responses/Error"
           },
           "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
             "$ref": "#/components/responses/Error"
           }
         }
@@ -1845,17 +1849,17 @@
           },
           "drops": {
             "type": "integer",
-            "description": "Distinct drop rows this item came from this month."
+            "description": "Distinct drop rows this item came from in the period shown."
           },
           "first_ts": {
             "type": "integer",
             "format": "int64",
-            "description": "Unix seconds of the first time this item was received this month."
+            "description": "Unix seconds of the first time this item was received in the period shown."
           },
           "last_ts": {
             "type": "integer",
             "format": "int64",
-            "description": "Unix seconds of the most recent time this item was received this month."
+            "description": "Unix seconds of the most recent time this item was received in the period shown."
           }
         }
       },
@@ -1904,11 +1908,15 @@
           },
           "partition": {
             "type": "integer",
-            "description": "YYYYMM month shown."
+            "description": "YYYYMM month shown; in all-time mode, the newest month covered."
           },
           "earliest_partition": {
             "type": "integer",
             "description": "First YYYYMM with tracked drops (month-picker lower bound)."
+          },
+          "all_time": {
+            "type": "boolean",
+            "description": "True when the payload covers the player's whole account rather than a single month."
           },
           "npcs": {
             "type": "array",
