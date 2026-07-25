@@ -23,6 +23,8 @@ only).
 
 import asyncio
 import json
+import logging
+import os
 import re
 import time
 from datetime import datetime
@@ -36,6 +38,8 @@ from services.kb.answerer import (
     answer as _kb_answer,
     AnswerError,
 )
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Schema card
@@ -58,7 +62,7 @@ _CARD_TABLES = [
     "group_subscriptions",
     "subscription_tiers",
     "player_points",
-    "item_list",
+    "items",
     "npc_list",
 ]
 
@@ -85,6 +89,21 @@ Domain notes (authoritative):
   and always LIMIT. Never aggregate over the whole table without a filter.
 - All Discord ids are stored as strings — quote them in SQL.
 - Dates are DATETIME columns; compare with 'YYYY-MM-DD' literals.
+
+Name -> id resolution (drops stores ONLY numeric ids, never names):
+- Item names live in `items` (item_id, item_name); NPC names in `npc_list`
+  (npc_id, npc_name). drops.item_id / drops.npc_id are the join keys.
+- ONE item name can map to MULTIPLE item_ids (noted/stacked/variant rows). Never
+  resolve a name to a single id with LIMIT 1 — that silently loses drops.
+  Resolve the whole set and match against all of them, e.g.:
+    SELECT DISTINCT n.npc_name, COUNT(*) c FROM drops d
+      JOIN npc_list n ON n.npc_id = d.npc_id
+     WHERE d.item_id IN (SELECT item_id FROM items WHERE item_name = 'Vial of blood')
+     GROUP BY n.npc_name ORDER BY c DESC LIMIT 50
+- Prefer resolving names inside a subquery like that (one round-trip) over
+  spending a separate query on the lookup.
+- Match item/npc names case-insensitively and exactly where possible; fall back
+  to LIKE '%name%' only when an exact match returns nothing.
 """.strip()
 
 _schema_card_cache: str | None = None
@@ -100,9 +119,15 @@ def build_schema_card() -> str:
     from db.models.base import Base
 
     lines: list[str] = []
+    missing: list[str] = []
     for tname in _CARD_TABLES:
         table = Base.metadata.tables.get(tname)
         if table is None:
+            # A typo here is invisible at runtime but silently blinds the
+            # planner to a whole table (this is exactly how `item_list` — real
+            # name `items` — went unnoticed and made every item-name question
+            # fail). Complain loudly instead of dropping it on the floor.
+            missing.append(tname)
             continue
         cols = []
         fks = []
@@ -118,6 +143,12 @@ def build_schema_card() -> str:
         if fks:
             line += f"  [FK {', '.join(fks)}]"
         lines.append(line)
+    if missing:
+        logger.warning(
+            "KB schema card: %d allowlisted table(s) not found in ORM metadata "
+            "and omitted from the planner prompt: %s",
+            len(missing), ", ".join(missing),
+        )
     _schema_card_cache = "\n".join(lines)
     return _schema_card_cache
 
@@ -154,6 +185,62 @@ Respond with ONLY a JSON object, no markdown fences, exactly this shape:
 ("queries" must be [] when mode is "kb".)"""
 
 
+# The planner runs with its own replacement system prompt (not Claude Code's
+# default) — see answerer._run_claude_json. Kept separate from the answering
+# persona so the SQL-writing stage never inherits "be helpful, cite excerpts"
+# framing, and so mined Discord content stays out of this stage entirely.
+_PLANNER_SYSTEM = (
+    "You are a MariaDB query planner for DropTracker, an Old School RuneScape "
+    "loot-tracking platform. You translate an operator's question into a small "
+    "set of read-only SELECT statements against a known schema. You output only "
+    "JSON matching the requested shape — never prose, never markdown fences. "
+    "Correctness over cleverness: prefer one precise query with the right joins "
+    "over several vague ones."
+)
+
+_QUERIES_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "purpose": {"type": "string"},
+            "sql": {"type": "string"},
+        },
+        "required": ["purpose", "sql"],
+        "additionalProperties": False,
+    },
+}
+
+# --json-schema makes the CLI validate structured output, so the tolerant
+# text parsing below is now a safety net rather than the primary path. That
+# matters: the old failure mode was a malformed plan silently degrading to
+# mode="kb", i.e. a live-records question answered from mined chat instead.
+_PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "mode": {"type": "string", "enum": ["kb", "db", "both"]},
+        "queries": _QUERIES_SCHEMA,
+    },
+    "required": ["mode", "queries"],
+    "additionalProperties": False,
+}
+
+_REFINE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "done": {"type": "boolean"},
+        "queries": _QUERIES_SCHEMA,
+    },
+    "required": ["done"],
+    "additionalProperties": False,
+}
+
+# How many follow-up query rounds the investigator may run after the initial
+# plan. Multi-hop questions ("which NPCs dropped X", "who administers Y")
+# routinely need 2 hops; the old hard-coded single round capped them short.
+_MAX_ROUNDS = max(0, int(os.getenv("KB_MAX_ROUNDS", "3")))
+
+
 def _parse_plan(raw: str) -> dict:
     """Best-effort strict-JSON parse; falls back to kb mode."""
     s = raw.strip()
@@ -169,7 +256,11 @@ def _parse_plan(raw: str) -> dict:
         if mode not in ("kb", "db", "both") or not isinstance(queries, list):
             raise ValueError("bad shape")
         return {"mode": mode, "queries": queries[:3]}
-    except Exception:
+    except Exception as e:
+        # Should be unreachable now that the plan call uses --json-schema; if it
+        # fires, a live-records question is about to be answered from mined chat
+        # instead, so make it visible rather than silently degrading.
+        logger.warning("KB planner returned unparseable output (%s); falling back to kb mode. Raw: %.300s", e, raw)
         return {"mode": "kb", "queries": []}
 
 
@@ -205,7 +296,7 @@ def _execute_plan(queries: list) -> list[dict]:
 
 
 _REFINE_TEMPLATE = """You are investigating a question against DropTracker's MariaDB.
-You already ran these queries:
+This is follow-up round {round} of at most {max_rounds}. Queries run so far:
 
 {db_results}
 
@@ -213,11 +304,17 @@ You already ran these queries:
 
 QUESTION: {question}
 
-If the results above are enough to answer fully, respond with ONLY: {{"done": true}}
-If ONE more round of queries would materially improve the answer (e.g. mapping
-ids you found to names), respond with ONLY:
-{{"queries": [{{"purpose": "...", "sql": "SELECT ..."}}]}}
-(max 2 queries; plain single-statement SELECTs with LIMIT <=50; no semicolons.)"""
+Decide whether the data above already answers the question FULLY.
+- If yes, respond with {{"done": true, "queries": []}}.
+- If one more round would materially improve it, respond with
+  {{"done": false, "queries": [{{"purpose": "...", "sql": "SELECT ..."}}]}}.
+
+Ask for more queries when: you resolved ids but still need their names (or vice
+versa); a query returned an error you can correct; a result is empty ONLY because
+the filter was too strict (e.g. exact name match -> try LIKE). Do NOT ask for
+more when the answer is simply "no such records exist" — an empty result is a
+valid, meaningful answer. Max 2 queries; plain single-statement SELECTs with
+LIMIT <=50; no semicolons."""
 
 
 _ANSWER_TEMPLATE = """You are the internal assistant for DropTracker (OSRS loot/achievement
@@ -272,7 +369,9 @@ async def answer_smart(question: str, top_k: int = 4) -> dict:
         question=question,
     )
     async with _sem:
-        plan_raw, meta = await _run_claude_json(plan_prompt)
+        plan_raw, meta = await _run_claude_json(
+            plan_prompt, system_prompt=_PLANNER_SYSTEM, json_schema=_PLAN_SCHEMA
+        )
     acc_usage(usage, meta)
     plan = _parse_plan(plan_raw)
 
@@ -286,24 +385,37 @@ async def answer_smart(question: str, top_k: int = 4) -> dict:
 
     db_results = await asyncio.to_thread(_execute_plan, plan["queries"])
 
-    # One optional refinement round: lets the model chase an obvious follow-up
-    # (e.g. it found discord_ids and now wants usernames) without looping.
-    if db_results:
+    # Refinement rounds: let the model chase follow-ups (resolve ids it found to
+    # names, correct a query that errored, loosen a filter that matched nothing)
+    # until it says it is done or the round budget runs out. Multi-hop questions
+    # need more than the single round this used to allow; each round is now cheap
+    # (~200 prompt tokens of overhead instead of ~9.5k) so the budget can be real.
+    rounds_used = 0
+    for rnd in range(1, _MAX_ROUNDS + 1):
+        if not db_results:
+            break
         refine_prompt = _REFINE_TEMPLATE.format(
             db_results=_format_db_results(db_results),
             notes=_DOMAIN_NOTES,
             question=question,
+            round=rnd,
+            max_rounds=_MAX_ROUNDS,
         )
         async with _sem:
-            refine_raw, meta = await _run_claude_json(refine_prompt)
+            refine_raw, meta = await _run_claude_json(
+                refine_prompt, system_prompt=_PLANNER_SYSTEM, json_schema=_REFINE_SCHEMA
+            )
         acc_usage(usage, meta)
+        rounds_used = rnd
         try:
             r = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", refine_raw.strip()))
             extra = (r.get("queries") or [])[:2] if isinstance(r, dict) and not r.get("done") else []
         except Exception:
+            logger.warning("KB refine round %d returned unparseable output: %.200s", rnd, refine_raw)
             extra = []
-        if extra:
-            db_results += await asyncio.to_thread(_execute_plan, extra)
+        if not extra:
+            break
+        db_results += await asyncio.to_thread(_execute_plan, extra)
 
     kb_block = ""
     kb_sources: list[dict] = []
@@ -357,5 +469,6 @@ async def answer_smart(question: str, top_k: int = 4) -> dict:
         "elapsed_s": round(time.monotonic() - t0, 1),
         "mode": plan["mode"],
         "sql": [r.get("sql") for r in db_results if r.get("sql")],
+        "rounds": rounds_used,
         "usage": usage,
     }

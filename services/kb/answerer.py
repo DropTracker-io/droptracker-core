@@ -30,14 +30,28 @@ _sem = asyncio.Semaphore(1)  # one synthesis at a time (owner-only usage)
 _CHUNK_CHAR_CAP = 2000
 _CONTEXT_CHAR_CAP = 16000
 
+# The persona moved out of the piped prompt and into --system-prompt, which
+# REPLACES Claude Code's default system prompt. That default is built for an
+# interactive coding agent (tool docs, harness rules, skill catalogue, per-machine
+# context) and cost ~9.5k input tokens on every call — for a text-only synthesis
+# that never uses a tool, all of it was dead weight. Measured on this host:
+#   before: input 1 + cache_creation 6229 + cache_read 3289  (~9.5k)
+#   after:  input ~184                                       (~98% less)
+# /ask makes 3+ CLI calls per question, so this is ~28k tokens saved per question.
+_SYSTEM_PROMPT = (
+    "You are the internal knowledgebase assistant for DropTracker, an Old School "
+    "RuneScape loot/achievement tracking platform (Python backend, Discord bots, "
+    "RuneLite plugin, MariaDB, Redis). You answer the project owner's operational "
+    "questions. Ground every claim in the context you are given; when it is "
+    "insufficient, say so and name exactly what is missing rather than guessing. "
+    "Cite excerpt numbers like [1] where you rely on them. Be concise and concrete: "
+    "answers are rendered into a Discord embed, so lead with the answer, prefer "
+    "short lines, and include ids alongside names."
+)
+
 _HEADER = (
-    "You are the internal knowledgebase assistant for DropTracker, an Old School\n"
-    "RuneScape loot/achievement tracking platform (Python backend, Discord bots,\n"
-    "RuneLite plugin, MySQL, Redis). Answer the operator's question using ONLY the\n"
-    "context excerpts below (mined from support tickets, Discord forums/chat, and\n"
-    "project docs) plus general knowledge of the project structure. Cite excerpt\n"
-    "numbers like [1] where you rely on them. If the context is insufficient, say\n"
-    "so and name what's missing — do not guess. Be concise and concrete."
+    "Answer the operator's question using ONLY the context excerpts below (mined\n"
+    "from support tickets, Discord forums/chat, and project docs)."
 )
 
 
@@ -64,17 +78,44 @@ def acc_usage(total: dict, meta: dict) -> dict:
     return total
 
 
-async def _run_claude_json(prompt: str) -> tuple[str, dict]:
+async def _run_claude_json(
+    prompt: str,
+    system_prompt: str | None = None,
+    json_schema: dict | None = None,
+) -> tuple[str, dict]:
     """Run one ``claude -p`` synthesis. Returns (text, usage_meta).
 
     Uses ``--output-format json`` so each call reports token usage and the
     API-equivalent cost (``total_cost_usd`` — informational only: subscription
-    auth means nothing is actually billed). The installed CLI (v2.1.x) has no
-    ``--max-turns``; tools are disabled with ``--tools ""``. ANTHROPIC_API_KEY
-    is removed from the child env so the CLI uses subscription auth only.
+    auth means nothing is actually billed). ANTHROPIC_API_KEY is removed from
+    the child env so the CLI uses subscription auth only.
+
+    Everything the default Claude Code harness would inject is stripped, because
+    a text-only synthesis call can use none of it:
+      ``--tools ""``            no tools, so no tool schemas in the prompt
+      ``--system-prompt``       replaces the (large) default system prompt
+      ``--strict-mcp-config``   ignores the machine's MCP servers (the claude.ai
+                                ones are unauthenticated here — pure overhead)
+      ``--disable-slash-commands``  drops the skill catalogue
+      ``--setting-sources ""``  skips user/project/local settings discovery
+
+    ``json_schema`` turns on the CLI's structured-output validation, so callers
+    that need machine-readable output get schema-valid JSON instead of parsing
+    prose and silently falling back when the model wraps it in prose or fences.
     """
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-    cmd = [_CLAUDE, "-p", "--output-format", "json", "--model", _MODEL, "--tools", ""]
+    cmd = [
+        _CLAUDE, "-p",
+        "--output-format", "json",
+        "--model", _MODEL,
+        "--tools", "",
+        "--system-prompt", system_prompt or _SYSTEM_PROMPT,
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+        "--setting-sources", "",
+    ]
+    if json_schema is not None:
+        cmd += ["--json-schema", json.dumps(json_schema)]
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.PIPE,
