@@ -2,10 +2,12 @@
 items.py) — the pure helpers around the last-received registry. DB/Redis are
 stubbed by tests/conftest.py, so fakes are injected explicitly."""
 
+from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
-from web_api.routes import npcs
+from web_api import common as web_common
+from web_api.routes import items, npcs
 
 
 class FakeRedisHash:
@@ -131,3 +133,115 @@ class TestLastDropsFor:
             latest, status = npcs._last_drops_for(s, 7)
         assert status == "ready"
         assert 995 in latest
+
+
+class TestVariantItemIds:
+    """One item name spans several ids; readers of per-item-id tables need all
+    of them (see items.variant_item_ids)."""
+
+    def _session(self, ids):
+        s = MagicMock()
+        s.query.return_value.filter.return_value.all.return_value = [(i,) for i in ids]
+        return s
+
+    def test_returns_every_id_sharing_the_name(self):
+        s = self._session([22405, 22446, 22447, 22448])
+        assert items.variant_item_ids(s, "Vial of blood", 22405) == [
+            22405, 22446, 22447, 22448
+        ]
+
+    def test_unknown_name_falls_back_to_the_requested_id(self):
+        assert items.variant_item_ids(self._session([]), "Nonexistent", 7) == [7]
+
+    def test_blank_name_never_queries(self):
+        s = MagicMock()
+        assert items.variant_item_ids(s, None, 7) == [7]
+        s.query.assert_not_called()
+
+
+class TestSources:
+    """items._sources: the drop-source list behind the item page and the event
+    task form's per-item "restrict to specific NPC sources" picker."""
+
+    @staticmethod
+    @contextmanager
+    def _db(*, wiki_rows, observed_rows=(), total=None):
+        """Patch db_session so _sources sees canned wiki + observed results.
+
+        Call order inside _sources: total (fetchone) -> wiki rows (fetchall)
+        -> _observed_source_rows' drop scan (fetchall) -> its npc-name lookup
+        (fetchall).
+        """
+        s = MagicMock()
+        names = {r[1] for r in wiki_rows} | {r[1] for r in observed_rows}
+        s.execute.side_effect = [
+            MagicMock(fetchone=lambda: (total if total is not None else len(names),)),
+            MagicMock(fetchall=lambda: list(wiki_rows)),
+            # (npc_id, player_id) drop rows: enough of each to clear the
+            # min-drops / min-players thresholds.
+            MagicMock(fetchall=lambda: [
+                (r[0], p) for r in observed_rows for p in range(1, 6)
+            ]),
+            MagicMock(fetchall=lambda: [(r[0], r[1]) for r in observed_rows]),
+        ]
+
+        @contextmanager
+        def fake_session():
+            yield s
+
+        # _sources memoizes per id-set in the shared in-process cache.
+        web_common._cache.clear()
+        with patch.object(items, "db_session", fake_session):
+            yield s
+
+    def test_unions_sources_across_every_variant_id(self):
+        """The regression this guards: resolving "Vial of blood" to one id
+        (MIN -> 22405) asked the wiki table about an id holding a single ToB
+        Hard Mode row while every receipt sits on 22446, so the picker offered
+        one of three real sources."""
+        wiki = [(13961, "Theatre of Blood: Hard Mode", "1", 0.066, 1, 1)]
+        observed = [(13699, "Theatre of Blood"), (13958, "Theatre of Blood: Entry Mode")]
+        with self._db(wiki_rows=wiki, observed_rows=observed) as s:
+            out = items._sources([22405, 22446, 22447, 22448])
+        assert [n["name"] for n in out["npcs"]] == [
+            "Theatre of Blood: Hard Mode",
+            "Theatre of Blood",
+            "Theatre of Blood: Entry Mode",
+        ]
+        # Every variant id reaches both source queries.
+        for call in s.execute.call_args_list[:3]:
+            assert call.args[1]["ids"] == [22405, 22446, 22447, 22448]
+
+    def test_observed_scan_skipped_when_wiki_already_fills_the_cap(self):
+        """The scan random-reads up to 50k drop rows (~10s for a ubiquitous
+        item) and its extras are discarded once the list is full."""
+        wiki = [
+            (i, f"NPC {i}", "1", 0.001, 1, 1) for i in range(items._SOURCES_LIMIT)
+        ]
+        with self._db(wiki_rows=wiki, observed_rows=[(999, "Never reached")]) as s:
+            out = items._sources([1619, 1620])
+        assert len(out["npcs"]) == items._SOURCES_LIMIT
+        assert "Never reached" not in {n["name"] for n in out["npcs"]}
+        # total + wiki only — the drop scan never ran.
+        assert s.execute.call_count == 2
+
+    def test_alias_members_survive_the_union(self):
+        """A merged display alias must still carry the real recorded names the
+        task engine matches drops by."""
+        wiki = [(13974, "Reward cart (Wintertodt)", "1", 0.01, 1, 1),
+                (20693, "Supply crate (Wintertodt)", "1", 0.01, 1, 1)]
+        with self._db(wiki_rows=wiki):
+            out = items._sources([20718])
+        assert [n["name"] for n in out["npcs"]] == ["Wintertodt"]
+        assert out["npcs"][0]["members"] == [
+            "Reward cart (Wintertodt)", "Supply crate (Wintertodt)"
+        ]
+
+    def test_result_is_cached_per_id_set(self):
+        wiki = [(963, "Kalphite Queen", "1", 0.0078, 1, 1)]
+        with self._db(wiki_rows=wiki) as s:
+            first = items._sources([2513, 3140])
+            queries = s.execute.call_count
+            again = items._sources([3140, 2513])  # same set, either order
+        assert first == again
+        assert s.execute.call_count == queries  # second call served from cache

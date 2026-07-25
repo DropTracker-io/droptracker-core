@@ -3695,7 +3695,7 @@ async def npc_drop_items():
     def _load():
         # Lazy imports keep events.py's conftest ``services``-stub isolation
         # and reuse the npc page's table readers (wiki + family + observed).
-        from db import NpcList, PlayerItemHourlyTotals
+        from db import ItemList, NpcList, PlayerItemHourlyTotals
         from web_api.routes.npcs import (
             _family_table_rows,
             _observed_table_rows,
@@ -3713,7 +3713,7 @@ async def npc_drop_items():
                 rows, _last, _status, _build = _observed_table_rows(
                     s, npc_id, npc.npc_name
                 )
-            out, seen = [], set()
+            picked, seen = [], set()
             # Unnoted rows first so the per-name dedupe keeps the id whose
             # itemdb icon players recognise.
             for item_id, item_name, _qty, noted, _rarity, _rolls in sorted(
@@ -3724,21 +3724,44 @@ async def npc_drop_items():
                 if not name or key in seen or _PLACEHOLDER_ITEM.match(name):
                     continue
                 seen.add(key)
+                picked.append((int(item_id), name))
+                if len(picked) >= _NPC_DROPS_LIMIT:
+                    break
+
+            # One name -> every variant id, in a single pass. A drop lands on
+            # whichever id the client sent, so probing only the id printed on
+            # the wiki row called real items untracked: ToB's table lists Vial
+            # of blood as 22405 (no rollup rows) while receipts sit on 22446.
+            # /events/meta/items already probes the whole variant set, so
+            # without this the same item was tracked in one picker and flagged
+            # "never seen in tracked drops" in the other.
+            variant_ids: dict[str, list[int]] = {}
+            for iid, iname in (
+                s.query(ItemList.item_id, ItemList.item_name)
+                .filter(ItemList.item_name.in_([n for _, n in picked]))
+                .all()
+            ):
+                variant_ids.setdefault(iname, []).append(int(iid))
+
+            out = []
+            for item_id, name in picked:
                 # Indexed LIMIT'd probe, mirroring /events/meta/items: tasks
                 # match by name, so flag names never seen in the drop history.
                 observed = (
                     s.query(PlayerItemHourlyTotals.item_id)
-                    .filter(PlayerItemHourlyTotals.item_id == int(item_id))
+                    .filter(
+                        PlayerItemHourlyTotals.item_id.in_(
+                            variant_ids.get(name) or [item_id]
+                        )
+                    )
                     .limit(RECEIVABLE_MIN_ROWS)
                     .all()
                 )
                 out.append({
-                    "id": int(item_id),
+                    "id": item_id,
                     "name": name,
                     "tracked": len(observed) >= RECEIVABLE_MIN_ROWS,
                 })
-                if len(out) >= _NPC_DROPS_LIMIT:
-                    break
             return out
 
     return jsonify(await asyncio.to_thread(_load))
@@ -3769,15 +3792,28 @@ async def item_sources():
 
         with db_session() as s:
             rows = (
-                s.query(func.min(ItemList.item_id), ItemList.item_name)
-                .filter(ItemList.item_name.in_(names), ItemList.noted.is_(False))
-                .group_by(ItemList.item_name)
+                s.query(ItemList.item_id, ItemList.item_name, ItemList.noted)
+                .filter(ItemList.item_name.in_(names))
                 .all()
             )
-        resolved = [(int(i), n) for i, n in rows]
+        # Keep EVERY id a name maps to. Collapsing to one (this used to take
+        # MIN(item_id) over the unnoted rows) asked the wiki/drop tables about
+        # a variant id that holds no rows, so the picker offered a fraction of
+        # the real sources — "Vial of blood" showed only ToB Hard Mode because
+        # every receipt is recorded on 22446 while MIN picked 22405. `item_id`
+        # stays the primary unnoted id (the response's identity field).
+        ids_by_name: dict[str, list[int]] = {}
+        primary: dict[str, int] = {}
+        for iid, name, noted in rows:
+            ids_by_name.setdefault(name, []).append(int(iid))
+            if not noted:
+                primary[name] = min(primary.get(name, int(iid)), int(iid))
         # _sources opens its own db_session, so call it after the resolve
         # session above has closed rather than nesting.
-        return [{"item_name": n, "item_id": i, **_sources(i)} for i, n in resolved]
+        return [
+            {"item_name": n, "item_id": primary.get(n, min(ids)), **_sources(ids)}
+            for n, ids in ids_by_name.items()
+        ]
 
     return jsonify(await asyncio.to_thread(_load))
 
