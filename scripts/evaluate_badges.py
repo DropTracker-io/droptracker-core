@@ -16,6 +16,11 @@ Usage
     # a specific day / one evaluator family
     python scripts/evaluate_badges.py --day 20260703 --only daily --dry-run
     python scripts/evaluate_badges.py --only records
+
+    # the held global loot leader badges (all-time + monthly); --month pins
+    # the monthly one to a specific board instead of the current month
+    python scripts/evaluate_badges.py --only leaders --dry-run
+    python scripts/evaluate_badges.py --only leaders --month 202606
 """
 from __future__ import annotations
 
@@ -36,7 +41,10 @@ def main() -> int:
                     help="log intended awards without writing anything")
     ap.add_argument("--day", metavar="YYYYMMDD",
                     help="process this specific day instead of the marker logic")
-    ap.add_argument("--only", choices=["daily", "streaks", "records"],
+    ap.add_argument("--month", metavar="YYYYMM",
+                    help="converge the monthly leader badge against this month "
+                         "instead of the current one")
+    ap.add_argument("--only", choices=["daily", "streaks", "records", "leaders"],
                     help="restrict to one evaluator family")
     args = ap.parse_args()
 
@@ -48,7 +56,13 @@ def main() -> int:
         # Dry runs shouldn't depend on (or advance) the marker.
         days = [day_token(datetime.now() - timedelta(days=1))]
 
-    stats = run_badge_cycle(dry_run=args.dry_run, days=days, only=args.only)
+    months = None
+    if args.month:
+        datetime.strptime(args.month, "%Y%m")  # validate
+        months = [args.month]
+
+    stats = run_badge_cycle(dry_run=args.dry_run, days=days, only=args.only,
+                            months=months)
     print(f"[evaluate_badges] done: {stats}")
     return 0
 

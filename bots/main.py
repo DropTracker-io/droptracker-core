@@ -624,14 +624,17 @@ async def create_tasks():
 @Task.create(IntervalTrigger(minutes=60))
 async def badge_cycle():
     """Evaluate automatic badges (services/badges.py). The engine keeps a
-    Redis day marker, so all but the first run after daily rollover are a
-    single Redis GET; on downtime it catches up the missed days itself."""
+    Redis day marker, so all but the first run after daily rollover skip the
+    day-scoped families; on downtime it catches up the missed days itself.
+    The held loot-leader badges converge every run (they track a live board)."""
     try:
         from services.badges import run_badge_cycle
         stats = await asyncio.to_thread(run_badge_cycle)
-        if stats.get("days"):
+        changed_leaders = {k: v for k, v in stats.get("leaders", {}).items() if v}
+        if stats.get("days") or changed_leaders:
             print(f"Badge cycle processed {stats['days']}: "
-                  f"daily={stats['daily']} streaks={stats['streaks']} records={stats['records']}")
+                  f"daily={stats['daily']} streaks={stats['streaks']} "
+                  f"records={stats['records']} leaders={changed_leaders}")
     except Exception as e:
         print(f"Badge cycle failed: {e}")
 

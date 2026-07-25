@@ -6,7 +6,10 @@ Covers:
   * streak badges evaluated against the most recent complete day (players who
     are mid-streak get picked up by the nightly cycle going forward),
   * boss records, which converge over the full ``personal_best`` history
-    natively (no window needed).
+    natively (no window needed),
+  * the held global loot leaders — the all-time board, plus one monthly slot
+    per month the backfill window touches (those boards are persistent, so a
+    past month converges to its true final winner).
 
 Days whose daily sets have expired or are empty are skipped silently.
 
@@ -52,7 +55,7 @@ def main() -> int:
           f"{days[0]}..{days[-1]}")
     stats = run_badge_cycle(dry_run=dry_run, days=days)
     print(f"[backfill_badges] done: daily={stats['daily']} streaks={stats['streaks']} "
-          f"records={stats['records']}")
+          f"records={stats['records']} leaders={stats['leaders']}")
     if dry_run:
         print("[backfill_badges] dry run — re-run with --commit to write awards")
     return 0

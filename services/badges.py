@@ -5,13 +5,14 @@ from the bot via ``asyncio.to_thread`` or from CLI scripts.
 
 Automatic badge behavior is code-owned: a badge row's ``criteria`` JSON has a
 ``type`` field that maps to an evaluator here (``daily_champion``,
-``loot_streak``, ``boss_record``). Definitions (name/tone/icon/active) stay
-admin-editable in the DB.
+``loot_streak``, ``boss_record``, ``global_champion``). Definitions
+(name/tone/icon/active) stay admin-editable in the DB.
 
 All evaluators are idempotent — re-running any day converges to the same
 awards — so the hourly ``run_badge_cycle`` can safely catch up after downtime.
-Data sources are Redis daily boards and the small ``personal_best`` table
-only; the 160M-row ``drops`` table is never touched.
+Data sources are Redis leaderboards (daily boards, plus the persistent
+monthly/all-time boards) and the small ``personal_best`` table only; the
+160M-row ``drops`` table is never touched.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy.exc import IntegrityError
 
 from db import Badge, NpcList, PlayerBadge, Session
-from utils.partitions import day_token
+from utils.partitions import ALL, day_token, is_valid_token, month_token
 from utils.redis import redis_client
 
 # Redis marker: the most recent day token fully processed by run_badge_cycle.
@@ -46,6 +47,13 @@ _TEAM_SIZE_RE = re.compile(r"^(Solo|[1-9]\d?|[1-9]\d?-\d{1,2}|[1-9]\d?\+)$")
 
 # Cap SQL IN() clauses / Redis pipelines when filtering streak candidates.
 _CHUNK = 5000
+
+# How deep to scan a loot board for an eligible leader. The public leaderboard
+# omits hidden players and ids whose ``players`` row is gone, so the leader
+# badges follow the highest *visible* entry rather than naming someone the site
+# refuses to show. 25 is far more headroom than the handful of hidden accounts
+# near the top of a board could ever consume.
+_LEADER_SCAN = 25
 
 
 def _log(msg: str) -> None:
@@ -202,6 +210,125 @@ def evaluate_daily_champion(session, badge: Badge, day: str, dry_run: bool = Fal
         return 1
     return 0
 
+def _visible_player_ids(session, player_ids: List[int]) -> set:
+    """Subset of ``player_ids`` a public board would actually show.
+
+    Mirrors ``web_api.common.hidden_player_ids`` (``Player.hidden`` or the
+    owning ``User.hidden``) so a leader badge never names an account the site
+    hides, and drops ids with no ``players`` row at all — merged or deleted
+    players can linger in a sorted set. Both flags are nullable; NULL means
+    "not hidden", same as the web filter.
+    """
+    if not player_ids:
+        return set()
+    from db import Player, User
+
+    rows = (
+        session.query(Player.player_id, Player.hidden, User.hidden)
+        .outerjoin(User, User.user_id == Player.user_id)
+        .filter(Player.player_id.in_(player_ids))
+        .all()
+    )
+    return {int(pid) for pid, p_hidden, u_hidden in rows if not p_hidden and not u_hidden}
+
+
+def _held_by(session, badge: Badge, slot_key: str) -> Optional[int]:
+    """Player id currently holding ``slot_key`` for ``badge``, if any."""
+    row = (
+        session.query(PlayerBadge.player_id)
+        .filter(
+            PlayerBadge.badge_id == badge.badge_id,
+            PlayerBadge.group_key == 0,
+            PlayerBadge.active_key == slot_key,
+        )
+        .first()
+    )
+    return int(row[0]) if row else None
+
+
+def _period_closed(period: str, now: Optional[datetime] = None) -> bool:
+    """True when ``period``'s board can no longer change (a past month).
+
+    The all-time board never closes, so an all-time leader badge only makes
+    sense with the ``held`` semantic.
+    """
+    if period == ALL:
+        return False
+    return period < month_token(now or datetime.now())
+
+
+def evaluate_global_champion(session, badge: Badge, dry_run: bool = False,
+                             period: str = ALL) -> int:
+    """Award/converge the "top of the loot board" badge for one ``period``.
+
+    ``period`` is a partition token — ``"all"`` for the all-time board or a
+    ``YYYYMM`` month token — so the badge reads exactly the key the site's
+    leaderboard does (``leaderboard:all`` / ``leaderboard:202607``; both are
+    persistent, unlike the 90-day daily boards). One slot per period, so each
+    month gets its own award.
+
+    ``badge.semantic`` (admin-editable) picks the behavior:
+
+    ``held``      the current #1 holds it live. Losing the lead marks the old
+                  award ``lost`` — kept as history ("Held until ...") — and
+                  the new leader gets an active row. A month that has ended
+                  keeps its winner forever: nothing writes to that board again.
+    ``permanent`` a trophy for a *finished* period, like the daily champion:
+                  the in-progress month is skipped entirely (its winner isn't
+                  decided yet) and the award, once made, is never taken back.
+
+    Returns 1 when an award was made or moved, else 0.
+    """
+    held = badge.semantic == "held"
+    if not held and not _period_closed(period):
+        # 'permanent' + a period still being written to would freeze whoever
+        # happens to lead right now. Wait for the month to close.
+        return 0
+    top = redis_client.client.zrevrange(f"leaderboard:{period}", 0, _LEADER_SCAN - 1,
+                                        withscores=True)
+    if not top:
+        return 0
+
+    ranked: List[Tuple[int, int]] = []
+    for member, score in top:
+        try:
+            player_id = int(member.decode() if isinstance(member, bytes) else member)
+        except (ValueError, AttributeError):
+            continue
+        loot = int(float(score))
+        if loot <= 0:
+            break  # scores descend: nothing below this one is positive either
+        ranked.append((player_id, loot))
+    if not ranked:
+        return 0
+
+    visible = _visible_player_ids(session, [pid for pid, _ in ranked])
+    leader = next(((pid, loot) for pid, loot in ranked if pid in visible), None)
+    if leader is None:
+        return 0
+    player_id, loot = leader
+
+    context = {"period": period, "loot": loot}
+    if dry_run:
+        holder = _held_by(session, badge, period)
+        if holder == player_id or (not held and holder is not None):
+            return 0
+        _log(f"DRY-RUN {badge.key} [{period}]: player {player_id} takes it with "
+             f"{loot:,} gp (held by {holder if holder is not None else 'nobody'})")
+        return 1
+
+    if held:
+        outcome = transfer_held_badge(session, badge, period, player_id, context)
+        session.commit()  # no-op when the holder and context are unchanged
+        if outcome == "retained":
+            return 0
+    else:
+        if award_badge(session, badge, player_id, slot_key=period, context=context) is None:
+            return 0  # slot already awarded (or revoked — revocation is sticky)
+        session.commit()
+        outcome = "awarded"
+    _log(f"{badge.key} [{period}]: {outcome} to player {player_id} ({loot:,} gp)")
+    return 1
 
 def evaluate_streaks(session, badge: Badge, day: str, days: int, dry_run: bool = False) -> int:
     """Award ``badge`` to players present on ``leaderboard:{day}`` and every
@@ -353,6 +480,43 @@ def _load_automatic_badges(session) -> List[Tuple[Badge, dict]]:
     return out
 
 
+def _months_to_process(day_list: List[str], now: Optional[datetime] = None) -> List[str]:
+    """Month tokens the monthly leader badge converges this cycle.
+
+    Always the current month, plus the month of every day being processed — so
+    the first run after a rollover re-converges the month that just ended
+    against its final board before opening the new month's slot. (Without it,
+    a month's winner would freeze at whatever the last cycle *inside* that
+    month saw, missing everything logged after it.)
+    """
+    tokens = [month_token(now or datetime.now())]
+    for day in day_list:
+        try:
+            token = month_token(datetime.strptime(day, "%Y%m%d"))
+        except ValueError:
+            continue
+        if token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def _leader_periods(crit: dict, month_list: List[str]) -> List[str]:
+    """Partition tokens a ``global_champion`` badge's criteria asks for.
+
+    ``{"period": "all"}`` (the default) → the all-time board; ``"month"`` →
+    every month token due this cycle; a literal token (``"202606"``) pins the
+    badge to one board.
+    """
+    period = str(crit.get("period") or ALL).strip().lower()
+    if period in ("month", "monthly"):
+        return list(month_list)
+    if period in (ALL, "alltime", "all_time"):
+        return [ALL]
+    if is_valid_token(period):
+        return [period]
+    return []
+
+
 def _days_to_process(yesterday_token: str) -> List[str]:
     """Day tokens after the completion marker, up through yesterday."""
     y_dt = datetime.strptime(yesterday_token, "%Y%m%d")
@@ -384,21 +548,29 @@ def _days_to_process(yesterday_token: str) -> List[str]:
 
 
 def run_badge_cycle(dry_run: bool = False, days: Optional[List[str]] = None,
-                    only: Optional[str] = None) -> dict:
+                    only: Optional[str] = None,
+                    months: Optional[List[str]] = None) -> dict:
     """Evaluate all automatic badges. Called hourly from the bot; the day
-    marker makes runs after the first of the day a single Redis GET.
+    marker makes the day-scoped families a single Redis GET after the first
+    run of the day.
 
     ``days`` overrides the marker-derived day list (used by scripts);
-    ``only`` restricts to 'daily' | 'streaks' | 'records'.
+    ``months`` does the same for the monthly leader badge; ``only`` restricts
+    to 'daily' | 'streaks' | 'records' | 'leaders'.
     """
     yesterday = day_token(datetime.now() - timedelta(days=1))
     day_list = days if days is not None else _days_to_process(yesterday)
-    stats = {"days": day_list, "daily": 0, "streaks": 0, "records": {}}
+    month_list = months if months is not None else _months_to_process(day_list)
+    stats = {"days": day_list, "months": month_list,
+             "daily": 0, "streaks": 0, "records": {}, "leaders": {}}
 
-    # Hourly no-op fast path: day already processed and no explicit request —
-    # skip everything (including record convergence, which rides the daily run).
-    if not day_list and days is None and only is None:
-        return stats
+    # The day-scoped families (and record convergence, which rides the daily
+    # run) no-op once the day's marker is set. The held leader badges are the
+    # exception: they track a live board, so they converge every cycle — two
+    # Redis reads and a couple of indexed queries — and the site's #1 chip is
+    # never more than an hour stale.
+    explicit = days is not None or only is not None
+    run_daily_families = bool(day_list) or explicit
 
     session = Session()
     try:
@@ -415,7 +587,19 @@ def run_badge_cycle(dry_run: bool = False, days: Optional[List[str]] = None,
                 for day in day_list:
                     stats["streaks"] += evaluate_streaks(session, badge, day, n, dry_run)
             elif ctype == "boss_record" and only in (None, "records"):
+                if not run_daily_families:
+                    continue
                 stats["records"][badge.key] = evaluate_boss_records(session, badge, dry_run)
+            elif ctype == "global_champion" and only in (None, "leaders"):
+                periods = _leader_periods(crit, month_list)
+                if not periods:
+                    _log(f"badge {badge.key}: unknown criteria period "
+                         f"{crit.get('period')!r}, skipping")
+                    continue
+                for token in periods:
+                    stats["leaders"][f"{badge.key}:{token}"] = evaluate_global_champion(
+                        session, badge, dry_run, period=token
+                    )
 
         if not dry_run and days is None and day_list:
             redis_client.client.set(LAST_COMPLETED_DAY_KEY, day_list[-1])
