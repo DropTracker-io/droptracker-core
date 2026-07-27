@@ -40,7 +40,7 @@ DropTracker is an Old School RuneScape (OSRS) loot and achievement tracking plat
 
 Production runs as **systemd units** (`/etc/systemd/system/droptracker-*.service`; canonical copies in `deploy/systemd/`).
 
-> **Two service accounts.** The bots, intake API and workers run as `User=user`; **`droptracker-webapi`, `droptracker-adminbot` and the node units run as `User=debian`**. Any directory both sides write (shared `clans/` asset trees, generated images) must be group-writable/0777 or one process silently fails to write the other's files.
+> **Two service accounts.** The bots, intake API and workers run as `User=user`; **`droptracker-webapi` and the node units run as `User=debian`**. Any directory both sides write (shared `clans/` asset trees, generated images) must be group-writable/0777 or one process silently fails to write the other's files.
 
 | Systemd Unit | Entry Point | Purpose | Port |
 |---|---|---|---|
@@ -57,7 +57,6 @@ Production runs as **systemd units** (`/etc/systemd/system/droptracker-*.service
 | `droptracker-heartbeat` | `bots/heartbeat.py` | Uptime heartbeat bot | — |
 | `droptracker-events` | `workers/event_consumer.py` | Events v2: drains `events:submissions`, applies task/bingo/team progress | — |
 | `droptracker-webhook-consumer` | `workers/webhook_consumer.py` | Drains `webhook:queue` — **live** (`WEBHOOK_QUEUE_MODE=true` in prod `.env`) | — |
-| `droptracker-adminbot` | `bots/adminbot.py` | Owner-only admin/KB bot (`/ask`, `/kb-search`, `/kb-sync`, `/lookup`, gated `/sql`). Runs as `debian` because answer synthesis shells out to the Claude Code CLI whose subscription auth lives in `/home/debian/.claude` | — |
 
 **Timers:** `droptracker-db-backup.timer` (08:30 UTC → `scripts/db_backup.sh`, MariaDB + Redis to local + B2) and `droptracker-prune-images.timer` (04:00 UTC → `scripts.prune_drop_images --apply`, low-value screenshots past 30d).
 
@@ -115,7 +114,6 @@ droptracker/
 ├── bots/
 │   ├── main.py             # Primary Discord bot (core)
 │   ├── webhook_bot.py      # Webhook-channel reader + suggestion-forum sync
-│   ├── adminbot.py         # Owner-only admin/KB bot (separate token + process)
 │   ├── hall_of_fame.py     # HOF image bot
 │   └── heartbeat.py        # Heartbeat bot
 │
@@ -123,8 +121,6 @@ droptracker/
 │   ├── user.py             # /help, /accounts, /settings, /claim-rsn, etc.
 │   ├── admin.py            # /create-group, /webhooks, etc.
 │   ├── group_admin.py      # Point adjustments, audit log
-│   ├── adminbot_cmds.py    # Owner-only — loaded ONLY by adminbot, NOT exported
-│   │                       #   from commands/__init__.py (the core bot loads that wholesale)
 │   └── utils.py            # try_create_user, is_admin, is_user_authorized
 │
 ├── data/
@@ -341,23 +337,6 @@ Stored in `group_configurations` (key-value per group). The authoritative schema
 
 ---
 
-## Knowledgebase + Owner-Only Admin Bot (kb01a)
-
-Discord content is mined into a searchable knowledgebase, served by a separate owner-only admin bot. Zero-added-API-cost design: answer synthesis shells out to the **Claude Code CLI** (`claude -p --tools ""`, subscription auth — `ANTHROPIC_API_KEY` is deliberately stripped from the subprocess env), and semantic search uses **local fastembed** vectors (CPU/ONNX; `KB_EMBEDDINGS=off` degrades to keyword-only).
-
-- **Tables:** `kb_documents` / `kb_chunks` (FULLTEXT on `content` — first FULLTEXT index in this schema) / `kb_ingest_state` (`db/models/knowledgebase.py`, migration `kb01a`).
-- **Sources:** mirrored ticket transcripts (`ticket_messages`, no Discord calls), suggestions/bugs forums, chat channels in `KB_CHAT_CHANNEL_IDS`, and repo docs (`docs/*.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`).
-- **Mining:** `services/kb/miner.py`; one-shot backfill via `python -m scripts.kb_mine`. Discord mining uses **REST-only login** (`Client.login()`, no gateway) so `HALL_OF_FAME_BOT_TOKEN` can be borrowed without touching the live `droptracker-hof` gateway session; close with `bot.http.close()` (`bot.stop()` raises without a gateway). Ongoing sync: the admin bot's `/kb-sync` on its own token.
-- **Retrieval:** `services/kb/retriever.py` — MariaDB `MATCH…AGAINST` + cosine over packed float32 BLOBs, merged with reciprocal-rank fusion.
-- **Investigations:** `services/kb/investigator.py` — `/ask` routes between KB RAG and **agentic read-only DB investigation**: the model plans up to 3 SELECTs against a curated schema card, then runs up to `KB_MAX_ROUNDS` (default 3) follow-up rounds to resolve ids to names, retry a query that errored, or loosen a filter that matched nothing. Every statement passes `services/kb/sql_guard.py` and runs AUTOCOMMIT + `max_statement_time=10` + session READ ONLY, capped at 50 rows. Executed SQL is shown in the reply embed and audited. Mined Discord content is never shown to the SQL-planning stage (prompt-injection isolation) — which is also why plan/refine stay separate CLI calls instead of sharing one session with the answering stage.
-- **Schema card correctness:** `_CARD_TABLES` in `investigator.py` lists *real table names*, resolved against `Base.metadata`. A name that doesn't resolve is omitted from the planner prompt, silently blinding the planner to that table — `item_list` (real name: `items`) did exactly that and broke every item-name question until 2026-07-25. `build_schema_card()` now logs a warning naming anything that fails to resolve; treat that warning as a bug.
-- **CLI call shape / token cost:** all KB calls go through `answerer._run_claude_json`, which **replaces** Claude Code's default system prompt (`--system-prompt`) and strips the harness these calls cannot use (`--tools ""`, `--strict-mcp-config`, `--disable-slash-commands`, `--setting-sources ""`). Measured on this host, that cut per-call overhead from ~9.5k input tokens to ~184. Stages needing machine-readable output pass `json_schema=` (the CLI's `--json-schema`), so a malformed plan can no longer silently degrade `/ask` to KB-only mode.
-- **Admin bot:** `bots/adminbot.py` + `commands/adminbot_cmds.py` (loaded ONLY by the admin bot — deliberately **not** exported from `commands/__init__.py`, which the public core bot loads wholesale). Every command is owner-gated (`WEB_SUPERADMIN_DISCORD_IDS` ∪ `User.is_superadmin`), ephemeral, and audited to `audit_log` (`adminbot.*`). `/sql` is read-only-validated and disabled until `KB_ALLOW_SQL=true`.
-- **Env keys:** `ADMIN_BOT_TOKEN`, `ADMIN_BOT_GUILD_IDS`, `KB_CHAT_CHANNEL_IDS`, `KB_EMBEDDINGS`, `KB_EMBED_MODEL`, `KB_EMBED_CACHE`, `CLAUDE_CLI_PATH`, `KB_CLAUDE_MODEL`, `KB_CLAUDE_TIMEOUT`, `KB_MAX_ROUNDS`, `KB_ALLOW_SQL`.
-- **Known cost:** aggregating `drops` over a 30-day window exceeds the guard's `max_statement_time=10` — `/ask` correctly reports the timeout rather than guessing, but date-ranged drop rankings need an index on `drops(date_added)` before they can be answered.
-
----
-
 ## Development Setup
 
 ```bash
@@ -432,4 +411,3 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | Subscriptions / billing | `web_api/billing.py` (Stripe), `payments.py`, `routes/subscriptions.py` |
 | Tickets / suggestions | `services/ticket_system.py`, `services/suggestion_sync.py`, `web_api/routes/{tickets,suggestions}.py` |
 | Group creation / RSN claims | `db/group_creation.py`, `db/player_claims.py` (shared by bot + web) |
-| Knowledgebase / owner admin bot | `services/kb/`, `bots/adminbot.py`, `commands/adminbot_cmds.py`, `scripts/kb_mine.py` |

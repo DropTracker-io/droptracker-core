@@ -21,7 +21,6 @@ sudo systemctl restart <unit>
 | `droptracker-webhooks` | `bots/webhook_bot.py` | — |
 | `droptracker-hof` | `bots/hall_of_fame.py` | — |
 | `droptracker-heartbeat` | `bots/heartbeat.py` | — |
-| `droptracker-adminbot` | `bots/adminbot.py` | — |
 | `droptracker-lootboards` | `lootboard/_board_generator.py` | — |
 | `droptracker-player-updates` | `data/player_total_updater.py` | — |
 | `droptracker-video-worker` | `services/video_worker.py` | — |

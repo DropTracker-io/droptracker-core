@@ -13,7 +13,7 @@ has since closed is left for the sweep to edit (this script never touches
 Discord messages, only the table).
 
 Runs REST-only (``bot.login()``, no gateway) so it is safe to run while
-droptracker-core is live — same pattern as scripts/kb_mine.py.
+droptracker-core is live.
 
     cd /store/droptracker/disc && venv/bin/python -m scripts.backfill_signup_prompts
     …                                                            --events 35 --limit 200
@@ -130,7 +130,7 @@ async def _run(token: str, event_ids, limit: int, dry_run: bool) -> dict:
     finally:
         session.close()
         # http.close(), not bot.stop() — stop() dereferences a gateway that was
-        # never started (see scripts/kb_mine.py for the full explanation).
+        # never started and raises.
         try:
             await bot.http.close()
         except Exception:  # noqa: BLE001
