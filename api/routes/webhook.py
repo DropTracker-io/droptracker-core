@@ -317,6 +317,11 @@ async def _process_webhook_request(req_start):
     # -> api.core -> api/__init__ -> this module) while common is still
     # partially initialized. By call time all modules are fully loaded.
     from data.submissions.common import SubmissionResponse
+    from data.submissions.raid_dedupe import (
+        RELOOT_FLAG,
+        RELOOT_REJECT_MESSAGE,
+        flag_raid_reloot_duplicates,
+    )
 
     success = False
     request_type = "webhook"
@@ -355,6 +360,12 @@ async def _process_webhook_request(req_start):
                 if not processed_items:
                     return jsonify({"error": "Could not process webhook data"}), 400
 
+                # Re-looted raid chest defense (data/submissions/raid_dedupe.py):
+                # fingerprint the payload's raid drop bundle before dispatch so
+                # a second opening of the same reward chest (bank collection
+                # chest, older plugin builds) is rejected, not double-counted.
+                flag_raid_reloot_duplicates(processed_items)
+
                 submission_type = processed_items[0].get("type")
                 g.submission_type = submission_type or "webhook"
                 processed_items[0]["downloaded"] = False
@@ -371,6 +382,15 @@ async def _process_webhook_request(req_start):
                         processed_data["downloaded"] = False
                         world_type = _normalize_world_type(processed_data.get("world_type"))
                         processed_data["world_type"] = world_type
+
+                        # Flagged re-looted raid bundle: reject instead of
+                        # processing — a second Drop row would double GP and
+                        # credit a phantom KC.
+                        if (_normalize_submission_type(submission_type) == "drop"
+                                and processed_data.get(RELOOT_FLAG)):
+                            response = SubmissionResponse(False, RELOOT_REJECT_MESSAGE)
+                            _mark_submission_outcome(processed_data, "drop", response)
+                            continue
 
                         if world_type == "seasonal":
                             if not is_seasonal_active():

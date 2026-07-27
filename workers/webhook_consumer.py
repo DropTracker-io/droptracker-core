@@ -86,6 +86,11 @@ async def _process_entry(entry_bytes: bytes) -> None:
     )
     from data import submissions
     from data.submissions.common import SubmissionResponse
+    from data.submissions.raid_dedupe import (
+        RELOOT_FLAG,
+        RELOOT_REJECT_MESSAGE,
+        flag_raid_reloot_duplicates,
+    )
     from db.models import Player
     from utils.download import download_image
 
@@ -100,6 +105,14 @@ async def _process_entry(entry_bytes: bytes) -> None:
     if not processed_items:
         log.warning("process_webhook_data returned nothing; skipping entry")
         return
+
+    # Re-looted raid chest defense (see data/submissions/raid_dedupe.py):
+    # fingerprint the payload's raid drop bundle before dispatch so a second
+    # opening of the same reward chest (bank collection chest, older plugin
+    # builds) is rejected instead of double-counted.
+    reflagged = flag_raid_reloot_duplicates(processed_items)
+    if reflagged:
+        log.info("Flagged %d raid re-loot duplicate embed(s) in payload", reflagged)
 
     db_session = get_db_session()
     tmp_fh = None
@@ -142,6 +155,16 @@ async def _process_entry(entry_bytes: bytes) -> None:
             norm_type = _normalize_submission_type(submission_type)
 
             try:
+                # Flagged re-looted raid bundle: reject instead of processing —
+                # a second Drop row would double GP and credit a phantom KC.
+                if norm_type == "drop" and processed_data.get(RELOOT_FLAG):
+                    _mark_submission_outcome(
+                        processed_data,
+                        norm_type,
+                        SubmissionResponse(False, RELOOT_REJECT_MESSAGE),
+                    )
+                    continue
+
                 if world_type == "seasonal":
                     from services.seasonal_state import is_seasonal_active
                     if not is_seasonal_active():
