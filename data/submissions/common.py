@@ -53,7 +53,7 @@ from services import redis_updates
 from services.points import award_points_to_player
 
 from utils.ge_value import get_true_item_value
-from utils import osrs_api
+import osrs_api
 from utils.wiseoldman import (
     check_user_by_id,
     check_user_by_username,

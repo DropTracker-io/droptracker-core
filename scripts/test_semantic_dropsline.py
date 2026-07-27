@@ -4,7 +4,7 @@ from collections import Counter
 
 import aiohttp
 
-from utils.osrs_api.semantic import SemanticAPI
+from osrs_api.semantic import SemanticAPI
 
 
 class _MinimalWikiClient:

@@ -85,7 +85,6 @@ _STUBS = [
     "utils.patreon",
     "utils.cloudflare_update",
     "utils.github",
-    "utils.osrs_api",
     "osrs_api",
     # Service layer
     "services",

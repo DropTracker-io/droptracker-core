@@ -57,6 +57,36 @@ def test_subpage_reference_is_stripped_before_match():
     assert _run(api.check_drop("Serpentine visage", "Zulrah")) is True
 
 
+def test_encounter_alias_matches_wiki_page():
+    # Submitted encounter names accept their per-boss / variant wiki pages.
+    cases = [
+        ("Fire element staff crown", "Royal Titans", "Branda the Fire Queen"),
+        ("Ice element staff crown", "Royal Titans", "Eldric the Ice King"),
+        ("Granite hammer", "Dusk", "Grotesque Guardians"),
+        ("Broken zombie axe", "Armoured zombie", "Armoured zombie (Zemouregal's Fort)"),
+        ("Osmumten's fang", "Tombs of Amascut: Entry Mode", "Chest (Tombs of Amascut)"),
+        ("Onyx", "Tekton (enraged)", "Tekton"),
+        ("Tome of fire (empty)", "Reward cart (Wintertodt)", "Reward Cart"),
+        ("Ring of 3rd age", "Clue Scroll (Master)", "The Mimic"),
+        ("Ring of 3rd age", "Clue Scroll (Elite)", "The Mimic"),
+    ]
+    for item, npc, wiki_page in cases:
+        api = _api({"bucket": [{"page_name": wiki_page}]})
+        assert _run(api.check_drop(item, npc)) is True, (item, npc, wiki_page)
+
+
+def test_alias_does_not_widen_spoof_surface():
+    # An alias for one NPC must not make an unrelated NPC acceptable.
+    api = _api({"bucket": [{"page_name": "Grotesque Guardians"}]})
+    assert _run(api.check_drop("Granite hammer", "Zulrah")) is False
+
+
+def test_activity_source_is_exempt():
+    # Kingdom of Miscellania is an activity; dropsline can never confirm it.
+    api = _api({"bucket": [{"page_name": "Coal rocks"}]})
+    assert _run(api.check_drop("Coal", "Kingdom of Miscellania")) is True
+
+
 def test_empty_dropsline_fails_open():
     # Successful query, but the item has no drop-source rows (new item / name
     # variant / wiki gap). Absence of data is not proof of a spoof.

@@ -24,7 +24,7 @@ class SemanticAPI:
         "Rewards Chest (Fortis Colosseum)": "Fortis Colosseum",
         "Ancient chest": ["Chambers of Xeric", "Chambers of Xeric Challenge Mode"],
         "Monumental chest": ["Theatre of Blood: Hard Mode", "Theatre of Blood"],
-        "Chest (Tombs of Amascut)": ["Tombs of Amascut", "Tombs of Amascut: Expert Mode"],
+        "Chest (Tombs of Amascut)": ["Tombs of Amascut", "Tombs of Amascut: Expert Mode", "Tombs of Amascut: Entry Mode"],
         "Chest (Barrows)": "Barrows",
         "Reward pool": "Tempoross",
         "Reward casket (easy)": "Clue Scroll (Easy)",
@@ -38,6 +38,22 @@ class SemanticAPI:
         # under its individual name. Both map to our "Royal Titans".
         "Branda the Fire Queen": "Royal Titans",
         "Eldric the Ice King": "Royal Titans",
+        # Grotesque Guardians: the plugin reports the loot-awarding boss "Dusk";
+        # the wiki lists the duo's loot under the combined encounter page.
+        "Grotesque Guardians": "Dusk",
+        # The wiki splits Armoured zombie drops across per-location pages.
+        "Armoured zombie (Zemouregal's Base)": "Armoured zombie",
+        "Armoured zombie (Zemouregal's Fort)": "Armoured zombie",
+        # In-raid CoX drops (e.g. Onyx) come from the boss's base wiki page,
+        # but the plugin reports the enraged phase name.
+        "Tekton": "Tekton (enraged)",
+        # Wintertodt's reward cart page is titled just "Reward Cart".
+        "Reward Cart": "Reward cart (Wintertodt)",
+        # 3rd-age jewellery from elite/master caskets isn't in the dropsline
+        # bucket (Treasure Trails reward tables aren't indexed); the only
+        # indexed source is The Mimic, whose loot pool is exactly the
+        # elite/master casket unique pool.
+        "The Mimic": ["Clue Scroll (Master)", "Clue Scroll (Elite)"],
     }
     
     def __init__(self, client):
@@ -183,6 +199,12 @@ class SemanticAPI:
             if item_name == "Enhanced crystal teleport seed" and npc_name == "Elf":
                 return True
             if item_name.strip() == "Black tourmaline core" and npc_name.strip() == "Dusk":
+                return True
+            if npc_name.strip() == "Kingdom of Miscellania":
+                # Kingdom resource collection is an activity, not a monster;
+                # the dropsline bucket can never confirm it, so every stack
+                # (coal, herbs, logs, nests) worth >1M would be a guaranteed
+                # confident-negative false rejection.
                 return True
             
             # Build db-name -> {wiki page_name, …}. A single submitted NPC can

@@ -27,7 +27,7 @@ from utils.redis import redis_client
 from utils.messages import confirm_new_npc, confirm_new_item, name_change_message, new_player_message
 from utils.format import format_number, replace_placeholders, convert_from_ms
 from db.app_logger import AppLogger
-from utils import osrs_api
+import osrs_api
 from services.contribution_notifications import format_money
 from services.event_notifications import (
     EVENT_NOTIFICATION_TYPES,
