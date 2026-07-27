@@ -788,6 +788,30 @@ class TestMetricPathProgress:
         assert engine._row_path_idx(_Row(note="an admin note")) is None
         assert engine._row_path_idx(_Row()) is None
 
+    def test_row_path_idx_parses_combined_admin_note(self):
+        # Manual path awards carry the admin's reason alongside the tag.
+        assert engine._row_path_idx(_Row(note="path:1 | joined mid-event")) == 1
+        assert engine._row_path_idx(_Row(note=engine._path_note(3, "x"))) == 3
+        # Free text that merely starts with "path:" is not a tag.
+        assert engine._row_path_idx(_Row(note="path: see screenshot")) is None
+
+    def test_path_note_roundtrip(self):
+        assert engine._path_note(2) == "path:2"
+        assert engine._path_note(2, "credited by hand") == "path:2 | credited by hand"
+
+    def test_display_note_strips_engine_tag(self):
+        assert engine.display_note(None) is None
+        assert engine.display_note("") is None
+        assert engine.display_note("an admin note") == "an admin note"
+        assert engine.display_note("path:2") is None
+        assert engine.display_note("path:2 | joined mid-event") == "joined mid-event"
+        # Free text that merely starts with "path:" survives untouched.
+        assert engine.display_note("path: see screenshot") == "path: see screenshot"
+
+    def test_tagged_metric_row_with_admin_note_still_folds_to_its_path(self):
+        rows = [_Row(None, quantity=250, note="path:1 | manual credit")]
+        assert engine._anypath_progress_from_rows(rows, GWD_OR, ANY_PATH_THRESHOLD) == 50
+
 
 # ── DT2 vestige pity rolls (Gold ring counts as the vestige) ──────────────────
 

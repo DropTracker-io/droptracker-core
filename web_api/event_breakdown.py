@@ -143,7 +143,12 @@ def _group_from_names(mode: str, names_norm, need: int, qty_by: dict,
 
 def _contributors(rows, player_names: dict, ts) -> list[dict]:
     """Per-player rollup of applied contributions: who obtained what, newest
-    first. ``items`` groups by matched item name (``None`` = wildcard/manual)."""
+    first. ``items`` groups by matched item name (``None`` = wildcard/manual).
+    ``note`` carries the organizer's reason on manual awards (newest wins on
+    the rare multi-noted rollup) so the UI never shows a bare "Manual award"
+    when an explanation exists."""
+    from services.event_engine import display_note
+
     agg: dict = {}
     order = 0
     for r in rows:
@@ -154,7 +159,8 @@ def _contributors(rows, player_names: dict, ts) -> list[dict]:
         order += 1
         rec = agg.get(key)
         if rec is None:
-            rec = {"player_id": pid, "quantity": 0, "_items": {}, "_last_id": 0, "_last_at": None}
+            rec = {"player_id": pid, "quantity": 0, "_items": {}, "_last_id": 0,
+                   "_last_at": None, "_note": None, "_note_id": -1}
             agg[key] = rec
         q = max(int(getattr(r, "quantity", 1) or 1), 1)
         rec["quantity"] += q
@@ -164,6 +170,10 @@ def _contributors(rows, player_names: dict, ts) -> list[dict]:
         if rid >= rec["_last_id"]:
             rec["_last_id"] = rid
             rec["_last_at"] = getattr(r, "created_at", None)
+        note = display_note(getattr(r, "note", None))
+        if note and rid >= rec["_note_id"]:
+            rec["_note_id"] = rid
+            rec["_note"] = note
     out = []
     for rec in agg.values():
         out.append({
@@ -171,6 +181,7 @@ def _contributors(rows, player_names: dict, ts) -> list[dict]:
             "player_name": player_names.get(rec["player_id"]) if rec["player_id"] else None,
             "quantity": rec["quantity"],
             "items": [{"name": k, "quantity": v} for k, v in rec["_items"].items()],
+            "note": rec["_note"],
             "last_at": ts(rec["_last_at"]) if rec["_last_at"] is not None else None,
         })
     out.sort(key=lambda c: (c["last_at"] or 0), reverse=True)

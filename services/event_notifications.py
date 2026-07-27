@@ -679,6 +679,10 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             received = _received_item_text(data)
             if received:
                 field("Received", received, inline=False)
+        # Manual awards: the organizer's reason for granting credit (payload
+        # only carries it when one was written).
+        if data.get("note"):
+            field("Note", str(data["note"]), inline=False)
         # Who did it: a single person collapses to "Completed by"; several get
         # the full "Contributors" breakdown. Falls back to the completer when
         # the ledger lookup came up empty (e.g. a manually-awarded row).

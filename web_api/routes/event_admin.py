@@ -106,6 +106,8 @@ APPLIED_STATUSES = ("auto", "confirmed", "manual")
 
 def _completion_payload(c: EventCompletion, task_label=None, team_name=None,
                         player_name=None) -> dict:
+    from services.event_engine import display_note
+
     return {
         "id": c.id,
         "event_id": c.event_id,
@@ -120,7 +122,8 @@ def _completion_payload(c: EventCompletion, task_label=None, team_name=None,
         "source_type": c.source_type,
         "submission_guid": c.submission_guid,
         "proof_url": c.proof_url,
-        "note": c.note,
+        "matched_target": c.matched_target,
+        "note": display_note(c.note),
         "created_at": _ts(c.created_at),
     }
 
@@ -134,6 +137,7 @@ def _snapshot(c: EventCompletion) -> str:
         "player_id": c.player_id,
         "quantity": int(c.quantity or 1),
         "source_type": c.source_type,
+        "matched_target": c.matched_target,
         "note": c.note,
         "acted_by_user_id": c.acted_by_user_id,
     })
@@ -475,9 +479,38 @@ async def award_completion(event_id: int):
         abort_problem(422, "Invalid quantity", "'quantity' must be a positive integer.")
     complete = bool(body.get("complete"))
     note = _clean_note(body)
+    # Optional part selection (multi-part tasks): a specific listed item
+    # (``matched_target``) or a metric path index (``path``, any_path KC/GP
+    # alternatives). Without either, the award stays a generic wildcard.
+    matched_target = body.get("matched_target")
+    if matched_target is not None:
+        if not isinstance(matched_target, str) or not matched_target.strip():
+            abort_problem(422, "Invalid matched_target",
+                          "'matched_target' must be a non-empty string.")
+        matched_target = matched_target.strip()
+        if len(matched_target) > 120:
+            abort_problem(422, "Invalid matched_target",
+                          "'matched_target' must be at most 120 characters.")
+    path_idx = body.get("path")
+    if path_idx is not None and (not isinstance(path_idx, int)
+                                 or isinstance(path_idx, bool) or path_idx < 0):
+        abort_problem(422, "Invalid path", "'path' must be a non-negative integer.")
+    if matched_target is not None and path_idx is not None:
+        abort_problem(422, "Choose one part",
+                      "Provide either 'matched_target' (an item) or 'path' "
+                      "(a KC/GP path), not both.")
+    if complete and (matched_target is not None or path_idx is not None):
+        # 'complete' fills the whole task with one wildcard row; a
+        # part-specific award is progress by definition (an all_of row counts
+        # as ONE distinct item no matter its quantity, so combining them
+        # would under-credit).
+        abort_problem(422, "Choose one mode",
+                      "'complete' marks the whole task done and cannot be "
+                      "combined with a specific item or path — award the "
+                      "part as progress instead.")
 
     def _apply():
-        nonlocal quantity
+        nonlocal quantity, note
         # P0-10: manual rows have no submission_guid, so the ledger's unique
         # (task, team, guid) index can't dedupe them — an organizer's double
         # click would insert and apply two identical awards. A short one-shot
@@ -521,13 +554,41 @@ async def award_completion(event_id: int):
             )
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+            eng = _engine()
+            if matched_target is not None:
+                # Validate against the task's config exactly like an automatic
+                # submission would match — this also converts quantity into
+                # point credit for point_collection tasks (weight × qty), so
+                # the ledger row folds identically to an auto row.
+                credit = eng.item_match_quantity(
+                    eng._task_to_dict(task), matched_target, quantity)
+                if credit is None:
+                    abort_problem(
+                        422, "Item not part of task",
+                        f"'{matched_target}' is not one of this task's "
+                        "configured items or its target.")
+                quantity = credit
+            if path_idx is not None:
+                config = eng.parse_task_config(task.config)
+                paths = (config.get("paths") or []) if config.get("kind") == "any_path" else []
+                path = paths[path_idx] if 0 <= path_idx < len(paths) else None
+                if (not isinstance(path, dict)
+                        or path.get("metric") not in eng.PATH_METRICS):
+                    abort_problem(
+                        422, "Invalid path",
+                        "'path' must be the index of a KC/GP path on an "
+                        "either-or task — item and points paths are credited "
+                        "by item name instead.")
+                # Bind the row to its path the same way engine metric rows
+                # are: a note tag ('path:N'), with the admin note riding
+                # alongside ('path:N | reason').
+                note = eng._path_note(path_idx, note)
             if complete:
                 # "Mark complete": fill whatever progress is left so this one
                 # ledger row crosses the task's threshold (an award of the
                 # default quantity 1 on a 50-KC task otherwise just records
                 # 1/50 and completes nothing). Locked read (P0-10): a
                 # concurrent award/confirm must not both see the same "left".
-                eng = _engine()
                 # Team-aware: whole_team pb thresholds scale to the roster.
                 threshold = eng.effective_threshold(s, eng._task_to_dict(task), team_id)
                 current = (
@@ -559,6 +620,7 @@ async def award_completion(event_id: int):
                 submission_guid=f"manual:{task_id}:{team_id}:{user_id}:{int(time.time()) // 5}",
                 acted_by_user_id=user_id,
                 note=note,
+                matched_target=matched_target,
             )
             s.add(comp)
             try:

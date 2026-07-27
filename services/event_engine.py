@@ -295,23 +295,44 @@ PATH_METRICS = ("kc", "loot_value")
 _PATH_NOTE_PREFIX = "path:"
 
 
-def _path_note(idx: int) -> str:
-    """Engine-written ledger tag binding a metric row to its config path."""
-    return f"{_PATH_NOTE_PREFIX}{int(idx)}"
+def _path_note(idx: int, note: Optional[str] = None) -> str:
+    """Engine-written ledger tag binding a metric row to its config path.
+    A manual award may carry an admin note alongside the tag
+    (``path:N | reason``) — :func:`_row_path_idx` parses either form and
+    :func:`display_note` recovers the human half."""
+    tag = f"{_PATH_NOTE_PREFIX}{int(idx)}"
+    return f"{tag} | {note}" if note else tag
 
 
 def _row_path_idx(row) -> Optional[int]:
     """Metric-path index a ledger row was recorded for, parsed from the
-    engine's ``note`` tag (``path:N``); None for item/manual/bonus rows.
-    Reject/revoke may overwrite ``note`` with an admin note — those rows are
-    already excluded from every fold, so the tag never needs to survive."""
+    engine's ``note`` tag (``path:N`` or ``path:N | admin note``); None for
+    item/manual/bonus rows. Reject/revoke may overwrite ``note`` with an admin
+    note — those rows are already excluded from every fold, so the tag never
+    needs to survive."""
     note = getattr(row, "note", None)
     if not isinstance(note, str) or not note.startswith(_PATH_NOTE_PREFIX):
         return None
     try:
-        return int(note[len(_PATH_NOTE_PREFIX):])
+        return int(note[len(_PATH_NOTE_PREFIX):].split("|", 1)[0].strip())
     except (TypeError, ValueError):
         return None
+
+
+def display_note(note) -> Optional[str]:
+    """Human-facing half of a ledger ``note``: the admin's free text with any
+    engine ``path:N`` tag stripped. None when the note is empty or is a bare
+    tag — serializers use this so path bookkeeping never leaks into the UI."""
+    if not isinstance(note, str) or not note.strip():
+        return None
+    if note.startswith(_PATH_NOTE_PREFIX):
+        head, sep, rest = note[len(_PATH_NOTE_PREFIX):].partition("|")
+        try:
+            int(head.strip())
+        except (TypeError, ValueError):
+            return note.strip()  # free text that merely starts with "path:"
+        return rest.strip() or None if sep else None
+    return note.strip()
 
 
 def _path_need(path: dict) -> int:
@@ -2824,6 +2845,11 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         "proof_url": completion.proof_url,
         "contributors": contributors,
     }
+    # Manual awards carry the organizer's reason — surface it so the
+    # completion message can say WHY credit was granted, not just "manual".
+    _note = display_note(completion.note)
+    if _note:
+        notification["note"] = _note
     if _list_kind(task) == "point_collection":
         # Ledger quantities on this task are point credits, not item counts —
         # renderers must not read them as "2× Bandos chestplate".

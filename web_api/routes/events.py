@@ -1080,6 +1080,8 @@ async def get_event_team(event_id: int, team_id: int):
             def _last_contribution(c) -> dict | None:
                 """The member's newest applied ledger row, shaped for the
                 roster's "what they did last" line."""
+                from services.event_engine import display_note
+
                 if c is None:
                     return None
                 return {
@@ -1089,6 +1091,7 @@ async def get_event_team(event_id: int, team_id: int):
                     "quantity": int(c.quantity or 1),
                     "source_type": c.source_type,
                     "matched_target": c.matched_target,
+                    "note": display_note(c.note),
                     "created_at": _ts(c.created_at),
                 }
 
@@ -1211,6 +1214,8 @@ async def get_event_team(event_id: int, team_id: int):
                     .filter(Player.player_id.in_(missing_pids)).all()
                 ):
                     player_names[pid] = name
+            from services.event_engine import display_note as _dnote
+
             activity = [
                 {
                     "id": c.id,
@@ -1221,6 +1226,7 @@ async def get_event_team(event_id: int, team_id: int):
                     "quantity": int(c.quantity or 1),
                     "source_type": c.source_type,
                     "matched_target": c.matched_target,
+                    "note": _dnote(c.note),
                     "created_at": _ts(c.created_at),
                 }
                 for c in applied[:50]
@@ -1676,6 +1682,8 @@ async def get_event_player(event_id: int, player_id: int):
                 key=lambda r: (-r["points"], -r["completions"], -r["quantity"]),
             )
 
+            from services.event_engine import display_note as _dnote
+
             activity = [
                 {
                     "id": c.id,
@@ -1684,6 +1692,7 @@ async def get_event_player(event_id: int, player_id: int):
                     "quantity": int(c.quantity or 1),
                     "source_type": c.source_type,
                     "matched_target": c.matched_target,
+                    "note": _dnote(c.note),
                     "created_at": _ts(c.created_at),
                 }
                 for c in applied[:30]
@@ -2304,6 +2313,8 @@ async def get_completion_history(event_id: int):
     page, limit = parse_page(request, default_limit=50, max_limit=100)
 
     def _load():
+        from services.event_engine import display_note
+
         with db_session() as s:
             ev = s.query(Event).filter(Event.id == event_id).first()
             if not ev:
@@ -2424,6 +2435,7 @@ async def get_completion_history(event_id: int):
                         "source_type": r.source_type,
                         "status": r.status,
                         "proof_url": r.proof_url,
+                        "note": display_note(r.note),
                         "created_at": _ts(r.created_at),
                     })
                 if cache_key is not None:

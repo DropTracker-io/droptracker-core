@@ -175,7 +175,8 @@ DEFAULT_LAYOUTS = {
                            "**Points** `+{points}`\n"
                            "{team_total_line}\n"
                            "{completed_by_line}\n"
-                           "{contributors_block}",
+                           "{contributors_block}\n"
+                           "{note_line}",
                 "thumbnail": "{completion_icon}",
             },
             {"type": "text", "content": "{bingo_stats}"},
@@ -504,6 +505,8 @@ TOKEN_DOCS = {
                         "sample": "**Team total** `120 pts`"},
     "completed_by_line": {"help": "\"Completed by\" line (single contributor)",
                           "sample": "**Completed by** `Zezima`"},
+    "note_line": {"help": "Organizer's note on a manual award (drops when absent)",
+                  "sample": "-# Note: credited retroactively — joined mid-event"},
     "contributors_block": {"help": "Ranked contributor breakdown (several contributors)",
                            "sample": "**Contributors**\n\U0001F947 **Zezima** `3`\n\U0001F948 **Durial321** `1`"},
     "contributors_line": {"help": "Compact comma-joined contributor list",
@@ -620,7 +623,7 @@ TYPE_META = {
         "tokens": ("team_name", "player_name", "task_label", "points", "received_line",
                    "team_total_line", "completed_by_line", "contributors_block",
                    "contributors_line", "bingo_stats", "completion_icon", "task_icon",
-                   "cell_label", "cell_list", "cell_plural", "proof_url"),
+                   "cell_label", "cell_list", "cell_plural", "proof_url", "note_line"),
         "standings": False,
     },
     "event_task_progress": {
@@ -1250,6 +1253,11 @@ def notification_context(notification_type: str, data: dict) -> dict:
     # text as the legacy embed's "Received" field so both renderers agree.
     if not _completion_item_redundant(data):
         put("received_line", _received_item_text(data))
+
+    # Manual awards: the organizer's reason for granting credit (enqueued
+    # only when one was written) — same text as the legacy embed's "Note".
+    if data.get("note"):
+        put("note_line", f"-# Note: {data['note']}")
 
     # Bingo cells — labels are the readable "tile" identity; fall back to the
     # raw index for callers that only have that (legacy queued rows).
