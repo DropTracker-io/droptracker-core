@@ -35,7 +35,14 @@ from typing import Callable, Iterable, Optional
 # i.e. the most boss-like, which is what an event tile is actually about.
 EFFORT_SOURCES_PER_ITEM = 8
 #: Hard ceiling on one event's effort NPC set, after the union.
-EFFORT_MAX_NPCS = 80
+#:
+#: Sized for a whole-content loot sweep, which legitimately spans every boss in
+#: the game: the live "Loot Sweep (All Content)" event resolves 155 NPCs and was
+#: silently truncated at the old ceiling of 80. The map is a dict consulted with
+#: one lookup per submission, so its SIZE costs nothing on the hot path — the
+#: ceiling only bounds the one-off inference at state load (~7s for that event,
+#: then Redis-cached for hours) and the cached blob.
+EFFORT_MAX_NPCS = 300
 
 #: Redis scope prefix for effort KC watermarks. Distinct from every credit
 #: scope (``_kc_state_scope`` uses bare task ids / ``{task}:{npc}``) so effort

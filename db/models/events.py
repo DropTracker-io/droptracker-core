@@ -379,6 +379,14 @@ class Event(Base):
     # event starts). Settable in the wizard and flippable at any status via
     # PATCH /events; every flip lands in the event.settings.update audit diff.
     allow_live_edits = Column(Boolean, nullable=False, default=False, server_default="0")
+    # EHE visibility (web74a): "public" shows each player's Efficient Hours
+    # towards Event on the team/player surfaces; "admins" keeps the figure to
+    # the event managers' effort report. Some clans don't want a per-member
+    # effort number on a public page — it invites "you did the least" — so the
+    # data is always RECORDED and only the display is gated. Public is the
+    # default so existing events keep behaving as they do today.
+    effort_visibility = Column(String(16), nullable=False,
+                               default="public", server_default="public")
     # Late sign-ups (web70a): OFF (default) closes self sign-ups the moment the
     # event begins — the Discord prompt retires its button, the join panel and
     # the API refuse. ON restores the pre-web70a behaviour: players may still

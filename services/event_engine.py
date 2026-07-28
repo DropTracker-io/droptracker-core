@@ -1895,7 +1895,7 @@ def _done_tasks_key(event_id: int, team_id) -> str:
 # config only, so without this a logic change would keep serving stale cached
 # maps until someone happened to edit a task — which is exactly how pb_target
 # support first landed invisibly.
-_EFFORT_MAP_VERSION = "2"
+_EFFORT_MAP_VERSION = "3"
 
 
 def _effort_tasks_digest(tasks) -> str:
@@ -1930,6 +1930,38 @@ def _npc_ids_for_names(session, names) -> dict:
     return out
 
 
+def _loot_sweep_effort_names(config: dict) -> tuple:
+    """``([normalized npc names], [item names])`` an EHE-relevant loot_sweep
+    task points at.
+
+    Reads the raw config rather than :class:`services.loot_sweep.LootSweepConfig`
+    so this stays import-free (the unit-test conftest stubs ``services``), and
+    because the group-level structure is what matters here — the normalized
+    matcher index flattens item aliases, which would inflate the inference list
+    with duplicates. Handles the v1 back-compat shape (flat top-level
+    ``items``/``npcs``) the same way the sweep scorer does.
+    """
+    groups = list(config.get("groups") or [])
+    if not groups and config.get("items"):
+        groups = [{"npcs": config.get("npcs") or [], "items": config.get("items")}]
+
+    npcs: set = set()
+    item_names: set = set()
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        allowed = _norm_npc_set(group.get("npcs"))
+        if allowed:
+            npcs |= set(allowed)
+            continue
+        for it in (group.get("items") or []):
+            name = it if isinstance(it, str) else (it or {}).get("item_name") or (it or {}).get("name")
+            name = _norm(name)
+            if name:
+                item_names.add(name)
+    return sorted(npcs), sorted(item_names)
+
+
 def _effort_task_descriptors(session, tasks) -> list:
     """Per-task ``{task_id, npcs, npc_ids, item_names}`` for
     :func:`services.event_effort.build_effort_map`.
@@ -1962,6 +1994,13 @@ def _effort_task_descriptors(session, tasks) -> list:
                 npcs = sorted(configured)
             else:
                 item_names = sorted(_config_item_entries(task.get("config") or {}))
+        elif ttype == "loot_sweep":
+            # A loot-sweep set names its own sources per group ("Barrows" for
+            # the brothers' pieces), so those are explicit; groups that name
+            # none fall back to inferring from their item list, exactly like an
+            # unrestricted item task. Both can be non-empty on one task — a
+            # sweep mixes NPC-scoped and open groups freely.
+            npcs, item_names = _loot_sweep_effort_names(task.get("config") or {})
         if not npcs and not item_names:
             continue
         explicit.update(npcs)

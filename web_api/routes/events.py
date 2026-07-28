@@ -224,6 +224,10 @@ def _summary(ev: Event) -> dict:
         "leadership": _leadership(ev),
         "per_group_discord": bool(getattr(ev, "per_group_discord", False)),
         "allow_live_edits": bool(getattr(ev, "allow_live_edits", False)),
+        # EHE display gate (web74a) — the value itself, so the manager form can
+        # render the current setting. The per-player figures are omitted
+        # entirely when it's "admins" and the viewer isn't one.
+        "effort_visibility": getattr(ev, "effort_visibility", None) or "public",
         # Sign-up window (web70a): the toggle, plus the derived answers the
         # join panel and the sign-up post both read — sign-ups close when the
         # event starts unless allow_late_signups is on.
@@ -453,6 +457,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
     teams_rows = s.query(EventTeam).filter(EventTeam.event_id == ev.id).all()
     team_names = {tm.id: tm.name for tm in teams_rows}
     team_ids = [tm.id for tm in teams_rows]
+    show_effort = _effort_visible(s, viewer_id, ev)
     members_by_team: dict[int, list[dict]] = {}
     member_rows = []
     if team_ids:
@@ -469,7 +474,10 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
         # team and player endpoints.
         from web_api.event_effort import effort_by_player
 
-        effort = effort_by_player(s, ev.id, [m.player_id for m, _ in member_rows])
+        # Hidden (effort_visibility='admins', non-admin viewer) => the figures
+        # are never computed, so they cannot leak through a stray key.
+        effort = (effort_by_player(s, ev.id, [m.player_id for m, _ in member_rows])
+                  if show_effort else {})
         for m, player_name in member_rows:
             members_by_team.setdefault(m.team_id, []).append({
                 "player_id": m.player_id,
@@ -480,19 +488,24 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
                 "player_name": player_name or f"Player {m.player_id}",
                 "joined_at": _ts(m.joined_at),
                 "role": getattr(m, "role", None),
-                "effort_ehb": (effort.get(m.player_id) or {}).get("ehb_hours", 0.0),
-                # Portion priced with derived (non-WOM) rates — >0 means the
-                # scalar should read as an estimate ("~12h").
-                "effort_ehb_estimated": (effort.get(m.player_id) or {})
-                    .get("ehb_estimated_hours", 0.0),
+                **({
+                    "effort_ehb": (effort.get(m.player_id) or {}).get("ehb_hours", 0.0),
+                    # Portion priced with derived (non-WOM) rates — >0 means the
+                    # scalar should read as an estimate ("~12h").
+                    "effort_ehb_estimated": (effort.get(m.player_id) or {})
+                        .get("ehb_estimated_hours", 0.0),
+                } if show_effort else {}),
             })
     teams = []
     for tm in teams_rows:
         members = members_by_team.get(tm.id, [])
         teams.append({
-            "ehb_hours": round(sum(m.get("effort_ehb") or 0.0 for m in members), 2),
-            "ehb_estimated_hours": round(
-                sum(m.get("effort_ehb_estimated") or 0.0 for m in members), 2),
+            **({
+                "ehb_hours": round(
+                    sum(m.get("effort_ehb") or 0.0 for m in members), 2),
+                "ehb_estimated_hours": round(
+                    sum(m.get("effort_ehb_estimated") or 0.0 for m in members), 2),
+            } if show_effort else {}),
             "id": tm.id,
             "name": tm.name,
             "score": score_num(tm.score),
@@ -1132,7 +1145,9 @@ async def get_event_team(event_id: int, team_id: int):
             # not. Fails open to {} — members simply render without it.
             from web_api.event_effort import effort_by_player
 
-            effort = effort_by_player(s, event_id, roster_pids)
+            show_effort = _effort_visible(s, viewer_id, ev)
+            effort = (effort_by_player(s, event_id, roster_pids)
+                      if show_effort else {})
             members = []
             for m, player_name in member_rows:
                 agg = contrib.get(m.player_id) or {}
@@ -1266,12 +1281,14 @@ async def get_event_team(event_id: int, team_id: int):
                     "member_count": len(members),
                     "coins": int(getattr(team, "coins", 0) or 0),
                     "loot_gp": money(sum(loot_gp.values())),
-                    "ehb_hours": round(
-                        sum(float((e or {}).get("ehb_hours") or 0.0)
-                            for e in effort.values()), 2),
-                    "ehb_estimated_hours": round(
-                        sum(float((e or {}).get("ehb_estimated_hours") or 0.0)
-                            for e in effort.values()), 2),
+                    **({
+                        "ehb_hours": round(
+                            sum(float((e or {}).get("ehb_hours") or 0.0)
+                                for e in effort.values()), 2),
+                        "ehb_estimated_hours": round(
+                            sum(float((e or {}).get("ehb_estimated_hours") or 0.0)
+                                for e in effort.values()), 2),
+                    } if show_effort else {}),
                 },
                 "members": members,
                 "items": team_items,
@@ -1333,7 +1350,9 @@ async def get_event_teams(event_id: int):
             # Team EHE = the roster's summed effort, same shape as loot_gp.
             from web_api.event_effort import effort_by_player
 
-            effort = effort_by_player(s, event_id, all_pids)
+            show_effort = _effort_visible(s, viewer_id, ev)
+            effort = (effort_by_player(s, event_id, all_pids)
+                      if show_effort else {})
             ehb_by_player = {
                 pid: float(e.get("ehb_hours") or 0.0) for pid, e in effort.items()
             }
@@ -1421,9 +1440,12 @@ async def get_event_teams(event_id: int):
                     "member_count": len(pids),
                     "tasks_done": done_by_team.get(tm.id, 0),
                     "loot_gp": money(sum(loot_gp.get(p, 0) for p in pids)),
-                    "ehb_hours": round(sum(ehb_by_player.get(p, 0.0) for p in pids), 2),
-                    "ehb_estimated_hours": round(
-                        sum(ehb_est_by_player.get(p, 0.0) for p in pids), 2),
+                    **({
+                        "ehb_hours": round(
+                            sum(ehb_by_player.get(p, 0.0) for p in pids), 2),
+                        "ehb_estimated_hours": round(
+                            sum(ehb_est_by_player.get(p, 0.0) for p in pids), 2),
+                    } if show_effort else {}),
                     "pot_total": money((pot or {}).get("per_team", {}).get(tm.id, 0)),
                     "items": top_items(items_by_team.get(tm.id, []), item_ids,
                                        _TEAMS_ITEM_PREVIEW),
@@ -1446,8 +1468,11 @@ async def get_event_teams(event_id: int):
                     "players": len(all_pids),
                     "tasks": int(task_count),
                     "loot_gp": money(sum(loot_gp.values())),
-                    "ehb_hours": round(sum(ehb_by_player.values()), 2),
-                    "ehb_estimated_hours": round(sum(ehb_est_by_player.values()), 2),
+                    **({
+                        "ehb_hours": round(sum(ehb_by_player.values()), 2),
+                        "ehb_estimated_hours": round(
+                            sum(ehb_est_by_player.values()), 2),
+                    } if show_effort else {}),
                 },
             }
 
@@ -1611,7 +1636,9 @@ async def get_event_players(event_id: int):
             # Bingo EHB per player — the effort that credited nothing.
             from web_api.event_effort import effort_by_player
 
-            effort = effort_by_player(s, event_id, pids, boss_limit=5)
+            show_effort = _effort_visible(s, viewer_id, ev)
+            effort = (effort_by_player(s, event_id, pids, boss_limit=5)
+                      if show_effort else {})
 
             players = rank_players(
                 contrib, points, membership, names, items_by_pid,
@@ -1629,11 +1656,12 @@ async def get_event_players(event_id: int):
                         row["player_id"] = None
             for row in players:  # raw int -> Money envelope at the boundary
                 row["loot_gp"] = money(row["loot_gp"])
-            totals["ehb_hours"] = round(
-                sum(float(e.get("ehb_hours") or 0) for e in effort.values()), 2)
-            totals["ehb_estimated_hours"] = round(
-                sum(float(e.get("ehb_estimated_hours") or 0)
-                    for e in effort.values()), 2)
+            if show_effort:
+                totals["ehb_hours"] = round(
+                    sum(float(e.get("ehb_hours") or 0) for e in effort.values()), 2)
+                totals["ehb_estimated_hours"] = round(
+                    sum(float(e.get("ehb_estimated_hours") or 0)
+                        for e in effort.values()), 2)
             return {"event": _summary(ev), "players": players, "totals": totals}
 
     payload = await asyncio.to_thread(_load)
@@ -1642,6 +1670,33 @@ async def get_event_players(event_id: int):
     if viewer_id is not None:
         return private_no_store(jsonify(payload))
     return with_cache_headers(jsonify(payload), max_age=15)
+
+
+#: How EHE may be displayed. "public" = the team/player surfaces show it;
+#: "admins" = only the event managers' effort report does.
+EFFORT_VISIBILITY_VALUES = ("public", "admins")
+
+
+def _effort_visibility_value(raw) -> str:
+    """Coerce a submitted visibility to a known value, defaulting to public.
+    Deliberately forgiving rather than a 422: an unrecognised value here should
+    fall back to today's behaviour, not fail an otherwise valid event save."""
+    value = str(raw or "").strip().lower()
+    return value if value in EFFORT_VISIBILITY_VALUES else "public"
+
+
+def _effort_visible(s, viewer_id, ev) -> bool:
+    """Whether EHE may be shown on this event's PUBLIC surfaces.
+
+    ``effort_visibility='admins'`` keeps the per-player figure inside the
+    managers' effort report: a public "who did the least" column is a social
+    problem some clans would rather not have. Effort is still recorded either
+    way, and event admins always see it — so flipping the toggle later reveals
+    the full history rather than starting from nothing.
+    """
+    if (getattr(ev, "effort_visibility", None) or "public") != "admins":
+        return True
+    return _is_event_admin(s, viewer_id, ev)
 
 
 def _player_effort(s, event_id: int, player_id: int, *, boss_limit: int = 20):
@@ -1823,7 +1878,8 @@ async def get_event_player(event_id: int, player_id: int):
                     # Full EHE breakdown here (unlike the list rows): the
                     # drill-down is where "what did they actually grind" is the
                     # question being asked.
-                    "effort": _player_effort(s, event_id, player_id),
+                    "effort": (_player_effort(s, event_id, player_id)
+                               if _effort_visible(s, viewer_id, ev) else None),
                 },
                 "items": items,
                 "tasks": tasks,
@@ -2794,6 +2850,8 @@ async def create_event():
                 formation_mode=formation_mode,
                 requires_confirmation=bool(body.get("requires_confirmation")),
                 allow_live_edits=bool(body.get("allow_live_edits")),
+                effort_visibility=_effort_visibility_value(
+                    body.get("effort_visibility")),
                 allow_late_signups=bool(body.get("allow_late_signups")),
                 submission_policy=submission_policy,
                 join_code=join_code or None,
@@ -2849,6 +2907,7 @@ def _event_settings_snapshot(ev) -> dict:
         "bonus_blackout_points": int(getattr(ev, "bonus_blackout_points", 0) or 0),
         "buyins_enabled": bool(getattr(ev, "buyins_enabled", False)),
         "allow_live_edits": bool(getattr(ev, "allow_live_edits", False)),
+        "effort_visibility": getattr(ev, "effort_visibility", None) or "public",
         "allow_late_signups": bool(getattr(ev, "allow_late_signups", False)),
         "starts_at": starts_at.isoformat() if starts_at else None,
         "ends_at": ends_at.isoformat() if ends_at else None,
@@ -2963,6 +3022,12 @@ async def update_event(event_id: int):
                 # while active). Flippable at any status — the settings-snapshot
                 # diff below audits every change.
                 ev.allow_live_edits = bool(body.get("allow_live_edits"))
+            if "effort_visibility" in body:
+                # web74a: whether EHE shows on the public team/player surfaces
+                # or only in the managers' effort report. Recording is
+                # unaffected, so flipping it ON later reveals the full history.
+                ev.effort_visibility = _effort_visibility_value(
+                    body.get("effort_visibility"))
             if "allow_late_signups" in body:
                 # web70a: keep self sign-ups open after the event begins. Off by
                 # default — the sign-up window normally ends at the start, and

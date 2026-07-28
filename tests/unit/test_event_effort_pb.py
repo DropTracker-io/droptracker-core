@@ -165,3 +165,55 @@ class TestEventKindNoLongerGates:
             assert engine._effort_tasks_digest(tasks) != digest
         finally:
             engine._EFFORT_MAP_VERSION = original
+
+
+class TestLootSweepRelevance:
+    """A loot sweep is an event kind, not an exemption: its sets name bosses
+    (Barrows for the brothers' pieces) and its items imply more. Sweeps were
+    resolving to an empty map, so a whole event type earned no EHE."""
+
+    def test_group_npcs_are_explicit(self):
+        npcs, items = engine._loot_sweep_effort_names({
+            "groups": [
+                {"label": "Ahrim", "npcs": ["Barrows"],
+                 "items": ["Ahrim's hood", "Ahrim's robetop"]},
+                {"label": "Dharok", "npcs": ["Barrows"], "items": ["Dharok's helm"]},
+            ]
+        })
+        # Named sources win outright — no inference needed for those items.
+        assert npcs == ["barrows"]
+        assert items == []
+
+    def test_groups_without_npcs_fall_back_to_their_items(self):
+        npcs, items = engine._loot_sweep_effort_names({
+            "groups": [{"label": "Open", "items": ["Twisted bow", {"item_name": "Elysian sigil"}]}]
+        })
+        assert npcs == []
+        assert items == ["elysian sigil", "twisted bow"]
+
+    def test_mixed_groups_yield_both(self):
+        # A sweep freely mixes NPC-scoped and open groups; one task descriptor
+        # has to carry both halves.
+        npcs, items = engine._loot_sweep_effort_names({
+            "groups": [
+                {"npcs": ["Barrows"], "items": ["Ahrim's hood"]},
+                {"items": ["Twisted bow"]},
+            ]
+        })
+        assert npcs == ["barrows"] and items == ["twisted bow"]
+
+    def test_v1_flat_config_still_resolves(self):
+        npcs, items = engine._loot_sweep_effort_names(
+            {"npcs": ["Zulrah"], "items": ["Tanzanite fang"]})
+        assert npcs == ["zulrah"] and items == []
+
+    def test_empty_config_is_not_an_error(self):
+        assert engine._loot_sweep_effort_names({}) == ([], [])
+
+    def test_loot_sweep_task_reaches_the_descriptors(self):
+        session = _FakeSession([(13699, "Barrows")])
+        out = engine._effort_task_descriptors(session, [
+            {"id": 5, "type": "loot_sweep",
+             "config": {"groups": [{"npcs": ["Barrows"], "items": ["Ahrim's hood"]}]}},
+        ])
+        assert out and out[0]["npcs"] == ["barrows"]
