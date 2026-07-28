@@ -245,10 +245,19 @@ def main():
                   else q.filter(Event.id == args.event).all())
         if not events:
             sys.exit("no matching event(s)")
+        # One event loop for the whole run: the shared wom.Client holds an
+        # aiohttp session bound to whichever loop started it, so a second
+        # asyncio.run() would fetch into a closed loop and silently return no
+        # rows for every event after the first.
+        async def _fetch_all():
+            out = []
+            for ev in events:
+                print(f"event {ev.id}: {ev.name!r} ({ev.status})")
+                out.append((ev, await _bulk_rows(session, ev)))
+            return out
+
         total = 0
-        for ev in events:
-            print(f"event {ev.id}: {ev.name!r} ({ev.status})")
-            rows = asyncio.run(_bulk_rows(session, ev))
+        for ev, rows in asyncio.run(_fetch_all()):
             if rows:
                 total += _backfill_event(session, redis_conn, ev, rows, apply=args.apply)
         if args.apply:
