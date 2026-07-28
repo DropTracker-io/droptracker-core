@@ -14,7 +14,11 @@ the shapes the event surfaces render:
 Every path fails OPEN to empty/zero: effort is context, never worth a 500.
 EHB pricing uses WOM's published rates, read from the cache the events worker
 keeps warm — a cold cache means every figure is 0 hours, which reads as "not
-known yet" rather than wrong.
+known yet" rather than wrong. Bosses WOM publishes no rate for fall back to
+``npc_ehb_rates`` (our own estimates, computed by
+``scripts/compute_npc_ehb_rates.py``); hours priced that way are flagged
+``estimated`` so the UI can label them, and a derived rate never overrides a
+WOM one.
 """
 from __future__ import annotations
 
@@ -27,6 +31,22 @@ def _rates() -> dict:
         from utils.wiseoldman import get_ehb_rates_sync
 
         return get_ehb_rates_sync() or {}
+    except Exception:
+        return {}
+
+
+def _derived_rates(s) -> dict:
+    """``{npc_id: kills per hour}`` from ``npc_ehb_rates`` — the fallback
+    pricing for bosses WOM has no rate for. The table is tiny (one row per
+    unpriced boss with enough data), so it's loaded whole."""
+    try:
+        from db.models import NpcEhbRate
+
+        return {
+            int(npc_id): float(rate)
+            for npc_id, rate in s.query(NpcEhbRate.npc_id, NpcEhbRate.rate_kph)
+            if rate and float(rate) > 0
+        }
     except Exception:
         return {}
 
@@ -64,15 +84,21 @@ def _group_rows(rows) -> dict:
     return grouped
 
 
-def _summarize(rows, rates, *, boss_limit: int) -> dict:
+def _summarize(rows, rates, derived_rates, *, boss_limit: int) -> dict:
     from services.event_effort import rows_to_summary
 
-    summary = rows_to_summary(rows, rates)
+    summary = rows_to_summary(rows, rates, derived_rates)
     last_at = summary.get("last_at")
+    bosses = []
+    for b in summary.get("bosses", [])[:boss_limit]:
+        bosses.append({**b, "ehb_hours": round(float(b.get("ehb_hours") or 0.0), 2)})
     return {
         "ehb_hours": round(float(summary.get("ehb_hours") or 0.0), 2),
+        # Subset of ehb_hours priced with OUR derived rates rather than WOM's
+        # published ones — >0 tells the UI to mark the figure as an estimate.
+        "ehb_estimated_hours": round(float(summary.get("ehb_estimated_hours") or 0.0), 2),
         "kills": int(summary.get("kills") or 0),
-        "bosses": summary.get("bosses", [])[:boss_limit],
+        "bosses": bosses,
         "boss_count": len(summary.get("bosses") or []),
         "last_at": int(last_at.timestamp()) if isinstance(last_at, datetime) else None,
         "frozen": int(summary.get("frozen") or 0),
@@ -94,8 +120,9 @@ def effort_by_player(s, event_id: int, player_ids: Iterable[int],
     except Exception:
         return {}
     rates = _rates()
+    derived = _derived_rates(s)
     return {
-        pid: _summarize(rows, rates, boss_limit=boss_limit)
+        pid: _summarize(rows, rates, derived, boss_limit=boss_limit)
         for pid, rows in grouped.items()
     }
 
@@ -119,6 +146,7 @@ def effort_report(s, event_id: int, roster: Iterable[dict],
     except Exception:
         grouped = {}
     rates = _rates()
+    derived = _derived_rates(s)
 
     players = []
     for member in roster or []:
@@ -126,7 +154,7 @@ def effort_report(s, event_id: int, roster: Iterable[dict],
         if pid is None:
             continue
         rows = grouped.get(int(pid)) or []
-        summary = _summarize(rows, rates, boss_limit=boss_limit)
+        summary = _summarize(rows, rates, derived, boss_limit=boss_limit)
         last_at = summary["last_at"]
         # No effort at all => idle since they joined, or since the event began.
         reference = last_at or member.get("joined_at")
@@ -156,6 +184,9 @@ def effort_report(s, event_id: int, roster: Iterable[dict],
             "participants": len(players),
             "active": sum(1 for p in players if not p["never_active"]),
             "ehb_hours": round(sum(p["ehb_hours"] for p in players), 2),
+            # Portion of ehb_hours priced with derived (non-WOM) rates.
+            "ehb_estimated_hours": round(
+                sum(p["ehb_estimated_hours"] for p in players), 2),
             "kills": sum(p["kills"] for p in players),
         },
         # Surfaced so the UI can say "EHB unavailable" rather than showing a

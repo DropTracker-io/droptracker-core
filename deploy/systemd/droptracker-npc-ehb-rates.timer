@@ -1,0 +1,20 @@
+# Weekly trigger for droptracker-npc-ehb-rates.service (Mondays ~05:30 UTC).
+#
+# Ahead of the 08:30 UTC backup and after the 04:00 image prune, in the same
+# quiet window the other maintenance timers use.
+#
+# Install:  sudo cp deploy/systemd/droptracker-npc-ehb-rates.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now droptracker-npc-ehb-rates.timer
+
+[Unit]
+Description=Weekly DropTracker derived-EHB-rate recompute (Mon ~05:30 UTC)
+
+[Timer]
+OnCalendar=Mon *-*-* 05:30:00 UTC
+RandomizedDelaySec=900
+Persistent=true
+Unit=droptracker-npc-ehb-rates.service
+
+[Install]
+WantedBy=timers.target

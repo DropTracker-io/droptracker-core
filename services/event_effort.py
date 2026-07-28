@@ -155,15 +155,41 @@ def ehb_hours(kills_by_metric: dict, rates: dict) -> float:
     return total
 
 
-def rows_to_summary(rows: Iterable[dict], rates: dict) -> dict:
+def _derived_rate(derived_rates: Optional[dict], npc_id) -> float:
+    """The usable derived kills/hour for an NPC id, or 0. Tolerates junk on
+    both sides (string ids from JSON, non-numeric rates)."""
+    if not derived_rates or npc_id is None:
+        return 0.0
+    try:
+        rate = float(derived_rates.get(int(npc_id)) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return rate if rate > 0 else 0.0
+
+
+def rows_to_summary(rows: Iterable[dict], rates: dict,
+                    derived_rates: Optional[dict] = None) -> dict:
     """Fold one player's effort rows into the shape the read model exposes.
 
     ``rows`` are ``{"npc_id", "npc_name", "boss_metric", "kills", "last_at",
-    "frozen_at"}``. Returns ``{"ehb_hours", "kills", "bosses": [...],
-    "last_at", "frozen"}`` with bosses ordered by EHB contribution (then
-    kills), so the biggest investment reads first.
+    "frozen_at"}``. Returns ``{"ehb_hours", "ehb_estimated_hours", "kills",
+    "bosses": [...], "last_at", "frozen"}`` with bosses ordered by EHB
+    contribution (then kills), so the biggest investment reads first.
+
+    ``derived_rates`` is ``{npc_id: kills per hour}`` from ``npc_ehb_rates`` —
+    our own estimates for bosses WOM publishes no rate for (thread #93:
+    approximation is fine, but labelled). Pricing order per row is strict:
+
+    1. The WOM rate for the row's metric, when published. A derived rate never
+       overrides a WOM one, even when both exist.
+    2. The derived rate for the row's ``npc_id``. Hours priced this way are
+       flagged ``estimated`` on the boss entry and summed separately into
+       ``ehb_estimated_hours`` (a subset of ``ehb_hours``, not an addition).
+    3. Nothing — the honest 0 this feature started with.
     """
-    bosses, kills_by_metric, total_kills = [], {}, 0
+    bosses, total_kills = [], 0
+    total_hours = 0.0
+    estimated_hours = 0.0
     last_at = None
     frozen = 0
     for row in rows or []:
@@ -175,27 +201,37 @@ def rows_to_summary(rows: Iterable[dict], rates: dict) -> dict:
             continue
         metric = row.get("boss_metric") or None
         total_kills += kills
-        if metric:
-            kills_by_metric[metric] = kills_by_metric.get(metric, 0) + kills
         row_last = row.get("last_at")
         if row_last is not None and (last_at is None or row_last > last_at):
             last_at = row_last
         is_frozen = row.get("frozen_at") is not None
         if is_frozen:
             frozen += 1
+        hours = ehb_hours({metric: kills}, rates) if metric else 0.0
+        estimated = False
+        if hours <= 0:
+            derived = _derived_rate(derived_rates, row.get("npc_id"))
+            if derived > 0:
+                hours = kills / derived
+                estimated = True
+        total_hours += hours
+        if estimated:
+            estimated_hours += hours
         bosses.append(
             {
                 "npc_id": row.get("npc_id"),
                 "name": row.get("npc_name"),
                 "metric": metric,
                 "kills": kills,
-                "ehb_hours": ehb_hours({metric: kills}, rates) if metric else 0.0,
+                "ehb_hours": hours,
+                "estimated": estimated,
                 "frozen": is_frozen,
             }
         )
     bosses.sort(key=lambda b: (-b["ehb_hours"], -b["kills"], str(b["name"] or "")))
     return {
-        "ehb_hours": ehb_hours(kills_by_metric, rates),
+        "ehb_hours": total_hours,
+        "ehb_estimated_hours": estimated_hours,
         "kills": total_kills,
         "bosses": bosses,
         "last_at": last_at,

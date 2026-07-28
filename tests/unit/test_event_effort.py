@@ -187,6 +187,72 @@ class TestSummary:
         assert out["bosses"][0]["kills"] == 300
 
 
+class TestDerivedRates:
+    """Fallback pricing from npc_ehb_rates — our own estimates for bosses WOM
+    doesn't publish a rate for (thread #93: approximation is fine, labelled,
+    and a derived rate must never silently replace a WOM one)."""
+
+    def _row(self, **over):
+        row = {"npc_id": 15742, "npc_name": "The Maggot King",
+               "boss_metric": "maggot_king", "kills": 130,
+               "last_at": 1, "frozen_at": None}
+        row.update(over)
+        return row
+
+    def test_unpriced_metric_falls_back_to_the_derived_rate(self):
+        # The motivating case: 130 Maggot King kills read "0h" before this.
+        out = rows_to_summary([self._row()], RATES, {15742: 26.0})
+        assert out["ehb_hours"] == pytest.approx(5.0)
+        assert out["ehb_estimated_hours"] == pytest.approx(5.0)
+        assert out["bosses"][0]["estimated"] is True
+
+    def test_wom_rate_wins_even_when_a_derived_rate_exists(self):
+        out = rows_to_summary(
+            [{"npc_id": 1, "npc_name": "Zulrah", "boss_metric": "zulrah",
+              "kills": 46, "last_at": 1, "frozen_at": None}],
+            RATES, {1: 10.0})
+        # 46 kills at WOM's 46/h, not at the derived 10/h.
+        assert out["ehb_hours"] == pytest.approx(1.0)
+        assert out["ehb_estimated_hours"] == 0.0
+        assert out["bosses"][0]["estimated"] is False
+
+    def test_metricless_npc_is_priced_by_npc_id(self):
+        # A source WOM doesn't track at all can still carry a derived rate.
+        out = rows_to_summary(
+            [self._row(boss_metric=None, kills=52)], RATES, {15742: 52.0})
+        assert out["ehb_hours"] == pytest.approx(1.0)
+        assert out["bosses"][0]["estimated"] is True
+
+    def test_no_derived_entry_keeps_the_honest_zero(self):
+        out = rows_to_summary([self._row()], RATES, {9999: 26.0})
+        assert out["ehb_hours"] == 0.0
+        assert out["ehb_estimated_hours"] == 0.0
+        assert out["bosses"][0]["estimated"] is False
+        assert out["kills"] == 130  # activity still counts
+
+    def test_none_derived_map_is_the_old_behaviour(self):
+        out = rows_to_summary([self._row()], RATES, None)
+        assert out["ehb_hours"] == 0.0
+        assert out["bosses"][0]["estimated"] is False
+
+    def test_junk_derived_values_are_skipped(self):
+        for junk in ({15742: 0}, {15742: -5}, {15742: None}, {15742: "x"}):
+            out = rows_to_summary([self._row()], RATES, junk)
+            assert out["ehb_hours"] == 0.0, junk
+
+    def test_estimated_hours_are_a_subset_not_an_addition(self):
+        rows = [
+            {"npc_id": 1, "npc_name": "Zulrah", "boss_metric": "zulrah",
+             "kills": 46, "last_at": 1, "frozen_at": None},
+            self._row(kills=26),
+        ]
+        out = rows_to_summary(rows, RATES, {15742: 26.0})
+        assert out["ehb_hours"] == pytest.approx(2.0)       # 1h WOM + 1h derived
+        assert out["ehb_estimated_hours"] == pytest.approx(1.0)
+        # Ordering still by contribution: equal hours fall back to kills.
+        assert [b["name"] for b in out["bosses"]] == ["Zulrah", "The Maggot King"]
+
+
 class TestScopeIsolation:
     def test_effort_scope_is_namespaced_away_from_credit_scopes(self):
         # A crediting kc_target scope is a bare task id or "id:npc"; effort

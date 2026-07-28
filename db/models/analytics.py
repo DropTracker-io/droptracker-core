@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, DateTime, BigInteger, UniqueConstraint, Index, ForeignKey, Text, Enum, TIMESTAMP
+from sqlalchemy import Column, Integer, String, Date, DateTime, BigInteger, Float, UniqueConstraint, Index, ForeignKey, Text, Enum, TIMESTAMP
 from sqlalchemy import func, text
 
 from .base import Base
@@ -43,6 +43,41 @@ class PlayerNpcHourlyTotals(Base):
     total_value = Column(BigInteger, default=0)
     drop_count = Column(Integer, default=0)
     last_drop_time = Column(DateTime)
+
+
+class NpcEhbRate(Base):
+    """Derived kills-per-hour for NPCs WOM publishes no EHB rate for.
+
+    WOM's ``/efficiency/rates`` table covers ~66 bosses; newer content (exactly
+    where clan bingos concentrate) is absent and priced 0 EHB by Bingo EHB's
+    honest-zero rule. This table holds our own estimate, computed from
+    DropTracker data by ``scripts/compute_npc_ehb_rates.py``:
+
+    * ``pb_median`` — 3600000 / median ``personal_best.kill_time`` (ms).
+      Calibrates to WOM's published rates at factor ~1.0 on priced bosses.
+    * ``drop_gaps`` — p90 of per-player kills/hour from inter-drop-burst gaps
+      in ``drops`` (a burst = one kill's multi-item loot). p90 because WOM
+      rates assume *efficient* play; the per-player median reads ~35% low.
+
+    The read path (``services/event_effort.rows_to_summary``) consults this
+    ONLY when the WOM rate table has no entry for the row's metric — a derived
+    rate never overrides a published one — and marks the priced hours as
+    estimated so the UI can label them.
+    """
+
+    __tablename__ = 'npc_ehb_rates'
+    __table_args__ = {'extend_existing': True}
+
+    npc_id = Column(Integer, ForeignKey('npc_list.npc_id'), primary_key=True,
+                    autoincrement=False)
+    # WOM slug when the NPC has one (rate simply unpublished); NULL for
+    # sources WOM doesn't track at all.
+    boss_metric = Column(String(48), nullable=True)
+    rate_kph = Column(Float, nullable=False)
+    # PB rows (pb_median) or qualifying players (drop_gaps) behind the rate.
+    sample_size = Column(Integer, nullable=False, default=0)
+    method = Column(String(16), nullable=False)
+    computed_at = Column(DateTime, nullable=False, default=func.now())
 
 
 class GroupRecentDrops(Base):

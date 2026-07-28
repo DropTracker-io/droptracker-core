@@ -1,0 +1,33 @@
+# Weekly recompute of derived EHB rates for WOM-unpriced bosses.
+# Triggered by droptracker-npc-ehb-rates.timer — do not enable the service itself.
+#
+# Fills `npc_ehb_rates` from DropTracker's own data (personal_best timings,
+# inter-drop gaps) for bosses WOM's /efficiency/rates table doesn't cover, so
+# Bingo EHB can price them instead of scoring 0. The read path always prefers
+# a WOM rate; these are labelled estimates. See scripts/compute_npc_ehb_rates.py
+# for methods, calibration and thresholds.
+#
+# Weekly matches the WOM rate cache TTL (WOM_EHB_RATES_CACHE_TTL, 7d) — rates
+# only move when content or the meta does. The drop_gaps method reads a 30-day
+# window per boss, so a missed week costs nothing.
+#
+# Manual dry run:  cd /store/droptracker/disc && venv/bin/python -m scripts.compute_npc_ehb_rates
+# Manual real run: sudo systemctl start droptracker-npc-ehb-rates.service
+# Watch it:        journalctl -u droptracker-npc-ehb-rates.service -f
+
+[Unit]
+Description=DropTracker derived EHB rates recompute (WOM-unpriced bosses)
+Wants=network-online.target
+After=network-online.target mariadb.service mysql.service redis-server.service
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.compute_npc_ehb_rates --apply
+# ~60 candidate NPCs; the gap method costs ~10-40s of indexed reads per boss
+# that needs it. Generous ceiling, still bounded.
+TimeoutStartSec=2h
+# Pure analytics, never urgent.
+Nice=15
+IOSchedulingClass=idle

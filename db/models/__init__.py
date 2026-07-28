@@ -29,6 +29,7 @@ from .lootboard import LootboardStyle
 from .analytics import (
     PlayerItemHourlyTotals,
     PlayerNpcHourlyTotals,
+    NpcEhbRate,
     GroupRecentDrops,
     PlayerDailyAggregates,
     PlayerLootData,
@@ -183,6 +184,7 @@ __all__ = [
     "NewWebhook",
     "PlayerItemHourlyTotals",
     "PlayerNpcHourlyTotals",
+    "NpcEhbRate",
     "GroupRecentDrops",
     "PlayerDailyAggregates",
     "PlayerLootData",
