@@ -22,6 +22,12 @@ from quart import Blueprint, jsonify
 from sqlalchemy import bindparam, text
 
 from db import ItemList, Player
+from db.item_sources import (
+    SOURCES_LIMIT as _SOURCES_LIMIT,
+    observed_source_rows as _observed_source_rows,
+    source_npc_rows,
+    variant_item_ids,
+)
 from utils.ge_value import get_true_item_value
 from utils.redis import redis_client
 from web_api.common import (
@@ -53,17 +59,11 @@ _STATS_LOCK_TTL = 300
 
 _RECENT_LIMIT = 15
 _TOP_RECEIVERS_LIMIT = 10
-_SOURCES_LIMIT = 100
 
-# Tracked-drop fallback for _sources: the wiki table (dt_npc_loot) misses whole
-# activity sources (e.g. Wintertodt's reward cart has zero wiki rows), so NPCs
-# we've actually OBSERVED dropping the item are unioned in. The scan samples at
-# most this many drop rows (ix_drops_item_id) so ultra-common items stay
-# bounded, and a source only qualifies past both thresholds — filtering
-# one-off misattributions (a "Bird nest" that once reported a dragon axe).
-_TRACKED_SOURCE_SCAN_ROWS = 50_000
-_TRACKED_SOURCE_MIN_DROPS = 5
-_TRACKED_SOURCE_MIN_PLAYERS = 3
+# The source queries themselves live in ``db/item_sources.py`` — the events
+# worker needs the same answer for effort attribution and must not import a
+# route module. Imported above under their historical names; this module keeps
+# only the presentation layer (icons, alias collapsing, caching).
 
 
 def _rc():
@@ -75,26 +75,6 @@ def _item_or_404(item_id: int, s) -> ItemList:
     if item is None:
         abort_problem(404, "Unknown item", f"No item with id {item_id}.")
     return item
-
-
-def variant_item_ids(s, item_name: str | None, fallback_id: int) -> list[int]:
-    """Every ``items`` id sharing ``item_name`` (noted variants included).
-
-    One OSRS item name spans several ids — stack-size variants, the noted
-    copy, placeholder/beta rows — and a submitted drop is recorded under
-    whichever id the client sent, which is often not the lowest. Anything that
-    reads a per-item-id table for a *name* (drop sources, receivable probes)
-    must cover the whole set or it reads a variant with no rows at all.
-    ``fallback_id`` covers a name that resolves to nothing (or is NULL).
-    """
-    name = (item_name or "").strip()
-    if not name:
-        return [int(fallback_id)]
-    ids = [
-        int(i)
-        for (i,) in s.query(ItemList.item_id).filter(ItemList.item_name == name).all()
-    ]
-    return ids or [int(fallback_id)]
 
 
 def _player_names(s, ids: set) -> dict:
@@ -281,60 +261,13 @@ def _recent_drops(item_id: int) -> list:
     return out
 
 
-def _observed_source_rows(s, item_ids: list[int]) -> list[tuple[int, str, int]]:
-    """``(npc_id, npc_name, drop_count)`` for NPCs we've actually observed
-    dropping this item, most-seen first — the wiki-gap fallback feeding
-    :func:`_sources`. Samples at most ``_TRACKED_SOURCE_SCAN_ROWS`` drop rows
-    (bounded on ultra-common items) and applies the min-drops / min-players
-    thresholds so one-off misattributed drops don't invent a source.
-
-    Takes every id the item name maps to — see :func:`_sources`."""
-    rows = s.execute(
-        text("SELECT npc_id, player_id FROM drops WHERE item_id IN :ids LIMIT :lim")
-        .bindparams(bindparam("ids", expanding=True)),
-        {"ids": list(item_ids), "lim": _TRACKED_SOURCE_SCAN_ROWS},
-    ).fetchall()
-    drops_by_npc: dict[int, int] = {}
-    players_by_npc: dict[int, set] = {}
-    for npc_id, player_id in rows:
-        if npc_id is None:
-            continue
-        nid = int(npc_id)
-        drops_by_npc[nid] = drops_by_npc.get(nid, 0) + 1
-        players_by_npc.setdefault(nid, set()).add(player_id)
-    qualifying = [
-        nid
-        for nid, count in drops_by_npc.items()
-        if count >= _TRACKED_SOURCE_MIN_DROPS
-        and len(players_by_npc[nid]) >= _TRACKED_SOURCE_MIN_PLAYERS
-    ]
-    if not qualifying:
-        return []
-    names = dict(
-        s.execute(
-            text("SELECT npc_id, npc_name FROM npc_list WHERE npc_id IN :ids")
-            .bindparams(bindparam("ids", expanding=True)),
-            {"ids": qualifying},
-        ).fetchall()
-    )
-    out = [(nid, names[nid], drops_by_npc[nid]) for nid in qualifying if nid in names]
-    out.sort(key=lambda r: -r[2])
-    return out
-
-
 def _sources(item_ids: list[int]) -> dict:
-    """NPCs that drop this item: the wiki drop table (rarest first) unioned
-    with observed tracked-drop sources the wiki table misses, alias groups
+    """NPCs that drop this item, ready for display: the shared source rows
+    (``db.item_sources.source_npc_rows``) with icons attached and alias groups
     (e.g. Wintertodt's two reward containers) collapsed to one entry.
 
-    Takes EVERY ``items`` id the item's name maps to, not one. Both source
-    tables are keyed by item id, but an OSRS item name spans several ids
-    (stack sizes, noted, placeholder variants) and a drop is recorded under
-    whichever id the client sent — usually not the lowest. Asking about a
-    single id therefore answers about an id with no rows: "Vial of blood"
-    resolved to 22405 (wiki: Hard Mode only, zero drops) while every real
-    receipt sits on 22446, so the task-form picker offered one ToB variant
-    out of three. Callers pass the whole variant set.
+    Takes EVERY ``items`` id the item's name maps to, not one — see
+    :func:`db.item_sources.source_npc_rows` for why.
     """
     from web_api.routes.npc_source_aliases import alias_group_for_member
 
@@ -345,85 +278,18 @@ def _sources(item_ids: list[int]) -> dict:
         return cached
 
     with db_session() as s:
-        total = s.execute(
-            text(
-                "SELECT COUNT(DISTINCT n.npc_name) FROM xenforo.dt_npc_loot l "
-                "JOIN npc_list n ON n.npc_id = l.npc_id WHERE l.item_id IN :ids"
-            ).bindparams(bindparam("ids", expanding=True)),
-            {"ids": ids},
-        ).fetchone()
-        # One row per npc NAME, chosen in SQL (ROW_NUMBER) rather than by
-        # truncate-then-dedupe in Python: dt_npc_loot repeats a drop-table line
-        # per wiki revision (125k rows for 62k distinct item/npc pairs) and
-        # replicates it across multi-form boss ids, so a bare `LIMIT` spent its
-        # whole budget on duplicates — "Uncut ruby" has 261 distinct sources but
-        # surfaced only 34. `tracked DESC` still prefers the id variant drops
-        # actually land on, so the entry links to the NPC page that has data.
-        rows = s.execute(
-            text(
-                "WITH src AS ("
-                "  SELECT l.npc_id, n.npc_name, l.quantity, l.rarity, l.rolls, "
-                "         EXISTS(SELECT 1 FROM player_npc_hourly_totals t "
-                "                WHERE t.npc_id = l.npc_id) AS tracked "
-                "  FROM xenforo.dt_npc_loot l "
-                "  JOIN npc_list n ON n.npc_id = l.npc_id "
-                "  WHERE l.item_id IN :ids"
-                ") "
-                "SELECT npc_id, npc_name, quantity, rarity, rolls, tracked FROM ("
-                "  SELECT src.*, ROW_NUMBER() OVER ("
-                "           PARTITION BY npc_name "
-                "           ORDER BY rarity ASC, tracked DESC, npc_id ASC) AS rn "
-                "  FROM src"
-                ") x WHERE x.rn = 1 "
-                "ORDER BY rarity ASC, tracked DESC, npc_id ASC LIMIT :lim"
-            ).bindparams(bindparam("ids", expanding=True)),
-            {"ids": ids, "lim": _SOURCES_LIMIT},
-        ).fetchall()
-        # The observed scan is a wiki-GAP fallback whose extras are discarded
-        # once the list is full, and it costs a random row read per sampled
-        # drop (~10s for an item as common as Uncut ruby, which has no gap to
-        # fill — its wiki table alone overflows the cap). Skip it when the
-        # wiki rows already fill the list: identical output, none of the cost.
-        observed = (
-            _observed_source_rows(s, ids) if len(rows) < _SOURCES_LIMIT else []
-        )
+        wiki_total, rows = source_npc_rows(s, ids, limit=_SOURCES_LIMIT)
 
-    npcs = []
-    seen_names = set()
-    for npc_id, npc_name, quantity, rarity, rolls, _tracked in rows:
-        seen_names.add(npc_name)
-        npcs.append(
-            {
-                "npc_id": int(npc_id),
-                "name": npc_name,
-                "icon_url": f"{IMG_BASE}/npcdb/{npc_id}.png",
-                "quantity": str(quantity),
-                "rarity": float(rarity),
-                "rolls": int(rolls or 1),
-                # Whether we have tracked-drop history for this NPC — lets the
-                # event task-source picker warn on sources we've never observed.
-                "tracked": bool(_tracked),
-            }
-        )
-    # Wiki-gap fallback: sources we've observed dropping the item but the wiki
-    # table doesn't know. Rarity 0 renders as "—" (no wiki rate to show).
-    extra = 0
-    for npc_id, npc_name, _count in observed:
-        if npc_name in seen_names or len(npcs) >= _SOURCES_LIMIT:
-            continue
-        seen_names.add(npc_name)
-        extra += 1
-        npcs.append(
-            {
-                "npc_id": int(npc_id),
-                "name": npc_name,
-                "icon_url": f"{IMG_BASE}/npcdb/{npc_id}.png",
-                "quantity": "1",
-                "rarity": 0.0,
-                "rolls": 1,
-                "tracked": True,
-            }
-        )
+    # The wiki-gap fallback entries aren't in wiki_total, so they're added back
+    # below; `observed` is a resolver detail and never reaches the payload.
+    extra = sum(1 for row in rows if row.get("observed"))
+    npcs = [
+        {
+            **{k: v for k, v in row.items() if k != "observed"},
+            "icon_url": f"{IMG_BASE}/npcdb/{row['npc_id']}.png",
+        }
+        for row in rows
+    ]
     # Collapse alias-group members ("Reward cart (Wintertodt)" + "Supply crate
     # (Wintertodt)") into one display entry. `members` carries the real names so
     # the source-restriction picker stores what drops actually record.
@@ -446,7 +312,7 @@ def _sources(item_ids: list[int]) -> dict:
                 "members": list(group["members"]),
             }
         )
-    out = {"total": int(total[0] or 0) + max(extra, 0), "npcs": collapsed}
+    out = {"total": int(wiki_total) + max(extra, 0), "npcs": collapsed}
     cache_set(key, out)
     return out
 

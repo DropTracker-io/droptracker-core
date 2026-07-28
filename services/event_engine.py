@@ -76,7 +76,9 @@ unwinds cell completions and stale bonus rows when a completion is revoked.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -1323,6 +1325,13 @@ class MatcherState:
     # id the matcher may evaluate for that team. Absent key = no live task
     # (awaiting roll / blocked / finished) — submissions are ignored.
     board_task_by_team: dict = field(default_factory=dict)
+    # Bingo EHB: event_id -> {normalized npc name -> {npc_id, metric, tasks}}.
+    # The NPCs an event's tasks make relevant, so effort can be recorded for
+    # kills that credit nothing. Resolved via load_effort_npcs (Redis-cached).
+    effort_npcs_by_event: dict = field(default_factory=dict)
+    # (event_id, team_id) -> set of task ids already complete. The effort
+    # freeze gate, mirrored into Redis for the hot path.
+    completed_tasks_by_team: dict = field(default_factory=dict)
     loaded_at: float = 0.0
 
 
@@ -1523,7 +1532,123 @@ def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
                     .filter(EventBoardPosition.event_id.in_(board_ids)).all()):
             if pos.status == "active" and pos.current_task_id:
                 state.board_task_by_team[(pos.event_id, pos.team_id)] = pos.current_task_id
+
+    # Bingo EHB: the NPCs each event's tasks make relevant, plus the freeze
+    # gate (which tasks are already done per team). Both are Redis-cached, so
+    # this stays a cache read on the overwhelming majority of reloads.
+    if _EFFORT_ENABLED:
+        from utils.redis import redis_client
+
+        redis_conn = getattr(redis_client, "client", None)
+        for event_id, event in state.events.items():
+            if (event.get("kind") or "standard") not in EFFORT_EVENT_KINDS:
+                continue
+            state.effort_npcs_by_event[event_id] = load_effort_npcs(
+                session, redis_conn, event_id,
+                state.tasks_by_event.get(event_id) or [])
+        teams_by_event: dict = {}
+        for team in teams:
+            teams_by_event.setdefault(team_event[team.id], []).append(team.id)
+        state.completed_tasks_by_team = _refresh_done_tasks(
+            session, redis_conn, event_ids, teams_by_event)
     return state
+
+
+def _refresh_done_tasks(session, redis_conn, event_ids, teams_by_event) -> dict:
+    """Rebuild the per-team completed-task sets backing the effort freeze.
+
+    ``EventProgress`` is the truth; Redis is a cache the hot path can read
+    without a query. Rebuilding wholesale each reload is what makes a revoke
+    (which clears ``completed``) un-freeze effort automatically, and what heals
+    a lost write-through.
+
+    Returns ``{(event_id, team_id): {task_id, ...}}``.
+    """
+    if not event_ids:
+        return {}
+    from db.models import EventProgress
+
+    try:
+        rows = (session.query(EventProgress.event_id, EventProgress.team_id,
+                              EventProgress.task_id)
+                .filter(EventProgress.event_id.in_(event_ids),
+                        EventProgress.completed.is_(True))
+                .all())
+    except Exception:
+        return {}
+    done: dict = {}
+    for event_id, team_id, task_id in rows:
+        if team_id is None:
+            continue
+        done.setdefault((event_id, team_id), set()).add(int(task_id))
+    if redis_conn is None:
+        return done
+    try:
+        pipe = redis_conn.pipeline()
+        # Every team is rewritten, not just the ones with completions: a team
+        # whose only completion was revoked must end up with an EMPTY set, and
+        # skipping it would leave the stale members frozen forever.
+        for event_id, team_ids in teams_by_event.items():
+            for team_id in team_ids:
+                key = _done_tasks_key(event_id, team_id)
+                task_ids = done.get((event_id, team_id))
+                pipe.delete(key)
+                if task_ids:
+                    pipe.sadd(key, *task_ids)
+                    pipe.expire(key, _STATE_KEY_TTL)
+        pipe.execute()
+    except Exception:
+        pass
+    return done
+
+
+def reconcile_effort_freezes(session, state: "MatcherState") -> int:
+    """Stamp / clear ``web_event_effort.frozen_at`` to match the freeze gate.
+
+    ``frozen_at`` is a reporting flag ("this boss stopped counting"), so it is
+    maintained off the submission path, on the same cadence as matcher state.
+    Accrual itself stops the instant a task completes (the Redis write-through
+    in ``apply_ledger_row``); this only catches the display up, and reverses
+    itself when a revoke re-opens a task. Returns the number of rows changed.
+    Caller owns the commit.
+    """
+    if not _EFFORT_ENABLED or not state.effort_npcs_by_event:
+        return 0
+    from db.models import EventEffort
+
+    changed = 0
+    now = datetime.now()
+    for event_id, npcs in state.effort_npcs_by_event.items():
+        if not npcs:
+            continue
+        # (team_id -> frozen npc ids) for every team that has completed
+        # anything; teams with no completions can freeze nothing.
+        frozen_by_team: dict = {}
+        for (ev, team_id), done in state.completed_tasks_by_team.items():
+            if ev != event_id:
+                continue
+            ids = {
+                int(entry["npc_id"]) for entry in npcs.values()
+                if entry.get("npc_id")
+                and entry.get("tasks")
+                and all(int(t) in done for t in entry["tasks"])
+            }
+            if ids:
+                frozen_by_team[team_id] = ids
+        try:
+            rows = (session.query(EventEffort)
+                    .filter(EventEffort.event_id == event_id).all())
+        except Exception:
+            continue
+        for row in rows:
+            should_freeze = int(row.npc_id) in frozen_by_team.get(row.team_id, ())
+            if should_freeze and row.frozen_at is None:
+                row.frozen_at = now
+                changed += 1
+            elif not should_freeze and row.frozen_at is not None:
+                row.frozen_at = None
+                changed += 1
+    return changed
 
 
 def set_active_events(redis_conn, event_ids) -> None:
@@ -1731,6 +1856,297 @@ def _fold_kc_watermark(redis_conn, event_id: int, task_id, player_id: int,
         return delta
     except Exception:
         return 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Effort (Bingo EHB) — non-crediting activity at an event's relevant NPCs
+# ══════════════════════════════════════════════════════════════════════════════
+# Contribution counters only record credit, so a player who grinds a boss all
+# week for a tile and never gets the drop is invisible. Effort records the
+# kills anyway, priced into EHB by ``services/event_effort.py``. It never
+# touches the ledger, the progress rollup, points or the team score.
+#
+# The relevance map is DB-backed (item -> source NPC inference), so it is
+# resolved once per task-set and cached in Redis: matcher state reloads every
+# 30s and must stay a query burst, not a burst plus per-item wiki lookups.
+_EFFORT_MAP_TTL = int(os.getenv("EVENT_EFFORT_MAP_TTL", str(6 * 3600)))
+_EFFORT_ENABLED = (os.getenv("EVENT_EFFORT_ENABLED", "true").strip().lower()
+                   not in ("0", "false", "no"))
+# Effort is a per-player investment metric; the kinds below have their own
+# scoring models where "kills at a relevant boss" means nothing (loot_sweep
+# scores loot value, board_game scores tile position). Ignoring them is
+# deliberate — see the plan's "know to ignore some of them".
+EFFORT_EVENT_KINDS = ("standard", "bingo", "clan_vs_clan")
+
+
+def _effort_map_key(event_id: int) -> str:
+    return f"events:{event_id}:effortnpcs"
+
+
+def _done_tasks_key(event_id: int, team_id) -> str:
+    """Task ids already complete for one team — the freeze gate. Mirrors
+    ``EventProgress.completed``; refreshed wholesale on every state load, and
+    written through on completion so a freeze takes effect immediately rather
+    than at the next reload."""
+    return f"events:{event_id}:donetasks:{team_id}"
+
+
+def _effort_tasks_digest(tasks) -> str:
+    """Identity of an event's task set for effort purposes. Changes only when
+    a task's type/target/source config changes, so editing an unrelated field
+    (label, points) does not force re-inference."""
+    parts = []
+    for task in sorted(tasks, key=lambda t: t.get("id") or 0):
+        config = task.get("config") or {}
+        parts.append("|".join((
+            str(task.get("id")), str(task.get("type")), _norm(task.get("target")),
+            json.dumps({k: config.get(k) for k in
+                        ("npcs", "source_npcs", "item_npcs", "items", "any_of",
+                         "groups", "paths")}, sort_keys=True, default=str),
+        )))
+    return hashlib.sha1("\n".join(parts).encode()).hexdigest()[:16]
+
+
+def _npc_ids_for_names(session, names) -> dict:
+    """``{normalized npc name: npc_id}`` for explicitly-named NPCs. Effort rows
+    are keyed by npc_id, so a name we cannot resolve is simply not tracked."""
+    wanted = [n for n in {_norm(n) for n in names} if n]
+    if not wanted:
+        return {}
+    from db.models import NpcList
+
+    out = {}
+    for npc_id, npc_name in session.query(NpcList.npc_id, NpcList.npc_name).all():
+        key = _norm(npc_name)
+        if key in wanted and key not in out:
+            out[key] = int(npc_id)
+    return out
+
+
+def _effort_task_descriptors(session, tasks) -> list:
+    """Per-task ``{task_id, npcs, npc_ids, item_names}`` for
+    :func:`services.event_effort.build_effort_map`.
+
+    Config parsing stays here (one source of truth); the effort module only
+    unions and caps. An item task that already carries a source restriction
+    contributes those NPCs explicitly and skips inference — the admin has
+    already answered the question inference exists to guess at.
+    """
+    descriptors, explicit = [], set()
+    for task in tasks:
+        ttype = task.get("type")
+        npcs, item_names = [], []
+        if ttype == "kc_target":
+            npcs = list(_kc_npcs(task))
+        elif ttype in ("item_collection", "pet_collection", "loot_value"):
+            config = task.get("config") or {}
+            configured = set(_norm_npc_set(config.get("source_npcs")))
+            for allowed in (_item_source_index(config) or {}).values():
+                configured |= set(allowed)
+            # any_path KC paths name their own NPCs — they are explicit too.
+            for path in _metric_paths(task):
+                configured |= set(path.get("npcs") or ())
+            if configured:
+                npcs = sorted(configured)
+            else:
+                item_names = sorted(_config_item_entries(task.get("config") or {}))
+        if not npcs and not item_names:
+            continue
+        explicit.update(npcs)
+        descriptors.append({
+            "task_id": task.get("id"),
+            "npcs": npcs,
+            "item_names": item_names,
+        })
+    ids = _npc_ids_for_names(session, explicit) if explicit else {}
+    for d in descriptors:
+        d["npc_ids"] = ids
+    return descriptors
+
+
+def load_effort_npcs(session, redis_conn, event_id: int, tasks) -> dict:
+    """``{normalized npc name: {npc_id, metric, tasks}}`` for one event.
+
+    Cached in Redis under the task-set digest so the 30s state reload is free
+    unless the tasks actually changed. Any failure degrades to an empty map:
+    effort disappears from the UI, nothing else breaks.
+    """
+    if not _EFFORT_ENABLED or not tasks:
+        return {}
+    digest = _effort_tasks_digest(tasks)
+    key = _effort_map_key(event_id)
+    try:
+        raw = redis_conn.get(key) if redis_conn is not None else None
+        if raw:
+            cached = json.loads(raw)
+            if cached.get("digest") == digest:
+                return cached.get("npcs") or {}
+    except Exception:
+        pass
+
+    try:
+        from db.item_sources import source_npcs_for_item_names
+        from services.event_effort import EFFORT_SOURCES_PER_ITEM, build_effort_map
+        from utils.wiseoldman import wom_boss_metric
+
+        descriptors = _effort_task_descriptors(session, tasks)
+        npcs = build_effort_map(
+            descriptors,
+            resolve_sources=lambda names: source_npcs_for_item_names(
+                session, names, per_item_limit=EFFORT_SOURCES_PER_ITEM),
+            boss_metric=wom_boss_metric,
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "effort map resolution failed for event %s", event_id)
+        return {}
+
+    try:
+        if redis_conn is not None:
+            redis_conn.setex(key, _EFFORT_MAP_TTL,
+                             json.dumps({"digest": digest, "npcs": npcs}))
+    except Exception:
+        pass
+    return npcs
+
+
+def _effort_frozen(redis_conn, event_id: int, team_id, task_ids, done_cache: dict) -> bool:
+    """True when every task this NPC feeds is already complete for the team.
+
+    Brondt's requirement: a boss stops counting once the tile it feeds is done,
+    or the post-completion farm inflates the score. ``done_cache`` memoizes the
+    per-team set for the duration of one envelope.
+    """
+    if not task_ids:
+        return False
+    done = done_cache.get(team_id)
+    if done is None:
+        done = set()
+        try:
+            if redis_conn is not None:
+                for raw in (redis_conn.smembers(
+                        _done_tasks_key(event_id, team_id)) or ()):
+                    try:
+                        done.add(int(raw))
+                    except (TypeError, ValueError):
+                        continue
+        except Exception:
+            done = set()
+        done_cache[team_id] = done
+    return all(int(t) in done for t in task_ids if t is not None)
+
+
+def mark_task_done(redis_conn, event_id: int, team_id, task_id) -> None:
+    """Write-through of a completion into the freeze gate. Best-effort: the
+    set is rebuilt from ``EventProgress`` on every state load, so a lost write
+    only delays a freeze by one refresh interval."""
+    if redis_conn is None or team_id is None or task_id is None:
+        return
+    try:
+        key = _done_tasks_key(event_id, team_id)
+        redis_conn.sadd(key, int(task_id))
+        redis_conn.expire(key, _STATE_KEY_TTL)
+    except Exception:
+        pass
+
+
+def record_effort(session, event_id: int, team_id, player_id: int, npc_norm: str,
+                  entry: dict, delta: int, *, source: str, at: datetime) -> None:
+    """Add ``delta`` kills to one (event, player, npc) effort row.
+
+    Upsert rather than append: effort is a running counter per NPC, not a
+    ledger. ``source`` records which side of the hybrid fold fed it — a row
+    touched by both becomes ``both``, which is what tells the read model the
+    freeze on that row is plugin-precise rather than WOM-lagged.
+    """
+    from db.models import EventEffort
+
+    npc_id = entry.get("npc_id")
+    if not npc_id or delta <= 0:
+        return
+    row = (session.query(EventEffort)
+           .filter(EventEffort.event_id == event_id,
+                   EventEffort.player_id == player_id,
+                   EventEffort.npc_id == npc_id)
+           .first())
+    if row is None:
+        session.add(EventEffort(
+            event_id=event_id, team_id=team_id, player_id=player_id,
+            npc_id=npc_id, boss_metric=entry.get("metric"),
+            kills=int(delta), source=source, first_at=at, last_at=at,
+        ))
+        return
+    row.kills = int(row.kills or 0) + int(delta)
+    row.last_at = at
+    if team_id is not None:
+        row.team_id = team_id
+    if row.boss_metric is None and entry.get("metric"):
+        row.boss_metric = entry["metric"]
+    if row.source and row.source != source:
+        row.source = "both"
+
+
+def _apply_effort(session, redis_conn, state: "MatcherState", event: dict,
+                  team_id, player_id: int, envelope: dict, submitted_at: datetime,
+                  done_cache: dict, staged: Optional[StagedWrites] = None) -> None:
+    """Record effort for one envelope against one event. Never raises.
+
+    Runs alongside — not inside — the task-match loop: the whole point is that
+    it fires when nothing matched. Absolute KC is folded through the same
+    :func:`_fold_kc_watermark` the crediting paths use, under a distinct
+    ``eff:`` scope so the two can never consume each other's watermark.
+    """
+    if not _EFFORT_ENABLED:
+        return
+    if (event.get("kind") or "standard") not in EFFORT_EVENT_KINDS:
+        return
+    npcs = state.effort_npcs_by_event.get(event["id"]) or {}
+    if not npcs:
+        return
+    data = envelope.get("data") or {}
+    kind = envelope.get("kind")
+
+    if kind == "drop":
+        npc_norm = _norm(data.get("npc_name"))
+        kc_abs, seed = data.get("kill_count"), None
+        source, offset = "plugin", 1
+    elif kind == "wom_kc":
+        metric = str(data.get("boss_metric") or "").strip().lower()
+        npc_norm = next(
+            (name for name, e in npcs.items() if e.get("metric") == metric), "")
+        kc_abs, source, offset = data.get("kc"), "wom", 0
+        # Same D10 rule the crediting path uses: only seed from the window-start
+        # value for players who were in before the window opened.
+        seed = data.get("kc_start") if data.get("target_event_id") == event["id"] else None
+    else:
+        return
+
+    entry = npcs.get(npc_norm)
+    if entry is None:
+        return
+    if _effort_frozen(redis_conn, event["id"], team_id, entry.get("tasks"), done_cache):
+        return
+    try:
+        delta = _fold_kc_watermark(
+            redis_conn, event["id"], _effort_scope(npc_norm), player_id, kc_abs,
+            seed=seed, first_credit_offset=offset, staged=staged)
+        if delta > 0:
+            record_effort(session, event["id"], team_id, player_id, npc_norm,
+                          entry, delta, source=source, at=submitted_at)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "effort record failed (event %s, player %s, npc %r)",
+            event["id"], player_id, npc_norm)
+
+
+def _effort_scope(npc_norm: str) -> str:
+    from services.event_effort import effort_scope
+
+    return effort_scope(npc_norm)
 
 
 # Without a usable kill count, stacks from one kill are only distinguishable
@@ -2737,6 +3153,12 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
     progress.completed = True
     progress.completed_at = datetime.now()
     result["kind"] = "completion"
+    # Effort freeze (Bingo EHB): the NPCs feeding this task stop accruing once
+    # every task they feed is done for this team. Written through immediately
+    # so the farm that continues right after a tile completes doesn't score;
+    # the set is rebuilt from EventProgress on each state load, which is what
+    # makes a later revoke un-freeze it.
+    mark_task_done(redis_conn, event["id"], team_id, task["id"])
 
     team_score = None
     points = int(task.get("points") or 0)
@@ -3249,6 +3671,7 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
         submitted_at = datetime.fromtimestamp(int(envelope.get("ts") or time.time()))
     except (TypeError, ValueError, OSError, OverflowError):
         submitted_at = datetime.now()
+    effort_done_cache: dict = {}
 
     for event_id, team_id, joined_at in memberships:
         event = state.events.get(event_id)
@@ -3288,6 +3711,20 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
         # Restrict matching to cell-bound tasks. Board-game events have their
         # own current-tile filter above and are excluded here.
         bingo_board = event.get("has_bingo") and event.get("kind") != "board_game"
+
+        # Bingo EHB: record the kill as effort regardless of whether anything
+        # below matches — that is the entire point (a week at a boss with no
+        # drop should still show). Deliberately outside the task loop: effort
+        # is per NPC, not per task, so one in-game kill counter feeds it once
+        # however many tiles that NPC serves.
+        _apply_effort(session, redis_conn, state, event, team_id, player_id,
+                      envelope, submitted_at, effort_done_cache, staged=staged)
+        # Effort-only envelopes exist solely to feed the pass above — the WOM
+        # reconciler emits them for bosses relevant to a task but not tracked
+        # BY one, so letting them reach the matcher could only ever credit
+        # something the event never asked for.
+        if (envelope.get("data") or {}).get("effort_only"):
+            continue
 
         xp_delta = None  # baseline folded at most once per (event, envelope)
         for task in state.tasks_by_event.get(event_id, []):

@@ -1,0 +1,203 @@
+"""Bingo EHB — event-scoped effort, the pure core.
+
+Contribution counters only ever record *credit*: a player who grinds a boss all
+week and never gets the drop is invisible on every event surface. Effort fills
+that gap by counting kills at the bosses an event's tasks actually care about,
+whether or not anything dropped — Brondt's framing in the "Tracking effort
+towards a drop" thread: 5-manning Venenatis all week is high global EHB and
+zero bingo progress, and the reverse deserves to show.
+
+Two ideas carry the feature:
+
+**Relevance.** An event's effort NPCs are the union of its ``kc_target`` NPCs,
+the source restrictions admins set on item tasks (``config.source_npcs`` /
+``config.item_npcs``), and — when they set none — the NPCs that actually drop
+the task's items. That last inference is what makes "Yama KC counts toward the
+Oathplate tile" work with no admin setup.
+
+**Freezing.** Effort at an NPC stops accruing once every task that NPC feeds is
+complete for the team, so kills after the tile is done don't inflate the score.
+
+This module is deliberately pure — no DB, no Redis, no network, stdlib-only
+module imports — so it loads under the unit-test suite's stubbed ``services``
+package and the scoring rules can be tested directly. Config parsing stays in
+``services/event_engine.py`` (single source of truth); callers hand this module
+already-extracted descriptors plus two injected lookups.
+"""
+from __future__ import annotations
+
+from typing import Callable, Iterable, Optional
+
+# ── Caps ─────────────────────────────────────────────────────────────────────
+# A single common item can name hundreds of source NPCs ("Uncut ruby" has 261),
+# and the effort map is consulted per submission, so inference is bounded on
+# both axes. Sources come back rarity-ranked, so the cap keeps the rarest —
+# i.e. the most boss-like, which is what an event tile is actually about.
+EFFORT_SOURCES_PER_ITEM = 8
+#: Hard ceiling on one event's effort NPC set, after the union.
+EFFORT_MAX_NPCS = 80
+
+#: Redis scope prefix for effort KC watermarks. Distinct from every credit
+#: scope (``_kc_state_scope`` uses bare task ids / ``{task}:{npc}``) so effort
+#: folding can never consume a crediting task's watermark, or vice versa.
+EFFORT_SCOPE_PREFIX = "eff"
+
+
+def _norm(value) -> str:
+    """Mirror of ``services.event_engine._norm`` — the engine compares NPC
+    names this way (lower-cased, whitespace-collapsed), and effort lookups key
+    off envelope NPC names the engine already normalized, so the two must
+    agree. Deliberately not ``utils.npc_names.npc_match_key``: that folds
+    aliases the engine's KC path does not."""
+    if value is None:
+        return ""
+    return " ".join(str(value).strip().lower().split())
+
+
+def effort_scope(npc_norm: str) -> str:
+    """Watermark scope for one NPC's effort counter, per (event, npc, player).
+
+    Effort is NOT scoped per task: an NPC feeding three tiles is still one
+    in-game kill counter, and three watermarks over one absolute KC would
+    triple-count it.
+    """
+    return f"{EFFORT_SCOPE_PREFIX}:{_norm(npc_norm).replace(' ', '_')}"
+
+
+def build_effort_map(
+    task_descriptors: Iterable[dict],
+    *,
+    resolve_sources: Callable[[list], dict],
+    boss_metric: Callable[[str], Optional[str]],
+    max_npcs: int = EFFORT_MAX_NPCS,
+) -> dict:
+    """``{normalized npc name: {"npc_id", "metric", "tasks": [task_id, ...]}}``.
+
+    ``task_descriptors`` are ``{"task_id", "npcs": [normalized names],
+    "item_names": [raw names], "npc_ids": {name: id}}`` — the engine extracts
+    these from task configs so config parsing has one home. ``npcs`` are the
+    explicit NPCs (a ``kc_target``'s set, or an item task's configured source
+    restriction); ``item_names`` triggers inference and is expected to be empty
+    when the admin already restricted sources.
+
+    ``resolve_sources(item_names) -> {npc name: npc_id}`` is the injected
+    DB-backed inference (``db.item_sources.source_npcs_for_item_names``);
+    ``boss_metric(name) -> slug | None`` maps an NPC to its WOM metric
+    (``utils.wiseoldman.wom_boss_metric``). An NPC with no WOM metric is still
+    tracked — it earns activity (and so counts for the inactivity report) but
+    contributes no EHB, since there's no rate to divide by.
+
+    Explicit NPCs are added before inferred ones, so when the cap bites it is
+    always the guesses that get dropped.
+    """
+    out: dict = {}
+
+    def _add(name, npc_id, task_id) -> None:
+        key = _norm(name)
+        if not key:
+            return
+        entry = out.get(key)
+        if entry is None:
+            if len(out) >= max_npcs:
+                return
+            entry = {
+                "npc_id": int(npc_id) if npc_id is not None else None,
+                "metric": boss_metric(key) or None,
+                "tasks": [],
+            }
+            out[key] = entry
+        elif entry["npc_id"] is None and npc_id is not None:
+            entry["npc_id"] = int(npc_id)
+        if task_id not in entry["tasks"]:
+            entry["tasks"].append(task_id)
+
+    descriptors = list(task_descriptors)
+    for d in descriptors:
+        ids = d.get("npc_ids") or {}
+        for name in (d.get("npcs") or []):
+            _add(name, ids.get(_norm(name), ids.get(name)), d.get("task_id"))
+
+    # Inference second — see the docstring's ordering note. Batched per task so
+    # one query burst covers a whole tile's item list.
+    for d in descriptors:
+        names = list(d.get("item_names") or [])
+        if not names:
+            continue
+        try:
+            found = resolve_sources(names) or {}
+        except Exception:
+            # Inference is best-effort: a wiki/DB hiccup must degrade the
+            # effort map, never break matcher state loading.
+            continue
+        for npc_name, npc_id in found.items():
+            _add(npc_name, npc_id, d.get("task_id"))
+    return out
+
+
+def ehb_hours(kills_by_metric: dict, rates: dict) -> float:
+    """Efficient hours bossed for ``{wom metric slug: kills}`` at ``rates``
+    (``{slug: kills per hour}``).
+
+    Metrics with no rate contribute 0 — WOM publishes rates for ~66 bosses, and
+    everything else (skilling activities, brand-new content, chest/collective
+    sources) is real activity we simply cannot price. Returning 0 rather than
+    guessing keeps the number honest.
+    """
+    total = 0.0
+    for metric, kills in (kills_by_metric or {}).items():
+        try:
+            rate = float((rates or {}).get(metric) or 0)
+            count = float(kills or 0)
+        except (TypeError, ValueError):
+            continue
+        if rate > 0 and count > 0:
+            total += count / rate
+    return total
+
+
+def rows_to_summary(rows: Iterable[dict], rates: dict) -> dict:
+    """Fold one player's effort rows into the shape the read model exposes.
+
+    ``rows`` are ``{"npc_id", "npc_name", "boss_metric", "kills", "last_at",
+    "frozen_at"}``. Returns ``{"ehb_hours", "kills", "bosses": [...],
+    "last_at", "frozen"}`` with bosses ordered by EHB contribution (then
+    kills), so the biggest investment reads first.
+    """
+    bosses, kills_by_metric, total_kills = [], {}, 0
+    last_at = None
+    frozen = 0
+    for row in rows or []:
+        try:
+            kills = int(row.get("kills") or 0)
+        except (TypeError, ValueError):
+            kills = 0
+        if kills <= 0:
+            continue
+        metric = row.get("boss_metric") or None
+        total_kills += kills
+        if metric:
+            kills_by_metric[metric] = kills_by_metric.get(metric, 0) + kills
+        row_last = row.get("last_at")
+        if row_last is not None and (last_at is None or row_last > last_at):
+            last_at = row_last
+        is_frozen = row.get("frozen_at") is not None
+        if is_frozen:
+            frozen += 1
+        bosses.append(
+            {
+                "npc_id": row.get("npc_id"),
+                "name": row.get("npc_name"),
+                "metric": metric,
+                "kills": kills,
+                "ehb_hours": ehb_hours({metric: kills}, rates) if metric else 0.0,
+                "frozen": is_frozen,
+            }
+        )
+    bosses.sort(key=lambda b: (-b["ehb_hours"], -b["kills"], str(b["name"] or "")))
+    return {
+        "ehb_hours": ehb_hours(kills_by_metric, rates),
+        "kills": total_kills,
+        "bosses": bosses,
+        "last_at": last_at,
+        "frozen": frozen,
+    }

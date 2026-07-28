@@ -120,13 +120,17 @@ class ReconcileTarget:
     wom_groups: list = field(default_factory=list)
     skills: dict = field(default_factory=dict)        # dt skill key -> wom slug
     boss_metrics: set = field(default_factory=set)    # wom slugs
+    # Bingo EHB: slugs tracked for EFFORT only — kills at these bosses are
+    # relevant to the event's tasks but credit nothing on their own. Emitted
+    # as `effort_only` envelopes; disjoint from boss_metrics.
+    effort_metrics: set = field(default_factory=set)
     # wom_player_id -> (player_id, player_name, joined_at, is_stub)
     participants_by_wom: dict = field(default_factory=dict)
     # normalized username fallback for players missing players.wom_id
     participants_by_name: dict = field(default_factory=dict)
 
 
-def _relevant_metrics(state, event_id) -> tuple[dict, set]:
+def _relevant_metrics(state, event_id) -> tuple[dict, set, set]:
     from utils.wiseoldman import wom_skill_metric
 
     skills, bosses = {}, set()
@@ -163,7 +167,17 @@ def _relevant_metrics(state, event_id) -> tuple[dict, set]:
             metrics = task.get("wom_metrics")
             if isinstance(metrics, dict) and metrics:
                 bosses.update(metrics)
-    return skills, bosses
+    # Effort metrics ride along for free: bulk-gained already returns EVERY
+    # metric per member, so reading more of the same response costs nothing.
+    # The forced-update budget is capped per cycle regardless
+    # (WOM_EVENT_UPDATE_MAX_PER_CYCLE), so this changes WHICH players get
+    # prioritised, never how many calls we make.
+    effort = {
+        entry.get("metric")
+        for entry in (state.effort_npcs_by_event.get(event_id) or {}).values()
+        if entry.get("metric")
+    } - bosses
+    return skills, bosses, effort
 
 
 def _plan_targets_db(state) -> list[ReconcileTarget]:
@@ -175,9 +189,9 @@ def _plan_targets_db(state) -> list[ReconcileTarget]:
 
     candidates = {}
     for event_id in state.events:
-        skills, bosses = _relevant_metrics(state, event_id)
-        if skills or bosses:
-            candidates[event_id] = (skills, bosses)
+        skills, bosses, effort = _relevant_metrics(state, event_id)
+        if skills or bosses or effort:
+            candidates[event_id] = (skills, bosses, effort)
     if not candidates:
         return []
 
@@ -229,7 +243,7 @@ def _plan_targets_db(state) -> list[ReconcileTarget]:
         reset_db_connections()
 
     targets = []
-    for event_id, (skills, bosses) in candidates.items():
+    for event_id, (skills, bosses, effort) in candidates.items():
         event = state.events.get(event_id) or {}
         wom_groups = []
         for group_id in sorted(group_ids_by_event.get(event_id, ())):
@@ -251,6 +265,7 @@ def _plan_targets_db(state) -> list[ReconcileTarget]:
             wom_groups=wom_groups,
             skills=skills,
             boss_metrics=bosses,
+            effort_metrics=effort,
         )
         for player_id, joined_at in (rosters.get(event_id) or {}).items():
             p = players.get(player_id)
@@ -349,7 +364,11 @@ def _emit_for_row(redis_conn, target: ReconcileTarget, row: dict,
         }
         redis_conn.lpush(QUEUE_KEY, json.dumps(envelope, default=str))
         pushed += 1
-    for slug in target.boss_metrics:
+    # Crediting metrics first, then effort-only ones (Bingo EHB). Both come out
+    # of the same already-fetched response — no extra WOM traffic — but an
+    # effort envelope is flagged so the matcher skips it entirely and only the
+    # effort pass consumes it.
+    for slug in list(target.boss_metrics) + sorted(target.effort_metrics):
         m = metrics.get(slug)
         if not m:
             continue
@@ -360,6 +379,7 @@ def _emit_for_row(redis_conn, target: ReconcileTarget, row: dict,
             continue
         if kc <= 0:
             continue
+        effort_only = slug not in target.boss_metrics
         envelope = {
             "v": 1,
             "kind": "wom_kc",
@@ -375,6 +395,7 @@ def _emit_for_row(redis_conn, target: ReconcileTarget, row: dict,
                 "kc_start": kc_start if kc_start > 0 else None,
                 "target_event_id": target.event_id,
                 "source": "wom",
+                "effort_only": effort_only,
             },
         }
         redis_conn.lpush(QUEUE_KEY, json.dumps(envelope, default=str))
@@ -560,7 +581,12 @@ def _observe_activity(redis_conn, target: ReconcileTarget, latest: dict) -> dict
                 continue
     except Exception:
         log.exception("womact read failed for event %s", target.event_id)
-    relevant = set(target.skills.values()) | set(target.boss_metrics)
+    # Effort metrics count as activity: a player whose only event-relevant
+    # progress is effort (grinding a tile's boss with no drop yet) must not
+    # back off to the idle update tier — that is exactly who this feature is
+    # meant to make visible.
+    relevant = (set(target.skills.values()) | set(target.boss_metrics)
+                | set(target.effort_metrics))
     changed = {}
     for player_id, (updated, _username, row) in latest.items():
         epoch, streak, sig = stored.get(player_id, (0, 0, ""))

@@ -1150,6 +1150,105 @@ async def get_group_bulk_hiscores(wom_group_id: int) -> Optional[list]:
         route, f"{_REDIS_BULK_HISCORES_PREFIX}{int(wom_group_id)}")
 
 
+# ---------------------------------------------------------------------------
+# Efficiency rates (EHB) — the denominator for event-scoped effort scoring
+# ---------------------------------------------------------------------------
+# GET /efficiency/rates?metric=ehb&type=main -> [{"boss": slug, "rate": kph}].
+# ~66 entries and it only moves when Jagex/WOM rebalance, so it's cached for a
+# week; the in-process memo keeps the hot read path off Redis entirely.
+_EFFICIENCY_RATES_ROUTE = _wom_routes.Route("GET", "/efficiency/rates")
+EHB_RATES_CACHE_TTL = int(os.getenv("WOM_EHB_RATES_CACHE_TTL", str(7 * 24 * 3600)))
+_EHB_RATES_MEMO_TTL = float(os.getenv("WOM_EHB_RATES_MEMO_TTL", "3600"))
+_REDIS_EHB_RATES_PREFIX = "wom:ehb_rates:"
+_ehb_rates_memo: Dict[str, Tuple[float, Dict[str, float]]] = {}
+
+
+def _parse_ehb_rates(data) -> Dict[str, float]:
+    """``[{"boss": slug, "rate": kph}]`` -> ``{slug: kph}``, dropping anything
+    without a usable positive rate (a 0/absent rate means "no EHB credit",
+    which is the same as being absent from the map)."""
+    out: Dict[str, float] = {}
+    for entry in data or []:
+        if not isinstance(entry, dict):
+            continue
+        slug = str(entry.get("boss") or "").strip().lower()
+        try:
+            rate = float(entry.get("rate") or 0)
+        except (TypeError, ValueError):
+            continue
+        if slug and rate > 0:
+            out[slug] = rate
+    return out
+
+
+def get_ehb_rates_sync(account_type: str = "main") -> Dict[str, float]:
+    """Cached EHB rates without any network I/O — ``{}`` when never fetched.
+
+    The read paths (event engine apply, web API) are synchronous and must never
+    block on WOM, so they use this; :func:`get_ehb_rates` keeps it warm from
+    the async workers. An empty map degrades to "no EHB", never an error.
+    """
+    key = str(account_type or "main").strip().lower() or "main"
+    memo = _ehb_rates_memo.get(key)
+    if memo and (time.time() - memo[0]) < _EHB_RATES_MEMO_TTL:
+        return memo[1]
+    try:
+        raw = redis_client.client.get(f"{_REDIS_EHB_RATES_PREFIX}{key}")
+    except Exception as e:
+        logger.debug("WOM EHB rates cache read failed: %s", e)
+        return memo[1] if memo else {}
+    if raw is None:
+        return memo[1] if memo else {}
+    try:
+        rates = {k: float(v) for k, v in json.loads(raw).items()}
+    except (ValueError, TypeError, AttributeError):
+        return memo[1] if memo else {}
+    _ehb_rates_memo[key] = (time.time(), rates)
+    return rates
+
+
+async def get_ehb_rates(account_type: str = "main") -> Dict[str, float]:
+    """``{boss slug: kills per hour}`` for WOM's EHB rates, refreshing the
+    shared cache when it has expired. Returns the last known map (possibly
+    empty) rather than raising — effort scoring degrades to 0 EHB, it never
+    fails a submission."""
+    key = str(account_type or "main").strip().lower() or "main"
+    cached = get_ehb_rates_sync(key)
+    if cached:
+        return cached
+
+    if not await limiter.wait():
+        return cached
+    await client.start()
+    _log_wom_call("efficiency.rates", type=key)
+    route = _EFFICIENCY_RATES_ROUTE.compile().with_params(
+        {"metric": "ehb", "type": key})
+    try:
+        raw = await client._http.fetch(route)
+    except Exception as e:
+        logger.warning("WOM EHB rates fetch errored: %s", e)
+        return cached
+    if not isinstance(raw, (bytes, bytearray, str)):
+        logger.warning("WOM EHB rates fetch failed: %s", getattr(raw, "message", raw))
+        return cached
+    try:
+        rates = _parse_ehb_rates(json.loads(raw))
+    except (ValueError, TypeError) as e:
+        logger.warning("WOM EHB rates unparseable: %s", e)
+        return cached
+    if not rates:
+        logger.warning("WOM EHB rates response held no usable rates")
+        return cached
+    try:
+        redis_client.client.setex(
+            f"{_REDIS_EHB_RATES_PREFIX}{key}", EHB_RATES_CACHE_TTL, json.dumps(rates))
+    except Exception as e:
+        logger.debug("WOM EHB rates cache write failed: %s", e)
+    _ehb_rates_memo[key] = (time.time(), rates)
+    logger.info("WOM EHB rates refreshed: %d bosses (type=%s)", len(rates), key)
+    return rates
+
+
 async def request_player_update(username: str) -> bool:
     """Ask WOM to re-scrape one player's hiscores (event freshness pass)."""
     if not username or not await limiter.wait():

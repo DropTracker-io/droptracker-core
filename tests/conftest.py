@@ -134,6 +134,18 @@ if "db.entitlements" not in sys.modules:
     sys.modules["db.entitlements"] = _mod
     _spec.loader.exec_module(_mod)
 
+# db/item_sources.py — the item -> source-NPC queries, shared by the item page
+# and the events worker's effort resolver. Module imports are SQLAlchemy-only
+# and the ORM models are lazy-imported inside functions, so load the real
+# module: web_api.routes.items re-exports its helpers and the source tests
+# assert on the queries it issues.
+_ITEM_SOURCES_PATH = _Path(__file__).resolve().parent.parent / "db" / "item_sources.py"
+if "db.item_sources" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("db.item_sources", _ITEM_SOURCES_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["db.item_sources"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # db/event_rate_limits.py (web65a) — same shape: stdlib-only module imports,
 # lazy DB access, fail-closed grant helpers. deps/lifecycle import it lazily,
 # so route tests need it resolvable under the stubbed ``db`` package.
@@ -142,6 +154,16 @@ if "db.event_rate_limits" not in sys.modules:
     _spec = _importlib_util.spec_from_file_location("db.event_rate_limits", _RATE_LIMITS_PATH)
     _mod = _importlib_util.module_from_spec(_spec)
     sys.modules["db.event_rate_limits"] = _mod
+    _spec.loader.exec_module(_mod)
+
+# services/event_effort.py — the Bingo EHB scoring core. Pure by design
+# (stdlib-only module imports, injected lookups), so load the real module: the
+# effort tests assert on its relevance/EHB decisions directly.
+_EFFORT_PATH = _Path(__file__).resolve().parent.parent / "services" / "event_effort.py"
+if "services.event_effort" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.event_effort", _EFFORT_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.event_effort"] = _mod
     _spec.loader.exec_module(_mod)
 
 # services/event_buyins.py — the buy-in <-> roster invariant (web71a). Same

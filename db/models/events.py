@@ -754,6 +754,50 @@ class EventPlayerPoints(Base):
     created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
+class EventEffort(Base):
+    """Bingo EHB — kills a player put into an event's relevant NPCs, one row
+    per (event, player, npc), whether or not anything dropped.
+
+    Its own table rather than a column anywhere existing, for two reasons:
+    ``EventProgress`` is per (task, team) with no ``player_id`` at all, and
+    ``EventCompletion`` is the *credit* ledger — effort must never inflate
+    contribution counts, points, or the "Last …" line.
+
+    Not per task: an NPC feeding three tiles is still one in-game kill counter.
+    ``frozen_at`` is stamped when every task the NPC feeds has completed for
+    the team, after which the row stops accruing (kills already banked stay).
+    See ``services/event_effort.py`` for the scoring rules.
+    """
+
+    __tablename__ = "web_event_effort"
+    __table_args__ = (
+        Index("uq_web_evt_effort", "event_id", "player_id", "npc_id", unique=True),
+        Index("idx_web_evt_effort_team", "event_id", "team_id"),
+        # The inactivity report sorts a whole event's roster by recency.
+        Index("idx_web_evt_effort_last", "event_id", "last_at"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    # Stamped from the roster at write time so the admin report can group by
+    # team without a join; a player belongs to exactly one team per event.
+    team_id = Column(Integer, ForeignKey("web_event_teams.id"), nullable=True)
+    player_id = Column(Integer, ForeignKey("players.player_id"), nullable=False)
+    npc_id = Column(Integer, ForeignKey("npc_list.npc_id"), nullable=False)
+    # WOM boss slug, denormalized so the read path can price EHB without
+    # re-resolving names. NULL = tracked activity with no WOM rate (0 EHB).
+    boss_metric = Column(String(48), nullable=True)
+    kills = Column(BigInteger, nullable=False, default=0)
+    # 'plugin', 'wom', or 'both' — which side of the hybrid fold fed this row.
+    # Freeze precision depends on it: plugin folds are real-time and freeze
+    # exactly, WOM snapshots lag and lose the tail (documented approximation).
+    source = Column(String(16), nullable=False, default="plugin")
+    first_at = Column(DateTime, default=func.now(), nullable=False)
+    last_at = Column(DateTime, default=func.now(), nullable=False)
+    frozen_at = Column(DateTime, nullable=True)
+
+
 class EventChannel(Base):
     """Per-event Discord destination (PRD D8)."""
 

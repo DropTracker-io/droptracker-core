@@ -1113,6 +1113,11 @@ async def get_event_team(event_id: int, team_id: int):
             # figure is the roster sum; both fail open to zeros.
             roster_pids = [m.player_id for m, _ in member_rows]
             loot_gp = loot_gp_by_player(s, ev, roster_pids)
+            # Bingo EHB: effort at the event's relevant bosses, credited or
+            # not. Fails open to {} — members simply render without it.
+            from web_api.event_effort import effort_by_player
+
+            effort = effort_by_player(s, event_id, roster_pids)
             members = []
             for m, player_name in member_rows:
                 agg = contrib.get(m.player_id) or {}
@@ -1129,6 +1134,7 @@ async def get_event_team(event_id: int, team_id: int):
                     "tasks_contributed": len(rows_by_task),
                     "points": round(ppoints.get(m.player_id, 0.0), 2),
                     "loot_gp": money(loot_gp.get(m.player_id, 0)),
+                    "effort": effort.get(m.player_id),
                     "last_contribution": _last_contribution(agg.get("last")),
                     "items": top_items(
                         [{"name": mt, "quantity": q, "drops": d}
@@ -1565,9 +1571,16 @@ async def get_event_players(event_id: int):
                 for pid, lst in by_pid.items()
             }
 
+            # Bingo EHB per player — the effort that credited nothing.
+            from web_api.event_effort import effort_by_player
+
+            effort = effort_by_player(s, event_id, pids, boss_limit=5)
+
             players = rank_players(
                 contrib, points, membership, names, items_by_pid,
                 loot_gp=loot_gp)[:_PLAYERS_LIMIT]
+            for row in players:
+                row["effort"] = effort.get(row["player_id"])
             # Honor the privacy opt-out: a player who hid themselves (or whose
             # linked user did) is shown as "Hidden player" with no id/link to a
             # non-admin viewer — same masking the completion-history read uses.
@@ -1579,6 +1592,8 @@ async def get_event_players(event_id: int):
                         row["player_id"] = None
             for row in players:  # raw int -> Money envelope at the boundary
                 row["loot_gp"] = money(row["loot_gp"])
+            totals["ehb_hours"] = round(
+                sum(float(e.get("ehb_hours") or 0) for e in effort.values()), 2)
             return {"event": _summary(ev), "players": players, "totals": totals}
 
     payload = await asyncio.to_thread(_load)
@@ -1587,6 +1602,49 @@ async def get_event_players(event_id: int):
     if viewer_id is not None:
         return private_no_store(jsonify(payload))
     return with_cache_headers(jsonify(payload), max_age=15)
+
+
+@events_bp.get("/events/<int:event_id>/effort")
+async def get_event_effort(event_id: int):
+    """Bingo EHB participation report — event managers only.
+
+    "Five days into a weeklong bingo and someone's last activity was three days
+    ago" is the question this answers, so it deliberately lists the WHOLE
+    roster, quietest first, including members with no recorded effort at all.
+    Admin-gated rather than public: it names people who look inactive, which is
+    a leader's call to act on, not a public scoreboard.
+    """
+    viewer_id = current_user_id()
+
+    def _load():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if not _is_event_admin(s, viewer_id, ev):
+                abort_problem(403, "Not permitted",
+                              "Only event managers can view the effort report.")
+            roster = [
+                {"player_id": pid, "player_name": pname, "team_id": tid,
+                 "team_name": tname, "joined_at": joined_at}
+                for pid, pname, tid, tname, joined_at in (
+                    s.query(EventTeamMember.player_id, Player.player_name,
+                            EventTeamMember.team_id, EventTeam.name,
+                            EventTeamMember.joined_at)
+                    .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+                    .outerjoin(Player, Player.player_id == EventTeamMember.player_id)
+                    .filter(EventTeamMember.event_id == event_id)
+                    .all()
+                )
+            ]
+            from web_api.event_effort import effort_report
+
+            return {"event": _summary(ev), **effort_report(s, event_id, roster)}
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(404, "Event not found", f"No event {event_id}.")
+    return private_no_store(jsonify(payload))
 
 
 @events_bp.get("/events/<int:event_id>/players/<int:player_id>")

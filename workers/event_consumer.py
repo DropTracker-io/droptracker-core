@@ -156,6 +156,25 @@ def _refresh_state(r):
     return state
 
 
+def _reconcile_effort(state) -> int:
+    """Sync `web_event_effort.frozen_at` with the freeze gate (Bingo EHB)."""
+    from api.core import get_db_session, reset_db_connections
+    from services import event_engine
+
+    db_session = get_db_session()
+    try:
+        changed = event_engine.reconcile_effort_freezes(db_session, state)
+        if changed:
+            db_session.commit()
+        return changed
+    except Exception:
+        db_session.rollback()
+        raise
+    finally:
+        db_session.close()
+        reset_db_connections()
+
+
 def _run_lifecycle_sweep(r) -> dict:
     """One scheduler tick (Task 21): activate due drafts / end due actives
     through the same service functions the web_api routes use."""
@@ -524,6 +543,25 @@ async def run_consumer() -> None:
                     len(state.events), len(state.participants),
                     " (admin bump)" if bumped else "",
                 )
+                # Bingo EHB: catch the `frozen_at` reporting flag up to the
+                # freeze gate (accrual already stopped at completion time).
+                try:
+                    frozen = await asyncio.to_thread(_reconcile_effort, state)
+                    if frozen:
+                        log.info("Effort freeze reconcile updated %d row(s)", frozen)
+                except Exception:
+                    log.error("Effort freeze reconcile failed:\n%s",
+                              traceback.format_exc())
+                # Keep the shared EHB rate table warm. The read paths (web API,
+                # engine) are synchronous and only ever read the cache, so
+                # something async has to refresh it; this is a memo hit on all
+                # but roughly one call a week.
+                try:
+                    from utils.wiseoldman import get_ehb_rates
+
+                    await get_ehb_rates()
+                except Exception:
+                    log.warning("EHB rate refresh failed:\n%s", traceback.format_exc())
 
             # WOM reconciliation runs as a BACKGROUND task: the update
             # rotation inside it awaits one rate-limiter slot per player
