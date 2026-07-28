@@ -36,6 +36,7 @@ from db import (
     AuditLog,
     Event,
     EventBuyin,
+    EventSignup,
     EventTeam,
     EventTeamMember,
     Player,
@@ -212,7 +213,15 @@ def _pot_payload(s, ev, viewer_id) -> dict:
 
     total = buyin_total = donation_total = 0
     per_team_paid: dict = {}  # team_id -> [total, paid_buyin_count]
+    # Contributions carrying no team (web71a): buy-ins taken at sign-up before
+    # the draft, plus pot-wide donations. Aggregated the same way as a team so
+    # sum(per_team) + unassigned == total, and so the pre-draft checklist has a
+    # headline of its own.
+    unassigned_paid = unassigned_count = 0
+    unassigned_members: set = set()
     for r in rows:
+        if r.team_id is None and r.kind == "buyin" and r.player_id is not None:
+            unassigned_members.add(r.player_id)
         if r.status != "paid":
             continue
         amt = int(r.amount or 0)
@@ -226,6 +235,10 @@ def _pot_payload(s, ev, viewer_id) -> dict:
             pt[0] += amt
             if r.kind == "buyin":
                 pt[1] += 1
+        else:
+            unassigned_paid += amt
+            if r.kind == "buyin":
+                unassigned_count += 1
 
     per_team = [
         {
@@ -260,6 +273,11 @@ def _pot_payload(s, ev, viewer_id) -> dict:
             "allow_leader_mark": cfg["allow_leader_mark"],
         },
         "per_team": per_team,
+        "unassigned": {
+            "total": money(unassigned_paid),
+            "paid_count": unassigned_count,
+            "member_count": len(unassigned_members),
+        },
         "contributors": contributors,
         "can_manage": can_manage,
     }
@@ -493,10 +511,12 @@ async def delete_buyin(event_id: int, buyin_id: int):
 # --------------------------------------------------------------------------- #
 @event_prizes_bp.post("/events/<int:event_id>/buyins/bulk")
 async def bulk_seed_buyins(event_id: int):
-    """Seed one ``pledged`` buy-in row per team member at ``default_buyin`` —
-    a ready-to-tick checklist. Optionally scoped to one ``team_id``. Members
-    who already have a (non-void) buy-in row are skipped, so re-running is safe.
-    """
+    """Seed one ``pledged`` buy-in row per participant at ``default_buyin`` —
+    a ready-to-tick checklist. Optionally scoped to one ``team_id``; unscoped,
+    it also covers **sign-ups that no draft has placed yet** (web71a), whose
+    rows are seeded with ``team_id = NULL`` and follow their player onto a team
+    when the draft lands. Anyone who already has a (non-void) buy-in row is
+    skipped, so re-running is safe."""
     user_id = current_user_id()
     body = await json_body(required=False) or {}
     team_id = body.get("team_id")
@@ -524,21 +544,45 @@ async def bulk_seed_buyins(event_id: int):
             )
             if team_id is not None:
                 members_q = members_q.filter(EventTeamMember.team_id == team_id)
+            targets = list(members_q.all())
+            if team_id is None:
+                # Unscoped seed: everyone who signed up but is still in the
+                # pool gets a team-less row, so a pre-draft event can collect
+                # buy-ins without inventing a placeholder team. Scoped to one
+                # team, only that roster is touched (unchanged behaviour).
+                placed = {pid for (_tid, pid, _n, _u) in targets}
+                targets += [
+                    (None, pid, pname, puid)
+                    for pid, pname, puid in (
+                        s.query(EventSignup.player_id, Player.player_name,
+                                Player.user_id)
+                        .join(Player, Player.player_id == EventSignup.player_id)
+                        .filter(EventSignup.event_id == event_id)
+                        .all()
+                    )
+                    if pid not in placed
+                ]
             existing = {
-                (t, p) for (t, p) in
+                p for (p,) in
                 # Locking read = current read: a seed that waited on the
                 # event-row lock must see the winner's committed rows, not
                 # its own pre-lock snapshot.
-                s.query(EventBuyin.team_id, EventBuyin.player_id)
+                #
+                # Keyed on player alone, NOT (team, player): a player's buy-in
+                # is one contribution to one event, and its team_id moves with
+                # them (web71a). Keying on the pair would re-seed a second row
+                # every time the draft moved someone.
+                s.query(EventBuyin.player_id)
                 .filter(EventBuyin.event_id == event_id,
                         EventBuyin.kind == "buyin",
                         EventBuyin.status != "void")
                 .with_for_update().all()
             }
             created = 0
-            for tid, pid, pname, puid in members_q.all():
-                if (tid, pid) in existing:
+            for tid, pid, pname, puid in targets:
+                if pid in existing:
                     continue
+                existing.add(pid)   # a pooled sign-up may also hold a placement
                 s.add(EventBuyin(
                     event_id=event_id, team_id=tid, player_id=pid, rsn=pname,
                     user_id=puid, kind="buyin", amount=default, status="pledged",

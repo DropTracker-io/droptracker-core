@@ -38,14 +38,18 @@ def _wire(monkeypatch, session, user_id=7):
     monkeypatch.setattr(evr, "_assert_event_admin", lambda *a, **k: None)
 
 
-def _script_standard(*, event=None, team=None, players=(), eligible=(), placed=()):
+def _script_standard(*, event=None, team=None, players=(), eligible=(), placed=(),
+                     adds=True):
     """Query order on a standard event with an unbound team:
-    event, team, player resolve, eligibility, existing placements.
-    (The last two are only issued when at least one name resolved.)"""
+    event, team, player resolve, eligibility, existing placements, and — when
+    at least one name is actually added — the web71a buy-in carry-over UPDATE.
+    (Everything after the resolve is only issued when a name resolved.)"""
     batches = [[event or _event()], [team if team is not None else _team(4)], list(players)]
     if players:
         batches.append(list(eligible))
         batches.append(list(placed))
+        if adds:
+            batches.append([])   # buy-in carry-over UPDATE (web71a)
     return _S(*batches)
 
 
@@ -143,6 +147,7 @@ class TestBulkAddOutcomes:
             players=[(1, "Alice")],
             eligible=[],
             placed=[],
+            adds=False,     # nobody eligible -> no carry-over UPDATE
         )
         _wire(monkeypatch, s)
         r = await client.post(BULK, json={"names": ["alice"]})
@@ -160,6 +165,7 @@ class TestBulkAddOutcomes:
             [(42,), (43,)],   # participating groups
             [(1,)],           # eligibility
             [],               # placements
+            [],               # buy-in carry-over UPDATE (web71a)
         )
         _wire(monkeypatch, s)
         r = await client.post(BULK, json={"names": ["alice"]})

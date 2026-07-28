@@ -280,7 +280,9 @@ class TestJoinEventStandard:
         assert r.status_code == 403
 
     async def test_self_join_picks_requested_team(self, client, monkeypatch):
-        s = _S([_event()], [_player()], [(1,)], [], [_team(1), _team(2)])
+        # Trailing [] batch: the buy-in carry-over UPDATE (web71a) that points
+        # a sign-up-time buy-in at the team the player just landed on.
+        s = _S([_event()], [_player()], [(1,)], [], [_team(1), _team(2)], [])
         _wire(monkeypatch, s)
         r = await client.post("/api/v1/events/1/join", json={"player_id": 3, "team_id": 2})
         assert r.status_code == 200
@@ -288,7 +290,7 @@ class TestJoinEventStandard:
         assert s.committed
 
     async def test_self_join_single_team_auto_picks(self, client, monkeypatch):
-        s = _S([_event()], [_player()], [(1,)], [], [_team(5)])
+        s = _S([_event()], [_player()], [(1,)], [], [_team(5)], [])
         _wire(monkeypatch, s)
         r = await client.post("/api/v1/events/1/join", json={"player_id": 3})
         assert r.status_code == 200
@@ -317,6 +319,7 @@ class TestJoinEventStandard:
             [],
             [_team(1), _team(2), _team(3)],
             [(1, 5), (2, 2), (3, 9)],  # member counts by team
+            [],                        # buy-in carry-over UPDATE (web71a)
         )
         _wire(monkeypatch, s)
         r = await client.post("/api/v1/events/1/join", json={"player_id": 3})
@@ -346,14 +349,14 @@ class TestJoinSignupWindow:
     async def test_scheduled_event_before_start_still_joins(self, client, monkeypatch):
         ev = _event(allow_late_signups=False, status="draft",
                     starts_at=datetime.now() + timedelta(days=1))
-        s = _S([ev], [_player()], [(1,)], [], [_team(1), _team(2)])
+        s = _S([ev], [_player()], [(1,)], [], [_team(1), _team(2)], [])
         _wire(monkeypatch, s)
         r = await client.post("/api/v1/events/1/join", json={"player_id": 3, "team_id": 2})
         assert r.status_code == 200
 
     async def test_late_signups_event_still_joins(self, client, monkeypatch):
         s = _S([_event(allow_late_signups=True)], [_player()], [(1,)], [],
-               [_team(1), _team(2)])
+               [_team(1), _team(2)], [])
         _wire(monkeypatch, s)
         r = await client.post("/api/v1/events/1/join", json={"player_id": 3, "team_id": 2})
         assert r.status_code == 200
@@ -390,6 +393,7 @@ class TestAdminRosterStandard:
             [_player()],
             [(1,)],   # eligibility: member of the event's group
             [],       # no existing membership
+            [],       # buy-in carry-over UPDATE (web71a)
         )
         _wire(monkeypatch, s)
         monkeypatch.setattr(evr, "_assert_event_admin", lambda *a, **k: None)

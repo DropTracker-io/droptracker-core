@@ -144,6 +144,16 @@ if "db.event_rate_limits" not in sys.modules:
     sys.modules["db.event_rate_limits"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/event_buyins.py — the buy-in <-> roster invariant (web71a). Same
+# shape (stdlib-only module imports, lazy db) and MUST be registered before
+# services.event_signup, which imports it at module level.
+_BUYINS_PATH = _Path(__file__).resolve().parent.parent / "services" / "event_buyins.py"
+if "services.event_buyins" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.event_buyins", _BUYINS_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.event_buyins"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/event_signup.py — the shared sign-up rules (web70a's window gate
 # among them), imported lazily by the web routes and the bot. Module imports
 # are stdlib-only by design (DB models are lazy-imported inside functions), so

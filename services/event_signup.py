@@ -25,6 +25,10 @@ import random
 from datetime import datetime
 from typing import Optional
 
+# Sibling service, stdlib-only at import time for the same reason as this
+# module (its db imports are function-local), so importing it here is safe.
+from services.event_buyins import sync_buyin_team, sync_buyin_teams
+
 
 class SignupError(Exception):
     """A user-visible reason a sign-up / pool action was refused. The Web API
@@ -392,7 +396,11 @@ def _signed_up(session, ev, player_id: int) -> bool:
 
 def _place(session, event_id: int, player_id: int, team_id: int) -> None:
     """(Re)place a player onto a team: delete any existing membership on the
-    event, then insert a fresh row (joined_at resets — the credit cutoff)."""
+    event, then insert a fresh row (joined_at resets — the credit cutoff).
+
+    Does NOT move the player's buy-ins — the callers do that, in one batched
+    UPDATE per operation (see ``services/event_buyins.py``), because
+    :func:`randomize_pool` places the whole pool in a loop."""
     from db.models import EventTeam, EventTeamMember
 
     existing = (
@@ -428,6 +436,9 @@ def assign_from_pool(session, ev, player_id: int, team_id: int) -> None:
             raise SignupError(422, "Wrong clan",
                               "That team belongs to a different clan than the player.")
     _place(session, ev.id, player_id, team_id)
+    # web71a: the draft has happened — a buy-in this player paid at sign-up
+    # (recorded with no team) now credits the team they were sorted onto.
+    sync_buyin_team(session, ev.id, player_id, team_id)
 
 
 def unassign_from_pool(session, ev, player_id: int) -> None:
@@ -448,6 +459,9 @@ def unassign_from_pool(session, ev, player_id: int) -> None:
     )
     for m in memberships:
         session.delete(m)
+    # web71a: back in the pool -> their buy-in goes back to the unassigned
+    # bucket. The GP stays in the pot; it just stops crediting a team.
+    sync_buyin_team(session, ev.id, player_id, None)
 
 
 def randomize_pool(session, ev, group_id: Optional[int] = None) -> dict:
@@ -473,6 +487,7 @@ def randomize_pool(session, ev, group_id: Optional[int] = None) -> dict:
 
     assigned = 0
     unassigned = 0
+    placements: dict = {}   # player_id -> team_id, for the buy-in carry-over
     # Group sign-ups by the bucket they draw teams from.
     by_bucket: dict = {}
     for s in signups:
@@ -492,7 +507,12 @@ def randomize_pool(session, ev, group_id: Optional[int] = None) -> dict:
         for i, s in enumerate(order):
             team = bucket_teams[(start + i) % len(bucket_teams)]
             _place(session, ev.id, s.player_id, team.id)
+            placements[s.player_id] = team.id
             assigned += 1
+    # web71a: one UPDATE per destination team carries every sign-up-time buy-in
+    # onto the team the shuffle just dealt its payer — a re-roll re-points them
+    # again, so the pot's per-team split always matches the current draft.
+    sync_buyin_teams(session, ev.id, placements)
     return {"assigned": assigned, "unassigned": unassigned}
 
 
@@ -685,3 +705,6 @@ def remove_signup(session, ev, player_id: int) -> None:
     )
     for m in memberships:
         session.delete(m)
+    # web71a: a withdrawn player's buy-in (if any) stops crediting a team. The
+    # row itself stands — voiding paid GP is a separate, deliberate pot action.
+    sync_buyin_team(session, ev.id, player_id, None)

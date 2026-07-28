@@ -19,7 +19,7 @@ import pytest
 
 import web_api.routes.event_prizes as epr
 import web_api.routes.events as evr
-from web_api.common import ProblemException
+from web_api.common import ProblemException, money
 from tests.unit.test_event_auth_modes import _S, _SessionCM, _event, _player, _team
 
 
@@ -325,10 +325,11 @@ class TestDeleteBuyin:
 class TestBulkSeed:
     async def test_seeds_one_pledged_row_per_member(self, client, monkeypatch):
         members = [(1, 5, "Alice", 7), (1, 6, "Bob", 8)]  # (team, player, rsn, uid)
+        signups = []   # unscoped seed also sweeps the sign-up pool (web71a)
         existing = []  # nobody seeded yet
         # Second batch: the event-row FOR UPDATE mutex (concurrent-seed guard).
         s = _S([_event(prize_config='{"default_buyin": 5000000}')], [(1,)],
-               members, existing)
+               members, signups, existing)
         _wire_epr(monkeypatch, s)
         monkeypatch.setattr(epr, "EventBuyin", _RecBuyin)
         r = await client.post("/api/v1/events/1/buyins/bulk", json={})
@@ -340,14 +341,44 @@ class TestBulkSeed:
 
     async def test_skips_already_seeded_members(self, client, monkeypatch):
         members = [(1, 5, "Alice", 7), (1, 6, "Bob", 8)]
-        existing = [(1, 5)]  # Alice already has a buy-in
+        signups = []
+        existing = [(5,)]  # Alice already has a buy-in (keyed on player alone)
         # Second batch: the event-row FOR UPDATE mutex (concurrent-seed guard).
-        s = _S([_event(prize_config=None)], [(1,)], members, existing)
+        s = _S([_event(prize_config=None)], [(1,)], members, signups, existing)
         _wire_epr(monkeypatch, s)
         monkeypatch.setattr(epr, "EventBuyin", _RecBuyin)
         r = await client.post("/api/v1/events/1/buyins/bulk", json={})
         assert r.status_code == 200
         assert (await r.get_json())["created"] == 1  # only Bob
+
+    async def test_seeds_pooled_signups_with_no_team(self, client, monkeypatch):
+        """web71a: buy-ins are collected at sign-up, so an unscoped seed covers
+        everyone in the pool who no draft has placed yet — no placeholder team
+        needed. Their rows carry ``team_id=None`` until the draft lands."""
+        members = [(1, 5, "Alice", 7)]           # Alice was already drafted
+        signups = [(5, "Alice", 7), (6, "Bob", 8), (9, "Cara", None)]
+        s = _S([_event(prize_config='{"default_buyin": 1000}')], [(1,)],
+               members, signups, [])
+        _wire_epr(monkeypatch, s)
+        monkeypatch.setattr(epr, "EventBuyin", _RecBuyin)
+        r = await client.post("/api/v1/events/1/buyins/bulk", json={})
+        assert r.status_code == 200
+        assert (await r.get_json())["created"] == 3     # Alice once, + Bob, Cara
+        seeded = {row.player_id: row for row in s.added if isinstance(row, _RecBuyin)}
+        assert seeded[5].team_id == 1                   # drafted -> her team
+        assert seeded[6].team_id is None and seeded[9].team_id is None
+
+    async def test_team_scoped_seed_ignores_the_pool(self, client, monkeypatch):
+        """Scoped to one team, behaviour is unchanged: no pool query at all
+        (the scripted session would misalign if one were issued)."""
+        members = [(1, 5, "Alice", 7)]
+        s = _S([_event(prize_config=None)], [_team(1)], [(1,)], members, [])
+        _wire_epr(monkeypatch, s)
+        monkeypatch.setattr(epr, "EventBuyin", _RecBuyin)
+        r = await client.post("/api/v1/events/1/buyins/bulk", json={"team_id": 1})
+        assert r.status_code == 200
+        assert (await r.get_json())["created"] == 1
+        assert s._batches == []
 
 
 # --------------------------------------------------------------------------- #
@@ -405,6 +436,30 @@ class TestPotRedaction:
         per_team = {t["team_id"]: t["total"]["value"] for t in out["per_team"]}
         assert per_team == {1: 100, 2: 25}           # pledged 50 excluded
         assert out["can_manage"] is False
+
+    def test_unassigned_bucket_covers_pre_draft_buyins(self, monkeypatch):
+        """web71a: contributions carrying no team get their own bucket, so a
+        pre-draft pot has a headline and sum(per_team) + unassigned == total."""
+        monkeypatch.setattr(epr, "_is_event_admin", lambda *a, **k: True)
+        ev = _event(buyins_enabled=True)
+        rows = [
+            # Paid at sign-up, no team yet — the case a placeholder team used
+            # to be needed for.
+            _buyin(id=1, team_id=None, player_id=5, kind="buyin", amount=100,
+                   status="paid"),
+            # Pledged, no team: counts as a pre-draft member to tick, not GP.
+            _buyin(id=2, team_id=None, player_id=6, kind="buyin", amount=50,
+                   status="pledged"),
+            _buyin(id=3, team_id=1, player_id=7, kind="buyin", amount=40,
+                   status="paid"),
+        ]
+        s = _S([_team(1)], [(1, 1)], rows, [(5, "Zez")])
+        out = epr._pot_payload(s, ev, viewer_id=7)
+        assert out["unassigned"] == {
+            "total": money(100), "paid_count": 1, "member_count": 2,
+        }
+        per_team_total = sum(t["total"]["value"] for t in out["per_team"])
+        assert per_team_total + out["unassigned"]["total"]["value"] == out["total"]["value"]
 
     def test_admin_sees_all_rows_including_pledged(self, monkeypatch):
         monkeypatch.setattr(epr, "_is_event_admin", lambda *a, **k: True)

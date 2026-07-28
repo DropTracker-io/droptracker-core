@@ -665,16 +665,23 @@ def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> in
     }
     joined_at = event.activated_at or event.starts_at or now or datetime.now()
     added = 0
+    placements: dict = {}   # player_id -> team_id, for the buy-in carry-over
     for team in auto_teams:
         for pid in clan_members[team.id]:
             if pid in on_event or pid in multi_clan:
                 continue
             session.add(EventTeamMember(team_id=team.id, player_id=pid,
                                         event_id=event.id, joined_at=joined_at))
+            placements[pid] = team.id
             on_event.add(pid)
             added += 1
     if added:
         session.flush()
+        # web71a: a buy-in recorded before the roster materialized (whole-clan
+        # teams only exist from activation) follows its payer onto the team.
+        from services.event_buyins import sync_buyin_teams
+
+        sync_buyin_teams(session, event.id, placements)
     if added or removed:
         # Keep the auto-created team roles/threads (web53a) in step with the
         # reconciled roster on the bot's next tick.

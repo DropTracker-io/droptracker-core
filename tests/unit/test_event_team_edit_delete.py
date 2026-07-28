@@ -135,11 +135,12 @@ class TestUpdateTeam:
 class TestDeleteTeam:
     def _script(self, team, *, event=None):
         # Query order: event, team, then the child-row bulk deletes — the
-        # original four (bingo completions, completions, progress, members)
-        # plus the P0-5 additions (player points, leader votes, board
-        # positions, team inventory, team cooldowns, coin ledger, effects):
-        # 2 lookups + 11 deletes = 13 queries.
-        return _S([event or _event()], [team], *([[]] * 11))
+        # original four (bingo completions, completions, progress, members),
+        # the web71a buy-in release (an UPDATE to team_id=NULL, not a delete —
+        # paid pot GP outlives the team), then the P0-5 additions (player
+        # points, leader votes, board positions, team inventory, team
+        # cooldowns, coin ledger, effects): 2 lookups + 12 writes = 14 queries.
+        return _S([event or _event()], [team], *([[]] * 12))
 
     async def test_delete_clears_children_then_team_and_audits(self, client, monkeypatch):
         team = _team(4, name="Mistake")

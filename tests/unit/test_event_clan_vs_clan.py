@@ -308,6 +308,7 @@ class TestJoinClanRouting:
             [(3,)],                         # one-RSN: user's players (only self)
             [_team(1, group_id=10), _team(2, group_id=20)],
             [(20,)],                        # the player's clans -> clan 20
+            [],                             # buy-in carry-over UPDATE (web71a)
         )
         _wire_events(monkeypatch, s)
         r = await client.post("/api/v1/events/1/join", json={"player_id": 3})
@@ -333,6 +334,7 @@ class TestJoinClanRouting:
             [_team(1, group_id=10), _team(2, group_id=10), _team(3, group_id=20)],
             [(10,)],                        # player's clan: 10 -> teams 1 and 2
             [(1, 4), (2, 1), (3, 0)],       # team 3 is smallest overall but foreign
+            [],                             # buy-in carry-over UPDATE (web71a)
         )
         _wire_events(monkeypatch, s)
         r = await client.post("/api/v1/events/1/join", json={"player_id": 3})
@@ -398,6 +400,7 @@ class TestAdminAddMemberClan:
             [(10,), (20,)], [(1,)],
             [(1,)],                  # member of clan 20
             [],                      # no existing membership
+            [],                      # buy-in carry-over UPDATE (web71a)
         )
         _wire_events(monkeypatch, s)
         monkeypatch.setattr(evr, "_assert_event_admin", lambda *a, **k: None)

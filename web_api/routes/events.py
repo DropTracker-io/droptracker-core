@@ -3050,6 +3050,18 @@ def _mark_team_discord_dirty(s, event_id: int, team_id: int | None = None) -> No
     mark_team_members_dirty(s, event_id, team_id)
 
 
+def _sync_buyin_team(s, event_id: int, player_id: int, team_id: int | None) -> None:
+    """Roster changed: point that player's live buy-ins at their new placement
+    (``None`` = back in the pool / off the roster).
+
+    This is what lets a buy-in be recorded at sign-up, before any draft: see
+    ``services/event_buyins.py`` for the invariant. Lazy import — the unit-test
+    conftest stubs the ``services`` package."""
+    from services.event_buyins import sync_buyin_team
+
+    sync_buyin_team(s, event_id, player_id, team_id)
+
+
 def _drop_team_discord_rows(s, event_id: int, team_id: int) -> None:
     """Team hard delete: queue live role/channel teardown for the bot, then
     drop the rows themselves (their team FK is about to go away)."""
@@ -4217,6 +4229,14 @@ async def delete_team(event_id: int, team_id: int):
                 EventTeamMember.team_id == team_id
             ).delete(synchronize_session=False)
 
+            # web71a: buy-ins are NOT wiped with the team — that GP was
+            # contributed to the *event* and may already be paid. Return the
+            # rows to the unassigned bucket (which also clears the FK that
+            # would otherwise block this delete outright).
+            from services.event_buyins import release_team_buyins
+
+            release_team_buyins(s, event_id, team_id)
+
             # P0-5: points/vote + board-game children whose FKs (web45a–web48a)
             # postdate the original 4-table cascade. Several are NOT NULL
             # (board position, inventory, cooldown, coin ledger,
@@ -4539,6 +4559,8 @@ async def join_event(event_id: int):
             # joined_at (default now()) is the credit cutoff (PRD D10).
             s.add(EventTeamMember(team_id=team.id, player_id=player_id,
                                   event_id=event_id))
+            # web71a: a buy-in paid at sign-up follows the player onto the team.
+            _sync_buyin_team(s, event_id, player_id, team.id)
             # Per-team Discord (web53a): let the bot pick up the roster change.
             _mark_team_discord_dirty(s, event_id, team.id)
             try:
@@ -4591,6 +4613,10 @@ async def leave_event(event_id: int):
                     s.delete(signup)
             if membership or signup:
                 if membership:
+                    # web71a: off the roster -> their buy-in returns to the
+                    # unassigned bucket (the GP stays in the pot; it just stops
+                    # crediting a team they left).
+                    _sync_buyin_team(s, event_id, player_id, None)
                     _mark_team_discord_dirty(s, event_id, membership.team_id)
                 s.commit()
 
@@ -4658,6 +4684,9 @@ async def admin_add_member(event_id: int, team_id: int):
                 s.flush()
             s.add(EventTeamMember(team_id=team_id, player_id=player_id,
                                   event_id=event_id))
+            # web71a: carry a sign-up-time buy-in onto the team the draft (or
+            # this move) just put them on.
+            _sync_buyin_team(s, event_id, player_id, team_id)
             s.add(
                 AuditLog(
                     actor_user_id=user_id,
@@ -4813,6 +4842,12 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
                 added.append({"id": pid, "name": canonical})
 
             if added:
+                # web71a: one UPDATE for the whole batch's sign-up buy-ins.
+                from services.event_buyins import sync_buyin_teams
+
+                sync_buyin_teams(
+                    s, event_id, {a["id"]: team_id for a in added}
+                )
                 s.add(
                     AuditLog(
                         actor_user_id=user_id,
@@ -4890,6 +4925,9 @@ async def admin_remove_member(event_id: int, team_id: int, player_id: int):
                         after=None,
                     )
                 )
+                # web71a: their buy-in returns to the unassigned bucket rather
+                # than crediting a team they're no longer on.
+                _sync_buyin_team(s, event_id, player_id, None)
                 _mark_team_discord_dirty(s, event_id, team_id)
                 s.commit()
 
