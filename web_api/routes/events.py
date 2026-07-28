@@ -463,6 +463,13 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             .order_by(EventTeamMember.joined_at.asc())
             .all()
         )
+        # EHE per member — the compact scalar only, not the per-boss breakdown:
+        # a clan-vs-clan roster is 400+ members per team and the detail read is
+        # already the page's heaviest payload. The full breakdown lives on the
+        # team and player endpoints.
+        from web_api.event_effort import effort_by_player
+
+        effort = effort_by_player(s, ev.id, [m.player_id for m, _ in member_rows])
         for m, player_name in member_rows:
             members_by_team.setdefault(m.team_id, []).append({
                 "player_id": m.player_id,
@@ -473,11 +480,19 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
                 "player_name": player_name or f"Player {m.player_id}",
                 "joined_at": _ts(m.joined_at),
                 "role": getattr(m, "role", None),
+                "effort_ehb": (effort.get(m.player_id) or {}).get("ehb_hours", 0.0),
+                # Portion priced with derived (non-WOM) rates — >0 means the
+                # scalar should read as an estimate ("~12h").
+                "effort_ehb_estimated": (effort.get(m.player_id) or {})
+                    .get("ehb_estimated_hours", 0.0),
             })
     teams = []
     for tm in teams_rows:
         members = members_by_team.get(tm.id, [])
         teams.append({
+            "ehb_hours": round(sum(m.get("effort_ehb") or 0.0 for m in members), 2),
+            "ehb_estimated_hours": round(
+                sum(m.get("effort_ehb_estimated") or 0.0 for m in members), 2),
             "id": tm.id,
             "name": tm.name,
             "score": score_num(tm.score),
@@ -1251,6 +1266,12 @@ async def get_event_team(event_id: int, team_id: int):
                     "member_count": len(members),
                     "coins": int(getattr(team, "coins", 0) or 0),
                     "loot_gp": money(sum(loot_gp.values())),
+                    "ehb_hours": round(
+                        sum(float((e or {}).get("ehb_hours") or 0.0)
+                            for e in effort.values()), 2),
+                    "ehb_estimated_hours": round(
+                        sum(float((e or {}).get("ehb_estimated_hours") or 0.0)
+                            for e in effort.values()), 2),
                 },
                 "members": members,
                 "items": team_items,
@@ -1309,6 +1330,17 @@ async def get_event_teams(event_id: int):
                 roster_by_team.setdefault(tid, []).append(pid)
             all_pids = {p for pids in roster_by_team.values() for p in pids}
             loot_gp = loot_gp_by_player(s, ev, all_pids)
+            # Team EHE = the roster's summed effort, same shape as loot_gp.
+            from web_api.event_effort import effort_by_player
+
+            effort = effort_by_player(s, event_id, all_pids)
+            ehb_by_player = {
+                pid: float(e.get("ehb_hours") or 0.0) for pid, e in effort.items()
+            }
+            ehb_est_by_player = {
+                pid: float(e.get("ehb_estimated_hours") or 0.0)
+                for pid, e in effort.items()
+            }
 
             # Tasks completed per team.
             done_by_team = {
@@ -1389,6 +1421,9 @@ async def get_event_teams(event_id: int):
                     "member_count": len(pids),
                     "tasks_done": done_by_team.get(tm.id, 0),
                     "loot_gp": money(sum(loot_gp.get(p, 0) for p in pids)),
+                    "ehb_hours": round(sum(ehb_by_player.get(p, 0.0) for p in pids), 2),
+                    "ehb_estimated_hours": round(
+                        sum(ehb_est_by_player.get(p, 0.0) for p in pids), 2),
                     "pot_total": money((pot or {}).get("per_team", {}).get(tm.id, 0)),
                     "items": top_items(items_by_team.get(tm.id, []), item_ids,
                                        _TEAMS_ITEM_PREVIEW),
@@ -1411,6 +1446,8 @@ async def get_event_teams(event_id: int):
                     "players": len(all_pids),
                     "tasks": int(task_count),
                     "loot_gp": money(sum(loot_gp.values())),
+                    "ehb_hours": round(sum(ehb_by_player.values()), 2),
+                    "ehb_estimated_hours": round(sum(ehb_est_by_player.values()), 2),
                 },
             }
 
@@ -1594,6 +1631,9 @@ async def get_event_players(event_id: int):
                 row["loot_gp"] = money(row["loot_gp"])
             totals["ehb_hours"] = round(
                 sum(float(e.get("ehb_hours") or 0) for e in effort.values()), 2)
+            totals["ehb_estimated_hours"] = round(
+                sum(float(e.get("ehb_estimated_hours") or 0)
+                    for e in effort.values()), 2)
             return {"event": _summary(ev), "players": players, "totals": totals}
 
     payload = await asyncio.to_thread(_load)
@@ -1602,6 +1642,14 @@ async def get_event_players(event_id: int):
     if viewer_id is not None:
         return private_no_store(jsonify(payload))
     return with_cache_headers(jsonify(payload), max_age=15)
+
+
+def _player_effort(s, event_id: int, player_id: int, *, boss_limit: int = 20):
+    """One player's EHE breakdown, or None when they have no tracked effort."""
+    from web_api.event_effort import effort_by_player
+
+    return effort_by_player(s, event_id, [player_id],
+                            boss_limit=boss_limit).get(player_id)
 
 
 @events_bp.get("/events/<int:event_id>/effort")
@@ -1772,6 +1820,10 @@ async def get_event_player(event_id: int, player_id: int):
                     "loot_gp": money(
                         loot_gp_by_player(s, ev, [player_id]).get(player_id, 0)
                     ),
+                    # Full EHE breakdown here (unlike the list rows): the
+                    # drill-down is where "what did they actually grind" is the
+                    # question being asked.
+                    "effort": _player_effort(s, event_id, player_id),
                 },
                 "items": items,
                 "tasks": tasks,

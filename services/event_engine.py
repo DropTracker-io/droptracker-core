@@ -1540,9 +1540,7 @@ def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
         from utils.redis import redis_client
 
         redis_conn = getattr(redis_client, "client", None)
-        for event_id, event in state.events.items():
-            if (event.get("kind") or "standard") not in EFFORT_EVENT_KINDS:
-                continue
+        for event_id in state.events:
             state.effort_npcs_by_event[event_id] = load_effort_npcs(
                 session, redis_conn, event_id,
                 state.tasks_by_event.get(event_id) or [])
@@ -1872,11 +1870,12 @@ def _fold_kc_watermark(redis_conn, event_id: int, task_id, player_id: int,
 _EFFORT_MAP_TTL = int(os.getenv("EVENT_EFFORT_MAP_TTL", str(6 * 3600)))
 _EFFORT_ENABLED = (os.getenv("EVENT_EFFORT_ENABLED", "true").strip().lower()
                    not in ("0", "false", "no"))
-# Effort is a per-player investment metric; the kinds below have their own
-# scoring models where "kills at a relevant boss" means nothing (loot_sweep
-# scores loot value, board_game scores tile position). Ignoring them is
-# deliberate — see the plan's "know to ignore some of them".
-EFFORT_EVENT_KINDS = ("standard", "bingo", "clan_vs_clan")
+# Relevance is driven by TASK TYPE, not event kind: a board-game event's tiles
+# are ordinary kc/pb/item tasks and a player grinding one is participating just
+# as much as a bingo player. (An earlier event-kind allowlist excluded
+# board_game, which read as "ToB KC earns nothing here".) Kinds with no
+# effort-bearing task types — loot_sweep, whose tasks accrue loot value rather
+# than being worked toward — resolve to an empty map on their own.
 
 
 def _effort_map_key(event_id: int) -> str:
@@ -1891,11 +1890,19 @@ def _done_tasks_key(event_id: int, team_id) -> str:
     return f"events:{event_id}:donetasks:{team_id}"
 
 
+# Bump when the RESOLVER changes what a given task set maps to (a new task type
+# joins the relevance union, the caps move, …). The digest below covers task
+# config only, so without this a logic change would keep serving stale cached
+# maps until someone happened to edit a task — which is exactly how pb_target
+# support first landed invisibly.
+_EFFORT_MAP_VERSION = "2"
+
+
 def _effort_tasks_digest(tasks) -> str:
     """Identity of an event's task set for effort purposes. Changes only when
-    a task's type/target/source config changes, so editing an unrelated field
-    (label, points) does not force re-inference."""
-    parts = []
+    a task's type/target/source config changes (or the resolver version does),
+    so editing an unrelated field (label, points) does not force re-inference."""
+    parts = [f"v{_EFFORT_MAP_VERSION}"]
     for task in sorted(tasks, key=lambda t: t.get("id") or 0):
         config = task.get("config") or {}
         parts.append("|".join((
@@ -1938,6 +1945,11 @@ def _effort_task_descriptors(session, tasks) -> list:
         npcs, item_names = [], []
         if ttype == "kc_target":
             npcs = list(_kc_npcs(task))
+        elif ttype == "pb_target":
+            # Every attempt at the boss is work toward the task, whether or not
+            # the run beat the target time — a 40-minute ToB that missed the
+            # cutoff is still 40 minutes spent on this event.
+            npcs = [n for n in (_norm(task.get("target")),) if n]
         elif ttype in ("item_collection", "pet_collection", "loot_value"):
             config = task.get("config") or {}
             configured = set(_norm_npc_set(config.get("source_npcs")))
@@ -2100,8 +2112,6 @@ def _apply_effort(session, redis_conn, state: "MatcherState", event: dict,
     """
     if not _EFFORT_ENABLED:
         return
-    if (event.get("kind") or "standard") not in EFFORT_EVENT_KINDS:
-        return
     npcs = state.effort_npcs_by_event.get(event["id"]) or {}
     if not npcs:
         return
@@ -2112,6 +2122,41 @@ def _apply_effort(session, redis_conn, state: "MatcherState", event: dict,
         npc_norm = _norm(data.get("npc_name"))
         kc_abs, seed = data.get("kill_count"), None
         source, offset = "plugin", 1
+    elif kind == "pb":
+        # A kill-time submission is an attempt at the boss, and PB envelopes
+        # carry no absolute KC — so this takes the same no-kill_count path the
+        # crediting side uses: cooldown dedupe (which also collapses the drop
+        # and the pb from ONE kill, since they share the scope and arrive
+        # seconds apart) plus a fallback counter that a later absolute fold
+        # subtracts. Without that counter, a boss that reports both would
+        # double-count every kill.
+        npc_norm = _norm(data.get("npc_name"))
+        entry = npcs.get(npc_norm)
+        if entry is None:
+            return
+        if _effort_frozen(redis_conn, event["id"], team_id, entry.get("tasks"), done_cache):
+            return
+        scope = _effort_scope(npc_norm)
+        try:
+            if not _kc_dedupe(redis_conn, event["id"], scope, player_id,
+                              envelope, staged=staged):
+                return
+            fb_key = _kc_fallback_key(event["id"], scope, player_id)
+            if staged is not None:
+                staged.stage("incr", fb_key)
+                staged.stage("expire", fb_key, _STATE_KEY_TTL)
+            else:
+                redis_conn.incr(fb_key)
+                redis_conn.expire(fb_key, _STATE_KEY_TTL)
+            record_effort(session, event["id"], team_id, player_id, npc_norm,
+                          entry, 1, source="plugin", at=submitted_at)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "effort record failed (pb; event %s, player %s, npc %r)",
+                event["id"], player_id, npc_norm)
+        return
     elif kind == "wom_kc":
         metric = str(data.get("boss_metric") or "").strip().lower()
         npc_norm = next(
@@ -3694,6 +3739,22 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
         if not accepts_submission_source(event, envelope):
             continue
 
+        # Bingo EHB: record the kill as effort regardless of whether anything
+        # below matches — that is the entire point (a week at a boss with no
+        # drop should still show). Deliberately outside the task loop (effort
+        # is per NPC, not per task, so one in-game kill counter feeds it once
+        # however many tiles that NPC serves) and ahead of the board-game
+        # current-tile gate: a board-game player is participating in the event
+        # while they wait on a roll, so their kills still count.
+        _apply_effort(session, redis_conn, state, event, team_id, player_id,
+                      envelope, submitted_at, effort_done_cache, staged=staged)
+        # Effort-only envelopes exist solely to feed the pass above — the WOM
+        # reconciler emits them for bosses relevant to a task but not tracked
+        # BY one, so letting them reach the matcher could only ever credit
+        # something the event never asked for.
+        if (envelope.get("data") or {}).get("effort_only"):
+            continue
+
         # Board-game events (web44a): a team only ever works its CURRENT
         # tile task — no live task (awaiting roll / blocked / finished)
         # means nothing can match for this event.
@@ -3711,20 +3772,6 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
         # Restrict matching to cell-bound tasks. Board-game events have their
         # own current-tile filter above and are excluded here.
         bingo_board = event.get("has_bingo") and event.get("kind") != "board_game"
-
-        # Bingo EHB: record the kill as effort regardless of whether anything
-        # below matches — that is the entire point (a week at a boss with no
-        # drop should still show). Deliberately outside the task loop: effort
-        # is per NPC, not per task, so one in-game kill counter feeds it once
-        # however many tiles that NPC serves.
-        _apply_effort(session, redis_conn, state, event, team_id, player_id,
-                      envelope, submitted_at, effort_done_cache, staged=staged)
-        # Effort-only envelopes exist solely to feed the pass above — the WOM
-        # reconciler emits them for bosses relevant to a task but not tracked
-        # BY one, so letting them reach the matcher could only ever credit
-        # something the event never asked for.
-        if (envelope.get("data") or {}).get("effort_only"):
-            continue
 
         xp_delta = None  # baseline folded at most once per (event, envelope)
         for task in state.tasks_by_event.get(event_id, []):
