@@ -91,7 +91,7 @@ class DatabaseOperations:
 
     async def create_drop_object(self, item_id, player_id, date_received, npc_id, value, quantity, image_url: str = "", authed: bool = False,
                                 attachment_url: str = "", attachment_type: str = "", add_to_queue: bool = True, used_api: bool = False, unique_id: str = None, existing_session=None, model_class=None,
-                                source: str = None):
+                                source: str = None, kill_count: int = None):
         """
         Create a drop object and optionally add it to the processing queue.
         
@@ -114,7 +114,9 @@ class DatabaseOperations:
             used_api (bool, optional): Whether drop was submitted via API. Defaults to False.
             unique_id (str, optional): Unique identifier for deduplication. Defaults to None.
             existing_session (Session, optional): Database session to use. Defaults to None.
-            
+            kill_count (int, optional): Kill count at the time of the drop, already
+                normalized by the caller (None when the plugin reported none).
+
         Returns:
             Drop: The created Drop object
             
@@ -193,6 +195,11 @@ class DatabaseOperations:
         # (the /manual-submit route is main-world only).
         if source and hasattr(drop_model, "source"):
             newdrop.source = source
+        # Kill count at the time of the drop (web76a). Already normalized by the
+        # caller — None when the plugin didn't report one. Same model guard as
+        # `source`: only the main Drop model has the column.
+        if kill_count is not None and hasattr(drop_model, "kill_count"):
+            newdrop.kill_count = kill_count
 
         try:
             # Add the drop to the session and persist enough to generate drop_id.

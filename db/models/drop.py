@@ -58,6 +58,7 @@ class Drop(Base):
         used_api (bool): Whether the drop was submitted via API (default: False)
         partition (int): Time partition for efficient querying (default: current month)
         unique_id (str): Optional unique identifier for deduplication (up to 255 chars)
+        kill_count (int): Optional kill count at the time of the drop, or None
     
     Relationships:
         player: Associated Player object who received the drop
@@ -83,6 +84,11 @@ class Drop(Base):
     hidden = Column(Boolean, default=False, nullable=False, server_default="0")
     partition = Column(Integer, default=get_current_partition, index=True)
     unique_id = Column(String(255), nullable=True)
+    # Kill count at the moment of the drop, as reported by the plugin. NULL when
+    # the source doesn't track one (most non-boss drops) — never 0, which the
+    # plugin sends to mean "unknown" (see data/submissions/drop.py). Main-world
+    # only; the seasonal mirror doesn't carry it.
+    kill_count = Column(Integer, nullable=True)
     # Intake path: NULL = RuneLite plugin (/webhook), 'manual' = website
     # manual submit (/manual-submit). Drives per-group manual-submission
     # policies (suggestion #45) and the events confirm_non_api gate.

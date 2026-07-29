@@ -398,6 +398,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             existing_session=session if use_external_session else None,
             model_class=SeasonalDrop if is_seasonal else None,
             source=intake_source,
+            kill_count=kill_count,
         )
         
 
