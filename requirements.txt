@@ -37,7 +37,7 @@ requests==2.32.4
 # DropTracker fork of wom.py 1.0.0: metric-tolerant decoding (unknown WOM
 # metrics no longer crash the response) + enum current with the live API.
 # Replaces the old hand-patched site-packages copy. See deploy/wom/README.md.
-wom.py @ git+https://github.com/DropTracker-io/wom.py@ff32b4e40bd0997ce46499ef58f61951e803bea4
+wom.py @ git+https://github.com/DropTracker-io/wom.py@5ccc0b1666794ebdfc0a0440bdce723b2bfde242
 
 # Graphing & Visualization
 pillow==12.2.0
