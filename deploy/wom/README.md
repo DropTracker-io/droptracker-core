@@ -40,5 +40,25 @@ no outage, no CI/prod skew.
   the `@<sha>` pin here. `utils/wiseoldman.py` derives its slug sets straight
   from the enum, so there's no second list to update. The events reconciler logs
   when a task target has no WOM metric, so gaps surface on their own.
+- **Bumping the pin on an EXISTING venv — use `--force-reinstall`.** The fork's
+  version string never changes (always `1.0.0+dt.1`), so `pip install -r
+  requirements.txt` (even `--upgrade`) sees "same version already installed" and
+  **silently no-ops**: it clones the new sha, prepares metadata, then skips the
+  install. `pip show` reports success either way and can't tell you the sha. Do:
+
+  ```
+  venv/bin/pip install --no-deps --force-reinstall \
+    "wom.py @ git+https://github.com/DropTracker-io/wom.py@<sha>"
+  ```
+
+  and verify the sha that actually landed:
+
+  ```
+  cat venv/lib/python3.11/site-packages/wom_py-*.dist-info/direct_url.json
+  ```
+
+  Then restart the WOM-metric consumers — `droptracker-events`,
+  `droptracker-player-updates`, `droptracker-webapi`, `droptracker-core` —
+  since running processes hold the old module in memory.
 - **Bigger jump:** upstream has a v3.x line (breaking client API). Migrating to
   it is a separate, larger task; the fork keeps us on a stable 1.0.0 base.
