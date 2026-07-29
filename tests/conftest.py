@@ -45,6 +45,7 @@ _STUBS = [
     "db.models.combat_achievement",
     "db.models.player_pet",
     "db.models.quest_completion",
+    "db.models.recap",
     "db.models.seasonal_drop",
     "db.models.seasonal_personal_best",
     "db.models.seasonal_collection",

@@ -57,6 +57,13 @@ from .drop_split import DropSplit
 from .web import GroupAdmin, GroupEventManager, Announcement, AuditLog, DiscordOutbox, DocsPage, SiteRedirect, Suggestion, SuggestionMessage
 from .knowledgebase import KBDocument, KBChunk, KBIngestState, KB_SOURCE_TYPES
 from .badge import Badge, PlayerBadge
+from .recap import (
+    RecapSnapshot,
+    RECAP_SCHEMA_VERSION,
+    RECAP_SCOPES,
+    SCOPE_GROUP,
+    SCOPE_PLAYER,
+)
 from .subscriptions import (
     SubscriptionTier,
     GroupSubscription,
@@ -228,6 +235,11 @@ __all__ = [
     "KBIngestState",
     "KB_SOURCE_TYPES",
     "Badge",
+    "RecapSnapshot",
+    "RECAP_SCHEMA_VERSION",
+    "RECAP_SCOPES",
+    "SCOPE_GROUP",
+    "SCOPE_PLAYER",
     "PlayerBadge",
     "SubscriptionTier",
     "GroupSubscription",
