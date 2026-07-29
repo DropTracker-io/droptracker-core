@@ -38,6 +38,7 @@ pytest tests/integration -q   # needs live MySQL + Redis
 2. Generate a migration: `alembic revision --autogenerate -m "describe the change"`.
 3. Review the generated file carefully — autogenerate is noisy with this schema.
 4. Include the migration file contents in your PR description (since `alembic/versions/` is gitignored, reviewers can't see it in the diff).
+5. Check `alembic heads` — it must print exactly one. Because the version files aren't shared, it's easy to author a migration off a head that has since moved and split the graph in two; `alembic upgrade head` then refuses to run at all. Merge the split immediately with `alembic merge -m "why these lines diverged" heads` (no DDL — it just rejoins the graph). `tests/unit/test_alembic_single_head.py` guards this locally.
 
 Two things to keep in mind: the ORM spans **two MySQL schemas** (`data` and `xenforo`), and several submission tables have `seasonal_*` mirrors that usually need the same change.
 
