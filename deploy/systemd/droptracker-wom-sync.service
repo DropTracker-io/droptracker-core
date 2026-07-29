@@ -1,0 +1,30 @@
+# Auto-track the wom.py fork: install new WOM metrics and restart the services
+# that hold the enum in memory. Triggered by droptracker-wom-sync.timer — do not
+# enable the service itself.
+#
+# Runs as `debian` deliberately: that user owns venv/ (pip install), .git and
+# requirements.txt (pin commit), holds the SSH key the origin remote needs, and
+# has passwordless sudo for systemctl. Running as root would break the push.
+#
+# A run with nothing to do is a single `git ls-remote` and exits 0.
+# On a bad commit it rolls back and leaves the services untouched.
+#
+# Manual run:   sudo systemctl start droptracker-wom-sync.service
+# Dry run:      cd /store/droptracker/disc && venv/bin/python -m scripts.sync_wom_fork
+# Watch it:     journalctl -u droptracker-wom-sync.service -f
+
+[Unit]
+Description=Sync the wom.py fork (new WOM metrics) and restart consumers
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.sync_wom_fork --apply
+# Bounded by pip clone + install + a short test run; well under this.
+TimeoutStartSec=20m
+Nice=10
+# Set WOM_SYNC_NOTIFY=0 to silence the Discord DM on update/failure.
+#Environment=WOM_SYNC_NOTIFY=0

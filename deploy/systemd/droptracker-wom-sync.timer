@@ -1,0 +1,27 @@
+# Trigger for droptracker-wom-sync.service, every 30 minutes.
+#
+# Paced to match the fork's own sync workflow, which checks @wise-old-man/utils
+# hourly on Wed/Thu (OSRS update days) and every 12h otherwise. Checking twice
+# an hour means a new boss is live on this box within ~30 min of the fork
+# committing it, without needing the two schedules to line up.
+#
+# The cost of a no-change run is one `git ls-remote`, so the frequency is
+# effectively free; RandomizedDelaySec keeps it off the top of the hour where
+# the rollup re-folds and the GitHub Pages publisher already run.
+#
+# Install:  sudo cp deploy/systemd/droptracker-wom-sync.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now droptracker-wom-sync.timer
+
+[Unit]
+Description=Check the wom.py fork for new WOM metrics (every 30 min)
+
+[Timer]
+OnCalendar=*:0/30
+RandomizedDelaySec=300
+# Replay a missed check after a reboot rather than waiting for the next slot.
+Persistent=true
+Unit=droptracker-wom-sync.service
+
+[Install]
+WantedBy=timers.target
