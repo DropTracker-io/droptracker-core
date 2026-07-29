@@ -52,6 +52,7 @@ from web_api.routes.player_claims import player_claims_bp
 from web_api.routes.points import points_bp
 from web_api.routes.profiles import profiles_bp
 from web_api.routes.realtime import realtime_bp
+from web_api.routes.recaps import recaps_bp
 from web_api.routes.redirects import redirects_bp
 from web_api.routes.resolve import resolve_bp
 from web_api.routes.search import search_bp
@@ -186,6 +187,7 @@ def create_app() -> Quart:
     app.register_blueprint(player_claims_bp, url_prefix=API_PREFIX)
     app.register_blueprint(points_bp, url_prefix=API_PREFIX)
     app.register_blueprint(profiles_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(recaps_bp, url_prefix=API_PREFIX)
     app.register_blueprint(redirects_bp, url_prefix=API_PREFIX)
     app.register_blueprint(resolve_bp, url_prefix=API_PREFIX)
     app.register_blueprint(search_bp, url_prefix=API_PREFIX)

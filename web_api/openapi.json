@@ -908,6 +908,111 @@
           }
         }
       }
+    },
+    "/recaps/{scope}/{subjectId}/{period}": {
+      "get": {
+        "tags": [
+          "recaps"
+        ],
+        "operationId": "getRecap",
+        "summary": "One recap card (monthly or annual), as frozen when generated",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "description": "Recap subject kind.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "group",
+                "player"
+              ]
+            }
+          },
+          {
+            "name": "subjectId",
+            "in": "path",
+            "required": true,
+            "description": "Group id or player id, per `scope`.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "period",
+            "in": "path",
+            "required": true,
+            "description": "'YYYY-MM' for a monthly card, 'YYYY' for the annual fold.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recap payload. Fields are additive across schema_version; readers omit what they don't find.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/recaps/{scope}/{subjectId}": {
+      "get": {
+        "tags": [
+          "recaps"
+        ],
+        "operationId": "listRecaps",
+        "summary": "Every period this subject has a recap for, newest first",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "description": "Recap subject kind.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "group",
+                "player"
+              ]
+            }
+          },
+          {
+            "name": "subjectId",
+            "in": "path",
+            "required": true,
+            "description": "Group id or player id, per `scope`.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recap archive index.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1142,7 +1247,7 @@
           "signups_close_at": {
             "type": "integer",
             "nullable": true,
-            "description": "Derived, unix seconds: when sign-ups close — the event's start, or its end when allow_late_signups is set. Null when unscheduled (it closes at activation)."
+            "description": "Derived, unix seconds: when sign-ups close \u2014 the event's start, or its end when allow_late_signups is set. Null when unscheduled (it closes at activation)."
           },
           "activated_at": {
             "type": "integer",
