@@ -172,7 +172,7 @@ def _buyin(**kw):
     base = dict(
         id=9, event_id=1, team_id=3, player_id=5, rsn="P", user_id=7,
         kind="buyin", amount=1000, status="pledged", note=None,
-        paid_at=None, created_at=None,
+        proof_url=None, paid_at=None, created_at=None,
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -295,6 +295,99 @@ class TestUpdateBuyin:
             "/api/v1/events/1/buyins/9", json={"status": "banana"}
         )
         assert r.status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# Screenshot proof (web75a)
+# --------------------------------------------------------------------------- #
+_PROOF_KEY = "dt_uploads/" + "ab" * 16 + ".png"
+
+
+class TestBuyinProof:
+    async def test_record_stores_a_cdn_url_built_from_the_key(self, client, monkeypatch):
+        s = _S([_event()], [_team(3)], [_player(player_id=5)])
+        _wire_epr(monkeypatch, s)
+        monkeypatch.setattr(epr, "EventBuyin", _RecBuyin)
+        r = await client.post(
+            "/api/v1/events/1/buyins",
+            json={"kind": "donation", "amount": 1000, "rsn": "Sponsor",
+                  "proof_key": _PROOF_KEY},
+        )
+        assert r.status_code == 200
+        row = next(a for a in s.added if isinstance(a, _RecBuyin))
+        # The host comes from B2_CDN_BASE_URL — only the key half is ours to
+        # assert, and it must never be a client-supplied address.
+        assert row.proof_url.startswith("https://")
+        assert row.proof_url.endswith("/" + _PROOF_KEY)
+
+    async def test_record_without_a_key_leaves_it_null(self, client, monkeypatch):
+        s = _S([_event()], [_team(3)], [_player(player_id=5)])
+        _wire_epr(monkeypatch, s)
+        monkeypatch.setattr(epr, "EventBuyin", _RecBuyin)
+        r = await client.post(
+            "/api/v1/events/1/buyins",
+            json={"amount": 500, "player_id": 5, "team_id": 3},
+        )
+        assert r.status_code == 200
+        row = next(a for a in s.added if isinstance(a, _RecBuyin))
+        assert row.proof_url is None
+
+    @pytest.mark.parametrize("bad", [
+        "https://evil.example/pwn.png",         # an absolute URL, not a key
+        "dt_uploads/../../etc/passwd",          # traversal
+        "dt_uploads/nothex.png",                # not a minted uuid
+        "dt_uploads/" + "ab" * 16 + ".svg",     # not an accepted image type
+        "other_prefix/" + "ab" * 16 + ".png",   # outside the uploader namespace
+        123,
+    ])
+    async def test_bogus_proof_key_rejected(self, client, monkeypatch, bad):
+        s = _S([_event()])
+        _wire_epr(monkeypatch, s)
+        monkeypatch.setattr(epr, "EventBuyin", _RecBuyin)
+        r = await client.post(
+            "/api/v1/events/1/buyins",
+            json={"kind": "donation", "amount": 10, "rsn": "x", "proof_key": bad},
+        )
+        assert r.status_code == 422
+        assert not s.committed
+
+    async def test_patch_attaches_and_detaches(self, client, monkeypatch):
+        row = _buyin()
+        s = _S([_event()], [row])
+        _wire_epr(monkeypatch, s)
+        r = await client.patch(
+            "/api/v1/events/1/buyins/9",
+            json={"status": "paid", "proof_key": _PROOF_KEY},
+        )
+        assert r.status_code == 200
+        assert row.proof_url.endswith("/" + _PROOF_KEY)
+
+        # An explicit null detaches; omitting the field leaves it alone.
+        s2 = _S([_event()], [row])
+        _wire_epr(monkeypatch, s2)
+        assert (await client.patch(
+            "/api/v1/events/1/buyins/9", json={"note": "n"}
+        )).status_code == 200
+        assert row.proof_url is not None
+        s3 = _S([_event()], [row])
+        _wire_epr(monkeypatch, s3)
+        assert (await client.patch(
+            "/api/v1/events/1/buyins/9", json={"proof_key": None}
+        )).status_code == 200
+        assert row.proof_url is None
+
+    def test_proof_rides_with_the_row_on_public_reads(self, monkeypatch):
+        """Unlike `note`, proof is visible to whoever may see the contribution
+        — it exists to make the advertised pot verifiable."""
+        monkeypatch.setattr(epr, "_is_event_admin", lambda *a, **k: False)
+        ev = _event(buyins_enabled=True)
+        rows = [_buyin(id=1, team_id=1, player_id=5, kind="buyin", amount=100,
+                       status="paid", note="secret",
+                       proof_url="https://cdn.example/x.png")]
+        s = _S([_team(1)], [(1, 1)], rows, [(5, "Zez")])
+        out = epr._pot_payload(s, ev, viewer_id=None)
+        assert out["contributors"][0]["proof_url"] == "https://cdn.example/x.png"
+        assert out["contributors"][0]["note"] is None
 
 
 # --------------------------------------------------------------------------- #

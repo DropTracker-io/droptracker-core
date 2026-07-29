@@ -8,9 +8,17 @@ The tool tracks/advertises GP only — payouts are traded in-game by the clan
 
   GET    /api/v1/events/{id}/pot                         -> pot read (public)
   POST   /api/v1/events/{id}/buyins   { player_id?|rsn?, team_id?, kind?,
-                                        amount, status?, note? }        -> { id }
-  PATCH  /api/v1/events/{id}/buyins/{buyinId} { amount?, status?, note? } -> { ok }
+                                        amount, status?, note?,
+                                        proof_key? }                    -> { id }
+  PATCH  /api/v1/events/{id}/buyins/{buyinId} { amount?, status?, note?,
+                                                proof_key? }            -> { ok }
   DELETE /api/v1/events/{id}/buyins/{buyinId}            -> { ok, voided }
+
+``proof_key`` (web75a) is the object key returned by ``POST /uploads/proof`` —
+the shared, Pillow-validated screenshot uploader the manual-submission form
+already uses. The URL is built here from ``B2_CDN_BASE_URL``, never taken from
+the client, so the ledger can only ever point at our own CDN. Send
+``proof_key: null`` on a PATCH to detach.
 
 Writes require event-admin auth (the confirmed ``events`` entitlement); when
 ``prize_config.allow_leader_mark`` is on, a **team leader** may also
@@ -26,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime
 
 from quart import Blueprint, jsonify
@@ -74,6 +83,15 @@ event_prizes_bp = Blueprint("v1_event_prizes", __name__)
 # Statuses accepted on create / edit (never "void" directly — deletes soft-void).
 _SETTABLE_STATUSES = ("pledged", "paid")
 
+# Object keys minted by POST /uploads/proof: dt_uploads/{uuid4 hex}.{ext}.
+# Matched strictly (web75a) so a caller can never point a ledger row at an
+# arbitrary address — the stored URL is built from B2_CDN_BASE_URL below, not
+# taken from the request body.
+_PROOF_KEY_RE = re.compile(r"^dt_uploads/[0-9a-f]{32}\.(?:png|jpg|webp|gif)$")
+
+# "field absent" vs. an explicit null (= detach the screenshot).
+_UNSET = object()
+
 
 # --------------------------------------------------------------------------- #
 # Authorization: admins always (entitlement-gated); team leaders may tick their
@@ -119,6 +137,7 @@ def _snapshot(b: EventBuyin) -> str:
         "amount": int(b.amount or 0),
         "status": b.status,
         "note": b.note,
+        "proof_url": b.proof_url,
     })
 
 
@@ -140,6 +159,29 @@ def _clean_note(body: dict):
     if len(note) > 255:
         abort_problem(422, "Invalid note", "'note' must be at most 255 characters.")
     return note or None
+
+
+def _clean_proof(body: dict):
+    """``proof_key`` → the CDN URL to store, ``None`` to detach, ``_UNSET``
+    when the caller didn't mention it at all."""
+    if "proof_key" not in body:
+        return _UNSET
+    key = body.get("proof_key")
+    if key is None:
+        return None
+    if not isinstance(key, str):
+        abort_problem(422, "Invalid proof", "'proof_key' must be a string or null.")
+    key = key.strip()
+    if not key:
+        return None
+    if not _PROOF_KEY_RE.match(key):
+        abort_problem(
+            422, "Invalid proof",
+            "'proof_key' must be an object key returned by the proof uploader.",
+        )
+    from web_api.routes.submissions import B2_CDN_BASE_URL
+
+    return f"{B2_CDN_BASE_URL.rstrip('/')}/{key}"
 
 
 def _assert_team_in_event(s, event_id: int, team_id) -> None:
@@ -168,6 +210,11 @@ def _buyin_row(b: EventBuyin, name, can_manage: bool) -> dict:
         "status": b.status,
         # Notes are an admin affordance — never on public reads.
         "note": b.note if can_manage else None,
+        # Proof, unlike the note, rides with the row: it exists to make the
+        # advertised pot verifiable, so it is visible to exactly whoever is
+        # allowed to see the contribution itself (show_contributors gates the
+        # whole list upstream in _pot_payload).
+        "proof_url": b.proof_url,
         "created_at": _ts(b.created_at),
     }
 
@@ -324,6 +371,7 @@ async def record_buyin(event_id: int):
         abort_problem(422, "Invalid kind", f"'kind' must be one of {list(EVENT_BUYIN_KINDS)}.")
     amount = _clean_amount(body.get("amount", 0))
     note = _clean_note(body)
+    proof = _clean_proof(body)
     player_id = body.get("player_id")
     if player_id is not None and (not isinstance(player_id, int) or isinstance(player_id, bool)):
         abort_problem(422, "Invalid player_id", "'player_id' must be an integer or null.")
@@ -373,6 +421,7 @@ async def record_buyin(event_id: int):
                 amount=amount,
                 status=status,
                 note=note,
+                proof_url=None if proof is _UNSET else proof,
                 acted_by_user_id=user_id,
                 paid_at=datetime.utcnow() if status == "paid" else None,
             )
@@ -397,7 +446,7 @@ async def record_buyin(event_id: int):
 
 @event_prizes_bp.patch("/events/<int:event_id>/buyins/<int:buyin_id>")
 async def update_buyin(event_id: int, buyin_id: int):
-    """Edit amount / status / note. Setting ``status='paid'`` stamps
+    """Edit amount / status / note / proof. Setting ``status='paid'`` stamps
     ``paid_at`` — this is the roster "tick"."""
     user_id = current_user_id()
     body = await json_body()
@@ -431,6 +480,12 @@ async def update_buyin(event_id: int, buyin_id: int):
                 row.amount = _clean_amount(body.get("amount"))
             if "note" in body:
                 row.note = _clean_note(body)
+            # Attaching/detaching the screenshot is part of "mark this paid",
+            # so it stays inside a leader's allow_leader_mark scope — unlike
+            # the amount, which only an event admin sets.
+            proof = _clean_proof(body)
+            if proof is not _UNSET:
+                row.proof_url = proof
             if "status" in body:
                 status = body.get("status")
                 if status not in EVENT_BUYIN_STATUSES:

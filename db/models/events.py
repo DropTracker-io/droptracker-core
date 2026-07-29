@@ -705,6 +705,11 @@ class EventBuyin(Base):
     amount = Column(BigInteger, nullable=False, default=0)  # GP — BigInteger (see docstring)
     status = Column(String(16), nullable=False, default="pledged")  # EVENT_BUYIN_STATUSES
     note = Column(String(255), nullable=True)
+    # Optional screenshot backing this contribution — the trade window, the
+    # "you have received" chat line (web75a). Same shape and role as
+    # :attr:`EventCompletion.proof_url`: a public CDN URL derived server-side
+    # from an uploaded object key, never a client-supplied address.
+    proof_url = Column(String(255), nullable=True)
     # Admin/leader who last recorded or ticked this row.
     acted_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
