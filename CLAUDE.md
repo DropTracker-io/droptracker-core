@@ -121,6 +121,8 @@ droptracker/
 │   ├── user.py             # /help, /accounts, /settings, /claim-rsn, etc.
 │   ├── admin.py            # /create-group, /webhooks, etc.
 │   ├── group_admin.py      # Point adjustments, audit log
+│   ├── submissions.py      # /submit drop|clog|pb|ca|pet — manual submissions
+│   │                       #   (item/NPC autocomplete; forwards to /manual-submit)
 │   └── utils.py            # try_create_user, is_admin, is_user_authorized
 │
 ├── data/
@@ -132,6 +134,7 @@ droptracker/
 │       ├── pb.py  clog.py  ca.py  pet.py  quest.py  experience.py
 │       ├── death.py  diary.py  adventure_log.py
 │       ├── manual_policy.py     # Rules for web/manual (non-plugin) submissions
+│       ├── manual_discord.py    # Pure helpers for the Discord /submit commands
 │       └── point_awards.py      # check_and_award_points()
 │
 ├── db/
