@@ -28,6 +28,12 @@ LAST_ID_KEY = "npc_totals:last_drop_id"
 REFOLD_INTERVAL_SEC = int(os.getenv("ROLLUP_REFOLD_INTERVAL_SEC", "3600"))
 REFOLD_PACE_SEC = float(os.getenv("ROLLUP_REFOLD_PACE_SEC", "1.0"))
 PREV_MONTH_GRACE_DAYS = int(os.getenv("ROLLUP_REFOLD_PREV_MONTH_DAYS", "3"))
+# Hours of data per re-fold statement — see services/item_totals.py, which hit
+# the engine's 30s read_timeout doing a whole day per statement. This rollup is
+# ~16x smaller and has not crossed that line, but it is the same code shape on
+# the same growing `drops` table, so it is chunked identically rather than left
+# to fail later. Must divide 24 and stay >= 1 (chunks align to `date_hour`).
+REFOLD_CHUNK_HOURS = max(1, min(24, int(os.getenv("ROLLUP_REFOLD_CHUNK_HOURS", "1"))))
 
 _UPSERT_WINDOW_SQL = text(
     "INSERT INTO player_npc_hourly_totals "
@@ -183,6 +189,19 @@ def refold_partitions() -> list[int]:
     return parts
 
 
+def _hour_chunks(day_start, day_end):
+    """Yield (start, end) datetimes covering [day_start, day_end) in
+    REFOLD_CHUNK_HOURS steps. Accepts dates or datetimes; the final chunk is
+    clamped to day_end so a chunk size that doesn't divide the span can't
+    scan past the day."""
+    start = datetime.combine(day_start, datetime.min.time()) if not isinstance(day_start, datetime) else day_start
+    end = datetime.combine(day_end, datetime.min.time()) if not isinstance(day_end, datetime) else day_end
+    while start < end:
+        nxt = min(start + timedelta(hours=REFOLD_CHUNK_HOURS), end)
+        yield start, nxt
+        start = nxt
+
+
 def refold_plan() -> list[tuple[int, date, date]]:
     """Flattened (partition, day_start, day_end) work list for one re-fold pass,
     so the caller can drive it one day at a time (heartbeats/pacing between days)."""
@@ -207,12 +226,22 @@ def refold_day(session, partition: int, day_start, day_end, max_drop_id: int) ->
     Capping at max_drop_id (the tailer pointer) is what makes this safe to run
     on the live current partition: it never counts a drop with id > pointer that
     the additive tailer will still fold, so the two never double-count. Returns
-    rows affected."""
+    rows affected.
+
+    Executed in REFOLD_CHUNK_HOURS-sized statements, committed per chunk, so no
+    single statement can approach the engine's read_timeout. Chunks are aligned
+    to whole `date_hour` buckets (a bucket IS one hour), so each statement still
+    fully recomputes every bucket it touches and stays idempotent — an
+    interrupted day just leaves later chunks for the next pass, exactly as an
+    interrupted month already leaves later days."""
     s = session or _default_session
-    result = s.execute(
-        _REFOLD_DAY_SQL,
-        {"partition": int(partition), "day_start": day_start,
-         "day_end": day_end, "max_id": int(max_drop_id)},
-    )
-    s.commit()
-    return result.rowcount or 0
+    affected = 0
+    for chunk_start, chunk_end in _hour_chunks(day_start, day_end):
+        result = s.execute(
+            _REFOLD_DAY_SQL,
+            {"partition": int(partition), "day_start": chunk_start,
+             "day_end": chunk_end, "max_id": int(max_drop_id)},
+        )
+        s.commit()
+        affected += result.rowcount or 0
+    return affected
