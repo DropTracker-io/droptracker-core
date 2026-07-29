@@ -187,10 +187,13 @@ class GithubPagesUpdater:
 
     def _item_list_contents(self):
         """The deterministic plugin id-list files: ``valued_items.txt`` (active
-        value-override ids, always force-screenshotted) and
-        ``untradeable_items.txt`` (curated notable untradeables, toggle-gated).
-        Publishing them here keeps both in lockstep with the database / curated
-        source without a manual content-repo commit."""
+        value-override ids, always force-screenshotted), ``untradeable_items.txt``
+        (curated notable untradeables, toggle-gated) and
+        ``server_loot_npc_ids.txt`` (npcs whose loot RuneLite only reports via
+        ServerNpcLoot — see scripts/export_server_loot_npcs.py; publishing it
+        means a new server-loot boss no longer needs a plugin release).
+        Publishing them here keeps all three in lockstep with the database /
+        curated source without a manual content-repo commit."""
         out = []
         try:
             from db.models import ItemValueOverride
@@ -215,6 +218,14 @@ class GithubPagesUpdater:
                 out.append(("content/untradeable_items.txt", ",".join(str(i) for i in ids)))
         except Exception as e:
             print(f"Failed to build untradeable_items.txt content: {e}")
+        try:
+            from scripts.export_server_loot_npcs import build_content
+
+            content = build_content()
+            if content:
+                out.append(("content/server_loot_npc_ids.txt", content))
+        except Exception as e:
+            print(f"Failed to build server_loot_npc_ids.txt content: {e}")
         return out
 
     def _update_github_pages(self):
