@@ -394,6 +394,45 @@ def _npc_rollup(session, player_ids: list[int], period: str) -> dict:
 # --------------------------------------------------------------------------- #
 # `drops` reads — the one source that carries a single row's identity
 # --------------------------------------------------------------------------- #
+# Where submission screenshots live on disk, and where nginx serves them from.
+# Both halves are copied from ``utils/download.py``, which owns the convention.
+_UPLOAD_DIR_MARKER = "/static/assets/img/"
+_UPLOAD_URL_BASE = "https://www.droptracker.io/img/"
+
+
+def _public_image_url(raw: Optional[str]) -> Optional[str]:
+    """A screenshot URL a browser can actually fetch, or None.
+
+    ``drops.image_url`` is not consistently a URL: some rows carry the on-disk
+    path the file was written to (``/store/droptracker/disc/static/assets/img/
+    user-upload/...``) instead of the address it's served at. Rendered as-is
+    that's an ``<img>`` pointing at a filesystem path, which draws a broken-image
+    box on the poster — strictly worse than the blank the layout already handles,
+    because a card that shows its own plumbing failing discredits the numbers
+    beside it.
+
+    Absolute http(s) values pass through. A local path is mapped onto the public
+    prefix. Anything else is dropped, on the same omit-never-zero principle as
+    the rest of the card: no proof beats broken proof.
+    """
+    if not raw:
+        return None
+    url = raw.strip()
+    if not url:
+        return None
+    if url.startswith(("http://", "https://")):
+        return url
+    marker = url.find(_UPLOAD_DIR_MARKER)
+    if marker != -1:
+        return _UPLOAD_URL_BASE + url[marker + len(_UPLOAD_DIR_MARKER):].lstrip("/")
+    # Already site-relative ("/img/..."), which the site and the capture page
+    # both resolve same-origin — but the snapshot is an archive that may be
+    # rendered elsewhere, so store it absolute.
+    if url.startswith("/img/"):
+        return _UPLOAD_URL_BASE + url[len("/img/"):]
+    return None
+
+
 def _biggest_drop(session, player_ids: list[int], period: str) -> Optional[dict]:
     """The period's single largest drop, with the evidence attached.
 
@@ -444,7 +483,7 @@ def _biggest_drop(session, player_ids: list[int], period: str) -> Optional[dict]
         "quantity": int(quantity or 0),
         "total_value": int(total_value or 0),
         "date": date_added.isoformat() if date_added else None,
-        "image_url": image_url or None,
+        "image_url": _public_image_url(image_url),
         "kill_count": int(kill_count) if kill_count is not None else None,
     }
 
@@ -557,6 +596,49 @@ def _visible_group_player_ids(session, group_id: int) -> list[int]:
     return sorted(ids)
 
 
+# Groups 1 and 2 are infrastructure, not clans — 1 is the config template and 2
+# holds every tracked player. Neither belongs in a player's clan line.
+_NON_CLAN_GROUP_IDS = (1, 2)
+
+
+def _player_groups(session, player_id: int, limit: int = 2) -> list[dict]:
+    """The clans this player belongs to.
+
+    On a personal card the clan name is the context the player didn't already
+    know they'd get — it's what makes the card theirs rather than a stat sheet.
+    Capped because a few players sit in many groups and the header has room for
+    two. ``user_group_association`` carries no join date, so the order is by
+    group id (stable, not chronological) and the cap takes the oldest clans.
+    """
+    rows = session.execute(
+        text(
+            "SELECT g.group_id, g.group_name FROM user_group_association a "
+            "JOIN groups g ON g.group_id = a.group_id "
+            "WHERE a.player_id = :pid AND a.group_id NOT IN :skip "
+            "ORDER BY a.group_id"
+        ).bindparams(bindparam("skip", expanding=True)),
+        {"pid": player_id, "skip": list(_NON_CLAN_GROUP_IDS)},
+    ).fetchall()
+    return [{"id": int(gid), "name": name} for gid, name in rows[:limit] if gid and name]
+
+
+def _player_is_hidden(player_id: int) -> bool:
+    """Whether this player has opted out of public display.
+
+    Group cards already drop hidden members from their aggregates
+    (:func:`_visible_group_player_ids`); a *personal* card is the stronger case,
+    because the whole card is about one person and it gets a permanent public
+    URL. Fails closed: if the privacy list can't be read, treat the player as
+    hidden rather than publish a card we can't confirm they allow.
+    """
+    try:
+        from web_api.common import hidden_player_ids
+
+        return player_id in hidden_player_ids()
+    except Exception:
+        return True
+
+
 def _player_names(session, player_ids: list[int]) -> dict[int, str]:
     if not player_ids:
         return {}
@@ -602,20 +684,30 @@ def _base_month_payload(session, player_ids: list[int], period: str) -> dict:
 
 def compute_player_month(session, player_id: int, period: str) -> Optional[dict]:
     """One player's recap for one month, or ``None`` if they're below the
-    activity floor."""
+    activity floor or have opted out of public display."""
+    if _player_is_hidden(player_id):
+        return None
+
     partition = period_partition(period)
     payload = _base_month_payload(session, [player_id], period)
     if payload["totals"]["drops"] < MIN_DROPS_FOR_RECAP:
         return None
 
+    prev_period = previous_month_period(period)
+    prev_partition = period_partition(prev_period)
     totals = _redis_totals([player_id], partition)
-    prev_totals = _redis_totals([player_id], period_partition(previous_month_period(period)))
+    prev_totals = _redis_totals([player_id], prev_partition)
     rank, ranked = _player_rank(player_id, partition)
+    prev_rank, prev_ranked = _player_rank(player_id, prev_partition)
     names = _player_names(session, [player_id])
 
     payload["totals"]["loot"] = int(totals.get(player_id, 0))
     payload["scope"] = SCOPE_PLAYER
-    payload["subject"] = {"id": player_id, "name": names.get(player_id)}
+    payload["subject"] = {
+        "id": player_id,
+        "name": names.get(player_id),
+        "groups": _player_groups(session, player_id),
+    }
     # Per-item attribution is meaningful on a clan card and tautological on a
     # player's own: every item here was received by the subject. Strip it rather
     # than make the renderer special-case scope, and keep the stored payload from
@@ -630,6 +722,16 @@ def compute_player_month(session, player_id: int, period: str) -> Optional[dict]
         # nothing here because the rank and the board size are both O(1) reads.
         "percentile": round(100.0 * rank / ranked, 1) if rank and ranked else None,
         "previous_loot": int(prev_totals.get(player_id, 0)),
+        # Last month's placing, so the card can show movement. Both boards are
+        # O(1) Redis reads.
+        #
+        # Deliberately NOT differenced into "up 40 places": the board's size
+        # changes month to month, so a player who held still while 300 accounts
+        # joined below them hasn't moved down, and subtracting positions would
+        # claim they had. The card states both placings and lets the reader draw
+        # the line. `previous_of` is here so that judgement stays auditable.
+        "previous_position": prev_rank,
+        "previous_of": prev_ranked,
     }
     return _finalize(payload, period)
 

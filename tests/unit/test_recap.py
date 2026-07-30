@@ -355,3 +355,133 @@ class TestReceiverFold:
         })
         for entry in (*out["top_items"], *out["top_npcs"]):
             assert not [k for k in entry if k.startswith("_")], entry
+
+
+class TestPlayerMonth:
+    """`compute_player_month` — the personal card.
+
+    Its DB and Redis reads are stubbed; what's under test is the set of
+    judgements it makes on top of them: who is allowed a card at all, and what
+    the card is permitted to claim.
+    """
+
+    def _compute(self, monkeypatch, *, drops=100, hidden=False, rank=(34, 4812),
+                 prev_rank=(74, 4500), groups=None, top_items=None):
+        ranks = {202506: rank, 202505: prev_rank}
+        monkeypatch.setattr(recap, "_player_is_hidden", lambda pid: hidden)
+        monkeypatch.setattr(
+            recap, "_base_month_payload",
+            lambda session, pids, period: {
+                "totals": {"drops": drops, "loot_rollup": 999, "unique_items": 7},
+                "top_items": [dict(i) for i in (top_items or [])],
+                "top_npcs": [],
+                "achievements": {},
+            },
+        )
+        monkeypatch.setattr(recap, "_redis_totals",
+                            lambda pids, partition: {795: 1_000 if partition == 202506 else 500})
+        monkeypatch.setattr(recap, "_player_rank",
+                            lambda pid, partition: ranks.get(partition, (None, None)))
+        monkeypatch.setattr(recap, "_player_names", lambda session, pids: {795: "Buzzyn"})
+        monkeypatch.setattr(recap, "_player_groups",
+                            lambda session, pid, **kw: groups if groups is not None else [])
+        monkeypatch.setattr(recap, "_finalize", lambda payload, period: payload)
+        return recap.compute_player_month(None, 795, "2025-06")
+
+    def test_hidden_player_gets_no_card(self, monkeypatch):
+        # A personal card is a permanent public URL about one person; opting out
+        # of public display has to mean this too.
+        assert self._compute(monkeypatch, hidden=True) is None
+
+    def test_below_the_activity_floor_gets_no_card(self, monkeypatch):
+        assert self._compute(monkeypatch, drops=recap.MIN_DROPS_FOR_RECAP - 1) is None
+
+    def test_at_the_activity_floor_gets_a_card(self, monkeypatch):
+        # The floor is inclusive — a player with exactly the minimum qualifies.
+        assert self._compute(monkeypatch, drops=recap.MIN_DROPS_FOR_RECAP) is not None
+
+    def test_headline_loot_comes_from_redis_not_the_rollup(self, monkeypatch):
+        out = self._compute(monkeypatch)
+        assert out["totals"]["loot"] == 1_000
+        assert out["totals"]["loot_rollup"] == 999
+
+    def test_percentile_is_position_over_board_size(self, monkeypatch):
+        out = self._compute(monkeypatch, rank=(34, 4812))
+        assert out["rank"]["percentile"] == round(100.0 * 34 / 4812, 1)
+
+    def test_percentile_is_none_without_a_rank(self, monkeypatch):
+        out = self._compute(monkeypatch, rank=(None, None))
+        assert out["rank"]["percentile"] is None
+
+    def test_previous_placing_is_read_from_the_previous_month(self, monkeypatch):
+        out = self._compute(monkeypatch, rank=(34, 4812), prev_rank=(74, 4500))
+        assert out["rank"]["previous_position"] == 74
+        assert out["rank"]["previous_of"] == 4500
+
+    def test_previous_placing_is_stated_not_differenced(self, monkeypatch):
+        # The board grows, so a position delta can report a player who held
+        # still as having fallen. Both numbers ship; no delta does.
+        out = self._compute(monkeypatch)
+        assert "delta" not in out["rank"]
+        assert "movement" not in out["rank"]
+        assert "places" not in out["rank"]
+
+    def test_previous_placing_absent_when_they_were_unranked(self, monkeypatch):
+        out = self._compute(monkeypatch, prev_rank=(None, None))
+        assert out["rank"]["previous_position"] is None
+
+    def test_clans_land_on_the_subject(self, monkeypatch):
+        out = self._compute(monkeypatch, groups=[{"id": 14, "name": "Pegasus PvM"}])
+        assert out["subject"] == {
+            "id": 795, "name": "Buzzyn",
+            "groups": [{"id": 14, "name": "Pegasus PvM"}],
+        }
+
+    def test_clanless_player_gets_an_empty_group_list(self, monkeypatch):
+        out = self._compute(monkeypatch, groups=[])
+        assert out["subject"]["groups"] == []
+
+    def test_item_attribution_is_stripped(self, monkeypatch):
+        # Naming the receiver on a player's own card is tautological — every item
+        # in it was theirs.
+        out = self._compute(monkeypatch, top_items=[
+            _item(1, "Imbued heart", 100, receiver=(795, "Buzzyn"), receivers=1),
+        ])
+        assert "receiver" not in out["top_items"][0]
+        assert "receivers" not in out["top_items"][0]
+        assert out["top_items"][0]["name"] == "Imbued heart"
+
+    def test_scope_is_player(self, monkeypatch):
+        assert self._compute(monkeypatch)["scope"] == recap.SCOPE_PLAYER
+
+
+class TestPublicImageUrl:
+    """`drops.image_url` is not reliably a URL — some rows hold the on-disk path
+    the screenshot was written to. Rendering that draws a broken-image box on the
+    poster, so the card would rather show nothing."""
+
+    def test_absolute_urls_pass_through(self):
+        url = "https://www.droptracker.io/img/user-upload/2682265/drop/x/y_0_2.jpg"
+        assert recap._public_image_url(url) == url
+
+    def test_local_path_is_mapped_to_the_served_url(self):
+        assert recap._public_image_url(
+            "/store/droptracker/disc/static/assets/img/user-upload/1956709/drop/unknown/u.png"
+        ) == "https://www.droptracker.io/img/user-upload/1956709/drop/unknown/u.png"
+
+    def test_site_relative_path_is_made_absolute(self):
+        # A snapshot is an archive that may be rendered off-origin.
+        assert recap._public_image_url("/img/user-upload/1/drop/a.png") == (
+            "https://www.droptracker.io/img/user-upload/1/drop/a.png"
+        )
+
+    def test_unservable_values_are_dropped(self):
+        for raw in (None, "", "   ", "file:///tmp/x.png", "somewhere/else.png"):
+            assert recap._public_image_url(raw) is None
+
+    def test_no_double_slash_when_mapping(self):
+        out = recap._public_image_url(
+            "/store/droptracker/disc/static/assets/img/user-upload/9/drop/a.png"
+        )
+        assert "//img" not in out.replace("https://", "")
+        assert out.count("//") == 1  # only the scheme's
