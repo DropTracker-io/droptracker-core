@@ -106,6 +106,10 @@ DEFAULT_TEAM_TASK_PROGRESS = "milestones"
 DEFAULT_TEAM_DISCORD_CONFIG = {
     "channels_enabled": False,
     "roles_enabled": False,
+    # Temporary per-team VOICE channels: created alongside (or instead of) the
+    # text channel, gated by the same team role, placed in the same category,
+    # and torn down under the same retention rules.
+    "voice_enabled": False,
     # Snowflake of a FORUM channel: when set, team channels are auto-created
     # threads inside it instead of guild text channels. WARNING: Discord
     # threads have no per-thread permissions, so every team can read every
@@ -135,6 +139,7 @@ def effective_team_discord_config(raw_json) -> dict:
     config = {
         "channels_enabled": DEFAULT_TEAM_DISCORD_CONFIG["channels_enabled"],
         "roles_enabled": DEFAULT_TEAM_DISCORD_CONFIG["roles_enabled"],
+        "voice_enabled": DEFAULT_TEAM_DISCORD_CONFIG["voice_enabled"],
         "forum_channel_id": None,
         "category_channel_id": None,
         "retention": DEFAULT_TEAM_DISCORD_CONFIG["retention"],
@@ -149,7 +154,8 @@ def effective_team_discord_config(raw_json) -> dict:
         return config
     if not isinstance(data, dict):
         return config
-    for key in ("channels_enabled", "roles_enabled", "captain_config"):
+    for key in ("channels_enabled", "roles_enabled", "voice_enabled",
+                "captain_config"):
         if isinstance(data.get(key), bool):
             config[key] = data[key]
     forum = data.get("forum_channel_id")
@@ -166,7 +172,7 @@ def effective_team_discord_config(raw_json) -> dict:
             if not isinstance(entry, dict):
                 continue
             clean = {}
-            for key in ("role", "channel"):
+            for key in ("role", "channel", "voice"):
                 if isinstance(entry.get(key), bool):
                     clean[key] = entry[key]
             toggles = entry.get("toggles")
@@ -190,16 +196,19 @@ def effective_team_discord_config(raw_json) -> dict:
 
 def config_enabled(config: dict) -> bool:
     """Whether this scope provisions anything at all."""
-    return bool(config.get("channels_enabled") or config.get("roles_enabled"))
+    return bool(config.get("channels_enabled") or config.get("roles_enabled")
+                or config.get("voice_enabled"))
 
 
 def team_flags(config: dict, team_id) -> dict:
-    """{"role": bool, "channel": bool} for one team under one scope config —
-    the scope-level toggles ANDed with the per-team override (absent = on)."""
+    """{"role": bool, "channel": bool, "voice": bool} for one team under one
+    scope config — the scope-level toggles ANDed with the per-team override
+    (absent = on)."""
     entry = (config.get("teams") or {}).get(str(team_id)) or {}
     return {
         "role": bool(config.get("roles_enabled")) and entry.get("role", True),
         "channel": bool(config.get("channels_enabled")) and entry.get("channel", True),
+        "voice": bool(config.get("voice_enabled")) and entry.get("voice", True),
     }
 
 
@@ -358,6 +367,12 @@ def thread_name_for_team(name: str, color=None, index: int = 0) -> str:
     return (icon + TEAM_CHANNEL_SEPARATOR + ((name or "").strip() or "Team"))[:100]
 
 
+def voice_name_for_team(name: str, color=None, index: int = 0) -> str:
+    """Voice channels also keep the team's real name (Discord doesn't slugify
+    voice channel names either): "🔵┃Blue Team"."""
+    return thread_name_for_team(name, color, index)
+
+
 # --------------------------------------------------------------------------- #
 # Desired-state materialization (Web API side)
 # --------------------------------------------------------------------------- #
@@ -417,7 +432,7 @@ def _desired_rows(session, event) -> dict:
             if scope["group_id"] is not None and team.group_id != scope["group_id"]:
                 continue
             flags = team_flags(scope["config"], team.id)
-            if not (flags["role"] or flags["channel"]):
+            if not (flags["role"] or flags["channel"] or flags["voice"]):
                 continue
             desired[(team.id, scope["guild_id"])] = scope["group_id"]
     return desired
@@ -501,8 +516,8 @@ def mark_team_members_dirty(session, event_id: int, team_id=None) -> None:
 
 
 def orphan_team_discord_payloads(session, event_id: int, team_id=None) -> list:
-    """``{"guild_id","role_id","channel_id","channel_kind"}`` dicts for every
-    row that carries live Discord objects — enqueued on
+    """``{"guild_id","role_id","channel_id","voice_channel_id","channel_kind"}``
+    dicts for every row that carries live Discord objects — enqueued on
     :data:`ORPHAN_TEAM_DISCORD_KEY` before a hard delete FK-wipes the rows."""
     from db.models import EventTeamDiscord
 
@@ -512,12 +527,14 @@ def orphan_team_discord_payloads(session, event_id: int, team_id=None) -> list:
         query = query.filter(EventTeamDiscord.team_id == team_id)
     out = []
     for row in query.all():
-        if not (row.role_id or row.channel_id):
+        if not (row.role_id or row.channel_id or row.voice_channel_id):
             continue
         out.append({
             "guild_id": str(row.guild_id),
             "role_id": str(row.role_id) if row.role_id else None,
             "channel_id": str(row.channel_id) if row.channel_id else None,
+            "voice_channel_id": (str(row.voice_channel_id)
+                                 if row.voice_channel_id else None),
             "channel_kind": row.channel_kind,
         })
     return out

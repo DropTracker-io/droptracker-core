@@ -811,6 +811,7 @@ def _team_discord_payload(s, ev: Event, scope_group_id=None) -> dict:
             "name": t.name,
             "role_enabled": flags["role"],
             "channel_enabled": flags["channel"],
+            "voice_enabled": flags["voice"],
             "toggles": team_message_toggles(config, t.id, inherited=inherited),
             "pings": team_message_pings(config, t.id),
             "task_progress": team_task_progress_mode(config, t.id,
@@ -820,6 +821,8 @@ def _team_discord_payload(s, ev: Event, scope_group_id=None) -> dict:
             "explicit": _explicit_team_keys(config, t.id),
             "role_id": str(row.role_id) if row and row.role_id else None,
             "channel_id": str(row.channel_id) if row and row.channel_id else None,
+            "voice_channel_id": (str(row.voice_channel_id)
+                                 if row and row.voice_channel_id else None),
             "channel_kind": row.channel_kind if row else None,
             "sync_status": row.sync_status if row else None,
             # Surfaced whenever set — member-sync 403s (bot role below the
@@ -832,6 +835,7 @@ def _team_discord_payload(s, ev: Event, scope_group_id=None) -> dict:
         "guild_id": guild_id,
         "channels_enabled": config["channels_enabled"],
         "roles_enabled": config["roles_enabled"],
+        "voice_enabled": config["voice_enabled"],
         "forum_channel_id": config["forum_channel_id"],
         "category_channel_id": config["category_channel_id"],
         "retention": config["retention"],
@@ -869,12 +873,14 @@ async def get_event_team_discord(event_id: int):
 async def put_event_team_discord(event_id: int):
     """Replace one scope's team-discord config. Body mirrors the effective
     config shape: ``{group_id?, channels_enabled, roles_enabled,
-    forum_channel_id, category_channel_id, retention, captain_config, teams:
-    {"<team_id>": {"role", "channel"}}}``. ``forum_channel_id`` = threads (no
-    per-thread perms); ``category_channel_id`` = per-team text channels inside
-    that category (role-restricted, private). Saving immediately
-    (re)materializes the desired ``web_event_team_discord`` rows — the bot
-    provisions within ~30s."""
+    voice_enabled, forum_channel_id, category_channel_id, retention,
+    captain_config, teams: {"<team_id>": {"role", "channel", "voice"}}}``.
+    ``forum_channel_id`` = threads (no per-thread perms);
+    ``category_channel_id`` = per-team text/voice channels inside that
+    category (role-restricted, private); ``voice_enabled`` = a temporary team
+    voice channel with the same access + retention rules as the text channel.
+    Saving immediately (re)materializes the desired ``web_event_team_discord``
+    rows — the bot provisions within ~30s."""
     from services.event_team_discord import (
         effective_team_discord_config,
         sync_event_team_discord,
@@ -888,7 +894,8 @@ async def put_event_team_discord(event_id: int):
             not isinstance(scope_group_id, int) or isinstance(scope_group_id, bool)):
         abort_problem(422, "Invalid group_id", "'group_id' must be an integer or null.")
 
-    for key in ("channels_enabled", "roles_enabled", "captain_config"):
+    for key in ("channels_enabled", "roles_enabled", "voice_enabled",
+                "captain_config"):
         if key in body and not isinstance(body[key], bool):
             abort_problem(422, "Invalid config", f"'{key}' must be a boolean.")
     retention = body.get("retention")
@@ -919,7 +926,8 @@ async def put_event_team_discord(event_id: int):
                 _assert_event_admin(s, user_id, ev)
             owner, guild_id = _team_discord_scope_row(s, ev, scope_group_id)
 
-            enabling = bool(body.get("channels_enabled") or body.get("roles_enabled"))
+            enabling = bool(body.get("channels_enabled") or body.get("roles_enabled")
+                            or body.get("voice_enabled"))
             if enabling and not guild_id:
                 abort_problem(
                     422, "No Discord server",
@@ -989,7 +997,7 @@ async def put_event_team_discord(event_id: int):
                     abort_problem(422, "Invalid teams",
                                   f"teams.{tid} must be an object.")
                 clean = {}
-                for key in ("role", "channel"):
+                for key in ("role", "channel", "voice"):
                     if key in entry:
                         if not isinstance(entry[key], bool):
                             abort_problem(422, "Invalid teams",
@@ -1006,7 +1014,8 @@ async def put_event_team_discord(event_id: int):
             current = effective_team_discord_config(
                 getattr(owner, "team_discord_config", None))
             merged = dict(current)
-            for key in ("channels_enabled", "roles_enabled", "captain_config"):
+            for key in ("channels_enabled", "roles_enabled", "voice_enabled",
+                        "captain_config"):
                 if key in body:
                     merged[key] = bool(body[key])
             if "forum_channel_id" in body:
@@ -1032,11 +1041,13 @@ async def put_event_team_discord(event_id: int):
                 target=f"web_events.{event_id}" + (
                     f".group.{scope_group_id}" if scope_group_id is not None else ""),
                 before=json.dumps({k: before[k] for k in (
-                    "channels_enabled", "roles_enabled", "forum_channel_id",
-                    "category_channel_id", "retention", "captain_config")}),
+                    "channels_enabled", "roles_enabled", "voice_enabled",
+                    "forum_channel_id", "category_channel_id", "retention",
+                    "captain_config")}),
                 after=json.dumps({k: after[k] for k in (
-                    "channels_enabled", "roles_enabled", "forum_channel_id",
-                    "category_channel_id", "retention", "captain_config")}),
+                    "channels_enabled", "roles_enabled", "voice_enabled",
+                    "forum_channel_id", "category_channel_id", "retention",
+                    "captain_config")}),
             ))
             s.commit()
             return after

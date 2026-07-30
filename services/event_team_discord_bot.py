@@ -94,15 +94,19 @@ async def drain_team_discord_orphans(bot, redis_client, limit: int = 50) -> None
         except (ValueError, AttributeError):
             continue
         await _delete_discord_objects(
-            bot, data.get("guild_id"), data.get("role_id"), data.get("channel_id"))
+            bot, data.get("guild_id"), data.get("role_id"), data.get("channel_id"),
+            data.get("voice_channel_id"))
 
 
-async def _delete_discord_objects(bot, guild_id, role_id, channel_id) -> None:
-    """Best-effort teardown of one row's channel + role. Missing objects (bot
+async def _delete_discord_objects(bot, guild_id, role_id, channel_id,
+                                  voice_channel_id=None) -> None:
+    """Best-effort teardown of one row's channels + role. Missing objects (bot
     kicked, already deleted by hand) just mean nothing left to clean up."""
-    if channel_id:
+    for cid in (channel_id, voice_channel_id):
+        if not cid:
+            continue
         try:
-            channel = await bot.fetch_channel(int(channel_id))
+            channel = await bot.fetch_channel(int(cid))
             if channel is not None:
                 await channel.delete(reason=TEARDOWN_REASON)
         except Exception:
@@ -257,6 +261,68 @@ async def _ensure_channel(bot, guild, row, team, config, event,
             except Exception as exc:
                 print(f"[team-discord] channel {row.channel_id}: could not move "
                       f"to category {category_id}: {exc}")
+
+
+async def _ensure_voice_channel(bot, guild, row, team, config,
+                                icon_index: int = 0) -> None:
+    """Create/rename the team's temporary VOICE channel: private to the team
+    role when one exists (deny @everyone, allow role view/connect/speak),
+    public otherwise — the same access model as the text channel, in the same
+    optional category. Writes row.voice_channel_id back."""
+    import interactions
+    from services.event_team_discord import voice_name_for_team
+
+    name = voice_name_for_team(team.name, getattr(team, "color", None),
+                               icon_index)
+    channel = None
+    if row.voice_channel_id:
+        try:
+            channel = await bot.fetch_channel(int(row.voice_channel_id))
+        except Exception:
+            channel = None
+
+    category_id = config.get("category_channel_id")
+    if channel is None:
+        overwrites = []
+        if row.role_id:
+            overwrites = [
+                interactions.PermissionOverwrite(
+                    id=int(guild.id),
+                    type=interactions.OverwriteType.ROLE,
+                    deny=interactions.Permissions.VIEW_CHANNEL,
+                ),
+                interactions.PermissionOverwrite(
+                    id=int(row.role_id),
+                    type=interactions.OverwriteType.ROLE,
+                    allow=(interactions.Permissions.VIEW_CHANNEL
+                           | interactions.Permissions.CONNECT
+                           | interactions.Permissions.SPEAK),
+                ),
+                interactions.PermissionOverwrite(
+                    id=int(bot.user.id),
+                    type=interactions.OverwriteType.MEMBER,
+                    allow=(interactions.Permissions.VIEW_CHANNEL
+                           | interactions.Permissions.CONNECT),
+                ),
+            ]
+        channel = await guild.create_voice_channel(
+            name=name,
+            category=int(category_id) if category_id else interactions.MISSING,
+            permission_overwrites=overwrites or interactions.MISSING,
+            reason=PROVISION_REASON,
+        )
+        row.voice_channel_id = str(channel.id)
+    else:
+        if getattr(channel, "name", None) != name:
+            await channel.edit(name=name, reason=PROVISION_REASON)
+        # Category added/changed after creation: move it (best effort — a
+        # bad/deleted category id must not wedge the sync).
+        if category_id and str(getattr(channel, "parent_id", "") or "") != str(category_id):
+            try:
+                await channel.edit(parent_id=int(category_id), reason=PROVISION_REASON)
+            except Exception as exc:
+                print(f"[team-discord] voice channel {row.voice_channel_id}: "
+                      f"could not move to category {category_id}: {exc}")
 
 
 def _friendly_row_error(exc) -> str:
@@ -430,7 +496,8 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                     if row.delete_after and now < row.delete_after:
                         continue  # 48h grace still running
                     await _delete_discord_objects(
-                        bot, row.guild_id, row.role_id, row.channel_id)
+                        bot, row.guild_id, row.role_id, row.channel_id,
+                        row.voice_channel_id)
                     session.delete(row)
                     session.commit()
                     continue
@@ -476,6 +543,14 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                         await _delete_discord_objects(bot, None, None, row.channel_id)
                         row.channel_id = None
                         row.channel_kind = None
+                    if flags["voice"]:
+                        await _ensure_voice_channel(
+                            bot, guild, row, team, scope["config"],
+                            icon_index=team_icon_index(session, event.id, team.id))
+                    elif row.voice_channel_id:
+                        await _delete_discord_objects(bot, None, None,
+                                                      row.voice_channel_id)
+                        row.voice_channel_id = None
                     row.sync_status = "synced"
                     row.synced_at = now
                     row.last_error = None

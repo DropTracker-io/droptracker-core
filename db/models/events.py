@@ -906,6 +906,9 @@ class EventTeamDiscord(Base):
     role_id = Column(String(32), nullable=True)
     channel_id = Column(String(32), nullable=True)
     channel_kind = Column(String(16), nullable=True)
+    # Optional temporary team VOICE channel (voice_enabled) — same access
+    # gating and teardown rules as the text channel.
+    voice_channel_id = Column(String(32), nullable=True)
     sync_status = Column(String(16), nullable=False, default="pending")  # pending|synced|delete_pending|failed
     # JSON list of Discord user ids currently carrying the role / thread
     # membership; the bot's diff baseline for roster sync.

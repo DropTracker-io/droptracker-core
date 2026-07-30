@@ -27,6 +27,7 @@ class TestEffectiveConfig:
         config = etd.effective_team_discord_config(None)
         assert config["channels_enabled"] is False
         assert config["roles_enabled"] is False
+        assert config["voice_enabled"] is False
         assert config["forum_channel_id"] is None
         assert config["retention"] == "delete_48h"
         assert config["captain_config"] is True
@@ -87,15 +88,29 @@ class TestTeamFlags:
             '{"channels_enabled": true, "roles_enabled": true, '
             '"teams": {"5": {"role": false}}}'
         )
-        assert etd.team_flags(config, 5) == {"role": False, "channel": True}
-        # Absent team entry = both on.
-        assert etd.team_flags(config, 6) == {"role": True, "channel": True}
+        assert etd.team_flags(config, 5) == {
+            "role": False, "channel": True, "voice": False}
+        # Absent team entry = everything the scope enables.
+        assert etd.team_flags(config, 6) == {
+            "role": True, "channel": True, "voice": False}
 
     def test_disabled_scope_beats_per_team_on(self):
         config = etd.effective_team_discord_config(
             '{"roles_enabled": false, "teams": {"5": {"role": true}}}'
         )
         assert etd.team_flags(config, 5)["role"] is False
+
+    def test_voice_scope_toggle_ands_with_per_team(self):
+        config = etd.effective_team_discord_config(
+            '{"voice_enabled": true, "teams": {"5": {"voice": false}}}'
+        )
+        assert etd.config_enabled(config)  # voice alone counts as enabled
+        assert etd.team_flags(config, 5)["voice"] is False
+        assert etd.team_flags(config, 6)["voice"] is True
+        # Voice off at the scope beats a per-team on.
+        config = etd.effective_team_discord_config(
+            '{"teams": {"5": {"voice": true}}}')
+        assert etd.team_flags(config, 5)["voice"] is False
 
     def test_message_toggles_merge_defaults(self):
         config = etd.effective_team_discord_config(
@@ -172,6 +187,11 @@ class TestThreadName:
     def test_empty_falls_back_and_caps(self):
         assert etd.thread_name_for_team("") == "🟢┃Team"
         assert len(etd.thread_name_for_team("x" * 300)) <= 100
+
+    def test_voice_name_matches_thread_treatment(self):
+        # Voice channels keep the real name too — same icon treatment.
+        assert etd.voice_name_for_team("Blue Team", "#0000e0") == "🔵┃Blue Team"
+        assert etd.voice_name_for_team("") == "🟢┃Team"
 
 
 # ── notification-destination gating (pure parts) ─────────────────────────────
