@@ -46,6 +46,14 @@ RECAP_IMAGE_BASE_URL = os.getenv(
 RECAP_IMAGE_WIDTH = 1100
 RECAP_IMAGE_SCALE = 2.0
 
+# The poster is a fixed-composition artifact a few hundred px tall in CSS terms,
+# not a document: emulating a 1080px window would report a content height of
+# 1080 and pad the PNG with dead background below the frame. A short viewport
+# makes the capture exactly the card. Safe here because the card loads every
+# sprite eagerly (see components/recap-card.tsx) — nothing waits on being
+# scrolled into view.
+RECAP_IMAGE_VIEWPORT_HEIGHT = 400
+
 _CACHE_TTL_SECONDS = 24 * 3600
 
 # Where the rendered card lands. Group cards sit beside that group's lootboard
@@ -108,7 +116,12 @@ async def render_recap_png(
     try:
         from services.page_screenshot import screenshot_url
 
-        return await screenshot_url(url, width=RECAP_IMAGE_WIDTH, scale=scale)
+        return await screenshot_url(
+            url,
+            width=RECAP_IMAGE_WIDTH,
+            scale=scale,
+            viewport_height=RECAP_IMAGE_VIEWPORT_HEIGHT,
+        )
     except Exception as e:
         app_logger.log(
             log_type="error",

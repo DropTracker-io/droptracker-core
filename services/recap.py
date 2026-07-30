@@ -233,6 +233,13 @@ def _item_rollup(session, player_ids: list[int], period: str) -> dict:
     The hour-of-day and day-of-week histograms come out of the same index range
     as the totals, so they are effectively free: ``date_hour`` carries both
     (``RIGHT(...,2)`` is the hour, the date prefix gives the weekday).
+
+    The item read groups by ``(item_id, player_id)`` rather than ``item_id``
+    alone so each item can name **who received it** — the rollup already carries
+    ``player_id``, so attribution costs one extra grouping column on a read that
+    was happening anyway (measured 0.3s for a 269-member clan month). Folding to
+    per-item totals then happens in Python, which also yields the receiver count
+    for free.
     """
     if not player_ids:
         return {
@@ -244,12 +251,13 @@ def _item_rollup(session, player_ids: list[int], period: str) -> dict:
 
     rows = session.execute(
         text(
-            "SELECT r.item_id, i.item_name, SUM(r.quantity) AS qty, "
-            "       SUM(r.total_value) AS loot, SUM(r.drop_count) AS drops "
+            "SELECT r.item_id, i.item_name, r.player_id, "
+            "       SUM(r.quantity) AS qty, SUM(r.total_value) AS loot, "
+            "       SUM(r.drop_count) AS drops "
             "FROM player_item_hourly_totals r "
             "LEFT JOIN items i ON i.item_id = r.item_id "
             "WHERE r.player_id IN :pids AND r.date_hour BETWEEN :lo AND :hi "
-            "GROUP BY r.item_id, i.item_name"
+            "GROUP BY r.item_id, i.item_name, r.player_id"
         ).bindparams(bindparam("pids", expanding=True)),
         params,
     ).fetchall()
@@ -278,23 +286,51 @@ def _item_rollup(session, player_ids: list[int], period: str) -> dict:
         except (TypeError, ValueError, IndexError):
             continue
 
-    items = [
-        {
-            "item_id": int(item_id),
-            "name": name or f"Item {item_id}",
-            "quantity": int(qty or 0),
-            "loot": int(loot or 0),
-            "drops": int(drops or 0),
-        }
-        for item_id, name, qty, loot, drops in rows
-        if item_id is not None
-    ]
-    items.sort(key=lambda x: x["loot"], reverse=True)
+    # Fold the per-(item, player) rows into per-item totals, tracking who
+    # received the most of each by value.
+    merged: dict[int, dict] = {}
+    for item_id, name, player_id, qty, loot, drops in rows:
+        if item_id is None:
+            continue
+        entry = merged.setdefault(
+            int(item_id),
+            {
+                "item_id": int(item_id),
+                "name": name or f"Item {item_id}",
+                "quantity": 0,
+                "loot": 0,
+                "drops": 0,
+                "receivers": 0,
+                "_top_pid": None,
+                "_top_loot": -1,
+            },
+        )
+        loot = int(loot or 0)
+        entry["quantity"] += int(qty or 0)
+        entry["loot"] += loot
+        entry["drops"] += int(drops or 0)
+        entry["receivers"] += 1
+        if player_id is not None and loot > entry["_top_loot"]:
+            entry["_top_loot"] = loot
+            entry["_top_pid"] = int(player_id)
+
+    items = sorted(merged.values(), key=lambda x: x["loot"], reverse=True)
+    top = items[:TOP_N]
+
+    # Names only for what's actually displayed — resolving every receiver of
+    # every item in the month would be a much larger lookup for no benefit.
+    names = _player_names(session, [i["_top_pid"] for i in top if i["_top_pid"]])
+    for entry in items:
+        pid = entry.pop("_top_pid")
+        entry.pop("_top_loot")
+        if pid and pid in names:
+            entry["receiver"] = {"player_id": pid, "name": names[pid]}
+
     return {
         "loot": sum(i["loot"] for i in items),
         "drops": sum(i["drops"] for i in items),
         "unique_items": len(items),
-        "top_items": items[:TOP_N],
+        "top_items": top,
         "by_hour": by_hour,
         "by_weekday": by_weekday,
     }
@@ -580,6 +616,13 @@ def compute_player_month(session, player_id: int, period: str) -> Optional[dict]
     payload["totals"]["loot"] = int(totals.get(player_id, 0))
     payload["scope"] = SCOPE_PLAYER
     payload["subject"] = {"id": player_id, "name": names.get(player_id)}
+    # Per-item attribution is meaningful on a clan card and tautological on a
+    # player's own: every item here was received by the subject. Strip it rather
+    # than make the renderer special-case scope, and keep the stored payload from
+    # repeating the subject's name once per item.
+    for entry in payload.get("top_items", []):
+        entry.pop("receiver", None)
+        entry.pop("receivers", None)
     payload["rank"] = {
         "position": rank,
         "of": ranked,
@@ -701,6 +744,49 @@ def _group_superlatives(session, player_ids: list[int], period: str, names: dict
     }
 
 
+def _fold_receiver(agg: dict, entry: dict) -> None:
+    """Carry per-item attribution through the annual fold, but only when it stays
+    true.
+
+    A monthly snapshot records the *top* receiver of an item for that month. Those
+    can't be summed: if Chapsz got the June Masori body and Binny got the
+    September one, neither is "the" receiver for the year, and picking the larger
+    month would print one clanmate's name over another's drop.
+
+    So a receiver survives the fold only while every folded month that saw the
+    item reports the same sole receiver. The moment two months disagree — or any
+    month had it shared — attribution is dropped and only the count remains,
+    which the renderer reads as "shared" and shows no name for. Erring toward
+    saying nothing is the whole point: a name a clanmate can disprove costs more
+    than a blank.
+    """
+    receivers = int(entry.get("receivers") or 0)
+    incoming = entry.get("receiver")
+
+    # Once dropped, stay dropped — a later agreeing month must not resurrect it.
+    if agg.get("_recv_conflict"):
+        agg["receivers"] = max(int(agg.get("receivers") or 0), receivers)
+        return
+
+    if receivers > 1 or not incoming:
+        agg["_recv_conflict"] = True
+        agg.pop("receiver", None)
+        agg["receivers"] = max(int(agg.get("receivers") or 0), receivers or 2)
+        return
+
+    held = agg.get("receiver")
+    if held and held.get("player_id") != incoming.get("player_id"):
+        agg["_recv_conflict"] = True
+        agg.pop("receiver", None)
+        # Distinct people across months: shared over the year, however sole it
+        # was in any single month.
+        agg["receivers"] = 2
+        return
+
+    agg["receiver"] = incoming
+    agg["receivers"] = 1
+
+
 def compute_year(session, scope: str, subject_id: int, year: int) -> Optional[dict]:
     """Fold the twelve stored monthly snapshots into an annual card.
 
@@ -756,6 +842,7 @@ def compute_year(session, scope: str, subject_id: int, year: int) -> Optional[di
                 agg["drops"] += int(entry.get("drops", 0) or 0)
                 agg["kills"] += int(entry.get("kills", 0) or 0)
                 agg["quantity"] += int(entry.get("quantity", 0) or 0)
+                _fold_receiver(agg, entry)
 
         for key, value in (snap.get("achievements") or {}).items():
             achievements[key] = achievements.get(key, 0) + int(value or 0)
@@ -778,6 +865,9 @@ def compute_year(session, scope: str, subject_id: int, year: int) -> Optional[di
     # per-month top N, so these are a floor, and they're labelled as such.
     top_items = sorted(items.values(), key=lambda x: x["loot"], reverse=True)[:TOP_N]
     top_npcs = sorted(npcs.values(), key=lambda x: x["loot"], reverse=True)[:TOP_N]
+    # Drop the fold's bookkeeping flag before it reaches the stored payload.
+    for entry in (*top_items, *top_npcs):
+        entry.pop("_recv_conflict", None)
 
     payload = {
         "scope": scope,

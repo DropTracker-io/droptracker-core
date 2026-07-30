@@ -146,7 +146,8 @@ async def _browser_ws_url(port: int) -> str:
 
 
 async def _capture(ws_url: str, url: str, *, width: int, scale: float,
-                   timeout: float, max_height: int) -> bytes:
+                   timeout: float, max_height: int,
+                   viewport_height: int) -> bytes:
     # max_size=None: a full-page base64 PNG easily exceeds the 1 MiB ws default.
     async with websockets.connect(ws_url, max_size=None,
                                   open_timeout=10) as ws:
@@ -160,7 +161,8 @@ async def _capture(ws_url: str, url: str, *, width: int, scale: float,
 
             await cdp.send("Page.enable", session_id=sid)
             await cdp.send("Emulation.setDeviceMetricsOverride", {
-                "width": width, "height": 1080, "deviceScaleFactor": scale,
+                "width": width, "height": viewport_height,
+                "deviceScaleFactor": scale,
                 "mobile": False,
             }, session_id=sid)
 
@@ -191,7 +193,7 @@ async def _capture(ws_url: str, url: str, *, width: int, scale: float,
 
             metrics = await cdp.send("Page.getLayoutMetrics", session_id=sid)
             size = metrics.get("cssContentSize") or metrics.get("contentSize") or {}
-            content_h = int(math.ceil(size.get("height") or 0)) or 1080
+            content_h = int(math.ceil(size.get("height") or 0)) or viewport_height
             content_h = min(content_h, max_height)
             content_w = int(math.ceil(size.get("width") or width)) or width
 
@@ -207,12 +209,21 @@ async def _capture(ws_url: str, url: str, *, width: int, scale: float,
 
 
 async def screenshot_url(url: str, *, width: int = 1100, scale: float = 2.0,
-                         timeout: float = 30.0, max_height: int = 8000) -> bytes:
+                         timeout: float = 30.0, max_height: int = 8000,
+                         viewport_height: int = 1080) -> bytes:
     """Render ``url`` in headless chromium and return a full-page PNG.
 
     ``width`` is the CSS layout width; ``scale`` is the device pixel ratio (2 =
     retina-crisp). Raises on failure — callers that must fail open
-    (:mod:`services.event_board_image`) wrap this in try/except."""
+    (:mod:`services.event_board_image`) wrap this in try/except.
+
+    ``viewport_height`` is the emulated window height, and the floor on the
+    captured height: chromium reports ``cssContentSize`` as at least the
+    viewport, so a page shorter than the window yields a PNG padded with body
+    background to the bottom. Callers rendering a fixed-size artifact (the recap
+    poster) pass a short viewport to get an exactly-cropped image. Keep it tall
+    enough to cover anything lazily loaded — nothing below the fold will have
+    started fetching."""
     tmp = tempfile.mkdtemp(prefix="dt-shot-")
     proc = None
     try:
@@ -221,7 +232,8 @@ async def screenshot_url(url: str, *, width: int = 1100, scale: float = 2.0,
         port = await _devtools_port(profile, proc, timeout=15)
         ws_url = await _browser_ws_url(port)
         return await _capture(ws_url, url, width=width, scale=scale,
-                              timeout=timeout, max_height=max_height)
+                              timeout=timeout, max_height=max_height,
+                              viewport_height=viewport_height)
     finally:
         if proc is not None and proc.poll() is None:
             proc.terminate()

@@ -241,3 +241,117 @@ class TestAnnualFold:
         assert out["period"] == "2025"
         assert out["schema_version"] == recap.RECAP_SCHEMA_VERSION
         assert out["generated_at"]
+
+
+def _item(item_id, name, loot, *, receiver=None, receivers=None, quantity=1):
+    """A stored top_items entry, with optional attribution."""
+    entry = {"item_id": item_id, "name": name, "loot": loot,
+             "drops": 1, "quantity": quantity}
+    if receiver is not None:
+        entry["receiver"] = {"player_id": receiver[0], "name": receiver[1]}
+    if receivers is not None:
+        entry["receivers"] = receivers
+    return entry
+
+
+class TestReceiverFold:
+    """Per-item attribution through the annual fold.
+
+    A monthly snapshot names the top receiver *for that month*. Those can't be
+    summed: if one clanmate got the June drop and another got the September one,
+    printing either name over the year's total puts one person's name on
+    another's drop. So attribution survives only while every folded month agrees
+    on the same sole receiver, and the fold errs toward saying nothing.
+    """
+
+    def _fold(self, monkeypatch, months_by_period):
+        monkeypatch.setattr(
+            recap, "load_snapshot",
+            lambda session, scope, subject_id, period: months_by_period.get(period),
+        )
+        return recap.compute_year(None, "group", 14, 2025)
+
+    def _one_item(self, monkeypatch, months_by_period):
+        out = self._fold(monkeypatch, months_by_period)
+        assert len(out["top_items"]) == 1
+        return out["top_items"][0]
+
+    def test_sole_receiver_across_every_month_survives(self):
+        # A genuine once-a-year drop: one month saw it, one person got it.
+        agg = {"receivers": 0}
+        recap._fold_receiver(agg, _item(1, "3rd age bow", 5, receiver=(9, "Redquaker"), receivers=1))
+        assert agg["receiver"]["name"] == "Redquaker"
+        assert agg["receivers"] == 1
+
+    def test_same_sole_receiver_twice_still_survives(self):
+        agg = {"receivers": 0}
+        for _ in range(2):
+            recap._fold_receiver(agg, _item(1, "x", 5, receiver=(9, "Chapsz"), receivers=1))
+        assert agg["receiver"]["name"] == "Chapsz"
+        assert agg["receivers"] == 1
+
+    def test_two_months_disagreeing_drops_the_name(self):
+        agg = {"receivers": 0}
+        recap._fold_receiver(agg, _item(1, "x", 5, receiver=(9, "Chapsz"), receivers=1))
+        recap._fold_receiver(agg, _item(1, "x", 5, receiver=(7, "Binny"), receivers=1))
+        assert "receiver" not in agg
+        # Distinct people across months = shared over the year, however sole it
+        # was in either month.
+        assert agg["receivers"] == 2
+
+    def test_a_shared_month_drops_the_name(self):
+        agg = {"receivers": 0}
+        recap._fold_receiver(agg, _item(1, "x", 5, receiver=(9, "Chapsz"), receivers=4))
+        assert "receiver" not in agg
+        assert agg["receivers"] == 4
+
+    def test_a_later_agreeing_month_cannot_resurrect_attribution(self):
+        # Once two months have disagreed the item IS shared; a third month that
+        # happens to match the first must not undo that.
+        agg = {"receivers": 0}
+        recap._fold_receiver(agg, _item(1, "x", 5, receiver=(9, "Chapsz"), receivers=1))
+        recap._fold_receiver(agg, _item(1, "x", 5, receiver=(7, "Binny"), receivers=1))
+        recap._fold_receiver(agg, _item(1, "x", 5, receiver=(9, "Chapsz"), receivers=1))
+        assert "receiver" not in agg
+
+    def test_missing_attribution_is_treated_as_shared(self):
+        # An entry written before attribution existed, or one the source couldn't
+        # name — must not be reported as sole.
+        agg = {"receivers": 0}
+        recap._fold_receiver(agg, _item(1, "x", 5))
+        assert "receiver" not in agg
+        assert agg["receivers"] >= 2
+
+    def test_end_to_end_sole_receiver_reaches_the_payload(self, monkeypatch):
+        item = self._one_item(monkeypatch, {
+            "2025-03": _month("2025-03", 1, 1,
+                              top_items=[_item(1, "3rd age bow", 100,
+                                               receiver=(9, "Redquaker"), receivers=1)]),
+        })
+        assert item["receiver"]["name"] == "Redquaker"
+        assert item["loot"] == 100
+
+    def test_end_to_end_conflicting_receivers_reach_the_payload_unnamed(self, monkeypatch):
+        item = self._one_item(monkeypatch, {
+            "2025-03": _month("2025-03", 1, 1,
+                              top_items=[_item(1, "Twisted bow", 100,
+                                               receiver=(9, "A"), receivers=1)]),
+            "2025-07": _month("2025-07", 1, 1,
+                              top_items=[_item(1, "Twisted bow", 50,
+                                               receiver=(7, "B"), receivers=1)]),
+        })
+        assert "receiver" not in item
+        assert item["loot"] == 150  # value still folds; only the name is dropped
+
+    def test_fold_bookkeeping_never_leaks_into_the_payload(self, monkeypatch):
+        # `_recv_conflict` is internal state; a stored payload carrying it would
+        # ship to the client and outlive the fold that created it.
+        out = self._fold(monkeypatch, {
+            "2025-03": _month("2025-03", 1, 1,
+                              top_items=[_item(1, "x", 10, receiver=(9, "A"), receivers=1)],
+                              top_npcs=[{"npc_id": 5, "name": "ToB", "loot": 1, "drops": 1}]),
+            "2025-04": _month("2025-04", 1, 1,
+                              top_items=[_item(1, "x", 10, receiver=(7, "B"), receivers=1)]),
+        })
+        for entry in (*out["top_items"], *out["top_npcs"]):
+            assert not [k for k in entry if k.startswith("_")], entry
