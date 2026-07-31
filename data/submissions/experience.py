@@ -19,6 +19,7 @@ from .common import (
     debug_print,
     GroupConfiguration,
     award_points_to_player,
+    envelope_from_plugin,
 )
 
 # All OSRS skills in lowercase (matching PlayerExperience model columns)
@@ -515,7 +516,9 @@ async def experience_processor(experience_data, external_session=None):
                             "level": s["new_level"],
                         },
                         world_type=snapshot_world_type, player_name=player_name,
-                        used_api=used_api,
+                        # Plugin traffic regardless of intake transport (API or
+                        # Discord webhook); XP has no manual submission path.
+                        used_api=envelope_from_plugin(experience_data),
                     )
             except Exception:
                 pass
@@ -579,7 +582,9 @@ async def experience_processor(experience_data, external_session=None):
                         "level": _safe_int(_s.get("new_level")),
                     },
                     world_type="main", player_name=player_name,
-                    used_api=used_api,
+                    # Plugin traffic regardless of intake transport (API or
+                    # Discord webhook); XP has no manual submission path.
+                    used_api=envelope_from_plugin(experience_data),
                 )
         except Exception:
             pass

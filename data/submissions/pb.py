@@ -20,6 +20,7 @@ from .common import (
     debug_print,
     is_truthy_config,
     get_config_prefix,
+    envelope_from_plugin,
     SEASONAL_WORLD_TYPE,
     SeasonalPersonalBestEntry,
 )
@@ -269,10 +270,9 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                     "source_id": getattr(pb_entry, "id", None),
                 },
                 world_type=world_type, player_name=player_name,
-                # Manual web submissions must read as non-plugin to the events
-                # engine even though the intake route stamps used_api=True on
-                # the row (mirrors drop.py).
-                used_api=used_api and pb_data.get("intake_source") != "manual",
+                # used_api means "came from the plugin" to the events engine
+                # (API and Discord-webhook intake both count; mirrors drop.py).
+                used_api=envelope_from_plugin(pb_data),
             )
     except Exception:
         pass

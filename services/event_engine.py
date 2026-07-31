@@ -19,10 +19,12 @@ Envelope (v1)::
       "guid": "...", "player_id": 123, "player_name": "...",
       "ts": 1751600000, "used_api": true, "data": { ...type-specific... } }
 
-``used_api`` mirrors the submission's intake path (plugin API vs the
-webhook-bot fallback); events gate on it via ``submission_policy``
-(``all`` / ``confirm_non_api`` / ``api_only``). Absent (pre-upgrade queue
-entries) is treated as non-API.
+``used_api`` means "came from the RuneLite plugin" — true for both the
+direct plugin API and the Discord webhook-bot intake (the plugin posts
+those embeds too); false only for manual website/command submissions.
+Events gate on it via ``submission_policy`` (``all`` / ``confirm_non_api``
+/ ``api_only``). Absent (pre-upgrade queue entries) is treated as
+non-plugin.
 
 v1 evaluation semantics (task doc table):
 
@@ -1283,10 +1285,11 @@ def match_task_all(task: dict, envelope: dict) -> list:
 
 def accepts_submission_source(event: dict, envelope: dict) -> bool:
     """Whether the event's submission_policy admits this envelope's intake
-    path (pure; no I/O). Only ``api_only`` rejects; a missing ``used_api``
-    flag (pre-upgrade queue entries, webhook-bot fallback) reads as non-API.
-    WOM-reconciler envelopes are hiscores-sourced server-side data — trusted
-    under every policy."""
+    path (pure; no I/O). Only ``api_only`` rejects; ``used_api`` means "came
+    from the plugin" (API or Discord-webhook intake — producers stamp it;
+    manual submissions are the only non-plugin traffic). A missing flag
+    (pre-upgrade queue entries) reads as non-plugin. WOM-reconciler envelopes
+    are hiscores-sourced server-side data — trusted under every policy."""
     if envelope.get("source") == "wom":
         return True
     if event.get("submission_policy") == "api_only":
@@ -1297,8 +1300,9 @@ def accepts_submission_source(event: dict, envelope: dict) -> bool:
 def completion_status(event: dict, task: dict, envelope: dict) -> str:
     """Initial ledger-row status for a match (pure; no I/O): ``pending`` when
     the task or event forces confirmation (PRD D3), or when the event's
-    ``confirm_non_api`` policy holds a submission that didn't arrive via the
-    plugin API; ``auto`` otherwise."""
+    ``confirm_non_api`` policy holds a submission that didn't come from the
+    plugin (manual web/command submissions; plugin traffic via either the
+    API or the Discord webhook reader auto-applies); ``auto`` otherwise."""
     if task.get("requires_confirmation") or event.get("requires_confirmation"):
         return "pending"
     if (event.get("submission_policy") == "confirm_non_api"

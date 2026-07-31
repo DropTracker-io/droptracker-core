@@ -16,6 +16,7 @@ from .common import (
     debug_print,
     award_points_to_player,
     get_config_prefix,
+    envelope_from_plugin,
     SEASONAL_WORLD_TYPE,
     SeasonalPlayerPet,
 )
@@ -203,9 +204,8 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                 },
                 world_type=world_type, player_name=player_name,
                 # used_api means "came from the plugin" to the events engine
-                # (submission_policy gating). A manual website submission is not
-                # plugin traffic even though intake stamps used_api=True.
-                used_api=used_api and pet_data.get("intake_source") != "manual",
+                # (API and Discord-webhook intake both count; mirrors drop.py).
+                used_api=envelope_from_plugin(pet_data),
             )
         except Exception:
             pass

@@ -94,6 +94,18 @@ def debug_print(message, **kwargs):
 SEASONAL_WORLD_TYPE = "seasonal"
 
 
+def envelope_from_plugin(submission_data: dict) -> bool:
+    """Whether an event-engine envelope should read as plugin traffic
+    (``used_api`` on the envelope — NOT the DB rows' transport flag).
+
+    Plugin submissions reach us two ways: the direct plugin API and the
+    Discord webhook reader (the plugin posts those embeds too). Both count
+    as plugin for event submission policies; only manual website/command
+    submissions (``intake_source == "manual"``) are non-plugin.
+    """
+    return submission_data.get("intake_source") != "manual"
+
+
 def get_config_prefix(world_type: str) -> str:
     """Return the GroupConfiguration key prefix for the given world type.
 

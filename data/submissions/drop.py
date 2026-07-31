@@ -26,6 +26,7 @@ from .common import (
     player_list,
     redis_updates,
     get_config_prefix,
+    envelope_from_plugin,
     SEASONAL_WORLD_TYPE,
     SeasonalDrop,
 )
@@ -483,10 +484,10 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                 },
                 world_type=world_type, player_name=player_name,
                 # The envelope's used_api means "came from the plugin" to the
-                # events engine (submission_policy confirm_non_api/api_only).
-                # Manual website submissions are NOT plugin traffic, even
-                # though the intake route stamps used_api=True on the row.
-                used_api=used_api and intake_source != "manual",
+                # events engine (submission_policy confirm_non_api/api_only) —
+                # independent of the Drop row's used_api column, which records
+                # the intake transport (API vs Discord webhook).
+                used_api=envelope_from_plugin(drop_data),
             )
         except Exception:
             pass

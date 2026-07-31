@@ -66,6 +66,37 @@ class TestGetConfigPrefix:
         assert self.get_config_prefix("") == ""
 
 
+# ── envelope_from_plugin ──────────────────────────────────────────────────────
+
+class TestEnvelopeFromPlugin:
+    """Event-envelope used_api semantics: "came from the plugin". Both intake
+    transports (direct API and the Discord webhook reader) count as plugin;
+    only manual website/command submissions (intake_source == "manual") are
+    non-plugin — regardless of the payload's transport-level used_api flag."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from data.submissions.common import envelope_from_plugin
+        self.from_plugin = envelope_from_plugin
+
+    def test_api_intake_is_plugin(self):
+        assert self.from_plugin({"used_api": True}) is True
+
+    def test_webhook_bot_intake_is_plugin(self):
+        # The webhook bot stamps used_api=False (transport truth for the DB
+        # row) — the envelope must still read as plugin traffic.
+        assert self.from_plugin({"used_api": False}) is True
+
+    def test_no_flags_is_plugin(self):
+        assert self.from_plugin({}) is True
+
+    def test_manual_intake_is_not_plugin(self):
+        # Manual web/command submissions set intake_source="manual"; the
+        # intake route stamps used_api=True on the row but the envelope
+        # must read as non-plugin.
+        assert self.from_plugin({"used_api": True, "intake_source": "manual"}) is False
+
+
 # ── _is_temp_account_hash ─────────────────────────────────────────────────────
 
 class TestIsTempAccountHash:

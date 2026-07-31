@@ -499,6 +499,11 @@ async def on_message_create(event: MessageCreate):
                     ## Skip pvp
                     continue
                     
+                # Transport flag for the DB rows only (API vs webhook intake).
+                # The events engine no longer derives plugin-vs-manual from
+                # this: processors stamp the event envelope's used_api from
+                # intake_source, so webhook-path plugin traffic still counts
+                # as plugin under confirm_non_api / api_only policies.
                 embed_data['used_api'] = False
                 
                 try:
