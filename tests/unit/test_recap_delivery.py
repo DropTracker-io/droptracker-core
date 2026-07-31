@@ -258,6 +258,24 @@ class TestMonthPhrase:
         assert delivery.month_phrase("2025", this_year=2026) == "2025"
 
 
+class TestMonthlyLootboard:
+    def test_path_and_url_agree(self):
+        # The button resolves the same artifact the delivery run froze; if these
+        # two ever disagree the button silently shows nothing.
+        assert delivery.group_lootboard_path(14, "2026-06").endswith(
+            "/clans/14/recap/lootboard-2026-06.png"
+        )
+        assert delivery.group_lootboard_url(14, "2026-06").endswith(
+            "/img/clans/14/recap/lootboard-2026-06.png"
+        )
+
+    def test_stored_beside_the_card_not_in_the_generator_tree(self):
+        # lb/timeframes/ belongs to the on-demand board feature and is free to be
+        # pruned or renamed; a recap may be read years later.
+        path = delivery.group_lootboard_path(14, "2026-06")
+        assert "/recap/" in path and "timeframes" not in path
+
+
 class TestTestModeCap:
     def test_cap_is_small_enough_to_be_harmless(self):
         # An unattended run in test mode re-addresses every card to one person;

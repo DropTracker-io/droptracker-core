@@ -85,48 +85,52 @@ def _set_opt_in(discord_id: str, value: bool) -> bool:
         s.close()
 
 
-def _leaderboard_embed(group_id: int, period: str) -> Optional[dict]:
-    """That month's clan leaderboard, from the card's own stored payload.
-
-    Reading the snapshot rather than Redis means the list can't drift from the
-    card it sits under, and it keeps working for months whose leaderboard keys
-    have long since stopped being interesting.
-    """
+def _group_name(group_id: int) -> str:
     from db.models import Session as _Session
-    from services.recap import load_snapshot
-    from services.recap_delivery import _gp, format_period, group_recap_url
+    from sqlalchemy import text
 
     s = _Session()
     try:
-        payload = load_snapshot(s, "group", group_id, period)
+        row = s.execute(
+            text("SELECT group_name FROM groups WHERE group_id = :gid"),
+            {"gid": group_id},
+        ).first()
+        return (row[0] if row else None) or f"Group {group_id}"
+    except Exception:
+        return f"Group {group_id}"
+    finally:
+        s.close()
+
+
+async def _leaderboard_embed(group_id: int, period: str) -> Optional[dict]:
+    """That month's lootboard — the graphical board, not a rewritten list.
+
+    It's the same image the clan already sees in its own channel, rendered for
+    the month the card covers. Frozen at delivery time, so this is normally a
+    file that already exists; generating here is the fallback for a board that
+    was pruned or a message older than the file.
+    """
+    from services.recap_delivery import ensure_group_lootboard, format_period, group_recap_url
+
+    try:
+        url = await ensure_group_lootboard(group_id, period)
     except Exception as e:
         app_logger.log(
             log_type="error",
-            data=f"recap leaderboard read failed for group {group_id} {period}: {e}",
+            data=f"recap lootboard failed for group {group_id} {period}: {e}",
             app_name="core",
             description="recap_buttons",
         )
         return None
-    finally:
-        s.close()
-
-    if not payload:
-        return None
-    members = (payload.get("top_members") or [])[:LEADERBOARD_ROWS]
-    if not members:
+    if not url:
         return None
 
-    name = (payload.get("subject") or {}).get("name") or f"Group {group_id}"
-    lines = [
-        f"**{i}.** {m.get('name') or 'Unknown'} — **{_gp(m.get('loot') or 0)}**"
-        for i, m in enumerate(members, start=1)
-    ]
     return {
-        "title": f"{name} — {format_period(period)} leaderboard",
+        "title": f"{_group_name(group_id)} — {format_period(period)} loot",
         "url": group_recap_url(group_id, period),
-        "description": "\n".join(lines),
+        "image": {"url": url},
         "color": 0xC8A24C,
-        "footer": {"text": "Only you can see this · full card on the site"},
+        "footer": {"text": "Only you can see this · full recap on the site"},
     }
 
 
@@ -147,10 +151,14 @@ class RecapButtons(Extension):
             group_id = int(raw_group)
         except (ValueError, TypeError):
             return
-        embed = _leaderboard_embed(group_id, period)
+        # Deferred first: the board is normally already on disk, but the
+        # fallback render takes a second or two — longer than Discord's 3s
+        # window for a first response.
+        await ctx.defer(ephemeral=True)
+        embed = await _leaderboard_embed(group_id, period)
         if not embed:
             await ctx.send(
-                "That month's leaderboard isn't available any more.", ephemeral=True
+                "That month's lootboard isn't available any more.", ephemeral=True
             )
             return
         # Ephemeral: dozens of people pressing this shouldn't each add a message

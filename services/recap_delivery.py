@@ -526,6 +526,81 @@ def ensure_snapshot(session, scope: str, subject_id: int, period: str) -> Option
     return row.generated_at.isoformat() if row.generated_at else period
 
 
+def group_lootboard_path(group_id: int, period: str) -> str:
+    """Where the month's lootboard is frozen for a clan's recap.
+
+    Deliberately not the generator's own ``lb/timeframes/`` filename: that name
+    encodes exact timestamps and belongs to the on-demand board feature, which
+    is free to prune or rename it. A recap message may be read for years, so its
+    image gets a stable path of its own beside the card.
+    """
+    return (
+        f"/store/droptracker/disc/static/assets/img/clans/{group_id}"
+        f"/recap/lootboard-{period}.png"
+    )
+
+
+def group_lootboard_url(group_id: int, period: str) -> str:
+    return f"{_SITE}/img/clans/{group_id}/recap/lootboard-{period}.png"
+
+
+async def ensure_group_lootboard(group_id: int, period: str) -> Optional[str]:
+    """The clan's lootboard for ``period``, generating it once and keeping it.
+
+    This is the graphical board members already know from their own channel —
+    the recap's "monthly leaderboard" button shows that, not a rewritten list.
+    Rendered for the month's exact bounds rather than reusing the live board,
+    which is continuously overwritten and by the time anyone presses the button
+    would show a different month entirely.
+    """
+    path = group_lootboard_path(group_id, period)
+    if os.path.exists(path):
+        return group_lootboard_url(group_id, period)
+
+    import calendar
+    import shutil
+
+    year, month = int(period[:4]), int(period[5:7])
+    last_day = calendar.monthrange(year, month)[1]
+    start = datetime(year, month, 1)
+    end = datetime(year, month, last_day, 23, 59, 59)
+
+    try:
+        from lootboard.generator import generate_timeframe_board
+
+        generated = await generate_timeframe_board(
+            group_id=group_id, start_time=start, end_time=end
+        )
+    except Exception as e:
+        app_logger.log(
+            log_type="error",
+            data=f"recap lootboard generation failed for group {group_id} {period}: {e}",
+            app_name="core",
+            description="recap_delivery",
+        )
+        return None
+    if not generated or not os.path.exists(generated):
+        return None
+
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o777, exist_ok=True)
+        # Copy rather than move: the generator's own file backs the on-demand
+        # board feature and isn't ours to take.
+        tmp = f"{path}.tmp"
+        shutil.copyfile(generated, tmp)
+        os.replace(tmp, path)
+        os.chmod(path, 0o666)
+    except OSError as e:
+        app_logger.log(
+            log_type="error",
+            data=f"could not store recap lootboard {path}: {e}",
+            app_name="core",
+            description="recap_delivery",
+        )
+        return None
+    return group_lootboard_url(group_id, period)
+
+
 async def render_all(
     stamps: dict[tuple[str, int], str], period: str
 ) -> dict[tuple[str, int], str]:
@@ -921,6 +996,16 @@ async def run_delivery(
 
     images = await render_all(stamps, period)
     log(f"  {len(images)}/{len(stamps)} card image(s) rendered")
+
+    # Freeze each clan's monthly lootboard now, so the button on the post is
+    # instant rather than making whoever presses it wait on a render.
+    boards = 0
+    for target in targets:
+        if isinstance(target, GroupTarget):
+            if await ensure_group_lootboard(target.group_id, period):
+                boards += 1
+    if boards:
+        log(f"  {boards} monthly lootboard(s) ready")
 
     from services.recap import load_snapshot
     from utils.discord_rest import DiscordRest
