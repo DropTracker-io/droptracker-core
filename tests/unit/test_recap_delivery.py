@@ -152,12 +152,28 @@ class TestMessages:
         assert "Stop sending these" in labels
         assert "Keep sending these" not in labels
 
+    def test_every_card_greets_the_recipient_by_mention(self):
+        for opted_in in (True, False):
+            msg = delivery.build_dm_message(self._target(opted_in=opted_in), {}, None)
+            assert msg["content"].startswith("Hey, <@123>!")
+
+    def test_card_names_the_month_and_the_account(self):
+        msg = delivery.build_dm_message(self._target(opted_in=False), {}, None)
+        assert "**Buzzyn**" in msg["content"]
+        assert "month of **June" in msg["content"]
+
     def test_first_card_explains_why_it_arrived(self):
         msg = delivery.build_dm_message(self._target(opted_in=False), {}, None)
-        assert "first monthly recap" in (msg["content"] or "")
+        content = msg["content"]
+        assert "keep receiving these each month" in content
+        # Discord subtext, so the housekeeping doesn't compete with the card.
+        assert "-# P.S." in content
 
-    def test_repeat_card_says_nothing_extra(self):
-        assert delivery.build_dm_message(self._target(opted_in=True), {}, None)["content"] is None
+    def test_repeat_card_drops_the_opt_in_footnote(self):
+        # They already chose; the only thing left to say is on the button.
+        content = delivery.build_dm_message(self._target(opted_in=True), {}, None)["content"]
+        assert "P.S." not in content
+        assert "keep receiving" not in content
 
     def test_image_is_attached_when_rendered(self):
         msg = delivery.build_dm_message(self._target(), {}, "https://img/card.png")
@@ -176,12 +192,36 @@ class TestMessages:
     def test_summary_is_empty_for_an_empty_payload(self):
         assert delivery._summary_line({}) == ""
 
+    def _group(self):
+        return delivery.GroupTarget(
+            group_id=14, name="Pegasus PvM", channel_id="1", period="2026-06"
+        )
+
     def test_group_card_carries_no_opt_in_buttons(self):
         # A channel post isn't one person's to decide.
-        target = delivery.GroupTarget(group_id=14, name="Pegasus PvM", channel_id="1", period="2026-06")
-        msg = delivery.build_channel_message(target, {}, None)
+        msg = delivery.build_channel_message(self._group(), {}, None)
         ids = [c.get("custom_id") for c in msg["components"][0]["components"]]
         assert ids == [None]
+
+    def test_group_post_introduces_itself(self):
+        # It lands among hundreds of drop notifications, so it says what it is.
+        content = delivery.build_channel_message(self._group(), {}, None)["content"]
+        assert "Pegasus PvM" in content and "in review" in content
+
+    def test_group_post_keeps_the_configure_line_at_the_bottom(self):
+        msg = delivery.build_channel_message(self._group(), {}, None)
+        assert msg["content"].rstrip().endswith("in your group settings.")
+        assert "group settings" in msg["embeds"][0]["footer"]["text"]
+
+    def test_group_post_mentions_active_members_when_known(self):
+        msg = delivery.build_channel_message(
+            self._group(), {"totals": {"members_active": 28, "members_total": 269}}, None
+        )
+        assert "**28** members of 269" in msg["content"]
+
+    def test_group_post_omits_member_count_when_unknown(self):
+        content = delivery.build_channel_message(self._group(), {}, None)["content"]
+        assert "members" not in content
 
     def test_test_banner_names_the_real_recipient(self):
         msg = delivery.build_dm_message(self._target(opted_in=True), {}, None)
@@ -191,7 +231,21 @@ class TestMessages:
     def test_test_banner_keeps_the_original_content(self):
         msg = delivery.build_dm_message(self._target(opted_in=False), {}, None)
         banner = delivery.with_test_banner(msg, "someone else")
-        assert "first monthly recap" in banner["content"]
+        # The banner prefixes; it must not replace the message under test.
+        assert "keep receiving these each month" in banner["content"]
+        assert "Hey, <@123>!" in banner["content"]
+
+
+class TestMonthPhrase:
+    def test_current_year_is_left_unsaid(self):
+        assert delivery.month_phrase("2026-07", this_year=2026) == "July"
+
+    def test_other_years_are_named(self):
+        # A re-send of an old month must not read as if it were this one.
+        assert delivery.month_phrase("2025-07", this_year=2026) == "July 2025"
+
+    def test_annual_period_is_the_year(self):
+        assert delivery.month_phrase("2025", this_year=2026) == "2025"
 
 
 class TestFlags:

@@ -564,6 +564,22 @@ def format_period(period: str) -> str:
     return f"{_MONTHS[month - 1]} {year}"
 
 
+def month_phrase(period: str, this_year: Optional[int] = None) -> str:
+    """How a message refers to the period in a sentence.
+
+    "the month of July" reads better than "the month of July 2026" for the card
+    that arrives days later, but a re-send of an older month has to say which
+    year or it's just wrong. So the year appears only when it isn't the current
+    one.
+    """
+    if len(period) == 4:
+        return period
+    year, month = int(period[:4]), int(period[5:7])
+    name = _MONTHS[month - 1]
+    this_year = this_year if this_year is not None else datetime.now(timezone.utc).year
+    return name if year == this_year else f"{name} {year}"
+
+
 def _gp(value: int) -> str:
     """Short GP, matching how the card itself writes numbers."""
     value = int(value or 0)
@@ -622,27 +638,67 @@ def build_dm_message(target: UserTarget, payload: dict, image_url: Optional[str]
     if image_url:
         embed["image"] = {"url": image_url}
 
+    # Addressed to the person, not announced at them: their name, their account,
+    # the month by name. `-#` is Discord's subtext, which is where the
+    # housekeeping belongs — the card is the message, the opt-in is a footnote.
+    greeting = (
+        f"Hey, <@{target.discord_id}>!\n"
+        f"We recapped everything you tracked for the month of "
+        f"**{month_phrase(target.period)}** on **{target.player_name}**!"
+    )
+
     if target.opted_in:
         buttons = [
             {"type": 2, "style": 2, "label": "Stop sending these", "custom_id": "recap_optin:off"},
         ]
-        content = None
+        # No footnote on a card they asked for: the only thing left to say is how
+        # to stop, and the button already says it.
+        content = greeting
     else:
         buttons = [
             {"type": 2, "style": 1, "label": "Keep sending these", "custom_id": "recap_optin:on"},
             {"type": 2, "style": 2, "label": "No thanks", "custom_id": "recap_optin:off"},
         ]
         content = (
-            "Here's your first monthly recap. Press **Keep sending these** to get "
-            "one each month — otherwise this is the only one you'll receive."
+            f"{greeting}\n"
+            "-# P.S. **If you'd like to keep receiving these each month**, press the "
+            "button below — otherwise we'll only send this one, and you can view them "
+            "yourself on your profile from here on out!"
         )
     buttons.append({"type": 2, "style": 5, "label": "View on the site", "url": url})
 
     return {"content": content, "embeds": [embed], "components": [{"type": 1, "components": buttons}]}
 
 
+def _group_intro(target: GroupTarget, payload: dict) -> str:
+    """What the clan post says above the card.
+
+    Written for a channel rather than an inbox: it lands among hundreds of drop
+    notifications, so it has to say what it is and why it appeared. The member
+    count is the one number worth pulling out here, because a clan recap is
+    about the group rather than any one person — and it's dropped when the
+    payload can't answer, like everything else on the card.
+    """
+    lines = [
+        f"# {target.name} — {month_phrase(target.period)} in review",
+        "Here's everything the clan tracked last month, in one card: the biggest "
+        "drops, who pulled the most weight, and where it all came from.",
+    ]
+    totals = (payload or {}).get("totals") or {}
+    active, total = totals.get("members_active"), totals.get("members_total")
+    if active:
+        who = f"**{int(active):,}** members" + (
+            f" of {int(total):,}" if total else ""
+        )
+        lines.append(f"{who} put something on the board this month — nice work, everyone.")
+    lines.append(
+        "-# Clan admins: change where this posts, or turn it off, in your group settings."
+    )
+    return "\n".join(lines)
+
+
 def build_channel_message(target: GroupTarget, payload: dict, image_url: Optional[str]) -> dict:
-    """The clan's card. No buttons: a channel post is not one person's to
+    """The clan's card. No opt-in buttons: a channel post is not one person's to
     decide, so the switch lives in group settings where an admin can reach it."""
     url = group_recap_url(target.group_id, target.period)
     embed = {
@@ -657,7 +713,7 @@ def build_channel_message(target: GroupTarget, payload: dict, image_url: Optiona
     if image_url:
         embed["image"] = {"url": image_url}
     return {
-        "content": None,
+        "content": _group_intro(target, payload),
         "embeds": [embed],
         "components": [
             {"type": 1, "components": [
