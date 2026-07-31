@@ -284,6 +284,9 @@ async def on_startup(event: Startup):
     bot.load_extension("services.group_poll")
     bot.load_extension("services.activity_launch")
     bot.load_extension("services.news_optin")
+    # Buttons on the monthly recap DM. Persistent (custom_id match), so a card
+    # sent months ago still works.
+    bot.load_extension("services.recap_optin")
     print("Loaded services.")
     print("Set bot to ready")
     await asyncio.sleep(1)
