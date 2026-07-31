@@ -670,33 +670,6 @@ def build_dm_message(target: UserTarget, payload: dict, image_url: Optional[str]
     return {"content": content, "embeds": [embed], "components": [{"type": 1, "components": buttons}]}
 
 
-def _group_intro(target: GroupTarget, payload: dict) -> str:
-    """What the clan post says above the card.
-
-    Written for a channel rather than an inbox: it lands among hundreds of drop
-    notifications, so it has to say what it is and why it appeared. The member
-    count is the one number worth pulling out here, because a clan recap is
-    about the group rather than any one person — and it's dropped when the
-    payload can't answer, like everything else on the card.
-    """
-    lines = [
-        f"# {target.name} — {month_phrase(target.period)} in review",
-        "Here's everything the clan tracked last month, in one card: the biggest "
-        "drops, who pulled the most weight, and where it all came from.",
-    ]
-    totals = (payload or {}).get("totals") or {}
-    active, total = totals.get("members_active"), totals.get("members_total")
-    if active:
-        who = f"**{int(active):,}** members" + (
-            f" of {int(total):,}" if total else ""
-        )
-        lines.append(f"{who} put something on the board this month — nice work, everyone.")
-    lines.append(
-        "-# Clan admins: change where this posts, or turn it off, in your group settings."
-    )
-    return "\n".join(lines)
-
-
 def build_channel_message(target: GroupTarget, payload: dict, image_url: Optional[str]) -> dict:
     """The clan's card. No opt-in buttons: a channel post is not one person's to
     decide, so the switch lives in group settings where an admin can reach it."""
@@ -713,7 +686,10 @@ def build_channel_message(target: GroupTarget, payload: dict, image_url: Optiona
     if image_url:
         embed["image"] = {"url": image_url}
     return {
-        "content": _group_intro(target, payload),
+        # A heading and nothing else. The card carries the story, and a channel
+        # that already sees every drop doesn't need it narrated — the one line of
+        # housekeeping (where to configure this) stays in the embed footer.
+        "content": f"# {target.name} — {month_phrase(target.period)} in review",
         "embeds": [embed],
         "components": [
             {"type": 1, "components": [

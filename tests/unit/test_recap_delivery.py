@@ -203,25 +203,21 @@ class TestMessages:
         ids = [c.get("custom_id") for c in msg["components"][0]["components"]]
         assert ids == [None]
 
-    def test_group_post_introduces_itself(self):
-        # It lands among hundreds of drop notifications, so it says what it is.
+    def test_group_post_is_a_heading_and_nothing_else(self):
+        # The card carries the story; a channel that sees every drop already
+        # doesn't need it narrated.
         content = delivery.build_channel_message(self._group(), {}, None)["content"]
-        assert "Pegasus PvM" in content and "in review" in content
+        assert content == "# Pegasus PvM — June in review"
 
-    def test_group_post_keeps_the_configure_line_at_the_bottom(self):
-        msg = delivery.build_channel_message(self._group(), {}, None)
-        assert msg["content"].rstrip().endswith("in your group settings.")
-        assert "group settings" in msg["embeds"][0]["footer"]["text"]
-
-    def test_group_post_mentions_active_members_when_known(self):
-        msg = delivery.build_channel_message(
+    def test_group_post_stays_a_heading_however_full_the_payload(self):
+        content = delivery.build_channel_message(
             self._group(), {"totals": {"members_active": 28, "members_total": 269}}, None
-        )
-        assert "**28** members of 269" in msg["content"]
+        )["content"]
+        assert content == "# Pegasus PvM — June in review"
 
-    def test_group_post_omits_member_count_when_unknown(self):
-        content = delivery.build_channel_message(self._group(), {}, None)["content"]
-        assert "members" not in content
+    def test_configure_hint_lives_in_the_footer(self):
+        msg = delivery.build_channel_message(self._group(), {}, None)
+        assert "group settings" in msg["embeds"][0]["footer"]["text"]
 
     def test_test_banner_names_the_real_recipient(self):
         msg = delivery.build_dm_message(self._target(opted_in=True), {}, None)
