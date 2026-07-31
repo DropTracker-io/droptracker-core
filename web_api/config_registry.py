@@ -173,15 +173,15 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # Where it goes. Empty falls back to lootboard_channel_id, which is where a
     # clan's monthly totals already live, so most groups need not set this.
     {"key": "channel_id_to_post_recaps", "type": "channel", "default": None},
-    # Local hour (0-23) on the 1st. Combined with recap_timezone below; both are
-    # seeded from the browser of the first admin who opens this page after the
-    # feature ships, so the default is "midnight, their time" rather than a
-    # number someone has to reason about.
+    # Local hour (0-23) on the 1st. Combined with recap_timezone below, which is
+    # seeded from the browser of the first admin who opens this page, so the
+    # default is "noon, their time" rather than a number someone has to reason
+    # about. Noon and not midnight because the month closes at 00:00 UTC, which
+    # is the middle of the night across Europe and the Americas.
     #
-    # A card cannot be built before its month closes at 00:00 UTC, so a clan
-    # ahead of UTC gets the earliest moment after that rather than a local
-    # midnight that hasn't happened yet in our data.
-    {"key": "recap_post_hour", "type": "int", "default": 0, "min": 0, "max": 23},
+    # A card cannot be built before that close, so a clan far enough ahead of UTC
+    # gets the earliest moment after it — which is still their afternoon.
+    {"key": "recap_post_hour", "type": "int", "default": 12, "min": 0, "max": 23},
     # IANA name (e.g. "America/New_York"). Empty means UTC.
     {"key": "recap_timezone", "type": "string", "default": None},
 ]

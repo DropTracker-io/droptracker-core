@@ -32,8 +32,9 @@ After=network-online.target mariadb.service mysql.service redis-server.service
 Type=oneshot
 User=user
 WorkingDirectory=/store/droptracker/disc
-ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.send_recaps --apply
-# 2 = "RECAP_DELIVERY_ENABLED is not set", the normal state before launch.
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.send_recaps --apply --unattended
+# 2 = deliberately not sending: the feature is off, or test mode is still on
+# (--unattended refuses test traffic — see scripts/send_recaps.py).
 SuccessExitStatus=0 2
 # A full month's run is ~1,000 DMs plus renders, paced under Discord's limits.
 # Generous, but bounded so a wedged run can't overlap the next firing forever.

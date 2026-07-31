@@ -99,6 +99,33 @@ class TestIsDue:
         assert delivery.is_due(late, "2026-06", "UTC", 9, grace_days=7)
 
 
+class TestDefaultHour:
+    def test_default_is_midday_not_the_month_boundary(self):
+        # 00:00 UTC is when the month closes, and the middle of the night across
+        # Europe and the Americas — a recap nobody sees until it's buried.
+        assert delivery.DEFAULT_POST_HOUR == 12
+
+    def test_default_lands_at_midday_for_a_utc_subject(self):
+        assert delivery.due_at_utc("2026-07", None, delivery.DEFAULT_POST_HOUR) == _utc(
+            2026, 8, 1, 12
+        )
+
+    def test_default_lands_at_local_midday_behind_utc(self):
+        # Noon in Los Angeles on 1 August is 19:00 UTC (PDT).
+        assert delivery.due_at_utc(
+            "2026-07", "America/Los_Angeles", delivery.DEFAULT_POST_HOUR
+        ) == _utc(2026, 8, 1, 19)
+
+    def test_far_ahead_of_utc_is_clamped_into_the_afternoon_not_the_night(self):
+        # Kiritimati (UTC+14) noon on the 1st is 22:00 UTC on the 31st — before
+        # the month closes — so it clamps to the close, which is 14:00 local.
+        due = delivery.due_at_utc("2026-07", "Pacific/Kiritimati", delivery.DEFAULT_POST_HOUR)
+        assert due == delivery.month_close_utc("2026-07")
+        from zoneinfo import ZoneInfo
+
+        assert due.astimezone(ZoneInfo("Pacific/Kiritimati")).hour == 14
+
+
 class TestBestAccount:
     def test_picks_the_biggest_month(self):
         assert delivery.pick_best_account([(1, 50), (2, 900), (3, 100)]) == 2

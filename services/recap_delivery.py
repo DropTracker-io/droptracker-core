@@ -71,6 +71,14 @@ RENDER_CONCURRENCY = 3
 # the run was a decision rather than an accident.
 TEST_MODE_TARGET_CAP = 5
 
+# The hour a card goes out when nobody has chosen one, local to the subject's
+# timezone. Noon rather than the month boundary: the leaderboards roll at 00:00
+# UTC, but a recap arriving then reaches most of Europe and the Americas in the
+# middle of the night, where it is buried by morning. A subject ahead of UTC can
+# still be pulled back to the boundary — a card cannot exist before its month
+# closes — but that lands in their afternoon, not their small hours.
+DEFAULT_POST_HOUR = 12
+
 # Config keys (mirrored in web_api/config_registry.py).
 CFG_ENABLED = "recaps_enabled"
 CFG_CHANNEL = "channel_id_to_post_recaps"
@@ -329,10 +337,12 @@ def collect_group_targets(
         channel = (value(CFG_CHANNEL) or value(CFG_LOOTBOARD_CHANNEL) or "").strip()
         if not channel:
             continue
+        raw_hour = value(CFG_HOUR)
         try:
-            hour = int(value(CFG_HOUR) or 0)
+            # Unset (the seeded cohort has no row) means the default, not 0.
+            hour = DEFAULT_POST_HOUR if raw_hour in (None, "") else int(raw_hour)
         except (TypeError, ValueError):
-            hour = 0
+            hour = DEFAULT_POST_HOUR
         if not ignore_due and not is_due(now, period, value(CFG_TIMEZONE), hour):
             continue
         if already_delivered(session, SCOPE_GROUP, group_id, period, DELIVERY_CHANNEL, is_test):
@@ -362,10 +372,10 @@ def collect_user_targets(
     from services.recap import _redis_totals, period_partition
     from web_api.common import hidden_player_ids
 
-    # Users have no configurable hour yet: their card goes at the month close,
-    # which is when the leaderboards they already watch roll over. Checked
-    # first, because everything below is a multi-second scan of the rollup and
-    # a sweep that runs all month would otherwise pay it every tick for nothing.
+    # Nobody can be due before the month closes, whatever their timezone says.
+    # Checked first because everything below is a multi-second scan of the
+    # rollup, and a sweep running every fifteen minutes shouldn't pay for it
+    # just to learn there is nothing to do.
     if not ignore_due and now < month_close_utc(period):
         return []
 
@@ -423,11 +433,15 @@ def collect_user_targets(
     all_players = [pid for e in by_user.values() for pid in e["players"]]
     totals = _redis_totals(all_players, partition)
 
-    opted_in_users = _opted_in_user_ids(session, list(by_user))
+    prefs = _user_prefs(session, list(by_user))
 
     out: list[UserTarget] = []
     for user_id, entry in by_user.items():
-        opted_in = user_id in opted_in_users
+        opted_in, tz_name = prefs.get(user_id, (False, None))
+        # Their own noon, from the timezone the site seeded on their first visit
+        # — a recap landing at 3am is one nobody reads.
+        if not ignore_due and not is_due(now, period, tz_name, DEFAULT_POST_HOUR):
+            continue
         if not user_is_entitled(
             opted_in=opted_in, had_prior=user_had_prior_recap(session, user_id)
         ):
@@ -454,19 +468,32 @@ def collect_user_targets(
     return out
 
 
-def _opted_in_user_ids(session, user_ids: list[int]) -> set[int]:
+def _user_prefs(session, user_ids: list[int]) -> dict[int, tuple[bool, Optional[str]]]:
+    """``{user_id: (opted_in, timezone)}`` — both keys in one read.
+
+    Absent rows are the common case (opt-in defaults off, and a timezone only
+    exists once someone has opened the site since the feature shipped), so
+    callers get the defaults rather than a missing key.
+    """
     if not user_ids:
-        return set()
+        return {}
     rows = session.execute(
         text(
-            "SELECT user_id, config_value FROM user_configurations "
-            "WHERE config_key = :key AND user_id IN :ids"
+            "SELECT user_id, config_key, config_value FROM user_configurations "
+            "WHERE config_key IN (:opt, :tz) AND user_id IN :ids"
         ).bindparams(bindparam("ids", expanding=True)),
-        {"key": USER_CFG_OPT_IN, "ids": user_ids},
+        {"opt": USER_CFG_OPT_IN, "tz": USER_CFG_TIMEZONE, "ids": user_ids},
     ).fetchall()
-    return {
-        int(uid) for uid, value in rows if str(value).strip().lower() in ("1", "true", "yes", "on")
-    }
+    out: dict[int, tuple[bool, Optional[str]]] = {}
+    for user_id, key, value in rows:
+        user_id = int(user_id)
+        opted_in, tz_name = out.get(user_id, (False, None))
+        if key == USER_CFG_OPT_IN:
+            opted_in = str(value).strip().lower() in ("1", "true", "yes", "on")
+        else:
+            tz_name = (value or "").strip() or None
+        out[user_id] = (opted_in, tz_name)
+    return out
 
 
 # --------------------------------------------------------------------------- #

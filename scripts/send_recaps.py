@@ -61,6 +61,10 @@ def main() -> int:
         "--ignore-due", action="store_true",
         help="ignore each subject's local send time (for manual runs and testing)",
     )
+    ap.add_argument(
+        "--unattended", action="store_true",
+        help="this is the timer, not a human (refuses to send test traffic)",
+    )
     args = ap.parse_args()
 
     period = (args.period or last_completed_month()).strip()
@@ -76,6 +80,15 @@ def main() -> int:
     if args.apply and not delivery_enabled():
         print(f"  refusing to send: {ENV_ENABLED} is not set")
         print(f"  (set {ENV_ENABLED}=true, and {ENV_TEST_TARGET} while testing)")
+        return 2
+    if args.apply and args.unattended and test_id:
+        # The timer fires every 15 minutes for three days. Test sends are
+        # re-addressed to one person and recorded as is_test, so an unattended
+        # run in test mode would put hundreds of cards in that inbox over the
+        # window while delivering nothing to anyone real. Test traffic is for
+        # runs a human is watching.
+        print(f"  refusing to send: {ENV_TEST_TARGET} is set and this is an unattended run")
+        print(f"  (clear {ENV_TEST_TARGET} to go live; test sends need a manual run)")
         return 2
 
     session = Session()
