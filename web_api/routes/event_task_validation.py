@@ -62,7 +62,9 @@ ITEM_CONFIG_KINDS = ("any_of", "all_of", "point_collection", "assembly", "groups
 
 MAX_CONFIG_ITEMS = 100
 MAX_CONFIG_GROUPS = 10
-MAX_CONFIG_PATHS = 4
+# Abuse backstop only — real path counts are bounded by MAX_CONFIG_ITEMS
+# across the whole task ("one set of each Barrows brother's gear" = 6 paths).
+MAX_CONFIG_PATHS = 20
 # Ceiling for any task goal without a tighter bound of its own. web_event_tasks
 # .target_value is BIGINT (web69a), so the real limit is the JS-safe integer —
 # the web UI carries goals as JS numbers and would lose precision past this.
