@@ -64,6 +64,13 @@ ENV_TEST_TARGET = "RECAP_DELIVERY_TEST_DISCORD_ID"
 # to ~20 minutes without putting the box under memory pressure.
 RENDER_CONCURRENCY = 3
 
+# In test mode every message is re-addressed to one person, so a full month's run
+# would put a thousand cards in that person's inbox. An unattended run (the
+# systemd timer firing while the feature is being tested) therefore stops after
+# this many; passing an explicit --limit overrides it, because then the size of
+# the run was a decision rather than an accident.
+TEST_MODE_TARGET_CAP = 5
+
 # Config keys (mirrored in web_api/config_registry.py).
 CFG_ENABLED = "recaps_enabled"
 CFG_CHANNEL = "channel_id_to_post_recaps"
@@ -355,6 +362,13 @@ def collect_user_targets(
     from services.recap import _redis_totals, period_partition
     from web_api.common import hidden_player_ids
 
+    # Users have no configurable hour yet: their card goes at the month close,
+    # which is when the leaderboards they already watch roll over. Checked
+    # first, because everything below is a multi-second scan of the rollup and
+    # a sweep that runs all month would otherwise pay it every tick for nothing.
+    if not ignore_due and now < month_close_utc(period):
+        return []
+
     partition = period_partition(period)
     year, month = partition // 100, partition % 100
     lo, hi = f"{year:04d}-{month:02d}-01-00", f"{year:04d}-{month:02d}-31-23"
@@ -437,12 +451,6 @@ def collect_user_targets(
         )
         if limit and len(out) >= limit:
             break
-
-    # Users have no configurable hour yet: their card goes at the month close,
-    # which is when the leaderboards they already watch roll over. `ignore_due`
-    # exists so a manual run can send outside that window.
-    if not ignore_due and now < month_close_utc(period):
-        return []
     return out
 
 
@@ -698,6 +706,13 @@ def build_channel_message(target: GroupTarget, payload: dict, image_url: Optiona
         "embeds": [embed],
         "components": [
             {"type": 1, "components": [
+                # Answers "where did I come?" privately — the card only has room
+                # for the top five, and a channel doesn't need everyone's answer
+                # posted in it. Handled by services/recap_buttons.py.
+                {
+                    "type": 2, "style": 2, "label": "Monthly leaderboard",
+                    "custom_id": f"recap_lb:{target.group_id}:{target.period}",
+                },
                 {"type": 2, "style": 5, "label": "View on the site", "url": url},
             ]}
         ],
@@ -878,6 +893,14 @@ async def run_delivery(
     if not targets:
         outcome.notes.append("nothing due")
         return outcome
+
+    if test_id and limit is None and len(targets) > TEST_MODE_TARGET_CAP:
+        dropped = len(targets) - TEST_MODE_TARGET_CAP
+        targets = targets[:TEST_MODE_TARGET_CAP]
+        outcome.notes.append(
+            f"test mode: capped at {TEST_MODE_TARGET_CAP} targets ({dropped} not sent) — "
+            "pass --limit to override"
+        )
 
     log(f"  {len(targets)} target(s) due for {period}")
 

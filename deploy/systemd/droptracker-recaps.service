@@ -1,0 +1,43 @@
+# Monthly recap delivery — DMs each eligible player their card and posts each
+# opted-in clan's card to its channel.
+# Triggered by droptracker-recaps.timer — do not enable the service itself.
+#
+# Why a timer rather than a Task inside the core bot: the run is thousands of
+# blocking database reads and a headless-chromium render per card, which would
+# stall the bot's event loop (and with it the outbox drain and notification
+# sends) for minutes at a time. Delivery needs no gateway connection — it posts
+# over REST — so it has no reason to live in the bot. The bot owns only the
+# buttons on the messages (services/recap_buttons.py).
+#
+# Every firing is safe to repeat: `recap_deliveries` has a unique constraint per
+# (subject, period, kind), so a subject already sent is skipped rather than
+# messaged twice. Each run picks up whoever has since come due.
+#
+# NOTHING SENDS unless RECAP_DELIVERY_ENABLED=true in .env. Until then each
+# firing exits 2 immediately, which is why 2 counts as success below — a
+# deliberately disabled run is not a failure worth alerting on. While
+# RECAP_DELIVERY_TEST_DISCORD_ID is also set, every message goes to that one
+# person instead of its real recipient.
+#
+# Manual dry run:  cd /store/droptracker/disc && venv/bin/python -m scripts.send_recaps
+# Manual real run: sudo systemctl start droptracker-recaps.service
+# Watch it:        journalctl -u droptracker-recaps.service -f
+
+[Unit]
+Description=DropTracker monthly recap delivery (DMs + clan channel posts)
+Wants=network-online.target
+After=network-online.target mariadb.service mysql.service redis-server.service
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.send_recaps --apply
+# 2 = "RECAP_DELIVERY_ENABLED is not set", the normal state before launch.
+SuccessExitStatus=0 2
+# A full month's run is ~1,000 DMs plus renders, paced under Discord's limits.
+# Generous, but bounded so a wedged run can't overlap the next firing forever.
+TimeoutStartSec=3h
+# Never urgent, and it shares the box with the intake API.
+Nice=10
+IOSchedulingClass=idle

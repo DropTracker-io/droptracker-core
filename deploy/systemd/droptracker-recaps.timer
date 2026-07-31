@@ -1,0 +1,31 @@
+# Fires droptracker-recaps.service every 15 minutes on the 1st-3rd of the month.
+#
+# Every 15 minutes because send times are per-subject: each clan posts at its own
+# configured local hour, and the service decides who is due on each firing. A
+# single daily trigger could not express that.
+#
+# Bounded to the 1st-3rd because nothing can be due outside it — a card is built
+# the moment its month closes at 00:00 UTC, and services/recap_delivery.is_due
+# stops considering a subject three days later (a "recap" arriving on the 20th is
+# a surprise, not a recap). Those three days are the catch-up window: if the box
+# is down on the 1st, the next firing still delivers.
+#
+# Persistent=true replays a firing missed across a reboot. RandomizedDelaySec is
+# small on purpose — a clan configured for 09:00 should not receive its card at
+# 09:14 — and the run itself paces its sends.
+#
+# Install:  sudo cp deploy/systemd/droptracker-recaps.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now droptracker-recaps.timer
+
+[Unit]
+Description=DropTracker monthly recap delivery trigger (1st-3rd, every 15 min)
+
+[Timer]
+OnCalendar=*-*-01..03 *:00/15 UTC
+RandomizedDelaySec=60
+Persistent=true
+Unit=droptracker-recaps.service
+
+[Install]
+WantedBy=timers.target

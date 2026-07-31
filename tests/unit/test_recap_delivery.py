@@ -198,10 +198,20 @@ class TestMessages:
         )
 
     def test_group_card_carries_no_opt_in_buttons(self):
-        # A channel post isn't one person's to decide.
+        # A channel post isn't one person's to decide, so the opt-in lives in
+        # group settings — but the leaderboard button is fair game.
         msg = delivery.build_channel_message(self._group(), {}, None)
-        ids = [c.get("custom_id") for c in msg["components"][0]["components"]]
-        assert ids == [None]
+        ids = [c.get("custom_id") or "" for c in msg["components"][0]["components"]]
+        assert not any(i.startswith("recap_optin") for i in ids)
+
+    def test_group_card_offers_the_monthly_leaderboard(self):
+        msg = delivery.build_channel_message(self._group(), {}, None)
+        buttons = msg["components"][0]["components"]
+        lb = [c for c in buttons if (c.get("custom_id") or "").startswith("recap_lb:")]
+        assert len(lb) == 1
+        # The subject travels in the id, so a button pressed months later still
+        # knows which clan and month it belongs to.
+        assert lb[0]["custom_id"] == "recap_lb:14:2026-06"
 
     def test_group_post_is_a_heading_and_nothing_else(self):
         # The card carries the story; a channel that sees every drop already
@@ -246,6 +256,13 @@ class TestMonthPhrase:
 
     def test_annual_period_is_the_year(self):
         assert delivery.month_phrase("2025", this_year=2026) == "2025"
+
+
+class TestTestModeCap:
+    def test_cap_is_small_enough_to_be_harmless(self):
+        # An unattended run in test mode re-addresses every card to one person;
+        # the cap is what stops a thousand of them landing in one inbox.
+        assert 0 < delivery.TEST_MODE_TARGET_CAP <= 10
 
 
 class TestFlags:

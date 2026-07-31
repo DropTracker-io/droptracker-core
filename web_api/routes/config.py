@@ -217,6 +217,17 @@ async def patch_group_config(group_id: int):
                         after=audit_after,
                     )
                 )
+            # An admin touching `recaps_enabled` takes ownership of it: the
+            # launch pass sets it on a cohort of clans and later reverts only
+            # what it still recognises, so clearing its marker here is what
+            # stops that revert from switching off a clan that chose to keep
+            # recaps. See scripts/seed_recap_groups.py.
+            if "recaps_enabled" in coerced:
+                s.query(GroupConfiguration).filter(
+                    GroupConfiguration.group_id == group_id,
+                    GroupConfiguration.config_key == "recaps_seeded",
+                ).delete(synchronize_session=False)
+
             s.commit()
 
             # Invalidate the shared config cache so the bot/plugin path sees the
