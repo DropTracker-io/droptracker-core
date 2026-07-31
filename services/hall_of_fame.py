@@ -158,26 +158,10 @@ class ChannelNotPostable(Exception):
     crashing its pass every cycle."""
 
 
-class RateLimiter:
-    """Sliding-window limiter: at most ``max_calls`` per ``period_seconds``."""
-
-    def __init__(self, max_calls: int, period_seconds: float):
-        self.max_calls = max_calls
-        self.period = period_seconds
-        self.calls = deque()
-        self._lock = asyncio.Lock()
-
-    async def acquire(self):
-        async with self._lock:
-            while True:
-                now = time.monotonic()
-                while self.calls and now - self.calls[0] > self.period:
-                    self.calls.popleft()
-                if len(self.calls) < self.max_calls:
-                    self.calls.append(now)
-                    return
-                sleep_for = self.period - (now - self.calls[0])
-                await asyncio.sleep(max(sleep_for, 0.0) + random.uniform(0.01, 0.05))
+# Both moved to utils/discord_write.py so the recap delivery job shares one
+# implementation rather than growing a second, subtly different copy. Re-exported
+# here because this module's own code (and its tests) refer to RateLimiter.
+from utils.discord_write import DiscordWriter, RateLimiter  # noqa: E402,F401
 
 
 @dataclass
@@ -221,8 +205,14 @@ class ChannelScan:
 class HallOfFame(Extension):
     def __init__(self, bot: interactions.Client):
         self.bot = bot
-        self._global_limiter = RateLimiter(max_calls=6, period_seconds=1.0)
-        self._channel_limiters: Dict[str, RateLimiter] = {}
+        # Per-channel pacing: Discord's PATCH message bucket is 5 per rolling
+        # window per channel, and production logs show sustained 1.2s pacing
+        # still tripping it during mass-edit waves, so pace conservatively.
+        self._writer = DiscordWriter(
+            label="HOF",
+            global_max_calls=6, global_period=1.0,
+            bucket_max_calls=1, bucket_period=1.5,
+        )
         self._forbidden_until: Dict[int, float] = {}
         self._forbidden_strikes: Dict[int, int] = {}
         # group_id -> channel_id the strike happened on, so a channel
@@ -1021,66 +1011,14 @@ class HallOfFame(Extension):
             return None
 
     async def _discord_write(self, channel_id: str, factory, expect_result: bool = False):
-        """Run one Discord write (send/edit/delete) with pacing and retries.
+        """One paced, retrying Discord write — see :mod:`utils.discord_write`.
 
-        ``factory`` is a zero-arg callable returning a fresh coroutine, so the
-        call can be retried.  Forbidden and NotFound propagate to the caller;
-        BadRequest fails fast (retrying a 400 can never succeed); everything
-        else is retried with backoff.
-
-        ``expect_result`` MUST be True for sends and edits.  interactions'
-        HTTPClient gives up silently after 3 consecutive 429s — its request
-        loop simply ends and returns ``None`` instead of raising — which makes
-        ``Message.edit()`` a no-op that "succeeds".  Treating that None as
-        success is what poisoned the hash cache and froze stale boss messages
-        in place (the duplicate-boss symptom of issue #31).  When a None comes
-        back we wait out the bucket and retry, and if it never succeeds we
-        raise so the caller does not record the write as done.
+        ``expect_result`` MUST be True for sends and edits: treating the
+        library's silent None-on-429 as success is what poisoned the hash cache
+        and froze stale boss messages in place (the duplicate-boss symptom of
+        issue #31).
         """
-        last_exc: Optional[Exception] = None
-        for attempt in range(1, 5):
-            await self._global_limiter.acquire()
-            await self._get_channel_limiter(channel_id).acquire()
-            try:
-                result = await factory()
-                if expect_result and result is None:
-                    # Silent rate-limit exhaustion inside the HTTP client.
-                    delay = 5.0 * attempt + random.uniform(0.5, 1.5)
-                    log.warning(
-                        "HOF: write on channel %s returned None (library gave up on 429s), "
-                        "sleeping %.1fs before retry (attempt %d)",
-                        channel_id, delay, attempt,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                return result
-            except (Forbidden, NotFound, BadRequest):
-                raise
-            except RateLimited as e:
-                retry_after = float(getattr(e, "retry_after", None) or 2.0)
-                delay = min(retry_after, 60.0) + random.uniform(0.1, 0.5)
-                log.warning("HOF: 429 on channel %s, sleeping %.1fs (attempt %d)", channel_id, delay, attempt)
-                last_exc = e
-                await asyncio.sleep(delay)
-            except HTTPException as e:
-                last_exc = e
-                delay = min(2.0 * attempt, 8.0) + random.uniform(0.1, 0.5)
-                log.warning("HOF: HTTP %s on channel %s, retrying in %.1fs (attempt %d)",
-                            getattr(e, "status", "?"), channel_id, delay, attempt)
-                await asyncio.sleep(delay)
-        if last_exc:
-            raise last_exc
-        raise RuntimeError(f"HOF: discord write on channel {channel_id} kept returning None (rate limited)")
-
-    def _get_channel_limiter(self, channel_id: str) -> RateLimiter:
-        limiter = self._channel_limiters.get(channel_id)
-        if limiter is None:
-            # Discord's PATCH message bucket is 5 per rolling window per
-            # channel; production logs show sustained 1.2s pacing still trips
-            # it during mass-edit waves, so pace conservatively.
-            limiter = RateLimiter(max_calls=1, period_seconds=1.5)
-            self._channel_limiters[channel_id] = limiter
-        return limiter
+        return await self._writer.write(channel_id, factory, expect_result=expect_result)
 
     def _jump_url(self, group: Group, row: GroupPersonalBestMessage) -> str:
         return f"https://discord.com/channels/{group.guild_id}/{row.channel_id}/{row.message_id}"

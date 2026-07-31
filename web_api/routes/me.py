@@ -57,7 +57,10 @@ _BOOL_SETTINGS = [
 ]
 # Settings stored in user_configurations, shared with the Discord bot.
 # `dm_account_changes` gates the RSN-change DM in data/submissions/common.py.
-_CONFIG_SETTINGS = ["dm_account_changes"]
+# `dm_monthly_recap` gates repeat monthly recap DMs — everyone receives their
+# first one unsolicited (the delivery ledger records that it happened), and this
+# is how they ask for the ones after it. Absent row = off, so no backfill.
+_CONFIG_SETTINGS = ["dm_account_changes", "dm_monthly_recap"]
 # Supporter submission-DM opt-ins (user_configurations), read by
 # data/submissions/* at queue time. Saving them is allowed for everyone;
 # they only take effect with the `dm_submissions` supporter entitlement.
@@ -79,6 +82,30 @@ _DM_MIN_VALUE_MAX = 2_147_483_647
 # shows a fix-it banner. Users may PATCH it false to dismiss; the bot clears
 # it automatically on the next successful DM.
 _DM_DELIVERY_ISSUE_KEY = "dm_delivery_issue"
+# IANA timezone deciding when a monthly recap DM lands. Seeded once from the
+# browser the first time the settings page is opened, so the default is the
+# user's own midnight rather than a number they have to pick. Empty means UTC,
+# and so does anything unparseable — a recap arriving an hour off is not worth
+# failing a save over.
+_RECAP_TIMEZONE_KEY = "recap_timezone"
+_RECAP_TIMEZONE_MAX_LEN = 64
+
+
+def _is_known_timezone(name: str) -> bool:
+    """Whether the tz database recognises this name.
+
+    Rejecting an unknown name on save is worth it here even though the sender
+    tolerates one: the value arrives from a browser we don't control, and a typo
+    caught at the settings page is a fixable mistake, where the same typo caught
+    at 00:00 on the 1st is a recap that quietly went out at the wrong hour.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(name)
+        return True
+    except Exception:
+        return False
 
 
 def _config_bool(s, user_id: int, key: str) -> bool:
@@ -135,6 +162,7 @@ def _settings_dict(s, user: User) -> dict:
     except (TypeError, ValueError):
         out[_DM_MIN_VALUE_KEY] = 0
     out[_DM_DELIVERY_ISSUE_KEY] = _config_bool(s, user.user_id, _DM_DELIVERY_ISSUE_KEY)
+    out[_RECAP_TIMEZONE_KEY] = _config_value(s, user.user_id, _RECAP_TIMEZONE_KEY) or ""
     out["supporter_entitlements"] = resolve_user_entitlements(s, user.user_id, user=user)
     out["players"] = [
         {"id": p.player_id, "name": p.player_name, "hidden": bool(p.hidden)}
@@ -323,6 +351,12 @@ async def patch_me():
             if value is not False:
                 abort_problem(422, "Invalid value", f"'{key}' can only be set to false (dismiss).")
             updates[key] = value
+        elif key == _RECAP_TIMEZONE_KEY:
+            if not isinstance(value, str) or len(value) > _RECAP_TIMEZONE_MAX_LEN:
+                abort_problem(422, "Invalid value", f"'{key}' must be a short string.")
+            if value and not _is_known_timezone(value):
+                abort_problem(422, "Invalid value", f"'{key}' must be an IANA timezone name.")
+            updates[key] = value
         else:
             abort_problem(422, "Unknown setting", f"'{key}' is not a settable field.")
 
@@ -334,6 +368,8 @@ async def patch_me():
             for key, value in updates.items():
                 if key == _DM_MIN_VALUE_KEY:
                     _set_config_value(s, user.user_id, key, str(value))
+                elif key == _RECAP_TIMEZONE_KEY:
+                    _set_config_value(s, user.user_id, key, value)
                 elif key in _CONFIG_SETTINGS or key in _DM_CONFIG_SETTINGS or key == _DM_DELIVERY_ISSUE_KEY:
                     _set_config_bool(s, user.user_id, key, value)
                 else:

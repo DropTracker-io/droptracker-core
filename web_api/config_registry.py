@@ -160,6 +160,30 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # "password" coerces exactly like "string" (both coerce_* functions fall
     # through); the type only changes how the web editor renders the input.
     {"key": "wom_verification_code", "type": "password", "default": None},
+
+    # --- Monthly recaps ---
+    # The clan's "Wrapped" card, posted on the 1st for the month just ended
+    # (services/recap.py builds it; the delivery job posts it).
+    #
+    # Off by default: every clan receives one unsolicited card, after which an
+    # admin turns this on to keep getting them. That first post is authorised by
+    # a seeding pass rather than by code, so the flag always reflects the truth —
+    # a clan can switch it off in advance and never receive one at all.
+    {"key": "recaps_enabled", "type": "boolean", "default": False},
+    # Where it goes. Empty falls back to lootboard_channel_id, which is where a
+    # clan's monthly totals already live, so most groups need not set this.
+    {"key": "channel_id_to_post_recaps", "type": "channel", "default": None},
+    # Local hour (0-23) on the 1st. Combined with recap_timezone below; both are
+    # seeded from the browser of the first admin who opens this page after the
+    # feature ships, so the default is "midnight, their time" rather than a
+    # number someone has to reason about.
+    #
+    # A card cannot be built before its month closes at 00:00 UTC, so a clan
+    # ahead of UTC gets the earliest moment after that rather than a local
+    # midnight that hasn't happened yet in our data.
+    {"key": "recap_post_hour", "type": "int", "default": 0, "min": 0, "max": 23},
+    # IANA name (e.g. "America/New_York"). Empty means UTC.
+    {"key": "recap_timezone", "type": "string", "default": None},
 ]
 
 _BY_KEY = {f["key"]: f for f in GROUP_CONFIG_FIELDS}

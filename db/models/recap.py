@@ -44,6 +44,21 @@ SCOPE_GROUP = "group"
 SCOPE_PLAYER = "player"
 RECAP_SCOPES = (SCOPE_GROUP, SCOPE_PLAYER)
 
+# How a card reached its audience.
+DELIVERY_DM = "dm"
+DELIVERY_CHANNEL = "channel"
+DELIVERY_KINDS = (DELIVERY_DM, DELIVERY_CHANNEL)
+
+# Terminal states. `forbidden` is deliberately NOT a failure to retry: a user
+# whose DMs are closed is told on the website that they need to open them, and
+# the row still counts as delivered, so we don't re-attempt a bounce every month
+# for people who never interact. `failed` is for faults on our side (render
+# broke, Discord 5xx after retries) and may be re-attempted within the period.
+DELIVERY_SENT = "sent"
+DELIVERY_FORBIDDEN = "forbidden"
+DELIVERY_FAILED = "failed"
+DELIVERY_STATUSES = (DELIVERY_SENT, DELIVERY_FORBIDDEN, DELIVERY_FAILED)
+
 
 class RecapSnapshot(Base):
     """A computed recap card for one subject over one period."""
@@ -72,3 +87,63 @@ class RecapSnapshot(Base):
         Integer, nullable=False, default=RECAP_SCHEMA_VERSION, server_default="1"
     )
     generated_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
+class RecapDelivery(Base):
+    """One record of a recap card reaching (or failing to reach) an audience.
+
+    Distinct from :class:`RecapSnapshot`, which records that a card was *built*.
+    This records that it was *sent*, and it answers two different questions:
+
+    *Idempotency.* The unique constraint means a restart mid-run, a catch-up
+    tick, or a second sweep cannot post a clan's card twice or DM the same
+    person twice for one period.
+
+    *Entitlement.* Every user gets exactly one unsolicited recap — their first —
+    and opt-in is required for the rest. That rule needs no separate flag: "has
+    this user ever been sent one" is a query against ``user_id`` here. Storing it
+    per-delivery rather than as a boolean on the user also means we can see
+    *which* card they got and when, which is what makes a support question
+    answerable.
+
+    ``subject_id`` is the card's subject (a group id, or the player id whose card
+    was sent), while ``user_id`` is the human who received it. They differ on a
+    DM: a user with several accounts is sent their best account's card, so the
+    subject is that player and the recipient is the user.
+
+    ``is_test`` marks a redirected send during rollout — those go to a test
+    recipient rather than the real one, so they must not satisfy either question
+    above. It is part of the unique key so a real send can still follow a test
+    one for the same subject and period.
+    """
+
+    __tablename__ = "recap_deliveries"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope", "subject_id", "period", "kind", "is_test",
+            name="uq_recap_delivery_subject_period_kind",
+        ),
+        # "has this user ever had one" — the entitlement check, per user.
+        Index("idx_recap_delivery_user", "user_id", "is_test"),
+        # "what did this month's run do" — ops and reporting.
+        Index("idx_recap_delivery_period", "period", "kind"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scope = Column(String(16), nullable=False)
+    subject_id = Column(Integer, nullable=False)
+    period = Column(String(7), nullable=False)
+    kind = Column(String(16), nullable=False)
+    # Null for a channel post. Set for a DM, and the column the entitlement
+    # check reads.
+    user_id = Column(Integer, nullable=True)
+    # Discord snowflake of the channel or the recipient user. String, because
+    # snowflakes exceed a signed 32-bit int and are ids, not numbers.
+    target_id = Column(String(32), nullable=True)
+    status = Column(String(16), nullable=False, default=DELIVERY_SENT)
+    # Discord's id for the posted message, so a later edit or delete can find it.
+    message_id = Column(String(32), nullable=True)
+    error = Column(Text, nullable=True)
+    is_test = Column(Integer, nullable=False, default=0, server_default="0")
+    sent_at = Column(DateTime, nullable=False, server_default=func.now())
