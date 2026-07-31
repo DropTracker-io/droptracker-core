@@ -216,8 +216,12 @@ class TestMessages:
         assert content == "# Pegasus PvM — June in review"
 
     def test_configure_hint_lives_in_the_footer(self):
-        msg = delivery.build_channel_message(self._group(), {}, None)
-        assert "group settings" in msg["embeds"][0]["footer"]["text"]
+        # Worded as an invitation, not as management of an existing
+        # subscription: by default a clan receives exactly one card.
+        footer = delivery.build_channel_message(self._group(), {}, None)["embeds"][0]["footer"]
+        assert footer["text"] == (
+            "DropTracker.io · configure receiving recaps every month in your group settings"
+        )
 
     def test_test_banner_names_the_real_recipient(self):
         msg = delivery.build_dm_message(self._target(opted_in=True), {}, None)

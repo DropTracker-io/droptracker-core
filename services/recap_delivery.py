@@ -678,7 +678,12 @@ def build_channel_message(target: GroupTarget, payload: dict, image_url: Optiona
         "title": f"{target.name} — {format_period(target.period)}",
         "url": url,
         "color": _GOLD,
-        "footer": {"text": "DropTracker.io · manage recaps in your group settings"},
+        # Says what the default actually is: one card, unless a clan asks for
+        # more. "Manage recaps" implied they were already subscribed.
+        "footer": {
+            "text": "DropTracker.io · configure receiving recaps every month "
+                    "in your group settings"
+        },
     }
     summary = _summary_line(payload)
     if summary:
