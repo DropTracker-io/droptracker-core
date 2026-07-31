@@ -32,7 +32,12 @@ class SemanticAPI:
         "Reward casket (hard)": "Clue Scroll (Hard)",
         "Reward casket (elite)": "Clue Scroll (Elite)",
         "Reward casket (master)": "Clue Scroll (Master)",
-        "Reward Chest (The Gauntlet)": "Corrupted Gauntlet",
+        # npc_list's canonical spellings carry a leading "The" ("The Gauntlet",
+        # "The Corrupted Gauntlet" - see ensure_npc_id_for_player's variant
+        # dedup), which this alias didn't cover; every armour/weapon seed
+        # drop (the only Gauntlet rewards worth >1M) was silently rejected by
+        # the high-value check as a result.
+        "Reward Chest (The Gauntlet)": ["The Gauntlet", "The Corrupted Gauntlet"],
         # The Royal Titans is a duo encounter; the plugin reports the source as
         # the combined "Royal Titans", but the wiki lists each titan's loot
         # under its individual name. Both map to our "Royal Titans".
