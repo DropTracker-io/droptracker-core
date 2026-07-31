@@ -127,11 +127,19 @@ def _group_from_names(mode: str, names_norm, need: int, qty_by: dict,
                       icons: dict, entries: dict) -> dict:
     """Build one requirement group ({mode, need, obtained, satisfied, items})
     from a set/list of normalized item names."""
-    items = [_item_row(nn, icons, qty_by, (entries or {}).get(nn)) for nn in names_norm]
+    names = list(names_norm)
+    # A single-item any_of ("6000× Vial of blood") is really a counted goal:
+    # surface the group need on the item row so it reads 158/6000, not ✓.
+    single_need = need if mode != "all_of" and len(names) == 1 else 1
+    items = [_item_row(nn, icons, qty_by, (entries or {}).get(nn),
+                       required_default=single_need) for nn in names]
     if mode == "all_of":
         got = sum(1 for it in items if it["satisfied"])
-    else:  # any_of: quantities fold, capped at need (matches _grouped_progress_from_rows)
-        got = min(sum(min(it["obtained"], it["required"]) for it in items), need)
+    else:
+        # any_of: full quantities fold, capped only at the group need — the
+        # engine (_grouped_progress_from_rows) has no per-item cap, so a
+        # 53-vial stack must count 53 here too, not 1.
+        got = min(sum(it["obtained"] for it in items), need)
     return {
         "mode": mode,
         "need": need,
@@ -340,14 +348,18 @@ def build_task_breakdown(task: dict, tile: dict | None, rows, progress_row,
             mode = "points"
         else:
             mode = "any_of"
-        items = [_item_row(nn, icons, qty_by, entries.get(nn)) for nn in entries.keys()]
         need = target_val
+        single_need = need if mode == "any_of" and len(entries) == 1 else 1
+        items = [_item_row(nn, icons, qty_by, entries.get(nn),
+                           required_default=single_need) for nn in entries.keys()]
         if mode == "all_of":
             got = sum(1 for it in items if it["satisfied"])
         elif mode == "points":
             got = prog  # authoritative weighted-points total from the rollup
         else:
-            got = min(sum(min(it["obtained"], it["required"]) for it in items), need)
+            # any_of: full quantities fold (engine folds row quantities with
+            # no per-item cap — see _apply's flat `progress += quantity`).
+            got = min(sum(it["obtained"] for it in items), need)
         group = {
             "mode": mode,
             "need": need,
