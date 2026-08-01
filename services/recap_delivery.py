@@ -42,6 +42,7 @@ from db.models.recap import (
     DELIVERY_DM,
     DELIVERY_FAILED,
     DELIVERY_FORBIDDEN,
+    DELIVERY_NO_CARD,
     DELIVERY_SENT,
     SCOPE_GROUP,
     SCOPE_PLAYER,
@@ -231,6 +232,9 @@ class DeliveryOutcome:
 def already_delivered(
     session, scope: str, subject_id: int, period: str, kind: str, is_test: bool
 ) -> bool:
+    # `failed` means a fault on our side, which the model documents as
+    # re-attemptable within the period — so a failed row does not settle the
+    # subject; the next sweep picks them up again.
     return (
         session.query(RecapDelivery.id)
         .filter(
@@ -239,6 +243,7 @@ def already_delivered(
             RecapDelivery.period == period,
             RecapDelivery.kind == kind,
             RecapDelivery.is_test == (1 if is_test else 0),
+            RecapDelivery.status != DELIVERY_FAILED,
         )
         .first()
         is not None
@@ -249,7 +254,10 @@ def user_had_prior_recap(session, user_id: int) -> bool:
     """Whether this user has ever been sent a real recap DM.
 
     Test deliveries are excluded: a rollout that redirected their card to
-    somebody else must not be counted as the card they were owed.
+    somebody else must not be counted as the card they were owed. Likewise
+    `failed` (our fault, nothing arrived) and `no_card` (nothing to send that
+    month) — only a send that reached Discord, or bounced off closed DMs by
+    the recipient's own setting, consumes the one free recap.
     """
     return (
         session.query(RecapDelivery.id)
@@ -257,6 +265,7 @@ def user_had_prior_recap(session, user_id: int) -> bool:
             RecapDelivery.kind == DELIVERY_DM,
             RecapDelivery.user_id == user_id,
             RecapDelivery.is_test == 0,
+            RecapDelivery.status.in_((DELIVERY_SENT, DELIVERY_FORBIDDEN)),
         )
         .first()
         is not None
@@ -277,19 +286,33 @@ def record_delivery(
     error: Optional[str] = None,
     is_test: bool = False,
 ) -> RecapDelivery:
-    row = RecapDelivery(
-        scope=scope,
-        subject_id=subject_id,
-        period=period,
-        kind=kind,
-        user_id=user_id,
-        target_id=str(target_id) if target_id else None,
-        status=status,
-        message_id=str(message_id) if message_id else None,
-        error=(error or None) and str(error)[:500],
-        is_test=1 if is_test else 0,
+    # A re-attempt after a `failed` row must settle the same ledger slot, not
+    # trip the (scope, subject, period, kind, is_test) unique constraint.
+    row = (
+        session.query(RecapDelivery)
+        .filter(
+            RecapDelivery.scope == scope,
+            RecapDelivery.subject_id == subject_id,
+            RecapDelivery.period == period,
+            RecapDelivery.kind == kind,
+            RecapDelivery.is_test == (1 if is_test else 0),
+        )
+        .first()
     )
-    session.add(row)
+    if row is None:
+        row = RecapDelivery(
+            scope=scope,
+            subject_id=subject_id,
+            period=period,
+            kind=kind,
+            is_test=1 if is_test else 0,
+        )
+        session.add(row)
+    row.user_id = user_id
+    row.target_id = str(target_id) if target_id else None
+    row.status = status
+    row.message_id = str(message_id) if message_id else None
+    row.error = (error or None) and str(error)[:500]
     return row
 
 
@@ -1057,6 +1080,18 @@ async def run_delivery(
             payload = load_snapshot(session, scope, subject_id, period) or {}
             image_url = images.get((scope, subject_id))
             if not payload:
+                # Settle the ledger slot so the sweep stops re-planning a
+                # subject that will not have a card this period.
+                if apply:
+                    record_delivery(
+                        session, scope=scope, subject_id=subject_id,
+                        period=target.period,
+                        kind=DELIVERY_CHANNEL if is_group else DELIVERY_DM,
+                        status=DELIVERY_NO_CARD,
+                        user_id=None if is_group else target.user_id,
+                        is_test=bool(test_id),
+                    )
+                    session.commit()
                 outcome.skipped += 1
                 log(f"  skip {_describe(target)}: no snapshot")
                 continue

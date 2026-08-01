@@ -14,6 +14,7 @@ here; nothing else in this module depends on the library.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 import aiohttp
@@ -71,11 +72,15 @@ class DiscordRest:
                 return body
             if resp.status == 204:
                 return None
+            # These constructors take the aiohttp response itself (they read
+            # .status off it) — handing them a bare string makes __init__ blow
+            # up with AttributeError, which turns every 403/429 into an
+            # untyped failure downstream.
             if resp.status == 429:
                 retry_after = 1.0
                 if isinstance(body, dict):
                     retry_after = float(body.get("retry_after") or 1.0)
-                exc = RateLimited(f"429 on {path}")
+                exc = RateLimited(resp, text=f"429 on {path}")
                 # DiscordWriter reads this attribute to size its backoff; the
                 # library's own exception carries it under the same name.
                 exc.retry_after = retry_after
@@ -83,12 +88,12 @@ class DiscordRest:
             if resp.status == 403:
                 # The one failure that is a fact about the recipient rather than
                 # about us: DMs closed, or no shared server.
-                raise Forbidden(f"403 on {path}: {body}")
+                raise Forbidden(resp, text=f"403 on {path}: {body}")
             if resp.status == 404:
-                raise NotFound(f"404 on {path}: {body}")
+                raise NotFound(resp, text=f"404 on {path}: {body}")
             if resp.status == 400:
-                raise BadRequest(f"400 on {path}: {body}")
-            raise HTTPException(f"{resp.status} on {path}: {body}")
+                raise BadRequest(resp, text=f"400 on {path}: {body}")
+            raise HTTPException(resp, text=f"{resp.status} on {path}: {body}")
 
     async def open_dm(self, discord_user_id: str) -> str:
         """The DM channel with this user, opening one if needed."""
@@ -101,7 +106,12 @@ class DiscordRest:
         )
         channel_id = str((data or {}).get("id") or "")
         if not channel_id:
-            raise HTTPException(f"no channel id returned for user {key}")
+            # No live response object to hand over here (the request itself
+            # succeeded), so fake the attributes the constructor reads.
+            raise HTTPException(
+                SimpleNamespace(status=200, reason="OK"),
+                text=f"no channel id returned for user {key}",
+            )
         self._dm_channels[key] = channel_id
         return channel_id
 

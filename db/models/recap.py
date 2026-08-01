@@ -54,10 +54,16 @@ DELIVERY_KINDS = (DELIVERY_DM, DELIVERY_CHANNEL)
 # the row still counts as delivered, so we don't re-attempt a bounce every month
 # for people who never interact. `failed` is for faults on our side (render
 # broke, Discord 5xx after retries) and may be re-attempted within the period.
+# `no_card` records a subject that was due but had nothing to send (below the
+# activity floor, opted out of public display) — it stops the delivery sweep
+# re-planning them every cycle, without counting as the recap they were owed.
 DELIVERY_SENT = "sent"
 DELIVERY_FORBIDDEN = "forbidden"
 DELIVERY_FAILED = "failed"
-DELIVERY_STATUSES = (DELIVERY_SENT, DELIVERY_FORBIDDEN, DELIVERY_FAILED)
+DELIVERY_NO_CARD = "no_card"
+DELIVERY_STATUSES = (
+    DELIVERY_SENT, DELIVERY_FORBIDDEN, DELIVERY_FAILED, DELIVERY_NO_CARD
+)
 
 
 class RecapSnapshot(Base):
