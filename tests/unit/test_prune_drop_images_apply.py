@@ -8,6 +8,11 @@ session before it is ever pointed at production.
 Covered: dry run touches nothing, apply deletes + clears, high-value and
 in-window drops are never selected, an already-missing file still clears its
 dangling reference, and a failed unlink does NOT clear image_url.
+
+Also pinned here: the *shape* of the candidate query. It is normally not worth
+asserting on SQL text, but this scan is one index choice away from being a
+table walk that times out — which is exactly how the job died on 2026-08-01 —
+and nothing else would catch that drift until the nightly run failed.
 """
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ import importlib.util
 import json
 import os
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -45,12 +51,21 @@ def prune(tmp_path, monkeypatch):
 class FakeSession:
     """Scripted stand-in for db.models.base.session.
 
-    Returns the candidate rows once per partition, then empty (ending the
-    keyset walk), and records every UPDATE it is asked to run.
+    Serves the candidate rows once, then empty (ending the keyset walk), and
+    records every UPDATE it is asked to run.
+
+    Tests hand candidates in as ``(drop_id, image_url)``; the ``date_added``
+    the scan pages on is supplied here, because which timestamp a row carries
+    is irrelevant to what these tests assert (files unlinked, references
+    cleared, snapshot written). ``MIN(date_added)`` is answered just inside the
+    retention window so the walk builds two windows rather than one per day
+    since 2024.
     """
 
+    ROW_DATE = datetime(2026, 1, 1, 12, 0, 0)
+
     def __init__(self, candidates, recap_payloads=()):
-        self._candidates = candidates
+        self._candidates = [(cid, url, self.ROW_DATE) for cid, url in candidates]
         self._recap_payloads = list(recap_payloads)
         self._served = False
         self.cleared: list[int] = []
@@ -58,8 +73,8 @@ class FakeSession:
 
     def execute(self, statement, params=None):
         sql = str(statement)
-        if "DISTINCT `partition`" in sql:
-            return _Result([(202601,)])
+        if "MIN(date_added)" in sql:
+            return _Result([(datetime.now() - timedelta(days=32),)])
         if "recap_snapshots" in sql:
             return _Result([(p,) for p in self._recap_payloads])
         if sql.strip().upper().startswith("UPDATE"):
@@ -80,6 +95,9 @@ class _Result:
 
     def all(self):
         return self._rows
+
+    def scalar(self):
+        return self._rows[0][0] if self._rows else None
 
 
 def _run(module, session, argv):
@@ -239,3 +257,70 @@ def test_recap_protection_survives_a_malformed_payload(prune):
 
     assert keep.exists()
     assert session.cleared == []
+
+
+class _RecordingSession(FakeSession):
+    """FakeSession that keeps every statement it was handed."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sql: list[str] = []
+
+    def execute(self, statement, params=None):
+        self.sql.append(str(statement))
+        return super().execute(statement, params)
+
+
+def _candidate_sql(session) -> str:
+    return next(s for s in session.sql if "FROM drops" in s and "image_url" in s)
+
+
+def test_candidates_are_selected_by_date_range_not_partition(prune):
+    """The scan must ride ix_drops_date_added, and this is how it stops.
+
+    `WHERE partition = :p` has no composite index behind it and degrades to a
+    ref over the whole partition — 33M rows, which killed this job on
+    2026-08-01. The module docstring carries the measurements; this pins the
+    shape so the query cannot quietly drift back.
+    """
+    module, root = prune
+    _make_image(root, "1/drop/Zulrah/Coal_0.jpg")
+    session = _RecordingSession([(101, URL + "1/drop/Zulrah/Coal_0.jpg")])
+
+    _run(module, session, [])
+
+    sql = _candidate_sql(session)
+    assert "date_added >=" in sql and "date_added <" in sql
+    assert "`partition`" not in sql
+
+
+def test_candidates_are_ordered_by_date_not_drop_id(prune):
+    """Ordering by drop_id makes the optimiser drop the date index for the
+    PRIMARY key and walk the table from row 1 — measured worse (87.8M rows)
+    than the partition scan it would be replacing. So the keyset has to be
+    expressed against date_added."""
+    module, root = prune
+    _make_image(root, "1/drop/Zulrah/Coal_0.jpg")
+    session = _RecordingSession([(101, URL + "1/drop/Zulrah/Coal_0.jpg")])
+
+    _run(module, session, [])
+
+    sql = _candidate_sql(session)
+    assert "ORDER BY date_added, drop_id" in sql
+
+
+def test_windows_are_half_open_and_stop_at_the_cutoff(prune):
+    """A drop must land in exactly one window, and none may reach past the
+    retention cutoff — the window bounds are the only thing enforcing it now
+    that the query carries no `date_added < :cutoff` filter of its own."""
+    module, _root = prune
+    module.session = FakeSession([])
+    cutoff = datetime.now() - timedelta(days=30)
+
+    windows = module.windows_to_scan(cutoff)
+
+    assert windows, "expected at least one window"
+    assert windows[-1][1] == cutoff, "the last window must end exactly at the cutoff"
+    for (_a, end), (start, _b) in zip(windows, windows[1:]):
+        assert end == start, "windows must abut without gaps or overlap"
+    assert all(start < end for start, end in windows)

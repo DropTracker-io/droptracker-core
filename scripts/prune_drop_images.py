@@ -20,9 +20,26 @@ Why the DB drives this and not the filenames: ``download_player_image`` writes
 ``{item}_{entry_id}.{ext}`` but drop processors pass ``entry_id=0``, so the
 filename carries NO drop id (``Coal_0_19.jpg``). The row's ``image_url`` holds
 the only reliable file->drop mapping, so we scan ``drops`` and derive paths
-from it. Scanning is chunked by the indexed ``partition`` column (22 monthly
-partitions over 172M rows) — a single unindexed full scan on ``image_url``
-times out against MariaDB's read_timeout.
+from it.
+
+**How the scan is chunked, and why it must stay that way.** Day-sized
+``date_added`` ranges, ordered by ``(date_added, drop_id)``, riding
+``ix_drops_date_added``. This is not a stylistic choice — it is the same rule
+``services/recap.py`` documents at length, and this script was killed by
+breaking it (2026-08-01: "Lost connection to MySQL server during query"). The
+two ways to get it wrong, both measured with EXPLAIN on the live 175M-row
+table:
+
+* ``WHERE partition = :p`` — what this used to do. There is no composite of
+  ``partition`` with anything, so it degrades to a ``ref`` over the *entire*
+  partition: 33.3M rows for 202607, which is a timeout, not a query.
+* ``ORDER BY drop_id`` over a ``date_added`` range — the optimiser abandons the
+  date index in favour of the PRIMARY key to satisfy the sort, then walks the
+  table from row 1: 87.8M rows estimated, worse than what it replaced.
+
+Ordering by ``date_added`` keeps the range on the index it was given: **776k
+rows**, ~0.5s per day. Keyset pagination therefore has to be expressed against
+``(date_added, drop_id)`` rather than ``drop_id`` alone.
 
 Safety:
   * Dry-run by default; ``--apply`` is required to delete anything.
@@ -72,8 +89,8 @@ URL_PREFIXES = (
 
 DEFAULT_MIN_VALUE = 1_000_000
 DEFAULT_RETENTION_DAYS = 30
-# Rows per partition query / ids per UPDATE. Keeps each statement well inside
-# MariaDB's read_timeout and bounds memory on a 172M-row table.
+# Rows per window query / ids per UPDATE. Keeps each statement well inside
+# MariaDB's read_timeout and bounds memory on a 175M-row table.
 SELECT_CHUNK = 20_000
 UPDATE_CHUNK = 1_000
 
@@ -152,14 +169,29 @@ def recap_protected_paths() -> set[str]:
     return paths
 
 
-def partitions_to_scan(cutoff: datetime) -> list[int]:
-    """Monthly partitions that can hold drops older than the cutoff."""
-    rows = session.execute(text(
-        "SELECT DISTINCT `partition` FROM drops "
-        "WHERE `partition` IS NOT NULL AND `partition` <= :newest "
-        "ORDER BY `partition`"
-    ), {"newest": cutoff.year * 100 + cutoff.month}).all()
-    return [int(r[0]) for r in rows]
+def windows_to_scan(cutoff: datetime) -> list[tuple[datetime, datetime]]:
+    """Day-sized ``[start, end)`` windows covering every drop older than the
+    cutoff, oldest first.
+
+    Half-open so a drop at 23:59:59.999 lands in exactly one window, and sized
+    by day rather than by month because the window bounds *are* the index range
+    this scan rides on — see the module docstring. A day is ~300k rows, which
+    reads in well under a second.
+    """
+    # No WHERE clause on purpose. `MIN()` already ignores NULLs, and a bare
+    # MIN over an indexed column is resolved by a single index seek ("Select
+    # tables optimized away"); adding `WHERE date_added IS NOT NULL` defeats
+    # that and makes it range-scan all 87.8M index entries — measured, it times
+    # out exactly like the query this rewrite exists to fix.
+    earliest = session.execute(text("SELECT MIN(date_added) FROM drops")).scalar()
+    if earliest is None:
+        return []
+    windows = []
+    start = earliest.replace(hour=0, minute=0, second=0, microsecond=0)
+    while start < cutoff:
+        windows.append((start, min(start + timedelta(days=1), cutoff)))
+        start += timedelta(days=1)
+    return windows
 
 
 def main() -> int:
@@ -214,30 +246,37 @@ def main() -> int:
         # whose file was already gone — both change the DB, so both must be
         # recorded for the snapshot to actually be reversible.
         snap.write("drop_id\timage_url\tbytes\taction\n")
-        for part in partitions_to_scan(cutoff):
-            last_id = 0
+        for win_start, win_end in windows_to_scan(cutoff):
+            last_at, last_id = win_start, -1
             part_pruned = 0
             part_freed = 0
             while not stop:
                 rows = session.execute(text(
-                    "SELECT drop_id, image_url FROM drops "
-                    "WHERE `partition` = :part AND drop_id > :last "
+                    "SELECT drop_id, image_url, date_added FROM drops "
+                    "WHERE date_added >= :win_start AND date_added < :win_end "
+                    # Keyset pagination on the same (date_added, drop_id) order
+                    # the rows come back in. Expressed against date_added rather
+                    # than drop_id alone so the optimiser keeps the date index —
+                    # `ORDER BY drop_id` makes it switch to the PRIMARY key and
+                    # walk the table from row 1 (see the note above).
+                    "  AND (date_added > :last_at "
+                    "       OR (date_added = :last_at AND drop_id > :last_id)) "
                     "  AND image_url IS NOT NULL AND image_url <> '' "
-                    "  AND date_added < :cutoff "
                     "  AND (COALESCE(value,0) * COALESCE(quantity,1)) < :minv "
-                    "ORDER BY drop_id LIMIT :lim"
-                ), {"part": part, "last": last_id, "cutoff": cutoff,
+                    "ORDER BY date_added, drop_id LIMIT :lim"
+                ), {"win_start": win_start, "win_end": win_end,
+                    "last_at": last_at, "last_id": last_id,
                     "minv": args.min_value, "lim": SELECT_CHUNK}).all()
                 if not rows:
                     break
-                for drop_id, image_url in rows:
+                for drop_id, image_url, date_added in rows:
                     # Checked before the branches below: they `continue`, and a
                     # limit tested only on the delete path never fires on a run
                     # dominated by already-missing rows.
                     if args.limit and scanned >= args.limit:
                         stop = True
                         break
-                    last_id = drop_id
+                    last_at, last_id = date_added, drop_id
                     scanned += 1
                     path = local_path_for(image_url)
                     if path is None:
@@ -273,7 +312,7 @@ def main() -> int:
                 snap.flush()
                 flush_ids()
             if part_pruned:
-                print(f"  partition {part}: {part_pruned:,} images "
+                print(f"  {win_start:%Y-%m-%d}: {part_pruned:,} images "
                       f"({_fmt_bytes(part_freed)})")
             if stop:
                 break
