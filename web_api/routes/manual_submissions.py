@@ -28,7 +28,7 @@ from db import (
     Player,
 )
 from web_api.common import abort_problem, db_session, money, private_no_store
-from web_api.deps import assert_group_admin, current_user_id
+from web_api.deps import assert_group_admin, current_user_id, manageable_guild_ids
 
 manual_submissions_bp = Blueprint("v1_manual_submissions", __name__)
 
@@ -81,9 +81,15 @@ async def list_manual_submissions(group_id: int):
     reviewed ones for context."""
     user_id = current_user_id()
 
+    # Resolved outside the session block, the way group_admin.py does it: the
+    # MANAGE_GUILD-derived role source is what admits a Discord-side admin who
+    # has no explicit GroupAdmin row, and omitting it 403s exactly those people
+    # out of the queue they are supposed to moderate.
+    manage_ids = manageable_guild_ids(user_id)
+
     def _load():
         with db_session() as s:
-            assert_group_admin(s, user_id, group_id)
+            assert_group_admin(s, user_id, group_id, manage_ids)
             pending = _query(s, group_id, ("pending",))
             recent = _query(s, group_id, ("approved", "rejected"), limit=_RECENT_LIMIT)
             return {"pending": pending, "recent": recent, "pending_count": len(pending)}
@@ -99,8 +105,9 @@ def _review(group_id: int, drop_id: int, approve: bool):
     )
 
     user_id = current_user_id()
+    manage_ids = manageable_guild_ids(user_id)
     with db_session() as s:
-        assert_group_admin(s, user_id, group_id)
+        assert_group_admin(s, user_id, group_id, manage_ids)
         try:
             if approve:
                 result = approve_drop_for_group(s, drop_id, group_id, reviewer_user_id=user_id)

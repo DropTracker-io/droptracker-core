@@ -1392,6 +1392,12 @@ def _admin_group_ids(s, user_id: int, manage_ids) -> set[int]:
             .filter(Group.guild_id.in_([str(g) for g in manage_ids]))
             .all()
         }
+    # Event managers (web64a) are deliberately not admins in resolve_group_role,
+    # so every event route has to admit them explicitly — and this one didn't,
+    # which 403'd the task-preset picker for exactly the role built to use it.
+    from web_api.deps import event_manager_group_ids
+
+    gids |= event_manager_group_ids(s, user_id)
     return gids
 
 

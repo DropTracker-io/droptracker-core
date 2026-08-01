@@ -289,6 +289,12 @@ async def apply_nitro_boost_points(user_id: int, session_to_use = None):
             return
         print(f"Awarding nitro boost to {user_players[0].player_name}...")
         award_points_to_player(player_id=user_players[0].player_id, amount=250, source='Nitro Boost Upgrade',expires_in_days=60,session=local_session)
+        if not session_to_use:
+            # award_points_to_player only flushes when it is handed a session —
+            # the caller owns the commit. Without this the close() below rolled
+            # the credit straight back while the command still replied
+            # "points awarded".
+            local_session.commit()
     finally:
         if not session_to_use:
             local_session.close()

@@ -136,7 +136,10 @@ class DiscordOutbox(Base):
     embed_json = Column(Text, nullable=True)
     ref_type = Column(String(24), nullable=True)   # e.g. 'announcement'
     ref_id = Column(Integer, nullable=True)
-    status = Column(String(16), nullable=False, default="pending")  # pending|sent|failed
+    # pending|sending|sent|failed. `sending` is a claim taken before the row is
+    # handed to Discord, so a crash mid-drain leaves evidence instead of a row
+    # that looks untouched and gets posted a second time.
+    status = Column(String(16), nullable=False, default="pending")
     discord_message_id = Column(String(32), nullable=True)
     error = Column(Text, nullable=True)
     actor_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)

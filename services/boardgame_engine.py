@@ -925,6 +925,20 @@ def mercy_sweep(session, redis_conn, now: Optional[datetime] = None) -> list:
         if not (settings.get("mercy") or {}).get("enabled", True):
             pos.mercy_deadline = None
             continue
+        # The scan above is unlocked and the sweep runs on the consumer's own
+        # session while apply lanes move pieces concurrently — so re-read the
+        # row locked (as perform_roll does) and re-check the conditions that
+        # selected it. Without this, a completion that already advanced the
+        # team gets clobbered: current_task_id is nulled and the team is handed
+        # a second roll.
+        pos = (session.query(EventBoardPosition)
+               .filter(EventBoardPosition.id == pos.id)
+               .with_for_update()
+               .first())
+        if pos is None or pos.status != "active":
+            continue
+        if pos.mercy_deadline is None or pos.mercy_deadline > now:
+            continue
         # Mark the task's rollup complete (no score, no coins — mercy is a
         # release valve, not a reward).
         if pos.current_task_id:

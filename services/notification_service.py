@@ -2035,12 +2035,18 @@ class NotificationService:
             # semantics: failure marks the row failed / Forbidden propagates.
             sent_count, dest_errors = 0, []
             for dest in destinations:
-                channel, channel_error = await self._fetch_sendable_channel(dest["channel_id"])
-                if channel is None:
-                    dest_errors.append(
-                        channel_error or f"Channel {dest['channel_id']} not found for event {event.id}")
-                    continue
                 try:
+                    # The fetch belongs INSIDE the guard: fetch_channel raises
+                    # Forbidden on a channel the bot can't see (interactions'
+                    # own wrapper only swallows NotFound), and that escaped the
+                    # loop entirely — one clan's Missing Access silenced every
+                    # clan after it, which is the exact failure this per-
+                    # destination handling exists to prevent.
+                    channel, channel_error = await self._fetch_sendable_channel(dest["channel_id"])
+                    if channel is None:
+                        dest_errors.append(
+                            channel_error or f"Channel {dest['channel_id']} not found for event {event.id}")
+                        continue
                     if dest["ping"]:
                         dest_ping = configured_ping
                     elif dest.get("team_role"):
@@ -2049,6 +2055,12 @@ class NotificationService:
                     else:
                         dest_ping = None
                     sent_message = await _send_to(channel, dest_ping)
+                    if sent_message is None:
+                        # interactions' HTTP client returns None instead of
+                        # raising once it has burned its 429 retries, so a
+                        # message nobody received would otherwise be counted
+                        # as delivered.
+                        raise RuntimeError("send returned None (rate limited)")
                     sent_count += 1
                     # Remember the sign-up prompt so the bot can come back and
                     # retire its button when sign-ups close (web70a) — without
@@ -2832,6 +2844,13 @@ class NotificationService:
                         os.remove(image_temp_path)
                     except Exception:
                         pass
+
+            if message is None:
+                # interactions' HTTP client gives up after 3 consecutive 429s
+                # and returns None rather than raising. Marking the row 'sent'
+                # here retired a drop nobody ever saw AND skipped its
+                # NotifiedSubmission below, so it could never be found again.
+                raise RuntimeError("drop send returned None (rate limited)")
 
             # Mark as sent
             await self._cleanup_processed_local_video_after_send(db_session, data)

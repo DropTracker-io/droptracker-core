@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from db.models import DiscordOutbox, Announcement
 
 _ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 _USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
+
+# How long a claimed ('sending') row may sit before a later drain assumes the
+# claimer died and takes it back. Comfortably longer than any single send,
+# so a slow send is never stolen out from under the drain that owns it.
+RECLAIM_AFTER_MINUTES = 15
 
 
 def _allowed_mentions_for(content: str):
@@ -143,13 +148,36 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
     sent = 0
     session = session_factory()
     try:
+        # Reclaim rows a previous drain claimed and never resolved (a crash
+        # between the claim and the outcome). Bounded by age so it can never
+        # steal a row the running drain is mid-send on.
+        stale = datetime.now() - timedelta(minutes=RECLAIM_AFTER_MINUTES)
+        reclaimed = (
+            session.query(DiscordOutbox)
+            .filter(DiscordOutbox.status == "sending",
+                    DiscordOutbox.created_at < stale)
+            .update({"status": "pending"}, synchronize_session=False)
+        )
+        if reclaimed:
+            session.commit()
+            print(f"[discord_outbox] reclaimed {reclaimed} stranded row(s)")
+
         rows = (
             session.query(DiscordOutbox)
             .filter(DiscordOutbox.status == "pending")
             .order_by(DiscordOutbox.created_at.asc())
             .limit(limit)
+            .with_for_update(skip_locked=True)
             .all()
         )
+        # Claim the batch before anything is sent. Previously the whole batch's
+        # statuses lived in memory until a single commit at the end, so a crash
+        # (or a failure in that commit) re-posted every message that had already
+        # gone out, and two overlapping drains could both pick up the same rows.
+        for row in rows:
+            row.status = "sending"
+        session.commit()
+
         for row in rows:
             try:
                 if row.kind == "forum_post":
@@ -211,7 +239,16 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
                 row.error = str(e)[:500]
                 row.processed_at = datetime.now()
                 _mark_ref_failed(session, row)
-        session.commit()
+            finally:
+                # Per row, and in a finally so the forum-post branch's
+                # `continue` can't skip it: this row's outcome must be durable
+                # before the next send begins, or a later crash resurrects it
+                # as pending and posts it twice.
+                try:
+                    session.commit()
+                except Exception as commit_error:  # noqa: BLE001
+                    session.rollback()
+                    print(f"[discord_outbox] could not record row {row.id}: {commit_error}")
     except Exception as e:  # noqa: BLE001
         session.rollback()
         print(f"[discord_outbox] drain_once error: {e}")

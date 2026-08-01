@@ -553,6 +553,14 @@ def _mark_active_in_redis(event_id: int, active: bool) -> None:
             return
         if active:
             conn.sadd(event_engine.ACTIVE_EVENTS_KEY, int(event_id))
+            # Every writer of this gate must honour the same TTL (P1-6): SADD
+            # on a missing key creates it PERSISTENT, so activating from the
+            # web while the consumer is down resurrects the gate forever and
+            # re-opens producers into a queue nothing is draining.
+            conn.expire(
+                event_engine.ACTIVE_EVENTS_KEY,
+                event_engine.ACTIVE_EVENTS_TTL_SECONDS,
+            )
             event_engine.clear_ended_tombstone(conn, event_id)
         else:
             conn.srem(event_engine.ACTIVE_EVENTS_KEY, int(event_id))
@@ -874,8 +882,24 @@ def end_event(session, event, *, actor_user_id=None,
         raise LifecycleError(409, "Already ended", "This event has already ended.")
 
     before = {"status": event.status, "ended_at": _ts(event.ended_at)}
-    event.status = "past"
-    event.ended_at = now
+
+    # The status checks above read an UNLOCKED row, so two enders (the web
+    # route, the lifecycle sweep, the board-win path in the consumer) can both
+    # see 'active' and both run the whole wrap-up — duplicate teardown and a
+    # second `event_ended` announcement, which has no dedupe key. Flip the row
+    # atomically instead and let exactly one caller past.
+    from db.models import Event as _Event
+
+    changed = (
+        session.query(_Event)
+        .filter(_Event.id == event.id, _Event.status == event.status)
+        .update({"status": "past", "ended_at": now}, synchronize_session=False)
+    )
+    if not changed:
+        session.commit()
+        raise LifecycleError(409, "Already ended", "This event has already ended.")
+    session.refresh(event)
+
     _audit(session, actor_user_id, event, "event.end", before, {
         "status": "past",
         "ended_at": _ts(event.ended_at),

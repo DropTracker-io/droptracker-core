@@ -475,6 +475,19 @@ async def update_buyin(event_id: int, buyin_id: int):
                     "Team leaders can tick contributions paid or pledged (and "
                     "add a note) — amounts are set by event admins.",
                 )
+            # Voiding takes money OUT of the advertised pot, which this module
+            # treats as admin-only everywhere else (see _pot_role's docstring
+            # and the DELETE route). A leader may only move a row between
+            # pledged and paid — never void one, never resurrect a voided one.
+            if role == "leader" and (
+                body.get("status") == "void" or row.status == "void"
+            ):
+                abort_problem(
+                    403, "Voiding is an admin action",
+                    "Team leaders can tick contributions paid or pledged — "
+                    "voiding a contribution (or restoring a voided one) "
+                    "changes the advertised pot and is done by event admins.",
+                )
             before = _snapshot(row)
             if "amount" in body:
                 row.amount = _clean_amount(body.get("amount"))

@@ -125,9 +125,15 @@ def main() -> int:
         print(f"  note: {note}")
     print(
         f"[{mode}] sent={outcome.sent} planned/skipped={outcome.skipped} "
-        f"failed={outcome.failed} in {time.time() - started:.1f}s"
+        f"forbidden={outcome.forbidden} failed={outcome.failed} "
+        f"in {time.time() - started:.1f}s"
     )
-    return 0
+    # Only OUR failures are worth failing the unit over. `forbidden` (closed
+    # DMs, a channel the bot can't post in) is expected at this scale, is
+    # recorded as delivered and is never retried — exiting non-zero for it
+    # would make every month look broken. Exiting 0 regardless, which is what
+    # this did before, made a month where nothing sent look healthy.
+    return 1 if outcome.failed else 0
 
 
 if __name__ == "__main__":

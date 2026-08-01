@@ -226,6 +226,12 @@ class DeliveryOutcome:
     sent: int = 0
     skipped: int = 0
     failed: int = 0
+    # Counted apart from `failed` on purpose. A closed DM or a channel the bot
+    # can't post in is a fact about the recipient, is recorded as delivered,
+    # and is never retried — folding it into `failed` made a healthy launch run
+    # report "failed=147" and left the exit status unable to tell a bad month
+    # from a normal one.
+    forbidden: int = 0
     notes: list[str] = field(default_factory=list)
 
 
@@ -1123,6 +1129,8 @@ async def run_delivery(
                 outcome.sent += 1
             elif status == "planned":
                 outcome.skipped += 1
+            elif status == "forbidden":
+                outcome.forbidden += 1
             else:
                 outcome.failed += 1
             log(f"  {status:9} {_describe(target)}")
