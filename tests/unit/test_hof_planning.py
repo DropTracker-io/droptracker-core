@@ -5,9 +5,12 @@ raid-variant grouping, directory sizing, and the boss-select custom_id codec.
 """
 
 from utils.hof import (
+    CONSTRUCTION_EMOJI,
     DIRECTORY_BOTTOM_KEY,
     DIRECTORY_KEY,
+    MAX_MESSAGE_TEXT_CHARS,
     SEPULCHRE_CANONICAL,
+    SYNC_NOTE_TEXT,
     build_boss_plan,
     build_message_plan,
     canonical_display_name,
@@ -133,6 +136,45 @@ class TestBuildMessagePlan:
         assert after[2] == "Kraken"
         assert after[3] == "Zulrah"
         assert len(after) == len(before) + 1
+
+    def test_last_entry_is_always_a_directory(self):
+        # The sync-note footer rides on plan[-1]; if a non-directory key could
+        # ever land last, the note would be attached to a boss message that
+        # _render_directory never renders.
+        assert build_message_plan(["Kraken", "Zulrah"], True)[-1] == DIRECTORY_BOTTOM_KEY
+        assert build_message_plan(["Kraken", "Zulrah"], False)[-1] == DIRECTORY_KEY
+        assert build_message_plan([], True)[-1] == DIRECTORY_KEY
+
+
+class TestSyncNoteText:
+    """The wording/formatting here is owner-specified — pin it exactly."""
+
+    def test_exact_wording(self):
+        assert SYNC_NOTE_TEXT == (
+            "-# **Note**: You can sync all of your existing Personal Bests here by "
+            "doing the following:\n"
+            "-# 1. Build an `Adventure Log`  (min. 83 <:Construction:1533062962418417704> )  "
+            "inside of an `Achievement Gallery`  (80 <:Construction:1533062962418417704> )  "
+            "in your Player-Owned House.\n"
+            "-# 2. Open the Adventure Log, and click on the `Counters` tab. This will "
+            "immediately send your stored times to the DropTracker."
+        )
+
+    def test_every_line_is_subtext(self):
+        # A line that loses its '-# ' prefix renders full-size and breaks the
+        # footer look of the message.
+        assert all(line.startswith("-# ") for line in SYNC_NOTE_TEXT.split("\n"))
+
+    def test_emoji_uses_full_custom_form(self):
+        # A bare ':Construction:' shortcode renders as literal text in a bot
+        # message — only the <:name:id> form resolves to the emoji.
+        assert ":Construction:" not in SYNC_NOTE_TEXT.replace(CONSTRUCTION_EMOJI, "")
+        assert SYNC_NOTE_TEXT.count(CONSTRUCTION_EMOJI) == 2
+
+    def test_leaves_room_inside_the_message_cap(self):
+        # _render_directory has no shrink-and-retry loop, so the note must fit
+        # in the head-room the directory list gives back for it.
+        assert len(SYNC_NOTE_TEXT) < MAX_MESSAGE_TEXT_CHARS - 3300
 
 
 class TestFitDirectoryLines:

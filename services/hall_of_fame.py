@@ -85,6 +85,7 @@ from utils.hof import (
     DIRECTORY_BOTTOM_KEY,
     DIRECTORY_KEY,
     SEPULCHRE_CANONICAL,
+    SYNC_NOTE_TEXT,
     BossPlanEntry,
     build_boss_plan,
     build_message_plan,
@@ -781,17 +782,24 @@ class HallOfFame(Extension):
             row = slots.pop()
             await self._delete_slot(group, channel, scan, row, stats)
 
-        # Directories last, once every boss message id is final.
+        # Directories last, once every boss message id is final.  The sync note
+        # rides on whichever directory is physically last in the channel: the
+        # bottom one in individual-boss mode, the only one otherwise.
         row_by_key = {row.boss_name: row for row in slots}
+        last_key = plan[-1]
         if DIRECTORY_BOTTOM_KEY in plan:
             components = self._render_directory(
                 group, resolved, row_by_key, cfg, top_directory_url=directory_url,
+                include_sync_note=last_key == DIRECTORY_BOTTOM_KEY,
             )
             await self._apply_slot(
                 group, channel, scan, slots,
                 plan.index(DIRECTORY_BOTTOM_KEY), DIRECTORY_BOTTOM_KEY, components, stats,
             )
-        components = self._render_directory(group, resolved, row_by_key, cfg, top_directory_url=None)
+        components = self._render_directory(
+            group, resolved, row_by_key, cfg, top_directory_url=None,
+            include_sync_note=last_key == DIRECTORY_KEY,
+        )
         await self._apply_slot(group, channel, scan, slots, 0, DIRECTORY_KEY, components, stats)
 
     # ------------------------------------------------------------------ #
@@ -1040,6 +1048,7 @@ class HallOfFame(Extension):
         row_by_key: Dict[str, GroupPersonalBestMessage],
         cfg: GroupHOFConfig,
         top_directory_url: Optional[str],
+        include_sync_note: bool = False,
     ) -> List[BaseComponent]:
         display_names = [entry.display_name for entry, _ in resolved]
         linked_lines: List[str] = []
@@ -1052,7 +1061,11 @@ class HallOfFame(Extension):
             else:
                 linked_lines.append(f"- {name}")
 
-        lines = fit_directory_lines(linked_lines, plain_lines, limit=3300)
+        # _render_directory has no shrink-and-retry loop, so the boss list must
+        # give back exactly the room the sync note takes or a long directory
+        # would silently blow Discord's 4000-char message cap.
+        limit = 3300 - (len(SYNC_NOTE_TEXT) + 1 if include_sync_note else 0)
+        lines = fit_directory_lines(linked_lines, plain_lines, limit=limit)
         if not lines:
             lines = ["-# No Hall of Fame bosses are configured yet."]
 
@@ -1074,6 +1087,13 @@ class HallOfFame(Extension):
         if top_directory_url:
             body += f"\n-# 📋 [Jump to the top of the Hall of Fame]({top_directory_url})"
 
+        note_components: List[BaseComponent] = []
+        if include_sync_note:
+            note_components = [
+                SeparatorComponent(divider=True),
+                TextDisplayComponent(content=SYNC_NOTE_TEXT),
+            ]
+
         return [ContainerComponent(
             SeparatorComponent(divider=True),
             TextDisplayComponent(content=body),
@@ -1081,6 +1101,7 @@ class HallOfFame(Extension):
             *menu_rows,
             SeparatorComponent(divider=True),
             TextDisplayComponent(content=_FOOTER_TEXT),
+            *note_components,
         )]
 
     def _render_boss_entry(

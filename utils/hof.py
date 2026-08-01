@@ -65,6 +65,26 @@ SELECT_OPTIONS_PER_MENU = 25
 
 SELECT_CUSTOM_ID_PREFIX = "hof_boss_select"
 
+# Custom guild emoji (DropTracker primary guild). It has to be the full
+# <:name:id> form: a bare ':Construction:' shortcode is only expanded by the
+# Discord *composer*, so a bot posting it renders the literal text instead.
+# Emoji in message content are resolved from the CDN by id, so this renders in
+# every group's guild regardless of the HOF bot's membership there.
+CONSTRUCTION_EMOJI = "<:Construction:1533062962418417704>"
+
+# Footer appended to the LAST message of every Hall of Fame channel (the bottom
+# directory in individual-boss mode, otherwise the single directory message).
+# Players assume the Hall of Fame only tracks PBs set after they installed the
+# plugin, so tell them how to backfill the ones they already have. Lives here,
+# not in the service, so the exact wording is covered by the unit tests.
+SYNC_NOTE_TEXT = (
+    "-# **Note**: You can sync all of your existing Personal Bests here by doing the following:\n"
+    f"-# 1. Build an `Adventure Log`  (min. 83 {CONSTRUCTION_EMOJI} )  inside of an "
+    f"`Achievement Gallery`  (80 {CONSTRUCTION_EMOJI} )  in your Player-Owned House.\n"
+    "-# 2. Open the Adventure Log, and click on the `Counters` tab. This will immediately "
+    "send your stored times to the DropTracker."
+)
+
 
 def canonical_display_name(boss_name: str) -> str:
     """Map a configured boss name to the display name of the message it lives in.
