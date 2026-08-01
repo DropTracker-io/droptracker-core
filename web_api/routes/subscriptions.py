@@ -679,6 +679,27 @@ async def user_checkout():
             user = load_user(s, user_id)
             if not user:
                 abort_problem(401, "Not authenticated", "User not found for this session.")
+            # A second checkout while one is live creates a SECOND Stripe
+            # customer and subscription (start_user_checkout passes no
+            # customer=), and the webhook then overwrites this row's provider
+            # ids — orphaning the old subscription, which keeps charging every
+            # month with nothing pointing at it and no way for the user to
+            # reach it from the portal. Changing plan or amount goes through
+            # the portal, which acts on the subscription that actually exists.
+            existing = _load_user_sub(s, user_id)
+            if (
+                existing
+                and existing.status in ("active", "trialing", "past_due")
+                and existing.provider == "stripe"
+                and existing.provider_subscription_id
+            ):
+                abort_problem(
+                    409,
+                    "Subscription already active",
+                    "You already have an active supporter subscription. Use "
+                    "'Manage billing' to change your plan or amount, or cancel "
+                    "it first — starting a second one would bill you twice.",
+                )
             tier = (
                 s.query(SubscriptionTier)
                 .filter(
