@@ -42,6 +42,7 @@ from utils.embeds import get_global_drop_embed
 from utils.download import download_player_image
 from utils.format import normalize_player_display_equivalence
 from utils.wiseoldman import fetch_group_members, check_user_by_id, check_user_by_username, _group_member_count as _wom_group_member_count
+from utils import group_config
 from utils.redis import RedisClient, calculate_rank_amongst_groups, get_true_player_total
 from utils.format import format_number, get_extension_from_content_type, parse_redis_data, parse_stored_sheet, replace_placeholders
 #from utils.sheets.sheet_manager import SheetManager
@@ -779,7 +780,9 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
         GroupConfiguration.group_id == group.group_id,
         GroupConfiguration.config_key == "auto_provision_members",
     ).first()
-    provision_missing = provision_cfg is not None and provision_cfg.config_value.lower() == "true"
+    # Boolean configs are stored as "1"/"0" (web_api/config_registry.coerce_to_storage),
+    # not "true"/"false" — use the shared truthy check so this actually reads the value.
+    provision_missing = provision_cfg is not None and group_config.is_truthy(provision_cfg.config_value)
 
     group_wom_ids = await fetch_group_members(wom_id, force_refresh=True, provision_missing=provision_missing)
     if not group_wom_ids:
