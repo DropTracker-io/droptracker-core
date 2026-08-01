@@ -24,6 +24,11 @@ EVENT_BASE_URL = "https://www.droptracker.io/events"
 KIND_FOR_TYPE = {
     "event_started": "announcements",
     "event_ended": "announcements",
+    # Recurring schedules (web82a): a scoring window opened / closed while the
+    # event stays live between windows. The last close is silent — the event
+    # ends the same tick and event_ended is the wrap-up message.
+    "event_window_opened": "announcements",
+    "event_window_closed": "announcements",
     "event_completion": "completions",
     "event_line": "completions",
     "event_blackout": "completions",
@@ -87,6 +92,8 @@ _MEDALS = ("\U0001F947", "\U0001F948", "\U0001F949")  # gold / silver / bronze
 _COLORS = {
     "event_started": 0x00FF00,
     "event_ended": 0xFFD700,
+    "event_window_opened": 0x57F287,  # green — scoring is live again
+    "event_window_closed": 0x95A5A6,  # neutral gray — paused, not over
     "event_completion": 0x00FF00,
     "event_line": 0x9B59B6,
     "event_blackout": 0x2C2F33,
@@ -123,6 +130,8 @@ PROGRESS_MILESTONES = (25, 50, 75)
 DEFAULT_MESSAGE_TOGGLES = {
     "event_started": True,
     "event_ended": True,
+    "event_window_opened": True,
+    "event_window_closed": True,
     "event_completion": True,
     "event_task_progress": True,  # gated separately by task_progress mode
     "event_line": True,
@@ -664,6 +673,26 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         spec["title"] = f"\U0001F3C6 {event_name} has ended!"
         spec["description"] = f"[Full results]({url})" if url else None
         field("Final standings", _standings_lines(standings, 5), inline=False)
+
+    elif notification_type == "event_window_opened":
+        spec["title"] = f"\U0001F7E2 {event_name} — scoring is live!"
+        desc = "A scoring window just opened — drops count again."
+        spec["description"] = f"{desc}\n\n[Follow the event live]({url})" if url else desc
+        closes = _fmt_ts(data.get("window_ends_at"))
+        if closes:
+            field("Window closes", closes)
+        nxt = _fmt_ts(data.get("next_window_starts_at"))
+        if nxt:
+            field("Next window", nxt)
+
+    elif notification_type == "event_window_closed":
+        spec["title"] = f"⏸️ {event_name} — scoring is paused"
+        nxt = _fmt_ts(data.get("next_window_starts_at"))
+        spec["description"] = (
+            f"This scoring window has closed. Next window opens {nxt}."
+            if nxt else "This scoring window has closed."
+        )
+        field("Standings so far", _standings_lines(standings, 5), inline=False)
 
     elif notification_type == "event_completion":
         spec["title"] = f"✅ Task complete: {task_label or 'Task'}"

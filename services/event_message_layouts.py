@@ -127,6 +127,9 @@ DEFAULT_LAYOUTS = {
                 "type": "text",
                 "content": "**Started** {starts_at}\n**Ends** {ends_at}\n**Teams** `{team_count}`",
             },
+            # Recurring schedules (web82a): one pre-composed line — the whole
+            # block drops via the token-drop rule for continuous events.
+            {"type": "text", "content": "{schedule_line}"},
             # Prize pot (web52a): a single pre-composed line, so the whole block
             # drops via the token-drop rule when the pot is off / not advertised.
             {"type": "text", "content": "{pot_started_line}"},
@@ -138,6 +141,39 @@ DEFAULT_LAYOUTS = {
                     {"label": "Follow the event live", "url": "{event_url}"},
                 ],
             },
+        ],
+    },
+    "event_window_opened": {
+        "accent_color": "#57F287",
+        "blocks": [
+            {"type": "text", "content": "## \U0001F7E2 {event_name} — scoring is live!"},
+            {"type": "separator"},
+            {"type": "text",
+             "content": "A scoring window just opened — drops count again.\n"
+                        "**Window closes** {window_closes_at}"},
+            {"type": "text", "content": "-# Next window: {next_window_opens_at}"},
+            {"type": "separator"},
+            {
+                "type": "buttons",
+                "buttons": [
+                    {"label": "\U0001F4F2 Open live board", "launch": True},
+                    {"label": "Follow the event live", "url": "{event_url}"},
+                ],
+            },
+        ],
+    },
+    "event_window_closed": {
+        "accent_color": "#95A5A6",
+        "blocks": [
+            {"type": "text", "content": "## ⏸️ {event_name} — scoring is paused"},
+            {"type": "separator"},
+            {"type": "text",
+             "content": "This scoring window has closed — drops won't count "
+                        "until the next one.\n"
+                        "**Next window opens** {next_window_opens_at}"},
+            {"type": "standings", "limit": 5, "title": "**Standings so far**"},
+            {"type": "separator"},
+            {"type": "buttons", "buttons": [{"label": "View standings", "url": "{event_url}"}]},
         ],
     },
     "event_ended": {
@@ -545,6 +581,15 @@ TOKEN_DOCS = {
     "roll_thanks_line": {"help": "\" (thanks **player**)\" credit on the roll prompt",
                          "sample": " (thanks **Zezima**)"},
     "reason": {"help": "Why the lifecycle step failed", "sample": "no team has any members"},
+    "window_closes_at": {"help": "When the current scoring window closes "
+                                 "(recurring-schedule events; Discord timestamp)",
+                         "sample": "August 3, 2026 12:00 AM"},
+    "next_window_opens_at": {"help": "When the next scoring window opens "
+                                     "(recurring-schedule events; Discord timestamp)",
+                             "sample": "August 8, 2026 12:00 AM"},
+    "schedule_line": {"help": "The event's recurring schedule in one line "
+                              "(drops for continuous events)",
+                      "sample": "\U0001F4C5 Weekly: Sat 00:00 → Mon 00:00 UTC"},
     "pot_started_line": {"help": "Prize-pot line on the start announcement (drops when "
                                  "the pot is off or not advertised)",
                          "sample": "\U0001F4B0 **250M GP** prize pot on the line!"},
@@ -600,7 +645,22 @@ TYPE_META = {
     "event_started": {
         "label": "Event started", "group": "Lifecycle",
         "description": "Posted to the announcements channel when the event goes live.",
-        "tokens": ("team_count", "pot_started_line"), "standings": False,
+        "tokens": ("team_count", "pot_started_line", "schedule_line"),
+        "standings": False,
+    },
+    "event_window_opened": {
+        "label": "Scoring window opened", "group": "Lifecycle",
+        "description": "Recurring-schedule events: a scoring window just opened — "
+                       "drops count again until it closes.",
+        "tokens": ("window_closes_at", "next_window_opens_at", "schedule_line"),
+        "standings": False,
+    },
+    "event_window_closed": {
+        "label": "Scoring window closed", "group": "Lifecycle",
+        "description": "Recurring-schedule events: the current scoring window closed; "
+                       "the event pauses until the next one (the final close is "
+                       "announced as the event end instead).",
+        "tokens": ("next_window_opens_at", "schedule_line"), "standings": True,
     },
     "event_ended": {
         "label": "Event ended", "group": "Lifecycle",
@@ -1213,6 +1273,12 @@ def notification_context(notification_type: str, data: dict) -> dict:
             + (f" (`+{fmt_pts(pts)} pts`)" if pts else ""))
     put("starts_at", _fmt_ts(data.get("starts_at")))
     put("ends_at", _fmt_ts(data.get("ends_at")))
+    # Recurring schedules (web82a) — window lifecycle posts + the started
+    # announcement's schedule line.
+    put("window_closes_at", _fmt_ts(data.get("window_ends_at")))
+    put("next_window_opens_at", _fmt_ts(data.get("next_window_starts_at")))
+    if data.get("schedule_summary"):
+        put("schedule_line", f"\U0001F4C5 {data['schedule_summary']}")
     # Raw unix seconds for the universal footer line (event_footer_line);
     # kept separate from the pre-formatted starts_at/ends_at tokens above.
     put("starts_at_unix", data.get("starts_at"))

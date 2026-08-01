@@ -324,6 +324,9 @@ class TestSnapshot:
             # the fake event snapshot to their defaults).
             "buyins_enabled": False, "prize_config": None,
             "leadership_config": None, "message_config": None,
+            # Recurring schedule rule (web82a) — recompiled against the new
+            # run's dates on instantiate; None for a continuous event.
+            "schedule": None,
         }
         assert [t["label"] for t in payload["tasks"]] == ["Whip", "Zulrah x50"]
         assert payload["teams"] == [{"name": "Red"}]

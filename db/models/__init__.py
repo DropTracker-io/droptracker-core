@@ -80,6 +80,7 @@ from .subscriptions import (
 )
 from .events import (
     Event,
+    EventWindow,
     EventTask,
     EventTeam,
     EventTeamMember,
@@ -267,6 +268,7 @@ __all__ = [
     "SubscriptionPayment",
     "UserSubscription",
     "Event",
+    "EventWindow",
     "EventTask",
     "EventTeam",
     "EventTeamMember",

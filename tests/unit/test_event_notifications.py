@@ -20,7 +20,9 @@ sys.modules["_event_notifications_under_test"] = en
 _spec.loader.exec_module(en)
 
 ALL_TYPES = (
-    "event_started", "event_ended", "event_completion",
+    "event_started", "event_ended",
+    "event_window_opened", "event_window_closed",
+    "event_completion",
     "event_line", "event_blackout", "event_lead_change", "event_pending",
     "event_activation_failed", "event_end_failed", "event_multi_clan_skipped",
     "event_signup_prompt", "event_task_progress",
@@ -37,6 +39,9 @@ class TestKindMapping:
         assert en.KIND_FOR_TYPE == {
             "event_started": "announcements",
             "event_ended": "announcements",
+            # web82a — recurring-schedule window transitions.
+            "event_window_opened": "announcements",
+            "event_window_closed": "announcements",
             "event_completion": "completions",
             "event_line": "completions",
             "event_blackout": "completions",

@@ -13,6 +13,9 @@ stubs like ``event_players``):
   stamps. A draft has no window.
 - end = ``ended_at`` / ``ends_at``, clamped to *now*. Future starts and
   empty/inverted windows resolve to ``None`` → every GP figure reads 0.
+- recurring-schedule events (web82a) then split that span by their scoring
+  windows (:func:`intersect_windows`) — loot earned while the event was
+  paused between windows is not part of the event.
 
 The rollup reads ``player_npc_hourly_totals`` (services/npc_totals.py keeps
 it current to the hour; every drop carries an npc_id so it covers all loot),
@@ -52,6 +55,28 @@ def event_window(ev, now: Optional[datetime] = None) -> Optional[Tuple[datetime,
     return start, end
 
 
+def intersect_windows(window: Optional[Tuple[datetime, datetime]],
+                      schedule_windows) -> list:
+    """The event's loot-counting span split by its scoring schedule (web82a).
+
+    Continuous events (no ``schedule_windows``) keep the single window as a
+    one-element list. A recurring-schedule event counts loot only while
+    scoring is open — GP earned on a Wednesday of a weekends-only event is
+    not part of that event — so each scoring window is clipped to the overall
+    window and empty results are dropped. Pure."""
+    if window is None:
+        return []
+    if not schedule_windows:
+        return [window]
+    lo, hi = window
+    out = []
+    for start, end in schedule_windows:
+        start, end = max(start, lo), min(end, hi)
+        if end > start:
+            out.append((start, end))
+    return out
+
+
 def hour_range(window: Tuple[datetime, datetime]) -> Tuple[str, str]:
     """The inclusive ``date_hour`` string bounds (``YYYY-MM-DD-HH``, the
     player_npc_hourly_totals key format — zero-padded, so lexicographic
@@ -78,6 +103,26 @@ def _redis():
         return None
 
 
+def _schedule_windows(s, ev) -> list:
+    """The event's materialized scoring windows (web82a) as ``[(start, end)]``,
+    empty for continuous events. Fails open to empty — a lookup error should
+    widen the GP figure, never zero it."""
+    if not getattr(ev, "schedule_config", None):
+        return []
+    try:
+        from db.models import EventWindow
+
+        return [
+            (w.starts_at, w.ends_at)
+            for w in s.query(EventWindow)
+            .filter(EventWindow.event_id == ev.id)
+            .order_by(EventWindow.starts_at)
+            .all()
+        ]
+    except Exception:
+        return []
+
+
 def loot_gp_by_player(s, ev, player_ids: Iterable[int]) -> Dict[int, int]:
     """``{player_id: total loot GP}`` over the event's window for the given
     players. Cached per event in Redis; fails open to an empty map (callers
@@ -85,8 +130,8 @@ def loot_gp_by_player(s, ev, player_ids: Iterable[int]) -> Dict[int, int]:
     pids = sorted({int(p) for p in player_ids if p})
     if not pids:
         return {}
-    window = event_window(ev)
-    if window is None:
+    windows = intersect_windows(event_window(ev), _schedule_windows(s, ev))
+    if not windows:
         return {pid: 0 for pid in pids}
 
     key = f"event:{getattr(ev, 'id', 0)}:lootgp:{_CACHE_VERSION}"
@@ -100,20 +145,20 @@ def loot_gp_by_player(s, ev, player_ids: Iterable[int]) -> Dict[int, int]:
         except Exception:
             pass
 
-    lo, hi = hour_range(window)
     out = {pid: 0 for pid in pids}
     try:
-        from sqlalchemy import func
+        from sqlalchemy import and_, func, or_
 
         from db.models import PlayerNpcHourlyTotals as H
 
+        # One OR'd range per scoring window (usually exactly one). Hour
+        # granularity means a window's edge hours are counted whole — the
+        # same approximation the single-window path always made.
+        spans = [and_(H.date_hour >= lo, H.date_hour <= hi)
+                 for lo, hi in (hour_range(w) for w in windows)]
         for pid, total in (
             s.query(H.player_id, func.sum(H.total_value))
-            .filter(
-                H.player_id.in_(pids),
-                H.date_hour >= lo,
-                H.date_hour <= hi,
-            )
+            .filter(H.player_id.in_(pids), or_(*spans))
             .group_by(H.player_id)
             .all()
         ):

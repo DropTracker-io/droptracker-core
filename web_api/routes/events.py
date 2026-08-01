@@ -167,6 +167,63 @@ def _parse_ping_config(raw) -> str | None:
     return json.dumps(out) if out else None
 
 
+def _apply_schedule(s, ev: Event, raw, *, kind: str | None = None) -> None:
+    """Validate a client 'schedule' object and rewrite the event's scoring
+    windows (web82a). ``None``/``{}`` clears the schedule (continuous event).
+    Maps every :class:`ScheduleError` onto a 422 pointing at the wizard's
+    schedule step."""
+    from services.event_schedule import ScheduleError, apply_schedule, validate_config
+
+    effective_kind = kind or (getattr(ev, "kind", None) or "standard")
+    try:
+        config = validate_config(raw)
+        if config and effective_kind == "board_game":
+            # Board-game clocks (turn cooldowns, auto-stall, shop restock) are
+            # wall-clock and keep ticking while scoring is closed, so a paused
+            # window would penalise teams for not playing. Blocked until those
+            # clocks learn to pause.
+            raise ScheduleError(
+                "Board-game events can't use a recurring schedule yet — their "
+                "turn timers keep running between scoring windows.")
+        apply_schedule(s, ev, config)
+    except ScheduleError as exc:
+        abort_problem(422, "Invalid schedule", exc.detail,
+                      extra={"code": "invalid_schedule", "target": "dates"})
+
+
+def _schedule_state(s, ev: Event) -> dict | None:
+    """The event's schedule as the frontend consumes it: the stored rule, a
+    human summary, the materialized windows, and which one is open now.
+    ``None`` for a continuous event."""
+    raw = getattr(ev, "schedule_config", None)
+    if not raw:
+        return None
+    from services.event_schedule import (
+        current_window,
+        describe,
+        load_windows,
+        next_window,
+        parse_config,
+    )
+
+    now = datetime.now()
+    windows = load_windows(s, ev.id)
+    cur = current_window(windows, now)
+    nxt = next_window(windows, now)
+    return {
+        "rule": (parse_config(raw) or {}).get("rule"),
+        "tz": "UTC",
+        "summary": describe(raw),
+        "window_count": len(windows),
+        "windows": [{"starts_at": _ts(a), "ends_at": _ts(b)} for a, b in windows],
+        "scoring_open": cur is not None,
+        "current_window": ({"starts_at": _ts(cur[0]), "ends_at": _ts(cur[1])}
+                           if cur else None),
+        "next_window": ({"starts_at": _ts(nxt[0]), "ends_at": _ts(nxt[1])}
+                        if nxt else None),
+    }
+
+
 def _event_pings(ev: Event) -> dict:
     """Parsed ``ping_config`` ({ping_key: [role ids]}), {} when unset/corrupt."""
     raw = getattr(ev, "ping_config", None)
@@ -234,9 +291,27 @@ def _summary(ev: Event) -> dict:
         "allow_late_signups": bool(getattr(ev, "allow_late_signups", False)),
         "signups_open": _signups_open(ev),
         "signups_close_at": _ts(_signup_close_at(ev)),
+        # Recurring schedule (web82a) — the cheap, query-free half: whether
+        # the event scores in windows and the one-line summary. The full
+        # window list + open/next state rides on the detail payload
+        # (_schedule_state), which costs a query per event.
+        "has_schedule": bool(getattr(ev, "schedule_config", None)),
+        "schedule_summary": _schedule_summary(ev),
         "activated_at": _ts(ev.activated_at),
         "ended_at": _ts(ev.ended_at),
     }
+
+
+def _schedule_summary(ev: Event) -> str | None:
+    raw = getattr(ev, "schedule_config", None)
+    if not raw:
+        return None
+    try:
+        from services.event_schedule import describe
+
+        return describe(raw)
+    except Exception:
+        return None
 
 
 def _signups_open(ev: Event) -> bool:
@@ -434,6 +509,10 @@ def _attach_task_tiles(s, tasks: list[dict]) -> None:
 
 def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
     base = _summary(ev)
+    # Recurring schedule (web82a): the window list + whether scoring is open
+    # right now. None for continuous events, so every existing consumer is
+    # untouched.
+    base["schedule"] = _schedule_state(s, ev)
 
     tasks = [
         {
@@ -2863,6 +2942,13 @@ async def create_event():
             )
             s.add(ev)
             s.commit()
+            # Recurring schedule (web82a) — after the commit, so the windows
+            # have an event id to hang off. Validation failures abort before
+            # anything else is seeded (the draft row is left behind, exactly
+            # as it is for any later failed step in this flow).
+            if body.get("schedule"):
+                _apply_schedule(s, ev, body.get("schedule"), kind=kind)
+                s.commit()
             if mode == "clan_vs_clan":
                 # Seed the host as an accepted participant; opponents are
                 # invited via POST /events/{id}/participants.
@@ -2911,6 +2997,9 @@ def _event_settings_snapshot(ev) -> dict:
         "allow_late_signups": bool(getattr(ev, "allow_late_signups", False)),
         "starts_at": starts_at.isoformat() if starts_at else None,
         "ends_at": ends_at.isoformat() if ends_at else None,
+        # web82a — a schedule change moves when submissions count, which is
+        # exactly the kind of edit a manager needs to be able to trace.
+        "schedule": _schedule_summary(ev),
     }
 
 
@@ -3013,6 +3102,14 @@ async def update_event(event_id: int):
                             f"The '{new_kind}' event type is not currently "
                             "available to your group.",
                         )
+                    if (new_kind == "board_game"
+                            and getattr(ev, "schedule_config", None)
+                            and not body.get("schedule")):
+                        abort_problem(
+                            409, "Schedule not supported",
+                            "Board-game events can't use a recurring schedule — "
+                            "clear the schedule before switching the event type.",
+                            extra={"code": "invalid_schedule", "target": "dates"})
                     ev.kind = new_kind
             if "requires_confirmation" in body:
                 # Event-level force: all completions queue for review (PRD D3).
@@ -3139,6 +3236,18 @@ async def update_event(event_id: int):
                             f"'{key}' must be a non-negative integer.",
                         )
                     setattr(ev, key, val)
+            # Recurring schedule (web82a). Runs after every other field is set
+            # so windows materialize against the NEW dates, and re-runs on a
+            # date change even when the rule itself didn't move — the windows
+            # are clamped to [starts_at, ends_at] and would otherwise drift
+            # out of sync with them.
+            if "schedule" in body:
+                _apply_schedule(s, ev, body.get("schedule"))
+            elif (getattr(ev, "schedule_config", None)
+                    and any(k in body for k in ("starts_at", "ends_at"))):
+                from services.event_schedule import parse_config
+
+                _apply_schedule(s, ev, parse_config(ev.schedule_config))
             if any(k in body for k in ("name", "description", "starts_at", "ends_at")):
                 # Flip synced guild rows back to pending so the bot edits the
                 # live Discord scheduled event (never re-creates: the row

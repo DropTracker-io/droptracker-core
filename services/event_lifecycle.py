@@ -41,6 +41,14 @@ _ACTIVATION_FAILED_TTL = 7 * 24 * 3600
 # tick until the end succeeds, and the admin channel should hear about it once.
 END_FAILED_KEY = "events:sweep:end-failed:{event_id}"
 
+# Recurring schedules (web82a): the last observed window state per event —
+# "open:{window row id}" or "closed" — so the sweep announces transitions
+# exactly once. Missing key (first tick after activation, Redis restart) is
+# seeded silently: the started announcement already covers the first window,
+# and a flush must not re-announce mid-flight.
+WINDOW_STATE_KEY = "events:window-open:{event_id}"
+_WINDOW_STATE_TTL = 14 * 24 * 3600
+
 
 class LifecycleError(Exception):
     """A transition is not allowed. ``status`` is the HTTP status the route
@@ -153,6 +161,39 @@ def activation_blocker_items(session, event, now: Optional[datetime] = None) -> 
             "code": "end_in_past", "target": "dates",
             "message": "The end date is in the past — move it into the future first.",
         })
+
+    # Recurring schedules (web82a). The write paths validate all of this too;
+    # these blockers catch drift (dates moved after the schedule was set, a
+    # kind change, every window already elapsed by start time).
+    if getattr(event, "schedule_config", None):
+        if (getattr(event, "kind", None) or "standard") == "board_game":
+            blockers.append({
+                "code": "schedule_board_game", "target": "dates",
+                "message": ("Board-game events can't use a recurring schedule — "
+                            "remove the schedule or change the event type."),
+            })
+        if event.starts_at is None or event.ends_at is None:
+            blockers.append({
+                "code": "schedule_needs_dates", "target": "dates",
+                "message": ("A recurring schedule needs both a start and an end "
+                            "date set."),
+            })
+        else:
+            from db.models import EventWindow
+
+            upcoming = (
+                session.query(EventWindow)
+                .filter(EventWindow.event_id == event.id,
+                        EventWindow.ends_at > now)
+                .count()
+            )
+            if upcoming == 0:
+                blockers.append({
+                    "code": "schedule_no_windows", "target": "dates",
+                    "message": ("The recurring schedule has no scoring windows "
+                                "left before the end date — adjust the dates or "
+                                "the schedule."),
+                })
 
     if event.has_bingo:
         cells = (
@@ -778,6 +819,16 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
         "ends_at": _ts(event.ends_at),
         "team_count": team_count,
     }
+    # Recurring schedules (web82a): the start announcement carries the
+    # schedule in one line ("📅 Weekly: Sat 00:00 → Mon 00:00 UTC") so
+    # participants know scoring is windowed, not continuous.
+    if getattr(event, "schedule_config", None):
+        try:
+            from services.event_schedule import describe
+
+            started_extra["schedule_summary"] = describe(event.schedule_config)
+        except ImportError:  # unit-test stubs
+            pass
     # Prize pot (web52a): advertise the opening pot on the start announcement.
     _pot_line = _pot_advertise_line(session, event, team_count)
     if _pot_line:
@@ -1032,6 +1083,121 @@ def _notify_end_failure(session, redis_conn, event, detail: str) -> None:
     )
 
 
+def run_window_sweep(session, redis_conn, events, now: Optional[datetime] = None) -> dict:
+    """Recurring schedules (web82a): detect scoring-window open/close
+    transitions on active scheduled events and announce them.
+
+    The scoring gate itself needs none of this — the matcher checks each
+    submission's timestamp against the materialized windows directly. This
+    sweep only drives the HUMAN surfaces: the ``event_window_opened`` /
+    ``event_window_closed`` announcements and the SSE frames the live pages
+    listen to. The close of the LAST window is silent — the event ends within
+    the same minute and ``event_ended`` is the wrap-up message.
+
+    Returns ``{"opened": [ids], "closed": [ids]}``.
+    """
+    summary = {"opened": [], "closed": []}
+    if redis_conn is None:
+        return summary
+    scheduled = [e for e in events or []
+                 if getattr(e, "schedule_config", None)]
+    if not scheduled:
+        return summary
+    now = now or datetime.now()
+
+    from db.models import EventWindow
+    from services import event_engine
+
+    wins_by_event: dict = {}
+    for w in (
+        session.query(EventWindow)
+        .filter(EventWindow.event_id.in_([e.id for e in scheduled]))
+        .order_by(EventWindow.event_id, EventWindow.starts_at)
+        .all()
+    ):
+        wins_by_event.setdefault(w.event_id, []).append(w)
+
+    for event in scheduled:
+        wins = wins_by_event.get(event.id) or []
+        if not wins:
+            continue
+        open_row = next((w for w in wins if w.starts_at <= now < w.ends_at), None)
+        state = f"open:{open_row.id}" if open_row is not None else "closed"
+        key = WINDOW_STATE_KEY.format(event_id=event.id)
+        try:
+            prev = redis_conn.get(key)
+            if isinstance(prev, bytes):
+                prev = prev.decode()
+            redis_conn.set(key, state, ex=_WINDOW_STATE_TTL)
+        except Exception:
+            continue  # no state, no dedupe — better silent than spam
+        if prev is None or prev == state:
+            continue
+
+        next_row = next((w for w in wins if w.starts_at > now), None)
+        try:
+            from services.event_schedule import describe
+
+            schedule_summary = describe(event.schedule_config)
+        except Exception:
+            schedule_summary = None
+        ev_dict = event_engine._event_to_dict(event)
+
+        if open_row is not None:
+            try:
+                event_engine._enqueue_notification(
+                    session, "event_window_opened", ev_dict,
+                    _representative_player_id(session, event.id),
+                    {
+                        "window_starts_at": _ts(open_row.starts_at),
+                        "window_ends_at": _ts(open_row.ends_at),
+                        "next_window_starts_at": _ts(next_row.starts_at) if next_row else None,
+                        "schedule_summary": schedule_summary,
+                    },
+                )
+                session.commit()
+                summary["opened"].append(event.id)
+            except Exception:
+                session.rollback()
+                log.error("Window sweep: opened-announcement enqueue failed "
+                          "for event %s", event.id, exc_info=True)
+            _publish(event.id, {
+                "kind": "window_opened", "event_id": event.id,
+                "name": event.name,
+                "window_ends_at": _ts(open_row.ends_at),
+            })
+        else:
+            if next_row is None:
+                continue  # last window closed → event_ended says it all
+            standings: list = []
+            try:
+                standings = final_standings(session, event.id, limit=5)
+            except Exception:
+                session.rollback()
+            try:
+                event_engine._enqueue_notification(
+                    session, "event_window_closed", ev_dict,
+                    _representative_player_id(session, event.id),
+                    {
+                        "standings": standings,
+                        "next_window_starts_at": _ts(next_row.starts_at),
+                        "schedule_summary": schedule_summary,
+                    },
+                )
+                session.commit()
+                summary["closed"].append(event.id)
+            except Exception:
+                session.rollback()
+                log.error("Window sweep: closed-announcement enqueue failed "
+                          "for event %s", event.id, exc_info=True)
+            _publish(event.id, {
+                "kind": "window_closed", "event_id": event.id,
+                "name": event.name,
+                "next_window_starts_at": _ts(next_row.starts_at),
+            })
+    return summary
+
+
 def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None) -> dict:
     """One scheduler tick: activate due drafts / end due actives through the
     exact same transition functions the routes use. Commits per transition
@@ -1125,6 +1291,21 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
             session.rollback()
             log.error("Sweep: auto-clan roster reconcile failed for event %s",
                       event.id, exc_info=True)
+
+    # Recurring schedules (web82a): announce scoring-window opens/closes on
+    # active scheduled events. Freshly-activated events seed their state
+    # silently this same tick (their row objects mutated to status='active'
+    # above); events that just ended are excluded.
+    try:
+        run_window_sweep(
+            session, redis_conn,
+            [e for e in rows
+             if e.status == "active" and e.id not in due["end"]],
+            now=now,
+        )
+    except Exception:
+        session.rollback()
+        log.error("Sweep: window transition sweep failed", exc_info=True)
 
     # Board-game shop stock refresh (web50a): restock due events on the tick so
     # shops refresh even when nobody is actively browsing. maybe_refresh_shop is

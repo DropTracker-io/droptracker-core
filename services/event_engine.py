@@ -1358,7 +1358,49 @@ def _event_to_dict(event) -> dict:
         "bonus_blackout_points": int(event.bonus_blackout_points or 0),
         "window_start": max(starts) if starts else None,
         "window_end": min(ends) if ends else None,
+        # Recurring schedules (web82a): set truthy when schedule_config is
+        # present; load_matcher_state attaches the materialized "windows"
+        # list ([(start, end), ...]) for the scoring gate.
+        "scheduled": bool(getattr(event, "schedule_config", None)),
     }
+
+
+#: Returned by :func:`schedule_window_seq` for a continuous (unscheduled)
+#: event — distinct from ``None`` ("scheduled, but closed right now").
+CONTINUOUS = -1
+
+
+def schedule_window_seq(event: dict, ts):
+    """Which scoring window of a recurring-schedule event (web82a) contains
+    ``ts``: the window's 0-based sequence, :data:`CONTINUOUS` for an event
+    with no schedule, or ``None`` when the event is scheduled but no window
+    is open at ``ts`` (scoring frozen). ``[start, end)`` containment, matching
+    services/event_schedule.in_any_window."""
+    windows = event.get("windows")
+    if not windows:
+        return CONTINUOUS
+    for seq, (ws, we) in enumerate(windows):
+        if ws <= ts < we:
+            return seq
+    return None
+
+
+def schedule_open(event: dict, ts) -> bool:
+    """Whether ``ts`` falls inside one of the event's scoring windows
+    (continuous events are always open). See :func:`schedule_window_seq`."""
+    return schedule_window_seq(event, ts) is not None
+
+
+def window_scope(seq) -> str:
+    """Redis key suffix isolating per-window absolute-counter state (KC
+    watermarks, XP baselines) on a recurring-schedule event.
+
+    Every window re-baselines: kills and XP earned while scoring was CLOSED
+    must not fold into the next window's first credit. Both sources of
+    absolute counters — plugin ``kill_count`` and WOM hiscores — carry the
+    same suffix, so the double-count guard between them still holds inside a
+    window. Empty for continuous events, which keep their historical keys."""
+    return "" if seq is None or seq == CONTINUOUS else f":w{seq}"
 
 
 def _task_wom_metrics(task_type, npcs) -> dict:
@@ -1454,6 +1496,21 @@ def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
         return state
     event_ids = [e.id for e in events]
     state.events = {e.id: _event_to_dict(e) for e in events}
+
+    # Recurring schedules (web82a): attach each scheduled event's compiled
+    # scoring windows. Windows are static data (rule edits rewrite the rows
+    # and bump the matcher), so the per-envelope gate needs no Redis — plain
+    # containment against this snapshot.
+    scheduled_ids = [e.id for e in events if getattr(e, "schedule_config", None)]
+    if scheduled_ids:
+        from db.models import EventWindow
+
+        for w in (session.query(EventWindow)
+                  .filter(EventWindow.event_id.in_(scheduled_ids))
+                  .order_by(EventWindow.event_id, EventWindow.starts_at)
+                  .all()):
+            state.events[w.event_id].setdefault("windows", []).append(
+                (w.starts_at, w.ends_at))
 
     for task in session.query(EventTask).filter(EventTask.event_id.in_(event_ids)).all():
         if task.type not in AUTO_TASK_TYPES:
@@ -1759,6 +1816,17 @@ def _fold_xp_baseline(redis_conn, event_id: int, player_id: int, skill, xp,
         return xp - prev
     except Exception:
         return 0
+
+
+def _window_start_for(event: dict, seq):
+    """The opening instant of the scoring window a submission landed in — the
+    sub-window's start on a recurring-schedule event (web82a), else the
+    event's overall window start."""
+    if seq is not None and seq != CONTINUOUS:
+        windows = event.get("windows") or ()
+        if 0 <= seq < len(windows):
+            return windows[seq][0]
+    return event.get("window_start")
 
 
 def _seed_allowed(joined_at, window_start) -> bool:
@@ -3779,6 +3847,17 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
             continue
         if event["window_end"] is not None and submitted_at > event["window_end"]:
             continue
+        # Recurring schedules (web82a): inside the overall window, scoring is
+        # only open during the event's materialized sub-windows (e.g. the
+        # weekends of a weekends-only month). Judged on the submission's own
+        # timestamp — same freeze rule as the overall window; effort (EHE)
+        # recording below is behind this gate too. The sequence scopes every
+        # absolute-counter baseline so each window starts fresh (see
+        # window_scope).
+        window_seq = schedule_window_seq(event, submitted_at)
+        if window_seq is None:
+            continue
+        wscope = window_scope(window_seq)
         if not accepts_submission_source(event, envelope):
             continue
 
@@ -3830,16 +3909,24 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
                 data = envelope.get("data") or {}
                 # WOM envelopes carry the window-start value; seeding from it
                 # is only valid for the event whose window produced it, and
-                # only for players in before the window opened (PRD D10).
+                # only for players in before the window opened (PRD D10). On a
+                # recurring-schedule event the boundary that matters is the
+                # SCORING window the envelope lands in — the reconciler bounds
+                # each fetch to one window, so kc_start/xp_start are that
+                # window's opening values.
                 wom_seed_ok = (data.get("source") == "wom"
                                and data.get("target_event_id") == event_id
-                               and _seed_allowed(joined_at, event["window_start"]))
+                               and _seed_allowed(
+                                   joined_at,
+                                   _window_start_for(event, window_seq)))
                 if match["mode"] == "kc":
                     # Multi-NPC kc tasks keep absolute-KC state PER NPC — each
                     # NPC's kill_count is its own counter, so one shared
                     # watermark would swallow the lower counts. Metric-path
-                    # matches scope per (task, path, NPC) on top.
-                    kc_scope = _match_kc_scope(task, match, _norm(data.get("npc_name")))
+                    # matches scope per (task, path, NPC) on top. The window
+                    # suffix re-baselines every scoring window (web82a).
+                    kc_scope = _match_kc_scope(
+                        task, match, _norm(data.get("npc_name"))) + wscope
                     try:
                         kill_count = int(data.get("kill_count"))
                     except (TypeError, ValueError):
@@ -3869,7 +3956,7 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
                 elif match["mode"] == "kc_abs":
                     metric = str(data.get("boss_metric") or "").strip().lower()
                     kc_scope = _match_kc_scope(
-                        task, match, _match_wom_npc(task, match, metric))
+                        task, match, _match_wom_npc(task, match, metric)) + wscope
                     quantity = _fold_kc_watermark(
                         redis_conn, event_id, kc_scope, player_id, data.get("kc"),
                         seed=data.get("kc_start") if wom_seed_ok else None,
@@ -3878,9 +3965,11 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
                         continue
                 elif match["mode"] == "xp":
                     if xp_delta is None:
+                        skill = data.get("skill")
                         xp_delta = _fold_xp_baseline(
                             redis_conn, event_id, player_id,
-                            data.get("skill"), data.get("xp"),
+                            (f"{skill}{wscope}" if skill else skill),
+                            data.get("xp"),
                             seed=data.get("xp_start") if wom_seed_ok else None,
                             staged=staged)
                     if xp_delta <= 0:

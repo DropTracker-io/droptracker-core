@@ -11,7 +11,7 @@ import importlib.util
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -423,3 +423,74 @@ class TestRequestUpdates:
         assert n == 1
         assert activity[1] == (100, 0, "abc")
         assert self.ACT_KEY not in r.hashes
+
+
+# ── recurring-schedule fetch bounds (web82a) ─────────────────────────────────
+
+class TestScoringBounds:
+    """WOM reports GAINS BETWEEN TWO INSTANTS, so a fetch span that crosses a
+    closed period would hand the matcher XP/KC earned while the event was
+    paused. Every fetch is therefore bounded to a single scoring window.
+    """
+
+    WEEKENDS = [(datetime(2026, 8, 1), datetime(2026, 8, 3)),
+                (datetime(2026, 8, 8), datetime(2026, 8, 10))]
+
+    def _target(self, windows=None):
+        return recon.ReconcileTarget(
+            event_id=1, event_name="e",
+            window_start=datetime(2026, 8, 1), window_end=datetime(2026, 9, 1),
+            windows=list(windows if windows is not None else self.WEEKENDS))
+
+    def test_continuous_event_uses_the_whole_event_window(self):
+        bounds = recon.scoring_bounds(self._target(windows=[]), datetime(2026, 8, 5))
+        assert bounds == (datetime(2026, 8, 1), datetime(2026, 8, 5))
+
+    def test_inside_a_window_fetches_from_that_window_start(self):
+        bounds = recon.scoring_bounds(self._target(), datetime(2026, 8, 2, 12))
+        assert bounds == (datetime(2026, 8, 1), datetime(2026, 8, 2, 12))
+
+    def test_between_windows_fetches_nothing(self):
+        assert recon.scoring_bounds(self._target(), datetime(2026, 8, 5)) is None
+
+    def test_grace_period_captures_a_window_tail(self):
+        # WOM snapshots lag the game: without this the last minutes of every
+        # weekend would be lost the instant the window shut.
+        just_closed = datetime(2026, 8, 3) + timedelta(minutes=10)
+        assert recon.scoring_bounds(self._target(), just_closed) == self.WEEKENDS[0]
+
+    def test_grace_expires(self):
+        long_after = datetime(2026, 8, 3) + timedelta(
+            seconds=recon.WINDOW_TAIL_GRACE_SECONDS + 60)
+        assert recon.scoring_bounds(self._target(), long_after) is None
+
+    def test_final_pass_falls_back_to_the_last_elapsed_window(self):
+        bounds = recon.scoring_bounds(self._target(), datetime(2026, 9, 1), final=True)
+        assert bounds == self.WEEKENDS[-1]
+
+    def test_no_window_start_means_no_fetch(self):
+        target = self._target()
+        target.window_start = None
+        assert recon.scoring_bounds(target, datetime(2026, 8, 2)) is None
+
+
+class TestClosingEdges:
+    def test_continuous_event_has_only_the_event_end(self):
+        target = recon.ReconcileTarget(
+            event_id=1, event_name="e", window_start=datetime(2026, 8, 1),
+            window_end=datetime(2026, 9, 1))
+        assert recon._closing_edges(target) == [("end", datetime(2026, 9, 1))]
+
+    def test_each_scoring_window_gets_its_own_pre_close_pass(self):
+        # A weekend's final hours are as final as the event's — the next window
+        # re-baselines, so gains not fetched before the close are lost.
+        target = recon.ReconcileTarget(
+            event_id=1, event_name="e", window_start=datetime(2026, 8, 1),
+            window_end=datetime(2026, 9, 1),
+            windows=[(datetime(2026, 8, 1), datetime(2026, 8, 3)),
+                     (datetime(2026, 8, 8), datetime(2026, 8, 10))])
+        assert recon._closing_edges(target) == [
+            ("w0", datetime(2026, 8, 3)),
+            ("w1", datetime(2026, 8, 10)),
+            ("end", datetime(2026, 9, 1)),
+        ]

@@ -83,6 +83,10 @@ AUDIENCE_FOR_TYPE = {
     "event_lead_change": AUDIENCE_EVENT,
     "event_started": AUDIENCE_EVENT,
     "event_ended": AUDIENCE_EVENT,
+    # Recurring schedules (web82a): scoring window opened/closed — every
+    # participant wants "the weekend is live" in-game as much as on Discord.
+    "event_window_opened": AUDIENCE_EVENT,
+    "event_window_closed": AUDIENCE_EVENT,
 }
 
 # Types a player may switch off on the website (P1 UI writes
@@ -99,6 +103,8 @@ WEB_PREF_TYPES = (
     "event_lead_change",
     "event_started",
     "event_ended",
+    "event_window_opened",
+    "event_window_closed",
 )
 
 
@@ -661,6 +667,34 @@ def _resolve_item_ids(session, names: set) -> list:
     return sorted({int(r[0]) for r in rows})
 
 
+def _event_window_fields(session, event) -> dict:
+    """HUD fields describing a recurring-schedule event's scoring state
+    (web82a): ``{scoring_open, window_ends_at, next_window_at, schedule}``.
+    Empty dict for continuous events; never raises."""
+    if not getattr(event, "schedule_config", None):
+        return {}
+    try:
+        from datetime import datetime as _dt
+
+        from services.event_schedule import (
+            current_window, describe, load_windows, next_window,
+        )
+
+        now = _dt.now()
+        windows = load_windows(session, event.id)
+        if not windows:
+            return {}
+        cur, nxt = current_window(windows, now), next_window(windows, now)
+        return {
+            "scoring_open": cur is not None,
+            "window_ends_at": cur[1].isoformat() if cur else None,
+            "next_window_at": nxt[0].isoformat() if nxt else None,
+            "schedule": describe(event.schedule_config),
+        }
+    except Exception:
+        return {}
+
+
 def compose_event_state(session, player_id) -> dict:
     """The plugin's HUD/Events-tab state: one entry per active event the
     player is rostered in. All composition happens here so the client stays a
@@ -903,7 +937,12 @@ def compose_event_state(session, player_id) -> dict:
         entries.append({
             "event": {"id": event.id, "name": event.name, "kind": event.kind,
                       "has_bingo": bool(event.has_bingo),
-                      "ends_at": event.ends_at.isoformat() if event.ends_at else None},
+                      "ends_at": event.ends_at.isoformat() if event.ends_at else None,
+                      # Recurring schedules (web82a). Absent for continuous
+                      # events, so older plugin builds are unaffected; newer
+                      # ones show "scoring paused — resumes <time>" instead of
+                      # letting a player grind for credit that won't land.
+                      **_event_window_fields(session, event)},
             "team": {
                 "id": team.id,
                 "name": team.name,

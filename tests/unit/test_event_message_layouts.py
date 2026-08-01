@@ -295,7 +295,9 @@ class TestDefaultLayouts:
     def test_every_layout_type_has_a_default(self):
         # Keep in sync with db.models.events.EVENT_MESSAGE_LAYOUT_TYPES
         expected = {
-            "event_started", "event_ended", "event_completion",
+            "event_started", "event_ended",
+            "event_window_opened", "event_window_closed",
+            "event_completion",
             "event_task_progress", "event_line",
             "event_blackout", "event_lead_change", "event_pending",
             "event_activation_failed", "event_end_failed",
@@ -312,6 +314,13 @@ class TestDefaultLayouts:
             "event_started": {"event_id": 7, "event_name": "E", "description": "d",
                               "starts_at": 1700000000, "ends_at": 1700003600, "team_count": 4},
             "event_ended": {"event_id": 7, "event_name": "E"},
+            "event_window_opened": {"event_id": 7, "event_name": "E",
+                                    "window_ends_at": 1700003600,
+                                    "next_window_starts_at": 1700503600,
+                                    "schedule_summary": "Weekly: Sat 00:00 → Mon 00:00 UTC"},
+            "event_window_closed": {"event_id": 7, "event_name": "E",
+                                    "next_window_starts_at": 1700503600,
+                                    "schedule_summary": "Weekly: Sat 00:00 → Mon 00:00 UTC"},
             "event_completion": {"event_id": 7, "event_name": "E", "team_id": 1,
                                  "team_name": "Reds", "task_label": "Get a whip",
                                  "points": 10, "team_score": 30, "player_name": "Zed",

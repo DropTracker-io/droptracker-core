@@ -193,7 +193,12 @@ EVENT_DISCORD_POLICIES = ("on_activate", "immediate")
 #                     created in the event's primary guild (the main ask:
 #                     scheduled events can't ping by themselves).
 # - "event_started"/"event_ended" — the lifecycle announcements.
-EVENT_PING_KEYS = ("event_created", "event_started", "event_ended")
+EVENT_PING_KEYS = ("event_created", "event_started", "event_ended",
+                   # web82a: a recurring-schedule scoring window opened —
+                   # "the weekend is live, get on" is exactly what role pings
+                   # exist for. Keyed by notification type (the sender maps
+                   # ping_config[notification_type] directly).
+                   "event_window_opened")
 
 # How chatty the bot is about partial task progress (web_events.message_config
 # JSON, key "task_progress"):
@@ -212,6 +217,11 @@ EVENT_TASK_PROGRESS_MODES = ("off", "milestones", "all")
 EVENT_MESSAGE_TOGGLE_KEYS = (
     "event_started",
     "event_ended",
+    # Recurring schedules (web82a): a scoring window opened / closed on an
+    # event that runs in repeating windows (e.g. weekends only). The event
+    # stays live between windows, so these are distinct from started/ended.
+    "event_window_opened",
+    "event_window_closed",
     "event_completion",
     "event_task_progress",
     "event_line",
@@ -393,10 +403,47 @@ class Event(Base):
     # enter mid-event, right up to the end. Admins can always place players
     # manually either way (the roster stays open until the event is past).
     allow_late_signups = Column(Boolean, nullable=False, default=False, server_default="0")
+    # Recurring activation schedule (web82a): JSON rule describing WHEN inside
+    # [starts_at, ends_at] scoring is open (e.g. every weekend of the month,
+    # all weekends counting as one event). NULL = continuous (every event
+    # before web82a). The rule is validated + compiled by
+    # services/event_schedule.py into explicit web_event_windows rows — every
+    # consumer reads THOSE, never this JSON. Between windows the event stays
+    # 'active' (channels/boards/pages up) but submissions credit nothing.
+    # Not available for kind='board_game' (its turn/shop clocks are wall-clock
+    # and would keep ticking while scoring is closed).
+    schedule_config = Column(Text, nullable=True)
     activated_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class EventWindow(Base):
+    """One materialized ``[starts_at, ends_at)`` scoring window of a
+    recurring-schedule event (web82a). Compiled from
+    ``Event.schedule_config`` by services/event_schedule.py whenever the
+    schedule or the event dates change; ``seq`` is the 0-based chronological
+    position. ``source`` records provenance: 'rule' (compiled) or 'frozen'
+    (a fully-elapsed window preserved verbatim across a mid-event schedule
+    edit, so late-arriving submissions from it keep their credit). Events
+    without a schedule have no rows here."""
+
+    __tablename__ = "web_event_windows"
+    __table_args__ = (
+        Index("idx_web_event_window_event", "event_id", "starts_at"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id", ondelete="CASCADE"),
+                      nullable=False)
+    seq = Column(Integer, nullable=False, default=0)
+    starts_at = Column(DateTime, nullable=False)
+    ends_at = Column(DateTime, nullable=False)
+    source = Column(String(16), nullable=False, default="rule",
+                    server_default="rule")
+    created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
 class EventTask(Base):

@@ -116,6 +116,11 @@ class ReconcileTarget:
     event_name: str
     window_start: Optional[datetime]
     window_end: Optional[datetime]
+    # Recurring schedules (web82a): the event's materialized scoring windows
+    # as ordered [(start, end)] pairs. Empty for continuous events. Every
+    # fetch is bounded to ONE of these — a span crossing a closed period
+    # would report gains earned while the event was paused.
+    windows: list = field(default_factory=list)
     # [(group_id, wom_group_id, verification_code_or_None)]
     wom_groups: list = field(default_factory=list)
     skills: dict = field(default_factory=dict)        # dt skill key -> wom slug
@@ -262,6 +267,7 @@ def _plan_targets_db(state) -> list[ReconcileTarget]:
             event_name=event.get("name") or f"event {event_id}",
             window_start=event.get("window_start"),
             window_end=event.get("window_end"),
+            windows=list(event.get("windows") or ()),
             wom_groups=wom_groups,
             skills=skills,
             boss_metrics=bosses,
@@ -287,6 +293,42 @@ async def plan_targets(state) -> list[ReconcileTarget]:
     return await asyncio.to_thread(_plan_targets_db, state)
 
 
+# How long after a scoring window closes we keep reconciling it (web82a). WOM
+# snapshots lag the game, so the last minutes of a weekend would otherwise be
+# lost the moment the window shuts.
+WINDOW_TAIL_GRACE_SECONDS = 30 * 60
+
+
+def scoring_bounds(target: ReconcileTarget, now: datetime, *,
+                   final: bool = False) -> Optional[tuple]:
+    """The ``(start_at, end_at)`` WOM fetch span for one target at ``now``.
+
+    Continuous events: the event window, clamped to ``now``. Recurring
+    schedules (web82a): the CURRENT scoring window — or one that closed
+    within :data:`WINDOW_TAIL_GRACE_SECONDS`, so a weekend's tail still lands
+    — clamped to ``now``. Returns ``None`` when a scheduled event is between
+    windows: a span crossing a closed period reports gains earned while the
+    event was paused, which must not be credited. ``final=True`` (the
+    end-of-event pass) falls back to the last window so nothing is stranded.
+    """
+    if target.window_start is None:
+        return None
+    if not target.windows:
+        end_at = min(now, target.window_end) if target.window_end else now
+        return None if end_at <= target.window_start else (target.window_start, end_at)
+    grace = timedelta(seconds=WINDOW_TAIL_GRACE_SECONDS)
+    for start, end in target.windows:
+        if start <= now < end:
+            return (start, min(now, end))
+        if end <= now < end + grace:
+            return (start, end)
+    if final:
+        elapsed = [w for w in target.windows if w[1] <= now]
+        if elapsed:
+            return (elapsed[-1][0], elapsed[-1][1])
+    return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Envelope emission
 # ══════════════════════════════════════════════════════════════════════════════
@@ -302,7 +344,8 @@ def _match_participant(target: ReconcileTarget, player_obj: dict):
 
 
 def _emit_for_row(redis_conn, target: ReconcileTarget, row: dict,
-                  *, clamp_epoch: Optional[int], force: bool, stats: dict) -> int:
+                  *, clamp_epoch: Optional[int], force: bool, stats: dict,
+                  clamp_lo: Optional[int] = None) -> int:
     """Queue envelopes for one bulk-gained row. Returns envelopes pushed."""
     # Low-priority lane (batch 2): a reconcile burst must not head-of-line
     # block live plugin drops; the consumer drains this queue when idle.
@@ -329,6 +372,11 @@ def _emit_for_row(redis_conn, target: ReconcileTarget, row: dict,
     snap_epoch = _parse_wom_ts(row.get("endDate")) or updated_epoch or int(time.time())
     if clamp_epoch is not None:
         snap_epoch = min(snap_epoch, clamp_epoch)
+    if clamp_lo is not None:
+        # Keep the stamp inside the fetched scoring window (web82a): the
+        # matcher gates on it, and a WOM snapshot predating the window open
+        # would be frozen out along with the gains it reports.
+        snap_epoch = max(snap_epoch, clamp_lo)
 
     metrics = {m.get("metric"): m for m in (row.get("data") or [])
                if isinstance(m, dict)}
@@ -412,22 +460,37 @@ def _emit_for_row(redis_conn, target: ReconcileTarget, row: dict,
 
 
 async def _reconcile_target(redis_conn, target: ReconcileTarget, *,
-                            end_at: datetime, force: bool, stats: dict) -> list:
+                            now: datetime, force: bool, stats: dict,
+                            final: bool = False) -> list:
     """Fetch + emit for one target. Returns the fetched bulk-gained rows
-    (all groups concatenated) so the freshness rotation can reuse them."""
+    (all groups concatenated) so the freshness rotation can reuse them.
+
+    The fetch span is one scoring window (:func:`scoring_bounds`) — for a
+    continuous event that is simply the event window."""
     from utils.wiseoldman import get_group_bulk_gained
 
-    start_at = target.window_start
-    if start_at is None:
+    if target.window_start is None:
         # Shouldn't happen for active events (activation stamps the window),
         # but never reconcile an unbounded window.
         log.warning("Event %s has no window_start; skipping WOM reconcile",
                     target.event_id)
         return []
+    bounds = scoring_bounds(target, now, final=final)
+    if bounds is None:
+        # Recurring-schedule event between windows: nothing to reconcile.
+        return []
+    start_at, end_at = bounds
     if end_at <= start_at:
         return []
-    clamp_epoch = (int(target.window_end.timestamp())
-                   if target.window_end is not None else None)
+    # Emitted envelope timestamps are clamped INTO this window: the matcher
+    # gates every submission on its own timestamp, so a snapshot stamped a
+    # minute after a weekend closed would be discarded as out-of-window.
+    clamp_lo = int(start_at.timestamp())
+    clamp_epoch = int(end_at.timestamp())
+    if target.windows:
+        # Sub-windows are half-open [start, end) in the matcher, so a stamp
+        # landing exactly on the close would read as out-of-window.
+        clamp_epoch -= 1
     all_rows = []
     for _group_id, wom_gid, _code in target.wom_groups:
         rows = await get_group_bulk_gained(wom_gid, start_at, end_at)
@@ -440,8 +503,9 @@ async def _reconcile_target(redis_conn, target: ReconcileTarget, *,
             if isinstance(row, dict):
                 all_rows.append(row)
                 pushed += _emit_for_row(redis_conn, target, row,
-                                        clamp_epoch=clamp_epoch, force=force,
-                                        stats=stats)
+                                        clamp_epoch=clamp_epoch,
+                                        clamp_lo=clamp_lo,
+                                        force=force, stats=stats)
         stats["envelopes"] += pushed
     return all_rows
 
@@ -464,8 +528,7 @@ async def reconcile_once(state, redis_conn, now: Optional[datetime] = None) -> d
     update_cap = WOM_EVENT_UPDATE_MAX_PER_CYCLE
     for target in targets:
         stats["targets"] += 1
-        end_at = min(now, target.window_end) if target.window_end else now
-        rows = await _reconcile_target(redis_conn, target, end_at=end_at,
+        rows = await _reconcile_target(redis_conn, target, now=now,
                                        force=False, stats=stats)
         if update_cap > 0:
             fresh = await _freshness_for_target(redis_conn, target, rows,
@@ -486,9 +549,8 @@ async def final_reconcile(state, redis_conn, event_id: int) -> Optional[dict]:
     if not targets:
         return None
     target = targets[0]
-    end_at = target.window_end or datetime.now()
-    await _reconcile_target(redis_conn, target, end_at=end_at, force=True,
-                            stats=stats)
+    await _reconcile_target(redis_conn, target, now=datetime.now(), force=True,
+                            stats=stats, final=True)
     try:
         redis_conn.set(_womfinal_key(event_id), int(time.time()), ex=7 * 86400)
     except Exception:
@@ -750,14 +812,15 @@ async def _fetch_target_rows(target: ReconcileTarget, now: datetime) -> list:
     passes) — usually a cache hit on the last cycle's fetch."""
     from utils.wiseoldman import get_group_bulk_gained
 
-    if target.window_start is None:
+    bounds = scoring_bounds(target, now)
+    if bounds is None:
         return []
-    end_at = min(now, target.window_end) if target.window_end else now
-    if end_at <= target.window_start:
+    start_at, end_at = bounds
+    if end_at <= start_at:
         return []
     rows = []
     for _group_id, wom_gid, _code in target.wom_groups:
-        fetched = await get_group_bulk_gained(wom_gid, target.window_start, end_at)
+        fetched = await get_group_bulk_gained(wom_gid, start_at, end_at)
         rows.extend(fetched or [])
     return rows
 
@@ -798,6 +861,22 @@ def _spawn_freshness(target: ReconcileTarget, redis_conn, now: datetime,
     task.add_done_callback(_background_tasks.discard)
 
 
+def _closing_edges(target: ReconcileTarget) -> list:
+    """``[(stage, closes_at)]`` — the moments before which participants should
+    be force-refreshed on WOM so their gains land while they still count.
+
+    A continuous event has one: the event's end. A recurring-schedule event
+    (web82a) has one per scoring window — a weekend's last hours are as
+    final as the event's, since the next window re-baselines — plus the
+    event end. Each stage carries its own once-only Redis flag."""
+    edges = []
+    for seq, (_start, end) in enumerate(target.windows or ()):
+        edges.append((f"w{seq}", end))
+    if target.window_end is not None:
+        edges.append(("end", target.window_end))
+    return edges
+
+
 async def run_key_moment_updates(state, redis_conn,
                                  now: Optional[datetime] = None) -> None:
     """Fire the freshness pass at event activation and at the pre-end lead.
@@ -822,18 +901,20 @@ async def run_key_moment_updates(state, redis_conn,
                     _spawn_freshness(target, redis_conn, now, "activation",
                                      use_update_all=True,
                                      max_updates=WOM_EVENT_UPDATE_BUDGET)
-            if target.window_end is not None:
-                lead = target.window_end - timedelta(seconds=WOM_UPDATE_ALL_LEAD_SECONDS)
-                if (now >= lead and now < target.window_end
-                        and not redis_conn.get(_womupdall_key(target.event_id, "end"))):
-                    redis_conn.set(_womupdall_key(target.event_id, "end"),
-                                   int(time.time()), ex=_STATE_KEY_TTL)
-                    # Final standings deserve the freshest data: tighter
-                    # staleness bar and a doubled cap for this one pass.
-                    _spawn_freshness(target, redis_conn, now, "pre-end",
-                                     use_update_all=True,
-                                     min_stale=WOM_EVENT_UPDATE_MIN_INTERVAL,
-                                     max_updates=WOM_EVENT_UPDATE_MAX_PER_CYCLE * 2)
+            for stage, closes_at in _closing_edges(target):
+                lead = closes_at - timedelta(seconds=WOM_UPDATE_ALL_LEAD_SECONDS)
+                if now < lead or now >= closes_at:
+                    continue
+                flag = _womupdall_key(target.event_id, stage)
+                if redis_conn.get(flag):
+                    continue
+                redis_conn.set(flag, int(time.time()), ex=_STATE_KEY_TTL)
+                # Final standings deserve the freshest data: tighter
+                # staleness bar and a doubled cap for this one pass.
+                _spawn_freshness(target, redis_conn, now, f"pre-{stage}",
+                                 use_update_all=True,
+                                 min_stale=WOM_EVENT_UPDATE_MIN_INTERVAL,
+                                 max_updates=WOM_EVENT_UPDATE_MAX_PER_CYCLE * 2)
         except Exception:
             log.exception("Key-moment freshness pass failed for event %s",
                           target.event_id)

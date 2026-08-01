@@ -172,6 +172,11 @@ def snapshot_event(s, ev: Event) -> dict:
                 getattr(ev, "leadership_config", None)),
             "message_config": _parse_json_col(
                 getattr(ev, "message_config", None)),
+            # Recurring schedule (web82a): the RULE travels, never the
+            # materialized windows — instantiation recompiles it against the
+            # new run's dates, which is the whole point of "run our weekend
+            # event again next month".
+            "schedule": _parse_json_col(getattr(ev, "schedule_config", None)),
         },
         "tasks": tasks_out,
         "teams": teams_out,
@@ -290,6 +295,20 @@ def instantiate_template(
             setattr(ev, json_key, json.dumps(value))
     s.add(ev)
     s.flush()
+
+    # Recurring schedule (web82a) — recompiled against THIS run's dates. A
+    # template whose schedule no longer fits (dates too short for a single
+    # window, or none supplied) instantiates as a continuous event rather
+    # than failing the whole run; the organizer can re-add it in the manager.
+    schedule = spec.get("schedule")
+    if isinstance(schedule, dict) and schedule.get("rule") and starts_at and ends_at:
+        from services.event_schedule import ScheduleError, apply_schedule, validate_config
+
+        try:
+            apply_schedule(s, ev, validate_config(schedule))
+            s.flush()
+        except ScheduleError:
+            ev.schedule_config = None
 
     # Tasks — lenient revalidation; local payload index -> new row id.
     skipped: list[dict] = []

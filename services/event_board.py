@@ -134,6 +134,31 @@ def _tasks_summary(session, event) -> Optional[str]:
     return "-# " + " • ".join(parts)
 
 
+def _window_state(session, event) -> dict | None:
+    """``{open, current_end, next_start}`` (unix seconds) for a
+    recurring-schedule event (web82a), or ``None`` for a continuous one.
+    Fails open to None — the board must render regardless."""
+    if not getattr(event, "schedule_config", None):
+        return None
+    try:
+        from datetime import datetime as _dt
+
+        from services.event_schedule import current_window, load_windows, next_window
+
+        now = _dt.now()
+        windows = load_windows(session, event.id)
+        if not windows:
+            return None
+        cur, nxt = current_window(windows, now), next_window(windows, now)
+        return {
+            "open": cur is not None,
+            "current_end": int(cur[1].timestamp()) if cur else None,
+            "next_start": int(nxt[0].timestamp()) if nxt else None,
+        }
+    except Exception:
+        return None
+
+
 def _board_context(session, event, config: dict) -> dict:
     from db.models import EventTeam
     from services.event_notifications import event_url
@@ -142,9 +167,19 @@ def _board_context(session, event, config: dict) -> dict:
     if event.status == "past":
         status_line = "Final standings \U0001F3C1"
     else:
-        bits = ["Live"]
-        if event.ends_at:
-            bits.append(f"Ends <t:{int(event.ends_at.timestamp())}:R>")
+        # Recurring schedules (web82a): between scoring windows the event is
+        # still live but nothing counts — say so, and when it resumes.
+        window_state = _window_state(session, event)
+        if window_state and not window_state["open"]:
+            bits = ["⏸️ Paused"]
+            if window_state["next_start"]:
+                bits.append(f"Resumes <t:{window_state['next_start']}:R>")
+        else:
+            bits = ["Live"]
+            if window_state and window_state["current_end"]:
+                bits.append(f"Window closes <t:{window_state['current_end']}:R>")
+            elif event.ends_at:
+                bits.append(f"Ends <t:{int(event.ends_at.timestamp())}:R>")
         bits.append(f"{team_count} team{'s' if team_count != 1 else ''}")
         status_line = " • ".join(bits)
 
