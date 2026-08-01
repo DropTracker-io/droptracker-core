@@ -47,6 +47,20 @@ def config_truthy(value, default=False):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def config_int(value, default=0):
+    """Coerce a group_configurations text value to int.
+
+    Rows can hold "" (a cleared field in the web editor) or junk; missing,
+    empty and unparsable values all fall back to the caller's default.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return int(str(value).strip())
+    except (ValueError, TypeError):
+        return default
+
+
 def get_db_session():
     """Get a fresh session using the existing session factory"""
     return Session()
@@ -1377,9 +1391,10 @@ async def generate_timeframe_board(group_id: int = 0, wom_group_id: int = 0,
     group_config = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id).all()
     config = {conf.config_key: conf.config_value for conf in group_config}
     
-    # Get lootboard style and minimum value
-    loot_board_style = int(config.get('loot_board_type', 1))
-    minimum_value = int(config.get('minimum_value_to_notify', 2500000))
+    # Get lootboard style and minimum value ("" and the legacy 0 sentinel both
+    # mean "unset", matching the main board path above)
+    loot_board_style = config_int(config.get('loot_board_type'), 1) or 1
+    minimum_value = config_int(config.get('minimum_value_to_notify'), 2500000)
     
     # Load background image
     target_board = session.query(LootboardStyle).filter(LootboardStyle.id == loot_board_style).first()
