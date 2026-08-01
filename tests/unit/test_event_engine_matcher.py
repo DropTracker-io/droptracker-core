@@ -233,9 +233,23 @@ class TestKcTargetMultiNpc:
             t, _env("drop", {"npc_name": "Dagannoth Supreme"})) is None
 
     def test_state_scope_single_npc_is_bare_task_id(self):
-        # Legacy key shape: deployed single-NPC watermarks must survive.
+        # Legacy key shape: deployed single-NPC watermarks must survive. It is
+        # a STRING, not an int — callers append the recurring-window suffix to
+        # this scope, and `int + str` raised, which dead-lettered every WOM KC
+        # update for a single-NPC task instead of crediting it. The rendered
+        # Redis key is identical either way (all consumers interpolate it).
         t = _task(id=42, type="kc_target", target="Zulrah")
-        assert engine._kc_state_scope(t, "zulrah") == 42
+        assert engine._kc_state_scope(t, "zulrah") == "42"
+
+    def test_state_scope_concatenates_with_a_window_suffix(self):
+        """Every scope must survive `scope + window_scope(seq)`."""
+        single = _task(id=42, type="kc_target", target="Zulrah")
+        multi = self._dks()
+        multi["id"] = 42
+        for scope in (engine._kc_state_scope(single, "zulrah"),
+                      engine._kc_state_scope(multi, "dagannoth prime")):
+            assert scope + engine.window_scope(None) == scope
+            assert scope + engine.window_scope(3) == f"{scope}:w3"
 
     def test_state_scope_multi_npc_is_per_npc(self):
         t = self._dks()
@@ -727,9 +741,10 @@ class TestMetricPathMatching:
         t = _task(config=GWD_OR)
         assert engine._match_kc_scope(
             t, {"mode": "kc", "path": 1}, "kree'arra") == "1:p1:kree'arra"
-        # kc_target matches (no path) keep the legacy shapes.
+        # kc_target matches (no path) keep the legacy shape — as a string, so
+        # the caller's `+ window_scope(...)` cannot raise.
         kc = _task(type="kc_target", target="Zulrah", config={})
-        assert engine._match_kc_scope(kc, {"mode": "kc"}, "zulrah") == 1
+        assert engine._match_kc_scope(kc, {"mode": "kc"}, "zulrah") == "1"
 
 
 class TestMetricPathProgress:

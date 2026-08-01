@@ -284,8 +284,13 @@ def _kc_state_scope(task: dict, npc_norm: str):
     key shape, so live state survives an upgrade — while multi-NPC tasks track
     per NPC (each NPC has its own independent kill counter, so one shared
     watermark would swallow the smaller counts)."""
+    # str, not the bare int: callers append the recurring-window suffix
+    # (``window_scope``) to this, and ``int + str`` raises — which crashed the
+    # whole envelope, so every WOM KC update for a single-NPC task was
+    # dead-lettered instead of credited. The rendered key is unchanged (every
+    # consumer interpolates this into an f-string), so live state survives.
     if len(_kc_npcs(task)) <= 1:
-        return task["id"]
+        return str(task["id"])
     return f"{task['id']}:{npc_norm.replace(' ', '_')}"
 
 
