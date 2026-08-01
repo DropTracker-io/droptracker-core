@@ -747,6 +747,8 @@ def _summary_line(payload: dict) -> str:
         bits.append(f"**{_gp(loot)}** looted")
     if totals.get("drops"):
         bits.append(f"{int(totals['drops']):,} drops")
+    if totals.get("ehb"):
+        bits.append(f"{float(totals['ehb']):,.1f} EHB")
     if rank.get("position") and rank.get("of"):
         bits.append(f"ranked {int(rank['position']):,} of {int(rank['of']):,}")
     return " · ".join(bits)
@@ -1030,6 +1032,24 @@ async def run_delivery(
         )
 
     log(f"  {len(targets)} target(s) due for {period}")
+
+    # EHB lives at Wise Old Man, and the card computation is synchronous and
+    # must never call out — so the month's figures are fetched here, for this
+    # audience, before a single card is built. Only the first tick of the
+    # delivery window pays: a closed month is harvested once and kept.
+    try:
+        from services.recap_ehb import harvest_month_ehb
+
+        await harvest_month_ehb(
+            session,
+            period,
+            group_ids=[t.group_id for t in targets if isinstance(t, GroupTarget)],
+            player_ids=[t.player_id for t in targets if isinstance(t, UserTarget)],
+            log=log,
+        )
+    except Exception as e:
+        # A harvest that cannot run costs the cards one stat, not the run.
+        log(f"  EHB harvest unavailable: {e}")
 
     # Build every card first, then render them, then send: a subject whose card
     # can't be produced loses their message rather than derailing the run, and

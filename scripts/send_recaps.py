@@ -93,9 +93,10 @@ def main() -> int:
 
     session = Session()
     started = time.time()
-    try:
-        outcome = asyncio.run(
-            run_delivery(
+
+    async def _deliver():
+        try:
+            return await run_delivery(
                 session,
                 period=period,
                 now=now,
@@ -107,7 +108,16 @@ def main() -> int:
                 include_groups=not args.users_only,
                 include_users=not args.groups_only,
             )
-        )
+        finally:
+            # The EHB harvest talks to Wise Old Man over a shared client; this
+            # is a one-shot process, so hand its HTTP session back rather than
+            # letting aiohttp print a teardown error over the run's report.
+            from utils.wiseoldman import close_client
+
+            await close_client()
+
+    try:
+        outcome = asyncio.run(_deliver())
     finally:
         session.close()
 

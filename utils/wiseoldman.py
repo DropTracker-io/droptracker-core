@@ -1018,6 +1018,10 @@ from wom import routes as _wom_routes
 
 _BULK_GAINED_ROUTE = _wom_routes.Route("GET", "/groups/{}/bulk-gained")
 _BULK_HISCORES_ROUTE = _wom_routes.Route("GET", "/groups/{}/bulk-hiscores")
+# Per-player gains. wom.py does wrap this one, but its model layer decodes
+# metric keys as enums (see the fork note above), and the recap harvest wants a
+# single float out of one nested key — the raw route is the shorter path.
+_PLAYER_GAINED_ROUTE = _wom_routes.Route("GET", "/players/{}/gained")
 
 # Must stay below the reconcile cycle (WOM_RECONCILE_SECONDS) or polls would
 # read their own cached previous response; it exists to collapse
@@ -1025,6 +1029,7 @@ _BULK_HISCORES_ROUTE = _wom_routes.Route("GET", "/groups/{}/bulk-hiscores")
 WOM_BULK_CACHE_TTL = int(os.getenv("WOM_BULK_CACHE_TTL", "240"))
 _REDIS_BULK_GAINED_PREFIX = "wom:bulkgained:"
 _REDIS_BULK_HISCORES_PREFIX = "wom:bulkhiscores:"
+_REDIS_PLAYER_GAINED_PREFIX = "wom:playergained:ehb:"
 UPDATE_ALL_BADCODE_PREFIX = "wom:updateall:badcode:"
 
 # Skill/boss slug sets for family separation in metric mapping below. Single
@@ -1094,7 +1099,14 @@ def _iso_utc(dt) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-async def _fetch_bulk_route(route, cache_key: str) -> Optional[list]:
+async def _fetch_bulk_route(route, cache_key: str, expect=list):
+    """Fetch a raw WOM route through the shared limiter and Redis cache.
+
+    ``expect`` is the JSON container the endpoint is documented to return — the
+    bulk group routes answer with a list, the per-player ones with an object.
+    A response of the wrong shape is treated as a failure rather than handed to
+    a caller that would then have to re-check it.
+    """
     try:
         raw = redis_client.client.get(cache_key)
         if raw is not None:
@@ -1119,9 +1131,9 @@ async def _fetch_bulk_route(route, cache_key: str) -> Optional[list]:
     except (ValueError, TypeError) as e:
         logger.warning("WOM bulk response unparseable for %s: %s", route.uri, e)
         return None
-    if not isinstance(data, list):
-        logger.warning("WOM bulk response for %s not a list: %s", route.uri,
-                       str(data)[:200])
+    if not isinstance(data, expect):
+        logger.warning("WOM bulk response for %s not a %s: %s", route.uri,
+                       expect.__name__, str(data)[:200])
         return None
     try:
         redis_client.client.setex(cache_key, WOM_BULK_CACHE_TTL, json.dumps(data))
@@ -1148,6 +1160,52 @@ async def get_group_bulk_hiscores(wom_group_id: int) -> Optional[list]:
     route = _BULK_HISCORES_ROUTE.compile(int(wom_group_id))
     return await _fetch_bulk_route(
         route, f"{_REDIS_BULK_HISCORES_PREFIX}{int(wom_group_id)}")
+
+
+async def close_client() -> None:
+    """Release the shared aiohttp session.
+
+    For one-shot processes only. The long-running services hold this client for
+    the life of the process and would break if it were closed under them, but a
+    script that exits without closing it prints an "Unclosed client session"
+    error over whatever it was actually reporting.
+    """
+    try:
+        await client.close()
+    except Exception as e:
+        logger.debug("WOM client close failed: %s", e)
+
+
+async def get_player_gained_ehb(username: str, start_dt, end_dt) -> Optional[float]:
+    """GET /players/:username/gained — one player's EHB gained over a window.
+
+    The fallback for a player no group fetch covers. One call answers for one
+    player, where :func:`get_group_bulk_gained` answers for a whole clan, so
+    callers should exhaust the group route first and cap how many of these they
+    are willing to make.
+
+    ``None`` means WOM could not answer (rate-limit backlog, unknown player, no
+    snapshot in the window) and is deliberately distinct from ``0.0``, which
+    means the player was measured and bossed nothing.
+    """
+    if not username:
+        return None
+    route = _PLAYER_GAINED_ROUTE.compile(str(username)).with_params(
+        {"startDate": _iso_utc(start_dt), "endDate": _iso_utc(end_dt)})
+    cache_key = (f"{_REDIS_PLAYER_GAINED_PREFIX}"
+                 f"{normalize_player_display_equivalence(username)}:"
+                 f"{int(start_dt.timestamp())}:{int(end_dt.timestamp())}")
+    data = await _fetch_bulk_route(route, cache_key, expect=dict)
+    if not isinstance(data, dict):
+        return None
+    # `data.computed.ehb.value.gained` — the per-player endpoint nests each
+    # metric's gains under `value`, unlike bulk-gained's flat metric rows.
+    try:
+        computed = (data.get("data") or {}).get("computed") or {}
+        return float(((computed.get("ehb") or {}).get("value") or {})["gained"])
+    except (AttributeError, KeyError, TypeError, ValueError):
+        logger.debug("WOM player gains held no usable EHB for %s", username)
+        return None
 
 
 # ---------------------------------------------------------------------------

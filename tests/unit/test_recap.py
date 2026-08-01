@@ -120,12 +120,16 @@ class TestPeriodClosed:
 
 
 def _month(period, loot, drops, *, npc_available=True, top_npcs=None,
-           top_items=None, achievements=None, biggest=None, by_hour=None):
+           top_items=None, achievements=None, biggest=None, by_hour=None,
+           ehb=None):
     """A minimal stored monthly payload, shaped like `_base_month_payload`."""
+    totals = {"loot": loot, "drops": drops, "loot_rollup": loot}
+    if ehb is not None:
+        totals["ehb"] = ehb
     return {
         "period": period,
         "subject": {"id": 14, "name": "Test Clan"},
-        "totals": {"loot": loot, "drops": drops, "loot_rollup": loot},
+        "totals": totals,
         "top_items": top_items or [],
         "top_npcs": top_npcs or [],
         "npc_data_available": npc_available,
@@ -157,6 +161,34 @@ class TestAnnualFold:
         assert out["totals"]["loot"] == 350
         assert out["totals"]["drops"] == 35
         assert out["months_covered"] == ["2025-01", "2025-02"]
+
+    def test_ehb_folds_as_a_float(self, monkeypatch):
+        # `totals` is summed through int(), which would round every month's
+        # hours down. EHB is accumulated outside that loop for exactly this.
+        out = self._fold(monkeypatch, {
+            "2025-01": _month("2025-01", 100, 10, ehb=12.4),
+            "2025-02": _month("2025-02", 250, 25, ehb=8.3),
+        })
+        assert out["totals"]["ehb"] == 20.7
+
+    def test_ehb_is_absent_when_no_month_carried_it(self, monkeypatch):
+        # Every card written before web83a. A reader that finds no key omits
+        # the stat; it must never read as "this clan bossed zero hours".
+        out = self._fold(monkeypatch, {"2025-01": _month("2025-01", 100, 10)})
+        assert "ehb" not in out["totals"]
+
+    def test_ehb_sums_only_the_months_that_have_it(self, monkeypatch):
+        out = self._fold(monkeypatch, {
+            "2025-01": _month("2025-01", 100, 10),
+            "2025-02": _month("2025-02", 250, 25, ehb=8.5),
+        })
+        assert out["totals"]["ehb"] == 8.5
+
+    def test_annual_fold_states_no_previous_ehb(self, monkeypatch):
+        # There is no previous *year* to compare against, so the card must not
+        # be handed a baseline it would then draw a movement chip from.
+        out = self._fold(monkeypatch, {"2025-01": _month("2025-01", 1, 1, ehb=3.0)})
+        assert "previous_ehb" not in out["totals"]
 
     def test_tolerates_a_partial_year(self, monkeypatch):
         # Tracked data starts 2024-10, and any month can be missing; folding
@@ -366,8 +398,16 @@ class TestPlayerMonth:
     """
 
     def _compute(self, monkeypatch, *, drops=100, hidden=False, rank=(34, 4812),
-                 prev_rank=(74, 4500), groups=None, top_items=None):
+                 prev_rank=(74, 4500), groups=None, top_items=None,
+                 ehb=None, prev_ehb=None):
         ranks = {202506: rank, 202505: prev_rank}
+        gains = {"2025-06": ehb, "2025-05": prev_ehb}
+        monkeypatch.setattr(
+            recap, "_ehb_gains",
+            lambda session, pids, period: (
+                {795: gains[period]} if gains.get(period) is not None else {}
+            ),
+        )
         monkeypatch.setattr(recap, "_player_is_hidden", lambda pid: hidden)
         monkeypatch.setattr(
             recap, "_base_month_payload",
@@ -453,6 +493,31 @@ class TestPlayerMonth:
 
     def test_scope_is_player(self, monkeypatch):
         assert self._compute(monkeypatch)["scope"] == recap.SCOPE_PLAYER
+
+    def test_ehb_is_reported_with_its_previous_month(self, monkeypatch):
+        out = self._compute(monkeypatch, ehb=41.27, prev_ehb=33.5)
+        assert out["totals"]["ehb"] == 41.3
+        assert out["totals"]["previous_ehb"] == 33.5
+
+    def test_unharvested_player_has_no_ehb_at_all(self, monkeypatch):
+        # WOM hasn't answered for them. That is *unknown*, and a card that
+        # printed "0 EHB" would be claiming something nobody measured.
+        out = self._compute(monkeypatch, ehb=None, prev_ehb=None)
+        assert "ehb" not in out["totals"]
+        assert "previous_ehb" not in out["totals"]
+
+    def test_a_first_harvested_month_has_no_baseline(self, monkeypatch):
+        # The month before was never harvested, so there is nothing to move
+        # from — the figure ships, the comparison doesn't.
+        out = self._compute(monkeypatch, ehb=41.3, prev_ehb=None)
+        assert out["totals"]["ehb"] == 41.3
+        assert "previous_ehb" not in out["totals"]
+
+    def test_a_measured_zero_is_still_a_number(self, monkeypatch):
+        # Harvested and genuinely idle is not the same as unharvested: the
+        # stored row says so, and next month's comparison depends on it.
+        out = self._compute(monkeypatch, ehb=0.0, prev_ehb=12.0)
+        assert out["totals"]["ehb"] == 0.0
 
 
 class TestPublicImageUrl:

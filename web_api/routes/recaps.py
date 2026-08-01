@@ -186,6 +186,18 @@ async def get_recap(scope: str, subject_id: int, period: str):
                 return with_cache_headers(jsonify(payload), _CACHE_SECONDS)
         return abort_problem(404, "No recap for that period")
 
+    # EHB is the one number on the card that comes from outside, so it is
+    # fetched here — awaited, before the synchronous compute that reads it back
+    # out of the cache. Bounded by its own short time budget and fail-soft: a
+    # card built without it simply omits the stat, and the next visitor (or the
+    # monthly run) fills it in.
+    try:
+        from services.recap_ehb import ensure_player_ehb
+
+        await ensure_player_ehb(subject_id, period)
+    except Exception:
+        pass
+
     try:
         payload = await asyncio.to_thread(_generate_player, subject_id, period)
     except _CorruptPayload:

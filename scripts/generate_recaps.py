@@ -8,6 +8,12 @@ than duplicating them.
 Rendering and Discord delivery are separate concerns; this only produces the
 data the card is built from.
 
+One thing does reach outside: EHB is fetched from Wise Old Man and cached in
+``recap_wom_gains`` before the cards are computed. That happens on a dry run
+too — it caches immutable facts about a closed month, which is exactly what a
+dry run needs in place to show what the cards would say. ``--skip-ehb`` opts
+out.
+
 Usage
 -----
     # what would last month's group recaps look like? (writes nothing)
@@ -32,6 +38,7 @@ Note that 2025 is the earliest complete calendar year: tracked data starts
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -54,6 +61,8 @@ from services.recap import (  # noqa: E402
     period_partition,
     save_snapshot,
 )
+from services.recap_ehb import harvest_month_ehb  # noqa: E402
+from utils.wiseoldman import close_client  # noqa: E402
 
 
 def _group_ids(session) -> list[int]:
@@ -107,6 +116,9 @@ def main() -> int:
     ap.add_argument("--force-open", action="store_true",
                     help="generate even though the period hasn't closed yet; the "
                          "numbers will keep moving, so never publish these")
+    ap.add_argument("--skip-ehb", action="store_true",
+                    help="don't harvest EHB from Wise Old Man first; cards for "
+                         "subjects not already harvested will omit the stat")
     args = ap.parse_args()
 
     period = args.period.strip()
@@ -154,10 +166,37 @@ def main() -> int:
                 else:
                     subjects_by_scope[scope] = _active_player_ids(session, period)
 
+        if args.limit:
+            for scope in scopes:
+                subjects_by_scope[scope] = subjects_by_scope.get(scope, [])[: args.limit]
+
+        # EHB comes from Wise Old Man and is cached per month in
+        # `recap_wom_gains`, so it is fetched before any card is computed. This
+        # runs on a dry run too, and writes those cache rows: it fills a cache
+        # of immutable facts about a closed month, which is the thing a dry run
+        # needs in place to show what the cards would say. The annual fold reads
+        # the monthly snapshots and needs no harvest of its own.
+        if not is_year_period(period) and not args.skip_ehb:
+            print(f"  harvesting EHB for {period} from Wise Old Man...")
+
+            async def _harvest():
+                try:
+                    await harvest_month_ehb(
+                        session,
+                        period,
+                        group_ids=subjects_by_scope.get(SCOPE_GROUP, []),
+                        player_ids=subjects_by_scope.get(SCOPE_PLAYER, []),
+                        log=print,
+                    )
+                finally:
+                    # One-shot process: hand the HTTP session back, or aiohttp
+                    # complains over the report this script exists to print.
+                    await close_client()
+
+            asyncio.run(_harvest())
+
         for scope in scopes:
             subjects = subjects_by_scope.get(scope, [])
-            if args.limit:
-                subjects = subjects[: args.limit]
             print(f"  {scope}: {len(subjects)} subject(s)")
 
             for subject_id in subjects:
@@ -179,10 +218,12 @@ def main() -> int:
 
                 name = (payload.get("subject") or {}).get("name") or subject_id
                 totals = payload.get("totals", {})
+                ehb = (f" ehb={totals['ehb']:,.1f}"
+                       if totals.get("ehb") is not None else "")
                 print(
                     f"    {scope} {subject_id} ({name}): "
-                    f"loot={totals.get('loot', 0):,} drops={totals.get('drops', 0):,} "
-                    f"rank={(payload.get('rank') or {}).get('position')}"
+                    f"loot={totals.get('loot', 0):,} drops={totals.get('drops', 0):,}"
+                    f"{ehb} rank={(payload.get('rank') or {}).get('position')}"
                 )
                 if args.show:
                     print(json.dumps(payload, indent=2, default=str))

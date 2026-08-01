@@ -11,6 +11,7 @@ have a failure mode worth a test rather than a comment:
 Loaded from the file path so the conftest ``services`` stub doesn't shadow it.
 """
 
+import asyncio
 import importlib.util
 import os
 import sys
@@ -219,6 +220,15 @@ class TestMessages:
     def test_summary_is_empty_for_an_empty_payload(self):
         assert delivery._summary_line({}) == ""
 
+    def test_summary_carries_ehb_when_it_was_harvested(self):
+        line = delivery._summary_line({"totals": {"loot": 1_000, "ehb": 41.27}})
+        assert "41.3 EHB" in line
+
+    def test_summary_omits_ehb_on_a_card_that_predates_it(self):
+        # Every card written before web83a, and every subject the harvest
+        # hasn't reached.
+        assert "EHB" not in delivery._summary_line({"totals": {"loot": 1_000}})
+
     def _group(self):
         return delivery.GroupTarget(
             group_id=14, name="Pegasus PvM", channel_id="1", period="2026-06"
@@ -271,6 +281,92 @@ class TestMessages:
         # The banner prefixes; it must not replace the message under test.
         assert "keep receiving these each month" in banner["content"]
         assert "Hey, <@123>!" in banner["content"]
+
+
+class TestEhbHarvest:
+    """The harvest has to finish before the first card is computed.
+
+    EHB is read back out of a cache the card computation cannot fill itself, so
+    the ordering *is* the feature: harvest second and every card that month
+    silently ships without the stat, with nothing in the logs to say so.
+    """
+
+    def _run(self, monkeypatch, *, harvest_raises=False):
+        import types
+
+        events: list = []
+
+        async def fake_harvest(session, period, **kwargs):
+            events.append(("harvest", sorted(kwargs.get("group_ids") or []),
+                           sorted(kwargs.get("player_ids") or [])))
+            if harvest_raises:
+                raise RuntimeError("WOM unreachable")
+            return {}
+
+        ehb_stub = types.ModuleType("services.recap_ehb")
+        ehb_stub.harvest_month_ehb = fake_harvest
+        recap_stub = types.ModuleType("services.recap")
+        recap_stub.load_snapshot = lambda *a, **k: None
+
+        class _Rest:
+            def __init__(self, token):
+                pass
+
+        rest_stub = types.ModuleType("utils.discord_rest")
+        rest_stub.DiscordRest = _Rest
+        write_stub = types.ModuleType("utils.discord_write")
+        write_stub.DiscordWriter = lambda **kwargs: None
+
+        for name, module in (("services.recap_ehb", ehb_stub),
+                             ("services.recap", recap_stub),
+                             ("utils.discord_rest", rest_stub),
+                             ("utils.discord_write", write_stub)):
+            monkeypatch.setitem(sys.modules, name, module)
+
+        async def fake_render(stamps, period):
+            return {}
+
+        async def fake_board(group_id, period):
+            return False
+
+        def fake_snapshot(session, scope, subject_id, period):
+            events.append(("card", scope, subject_id))
+            return None
+
+        monkeypatch.setattr(delivery, "collect_group_targets", lambda *a, **k: [
+            delivery.GroupTarget(group_id=14, name="Pegasus PvM",
+                                 channel_id="1", period="2026-07"),
+        ])
+        monkeypatch.setattr(delivery, "collect_user_targets", lambda *a, **k: [
+            delivery.UserTarget(user_id=1, discord_id="2", player_id=795,
+                                player_name="Buzzyn", period="2026-07"),
+        ])
+        monkeypatch.setattr(delivery, "ensure_snapshot", fake_snapshot)
+        monkeypatch.setattr(delivery, "render_all", fake_render)
+        monkeypatch.setattr(delivery, "ensure_group_lootboard", fake_board)
+        monkeypatch.delenv(delivery.ENV_TEST_TARGET, raising=False)
+
+        outcome = asyncio.run(delivery.run_delivery(
+            None, period="2026-07", apply=False, log=lambda m: None,
+        ))
+        return events, outcome
+
+    def test_harvest_runs_before_any_card_is_built(self, monkeypatch):
+        events, _ = self._run(monkeypatch)
+        assert events[0][0] == "harvest"
+        assert [e[0] for e in events[1:]] == ["card", "card"]
+
+    def test_harvest_is_asked_about_exactly_this_run_s_audience(self, monkeypatch):
+        # Not "every group" — the harvest is scoped to the subjects whose cards
+        # are actually being built, which is what keeps the call count down.
+        events, _ = self._run(monkeypatch)
+        assert events[0] == ("harvest", [14], [795])
+
+    def test_a_failing_harvest_does_not_stop_the_run(self, monkeypatch):
+        # Losing EHB costs the cards one stat. It must not cost the delivery.
+        events, outcome = self._run(monkeypatch, harvest_raises=True)
+        assert [e[0] for e in events[1:]] == ["card", "card"]
+        assert outcome.skipped == 2
 
 
 class TestMonthPhrase:
