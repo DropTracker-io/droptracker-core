@@ -60,7 +60,22 @@ class RedisLootTracker:
         self._processing_players: Set[int] = set()  # Track players being processed
         
     def _get_partition(self, dt: datetime = None) -> int:
-        return get_current_partition()  
+        """Monthly YYYYMM partition for ``dt``, or the current month when no
+        timestamp is given.
+
+        ``dt`` is the drop's own timestamp (``drop.date_added``; may still be a
+        string coming off a queue payload — coerced). Honouring it is what
+        keeps a late-processed drop on the month it belongs to: on 2026-08-01
+        the webhook:queue backlog crossed the July→August rollover and, because
+        this method ignored ``dt``, July drops were credited to the 202608
+        monthly boards while the weekly/daily boards (which already derive
+        their tokens from the drop timestamp) stayed correct. Unparseable
+        values fall back to now via ``_coerce_drop_datetime``.
+        """
+        if dt is None:
+            return get_current_partition()
+        dt = self._coerce_drop_datetime(dt)
+        return dt.year * 100 + dt.month
 
     def _coerce_drop_datetime(self, drop_date) -> datetime:
         """Best-effort normalization for drop timestamp values."""
