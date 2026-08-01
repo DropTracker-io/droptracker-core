@@ -90,6 +90,35 @@ LANE_QUEUE_MAX = 50   # bounded → a hot lane backpressures the dispatcher
 QUEUE_ALARM_DEPTH = 10_000  # pending above this = lanes can't keep up
 
 
+def _use_read_committed(db_session) -> None:
+    """Run this session's transaction at READ COMMITTED.
+
+    The engine inherits MySQL's REPEATABLE READ, which pins a snapshot at the
+    transaction's first read. That is wrong for this worker: an apply re-folds
+    the ledger for a (task, team) to recompute progress, and the lanes run
+    concurrently over the same team (they shard by player, and a team's members
+    hash to different lanes). A lane that blocked on the progress row's FOR
+    UPDATE therefore woke up, read a FRESH progress value, and re-folded a
+    STALE ledger that could not see the row the other lane had just committed —
+    writing progress back lower and subtracting the other lane's points. The
+    P0-7 lock made that worse, not better, because it is exactly what creates
+    the gap between the two reads.
+
+    READ COMMITTED gives every statement the latest committed data, which is
+    what a queue worker applying independent envelopes wants. Safe here: the
+    server has log_bin OFF, so the statement-binlog restriction does not apply.
+    Scoped to this worker rather than the engine so nothing else changes.
+    """
+    try:
+        db_session.connection(
+            execution_options={"isolation_level": "READ COMMITTED"}
+        )
+    except Exception:
+        # Not worth failing an apply over; the pre-existing behaviour is the
+        # fallback, and the lock still serialises the write itself.
+        log.warning("could not set READ COMMITTED:\n%s", traceback.format_exc())
+
+
 def _lane_for(entry_bytes) -> int:
     """Deterministic lane for an envelope (player_id modulo). Malformed
     payloads route to lane 0 — they're skip-logged during apply anyway."""
@@ -147,6 +176,7 @@ def _refresh_state(r):
     from services import event_engine
 
     db_session = get_db_session()
+    _use_read_committed(db_session)
     try:
         state = event_engine.load_matcher_state(db_session)
     finally:
@@ -162,6 +192,7 @@ def _reconcile_effort(state) -> int:
     from services import event_engine
 
     db_session = get_db_session()
+    _use_read_committed(db_session)
     try:
         changed = event_engine.reconcile_effort_freezes(db_session, state)
         if changed:
@@ -182,6 +213,7 @@ def _run_lifecycle_sweep(r) -> dict:
     from services import event_lifecycle
 
     db_session = get_db_session()
+    _use_read_committed(db_session)
     try:
         return event_lifecycle.run_lifecycle_sweep(db_session, r)
     finally:
@@ -200,6 +232,7 @@ def _end_won_event(r, event_id) -> None:
     if not event_id:
         return
     db_session = get_db_session()
+    _use_read_committed(db_session)
     try:
         ev = db_session.query(Event).filter(Event.id == event_id).first()
         if ev is not None and ev.status == "active":
@@ -221,6 +254,7 @@ def _run_mercy_sweep(r) -> list:
     from services import boardgame_engine
 
     db_session = get_db_session()
+    _use_read_committed(db_session)
     try:
         swept = boardgame_engine.mercy_sweep(db_session, r)
         db_session.commit()
@@ -256,6 +290,7 @@ def _process_entry(r, state, entry_bytes) -> list:
         return []
 
     db_session = get_db_session()
+    _use_read_committed(db_session)
     # P0-6: watermark/baseline/dedupe advances are staged and only flushed
     # once the ledger row is durable — a rolled-back apply leaves the
     # watermark untouched so the retry re-earns the same delta instead of

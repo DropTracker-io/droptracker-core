@@ -1147,6 +1147,40 @@ async def billing_webhook():
             amt = _extract_amount_cents()
             if amt:
                 leg.amount_cents = amt
+            # The delta was priced when the checkout session was CREATED and
+            # never re-checked, so a concurrent or stale session could grant a
+            # tier the pool no longer pays for (two members each paying the
+            # full gap, or a leg cancelled in between). Re-resolve the pool now
+            # that this leg's amount is in it, and hold the leg to the highest
+            # tier that money actually covers. The payment is always honoured —
+            # only the tier it buys is corrected.
+            try:
+                s.flush()
+                covered = effective_group_subscription(s, leg.group_id).get("tier")
+                covered_key = getattr(covered, "key", None)
+                if covered_key and leg.tier_key != covered_key:
+                    from db.app_logger import AppLogger
+
+                    AppLogger().log(
+                        log_type="warning",
+                        data=(f"billing: group {leg.group_id} leg {leg.id} priced "
+                              f"for {leg.tier_key} but the pool covers "
+                              f"{covered_key}; applying {covered_key}"),
+                        app_name="web_api",
+                        description="billing_tier_revalidation",
+                    )
+                    leg.tier_key = covered_key
+            except Exception as revalidation_error:  # noqa: BLE001
+                # Never let re-validation cost us a subscription that was paid for.
+                from db.app_logger import AppLogger
+
+                AppLogger().log(
+                    log_type="error",
+                    data=(f"billing: tier re-validation failed for group "
+                          f"{leg.group_id}: {revalidation_error}"),
+                    app_name="web_api",
+                    description="billing_tier_revalidation",
+                )
             if leg.user_id is None and meta.get("payer_user_id"):
                 try:
                     leg.user_id = int(meta["payer_user_id"])
