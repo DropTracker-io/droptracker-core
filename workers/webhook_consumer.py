@@ -24,8 +24,13 @@ logging.basicConfig(
 log = logging.getLogger("webhook_consumer")
 
 QUEUE_KEY = "webhook:queue"
-# Entries that raise out of _process_entry land here instead of vanishing —
-# BLPOP has already removed them from the queue, so this is the only copy.
+# In-flight entries live here between the pop and the end of _process_entry.
+# BRPOPLPUSH makes that move atomic, so a SIGKILL / OOM / power loss leaves the
+# entry recoverable instead of destroying the only copy of a submission the API
+# already told the plugin it had ACCEPTED. Same shape as event_consumer's
+# PROCESSING list, which documents this as the fix for exactly this window.
+PROCESSING_KEY = "webhook:processing"
+# Entries that raise out of _process_entry land here instead of vanishing.
 DEAD_KEY = "webhook:dead"
 DEAD_MAX = 10_000
 BLPOP_TIMEOUT = 5
@@ -277,19 +282,28 @@ async def _worker(worker_id: int, r, stop: asyncio.Event) -> None:
     while not stop.is_set():
         entry_bytes = None
         try:
-            result = await asyncio.to_thread(r.blpop, QUEUE_KEY, BLPOP_TIMEOUT)
-            if result is None:
+            entry_bytes = await asyncio.to_thread(
+                r.brpoplpush, QUEUE_KEY, PROCESSING_KEY, BLPOP_TIMEOUT
+            )
+            if entry_bytes is None:
                 continue
-            _, entry_bytes = result
             _in_flight += 1
             try:
                 await _process_entry(entry_bytes)
             finally:
                 _in_flight -= 1
+                # Done with it either way — the except below dead-letters a
+                # failure, so leaving it in PROCESSING would double-apply it
+                # on the next reclaim.
+                await asyncio.to_thread(r.lrem, PROCESSING_KEY, 1, entry_bytes)
         except Exception:
             log.error("[worker %d] Error in consumer loop:\n%s", worker_id, traceback.format_exc())
             if entry_bytes is not None:
                 _dead_letter(r, entry_bytes)
+                try:
+                    await asyncio.to_thread(r.lrem, PROCESSING_KEY, 1, entry_bytes)
+                except Exception:
+                    pass
             await asyncio.sleep(1)
     log.info("[worker %d] stopped", worker_id)
 
@@ -303,10 +317,16 @@ async def _maintenance(r, stop: asyncio.Event) -> None:
         except asyncio.TimeoutError:
             pass
         try:
-            depth, dead = await asyncio.to_thread(
-                lambda: (r.llen(QUEUE_KEY), r.llen(DEAD_KEY)))
-            log.info("queue depth=%d dead=%d in_flight=%d workers=%d",
-                     depth, dead, _in_flight, NUM_WORKERS)
+            depth, dead, processing = await asyncio.to_thread(
+                lambda: (r.llen(QUEUE_KEY), r.llen(DEAD_KEY), r.llen(PROCESSING_KEY)))
+            log.info("queue depth=%d dead=%d processing=%d in_flight=%d workers=%d",
+                     depth, dead, processing, _in_flight, NUM_WORKERS)
+            # processing should track in_flight; a persistent excess means
+            # entries were stranded by a hard kill and await the next restart's
+            # reclaim.
+            if processing > _in_flight:
+                log.warning("%d entry(s) stranded in %s — reclaimed on next restart",
+                            processing - _in_flight, PROCESSING_KEY)
             if _in_flight == 0:
                 from api.core import reset_db_connections
                 reset_db_connections()
@@ -314,17 +334,42 @@ async def _maintenance(r, stop: asyncio.Event) -> None:
             log.debug("maintenance tick failed:\n%s", traceback.format_exc())
 
 
+def _reclaim_inflight(r) -> int:
+    """Put entries a dead worker was mid-processing back on the queue.
+
+    Only safe at startup, before any worker runs: anything still in PROCESSING
+    then belongs to a process that no longer exists. Entries go back to the
+    tail so they are retried ahead of newer traffic, matching event_consumer.
+    """
+    moved = 0
+    try:
+        while True:
+            entry = r.rpoplpush(PROCESSING_KEY, QUEUE_KEY)
+            if entry is None:
+                break
+            moved += 1
+            if moved >= 100_000:  # runaway backstop
+                break
+    except Exception:
+        log.error("reclaim of in-flight entries failed:\n%s", traceback.format_exc())
+    if moved:
+        log.warning("Reclaimed %d in-flight entry(s) from a previous run", moved)
+    return moved
+
+
 async def run_consumer() -> None:
     log.info("Webhook consumer starting (queue=%s, workers=%d)", QUEUE_KEY, NUM_WORKERS)
     r = await asyncio.to_thread(_get_redis)
+    await asyncio.to_thread(_reclaim_inflight, r)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
 
     def _request_stop(signame: str) -> None:
-        # Drain, don't drop: BLPOP'd entries are the only copy, so workers
-        # finish their in-flight entry before exiting (well inside the unit's
-        # TimeoutStopSec=30).
+        # Drain, don't drop: workers finish their in-flight entry before
+        # exiting (well inside the unit's TimeoutStopSec=30). PROCESSING now
+        # backs this up for the cases a graceful stop can't cover — SIGKILL,
+        # OOM, power loss.
         log.info("Received %s — finishing in-flight entries", signame)
         stop.set()
 

@@ -52,9 +52,56 @@ _PUBLIC_EXACT_SCOPES = ("global", "feed")  # "feed" = site-wide live drop ticker
 _FEED_HISTORY_KEY = "feed:recent"
 
 
-def _authorize_channels(raw: str) -> list[str]:
+# Whether an event is private changes about never, and the answer is the same
+# for every viewer — so it is cached briefly to keep the common (public) case
+# off the database entirely. The per-VIEWER check below is never cached.
+_EVENT_PRIVACY_TTL = 60.0
+_event_privacy_cache: dict[int, tuple[float, bool]] = {}
+
+
+def _may_watch_event(user_id, event_id: int) -> bool:
+    """Whether ``user_id`` may subscribe to a given event's live frames.
+
+    The HTTP event routes have always refused a private event to outsiders,
+    but this stream did not — and its frames are display-ready, naming players,
+    task labels, points and team scores. So anyone who knew the id could watch
+    a private event live that its own page would 404 for them.
+
+    Runs once per connection, not per frame, so a real lookup is affordable.
+    """
+    import time as _time
+
+    from db.models import Event
+    from web_api.common import db_session
+    from web_api.routes.events import _can_view_restricted, _is_restricted
+
+    cached = _event_privacy_cache.get(event_id)
+    if cached and cached[0] > _time.monotonic():
+        if not cached[1]:
+            return True  # public event, no per-viewer check needed
+    try:
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if ev is None:
+                return False
+            restricted = _is_restricted(ev)
+            _event_privacy_cache[event_id] = (
+                _time.monotonic() + _EVENT_PRIVACY_TTL, restricted
+            )
+            if not restricted:
+                return True
+            if user_id is None:
+                return False
+            return _can_view_restricted(s, user_id, ev)
+    except Exception:
+        # Fail closed: a private event's frames are the thing being protected.
+        return False
+
+
+async def _authorize_channels(raw: str) -> list[str]:
     """Validate + filter requested channels. Drops private ``player:`` scopes
-    unless a valid session is present."""
+    unless a valid session is present, and ``event:`` scopes the viewer may
+    not see."""
     user_id = None
     have_session = False
     try:
@@ -68,11 +115,23 @@ def _authorize_channels(raw: str) -> list[str]:
         ch = ch.strip()
         if not ch:
             continue
-        # "event:{id}" is public like "group:*" (live event pages, Task 17)
+        # "event:{id}" is public like "group:*" for PUBLIC events (live event
+        # pages, Task 17); private ones are gated below.
         if ch not in _PUBLIC_EXACT_SCOPES and not ch.startswith(("group:", "player:", "npc:", "event:")):
             continue
         if ch.startswith("player:") and not have_session:
             continue  # private feed requires a session
+        if ch.startswith("event:"):
+            try:
+                event_id = int(ch.split(":", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            # Off the event loop: this can hit the database.
+            allowed = await asyncio.to_thread(
+                _may_watch_event, user_id if have_session else None, event_id
+            )
+            if not allowed:
+                continue
         out.append(ch)
         if len(out) >= _MAX_CHANNELS:
             break
@@ -129,7 +188,7 @@ async def feed_recent():
 
 @realtime_bp.get("/stream")
 async def stream():
-    channels = _authorize_channels(request.args.get("channels", "global"))
+    channels = await _authorize_channels(request.args.get("channels", "global"))
     if not channels:
         channels = ["global"]
     rt_channels = [f"rt:{c}" for c in channels]

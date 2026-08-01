@@ -53,6 +53,14 @@ paypal_ipn_bp = Blueprint("v1_paypal_ipn", __name__)
 _VERIFY_URL = "https://ipnpb.paypal.com/cgi-bin/webscr"
 _VERIFY_URL_SANDBOX = "https://ipnpb.sandbox.paypal.com/cgi-bin/webscr"
 _TXN_DEDUP_TTL = 120 * 86400  # PayPal can redeliver for days; remember 120
+# The claim is taken BEFORE the subscription update commits, so it starts
+# short-lived and is only extended to the full window once the update is
+# durable. Claiming for 120 days up front meant a transient DB error between
+# the claim and the commit dropped a real payment permanently: PayPal's retry
+# arrived, matched the key, and was discarded as a duplicate. Five minutes is
+# long enough to absorb the near-simultaneous redeliveries the claim exists
+# for, and short enough that a genuine retry gets another go.
+_TXN_CLAIM_TTL = 300
 
 
 async def _verify_with_paypal(raw: bytes, sandbox: bool) -> str:
@@ -180,7 +188,7 @@ async def paypal_ipn():
     if txn_id:
         try:
             fresh = redis_client.client.set(
-                f"web:paypal:ipn:{txn_id}", "1", nx=True, ex=_TXN_DEDUP_TTL
+                f"web:paypal:ipn:{txn_id}", "1", nx=True, ex=_TXN_CLAIM_TTL
             )
             if not fresh:
                 return jsonify({"ignored": "duplicate txn"}), 200
@@ -282,4 +290,13 @@ async def paypal_ipn():
 
     result = await asyncio.to_thread(_extend_subscription, snapshot["kind"], snapshot["id"], updates)
     logger.info("paypal_ipn: %s — %s → %s", owner, action, result)
+    # Durable now: promote the short claim to the full remember-it window so a
+    # redelivery days from now is still recognised as a duplicate.
+    if txn_id:
+        try:
+            redis_client.client.set(
+                f"web:paypal:ipn:{txn_id}", "1", ex=_TXN_DEDUP_TTL
+            )
+        except Exception:
+            pass
     return jsonify({"received": True}), 200

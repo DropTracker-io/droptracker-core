@@ -1,9 +1,12 @@
 """Concurrent consumer worker behavior.
 
-The consumer runs NUM_WORKERS parallel blpop -> _process_entry loops. A
-BLPOP'd entry is the only remaining copy of a submission, so the worker loop
-must (a) dead-letter entries whose processing raises instead of dropping
-them, and (b) finish the in-flight entry before honoring a stop request.
+The consumer runs NUM_WORKERS parallel brpoplpush -> _process_entry loops.
+A popped entry is the only remaining copy of a submission the API already
+ACCEPTED, so the worker loop must (a) hold it in the PROCESSING list until it
+is resolved, so a hard kill leaves it recoverable, (b) dead-letter entries
+whose processing raises instead of dropping them, (c) remove it from
+PROCESSING either way, or the next restart's reclaim would apply it twice,
+and (d) finish the in-flight entry before honoring a stop request.
 """
 
 import asyncio
@@ -14,17 +17,17 @@ import workers.webhook_consumer as wc
 
 
 def _redis_returning(entries, stop):
-    """Fake redis: blpop yields each entry once, then sets stop and idles."""
+    """Fake redis: brpoplpush yields each entry once, then sets stop and idles."""
     r = MagicMock()
     remaining = list(entries)
 
-    def blpop(key, timeout):
+    def brpoplpush(src, dst, timeout):
         if remaining:
-            return (wc.QUEUE_KEY.encode(), remaining.pop(0))
+            return remaining.pop(0)
         stop.set()
         return None
 
-    r.blpop.side_effect = blpop
+    r.brpoplpush.side_effect = brpoplpush
     return r
 
 
@@ -44,6 +47,9 @@ async def test_worker_dead_letters_failed_entry(monkeypatch):
     pipe.ltrim.assert_called_once_with(wc.DEAD_KEY, 0, wc.DEAD_MAX - 1)
     pipe.execute.assert_called_once()
     assert wc._in_flight == 0  # decremented even on failure
+    # Dead-lettered is resolved: leaving it in PROCESSING would re-apply it
+    # on the next restart's reclaim, on top of the dead-letter copy.
+    r.lrem.assert_any_call(wc.PROCESSING_KEY, 1, entry)
 
 
 async def test_worker_processes_without_dead_letter(monkeypatch):
@@ -59,6 +65,7 @@ async def test_worker_processes_without_dead_letter(monkeypatch):
     ok.assert_awaited_once_with(entry)
     r.pipeline.assert_not_called()
     assert wc._in_flight == 0
+    r.lrem.assert_called_once_with(wc.PROCESSING_KEY, 1, entry)
 
 
 async def test_worker_finishes_in_flight_entry_on_stop(monkeypatch):
@@ -88,4 +95,27 @@ async def test_worker_exits_without_popping_when_already_stopped():
 
     await wc._worker(0, r, stop)
 
-    r.blpop.assert_not_called()
+    r.brpoplpush.assert_not_called()
+
+
+def test_reclaim_returns_stranded_entries_to_the_queue():
+    """Entries a killed worker was mid-processing must go back on the queue.
+
+    This is the whole point of the PROCESSING list: without the reclaim it
+    just relocates the loss instead of preventing it.
+    """
+    r = MagicMock()
+    stranded = [b"a", b"b"]
+    r.rpoplpush.side_effect = lambda src, dst: stranded.pop(0) if stranded else None
+
+    moved = wc._reclaim_inflight(r)
+
+    assert moved == 2
+    r.rpoplpush.assert_called_with(wc.PROCESSING_KEY, wc.QUEUE_KEY)
+
+
+def test_reclaim_is_quiet_when_nothing_was_stranded():
+    r = MagicMock()
+    r.rpoplpush.return_value = None
+
+    assert wc._reclaim_inflight(r) == 0
