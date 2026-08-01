@@ -191,6 +191,15 @@ class DatabaseOperations:
                     image_url=image_url,
                     used_api=used_api,
                     unique_id=unique_id)
+        # Derive the partition from the row's OWN date rather than letting the
+        # column default fire at INSERT time. They only differ when a row is
+        # written late — and that is exactly the month-boundary case, where the
+        # column default would file a 31st-of-the-month drop under the new
+        # month while date_added says otherwise, leaving the two disagreeing.
+        if hasattr(newdrop, "partition") and date_received_value is not None:
+            newdrop.partition = (
+                date_received_value.year * 100 + date_received_value.month
+            )
         # Intake-path marker ('manual' for website submissions). Only the main
         # Drop model carries the column; seasonal manual drops can't occur
         # (the /manual-submit route is main-world only).

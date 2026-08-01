@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -104,6 +104,41 @@ def envelope_from_plugin(submission_data: dict) -> bool:
     submissions (``intake_source == "manual"``) are non-plugin.
     """
     return submission_data.get("intake_source") != "manual"
+
+
+# How far behind "now" an accepted-at stamp may be and still be believed.
+# A submission that sat in the queue longer than this is more likely to be a
+# replayed or hand-requeued entry than a live one, and dating a row hours into
+# the past would silently rewrite a closed month's totals.
+_RECEIVED_AT_MAX_LAG = timedelta(hours=6)
+
+
+def received_at(submission_data: dict) -> datetime:
+    """When the server ACCEPTED this submission, for stamping the row.
+
+    Falls back to now() when the stamp is missing, unparseable, in the future,
+    or implausibly old. The distinction matters at a month or day boundary:
+    stamping at processing time means a queue backlog books kills earned before
+    midnight into the next month's leaderboards, rollups and recaps — which is
+    exactly what happened on 2026-08-01 when the queue ran ~107 minutes behind.
+
+    Deliberately the SERVER's accept time (``enqueued_at``, set in
+    api/routes/webhook.py), not the client's ``timestamp``: a player's clock is
+    neither accurate nor trustworthy, and a spoofed one could rewrite history.
+    """
+    raw = (submission_data or {}).get("_received_at")
+    if not raw:
+        return datetime.now()
+    try:
+        stamped = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return datetime.now()
+    if stamped.tzinfo is not None:
+        stamped = stamped.astimezone(timezone.utc).replace(tzinfo=None)
+    now = datetime.now()
+    if stamped > now or (now - stamped) > _RECEIVED_AT_MAX_LAG:
+        return now
+    return stamped
 
 
 def get_config_prefix(world_type: str) -> str:

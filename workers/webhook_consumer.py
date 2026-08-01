@@ -117,6 +117,14 @@ async def _process_entry(entry_bytes: bytes) -> None:
 
     entry = json.loads(entry_bytes)
     payload = entry["payload"]
+    # When the SERVER accepted this submission, as opposed to when a worker got
+    # round to it. Processors stamp rows with it so a queue backlog can't book
+    # a drop into the wrong month/day: on 2026-08-01 the queue ran ~107 minutes
+    # behind at peak, and everything earned before midnight that drained after
+    # it landed in the new month's leaderboards and rollups. Server-side by
+    # design — the client's own clock is not trustworthy for this.
+    if entry.get("enqueued_at"):
+        payload["_received_at"] = entry["enqueued_at"]
     image_tmp_path = entry.get("image_tmp_path")
     image_filename = entry.get("image_filename")
     image_content_type = entry.get("image_content_type")

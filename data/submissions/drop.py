@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import time
 
 from .common import (
+    received_at,
     SubmissionResponse,
     ensure_item_for_drop,
     ensure_player_and_auth,
@@ -386,7 +387,9 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         drop = await db.create_drop_object(
             item_id=item_id,
             player_id=player_id,
-            date_received=datetime.now(),
+            # Server ACCEPT time, not worker-pickup time: a queue backlog must
+            # not book a kill earned before midnight into the next month.
+            date_received=received_at(drop_data),
             npc_id=npc_id,
             value=int(raw_drop_value),
             quantity=int(quantity),
