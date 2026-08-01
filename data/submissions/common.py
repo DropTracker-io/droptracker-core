@@ -1010,15 +1010,30 @@ async def ensure_item_by_name(session, item_name):
     try:
         async with osrs_api.create_client() as client:
             item_id = await client.semantic.get_item_id(item_name)
-        if item_id:
-            item = ItemList(item_name=item_name, item_id=item_id, noted=0, stackable=0, stacked=0)
-            session.add(item)
-            session.commit()
-            await _ensure_item_icon(item_id)
-            return item
     except Exception:
         return None
-    return None
+    if not item_id:
+        return None
+    try:
+        item = ItemList(item_name=item_name, item_id=item_id, noted=0, stackable=0, stacked=0)
+        session.add(item)
+        session.commit()
+    except Exception:
+        # Either the name is a variant of an item whose id already exists, or
+        # a concurrent worker inserted it first. Roll back — the old bare
+        # `return None` left the session pending-rollback, which poisoned
+        # every later query in the same entry (observed 2026-08-01 00:59:
+        # clog of item 29784 dead-lettered a whole entry) — and reuse the
+        # existing row.
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        item = session.query(ItemList).filter(ItemList.item_id == item_id).first()
+        if not item:
+            return None
+    await _ensure_item_icon(item_id)
+    return item
 
 
 async def ensure_player_by_name_then_auth(session, player_name, account_hash, auth_key):

@@ -426,10 +426,21 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                 )
                 if manual_moderation:
                     record_moderation(session, drop.drop_id, manual_moderation)
-                    if use_external_session:
-                        session.flush()
-                    else:
-                        session.commit()
+                    try:
+                        if use_external_session:
+                            session.flush()
+                        else:
+                            session.commit()
+                    except Exception:
+                        # A failed flush/commit leaves the session pending-
+                        # rollback; clear it before the outer handler's
+                        # "never fail the submission" continue, or every
+                        # later commit on this session dies too.
+                        try:
+                            session.rollback()
+                        except Exception:
+                            pass
+                        raise
                     print(f"[ManualPolicy] Drop {drop.drop_id} withheld from groups "
                           f"{ {g: s for g, (s, _p) in manual_moderation.items()} } "
                           f"by manual_submission_policy")
