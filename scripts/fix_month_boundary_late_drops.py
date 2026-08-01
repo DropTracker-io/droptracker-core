@@ -38,9 +38,14 @@ What it corrects, per affected drop (event epoch < boundary, processed after):
      re-derived as the member-sum of each group's monthly board — the same
      definition web_api/routes/leaderboards.py falls back to.
   6. Redis `pstats:lootbox:*:{part}` settled-month caches: purged.
-  7. `recap_snapshots` for the previous month: deleted (cards regenerate on
-     demand / on delivery with corrected data). Frozen recap lootboard PNGs for
-     those groups are removed so the delivery run re-renders them.
+  7. `recap_snapshots` for the previous month: RECOMPUTED IN PLACE from the
+     corrected numbers. They must not be deleted — a snapshot is the published
+     artifact behind the permanent `/groups/{id}/recap/{period}` page, which
+     every recap DM already sent links to, and nothing rebuilds a deleted one
+     once that period's delivery run has been recorded. A subject that no
+     longer produces a card keeps its previous row (a stale card beats a dead
+     link) and is reported. Frozen recap lootboard PNGs ARE removed — those
+     self-heal, `ensure_group_lootboard` re-renders on first request.
 
 Reporting: per-player and per-group GP deltas (the amounts moving from the
 wrong month to the right one), plus current-vs-projected top standings for the
@@ -533,6 +538,48 @@ def purge_pstats(conn_r, parts: list[int]) -> int:
 # --------------------------------------------------------------------------- #
 # Recap snapshot invalidation
 # --------------------------------------------------------------------------- #
+def _recompute_snapshots(snapshots: list, period: str) -> tuple:
+    """Rebuild each recap card in place from the corrected numbers.
+
+    Uses the same compute+save path the delivery run uses, so a card that a
+    player already received keeps its URL and simply tells the truth. A subject
+    that can no longer produce a card (dropped below the activity floor once
+    the misattributed drops moved) keeps its old row rather than losing the
+    page entirely — a slightly stale card beats a dead link.
+    """
+    from db.models.base import Session
+    from services.recap import (
+        compute_group_month,
+        compute_player_month,
+        save_snapshot,
+    )
+
+    done, failures = 0, []
+    s = Session()
+    try:
+        for row in snapshots:
+            try:
+                payload = (
+                    compute_group_month(s, row["subject_id"], period)
+                    if row["scope"] == "group"
+                    else compute_player_month(s, row["subject_id"], period)
+                )
+                if not payload:
+                    failures.append({**row, "reason": "no longer produces a card"})
+                    continue
+                save_snapshot(s, row["scope"], row["subject_id"], period, payload)
+                s.commit()
+                done += 1
+            except Exception as e:  # noqa: BLE001
+                s.rollback()
+                failures.append({**row, "reason": str(e)[:200]})
+            if done and done % 100 == 0:
+                print(f"  recomputed {done}/{len(snapshots)} recap card(s)")
+    finally:
+        s.close()
+    return done, failures
+
+
 def invalidate_recaps(conn, prev_part: int, apply: bool) -> dict:
     period = f"{prev_part // 100:04d}-{prev_part % 100:02d}"
     rows = conn.execute(
@@ -541,9 +588,19 @@ def invalidate_recaps(conn, prev_part: int, apply: bool) -> dict:
     ).fetchall()
     out = {"period": period,
            "snapshots": [{"id": int(r[0]), "scope": r[1], "subject_id": int(r[2])} for r in rows],
-           "lootboards_removed": []}
+           "lootboards_removed": [],
+           "recomputed": 0,
+           "recompute_failures": []}
     if apply and rows:
-        conn.execute(text("DELETE FROM recap_snapshots WHERE period = :p"), {"p": period})
+        # RECOMPUTE, never delete. A snapshot is the published artifact: the
+        # permanent /groups/{id}/recap/{period} page renders from it, and every
+        # recap DM already sent links to that page. Deleting the row to "force
+        # a rebuild" assumed something would rebuild it — nothing does, because
+        # the delivery for this period has already run and the ledger says so.
+        # So the old behaviour silently 404'd every recap that had been sent.
+        out["recomputed"], out["recompute_failures"] = _recompute_snapshots(
+            out["snapshots"], period
+        )
     for r in out["snapshots"]:
         if r["scope"] != "group":
             continue
@@ -822,8 +879,9 @@ def main() -> int:
         recaps_preview = invalidate_recaps(c, prev_part, apply=False)
     if recaps_preview["snapshots"]:
         print(f"\nrecap_snapshots frozen for {recaps_preview['period']}: "
-              f"{[(r['scope'], r['subject_id']) for r in recaps_preview['snapshots']]} "
-              f"({'will delete' if args.apply else 'would delete'})")
+              f"{len(recaps_preview['snapshots'])} card(s) "
+              f"({'will recompute' if args.apply else 'would recompute'} in place; "
+              "published URLs are preserved)")
 
     plan = {
         "plan_id": (resumed or {}).get("plan_id", plan_id), "mode": mode,
@@ -900,9 +958,13 @@ def main() -> int:
     if not phases["recaps"]:
         with _maint_engine.begin() as c:
             recaps = invalidate_recaps(c, prev_part, apply=True)
-        print(f"[recaps] deleted {len(recaps['snapshots'])} snapshot(s) for "
-              f"{recaps['period']}; removed {len(recaps['lootboards_removed'])} frozen "
-              "lootboard PNG(s)")
+        print(f"[recaps] recomputed {recaps['recomputed']}/{len(recaps['snapshots'])} "
+              f"snapshot(s) for {recaps['period']}; removed "
+              f"{len(recaps['lootboards_removed'])} frozen lootboard PNG(s) "
+              "(regenerated on demand)")
+        if recaps["recompute_failures"]:
+            print(f"[recaps] WARNING: {len(recaps['recompute_failures'])} card(s) "
+                  "kept their previous numbers — see recap_invalidations in the plan")
         plan["recap_invalidations"] = recaps
         phases["recaps"] = True
         save_plan()
