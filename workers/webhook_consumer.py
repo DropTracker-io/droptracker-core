@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import sys
 import traceback
 
@@ -23,9 +24,24 @@ logging.basicConfig(
 log = logging.getLogger("webhook_consumer")
 
 QUEUE_KEY = "webhook:queue"
+# Entries that raise out of _process_entry land here instead of vanishing —
+# BLPOP has already removed them from the queue, so this is the only copy.
+DEAD_KEY = "webhook:dead"
+DEAD_MAX = 10_000
 BLPOP_TIMEOUT = 5
+# Concurrency model: N worker coroutines on one event loop, each running the
+# same blpop -> _process_entry loop. The worker count IS the concurrency
+# bound; every in-flight entry has its own SQLAlchemy session (Session() is a
+# plain sessionmaker) exactly like bots/webhook_bot.py's concurrent message
+# handling. The serial consumer's ~40k drops/hour ceiling put the queue hours
+# behind at evening peak (2026-07-31: 107 min).
+NUM_WORKERS = max(1, min(32, int(os.getenv("WEBHOOK_CONSUMER_WORKERS", "6"))))
 TEMP_DIR = os.getenv("WEBHOOK_TEMP_DIR", "/tmp/webhook_uploads")
 _REDIS_PW = os.getenv("DB_PASS")
+
+# Entries currently being processed across all workers. Only mutated between
+# awaits on the single event loop, so no lock is needed.
+_in_flight = 0
 
 
 def _get_redis():
@@ -75,7 +91,7 @@ def _push_plugin_notice(db_session, processed_data, response) -> None:
 
 
 async def _process_entry(entry_bytes: bytes) -> None:
-    from api.core import get_db_session, reset_db_connections
+    from api.core import get_db_session
     from api.routes.webhook import (
         _dispatch_seasonal_submission,
         _link_video_to_submission,
@@ -234,7 +250,10 @@ async def _process_entry(entry_bytes: bytes) -> None:
             except Exception:
                 pass
         db_session.close()
-        reset_db_connections()
+        # NOTE: the serial consumer called api.core.reset_db_connections()
+        # (scoped-session .remove()) here. With concurrent workers that would
+        # tear down the shared scoped session under any sibling that touched
+        # it, so cleanup now happens in _maintenance() only while idle.
         if image_tmp_path:
             try:
                 os.remove(image_tmp_path)
@@ -242,20 +261,80 @@ async def _process_entry(entry_bytes: bytes) -> None:
                 pass
 
 
-async def run_consumer() -> None:
-    log.info("Webhook consumer starting (queue=%s)", QUEUE_KEY)
-    r = await asyncio.to_thread(_get_redis)
+def _dead_letter(r, entry_bytes: bytes) -> None:
+    """Preserve a failed entry — it has already been popped from the queue."""
+    try:
+        pipe = r.pipeline()
+        pipe.lpush(DEAD_KEY, entry_bytes)
+        pipe.ltrim(DEAD_KEY, 0, DEAD_MAX - 1)
+        pipe.execute()
+    except Exception:
+        log.error("Failed to dead-letter entry:\n%s", traceback.format_exc())
 
-    while True:
+
+async def _worker(worker_id: int, r, stop: asyncio.Event) -> None:
+    global _in_flight
+    while not stop.is_set():
+        entry_bytes = None
         try:
             result = await asyncio.to_thread(r.blpop, QUEUE_KEY, BLPOP_TIMEOUT)
             if result is None:
                 continue
             _, entry_bytes = result
-            await _process_entry(entry_bytes)
+            _in_flight += 1
+            try:
+                await _process_entry(entry_bytes)
+            finally:
+                _in_flight -= 1
         except Exception:
-            log.error("Error in consumer loop:\n%s", traceback.format_exc())
+            log.error("[worker %d] Error in consumer loop:\n%s", worker_id, traceback.format_exc())
+            if entry_bytes is not None:
+                _dead_letter(r, entry_bytes)
             await asyncio.sleep(1)
+    log.info("[worker %d] stopped", worker_id)
+
+
+async def _maintenance(r, stop: asyncio.Event) -> None:
+    """Once a minute: log queue health; clean the scoped session while idle."""
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=60)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            depth, dead = await asyncio.to_thread(
+                lambda: (r.llen(QUEUE_KEY), r.llen(DEAD_KEY)))
+            log.info("queue depth=%d dead=%d in_flight=%d workers=%d",
+                     depth, dead, _in_flight, NUM_WORKERS)
+            if _in_flight == 0:
+                from api.core import reset_db_connections
+                reset_db_connections()
+        except Exception:
+            log.debug("maintenance tick failed:\n%s", traceback.format_exc())
+
+
+async def run_consumer() -> None:
+    log.info("Webhook consumer starting (queue=%s, workers=%d)", QUEUE_KEY, NUM_WORKERS)
+    r = await asyncio.to_thread(_get_redis)
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _request_stop(signame: str) -> None:
+        # Drain, don't drop: BLPOP'd entries are the only copy, so workers
+        # finish their in-flight entry before exiting (well inside the unit's
+        # TimeoutStopSec=30).
+        log.info("Received %s — finishing in-flight entries", signame)
+        stop.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _request_stop, sig.name)
+
+    tasks = [asyncio.create_task(_worker(i, r, stop)) for i in range(NUM_WORKERS)]
+    tasks.append(asyncio.create_task(_maintenance(r, stop)))
+    await asyncio.gather(*tasks)
+    log.info("Webhook consumer stopped cleanly")
 
 
 if __name__ == "__main__":
