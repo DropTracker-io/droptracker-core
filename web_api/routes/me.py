@@ -501,6 +501,9 @@ _EVENT_PREF_LABELS = {
     "event_lead_change": "Lead changes",
     "event_started": "Event started",
     "event_ended": "Event ended",
+    # web82a — recurring-schedule events only; silent for continuous ones.
+    "event_window_opened": "Scoring window opens",
+    "event_window_closed": "Scoring window closes",
 }
 
 

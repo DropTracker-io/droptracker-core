@@ -35,6 +35,11 @@ REFRESH_AFTER_TYPES = (
     "event_blackout",
     "event_lead_change",
     "event_ended",
+    # web82a: a window opening/closing flips the board's status line between
+    # "Live • Window closes" and "⏸️ Paused • Resumes" — redraw immediately
+    # rather than leaving it wrong until the 2-minute sweep.
+    "event_window_opened",
+    "event_window_closed",
     # Loot Sweep bonus payouts change standings — keep the board hot. The
     # per-item event_sweep_item is deliberately excluded (the 2-min sweep +
     # Redis-cached image already cover it without an edit per drop).
@@ -362,7 +367,8 @@ async def refresh_after_notification(bot, session, event, notification_type: str
         return
     # Lifecycle transitions redraw unconditionally (first post / final state);
     # mid-event bursts respect the cooldown.
-    force = notification_type in ("event_started", "event_ended")
+    force = notification_type in ("event_started", "event_ended",
+                                  "event_window_opened", "event_window_closed")
     await refresh_event_board(bot, session, event, force=force)
 
 

@@ -1909,7 +1909,12 @@ class NotificationService:
                         image_ref = f"attachment://{image_attachment.file_name}"
 
             standings = None
-            if notification_type in ('event_lead_change', 'event_ended'):
+            # web82a: event_window_closed shows the standings so far — a
+            # weekend's wrap-up post is the natural place to see who's ahead
+            # going into the break. Resolved live here like the others, not
+            # from the queued payload, so a row sent late isn't stale.
+            if notification_type in ('event_lead_change', 'event_ended',
+                                     'event_window_closed'):
                 limit = 3 if notification_type == 'event_lead_change' else 5
                 rows = (db_session.query(EventTeam)
                         .filter(EventTeam.event_id == event.id)
