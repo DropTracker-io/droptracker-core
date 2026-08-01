@@ -750,6 +750,41 @@ def _parse_nearby_players(raw):
     return None
 
 
+def _image_naming_hints(submission_type, data):
+    """Keys ``download_image`` reads to name a manual submission's screenshot.
+
+    The intake payload is only merged into ``processed_data`` inside the
+    per-type ``match`` block, which runs *after* the upload is saved — so
+    without these hints every manual image landed in ``.../drop/unknown/`` as
+    ``unknown_unknown.png``. Only non-empty values are returned: the naming
+    code defaults on key *absence*, and a present ``None`` stringifies to the
+    literal "None".
+    """
+    if submission_type == "drop":
+        npc_name = data.get("npc_name")
+        hints = {"source": npc_name, "npc_name": npc_name, "item": data.get("item_name")}
+    elif submission_type == "collection_log":
+        hints = {
+            "source": data.get("source") or data.get("npc_name"),
+            "item": data.get("item_name"),
+        }
+    elif submission_type == "personal_best":
+        boss_name = data.get("boss_name") or data.get("npc_name")
+        hints = {
+            "boss_name": boss_name,
+            "npc_name": boss_name,
+            "team_size": data.get("team_size"),
+            "time": data.get("time_ms"),
+        }
+    elif submission_type == "combat_achievement":
+        hints = {"task_name": data.get("task"), "task_tier": data.get("tier")}
+    elif submission_type == "pet":
+        hints = {"source": data.get("source"), "item": data.get("pet_name")}
+    else:
+        hints = {}
+    return {k: v for k, v in hints.items() if v not in (None, "")}
+
+
 MANUAL_SUBMIT_KEY_HEADER = "X-DT-Manual-Key"
 
 
@@ -942,16 +977,24 @@ async def _process_manual_submission(req_start):
             processed_data["has_image"] = True
             player_wom_id = player.wom_id if player else None
             try:
+                # download_image names the file from the payload and writes the
+                # public URL back as "image_path"; hand it a copy carrying the
+                # not-yet-merged per-type fields so nothing downstream sees the
+                # hint keys (e.g. "source" means different things per processor).
+                naming = {**processed_data, **_image_naming_hints(submission_type, data)}
                 file_path = await download_image(
                     sub_type=submission_type,
                     player=player,
                     player_wom_id=player_wom_id,
                     file_data=image_file,
-                    processed_data=processed_data
+                    processed_data=naming
                 )
                 log_phase("image_downloaded")
                 if file_path:
-                    processed_data["image_url"] = file_path
+                    # Store the URL the file is served at, never the filesystem
+                    # path — the site and Discord embeds render this verbatim,
+                    # so a /store/... path 404s (mirrors the plugin path above).
+                    processed_data["image_url"] = naming.get("image_path") or file_path
                     processed_data["downloaded"] = True
             except Exception as img_error:
                 logger.log_sync("error", f"Error downloading manual submission image: {img_error}")
