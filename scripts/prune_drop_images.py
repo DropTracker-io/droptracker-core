@@ -45,6 +45,7 @@ the thin slice of drops that just aged past the retention window.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -112,6 +113,45 @@ def _fmt_bytes(n: int) -> str:
     return f"{value:.1f} PiB"
 
 
+def recap_protected_paths() -> set[str]:
+    """On-disk screenshots a recap card points at, which must survive pruning.
+
+    A recap is an archive: ``/groups/{id}/recap/{period}`` is meant to stay
+    valid forever, and its biggest-drop card renders the screenshot straight
+    from the frozen payload. ``services/recap.py`` captures the URL into the
+    snapshot so the card can't be blanked by ``image_url`` being cleared — but
+    that says nothing about the FILE, and a player's best month is very often
+    worth under the prune threshold. Left alone, every low-value recap
+    screenshot 404s 30 days after the month it immortalised.
+    """
+    rows = session.execute(text(
+        "SELECT payload FROM recap_snapshots WHERE payload LIKE '%user-upload%'"
+    )).all()
+
+    urls: set[str] = set()
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "image_url" and isinstance(value, str):
+                    urls.add(value)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    for (payload,) in rows:
+        try:
+            walk(json.loads(payload))
+        except (TypeError, ValueError):
+            continue
+
+    paths = {p for p in (local_path_for(u) for u in urls) if p}
+    print(f"protected by recap snapshots: {len(paths):,} screenshot(s)")
+    return paths
+
+
 def partitions_to_scan(cutoff: datetime) -> list[int]:
     """Monthly partitions that can hold drops older than the cutoff."""
     rows = session.execute(text(
@@ -146,7 +186,9 @@ def main() -> int:
           f"{cutoff:%Y-%m-%d %H:%M} ({args.retention_days}d)")
     print(f"snapshot: {snapshot_path}\n")
 
-    scanned = pruned = missing = unresolved = 0
+    protected = recap_protected_paths()
+
+    scanned = pruned = missing = unresolved = protected_hits = 0
     freed = 0
     pending_ids: list[int] = []
     stop = False
@@ -201,6 +243,11 @@ def main() -> int:
                     if path is None:
                         unresolved += 1
                         continue
+                    if path in protected:
+                        # A recap card renders this one forever; leave both the
+                        # file and the drops.image_url reference alone.
+                        protected_hits += 1
+                        continue
                     try:
                         size = os.path.getsize(path)
                     except OSError:
@@ -239,6 +286,8 @@ def main() -> int:
     if missing:
         print(f"already missing    : {missing:,} (image_url "
               f"{'cleared' if args.apply else 'would be cleared'})")
+    if protected_hits:
+        print(f"recap-protected    : {protected_hits:,} (kept for recap cards)")
     if unresolved:
         print(f"unrecognised urls  : {unresolved:,} (left untouched)")
     if not args.apply:

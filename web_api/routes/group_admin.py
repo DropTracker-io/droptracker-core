@@ -48,6 +48,7 @@ from web_api.common import (
 from web_api.deps import (
     assert_group_admin,
     current_user_id,
+    is_superadmin,
     json_body,
     load_user,
     manageable_guild_ids,
@@ -887,9 +888,24 @@ async def create_group():
         abort_problem(422, "Invalid guild_id", "'guild_id' is required.")
 
     # The caller must manage the target guild (MANAGE_GUILD), from login cache.
-    manage_ids = manageable_guild_ids(user_id)
-    if manage_ids and guild_id not in manage_ids:
-        abort_problem(403, "Forbidden", "You do not manage the selected Discord server.")
+    # Fails CLOSED: an empty set means we cannot verify (user manages nothing,
+    # or the 7-day cache lapsed), not that anything goes — the old
+    # `if manage_ids and ...` form let anyone bind an arbitrary guild id and be
+    # seeded as its owner, locking the real admins out with `guild_conflict`.
+    # The wizard's server picker is fed by the same login cache, so a legitimate
+    # creator always has one; re-authenticating rebuilds it.
+    def _is_superadmin():
+        with db_session() as s:
+            return is_superadmin(load_user(s, user_id))
+
+    if not await asyncio.to_thread(_is_superadmin):
+        manage_ids = manageable_guild_ids(user_id)
+        if guild_id not in manage_ids:
+            abort_problem(
+                403, "Forbidden",
+                "You do not manage the selected Discord server. If you do, "
+                "sign out and back in to refresh your server list.",
+            )
 
     def _owner_identity():
         with db_session() as s:

@@ -12,6 +12,7 @@ dangling reference, and a failed unlink does NOT clear image_url.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
@@ -48,8 +49,9 @@ class FakeSession:
     keyset walk), and records every UPDATE it is asked to run.
     """
 
-    def __init__(self, candidates):
+    def __init__(self, candidates, recap_payloads=()):
         self._candidates = candidates
+        self._recap_payloads = list(recap_payloads)
         self._served = False
         self.cleared: list[int] = []
         self.commits = 0
@@ -58,6 +60,8 @@ class FakeSession:
         sql = str(statement)
         if "DISTINCT `partition`" in sql:
             return _Result([(202601,)])
+        if "recap_snapshots" in sql:
+            return _Result([(p,) for p in self._recap_payloads])
         if sql.strip().upper().startswith("UPDATE"):
             self.cleared.extend(params["ids"])
             return _Result([])
@@ -189,4 +193,49 @@ def test_traversal_url_never_escapes_the_root(prune, tmp_path):
     _run(module, session, ["--apply"])
 
     assert outside.exists(), "a traversal url must never reach a real file"
+    assert session.cleared == []
+
+
+def test_recap_referenced_screenshot_survives_pruning(prune):
+    """A screenshot a recap card points at must outlive the retention window.
+
+    Recap pages are permanent by design, and the biggest-drop card renders the
+    screenshot straight from the frozen payload — so a player's best month
+    being worth under the prune threshold used to blank their own card 30 days
+    after it was sent. Capturing the URL in the snapshot was never enough on
+    its own; the file has to stay too.
+    """
+    module, root = prune
+    keep = _make_image(root, "1/drop/Zulrah/Coal_0.jpg")
+    drop = _make_image(root, "2/drop/Zulrah/Coal_0.jpg")
+    payload = json.dumps({
+        "biggest_drop": {"image_url": URL + "1/drop/Zulrah/Coal_0.jpg"},
+    })
+    session = FakeSession(
+        [(101, URL + "1/drop/Zulrah/Coal_0.jpg"),
+         (102, URL + "2/drop/Zulrah/Coal_0.jpg")],
+        recap_payloads=[payload],
+    )
+
+    _run(module, session, ["--apply"])
+
+    assert keep.exists(), "a recap-referenced screenshot must never be pruned"
+    assert not drop.exists(), "unreferenced screenshots still prune normally"
+    # The protected row keeps its reference; only the pruned one is cleared.
+    assert session.cleared == [102]
+
+
+def test_recap_protection_survives_a_malformed_payload(prune):
+    """One unparsable snapshot must not disable protection for the rest."""
+    module, root = prune
+    keep = _make_image(root, "1/drop/Zulrah/Coal_0.jpg")
+    session = FakeSession(
+        [(101, URL + "1/drop/Zulrah/Coal_0.jpg")],
+        recap_payloads=["{not json", json.dumps(
+            {"biggest_drop": {"image_url": URL + "1/drop/Zulrah/Coal_0.jpg"}})],
+    )
+
+    _run(module, session, ["--apply"])
+
+    assert keep.exists()
     assert session.cleared == []

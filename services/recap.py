@@ -225,6 +225,54 @@ def _group_rank(
 
 
 # --------------------------------------------------------------------------- #
+# EHB (harvested from WOM, cached per month)
+# --------------------------------------------------------------------------- #
+def _ehb_gains(session, player_ids: list[int], period: str) -> dict[int, float]:
+    """``{player_id: ehb gained}`` for the month, from ``recap_wom_gains``.
+
+    Read-only and fail-soft, like every other source here: ``services.recap_ehb``
+    fills the table ahead of a generation run, and a subject it hasn't reached
+    yet simply has no EHB on their card. Computing this inline is not an option —
+    it would put an external API call on a synchronous path that a web request
+    waits on.
+
+    A missing row means *unknown*, not zero, which is why callers check
+    membership rather than reading a default.
+    """
+    if not player_ids:
+        return {}
+    try:
+        from services.recap_ehb import stored_gains
+
+        return stored_gains(session, player_ids, period)
+    except Exception:
+        return {}
+
+
+def _apply_ehb(totals: dict, current: dict, previous: dict,
+               player_ids: list[int]) -> None:
+    """Put ``ehb`` (and its month-ago baseline) on a totals dict, or nothing.
+
+    Scoped to ``player_ids`` on both sides, so a clan's comparison is its
+    *current* roster measured across two months rather than two different sets
+    of people — the same choice ``rank.previous_loot`` makes, and for the same
+    reason: a member who left is not a decline in the clan's bossing.
+
+    Within a harvested subject, a member with no row genuinely gained nothing
+    (WOM omits members with no snapshot in the window), so they count as zero.
+    But if *nothing* was harvested the stat is unknown, and an unknown stat is
+    left off the card rather than reported as zero.
+    """
+    if not current:
+        return
+    totals["ehb"] = round(sum(current.get(pid, 0.0) for pid in player_ids), 1)
+    if previous:
+        totals["previous_ehb"] = round(
+            sum(previous.get(pid, 0.0) for pid in player_ids), 1
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Rollup reads — composition (top items, top bosses, activity)
 # --------------------------------------------------------------------------- #
 def _item_rollup(session, player_ids: list[int], period: str) -> dict:
@@ -440,7 +488,11 @@ def _biggest_drop(session, player_ids: list[int], period: str) -> Optional[dict]
     ``image_url``/``drop_id``/``kill_count`` exist nowhere else. Capturing
     ``image_url`` into the snapshot matters — ``droptracker-prune-images.timer``
     deletes screenshots that are over 30 days old and worth under 1M GP, so a
-    recap that resolved the image lazily would go blank over time.
+    recap that resolved the image lazily would go blank over time. Capturing the
+    URL is only half of it: the prune script reads these payloads back and skips
+    the files they name, because a captured URL to a deleted file is just as
+    blank. Both halves are load-bearing — see
+    ``scripts/prune_drop_images.recap_protected_paths``.
 
     ``kill_count`` is populated from web76a onward and is NULL for everything
     before it, and for sources that don't report one.
@@ -702,6 +754,12 @@ def compute_player_month(session, player_id: int, period: str) -> Optional[dict]
     names = _player_names(session, [player_id])
 
     payload["totals"]["loot"] = int(totals.get(player_id, 0))
+    _apply_ehb(
+        payload["totals"],
+        _ehb_gains(session, [player_id], period),
+        _ehb_gains(session, [player_id], prev_period),
+        [player_id],
+    )
     payload["scope"] = SCOPE_PLAYER
     payload["subject"] = {
         "id": player_id,
@@ -759,7 +817,8 @@ def compute_group_month(session, group_id: int, period: str) -> Optional[dict]:
         return None
 
     member_totals = _redis_totals(player_ids, partition)
-    prev_partition = period_partition(previous_month_period(period))
+    prev_period = previous_month_period(period)
+    prev_partition = period_partition(prev_period)
     prev_totals = _redis_totals(player_ids, prev_partition)
     names = _player_names(session, player_ids)
     rank, ranked, board_loot = _group_rank(group_id, partition)
@@ -792,6 +851,12 @@ def compute_group_month(session, group_id: int, period: str) -> Optional[dict]:
     # here and are not on that page; a public recap should honour the opt-out.)
     payload["totals"]["members_active"] = len(ranked_members)
     payload["totals"]["members_total"] = len(player_ids)
+    _apply_ehb(
+        payload["totals"],
+        _ehb_gains(session, player_ids, period),
+        _ehb_gains(session, player_ids, prev_period),
+        player_ids,
+    )
     payload["scope"] = SCOPE_GROUP
     payload["subject"] = {"id": group_id, "name": group_row[0] if group_row else None}
     payload["rank"] = {
@@ -918,6 +983,11 @@ def compute_year(session, scope: str, subject_id: int, year: int) -> Optional[di
     # rather than assumed: a partial year would otherwise understate kills
     # silently, which is worse than omitting the card.
     npc_months_covered = 0
+    # EHB is folded outside `totals` because that loop coerces to int, and hours
+    # bossed are fractional. Counted as well as summed: a year that harvested
+    # three months would otherwise report those three as the annual figure.
+    ehb_total = 0.0
+    ehb_months = 0
 
     for period, snap in months:
         if snap.get("npc_data_available"):
@@ -925,6 +995,12 @@ def compute_year(session, scope: str, subject_id: int, year: int) -> Optional[di
         t = snap.get("totals", {})
         for key in totals:
             totals[key] += int(t.get(key, 0) or 0)
+        if t.get("ehb") is not None:
+            try:
+                ehb_total += float(t["ehb"])
+                ehb_months += 1
+            except (TypeError, ValueError):
+                pass
         by_month.append({"period": period, "loot": int(t.get("loot", 0) or 0)})
 
         for src, dest, id_key in ((snap.get("top_items", []), items, "item_id"),
@@ -965,6 +1041,9 @@ def compute_year(session, scope: str, subject_id: int, year: int) -> Optional[di
     # Unique counts can't be summed across months — the same item dropping in
     # March and July is one unique item, not two. The folded maps hold only the
     # per-month top N, so these are a floor, and they're labelled as such.
+    if ehb_months:
+        totals["ehb"] = round(ehb_total, 1)
+
     top_items = sorted(items.values(), key=lambda x: x["loot"], reverse=True)[:TOP_N]
     top_npcs = sorted(npcs.values(), key=lambda x: x["loot"], reverse=True)[:TOP_N]
     # Drop the fold's bookkeeping flag before it reaches the stored payload.

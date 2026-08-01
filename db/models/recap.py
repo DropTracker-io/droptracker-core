@@ -10,8 +10,10 @@ Why persisted and not cached:
   outlive any TTL;
 * ``/groups/{id}/recap/{period}`` is meant to stay valid forever;
 * the biggest-drop card points at a screenshot that
-  ``droptracker-prune-images.timer`` deletes once it is 30 days old and worth
-  under 1M GP — freezing the payload captures the URL while the file exists.
+  ``droptracker-prune-images.timer`` would otherwise delete once it is 30 days
+  old and worth under 1M GP. Freezing the payload captures the URL; the prune
+  script reads these payloads back (``recap_protected_paths``) and skips the
+  files they name, so the two together keep the card whole.
 
 ``period`` is ``'YYYY-MM'`` for a month and ``'YYYY'`` for a year. Both sort
 chronologically as strings, and ``len(period)`` distinguishes them, so no
@@ -26,6 +28,7 @@ from __future__ import annotations
 from sqlalchemy import (
     Column,
     DateTime,
+    Float,
     Index,
     Integer,
     String,
@@ -93,6 +96,40 @@ class RecapSnapshot(Base):
         Integer, nullable=False, default=RECAP_SCHEMA_VERSION, server_default="1"
     )
     generated_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
+class RecapWomGain(Base):
+    """One player's EHB gained over one month, as reported by WOM.
+
+    Not derivable from anything else we store: ``players.ehb`` is a lifetime
+    total overwritten on every roster sync, so it holds no history to
+    difference. The month's gain is harvested once, after the month closes,
+    and kept — a closed month's gains never change, so this is a permanent
+    cache rather than something to refresh.
+
+    That permanence is what makes the card's month-over-month comparison free:
+    the "previous month" figure was written by last month's run. It is also
+    what keeps the lazily-generated player cards off the WOM rate limiter,
+    since their clan's harvest has usually already covered them.
+
+    ``source`` records which call produced the row — ``'bulk'`` for the
+    per-clan ``bulk-gained`` fetch that covers a whole roster in one request,
+    ``'player'`` for the per-player fallback used by someone in no WOM-linked
+    group. Absence of a row means "not harvested", which the card treats as
+    unknown and omits; it never means zero.
+    """
+
+    __tablename__ = "recap_wom_gains"
+    __table_args__ = (
+        Index("idx_recap_wom_gains_period", "period"),
+        {"extend_existing": True},
+    )
+
+    player_id = Column(Integer, primary_key=True)
+    period = Column(String(7), primary_key=True)
+    ehb_gained = Column(Float, nullable=False, default=0.0, server_default="0")
+    source = Column(String(16), nullable=False, default="bulk", server_default="bulk")
+    fetched_at = Column(DateTime, nullable=False, server_default=func.now())
 
 
 class RecapDelivery(Base):
