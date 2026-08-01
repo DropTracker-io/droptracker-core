@@ -894,13 +894,33 @@ async def ensure_npc_id_for_player(session, npc_name, player_id, player_name, us
         async with osrs_api.create_client() as client:
             npc_id = await client.semantic.get_npc_id(npc_name)
         if npc_id:
-            new_npc = NpcList(npc_id=npc_id, npc_name=npc_name)
-            session.add(new_npc)
-            session.commit()
+            try:
+                new_npc = NpcList(npc_id=npc_id, npc_name=npc_name)
+                session.add(new_npc)
+                session.commit()
+            except Exception:
+                # A concurrent worker/process minted this npc between our
+                # lookup and the insert (the semantic call above is a long
+                # await). Roll back the failed transaction — leaving it
+                # pending would poison every later commit on this session —
+                # and use the row the winner created (mirrors
+                # ensure_item_for_drop's race handling).
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+                existing = session.query(NpcList.npc_id).filter(NpcList.npc_id == npc_id).first()
+                if not existing:
+                    raise
             npc_list[npc_name] = npc_id
             return npc_id, npc_name
     except Exception:
-        pass
+        # Clear any failed-transaction state before falling through to the
+        # new_npc notification path, which reuses this session.
+        try:
+            session.rollback()
+        except Exception:
+            pass
     notification_data = {"npc_name": npc_name, "player_name": player_name, "player_id": player_id}
     await create_notification(
         "new_npc",
