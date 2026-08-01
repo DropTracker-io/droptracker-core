@@ -610,7 +610,9 @@ async def ensure_group_lootboard(group_id: int, period: str) -> Optional[str]:
         return None
 
     try:
-        os.makedirs(os.path.dirname(path), mode=0o777, exist_ok=True)
+        from lootboard.generator import _ensure_public_dir
+
+        _ensure_public_dir(os.path.dirname(path))
         # Copy rather than move: the generator's own file backs the on-demand
         # board feature and isn't ours to take.
         tmp = f"{path}.tmp"

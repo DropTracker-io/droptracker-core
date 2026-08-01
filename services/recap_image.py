@@ -180,9 +180,13 @@ async def write_recap_image(
     filed under the player id in the same tree, which keeps one nginx mapping
     rather than two.
 
-    Directory mode is 0o777 deliberately: the bots run as ``User=user`` and
-    ``droptracker-webapi`` as ``User=debian``, and any shared asset tree either
-    side may write has to stay group-writable or one of them silently fails.
+    Directory creation goes through ``_ensure_public_dir`` deliberately: the
+    bots run as ``User=user`` and ``droptracker-webapi`` as ``User=debian``,
+    and any shared asset tree either side may write has to stay world-writable
+    or one of them silently fails. A bare ``os.makedirs(mode=0o777)`` is not
+    enough — the mode argument is filtered by the process umask (0022 on every
+    unit here), which is how the 2026-08-01 delivery run inherited 0755 dirs
+    from the debian-side pre-render and could not write a single card.
     """
     if scope not in (SCOPE_GROUP, SCOPE_PLAYER):
         return None
@@ -193,7 +197,9 @@ async def write_recap_image(
 
     path = recap_image_path(scope, subject_id, period)
     try:
-        os.makedirs(os.path.dirname(path), mode=0o777, exist_ok=True)
+        from lootboard.generator import _ensure_public_dir
+
+        _ensure_public_dir(os.path.dirname(path))
         # Write-then-rename so a reader (or nginx) never sees a half-written
         # PNG, and so a crashed render can't leave a truncated file that the
         # existence check would then treat as "already done".
