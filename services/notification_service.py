@@ -779,6 +779,42 @@ class NotificationService:
     NOTIF_BATCH_SIZE = 50
     NOTIF_LANE_CONCURRENCY = 6
 
+    # Audit P1: total tries a queue row gets when the failure is transient
+    # (429, Discord 5xx, network) before it lands in `failed` for good. A
+    # permanent failure (Forbidden/NotFound/BadRequest — a fact about the
+    # destination, not about us) never retries.
+    SEND_ATTEMPTS_MAX = 3
+
+    @staticmethod
+    def _is_transient_send_error(exc) -> bool:
+        from interactions.client.errors import (
+            BadRequest, Forbidden, HTTPException, NotFound, RateLimited,
+        )
+        if isinstance(exc, (Forbidden, NotFound, BadRequest)):
+            return False
+        if isinstance(exc, RateLimited):
+            return True
+        if isinstance(exc, HTTPException):
+            status = getattr(exc, "status", None)
+            return isinstance(status, int) and status >= 500
+        return isinstance(
+            exc, (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError, OSError)
+        )
+
+    def _should_retry_send(self, notification_id, exc) -> bool:
+        """Bounded transient-retry decision, attempt count kept in Redis so no
+        schema change is needed. Redis trouble means no retry — the old
+        terminal behaviour is the fallback, not an exception loop."""
+        if not self._is_transient_send_error(exc):
+            return False
+        try:
+            key = f"notif:send_attempts:{notification_id}"
+            attempts = int(redis_client.client.incr(key))
+            redis_client.client.expire(key, 86400)
+            return attempts < self.SEND_ATTEMPTS_MAX
+        except Exception:
+            return False
+
     async def process_pending_notifications(self):
         """Process pending notifications: batched fetch, per-group lanes sent
         concurrently (audit P0-3).
@@ -870,6 +906,14 @@ class NotificationService:
                     await self.process_notification_with_session(locked_notification, db_session)
                     return 1
                 except Exception as e:
+                    # Transient Discord/network faults go back to pending for
+                    # a bounded number of tries; everything else is terminal.
+                    if self._should_retry_send(notification_id, e):
+                        locked_notification.status = 'pending'
+                        locked_notification.error_message = f"transient, retrying: {e}"
+                        db_session.commit()
+                        app_logger.log(log_type="warning", data=f"Transient error on notification {notification_id}, requeued: {e}", app_name="notification_service", description="process_pending_notifications")
+                        return 0
                     locked_notification.status = 'failed'
                     locked_notification.error_message = str(e)
                     db_session.commit()

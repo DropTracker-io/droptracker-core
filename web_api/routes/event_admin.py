@@ -7,6 +7,7 @@ events where group_id is NULL):
   GET   /api/v1/events/{id}/completions?status=pending|all|<status>&teamId=&taskId=
         -> EventCompletion[] (joined task label / team name / player name)
   POST  /api/v1/events/{id}/completions/{completionId}/confirm            -> { ok }
+  POST  /api/v1/events/{id}/completions/confirm-bulk  { ids }  -> { ok, confirmed, skipped }
   POST  /api/v1/events/{id}/completions/{completionId}/reject  { note? }  -> { ok }
   POST  /api/v1/events/{id}/award   { task_id, team_id, quantity?, note? } -> { id }
   POST  /api/v1/events/{id}/revoke  { completion_id, note? }               -> { ok }
@@ -417,6 +418,98 @@ async def confirm_completion(event_id: int, completion_id: int):
     await asyncio.to_thread(_apply)
     _bump(event_id)
     return private_no_store(jsonify({"ok": True}))
+
+
+# Cap one bulk-confirm request — a big review queue is a few hundred rows, and
+# each confirm is a full apply (progress fold, points, notification), so the
+# bound keeps a single request from holding the review surface for minutes.
+MAX_BULK_CONFIRM = 200
+
+
+@event_admin_bp.post("/events/<int:event_id>/completions/confirm-bulk")
+async def confirm_completions_bulk(event_id: int):
+    """Confirm several pending completions in one call.
+
+    The frontend's "Confirm all" used to loop the single endpoint — one
+    round-trip per row, stopping dead at the first error. Body
+    ``{"ids": [int, ...]}``. Each row takes the same locked apply path as the
+    single confirm; a row that can't be confirmed (already acted on, missing)
+    is returned in ``skipped`` with a reason instead of failing the batch.
+    """
+    user_id = current_user_id()
+    body = await json_body()
+    raw = body.get("ids")
+    if not isinstance(raw, list) or not raw:
+        abort_problem(422, "Invalid ids", "'ids' must be a non-empty list.")
+    requested: list[int] = []
+    seen: set[int] = set()
+    for cid in raw:
+        if not isinstance(cid, int):
+            abort_problem(422, "Invalid ids", "'ids' must contain only integers.")
+        if cid not in seen:
+            seen.add(cid)
+            requested.append(cid)
+    if len(requested) > MAX_BULK_CONFIRM:
+        abort_problem(422, "Too many completions",
+                      f"At most {MAX_BULK_CONFIRM} completions per call.")
+
+    def _apply():
+        confirmed: list[int] = []
+        skipped: list[dict] = []
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            if ev.status == "past":
+                abort_problem(
+                    409, "Event has ended",
+                    "This event is over — pending completions can no longer "
+                    "be confirmed. Reject them (or leave them) for the record.",
+                )
+            for cid in requested:
+                try:
+                    comp = (
+                        s.query(EventCompletion)
+                        .filter(EventCompletion.event_id == event_id,
+                                EventCompletion.id == cid)
+                        .with_for_update()
+                        .first()
+                    )
+                    if comp is None:
+                        skipped.append({"id": cid, "reason": "Not found in this event."})
+                        continue
+                    if comp.status != "pending":
+                        skipped.append({"id": cid, "reason": f"Already '{comp.status}'."})
+                        continue
+                    before = _snapshot(comp)
+                    comp.status = "confirmed"
+                    comp.acted_by_user_id = user_id
+                    _engine().apply_completion(s, comp)
+                    s.add(AuditLog(
+                        actor_user_id=user_id,
+                        group_id=ev.group_id,
+                        event_id=ev.id,
+                        action="event.completion.confirm",
+                        target=f"web_event_completions.{cid}",
+                        before=before,
+                        after=_snapshot(comp),
+                    ))
+                    # Commit per row: each confirm stands on its own, the
+                    # FOR UPDATE lock is held for one row's apply, and a later
+                    # failure can't roll back confirms already reported.
+                    s.commit()
+                    _publish_pending_update(s, ev, comp)
+                    confirmed.append(cid)
+                except Exception as e:  # noqa: BLE001 — one bad row must not kill the batch
+                    s.rollback()
+                    skipped.append({"id": cid, "reason": f"Failed to apply: {e}"})
+        return confirmed, skipped
+
+    confirmed, skipped = await asyncio.to_thread(_apply)
+    if confirmed:
+        _bump(event_id)
+    return private_no_store(jsonify(
+        {"ok": True, "confirmed": confirmed, "skipped": skipped}
+    ))
 
 
 @event_admin_bp.post("/events/<int:event_id>/completions/<int:completion_id>/reject")
