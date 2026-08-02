@@ -1,0 +1,27 @@
+# Fires droptracker-health-watch.service every 2 minutes, always.
+#
+# Two minutes with a 2-failure threshold means a genuine outage pages in about
+# four minutes, while an ordinary restart or a blue-green deploy (both well
+# under a minute) never trips it. The 2026-08-02 outage ran for 2h31m before a
+# player reported it; four minutes is the point of this file.
+#
+# OnBootSec so a box that comes back up half-started still gets checked without
+# waiting for the first calendar tick. No Persistent= — a missed check while
+# the machine was off is not worth replaying, the current state is all that
+# matters.
+#
+# Install:  sudo cp deploy/systemd/droptracker-health-watch.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now droptracker-health-watch.timer
+
+[Unit]
+Description=DropTracker fleet health check trigger (every 2 minutes)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=droptracker-health-watch.service
+
+[Install]
+WantedBy=timers.target

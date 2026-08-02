@@ -1,0 +1,35 @@
+# Fleet health check — DMs the owner when a core service is actually down.
+# Triggered by droptracker-health-watch.timer; do not enable the service itself.
+#
+# Exists because of the 2026-08-02 outage: droptracker-api was dead for 2h31m
+# and nothing noticed. Hypercorn's master exits status 0 when its workers die,
+# so systemd logged `inactive (dead)` rather than `failed` — meaning a check
+# built on `systemctl list-units --state=failed` saw a perfectly clean fleet
+# while nginx returned 423,002 × 502. This polls `is-active` per unit AND
+# probes the ports.
+#
+# A timer rather than a task inside the core bot on purpose: a monitor that
+# lives inside the thing it monitors cannot report that thing dying. It also
+# needs no database — a DB outage is one of the things it has to survive in
+# order to report it — and keeps its state in logs/health_watch_state.json.
+#
+# Manual run:  cd /store/droptracker/disc && venv/bin/python -m scripts.health_watch --dry-run
+# Watch it:    journalctl -u droptracker-health-watch.service -f
+
+[Unit]
+Description=DropTracker fleet health check (alerts the owner on real downtime)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.health_watch
+# One pass is a dozen `systemctl is-active` calls and three short HTTP probes;
+# if it hasn't finished in a minute something is badly wrong with the box and
+# the next firing should get a clean run rather than piling up behind this one.
+TimeoutStartSec=60
+# Must never be the thing that makes a loaded box worse.
+Nice=10
+IOSchedulingClass=idle
