@@ -904,7 +904,12 @@ async def ensure_npc_id_for_player(session, npc_name, player_id, player_name, us
     # stored name so downstream rows/embeds use one spelling.
     from sqlalchemy import bindparam
 
-    from utils.npc_names import npc_match_variants, npc_slug_sql_expr
+    from utils.npc_names import (
+        npc_match_variants,
+        npc_primary_rank_sql_expr,
+        npc_primary_variants,
+        npc_slug_sql_expr,
+    )
 
     variants = npc_match_variants(npc_name)
     if variants:
@@ -914,9 +919,13 @@ async def ensure_npc_id_for_player(session, npc_name, player_id, player_name, us
                 f"       EXISTS(SELECT 1 FROM player_npc_hourly_totals t "
                 f"              WHERE t.npc_id = n.npc_id) AS tracked "
                 f"FROM npc_list n WHERE {npc_slug_sql_expr('n.npc_name')} IN :variants "
-                f"ORDER BY tracked DESC, n.npc_id ASC LIMIT 1"
-            ).bindparams(bindparam("variants", expanding=True)),
-            {"variants": variants},
+                f"ORDER BY {npc_primary_rank_sql_expr('n.npc_name')} ASC, "
+                f"         tracked DESC, n.npc_id ASC LIMIT 1"
+            ).bindparams(
+                bindparam("variants", expanding=True),
+                bindparam("primary_variants", expanding=True),
+            ),
+            {"variants": variants, "primary_variants": npc_primary_variants(npc_name)},
         ).first()
         if norm_row:
             canonical_id, canonical_name = int(norm_row[0]), norm_row[1]

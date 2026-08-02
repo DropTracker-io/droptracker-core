@@ -72,9 +72,12 @@ def _search_groups(s, q):
 
 def _primary_npc(s, name_or_slug):
     """(npc_id, npc_name) of the primary row for this boss's match key — the
-    variant that actually has tracked data, then lowest id. Same rule as
-    /resolve, so search hits and nice URLs land on the same page."""
+    encounter's own spelling ahead of alias spellings, then the variant that
+    actually has tracked data, then lowest id. Same rule as /resolve, so search
+    hits and nice URLs land on the same page."""
     from sqlalchemy import bindparam
+
+    from utils.npc_names import npc_primary_rank_sql_expr, npc_primary_variants
 
     variants = npc_match_variants(name_or_slug)
     if not variants:
@@ -86,9 +89,13 @@ def _primary_npc(s, name_or_slug):
             f"       EXISTS(SELECT 1 FROM player_npc_hourly_totals t "
             f"              WHERE t.npc_id = npc_list.npc_id) AS tracked "
             f"FROM npc_list WHERE {expr} IN :variants "
-            f"ORDER BY tracked DESC, npc_id ASC LIMIT 1"
-        ).bindparams(bindparam("variants", expanding=True)),
-        {"variants": variants},
+            f"ORDER BY {npc_primary_rank_sql_expr('npc_name')} ASC, "
+            f"         tracked DESC, npc_id ASC LIMIT 1"
+        ).bindparams(
+            bindparam("variants", expanding=True),
+            bindparam("primary_variants", expanding=True),
+        ),
+        {"variants": variants, "primary_variants": npc_primary_variants(name_or_slug)},
     ).fetchone()
 
 

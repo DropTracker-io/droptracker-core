@@ -2,10 +2,13 @@
 identity rule (suggestion #50). Pure functions, no DB."""
 from utils.npc_names import (
     MODE_SUFFIXES,
+    canonical_encounter_name,
     npc_base_slug,
     npc_family_tiers,
     npc_match_key,
     npc_match_variants,
+    npc_primary_rank_sql_expr,
+    npc_primary_variants,
     npc_slug,
     npc_slug_sql_expr,
     strip_the,
@@ -63,6 +66,49 @@ def test_match_variants_cover_all_spellings():
     assert set(npc_match_variants("Crystalline Hunllef")) == v
     assert npc_match_variants("") == []
     assert npc_match_variants(None) == []
+
+
+def test_encounter_members_rewrite_to_the_encounter_name():
+    # The Hunllefs and the Titans have npc_list rows of their own, so an
+    # exact-name lookup would store their PBs/drops on the boss id while the
+    # loot path uses the activity id — two boards for one encounter.
+    assert canonical_encounter_name("Crystalline Hunllef") == "The Gauntlet"
+    assert canonical_encounter_name("Corrupted Hunllef") == "The Corrupted Gauntlet"
+    assert canonical_encounter_name("Branda the Fire Queen") == "Royal Titans"
+    # Sources disagree on capitalisation/spacing; the rewrite is slug-based.
+    assert canonical_encounter_name("corrupted hunllef") == "The Corrupted Gauntlet"
+    assert canonical_encounter_name("  Crystalline  Hunllef ") == "The Gauntlet"
+    # Non-members and empties pass through untouched.
+    assert canonical_encounter_name("Vorkath") == "Vorkath"
+    assert canonical_encounter_name("The Gauntlet") == "The Gauntlet"
+    assert canonical_encounter_name("") == ""
+    assert canonical_encounter_name(None) is None
+
+
+def test_primary_variants_exclude_alias_spellings():
+    # The tie-break set for "which npc_list row IS this boss": the canonical
+    # spellings only. Crystalline Hunllef (id 9021) sorts below The Gauntlet
+    # (13703) despite the lower id precisely because it is not in here.
+    assert npc_primary_variants("The Gauntlet") == ["gauntlet", "the-gauntlet"]
+    # Resolving FROM the alias name yields the canonical primaries, not its own.
+    assert npc_primary_variants("Crystalline Hunllef") == ["gauntlet", "the-gauntlet"]
+    assert npc_primary_variants("Corrupted Gauntlet") == [
+        "corrupted-gauntlet",
+        "the-corrupted-gauntlet",
+    ]
+    for name in ("The Gauntlet", "Crystalline Hunllef", "Royal Titans"):
+        assert set(npc_primary_variants(name)) < set(npc_match_variants(name))
+    assert npc_primary_variants("") == []
+    assert npc_primary_variants(None) == []
+
+
+def test_primary_rank_sql_expr_shape():
+    expr = npc_primary_rank_sql_expr("n.npc_name")
+    # Canonical spellings sort first (0), aliases after (1).
+    assert expr.startswith("(CASE WHEN ") and "THEN 0 ELSE 1 END)" in expr
+    assert npc_slug_sql_expr("n.npc_name") in expr
+    assert ":primary_variants" in expr
+    assert ":other" in npc_primary_rank_sql_expr("npc_name", param="other")
 
 
 def test_base_slug_strips_mode_suffixes():

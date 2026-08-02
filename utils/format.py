@@ -135,6 +135,14 @@ def get_true_boss_name(npc_name: str):
 
 
 def _lookup_boss_name(session, npc_name: str):
+    # Multi-boss encounters resolve to the encounter row BEFORE the exact-name
+    # lookup: "Crystalline Hunllef" and "Corrupted Hunllef" have npc_list rows
+    # of their own, so an exact match would store Gauntlet PBs on the boss id
+    # while the loot path uses the activity id — the split PB boards the
+    # adventure log kept re-creating.
+    from utils.npc_names import canonical_encounter_name
+
+    npc_name = canonical_encounter_name(npc_name)
     npc = session.query(NpcList).filter(NpcList.npc_name == npc_name).first()
     if npc:
         print("Found an exact match for", npc_name, "in the database:", npc.npc_name, npc.npc_id)
@@ -142,12 +150,18 @@ def _lookup_boss_name(session, npc_name: str):
     else:
         # Normalized match (suggestion #50): same match key ⇒ same boss
         # (spelling, punctuation, "The " article and alias variants like
-        # Crystalline Hunllef → The Gauntlet), preferring the id that already
-        # has tracked data — instead of the ilike guess below.
+        # Crystalline Hunllef → The Gauntlet), preferring the encounter's own
+        # spelling and then the id that already has tracked data — instead of
+        # the prefix guess below.
         from sqlalchemy import bindparam
         from sqlalchemy import text as _text
 
-        from utils.npc_names import npc_match_variants, npc_slug_sql_expr
+        from utils.npc_names import (
+            npc_match_variants,
+            npc_primary_rank_sql_expr,
+            npc_primary_variants,
+            npc_slug_sql_expr,
+        )
 
         variants = npc_match_variants(npc_name)
         if variants:
@@ -157,15 +171,24 @@ def _lookup_boss_name(session, npc_name: str):
                     f"       EXISTS(SELECT 1 FROM player_npc_hourly_totals t "
                     f"              WHERE t.npc_id = n.npc_id) AS tracked "
                     f"FROM npc_list n WHERE {npc_slug_sql_expr('n.npc_name')} IN :variants "
-                    f"ORDER BY tracked DESC, n.npc_id ASC LIMIT 1"
-                ).bindparams(bindparam("variants", expanding=True)),
-                {"variants": variants},
+                    f"ORDER BY {npc_primary_rank_sql_expr('n.npc_name')} ASC, "
+                    f"         tracked DESC, n.npc_id ASC LIMIT 1"
+                ).bindparams(
+                    bindparam("variants", expanding=True),
+                    bindparam("primary_variants", expanding=True),
+                ),
+                {"variants": variants, "primary_variants": npc_primary_variants(npc_name)},
             ).first()
             if row:
                 print("Found a normalized match for", npc_name, "in the database:", row[1], row[0])
                 return row[1], int(row[0])
-        ## Try to find the closest match in the database
-        npc = session.query(NpcList).filter(NpcList.npc_name.ilike(f"%{npc_name}%")).first()
+        ## Try to find a more specific row that EXTENDS this name, e.g.
+        ## "Doom of Mokhaiotl" → "Doom of Mokhaiotl (Level 3)". Anchored to the
+        ## start on purpose: an unanchored "%name%" matched anything merely
+        ## mentioning the boss, so "Wintertodt" resolved to "Reward cart
+        ## (Wintertodt)" and "Hallowed Sepulchre" to "Coffin (Hallowed
+        ## Sepulchre)" — storing kills against scenery instead of the boss.
+        npc = session.query(NpcList).filter(NpcList.npc_name.ilike(f"{npc_name}%")).first()
         if npc:
             print("Found a close match for", npc_name, "in the database:", npc.npc_name, npc.npc_id)
             return npc.npc_name, npc.npc_id

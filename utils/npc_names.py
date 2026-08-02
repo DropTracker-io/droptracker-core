@@ -61,6 +61,20 @@ NPC_ALIASES = {
 ENCOUNTER_NAME_ALIASES = {
     "Branda the Fire Queen": "Royal Titans",
     "Eldric the Ice King": "Royal Titans",
+    # The plugin's chat-PB path names the boss ("Corrupted challenge duration"
+    # -> "Corrupted Hunllef") while its loot path names the activity, and
+    # npc_list carries rows for BOTH — so the exact-name lookup used to store
+    # Gauntlet PBs on the Hunllef npc_ids, splitting every Gauntlet PB board in
+    # two. Mirrors the plugin's own NpcUtilities.canonicalizeSpecialSource.
+    "Corrupted Hunllef": "The Corrupted Gauntlet",
+    "Crystalline Hunllef": "The Gauntlet",
+}
+
+
+#: ``ENCOUNTER_NAME_ALIASES`` keyed by slug, so a source that disagrees on
+#: capitalisation or punctuation ("corrupted hunllef") still folds.
+_ENCOUNTER_ALIASES_BY_SLUG = {
+    npc_slug(member): encounter for member, encounter in ENCOUNTER_NAME_ALIASES.items()
 }
 
 
@@ -71,7 +85,7 @@ def canonical_encounter_name(npc_name: str | None) -> str | None:
     """
     if not npc_name:
         return npc_name
-    return ENCOUNTER_NAME_ALIASES.get(str(npc_name).strip(), npc_name)
+    return _ENCOUNTER_ALIASES_BY_SLUG.get(npc_slug(npc_name), npc_name)
 
 
 def npc_match_key(name_or_slug: str | None) -> str:
@@ -98,6 +112,22 @@ def npc_match_variants(name_or_slug: str | None) -> list[str]:
         if canonical == key:
             variants.extend((alias, f"the-{alias}"))
     return variants
+
+
+def npc_primary_variants(name_or_slug: str | None) -> list[str]:
+    """The slugs a CANONICAL ``npc_list`` row for this boss would carry — the
+    match key and its "the-" article form, with alias spellings excluded.
+
+    Used to break ties in variant lookups: ``npc_match_variants`` deliberately
+    includes alias spellings ("crystalline-hunllef"), and several of those have
+    their own ``npc_list`` rows with LOWER ids than the encounter row, so an
+    ``ORDER BY npc_id`` tie-break lands on the alias ("Gauntlet" resolved to
+    Crystalline Hunllef id 9021 instead of The Gauntlet id 13703).
+    """
+    key = npc_match_key(name_or_slug)
+    if not key:
+        return []
+    return [key, f"the-{key}"]
 
 
 def npc_base_slug(slug: str) -> str | None:
@@ -166,3 +196,17 @@ def npc_slug_sql_expr(column: str) -> str:
     path never imports the web_api package.
     """
     return f"TRIM(BOTH '-' FROM REGEXP_REPLACE(LOWER({column}), '[^a-z0-9]+', '-'))"
+
+
+def npc_primary_rank_sql_expr(column: str, param: str = "primary_variants") -> str:
+    """ORDER BY term sorting canonical spellings of a match key ahead of alias
+    spellings (0 before 1). Bind ``param`` to ``npc_primary_variants(name)``
+    with an expanding ``bindparam``, alongside the ``npc_match_variants`` list
+    the ``IN`` filter uses.
+
+    Must come BEFORE any "prefer the id with tracked data" term: a boss's
+    alias row can pick up stray tracked rows (three misattributed Gauntlet
+    drops were enough to make "Gauntlet" resolve to Crystalline Hunllef), and
+    that must never outvote the encounter's own row.
+    """
+    return f"(CASE WHEN {npc_slug_sql_expr(column)} IN :{param} THEN 0 ELSE 1 END)"

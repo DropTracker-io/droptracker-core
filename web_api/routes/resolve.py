@@ -43,12 +43,13 @@ _MAX_CANDIDATES = 25
 def _resolve_npc(s, slug: str):
     """NPC variants collapse to one primary: duplicate names, spelling
     variants (same slug), "The " article variants and outright aliases
-    (Crystalline Hunllef → The Gauntlet) all resolve to the id that actually
-    has tracked data, then lowest id — so a stray empty variant row never
-    shadows the real page (suggestion #50)."""
+    (Crystalline Hunllef → The Gauntlet) all resolve to the encounter's own
+    spelling first, then the id that actually has tracked data, then lowest
+    id — so neither an alias row nor a stray empty variant row shadows the
+    real page (suggestion #50)."""
     from sqlalchemy import bindparam
 
-    from utils.npc_names import npc_match_variants
+    from utils.npc_names import npc_match_variants, npc_primary_rank_sql_expr, npc_primary_variants
 
     variants = npc_match_variants(slug)
     if not variants:
@@ -60,9 +61,13 @@ def _resolve_npc(s, slug: str):
             f"       EXISTS(SELECT 1 FROM player_npc_hourly_totals t "
             f"              WHERE t.npc_id = npc_list.npc_id) AS tracked "
             f"FROM npc_list WHERE {expr} IN :variants "
-            f"ORDER BY tracked DESC, npc_id ASC LIMIT 1"
-        ).bindparams(bindparam("variants", expanding=True)),
-        {"variants": variants},
+            f"ORDER BY {npc_primary_rank_sql_expr('npc_name')} ASC, "
+            f"         tracked DESC, npc_id ASC LIMIT 1"
+        ).bindparams(
+            bindparam("variants", expanding=True),
+            bindparam("primary_variants", expanding=True),
+        ),
+        {"variants": variants, "primary_variants": npc_primary_variants(slug)},
     ).fetchone()
     if not row:
         return None, []
