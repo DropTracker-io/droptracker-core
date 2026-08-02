@@ -16,7 +16,6 @@ from db.models import GroupConfiguration, Webhook, NewWebhook, Session, WebhookP
 from dotenv import load_dotenv
 import json
 from utils.encrypter import encrypt_webhook, decrypt_webhook
-from utils.plugin_urls import webhook_credentials
 from datetime import datetime, timedelta
 from db.app_logger import AppLogger
 load_dotenv()
@@ -103,15 +102,11 @@ class GithubPagesUpdater:
                     if w.webhook_url
                 ]
             main_encrypted = []
-
+            
             # Try to encrypt each webhook, skipping any that fail
             for url in main_urls:
                 try:
-                    credentials = webhook_credentials(url)
-                    if not credentials:
-                        print("Skipping malformed webhook URL")
-                        continue
-                    encrypted = encrypt_webhook(credentials)
+                    encrypted = encrypt_webhook(url)
                     main_encrypted.append(encrypted)
                 except Exception as e:
                     print(f"Failed to encrypt webhook {url}: {e}")

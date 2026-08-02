@@ -167,3 +167,51 @@ def test_failed_icon_mirror_is_not_retried_immediately():
         assert asyncio.run(group_icon.ensure_group_icon(1, url, session=session)) is False
     assert _Session.calls == 1
     group_icon._recent_failures.clear()
+
+
+# ── old clients must see exactly what they saw before ─────────────────────────
+
+def test_icon_url_is_unchanged_for_existing_clients():
+    """/event_state still emits the same absolute icon_url it always did.
+
+    The internal representation moved to relative paths so the new plugin can be
+    handed icon_path, but plugin versions in the wild read icon_url. If _img_url
+    ever stops reproducing the old "{IMG_BASE}/{rel}" exactly, every icon in
+    every deployed client breaks.
+    """
+    # Loaded from the file path: the conftest stubs the ``services`` package.
+    # Same approach as test_plugin_notifications.py.
+    import importlib.util
+    import os
+    import sys
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    path = os.path.join(root, "services", "plugin_notifications.py")
+    spec = importlib.util.spec_from_file_location("services.plugin_notifications", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["services.plugin_notifications"] = module
+    spec.loader.exec_module(module)
+    IMG_BASE, _img_url = module.IMG_BASE, module._img_url
+
+    assert _img_url("metrics/magic.png") == f"{IMG_BASE}/metrics/magic.png"
+    assert _img_url("npcdb/2215.png") == "https://www.droptracker.io/img/npcdb/2215.png"
+    # A task with no resolvable icon emitted None before and must still do so.
+    assert _img_url(None) is None
+    assert _img_url("") is None
+
+
+def test_group_icon_mirror_never_blocks_the_request():
+    """schedule_group_icon_mirror must not perform the download inline.
+
+    /group_search is served to every plugin version; an awaited fetch would add
+    the download's latency to clients that have no use for the mirror.
+    """
+    import inspect
+
+    from utils.group_icon import schedule_group_icon_mirror
+
+    assert not inspect.iscoroutinefunction(schedule_group_icon_mirror)
+    # Outside an event loop it is a no-op rather than an error.
+    assert schedule_group_icon_mirror(1, "https://cdn.discordapp.com/icons/1/a.png") is None
+    # An already-local icon needs no mirror at all.
+    assert schedule_group_icon_mirror(1, "https://www.droptracker.io/img/clans/1/icon.png") is None

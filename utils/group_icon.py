@@ -147,3 +147,29 @@ async def ensure_group_icon(group_id, icon_url, session=None) -> bool:
 def ensure_group_icon_sync(group_id, icon_url) -> bool:
     """Blocking wrapper around :func:`ensure_group_icon` for non-async callers."""
     return asyncio.run(ensure_group_icon(group_id, icon_url))
+
+
+# Strong references to in-flight mirror tasks. asyncio only holds a weak
+# reference to a running task, so without this the GC can collect one mid-flight.
+_pending: set = set()
+
+
+def schedule_group_icon_mirror(group_id, icon_url) -> None:
+    """Mirror the icon in the background, off the request path.
+
+    /group_search is served to every plugin version, including ones that have no
+    use for the mirror, so it must not wait on a download. The icon appears on
+    the next request instead of this one — the panel loads it asynchronously
+    anyway. Never raises.
+    """
+    if not icon_url or img_relative(icon_url):
+        return
+    try:
+        if os.path.exists(icon_mirror_path(group_id)):
+            return
+        task = asyncio.get_running_loop().create_task(
+            ensure_group_icon(group_id, icon_url))
+        _pending.add(task)
+        task.add_done_callback(_pending.discard)
+    except Exception:
+        pass

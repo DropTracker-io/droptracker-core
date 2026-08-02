@@ -241,9 +241,14 @@ async def group_search():
         final_submission_data = await assemble_submission_data(group_recent_submissions, db_session)
         # The plugin can only load images from our own host, so a Discord-hosted
         # icon has to be mirrored locally before we can hand out a path for it.
-        # See utils/group_icon.py.
-        from utils.group_icon import discord_invite_code, ensure_group_icon, icon_relative_path
-        await ensure_group_icon(group.group_id, group.icon_url)
+        # Scheduled, not awaited: this endpoint serves every plugin version and
+        # must not wait on a download. See utils/group_icon.py.
+        from utils.group_icon import (
+            discord_invite_code,
+            icon_relative_path,
+            schedule_group_icon_mirror,
+        )
+        schedule_group_icon_mirror(group.group_id, group.icon_url)
         return jsonify({
             "group_name": group.group_name,
             "group_description": group.description,
