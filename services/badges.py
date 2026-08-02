@@ -102,12 +102,17 @@ def award_badge(
         awarded_by=awarded_by,
         context=json.dumps(context) if context else None,
     )
-    session.add(award)
     try:
-        session.flush()
+        # SAVEPOINT, not a bare rollback: this session belongs to the CALLER,
+        # which stages a whole batch and commits once at the end. Rolling the
+        # session back to discard one lost race threw away every award already
+        # staged (and anything else in that transaction) while the loop kept
+        # counting them as successes. Same shape as event_engine's ledger insert.
+        with session.begin_nested():
+            session.add(award)
+            session.flush()
     except IntegrityError:
         # Lost a race on the unique index — someone else awarded the slot.
-        session.rollback()
         return None
     return award
 
@@ -161,11 +166,13 @@ def transfer_held_badge(
         active_key=slot_key,
         context=ctx_json,
     )
-    session.add(award)
     try:
-        session.flush()
+        # SAVEPOINT for the same reason as award_badge: a lost race here must
+        # not discard the caller's staged batch.
+        with session.begin_nested():
+            session.add(award)
+            session.flush()
     except IntegrityError:
-        session.rollback()
         return "retained"
     return outcome
 

@@ -19,11 +19,21 @@ Behavioral contract (mirrors ``UserCommands.claim_rsn_command``):
 The functions are context free: they accept plain primitives (Discord ids as
 strings) so they can run inside the Quart web_api process without importing
 the Discord bot stack. All mutations run on the global scoped ``session`` and
-end in commit-or-rollback (the web_api's per-request teardown is the safety
-net, but no function here leaves a transaction open on purpose).
+end in commit-or-rollback.
+
+The web_api's per-request teardown is NOT the safety net it looks like: these
+run inside ``asyncio.to_thread``, so the scoped session they touch belongs to
+the *worker thread*, while ``teardown_appcontext`` calls ``remove()`` on the
+event-loop thread — a different thread-local slot entirely. Every early return
+that only read (``not_found``, ``already_yours``, ``claimed_by_other``) would
+therefore strand an autobegun read transaction, holding its connection open
+for the life of the process. The public entry points are wrapped in
+``_release_scoped_session`` so cleanup happens on the thread that did the work,
+the same shape as ``services.points._autoclean_scoped_session``.
 """
 from __future__ import annotations
 
+import functools
 from datetime import datetime
 from typing import Optional, TypedDict
 
@@ -37,6 +47,30 @@ from db.models import (
     session,
 )
 from utils.format import get_player_by_claim_rsn, normalize_claim_rsn_input
+
+def _release_scoped_session(fn):
+    """``session.remove()`` in a finally, on the calling thread.
+
+    See the module docstring: these entry points run under
+    ``asyncio.to_thread``, so nothing else will ever clean up the thread-local
+    scoped session they used.
+
+    ONLY for outermost entry points. ``remove()`` discards the whole session,
+    so decorating a helper that runs inside another one's transaction (e.g.
+    ``ensure_user_provisioned``, called by ``claim_player``) would drop the
+    caller's work halfway through.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            try:
+                session.remove()
+            except Exception:
+                pass
+    return wrapper
+
 
 # Template user whose configuration rows are cloned when a user account has no
 # config rows yet (mirrors ``try_create_user`` / ``group_creation``).
@@ -196,6 +230,7 @@ def _player_claim_facts(player: Player) -> dict:
     }
 
 
+@_release_scoped_session
 def preview_claim(
     rsn: str, *, discord_id: Optional[str] = None, guild_id=None
 ) -> ClaimResult:
@@ -229,6 +264,7 @@ def preview_claim(
     return result
 
 
+@_release_scoped_session
 def claim_player(
     rsn: str,
     *,
@@ -283,6 +319,7 @@ def claim_player(
     return result
 
 
+@_release_scoped_session
 def unclaim_player(
     *,
     discord_id: str,
