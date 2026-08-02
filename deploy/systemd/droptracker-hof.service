@@ -17,7 +17,7 @@ WorkingDirectory=/store/droptracker/disc
 ExecStart=/store/droptracker/disc/venv/bin/python -m bots.hall_of_fame
 
 # Automatically restart the service if it fails
-Restart=on-failure
+Restart=always
 # Wait 5 seconds before restarting
 RestartSec=5
 

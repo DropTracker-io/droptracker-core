@@ -7,7 +7,7 @@ Environment=PYTHONUNBUFFERED=1
 User=user
 WorkingDirectory=/store/droptracker/disc
 ExecStart=/store/droptracker/disc/venv/bin/python -u /store/droptracker/disc/venv/bin/hypercorn --workers 6 --worker-class asyncio --keep-alive 2 --graceful-timeout 30 --max-requests 1000 --max-requests-jitter 200 --bind 127.0.0.1:31323 "api:create_app()"
-Restart=on-failure
+Restart=always
 RestartSec=5
 TimeoutStopSec=30
 Type=simple

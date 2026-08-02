@@ -15,7 +15,7 @@ Environment=XENFORO_DB_POOL_SIZE=1
 Environment=XENFORO_DB_MAX_OVERFLOW=0
 Environment=XENFORO_DB_POOL_TIMEOUT=5
 ExecStart=/store/droptracker/disc/venv/bin/hypercorn --workers 4 --worker-class asyncio --keep-alive 2 --graceful-timeout 20 --max-requests 500 --max-requests-jitter 100 --bind 127.0.0.1:31324 "api:create_app()"
-Restart=on-failure
+Restart=always
 RestartSec=5
 TimeoutStopSec=30
 Type=simple
