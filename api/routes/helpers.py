@@ -4,6 +4,27 @@ from utils.format import convert_from_ms, format_number
 from api.core import get_db_session
 from db import Player, PersonalBestEntry, NpcList, Drop, ItemList, CollectionLogEntry
 
+# On-disk root for everything served under https://www.droptracker.io/img/
+IMG_ROOT = "/store/droptracker/disc/static/assets/img/"
+
+
+def _img_path(stored_path):
+    """Relative path under /img/ for a stored screenshot, or None.
+
+    The RuneLite plugin is not allowed to take URLs from API responses (Plugin
+    Hub rule: every host it contacts must be hardcoded), so submissions carry the
+    path and the plugin anchors it onto its own base. Absolute *_url keys are
+    still emitted alongside for plugin versions predating that change.
+    """
+    if not stored_path:
+        return None
+    value = str(stored_path)
+    if value.startswith(IMG_ROOT):
+        return value[len(IMG_ROOT):]
+    if value.startswith("static/assets/img/"):
+        return value[len("static/assets/img/"):]
+    return None
+
 
 async def assemble_submission_data(submissions, db_session=None):
     local_session_created = False
@@ -42,11 +63,15 @@ async def assemble_submission_data(submissions, db_session=None):
                     npc = db_session.query(NpcList).filter(NpcList.npc_id == pb_entry.npc_id).first()
                     submission_data["display_name"] = "Personal Best: " + convert_from_ms(raw_best_time)
                     submission_data["image_url"] = f"https://www.droptracker.io/img/npcdb/{pb_entry.npc_id}.png"
+                    submission_data["image_path"] = f"npcdb/{pb_entry.npc_id}.png"
                     submission_data["source_name"] = npc.npc_name
                     if pb_entry.image_url:
                         submission_img_url = str(pb_entry.image_url)
                         submission_data["submission_image_url"] = submission_img_url.replace("/store/droptracker/disc/static/assets/img/", "https://www.droptracker.io/img/")
                         submission_data["submission_image_url"] = quote(submission_data["submission_image_url"], safe=':/?#[]@!$&\'()*+,;=')
+                        relative = _img_path(pb_entry.image_url)
+                        if relative:
+                            submission_data["submission_image_path"] = relative
                     submission_data["data"] = [
                         {
                             "type": "best_time",
@@ -62,6 +87,7 @@ async def assemble_submission_data(submissions, db_session=None):
                     drop_entry: Drop = db_session.query(Drop).filter(Drop.drop_id == submission.drop_id).first()
                     item = db_session.query(ItemList).filter(ItemList.item_id == drop_entry.item_id).first()
                     submission_data["image_url"] = f"https://www.droptracker.io/img/itemdb/{item.item_id}.png"
+                    submission_data["image_path"] = f"itemdb/{item.item_id}.png"
                     npc = db_session.query(NpcList).filter(NpcList.npc_id == drop_entry.npc_id).first()
                     submission_data["source_name"] = npc.npc_name
                     submission_data["display_name"] = f"{item.item_name}"
@@ -71,6 +97,9 @@ async def assemble_submission_data(submissions, db_session=None):
                         submission_img_url = str(drop_entry.image_url)
                         submission_data["submission_image_url"] = submission_img_url.replace("/store/droptracker/disc/static/assets/img/", "https://www.droptracker.io/img/")
                         submission_data["submission_image_url"] = quote(submission_data["submission_image_url"], safe=':/?#[]@!$&\'()*+,;=')
+                        relative = _img_path(drop_entry.image_url)
+                        if relative:
+                            submission_data["submission_image_path"] = relative
                     submission_data["data"] = [
                         {
                             "type": "item",
@@ -87,12 +116,16 @@ async def assemble_submission_data(submissions, db_session=None):
                     clog_entry: CollectionLogEntry = db_session.query(CollectionLogEntry).filter(CollectionLogEntry.log_id == submission.clog_id).first()
                     item = db_session.query(ItemList).filter(ItemList.item_id == clog_entry.item_id).first()
                     submission_data["image_url"] = f"https://www.droptracker.io/img/itemdb/{item.item_id}.png"
+                    submission_data["image_path"] = f"itemdb/{item.item_id}.png"
                     submission_data["source_name"] = item.item_name
                     submission_data["display_name"] = f"{item.item_name}"
                     if clog_entry.image_url:
                         submission_img_url = str(clog_entry.image_url)
                         submission_data["submission_image_url"] = submission_img_url.replace("/store/droptracker/disc/static/assets/img/", "https://www.droptracker.io/img/")
                         submission_data["submission_image_url"] = quote(submission_data["submission_image_url"], safe=':/?#[]@!$&\'()*+,;=')
+                        relative = _img_path(clog_entry.image_url)
+                        if relative:
+                            submission_data["submission_image_path"] = relative
                     submission_data["data"] = [
                         {
                             "type": "clog_item",
