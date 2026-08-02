@@ -100,15 +100,20 @@ class User(Base):
             group (Group): The Group object to associate with this user
             
         Note:
-            This method commits the session automatically if a new association is created.
+            This method commits the session automatically if a new association is
+            created, on the session THIS INSTANCE is attached to (see
+            ``Player.add_group`` for why that matters).
         """
+        from sqlalchemy.orm import object_session
+
+        sess = object_session(self) or session
         # Check if the association already exists by querying the user_group_association table
-        existing_association = session.query(user_group_association).filter_by(
+        existing_association = sess.query(user_group_association).filter_by(
             user_id=self.user_id, group_id=group.group_id).first()
 
         if not existing_association:
             # Only add the group if no association exists
             self.groups.append(group)
-            session.commit()
+            sess.commit()
 
 

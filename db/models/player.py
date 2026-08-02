@@ -106,9 +106,17 @@ class Player(Base):
             
         Note:
             This method commits the session automatically if a new association is created.
+            The session used is the one THIS INSTANCE is attached to — reading and
+            committing on the module-global scoped session while ``self`` belonged
+            to another session meant the check ran against a different transaction
+            than the append, and the commit landed on a session the caller did not
+            own.
         """
+        from sqlalchemy.orm import object_session
+
+        sess = object_session(self) or session
         # Check if the association already exists by querying the user_group_association table
-        existing_association = session.query(user_group_association).filter_by(
+        existing_association = sess.query(user_group_association).filter_by(
             player_id=self.player_id, group_id=group.group_id).first()
         if self.user:
             tuser = self.user
@@ -116,7 +124,7 @@ class Player(Base):
         if not existing_association:
             # Only add the group if no association exists
             self.groups.append(group)
-            session.commit()
+            sess.commit()
 
     def remove_group(self, group):
         """

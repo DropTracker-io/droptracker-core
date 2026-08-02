@@ -83,8 +83,10 @@ boundary AND epoch < boundary`, snapshotted INSIDE the write transaction — onc
 moved, a re-run finds nothing (any stragglers that trickled in are picked up by
 simply running again). The Redis player phase converges to DB truth; the
 NPC-board reversal is replayed from the plan file on --resume and guarded by a
-sentinel key (fix:month_boundary:{boundary}:npc_boards) so it cannot
-double-apply.
+two-phase sentinel key (fix:month_boundary:{boundary}:npc_boards, written
+`{plan}:running` before the work and `{plan}:done` after it) so it cannot
+double-apply — and so a run that died mid-phase is reported instead of being
+mistaken for a completed one, since ZINCRBY cannot be safely replayed.
 """
 from __future__ import annotations
 
@@ -432,9 +434,28 @@ def apply_npc_boards(conn_r, boundary: datetime, npc_pg: dict, npc_group: dict,
     from services.redis_updates import RedisLootTracker
 
     ttl = RedisLootTracker._NPC_MONTH_TTL
-    if not conn_r.set(sentinel_key(boundary), plan_id, nx=True):
-        holder = conn_r.get(sentinel_key(boundary))
-        print(f"  npc boards: already applied by plan {holder!r} — skipping")
+    # Two-phase sentinel. ZINCRBY is NOT idempotent, so the sentinel has to
+    # distinguish "someone finished this" from "someone started it and died":
+    # a single claim written before the work made a crash mid-phase look
+    # identical to a completed run, and --resume then skipped it, leaving the
+    # boards permanently half-corrected with nothing to say so.
+    key = sentinel_key(boundary)
+    holder = conn_r.get(key)
+    if holder is not None:
+        holder = holder.decode() if isinstance(holder, (bytes, bytearray)) else str(holder)
+        if holder.endswith(":done"):
+            print(f"  npc boards: already applied by plan {holder!r} — skipping")
+            return 0
+        # Started but never finished. Re-running would re-apply whatever part
+        # did land, so this needs a human, not a retry.
+        raise SystemExit(
+            f"npc boards: plan {holder!r} started this phase and did not finish.\n"
+            f"  The per-NPC increments are not replayable, so this run refuses to\n"
+            f"  touch them. Rebuild the affected boards from the DB, or clear\n"
+            f"  the sentinel ({key}) once you have decided what state they are in."
+        )
+    if not conn_r.set(key, f"{plan_id}:running", nx=True):
+        print("  npc boards: another run claimed this phase concurrently — skipping")
         return 0
 
     ops = 0
@@ -462,6 +483,9 @@ def apply_npc_boards(conn_r, boundary: datetime, npc_pg: dict, npc_group: dict,
         conn_r.zremrangebyscore(f"leaderboard:npc:{npc_id}:{cur_part}", "-inf", 0)
     for (npc_id, _pid, gid) in list(npc_group):
         conn_r.zremrangebyscore(f"leaderboard:group:{gid}:npc:{npc_id}:{cur_part}", "-inf", 0)
+
+    # Only now is the phase genuinely complete.
+    conn_r.set(key, f"{plan_id}:done")
     return ops
 
 

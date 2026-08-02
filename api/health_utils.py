@@ -45,25 +45,31 @@ async def health_check(app, include_request_test: bool = True) -> bool:
         return False
 
 
+def _probe_database() -> bool:
+    """Open, query and close in ONE thread.
+
+    Previously the open, the query and the close were three separate awaits:
+    ``wait_for`` cancels the AWAIT, not the worker thread, so on a timeout the
+    event loop ran ``close()`` on a Session another thread was still executing
+    a statement on. Session and Connection are not thread-safe, and the failure
+    mode is corruption of a pooled connection — from the health check, which is
+    supposed to be the harmless part of the system.
+    """
+    test_session = None
+    try:
+        test_session = get_db_session()
+        return test_session.execute(text("SELECT 1")).scalar() == 1
+    finally:
+        if test_session:
+            try:
+                test_session.close()
+            except Exception:
+                pass
+
+
 async def test_database_connectivity() -> bool:
     try:
-        test_session = None
-        try:
-            test_session = await asyncio.wait_for(
-                asyncio.to_thread(get_db_session),
-                timeout=5.0,
-            )
-            result = await asyncio.wait_for(
-                asyncio.to_thread(lambda: test_session.execute(text("SELECT 1")).scalar()),
-                timeout=3.0,
-            )
-            return result == 1
-        finally:
-            if test_session:
-                try:
-                    test_session.close()
-                except Exception:
-                    pass
+        return await asyncio.wait_for(asyncio.to_thread(_probe_database), timeout=8.0)
     except asyncio.TimeoutError:
         print("Database connectivity test timed out")
         return False
@@ -124,26 +130,15 @@ async def health_check_lightweight() -> dict:
     if not metrics:
         overall_healthy = False
 
-    # DB check
+    # DB check — one thread for open+query+close, so a timeout can never leave
+    # the event loop closing a Session a worker is still using (see
+    # _probe_database).
     try:
-        db_session = await asyncio.wait_for(
-            asyncio.to_thread(get_db_session),
-            timeout=2.0,
-        )
-        try:
-            await asyncio.wait_for(
-                asyncio.to_thread(lambda: db_session.execute(text("SELECT 1")).scalar()),
-                timeout=1.0,
-            )
+        if await asyncio.wait_for(asyncio.to_thread(_probe_database), timeout=3.0):
             checks["database"] = {"status": "healthy"}
-        except Exception:
+        else:
             checks["database"] = {"status": "unhealthy"}
             overall_healthy = False
-        finally:
-            try:
-                db_session.close()
-            except Exception:
-                pass
     except Exception:
         checks["database"] = {"status": "unhealthy"}
         overall_healthy = False

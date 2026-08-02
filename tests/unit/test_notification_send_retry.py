@@ -119,6 +119,13 @@ class TestTransientClassification:
         )
         assert ns.NotificationService._is_transient_send_error(asyncio.TimeoutError())
 
+    def test_an_abandoned_send_is_transient(self):
+        # channel.send returning None (library gave up on 429s) is surfaced as
+        # SendRateLimited so the row is requeued rather than marked delivered.
+        assert ns.NotificationService._is_transient_send_error(
+            ns.SendRateLimited("gave up")
+        )
+
     def test_arbitrary_bugs_are_permanent(self):
         assert not ns.NotificationService._is_transient_send_error(
             AttributeError("'str' object has no attribute 'status'")
@@ -162,3 +169,37 @@ class TestRetryBound:
 
         monkeypatch.setattr(ns.redis_client.client, "incr", _boom)
         assert not service._should_retry_send(7, _http_error(RateLimited, 429))
+
+
+class TestSendWrapper:
+    """`_send` is the single place that decides a send actually happened."""
+
+    @pytest.fixture()
+    def service(self):
+        return ns.NotificationService.__new__(ns.NotificationService)
+
+    async def test_a_real_message_is_returned(self, service):
+        sentinel = object()
+
+        async def send(*a, **k):
+            return sentinel
+
+        assert await service._send(SimpleNamespace(send=send), "hi") is sentinel
+
+    async def test_none_raises_instead_of_reporting_success(self, service):
+        async def send(*a, **k):
+            return None
+
+        with pytest.raises(ns.SendRateLimited):
+            await service._send(SimpleNamespace(send=send), "hi")
+
+    async def test_arguments_are_passed_through_untouched(self, service):
+        seen = {}
+
+        async def send(*a, **k):
+            seen["args"], seen["kwargs"] = a, k
+            return object()
+
+        await service._send(SimpleNamespace(send=send), "content", embed="E", files="F")
+        assert seen["args"] == ("content",)
+        assert seen["kwargs"] == {"embed": "E", "files": "F"}

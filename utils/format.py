@@ -118,9 +118,23 @@ def get_true_boss_name(npc_name: str):
     """
         Returns the name of the NPC we are storing in the database for a given npc name passed;
         generally coming from an adventure log message.
+
+        Runs on its OWN short-lived session. These are pure reads, but a read
+        on the module-global scoped session autobegins a transaction that this
+        function never ends — and its caller (adventure_log) runs inside the
+        long-lived webhook consumer, whose only scoped-session cleanup is gated
+        on the worker being idle and fires at most once a minute. Each lookup
+        therefore pinned a pooled connection with an idle transaction.
     """
+    from db.models.base import Session
+
     if npc_name == "Theatre of Blood Hard Mode":
         npc_name = "Theatre of Blood: Hard Mode"
+    with Session() as session:
+        return _lookup_boss_name(session, npc_name)
+
+
+def _lookup_boss_name(session, npc_name: str):
     npc = session.query(NpcList).filter(NpcList.npc_name == npc_name).first()
     if npc:
         print("Found an exact match for", npc_name, "in the database:", npc.npc_name, npc.npc_id)

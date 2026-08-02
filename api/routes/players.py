@@ -366,14 +366,17 @@ def _group_configs_for(player_name, acc_hash, db_session):
         )
     if not player:
         return None
-    if (
-        player.player_name
-        and player.player_name != player_name
-        and player.account_hash == acc_hash
-    ):
-        # Keep the display name current when identity is already verified by account hash.
-        player.player_name = player_name
-        db_session.commit()
+    # NO RENAME HERE. This is an unauthenticated GET whose player_name comes
+    # straight off the query string, so writing it onto the row let anyone
+    # holding a valid acc_hash (their own) relabel their player as any RSN they
+    # liked — and it stuck, because the submission fast path
+    # (ensure_player_and_auth) skips WOM precisely when the hash hits and the
+    # stored name already equals the submitted one. The impostor row then shows
+    # under the victim's name on leaderboards, profiles and drop embeds.
+    #
+    # A genuine RSN change needs no help from this endpoint: the names differ on
+    # the next submission, which drops out of the fast path into the
+    # WOM-authoritative lookup and renames the row to WOM's canonical spelling.
     player_gids = db_session.execute(text("SELECT group_id FROM user_group_association WHERE player_id = :player_id"), {"player_id": player.player_id}).all()
 
     # Events v2: advertise whether an active event with XP-based tasks

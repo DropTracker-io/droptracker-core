@@ -80,6 +80,14 @@ SUBMISSION_DM_TYPES = frozenset({
 
 # Removed global tracking dictionaries - now using database-based tracking via NotifiedSubmission table
 
+class SendRateLimited(Exception):
+    """A Discord send that the library abandoned after exhausting 429 retries.
+
+    Distinct type so the queue's transient classifier can requeue it rather
+    than dead-lettering a message that was never delivered.
+    """
+
+
 class NotificationService:
     def __init__(self, bot: interactions.Client, db_ops: DatabaseOperations):
         self.bot = bot
@@ -415,6 +423,25 @@ class NotificationService:
         if candidate != root and not candidate.startswith(root + os.sep):
             return None
         return candidate if os.path.exists(candidate) else None
+
+    async def _send(self, channel, *args, **kwargs):
+        """``channel.send`` that refuses to lie about having sent something.
+
+        interactions' HTTP client gives up after 3 consecutive 429s and returns
+        None instead of raising, so every bare ``channel.send(...)`` in this
+        module could report success for a message nobody received — and the
+        queue row was then marked 'sent' and never retried. Raising
+        ``SendRateLimited`` (which ``_is_transient_send_error`` classes as
+        transient) hands it to the existing bounded requeue instead.
+
+        This is the ONE place allowed to call ``channel.send`` directly.
+        """
+        result = await channel.send(*args, **kwargs)
+        if result is None:
+            raise SendRateLimited(
+                "channel.send returned None — the library exhausted its 429 retries"
+            )
+        return result
 
     @classmethod
     def _remote_image_allowed(cls, image_url: str) -> bool:
@@ -851,6 +878,8 @@ class NotificationService:
         from interactions.client.errors import (
             BadRequest, Forbidden, HTTPException, NotFound, RateLimited,
         )
+        if isinstance(exc, SendRateLimited):
+            return True
         if isinstance(exc, (Forbidden, NotFound, BadRequest)):
             return False
         if isinstance(exc, RateLimited):
@@ -1200,13 +1229,13 @@ class NotificationService:
                     local_path = self.hosted_image_path(image_url)
                     if local_path:
                         attachment = interactions.File(local_path)
-                        await channel.send(content, embed=embed, files=attachment)
+                        await self._send(channel, content, embed=embed, files=attachment)
                     else:
-                        await channel.send(content, embed=embed)
+                        await self._send(channel, content, embed=embed)
                 except Exception:
-                    await channel.send(content, embed=embed)
+                    await self._send(channel, content, embed=embed)
             else:
-                await channel.send(content, embed=embed)
+                await self._send(channel, content, embed=embed)
 
             notification.status = 'sent'
             notification.processed_at = datetime.now()
@@ -1309,13 +1338,13 @@ class NotificationService:
                     local_path = self.hosted_image_path(image_url)
                     if local_path:
                         attachment = interactions.File(local_path)
-                        await channel.send(content, embed=embed, files=attachment)
+                        await self._send(channel, content, embed=embed, files=attachment)
                     else:
-                        await channel.send(content, embed=embed)
+                        await self._send(channel, content, embed=embed)
                 except Exception:
-                    await channel.send(content, embed=embed)
+                    await self._send(channel, content, embed=embed)
             else:
-                await channel.send(content, embed=embed)
+                await self._send(channel, content, embed=embed)
 
             notification.status = 'sent'
             notification.processed_at = datetime.now()
@@ -1409,20 +1438,20 @@ class NotificationService:
 
             try:
                 if video_attachment:
-                    await channel.send(content, embed=embed, files=video_attachment)
+                    await self._send(channel, content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
                         # Resolved + containment-checked: image_url is attacker-influenced.
                         local_path = self.hosted_image_path(image_url)
                         if local_path:
                             attachment = interactions.File(local_path)
-                            await channel.send(content, embed=embed, files=attachment)
+                            await self._send(channel, content, embed=embed, files=attachment)
                         else:
-                            await channel.send(content, embed=embed)
+                            await self._send(channel, content, embed=embed)
                     except Exception:
-                        await channel.send(content, embed=embed)
+                        await self._send(channel, content, embed=embed)
                 else:
-                    await channel.send(content, embed=embed)
+                    await self._send(channel, content, embed=embed)
             finally:
                 if video_local_path:
                     try:
@@ -1522,20 +1551,20 @@ class NotificationService:
 
             try:
                 if video_attachment:
-                    await channel.send(content, embed=embed, files=video_attachment)
+                    await self._send(channel, content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
                         # Resolved + containment-checked: image_url is attacker-influenced.
                         local_path = self.hosted_image_path(image_url)
                         if local_path:
                             attachment = interactions.File(local_path)
-                            await channel.send(content, embed=embed, files=attachment)
+                            await self._send(channel, content, embed=embed, files=attachment)
                         else:
-                            await channel.send(content, embed=embed)
+                            await self._send(channel, content, embed=embed)
                     except Exception:
-                        await channel.send(content, embed=embed)
+                        await self._send(channel, content, embed=embed)
                 else:
-                    await channel.send(content, embed=embed)
+                    await self._send(channel, content, embed=embed)
             finally:
                 if video_local_path:
                     try:
@@ -1633,20 +1662,20 @@ class NotificationService:
 
             try:
                 if video_attachment:
-                    await channel.send(content, embed=embed, files=video_attachment)
+                    await self._send(channel, content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
                         # Resolved + containment-checked: image_url is attacker-influenced.
                         local_path = self.hosted_image_path(image_url)
                         if local_path:
                             attachment = interactions.File(local_path)
-                            await channel.send(content, embed=embed, files=attachment)
+                            await self._send(channel, content, embed=embed, files=attachment)
                         else:
-                            await channel.send(content, embed=embed)
+                            await self._send(channel, content, embed=embed)
                     except Exception:
-                        await channel.send(content, embed=embed)
+                        await self._send(channel, content, embed=embed)
                 else:
-                    await channel.send(content, embed=embed)
+                    await self._send(channel, content, embed=embed)
             finally:
                 if video_local_path:
                     try:
@@ -1677,7 +1706,7 @@ class NotificationService:
                 updates = ["- " + update + "\n" for update in updates]
                 text = f"### A new update log has been published:\n\n"
                 text += f"".join(updates)
-                await channel.send(text)
+                await self._send(channel, text)
                 notification.status = 'sent'
                 notification.processed_at = datetime.now()
                 db_session.commit()
@@ -2073,9 +2102,9 @@ class NotificationService:
                     )
                     send_kwargs = {"files": image_attachment} if image_attachment else {}
                     if allowed:
-                        return await channel.send(components=components,
+                        return await self._send(channel, components=components,
                                                   allowed_mentions=allowed, **send_kwargs)
-                    return await channel.send(components=components, **send_kwargs)
+                    return await self._send(channel, components=components, **send_kwargs)
                 except interactions.errors.Forbidden:
                     raise
                 except Exception as render_error:
@@ -2091,9 +2120,9 @@ class NotificationService:
                     if image_attachment:
                         send_kwargs["files"] = image_attachment
                     if ping_text:
-                        return await channel.send(content=ping_text, embed=embed,
+                        return await self._send(channel, content=ping_text, embed=embed,
                                                   allowed_mentions=allowed, **send_kwargs)
-                    return await channel.send(embed=embed, **send_kwargs)
+                    return await self._send(channel, embed=embed, **send_kwargs)
 
             # Deliver to every destination; per-group events keep going when
             # one clan's channel is broken (their misconfig must not silence
@@ -2121,12 +2150,6 @@ class NotificationService:
                     else:
                         dest_ping = None
                     sent_message = await _send_to(channel, dest_ping)
-                    if sent_message is None:
-                        # interactions' HTTP client returns None instead of
-                        # raising once it has burned its 429 retries, so a
-                        # message nobody received would otherwise be counted
-                        # as delivered.
-                        raise RuntimeError("send returned None (rate limited)")
                     sent_count += 1
                     # Remember the sign-up prompt so the bot can come back and
                     # retire its button when sign-ups close (web70a) — without
@@ -2299,7 +2322,7 @@ class NotificationService:
                                     await guild_member.remove_role(role=premium_role)
                     if channel and group_embed:
                         try:
-                            await channel.send(embed=group_embed)
+                            await self._send(channel, embed=group_embed)
                             notification.status = 'sent'
                             notification.processed_at = datetime.now()
                         except Exception as e:
@@ -2477,7 +2500,7 @@ class NotificationService:
             try:
                 channel = await self.bot.fetch_channel(CONTRIBUTION_CHANNEL_ID)
                 if channel:
-                    await channel.send(embed=global_embed)
+                    await self._send(channel, embed=global_embed)
                     sent_any = True
             except Exception as e:
                 errors.append(f"global channel: {e}")
@@ -2603,7 +2626,7 @@ class NotificationService:
                 try:
                     channel = await self.bot.fetch_channel(CONTRIBUTION_CHANNEL_ID)
                     if channel:
-                        await channel.send(
+                        await self._send(channel, 
                             nitro_attribution.nitro_boost_announcement_text(f"<@{discord_id}>", context)
                         )
                         sent_any = True
@@ -2651,7 +2674,7 @@ class NotificationService:
                 try:
                     channel = await self.bot.fetch_channel(CONTRIBUTION_CHANNEL_ID)
                     if channel:
-                        await channel.send(embeds=embeds)
+                        await self._send(channel, embeds=embeds)
                         sent = True
                 except Exception as e:
                     error = f"contributors channel: {e}"
@@ -2894,11 +2917,11 @@ class NotificationService:
 
             try:
                 if video_attachment:
-                    message = await channel.send(content, embed=embed, files=video_attachment)
+                    message = await self._send(channel, content, embed=embed, files=video_attachment)
                 elif attachment:
-                    message = await channel.send(content, embed=embed, files=attachment)
+                    message = await self._send(channel, content, embed=embed, files=attachment)
                 else:
-                    message = await channel.send(content, embed=embed)
+                    message = await self._send(channel, content, embed=embed)
             finally:
                 if video_local_path:
                     try:
@@ -2910,13 +2933,6 @@ class NotificationService:
                         os.remove(image_temp_path)
                     except Exception:
                         pass
-
-            if message is None:
-                # interactions' HTTP client gives up after 3 consecutive 429s
-                # and returns None rather than raising. Marking the row 'sent'
-                # here retired a drop nobody ever saw AND skipped its
-                # NotifiedSubmission below, so it could never be found again.
-                raise RuntimeError("drop send returned None (rate limited)")
 
             # Mark as sent
             await self._cleanup_processed_local_video_after_send(db_session, data)
@@ -3405,20 +3421,20 @@ class NotificationService:
 
             try:
                 if video_attachment:
-                    message = await channel.send(content, embed=embed, files=video_attachment)
+                    message = await self._send(channel, content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
                         # Resolved + containment-checked: image_url is attacker-influenced.
                         local_path = self.hosted_image_path(image_url)
                         if local_path:
                             attachment = interactions.File(local_path)
-                            message = await channel.send(content, embed=embed, files=attachment)
+                            message = await self._send(channel, content, embed=embed, files=attachment)
                         else:
-                            message = await channel.send(content, embed=embed)
+                            message = await self._send(channel, content, embed=embed)
                     except Exception:
-                        message = await channel.send(content, embed=embed)
+                        message = await self._send(channel, content, embed=embed)
                 else:
-                    message = await channel.send(content, embed=embed)
+                    message = await self._send(channel, content, embed=embed)
             finally:
                 if video_local_path:
                     try:
@@ -3516,20 +3532,20 @@ class NotificationService:
 
                 try:
                     if video_attachment:
-                        message = await channel.send(content, embed=embed, files=video_attachment)
+                        message = await self._send(channel, content, embed=embed, files=video_attachment)
                     elif image_url:
                         try:
                             # Resolved + containment-checked: image_url is attacker-influenced.
                             local_path = self.hosted_image_path(image_url)
                             if local_path:
                                 attachment = interactions.File(local_path)
-                                message = await channel.send(content, embed=embed, files=attachment)
+                                message = await self._send(channel, content, embed=embed, files=attachment)
                             else:
-                                message = await channel.send(content, embed=embed)
+                                message = await self._send(channel, content, embed=embed)
                         except Exception:
-                            message = await channel.send(content, embed=embed)
+                            message = await self._send(channel, content, embed=embed)
                     else:
-                        message = await channel.send(content, embed=embed)
+                        message = await self._send(channel, content, embed=embed)
                 finally:
                     if video_local_path:
                         try:
@@ -3694,21 +3710,21 @@ class NotificationService:
                     local_path = self.hosted_image_path(image_url)
                     if local_path:
                         attachment = interactions.File(local_path)
-                        message = await channel.send(content, embed=embed, files=attachment)
+                        message = await self._send(channel, content, embed=embed, files=attachment)
                     else:
                         #print(f"Debug - CA image file not found at: {local_path}")
-                        message = await channel.send(content, embed=embed)
+                        message = await self._send(channel, content, embed=embed)
                 except Exception as e:
                     #print(f"Debug - Error loading CA attachment: {e}")
-                    message = await channel.send(content, embed=embed)
+                    message = await self._send(channel, content, embed=embed)
             else:
-                message = await channel.send(content, embed=embed)
+                message = await self._send(channel, content, embed=embed)
             # Prefer attaching MP4 if available (Discord renders as native video)
             if video_url:
                 video_attachment, video_local_path = await self._download_video_attachment(video_url, notification.id)
                 if video_attachment:
                     try:
-                        message = await channel.send(content, embed=embed, files=video_attachment)
+                        message = await self._send(channel, content, embed=embed, files=video_attachment)
                     finally:
                         if video_local_path:
                             try:
@@ -3838,22 +3854,22 @@ class NotificationService:
 
             try:
                 if video_attachment:
-                    message = await channel.send(content, embed=embed, files=video_attachment)
+                    message = await self._send(channel, content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
                         # Resolved + containment-checked: image_url is attacker-influenced.
                         local_path = self.hosted_image_path(image_url)
                         if local_path:
                             attachment = interactions.File(local_path)
-                            message = await channel.send(content, embed=embed, files=attachment)
+                            message = await self._send(channel, content, embed=embed, files=attachment)
                         else:
                             print(f"Debug - Collection log image file not found at: {local_path}")
-                            message = await channel.send(content, embed=embed)
+                            message = await self._send(channel, content, embed=embed)
                     except Exception as e:
                         print(f"Debug - Error loading collection log attachment: {e}")
-                        message = await channel.send(content, embed=embed)
+                        message = await self._send(channel, content, embed=embed)
                 else:
-                    message = await channel.send(content, embed=embed)
+                    message = await self._send(channel, content, embed=embed)
             finally:
                 if video_local_path:
                     try:
