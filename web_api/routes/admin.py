@@ -76,6 +76,7 @@ from db import (
     SubscriptionPayment,
     SubscriptionTier,
     User,
+    UserConfiguration,
     UserSubscription,
 )
 from db.entitlements import (
@@ -2031,6 +2032,121 @@ async def admin_revoke_user_subscription(user_id: int):
     _audit(
         actor, "subscription.revoke", f"user:{user_id}",
         before=json.dumps(before), after=json.dumps(after),
+    )
+    return jsonify(after)
+
+
+# --------------------------------------------------------------------------- #
+# Nitro boost slots
+#
+# Discord exposes no per-member boost count: the member list only says WHO
+# boosts, boost system messages carry a count that can go stale, and
+# premium_subscription_count is an unattributable total. So some slots can only
+# be assigned by hand — that is what these endpoints are for. See
+# services/nitro_attribution.py for the full precedence rules.
+#
+# The bot owns the Discord facts and publishes a snapshot to Redis (the web API
+# never opens a Discord connection); this reads that snapshot and writes the
+# override the next reconcile will honour.
+# --------------------------------------------------------------------------- #
+@admin_bp.get("/admin/nitro-boosts")
+async def admin_nitro_boosts():
+    """Current boost attribution: who is credited how many slots, what the guild
+    says the total is, and how many slots nothing could account for."""
+    await _require_superadmin()
+
+    def _load():
+        from services.nitro_attribution import (
+            NITRO_BOOST_CENTS,
+            NITRO_COUNT_OVERRIDE_KEY,
+            load_boost_snapshot,
+        )
+
+        snapshot = load_boost_snapshot()
+        with db_session() as s:
+            # Every override on record, including for members who have since
+            # stopped boosting — those are exactly the ones worth clearing.
+            rows = (
+                s.query(User.user_id, User.username, User.discord_id, UserConfiguration.config_value)
+                .join(UserConfiguration, UserConfiguration.user_id == User.user_id)
+                .filter(UserConfiguration.config_key == NITRO_COUNT_OVERRIDE_KEY)
+                .all()
+            )
+            overrides = []
+            for user_id, username, discord_id, value in rows:
+                try:
+                    slots = int(value)
+                except (TypeError, ValueError):
+                    continue
+                overrides.append({
+                    "user_id": user_id,
+                    "username": username,
+                    "discord_id": str(discord_id) if discord_id else None,
+                    "slots": slots,
+                })
+        return {
+            "per_boost_cents": NITRO_BOOST_CENTS,
+            "snapshot": snapshot,
+            "overrides": sorted(overrides, key=lambda o: -o["slots"]),
+        }
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@admin_bp.post("/admin/users/<int:user_id>/nitro-boosts")
+async def admin_set_nitro_boosts(user_id: int):
+    """Set (or clear, with a null/absent ``slots``) a user's boost-slot count.
+
+    Takes effect on the next reconcile, which is nudged to run promptly. The
+    reconciler still refuses to credit anyone who is not actually boosting, and
+    still clamps the guild-wide total, so this cannot mint credit out of nothing.
+    """
+    actor = await _require_superadmin()
+    body = await json_body()
+    slots = body.get("slots")
+    if slots is not None:
+        if isinstance(slots, bool) or not isinstance(slots, int):
+            abort_problem(422, "Invalid value", "'slots' must be an integer or null.")
+        if slots < 1:
+            abort_problem(422, "Invalid value", "'slots' must be at least 1 (send null to clear).")
+
+    def _apply():
+        from services.nitro_attribution import (
+            MAX_BOOST_SLOTS_PER_USER,
+            get_boost_count_override,
+            set_boost_count_override,
+        )
+
+        if slots is not None and slots > MAX_BOOST_SLOTS_PER_USER:
+            abort_problem(
+                422, "Invalid value",
+                f"'slots' may not exceed {MAX_BOOST_SLOTS_PER_USER}.",
+            )
+        with db_session() as s:
+            user = s.query(User).filter(User.user_id == user_id).first()
+            if not user:
+                abort_problem(404, "User not found", f"No user with id {user_id}.")
+            before = get_boost_count_override(s, user_id)
+            set_boost_count_override(s, user_id, slots)
+            s.commit()
+            return before, {
+                "user_id": user_id,
+                "username": user.username,
+                "discord_id": str(user.discord_id) if user.discord_id else None,
+                "slots": get_boost_count_override(s, user_id),
+            }
+
+    before, after = await asyncio.to_thread(_apply)
+
+    def _nudge():
+        from services.nitro_attribution import request_reconcile
+
+        return request_reconcile()
+
+    await asyncio.to_thread(_nudge)
+    _audit(
+        actor, "nitro.override", f"user:{user_id}",
+        before=json.dumps({"slots": before}), after=json.dumps(after),
     )
     return jsonify(after)
 

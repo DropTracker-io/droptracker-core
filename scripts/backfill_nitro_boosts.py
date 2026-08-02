@@ -57,11 +57,35 @@ async def main(args: argparse.Namespace) -> None:
             print("Nothing to do.")
             return
 
+        # Boost SLOTS, not headcount — a member can boost more than once. The
+        # guild total is the ceiling; the boost system messages attribute what
+        # they can (see services/nitro_attribution.py).
+        state = await na.fetch_guild_boost_state(bot.http)
+        observed = (
+            await na.fetch_boost_message_counts(bot.http, state["system_channel_id"])
+            if state.get("boost_messages_enabled")
+            else {}
+        )
+
         with Session() as s:
             contexts = {b: na.booster_context(s, b) for b in boosters}
-            counts = na.attribute_boosters(s, set(boosters))
+            merged = dict(na.load_observed_counts(s, boosters))
+            merged.update(observed)
+            slots, diagnostics = na.resolve_boost_counts(
+                boosters, merged, na.load_boost_overrides(s, boosters), state.get("total")
+            )
+            counts = na.attribute_boosters(s, slots)
         credited = sum(counts.values())
         credited_cents = credited * na.NITRO_BOOST_CENTS
+        print(
+            f"Guild reports {diagnostics['guild_total']} boost slot(s); "
+            f"attributed {diagnostics['attributed']} across {diagnostics['boosters']} booster(s)."
+        )
+        if diagnostics["unattributed"]:
+            print(
+                f"  {diagnostics['unattributed']} slot(s) could not be traced to a member — "
+                f"left uncredited; assign them on /admin/nitro-boosts."
+            )
         entries = [
             (b, contexts[b].get("picked_group_name") if contexts[b].get("linked") else None)
             for b in boosters
@@ -89,7 +113,9 @@ async def main(args: argparse.Namespace) -> None:
 
         # ---- APPLY ----
         with Session() as s:
-            stats = na.run_reconcile(s, set(boosters))
+            stats = na.run_reconcile(
+                s, set(boosters), observed_counts=observed, guild_total=state.get("total")
+            )
         print(f"\nAwarded credit legs: {stats}")
 
         if not args.no_dm:

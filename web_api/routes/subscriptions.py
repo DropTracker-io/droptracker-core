@@ -170,8 +170,13 @@ def _serialize_group_sub(
         None,
     )
     if nitro_leg is not None and NITRO_BOOST_CENTS > 0:
+        # Boost SLOTS, not distinct members — one member can place several
+        # (services/nitro_attribution.py). `booster_count` is the pre-multi-boost
+        # name for the same number, kept so older clients keep rendering.
+        boost_count = int(nitro_leg.amount_cents) // NITRO_BOOST_CENTS
         payload["nitro"] = {
-            "booster_count": int(nitro_leg.amount_cents) // NITRO_BOOST_CENTS,
+            "boost_count": boost_count,
+            "booster_count": boost_count,
             "monthly_cents": int(nitro_leg.amount_cents),
             "per_boost_cents": NITRO_BOOST_CENTS,
         }

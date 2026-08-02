@@ -66,11 +66,17 @@ _nitro_scheduler_started = False
 # first reconcile has populated the set.
 _known_boosters: set = set()
 _boosters_seeded = False
+# The boost system-message history is walked in full once per process (it seeds
+# every slot count the live listener missed while this bot was down); later
+# passes only tail it, since new boosts arrive on the listener.
+_boost_history_scanned = False
 try:
     NITRO_RECONCILE_SECONDS = max(300, int(os.getenv("NITRO_RECONCILE_MINUTES", "60")) * 60)
 except (TypeError, ValueError):
     NITRO_RECONCILE_SECONDS = 3600
 _NITRO_DEBOUNCE_SECONDS = 30
+# How often the idle scheduler looks for an admin-requested reconcile.
+_NITRO_POLL_SECONDS = 60
 
 
 def _normalize_world_type(raw_world_type):
@@ -300,15 +306,78 @@ async def apply_nitro_boost_points(user_id: int, session_to_use = None):
             local_session.close()
 
 
-async def run_nitro_reconcile():
+@listen(MessageCreate)
+async def on_boost_system_message(event: MessageCreate):
+    """Record a boost's slot count from Discord's own boost system message.
+
+    This is the ONLY per-member slot signal Discord offers: ``content`` on a
+    type 8/9/10/11 message is the booster's cumulative boost count. It matters
+    most for the case member-list enumeration cannot see at all — a member
+    placing a second boost, which leaves ``premium_since`` untouched so
+    MemberUpdate never fires.
+    """
+    if not nitro_attribution.process_nitro_boosts_enabled():
+        return
+    try:
+        message = event.message
+        if message is None or str(getattr(message, "guild", None) and message.guild.id) != str(
+            nitro_attribution.MAIN_GUILD_ID
+        ):
+            return
+        # Reuse the pure parser so bot + history scan agree on the semantics.
+        parsed = nitro_attribution.boost_count_from_message({
+            "type": int(message.type),
+            "content": message.content,
+            "author": {"id": str(message.author.id)} if message.author else {},
+        })
+        if parsed is None:
+            return
+        booster_id, slots = parsed
+
+        def _db():
+            with Session() as s:
+                ok = nitro_attribution.record_observed_boost_count(s, booster_id, slots)
+                s.commit()
+                return ok
+
+        recorded = await asyncio.to_thread(_db)
+        print(f"[nitro] boost message: {booster_id} -> {slots} slot(s) (recorded={recorded})")
+        _nitro_dirty.set()  # re-credit with the new slot count
+    except Exception as e:
+        print(f"[nitro] boost message handling failed: {e}")
+
+
+async def run_nitro_reconcile(deep_scan: bool = False):
     """Enumerate current boosters of the main guild and reconcile per-group
-    nitro credit legs. DB work runs off the event loop."""
-    global _boosters_seeded
+    nitro credit legs. DB work runs off the event loop.
+
+    Three signals feed this (see services/nitro_attribution.py): the member list
+    (who boosts), the boost system messages (how many slots each placed), and
+    ``premium_subscription_count`` (the authoritative total, used as the ceiling
+    and to report slots nothing could attribute).
+    """
+    global _boosters_seeded, _boost_history_scanned
     boosters = await nitro_attribution.fetch_booster_discord_ids(bot.http)
+    state = await nitro_attribution.fetch_guild_boost_state(bot.http)
+
+    observed = {}
+    if state.get("boost_messages_enabled"):
+        # Full history once per process (seeds everything the live listener
+        # missed while we were down); a shallow tail on later passes.
+        full = deep_scan or not _boost_history_scanned
+        observed = await nitro_attribution.fetch_boost_message_counts(
+            bot.http, state["system_channel_id"], max_pages=60 if full else 3
+        )
+        if full:
+            _boost_history_scanned = True
+    else:
+        print("[nitro] boost system messages are disabled — slot counts rely on overrides.")
 
     def _db():
         with Session() as s:
-            return nitro_attribution.run_reconcile(s, boosters)
+            return nitro_attribution.run_reconcile(
+                s, boosters, observed_counts=observed, guild_total=state.get("total")
+            )
 
     stats = await asyncio.to_thread(_db)
     # Seed the known-booster set so the boost-time DM/announce fires only for
@@ -317,7 +386,28 @@ async def run_nitro_reconcile():
     _known_boosters.update(str(b) for b in boosters)
     _boosters_seeded = True
     print(f"[nitro] reconcile complete: {stats}")
+    if stats.get("unattributed"):
+        print(
+            f"[nitro] WARNING: {stats['unattributed']} boost slot(s) of "
+            f"{stats.get('guild_total')} could not be attributed to a member — "
+            f"assign them on /admin/nitro-boosts."
+        )
     return stats
+
+
+def _nitro_reconcile_requested() -> bool:
+    """True (and clears) when the admin dashboard asked for an immediate pass.
+
+    An override written by the web API would otherwise wait out the hour-long
+    tick before the group's credit moved.
+    """
+    try:
+        from utils.redis import RedisClient
+
+        client = RedisClient().client
+        return bool(client and client.getdel(nitro_attribution.RECONCILE_REQUEST_KEY))
+    except Exception:
+        return False
 
 
 async def _nitro_scheduler():
@@ -333,10 +423,20 @@ async def _nitro_scheduler():
         except Exception as e:
             print(f"[nitro] reconcile failed: {e}")
         try:
-            await asyncio.wait_for(_nitro_dirty.wait(), timeout=NITRO_RECONCILE_SECONDS)
-            await asyncio.sleep(_NITRO_DEBOUNCE_SECONDS)  # coalesce a burst of changes
-        except asyncio.TimeoutError:
-            pass  # periodic tick
+            # Poll for an admin-requested pass while waiting out the interval,
+            # so a manual override lands in minutes rather than within the hour.
+            deadline = time.monotonic() + NITRO_RECONCILE_SECONDS
+            while time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                try:
+                    await asyncio.wait_for(
+                        _nitro_dirty.wait(), timeout=min(_NITRO_POLL_SECONDS, remaining)
+                    )
+                    await asyncio.sleep(_NITRO_DEBOUNCE_SECONDS)  # coalesce a burst
+                    break
+                except asyncio.TimeoutError:
+                    if await asyncio.to_thread(_nitro_reconcile_requested):
+                        break
         finally:
             _nitro_dirty.clear()
 

@@ -431,8 +431,15 @@ def _nitro_payload(s, user_id: int) -> dict:
             .filter(Group.group_id.in_(gids))
             .all()
         )
+    # Slots the user has placed. A member can boost more than once, and all of
+    # their slots credit the one designated group.
+    from services.nitro_attribution import get_boost_count_override, get_observed_boost_count
+
+    slots = get_boost_count_override(s, user_id) or get_observed_boost_count(s, user_id) or 1
     return {
         "per_boost_cents": NITRO_BOOST_CENTS,
+        "boost_slots": int(slots),
+        "monthly_cents": int(slots) * NITRO_BOOST_CENTS,
         "designated_group_id": get_designated_group(s, user_id),
         # What the reconciler would credit right now (designation, else an
         # owned/admin group, else the lowest group_id).
