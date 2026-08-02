@@ -60,6 +60,17 @@ FOCUS_TTL_SECONDS = 6 * 3600
 IMG_BASE = "https://www.droptracker.io/img"
 STATIC_IMG_DIR = "/store/droptracker/disc/static/assets/img"
 
+
+def _img_url(relative_path):
+    """Absolute /img/ URL for a relative asset path, or None."""
+    return f"{IMG_BASE}/{relative_path}" if relative_path else None
+
+
+def _img_relative(url):
+    """Relative /img/ path for an asset URL already on our host, else None."""
+    from utils.plugin_urls import img_relative
+    return img_relative(url)
+
 AUDIENCE_TEAM = "team"
 AUDIENCE_EVENT = "event"
 
@@ -281,11 +292,15 @@ def pick_focus_task(tasks, progress_by_task, stamped_task_id=None):
 
 
 def _task_icon(session, task_row):
-    """(icon_item_id, icon_url) for an event task, via the site's task-tile
+    """(icon_item_id, icon_path) for an event task, via the site's task-tile
     derivation (the same source Discord thumbnails use). Prefers an item id
-    (client renders the sprite locally); falls back to an /img URL for
+    (client renders the sprite locally); falls back to an /img-relative path for
     NPC/skill icons whose asset exists on disk. (None, None) when nothing
-    resolves. Never raises."""
+    resolves. Never raises.
+
+    A path, not a URL: the RuneLite plugin may only load images from hosts
+    hardcoded in the plugin, so it anchors this itself. See utils/group_icon.py
+    for the same rule applied to group icons."""
     import os
 
     try:
@@ -330,7 +345,7 @@ def _task_icon(session, task_row):
         for icon in tile.get("icons") or []:
             rel = icon_asset_path(icon)
             if rel and os.path.exists(os.path.join(STATIC_IMG_DIR, rel)):
-                return None, f"{IMG_BASE}/{rel}"
+                return None, rel
     except Exception:
         pass
     return None, None
@@ -540,7 +555,7 @@ def describe_task(task: dict) -> tuple:
 
 
 def _batch_task_tiles(session, task_rows) -> dict:
-    """{task_id: {"icon_item_id", "icon_url", "badge", "value"}} for a whole
+    """{task_id: {"icon_item_id", "icon_path", "badge", "value"}} for a whole
     event's tasks, resolving item/NPC names in two bulk queries (the per-task
     variant of this is :func:`_task_icon`; a 30-task bingo board must not run
     60 lookups per /event_state). Never raises."""
@@ -598,7 +613,7 @@ def _batch_task_tiles(session, task_rows) -> dict:
         for task_id, spec in specs.items():
             tile = build_tile(spec, item_ids, npc_ids)
             icon_item_id = None
-            icon_url = None
+            icon_path = None
             for icon in tile.get("icons") or []:
                 if icon.get("type") == "item" and icon.get("id"):
                     icon_item_id = int(icon["id"])
@@ -607,11 +622,11 @@ def _batch_task_tiles(session, task_rows) -> dict:
                 for icon in tile.get("icons") or []:
                     rel = icon_asset_path(icon)
                     if rel and os.path.exists(os.path.join(STATIC_IMG_DIR, rel)):
-                        icon_url = f"{IMG_BASE}/{rel}"
+                        icon_path = rel
                         break
             tiles[task_id] = {
                 "icon_item_id": icon_item_id,
-                "icon_url": icon_url,
+                "icon_path": icon_path,
                 "badge": tile.get("badge"),
                 "value": tile.get("value"),
             }
@@ -797,16 +812,17 @@ def compose_event_state(session, player_id) -> dict:
             focus_tile = tiles.get(focus_row.id)
             if focus_tile is not None:
                 icon_item_id = focus_tile.get("icon_item_id")
-                icon_url = focus_tile.get("icon_url")
+                icon_path = focus_tile.get("icon_path")
             else:
-                icon_item_id, icon_url = _task_icon(session, focus_row)
+                icon_item_id, icon_path = _task_icon(session, focus_row)
             focus_task = {
                 "id": focus_row.id,
                 "label": focus_row.label,
                 "have": int(state.get("progress") or 0),
                 "need": need,
                 "icon_item_id": icon_item_id,
-                "icon_url": icon_url,
+                "icon_url": _img_url(icon_path),
+                "icon_path": icon_path,
                 "source": focus_source,
             }
 
@@ -900,7 +916,8 @@ def compose_event_state(session, player_id) -> dict:
                 "need": need,
                 "completed": bool(state.get("completed")),
                 "icon_item_id": tile.get("icon_item_id"),
-                "icon_url": tile.get("icon_url"),
+                "icon_url": _img_url(tile.get("icon_path")),
+                "icon_path": tile.get("icon_path"),
                 "badge": tile.get("badge"),
                 "value": tile.get("value"),
                 "description": description,
@@ -949,6 +966,7 @@ def compose_event_state(session, player_id) -> dict:
                 "color": team.color,
                 "icon_item_id": team.piece_item_id,
                 "icon_url": team.piece_icon_url,
+                "icon_path": _img_relative(team.piece_icon_url),
                 "score": int(team.score or 0),
                 "rank": team_rank,
                 "team_count": len(teams),

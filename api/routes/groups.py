@@ -239,11 +239,18 @@ async def group_search():
         player_count = group.get_player_count(session_to_use=db_session)
         group_recent_submissions = db_session.query(NotifiedSubmission).filter(or_(NotifiedSubmission.pb_id != None, NotifiedSubmission.drop_id != None, NotifiedSubmission.clog_id != None)).filter(NotifiedSubmission.group_id == group.group_id).order_by(NotifiedSubmission.date_added.desc()).limit(10).all()
         final_submission_data = await assemble_submission_data(group_recent_submissions, db_session)
+        # The plugin can only load images from our own host, so a Discord-hosted
+        # icon has to be mirrored locally before we can hand out a path for it.
+        # See utils/group_icon.py.
+        from utils.group_icon import discord_invite_code, ensure_group_icon, icon_relative_path
+        await ensure_group_icon(group.group_id, group.icon_url)
         return jsonify({
             "group_name": group.group_name,
             "group_description": group.description,
             "group_image_url": group.icon_url,
+            "group_image_path": icon_relative_path(group.group_id, group.icon_url),
             "public_discord_link": group.invite_url if group.invite_url else None,
+            "discord_invite_code": discord_invite_code(group.invite_url),
             "group_droptracker_id": group.group_id,
             "group_members": player_count,
             "group_rank": f"{group_rank}/{total_groups}",
