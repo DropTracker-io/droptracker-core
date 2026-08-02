@@ -304,10 +304,20 @@ async def _worker(worker_id: int, r, stop: asyncio.Event) -> None:
                 # failure, so leaving it in PROCESSING would double-apply it
                 # on the next reclaim.
                 await asyncio.to_thread(r.lrem, PROCESSING_KEY, 1, entry_bytes)
-        except Exception:
+        except Exception as exc:
             log.error("[worker %d] Error in consumer loop:\n%s", worker_id, traceback.format_exc())
             if entry_bytes is not None:
-                _dead_letter(r, entry_bytes)
+                # Infrastructure faults are NOT poison. On 2026-08-02 MariaDB
+                # was OOM-killed for ~7s and 36 already-ACCEPTED submissions —
+                # two of them personal bests — went straight to the dead list,
+                # where nothing would ever have looked at them. Requeue those a
+                # bounded number of times; only genuine poison (or an envelope
+                # that keeps failing) gets dead-lettered. Mirrors
+                # workers/event_consumer._is_retryable.
+                if _is_retryable(exc) and _requeue_with_backoff(r, entry_bytes):
+                    pass
+                else:
+                    _dead_letter(r, entry_bytes)
                 try:
                     await asyncio.to_thread(r.lrem, PROCESSING_KEY, 1, entry_bytes)
                 except Exception:
@@ -340,6 +350,61 @@ async def _maintenance(r, stop: asyncio.Event) -> None:
                 reset_db_connections()
         except Exception:
             log.debug("maintenance tick failed:\n%s", traceback.format_exc())
+
+
+# Total attempts an envelope gets when the failure looks like infrastructure
+# (DB restart, connection refused, lock timeout, Redis hiccup) rather than a
+# bad payload. Same value the events consumer uses.
+RETRY_MAX_ATTEMPTS = 5
+_ATTEMPTS_KEY = "_attempts"
+
+
+def _is_retryable(exc) -> bool:
+    """True for infrastructure errors worth retrying; False for poison."""
+    try:
+        from sqlalchemy.exc import (
+            DBAPIError, InterfaceError, OperationalError,
+            TimeoutError as SATimeoutError,
+        )
+
+        if isinstance(exc, (OperationalError, InterfaceError, SATimeoutError)):
+            return True
+        if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
+            return True
+    except ImportError:
+        pass
+    try:
+        import redis as _redis_mod
+
+        if isinstance(exc, _redis_mod.RedisError):
+            return True
+    except ImportError:
+        pass
+    return isinstance(exc, (ConnectionError, OSError, asyncio.TimeoutError))
+
+
+def _requeue_with_backoff(r, entry_bytes) -> bool:
+    """Put a transiently-failed entry back on the queue. False once it is spent.
+
+    The attempt counter rides on the envelope itself, so it survives a consumer
+    restart — a counter kept in memory would reset exactly when a crash loop is
+    doing the most damage.
+    """
+    try:
+        entry = json.loads(entry_bytes)
+        attempts = int(entry.get(_ATTEMPTS_KEY) or 0) + 1
+        if attempts >= RETRY_MAX_ATTEMPTS:
+            log.error("Envelope exhausted %d attempts — dead-lettering", attempts)
+            return False
+        entry[_ATTEMPTS_KEY] = attempts
+        r.rpush(QUEUE_KEY, json.dumps(entry))
+        log.warning("Transient failure — requeued (attempt %d/%d)",
+                    attempts, RETRY_MAX_ATTEMPTS)
+        return True
+    except Exception:
+        log.error("Could not requeue after a transient failure:\n%s",
+                  traceback.format_exc())
+        return False
 
 
 def _reclaim_inflight(r) -> int:

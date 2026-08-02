@@ -168,7 +168,12 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     # brand-new team-size bracket). Drives the near-real-time HOF refresh below.
     pb_row_changed = False
     if pb_entry:
-        if pb_entry.personal_best > current_ms:
+        # `current_ms == 0` means the kill had no timer ("N/A"), NOT an
+        # infinitely fast kill — but `stored > 0` is true for every real row,
+        # so an untimed kill used to pass this gate and overwrite a good time
+        # with whatever the plugin currently believes its PB is, which can be
+        # SLOWER than what we already hold.
+        if current_ms > 0 and pb_entry.personal_best > current_ms:
             old_time = pb_entry.personal_best
             pb_entry.personal_best = time_ms
             pb_entry.new_pb = is_personal_best
