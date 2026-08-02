@@ -371,6 +371,70 @@ class NotificationService:
             # Best effort cleanup only
             return
 
+    # Everything we are willing to serve from disk lives under here, and
+    # everything we are willing to fetch over the network lives on one of
+    # these hosts. Both lists are deliberately short.
+    HOSTED_IMG_ROOT = "/store/droptracker/disc/static/assets/img/"
+    HOSTED_IMG_PREFIXES = (
+        "https://www.droptracker.io/img/",
+        "https://droptracker.io/img/",
+        "http://www.droptracker.io/img/",
+        "http://droptracker.io/img/",
+    )
+    REMOTE_IMAGE_HOSTS = (
+        "cdn.discordapp.com",
+        "media.discordapp.net",
+        "images-ext-1.discordapp.net",
+        "images-ext-2.discordapp.net",
+    )
+
+    @classmethod
+    def hosted_image_path(cls, image_url: str):
+        """Local file for one of OUR image URLs, or None.
+
+        A submission's ``image_url`` is attacker-influenced (the intake
+        endpoint is public), and this used to be a bare string replace fed
+        straight to ``open()``: ``.../img/../../../.env`` resolved to the real
+        .env and got uploaded into the requester's own Discord channel. Resolve
+        the path and require it to stay under the image root.
+        """
+        if not image_url or not isinstance(image_url, str):
+            return None
+        raw = image_url.strip()
+        for prefix in cls.HOSTED_IMG_PREFIXES:
+            if raw.startswith(prefix):
+                relative = raw[len(prefix):]
+                break
+        else:
+            return None
+        relative = relative.split("?", 1)[0].split("#", 1)[0].lstrip("/")
+        if not relative:
+            return None
+        candidate = os.path.realpath(os.path.join(cls.HOSTED_IMG_ROOT, relative))
+        root = os.path.realpath(cls.HOSTED_IMG_ROOT)
+        if candidate != root and not candidate.startswith(root + os.sep):
+            return None
+        return candidate if os.path.exists(candidate) else None
+
+    @classmethod
+    def _remote_image_allowed(cls, image_url: str) -> bool:
+        """Only fetch images from hosts we actually expect.
+
+        Without this, any http(s) value in the payload turned the bot into an
+        SSRF proxy: it would GET 127.0.0.1:31325 or 169.254.169.254 and attach
+        the response to a Discord embed the requester can read.
+        """
+        try:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(image_url)
+        except Exception:
+            return False
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower()
+        return any(host == h or host.endswith("." + h) for h in cls.REMOTE_IMAGE_HOSTS)
+
     async def _resolve_image_attachment(self, image_url, notification_id) -> tuple["interactions.File | None", "str | None"]:
         """One image URL -> an attachable ``interactions.File``.
 
@@ -388,15 +452,12 @@ class NotificationService:
             return None, None
         try:
             if "droptracker.io" in image_url:
-                local_path = image_url.replace(
-                    "https://www.droptracker.io/img/",
-                    "/store/droptracker/disc/static/assets/img/",
-                )
-                if os.path.exists(local_path):
+                local_path = self.hosted_image_path(image_url)
+                if local_path:
                     return interactions.File(local_path), None
-                print(f"Debug - Image file not found at: {local_path}")
+                print(f"Debug - no hosted image for: {image_url}")
                 return None, None
-            if not image_url.startswith(("http://", "https://")):
+            if not self._remote_image_allowed(image_url):
                 return None, None
             # Remote (non-hosted) image: fetch to a temp file. 10 MB cap —
             # plugin screenshots are a few hundred KB.
@@ -1135,8 +1196,9 @@ class NotificationService:
 
             if image_url:
                 try:
-                    local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
-                    if os.path.exists(local_path):
+                    # Resolved + containment-checked: image_url is attacker-influenced.
+                    local_path = self.hosted_image_path(image_url)
+                    if local_path:
                         attachment = interactions.File(local_path)
                         await channel.send(content, embed=embed, files=attachment)
                     else:
@@ -1243,8 +1305,9 @@ class NotificationService:
 
             if image_url:
                 try:
-                    local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
-                    if os.path.exists(local_path):
+                    # Resolved + containment-checked: image_url is attacker-influenced.
+                    local_path = self.hosted_image_path(image_url)
+                    if local_path:
                         attachment = interactions.File(local_path)
                         await channel.send(content, embed=embed, files=attachment)
                     else:
@@ -1349,8 +1412,9 @@ class NotificationService:
                     await channel.send(content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
-                        local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
-                        if os.path.exists(local_path):
+                        # Resolved + containment-checked: image_url is attacker-influenced.
+                        local_path = self.hosted_image_path(image_url)
+                        if local_path:
                             attachment = interactions.File(local_path)
                             await channel.send(content, embed=embed, files=attachment)
                         else:
@@ -1461,8 +1525,9 @@ class NotificationService:
                     await channel.send(content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
-                        local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
-                        if os.path.exists(local_path):
+                        # Resolved + containment-checked: image_url is attacker-influenced.
+                        local_path = self.hosted_image_path(image_url)
+                        if local_path:
                             attachment = interactions.File(local_path)
                             await channel.send(content, embed=embed, files=attachment)
                         else:
@@ -1571,8 +1636,9 @@ class NotificationService:
                     await channel.send(content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
-                        local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
-                        if os.path.exists(local_path):
+                        # Resolved + containment-checked: image_url is attacker-influenced.
+                        local_path = self.hosted_image_path(image_url)
+                        if local_path:
                             attachment = interactions.File(local_path)
                             await channel.send(content, embed=embed, files=attachment)
                         else:
@@ -3342,8 +3408,9 @@ class NotificationService:
                     message = await channel.send(content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
-                        local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
-                        if os.path.exists(local_path):
+                        # Resolved + containment-checked: image_url is attacker-influenced.
+                        local_path = self.hosted_image_path(image_url)
+                        if local_path:
                             attachment = interactions.File(local_path)
                             message = await channel.send(content, embed=embed, files=attachment)
                         else:
@@ -3452,8 +3519,9 @@ class NotificationService:
                         message = await channel.send(content, embed=embed, files=video_attachment)
                     elif image_url:
                         try:
-                            local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
-                            if os.path.exists(local_path):
+                            # Resolved + containment-checked: image_url is attacker-influenced.
+                            local_path = self.hosted_image_path(image_url)
+                            if local_path:
                                 attachment = interactions.File(local_path)
                                 message = await channel.send(content, embed=embed, files=attachment)
                             else:
@@ -3622,8 +3690,9 @@ class NotificationService:
             
             if image_url:
                 try:
-                    local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
-                    if os.path.exists(local_path):
+                    # Resolved + containment-checked: image_url is attacker-influenced.
+                    local_path = self.hosted_image_path(image_url)
+                    if local_path:
                         attachment = interactions.File(local_path)
                         message = await channel.send(content, embed=embed, files=attachment)
                     else:
@@ -3772,8 +3841,9 @@ class NotificationService:
                     message = await channel.send(content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
-                        local_path = image_url.replace("https://www.droptracker.io/img/", "/store/droptracker/disc/static/assets/img/")
-                        if os.path.exists(local_path):
+                        # Resolved + containment-checked: image_url is attacker-influenced.
+                        local_path = self.hosted_image_path(image_url)
+                        if local_path:
                             attachment = interactions.File(local_path)
                             message = await channel.send(content, embed=embed, files=attachment)
                         else:

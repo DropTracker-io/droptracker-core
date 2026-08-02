@@ -966,16 +966,37 @@ async def ensure_npc_id_for_player(session, npc_name, player_id, player_name, us
     return None, npc_name
 
 
+def _safe_submitted_image_url(raw):
+    """Drop an ``image_url`` a client made up.
+
+    The intake endpoint is public, and this value is persisted and later turned
+    back into a local path / fetch target by the notification sender. A
+    traversal string under our own host ("…/img/../../../.env") therefore used
+    to read an arbitrary server file and attach it to a Discord embed. The
+    sender re-checks containment now, but nothing legitimate needs a
+    client-authored URL under our host: those are written by the server after
+    it downloads the file, and this function only ever sees the pre-download
+    payload.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    candidate = raw.strip()
+    if "droptracker.io" in candidate.lower():
+        return None
+    return candidate
+
+
 def resolve_attachment_from_drop_data(drop_data):
     """Return (attachment_url, attachment_type) based on drop_data."""
 
     downloaded = drop_data.get("downloaded", False)
     image_url = drop_data.get("image_url", None)
     if downloaded:
+        # Server-written after a successful download — trusted.
         return image_url, "downloaded"
     if drop_data.get("attachment_type", None) is not None:
         return drop_data.get("attachment_url", None), drop_data.get("attachment_type", None)
-    return image_url, None
+    return _safe_submitted_image_url(image_url), None
 
 
 def get_player_groups_with_global(session, player: Player):

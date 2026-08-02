@@ -51,8 +51,33 @@ def create_frontend(bot: interactions.Client):
                                      page_name="Home",
                                      current_page="home")
         
+    # Extensions this tree may serve for the browser to RENDER. Anything else
+    # is handed back as a download instead.
+    _INLINE_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+    def _force_download(response, filename):
+        """Serve a non-image as an opaque download, never as page content.
+
+        Ticket attachments are mirrored into this tree with whatever extension
+        the uploader chose, and this route is public and unauthenticated. An
+        attacker could open a support ticket, attach `poc.html` (or an .svg
+        carrying script), and get it served from www.droptracker.io — same
+        origin as the session cookie, so the script could drive every BFF route
+        as whoever opened the link. Downloading it instead keeps genuinely
+        useful non-image attachments (client.log, droptracker.log) working
+        while making them inert, and this covers the files ALREADY on disk, not
+        just newly mirrored ones.
+        """
+        response.headers['Content-Type'] = 'application/octet-stream'
+        response.headers['Content-Disposition'] = (
+            f'attachment; filename="{os.path.basename(filename)}"'
+        )
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+
     @front.route('/img/<path:filename>')
     async def serve_img(filename):
+        _is_inline_image = filename.lower().endswith(_INLINE_IMAGE_EXTS)
         ## Check if the file exists
         if not os.path.exists(os.path.join('static/assets/img', filename)):
             # Grayscale receipt-tab variants (Loot Sweep board): serve
@@ -128,7 +153,13 @@ def create_frontend(bot: interactions.Client):
             else:
                 print(f"No .png, .jpeg, or .jpg extension found in {filename}")
             return await send_from_directory('static/assets/img', 'droptracker-small.gif')
-        return await send_from_directory('static/assets/img', filename)
+        response = await send_from_directory('static/assets/img', filename)
+        if not _is_inline_image:
+            return _force_download(response, filename)
+        # Even a real image gets nosniff: a .png whose bytes are HTML must not
+        # be re-interpreted as a document.
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
     
     @front.route('/user-upload/<path:filename>')
     async def serve_user_img(filename):
