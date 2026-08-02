@@ -114,6 +114,13 @@ def test_icon_relative_path_handles_missing_icon(icon_url):
 def test_img_path_relativises_stored_screenshot_paths():
     from api.routes.helpers import _img_path
 
+    # Current rows store the public URL; older rows store the on-disk path.
+    # Both must resolve, or recent submissions render no screenshot at all.
+    assert _img_path("https://www.droptracker.io/img/user-upload/520173/drop/Phantom_Muspah/Fire_rune_0_6.jpg") \
+        == "user-upload/520173/drop/Phantom_Muspah/Fire_rune_0_6.jpg"
+    # Real paths carry apostrophes — these must survive, not be dropped.
+    assert _img_path("https://www.droptracker.io/img/user-upload/1/drop/Phosani's_Nightmare/a.jpg") \
+        == "user-upload/1/drop/Phosani's_Nightmare/a.jpg"
     assert _img_path("/store/droptracker/disc/static/assets/img/user-upload/1/drop/x.jpg") \
         == "user-upload/1/drop/x.jpg"
     assert _img_path("static/assets/img/user-upload/1/drop/x.jpg") \

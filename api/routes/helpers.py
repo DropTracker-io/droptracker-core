@@ -3,6 +3,7 @@ from urllib.parse import quote
 from utils.format import convert_from_ms, format_number
 from api.core import get_db_session
 from db import Player, PersonalBestEntry, NpcList, Drop, ItemList, CollectionLogEntry
+from utils.plugin_urls import img_relative
 
 # On-disk root for everything served under https://www.droptracker.io/img/
 IMG_ROOT = "/store/droptracker/disc/static/assets/img/"
@@ -15,10 +16,18 @@ def _img_path(stored_path):
     Hub rule: every host it contacts must be hardcoded), so submissions carry the
     path and the plugin anchors it onto its own base. Absolute *_url keys are
     still emitted alongside for plugin versions predating that change.
+
+    The column holds two shapes: current rows store the public URL already
+    (which is why the ``.replace()`` below them is a no-op for those), while
+    older rows store the on-disk path. Handle both — reading only the filesystem
+    form silently yields no screenshot for every recent submission.
     """
     if not stored_path:
         return None
-    value = str(stored_path)
+    value = str(stored_path).strip()
+    relative = img_relative(value)
+    if relative:
+        return relative
     if value.startswith(IMG_ROOT):
         return value[len(IMG_ROOT):]
     if value.startswith("static/assets/img/"):
