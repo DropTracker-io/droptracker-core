@@ -760,105 +760,136 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
 
 
 unique_id_cache = {"clog": [], "drop": [], "pb": [], "ca": [], "pet": [], "quest": [], "death": [], "diary": []}
+_UNIQUE_ID_CACHE_SIZE = 1000
+
+
+def _remember_seen(submission_type: str, unique_id) -> None:
+    """Record a GUID whose row we have just CONFIRMED exists in the database.
+
+    Only ever called after a successful lookup — see the invariant in
+    ensure_can_create().
+    """
+    seen = unique_id_cache.setdefault(submission_type, [])
+    seen.append(unique_id)
+    if len(seen) > _UNIQUE_ID_CACHE_SIZE:
+        seen.pop(0)
 
 
 async def ensure_can_create(session, unique_id, submission_type) -> bool:
-    """Ensure no duplicate recent submission exists for a unique_id.
+    """Ensure no submission has already been recorded for this unique_id.
+
+    The GUID is minted by the plugin per submission, so "a row already carries
+    it" is the definition of a duplicate — regardless of how long ago that row
+    was written. This check is therefore UNBOUNDED in time. It used to only
+    look back one hour, which meant a submission replayed later than that could
+    not see its own original and was written a second time: the 2026-08-02
+    intake outage was recovered by retrying failed submissions hours later, and
+    nine drops from a single 01:34 kill landed twice (06:40 and 10:28). Every
+    plan for surviving the next outage — a spooler, a failover origin, draining
+    a backlog — works by replaying traffic late, so late replay has to be a
+    no-op rather than a way to inflate totals. The unbounded lookup is free:
+    ix_drops_unique_id makes it a ~0.3 ms index hit even on the 175M-row table.
+
+    INVARIANT: a GUID that did NOT produce a row must never read as already
+    seen. The in-memory cache is strictly read-through — a GUID is recorded
+    only once the row has been seen in the database (_remember_seen), never
+    on the way in. The old code appended before the DB check and only ever
+    evicted by size, so a submission that failed *after* being cached had its
+    legitimate retry silently rejected for the life of the process — the exact
+    failure an outage produces, turning one dropped submission into a
+    permanently lost one.
 
     Returns:
-        bool: True if safe to create, False if duplicate exists.
+        bool: True if safe to create, False if a row already exists.
     """
 
     await asyncio.sleep(0)
+    # No GUID means no dedup key, so there is nothing to compare and the
+    # submission must be allowed through. Guarding this is NOT optional now
+    # that the lookup is unbounded: `unique_id == None` compiles to `IS NULL`,
+    # which matches the ~200k legacy rows that carry no GUID (22k in
+    # personal_best alone, and the guid-less intake paths still write ~1.2k a
+    # month). Unbounded, that would match one of them every time and reject
+    # every guid-less submission forever. The old one-hour window hid this by
+    # only ever considering NULL rows written in the last hour.
+    if not unique_id:
+        return True
     if submission_type not in unique_id_cache:
         unique_id_cache[submission_type] = []
     if unique_id in unique_id_cache[submission_type]:
         return False
-    unique_id_cache[submission_type].append(unique_id)
-    if len(unique_id_cache[submission_type]) > 1000:
-        unique_id_cache[submission_type].pop(0)
-    
+
     def _check_existing():
-        cutoff = datetime.now() - timedelta(hours=1)
         match submission_type:
             case "clog":
                 return session.query(CollectionLogEntry).filter(
                     CollectionLogEntry.unique_id == unique_id,
-                    CollectionLogEntry.date_added > cutoff,
                 ).first()
             case "drop":
                 return session.query(Drop).filter(
                     Drop.unique_id == unique_id,
                     Drop.used_api == True,
-                    Drop.date_added > cutoff,
                 ).first()
             case "pb":
                 return session.query(PersonalBestEntry).filter(
                     PersonalBestEntry.unique_id == unique_id,
-                    PersonalBestEntry.date_added > cutoff,
                 ).first()
             case "ca":
                 return session.query(CombatAchievementEntry).filter(
                     CombatAchievementEntry.unique_id == unique_id,
-                    CombatAchievementEntry.date_added > cutoff,
                 ).first()
             case "pet":
                 return session.query(PlayerPet).filter(
                     PlayerPet.unique_id == unique_id,
-                    PlayerPet.date_added > cutoff,
                 ).first()
             case "quest":
                 return session.query(QuestCompletionEntry).filter(
                     QuestCompletionEntry.unique_id == unique_id,
-                    QuestCompletionEntry.date_added > cutoff,
                 ).first()
             case "death" | "seasonal_death":
                 # Deaths share one table across world types (world_type column).
                 return session.query(PlayerDeath).filter(
                     PlayerDeath.unique_id == unique_id,
-                    PlayerDeath.date_added > cutoff,
                 ).first()
             case "diary" | "seasonal_diary":
                 # Diary completions share one table across world types (world_type column).
                 return session.query(DiaryCompletionEntry).filter(
                     DiaryCompletionEntry.unique_id == unique_id,
-                    DiaryCompletionEntry.date_added > cutoff,
                 ).first()
             case "seasonal_drop":
                 return session.query(SeasonalDrop).filter(
                     SeasonalDrop.unique_id == unique_id,
                     SeasonalDrop.used_api == True,
-                    SeasonalDrop.date_added > cutoff,
                 ).first()
             case "seasonal_pb":
                 return session.query(SeasonalPersonalBestEntry).filter(
                     SeasonalPersonalBestEntry.unique_id == unique_id,
-                    SeasonalPersonalBestEntry.date_added > cutoff,
                 ).first()
             case "seasonal_clog":
                 return session.query(SeasonalCollectionLogEntry).filter(
                     SeasonalCollectionLogEntry.unique_id == unique_id,
-                    SeasonalCollectionLogEntry.date_added > cutoff,
                 ).first()
             case "seasonal_ca":
                 return session.query(SeasonalCombatAchievementEntry).filter(
                     SeasonalCombatAchievementEntry.unique_id == unique_id,
-                    SeasonalCombatAchievementEntry.date_added > cutoff,
                 ).first()
             case "seasonal_pet":
                 return session.query(SeasonalPlayerPet).filter(
                     SeasonalPlayerPet.unique_id == unique_id,
-                    SeasonalPlayerPet.date_added > cutoff,
                 ).first()
             case "seasonal_quest":
                 return session.query(SeasonalQuestCompletionEntry).filter(
                     SeasonalQuestCompletionEntry.unique_id == unique_id,
-                    SeasonalQuestCompletionEntry.date_added > cutoff,
                 ).first()
         return None
     
     existing_entry = _check_existing()
-    return existing_entry is None
+    if existing_entry is None:
+        return True
+    # Proven to exist — safe to remember, so a replay storm of the same GUID
+    # costs one lookup rather than one per attempt.
+    _remember_seen(submission_type, unique_id)
+    return False
 
 
 async def ensure_npc_id_for_player(session, npc_name, player_id, player_name, use_external_session):

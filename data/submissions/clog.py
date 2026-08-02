@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+from sqlalchemy.exc import IntegrityError
+
 from .common import (
     SubmissionResponse,
     ensure_item_by_name,
@@ -181,8 +183,18 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
             used_api=used_api,
             unique_id=unique_id
         )
-        session.add(clog_entry)
-        session.commit()
+        # SAVEPOINT: web84a made unique_id UNIQUE here, so a replay of this
+        # submission raises instead of inserting a second row. That is a no-op
+        # SUCCESS — the slot is already recorded — and it must discard only
+        # this row, not anything else staged on a caller-owned session.
+        try:
+            with session.begin_nested():
+                session.add(clog_entry)
+                session.flush()
+            session.commit()
+        except IntegrityError:
+            print(f"Clog entry with Unique ID {unique_id} already exists — replay, ignoring")
+            return
 
         if attachment_url and not downloaded:
             try:

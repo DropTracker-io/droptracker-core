@@ -22,7 +22,12 @@ import pytest
 # common.py imports the world; the conftest stubs `db`/`services`, but the
 # module still pulls in api.core and friends, so load it by path with those
 # already stubbed the way the other submission tests do.
-for _name in ("api", "api.core", "osrs_api", "interactions"):
+# NB: deliberately NOT stubbing the `api` package itself. sys.modules is
+# global, so replacing it here with a MagicMock leaks into every module
+# collected afterwards and breaks their `from api.routes... import ...` —
+# which made the suite order-dependent. `api.core` alone is what common.py
+# needs, and conftest already stubs it.
+for _name in ("api.core", "osrs_api", "interactions"):
     sys.modules.setdefault(_name, MagicMock())
 
 _MODULE_PATH = os.path.join(
@@ -90,3 +95,66 @@ class TestReceivedAt:
         got = common.received_at({"_received_at": aware.isoformat()})
         assert got.tzinfo is None
         assert abs((got - datetime.now()).total_seconds() + 1800) < 60
+
+
+class TestReceivedAtReachesTheProcessors:
+    """The envelope stamp must survive the hop into per-embed submission data.
+
+    `received_at()` above was correct from the day it shipped and still did
+    nothing: the consumer sets `_received_at` on the ENVELOPE payload, but
+    `process_webhook_data` rebuilds each embed's `processed_data` purely from
+    `embed["fields"]`, so every top-level key was dropped on the floor. The
+    stamp never reached the processors, `received_at()` always read None, and
+    the month-boundary fix was inert — a backlog draining across midnight kept
+    booking kills into the wrong month. These cover the hop, not the parser.
+    """
+
+    @staticmethod
+    def _envelope(stamp, **fields):
+        payload = {
+            "embeds": [{
+                "fields": [{"name": k, "value": v} for k, v in
+                           {"type": "drop", "player_name": "TestPlayer",
+                            "guid": "guid-abc", **fields}.items()],
+            }],
+        }
+        if stamp is not None:
+            payload["_received_at"] = stamp
+        return payload
+
+    async def _process(self, payload):
+        from api.routes.webhook import process_webhook_data
+        items = await process_webhook_data(payload)
+        assert items and len(items) == 1
+        return items[0]
+
+    async def test_envelope_stamp_reaches_processed_data(self):
+        stamp = (datetime.now() - timedelta(minutes=90)).isoformat()
+        processed = await self._process(self._envelope(stamp))
+        assert processed.get("_received_at") == stamp
+
+    async def test_row_is_stamped_with_accept_time_not_pickup_time(self, common):
+        """End to end: a 90-minute-late entry dates to when it was ACCEPTED."""
+        accepted = datetime.now() - timedelta(minutes=90)
+        processed = await self._process(self._envelope(accepted.isoformat()))
+        stamped = common.received_at(processed)
+        assert abs((stamped - accepted).total_seconds()) < 1, (
+            "row must date to server accept time, not worker pickup time"
+        )
+        assert not _close_to_now(stamped)
+
+    async def test_stamp_survives_alongside_embed_fields(self):
+        """Carrying the stamp must not disturb the fields already parsed."""
+        stamp = datetime.now().isoformat()
+        processed = await self._process(
+            self._envelope(stamp, item_name="Twisted bow", source="Chambers of Xeric")
+        )
+        assert processed["item_name"] == "Twisted bow"
+        assert processed["source"] == "Chambers of Xeric"
+        assert processed["_received_at"] == stamp
+
+    async def test_absent_stamp_leaves_no_key(self, common):
+        """A payload with no envelope stamp falls back to now(), as before."""
+        processed = await self._process(self._envelope(None))
+        assert "_received_at" not in processed
+        assert _close_to_now(common.received_at(processed))

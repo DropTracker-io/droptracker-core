@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+from sqlalchemy.exc import IntegrityError
+
 from .common import (
     SubmissionResponse,
     ensure_player_by_name_then_auth,
@@ -130,9 +132,21 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
         debug_print(f"Creating new pet entry for {player_name}: {pet_name}")
         try:
             new_pet = pet_model(player_id=player_id, item_id=pet_item_id, pet_name=pet_name, unique_id=unique_id, date_added=datetime.now())
-            session.add(new_pet)
+            # SAVEPOINT, not a bare add: a unique-violation on unique_id must
+            # discard only this row, not whatever else the caller has staged
+            # on a shared session. Same shape as services/badges.py.
+            with session.begin_nested():
+                session.add(new_pet)
+                session.flush()
             session.commit()
             debug_print(f"Pet entry created successfully")
+        except IntegrityError:
+            # web84a's UNIQUE index caught a replay of this exact submission —
+            # the row already exists, so this is a no-op SUCCESS, not an error.
+            # Treated as "not new" so it doesn't notify a second time.
+            debug_print(f"Pet entry for unique_id {unique_id} already exists — replay, ignoring")
+            is_new_pet = False
+            new_pet = None
         except Exception as e:
             debug_print(f"Error creating pet entry: {e}")
             if not use_external_session:

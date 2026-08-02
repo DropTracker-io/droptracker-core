@@ -123,20 +123,78 @@ class TestIsTempAccountHash:
 
 # ── ensure_can_create ─────────────────────────────────────────────────────────
 
+class _FakeColumn:
+    """A model column whose comparisons render as readable strings.
+
+    tests/conftest.py stubs `db` as a MagicMock, so the real ORM columns
+    compare into opaque MagicMocks and any assertion on the query's shape
+    passes vacuously. Patching the models with this makes the criteria
+    inspectable.
+    """
+
+    def __init__(self, name):
+        self.name = name
+
+    def __eq__(self, other):
+        return f"{self.name} == {other!r}"
+
+    def __gt__(self, other):
+        return f"{self.name} > {other!r}"
+
+
+class _FakeModel:
+    unique_id = _FakeColumn("unique_id")
+    date_added = _FakeColumn("date_added")
+    used_api = _FakeColumn("used_api")
+
+
+# Model attribute on data.submissions.common backing each dedup type.
+_MODEL_FOR_TYPE = {
+    "drop": "Drop",
+    "pb": "PersonalBestEntry",
+    "clog": "CollectionLogEntry",
+    "ca": "CombatAchievementEntry",
+    "pet": "PlayerPet",
+    "quest": "QuestCompletionEntry",
+}
+
+
+class _RecordingSession:
+    """Session stub that records every filter criterion it is handed.
+
+    Lets a test assert on the SHAPE of the dedup query (e.g. that it carries no
+    date window) and count how many lookups actually reached the "database".
+    """
+
+    def __init__(self, existing=None):
+        self.existing = existing
+        self.criteria = []
+        self.query_count = 0
+
+    def query(self, model):
+        self.query_count += 1
+        return self
+
+    def filter(self, *criteria):
+        self.criteria.extend(criteria)
+        return self
+
+    def first(self):
+        return self.existing
+
+
 class TestEnsureCanCreate:
     @pytest.fixture(autouse=True)
     def _import(self):
-        from data.submissions.common import ensure_can_create
+        from data.submissions.common import ensure_can_create, unique_id_cache
         self.ensure_can_create = ensure_can_create
+        # Module-global, but conftest's autouse reset_unique_id_cache already
+        # clears it around every test — just bind it for assertions.
+        self.cache = unique_id_cache
 
     async def test_new_unique_id_allows_creation(self, mock_session):
         result = await self.ensure_can_create(mock_session, "guid-new-001", "drop")
         assert result is True
-
-    async def test_duplicate_in_cache_blocks_creation(self, mock_session):
-        await self.ensure_can_create(mock_session, "guid-dup-001", "drop")
-        result = await self.ensure_can_create(mock_session, "guid-dup-001", "drop")
-        assert result is False
 
     async def test_different_types_do_not_collide(self, mock_session):
         await self.ensure_can_create(mock_session, "guid-shared-001", "drop")
@@ -159,6 +217,86 @@ class TestEnsureCanCreate:
     async def test_seasonal_drop_type(self, mock_session):
         result = await self.ensure_can_create(mock_session, "guid-seasonal-001", "seasonal_drop")
         assert result is True
+
+    # ── replay safety (2026-08-02 outage) ────────────────────────────────────
+    # The recovery from a 2h31m intake outage replayed failed submissions hours
+    # later and wrote 9 drops twice. These cases pin the two reasons why.
+
+    async def test_lookup_carries_no_date_window(self):
+        """A row written 2+ hours ago must still block: no time bound at all.
+
+        The dedup query used to filter `date_added > now() - 1 hour`, so a
+        replay older than that could not see its own original and inserted a
+        duplicate. Asserting on the query shape (rather than a wall-clock
+        fixture) proves the window is gone without making the test time-
+        dependent.
+        """
+        session = _RecordingSession(existing=object())
+        with patch("data.submissions.common.Drop", _FakeModel):
+            assert await self.ensure_can_create(session, "guid-old-row", "drop") is False
+        rendered = [str(c) for c in session.criteria]
+        assert any("unique_id" in r for r in rendered), (
+            f"expected the dedup query to filter on unique_id, got: {rendered}"
+        )
+        assert not any("date_added" in r for r in rendered), (
+            f"dedup lookup must not be time-bounded, got: {rendered}"
+        )
+
+    @pytest.mark.parametrize("sub_type", sorted(_MODEL_FOR_TYPE))
+    async def test_old_row_still_blocks_every_type(self, sub_type):
+        """Every type dedups unbounded, not just drops."""
+        session = _RecordingSession(existing=object())
+        with patch(f"data.submissions.common.{_MODEL_FOR_TYPE[sub_type]}", _FakeModel):
+            assert await self.ensure_can_create(session, f"guid-old-{sub_type}", sub_type) is False
+        rendered = [str(c) for c in session.criteria]
+        assert any("unique_id" in r for r in rendered)
+        assert not any("date_added" in r for r in rendered), (
+            f"{sub_type} dedup lookup must not be time-bounded, got: {rendered}"
+        )
+
+    async def test_failed_submission_can_be_retried(self, mock_session):
+        """A GUID that never produced a row must not read as already seen.
+
+        The cache used to be written BEFORE the DB check and was only ever
+        evicted by size, so a submission that failed after being cached — what
+        an outage causes — had its legitimate retry rejected for the life of
+        the process, turning a dropped submission into a permanently lost one.
+        """
+        guid = "guid-failed-then-retried"
+        assert await self.ensure_can_create(mock_session, guid, "drop") is True
+        # The submission now fails; no row is ever written (mock_session keeps
+        # returning None). The retry must still be allowed through.
+        assert await self.ensure_can_create(mock_session, guid, "drop") is True
+        assert guid not in self.cache["drop"]
+
+    async def test_confirmed_duplicate_is_cached(self):
+        """The cache is read-through: only a CONFIRMED row is remembered."""
+        session = _RecordingSession(existing=object())
+        assert await self.ensure_can_create(session, "guid-known-dup", "drop") is False
+        assert "guid-known-dup" in self.cache["drop"]
+        # Second attempt short-circuits on the cache — no further DB lookup.
+        assert await self.ensure_can_create(session, "guid-known-dup", "drop") is False
+        assert session.query_count == 1
+
+    @pytest.mark.parametrize("missing", [None, ""])
+    async def test_missing_unique_id_is_never_a_duplicate(self, missing):
+        """No GUID means no dedup key — allow it, and never query.
+
+        `unique_id == None` renders as `IS NULL`, which matches the ~200k
+        legacy rows carrying no GUID. Unbounded, that would reject every
+        guid-less submission forever; the old one-hour window masked it.
+        """
+        session = _RecordingSession(existing=object())
+        assert await self.ensure_can_create(session, missing, "pb") is True
+        assert session.query_count == 0
+
+    async def test_cache_is_size_bounded(self, mock_session):
+        """Confirmed-duplicate caching must not grow without limit."""
+        from data.submissions.common import _UNIQUE_ID_CACHE_SIZE
+        session = _RecordingSession(existing=object())
+        for i in range(_UNIQUE_ID_CACHE_SIZE + 50):
+            await self.ensure_can_create(session, f"guid-bulk-{i}", "drop")
+        assert len(self.cache["drop"]) == _UNIQUE_ID_CACHE_SIZE
 
 
 # ── check_auth ────────────────────────────────────────────────────────────────

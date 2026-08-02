@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+from sqlalchemy.exc import IntegrityError
+
 from .common import (
     SubmissionResponse,
     ensure_player_by_name_then_auth,
@@ -103,7 +105,21 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
             used_api=used_api,
             unique_id=unique_id,
         )
-        session.add(ca_entry)
+        # SAVEPOINT: web84a made unique_id UNIQUE here, so a replay of this
+        # submission raises instead of inserting a second row. That is a no-op
+        # SUCCESS — the task is already recorded — and it must discard only
+        # this row, not anything else staged on a caller-owned session. The
+        # flush also assigns ca_entry.id up front, which the image download
+        # below reads (it previously relied on an autoflush further down).
+        try:
+            with session.begin_nested():
+                session.add(ca_entry)
+                session.flush()
+        except IntegrityError:
+            debug_print(
+                f"CA entry with Unique ID {unique_id} already exists — replay, ignoring"
+            )
+            return
         is_new_ca = True
         if attachment_url and not downloaded:
             try:

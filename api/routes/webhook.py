@@ -599,6 +599,16 @@ async def process_webhook_data(webhook_data):
             }
             if not processed_data.get("timestamp"):
                 processed_data["timestamp"] = int(datetime.now().timestamp())
+            # Carry the server's accept time down from the ENVELOPE onto each
+            # embed's processed data. processed_data is rebuilt purely from
+            # embed["fields"], so top-level payload keys are otherwise dropped
+            # here — which left data.submissions.common.received_at() reading
+            # None and silently falling back to worker-pickup time, making the
+            # month-boundary fix inert from the day it shipped. Without this,
+            # a queue backlog draining across midnight still books kills into
+            # the wrong month.
+            if webhook_data.get("_received_at"):
+                processed_data["_received_at"] = webhook_data["_received_at"]
             processed_data["world_type"] = _normalize_world_type(processed_data.get("world_type"))
             submission_type = str(processed_data.get("type", "")).lower()
             if submission_type in ("drop", "npc", "other"):

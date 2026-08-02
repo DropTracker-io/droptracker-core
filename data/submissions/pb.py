@@ -3,6 +3,8 @@
 import asyncio
 from datetime import datetime
 
+from sqlalchemy.exc import IntegrityError
+
 from .common import (
     SubmissionResponse,
     convert_to_ms,
@@ -200,8 +202,20 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
             used_api=used_api,
             unique_id=unique_id,
         )
-        session.add(pb_entry)
-        pb_row_changed = True
+        # SAVEPOINT: web84a made unique_id UNIQUE here, so a replay of this
+        # submission raises instead of inserting a second row. That is a no-op
+        # SUCCESS — the PB is already recorded — and it must discard only this
+        # row, not anything else staged on a caller-owned session.
+        try:
+            with session.begin_nested():
+                session.add(pb_entry)
+                session.flush()
+            pb_row_changed = True
+        except IntegrityError:
+            debug_print(
+                f"PB entry with Unique ID {unique_id} already exists — replay, ignoring"
+            )
+            return
 
     if use_external_session:
         session.flush()
