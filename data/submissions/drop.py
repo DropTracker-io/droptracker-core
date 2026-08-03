@@ -205,7 +205,12 @@ async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
 
 
 def _strip_empty_sentinel(cleaned):
-    """The plugin sends the literal string "none" when no players are nearby."""
+    """Drop the legacy "none" sentinel meaning no players were nearby.
+
+    Plugins since ~5.3 (NearbyPlayerTracker) send "nearby_players" and simply
+    omit the field when empty; the literal string "none" came from the legacy
+    "members" field and is still stripped here for older clients.
+    """
     if cleaned and len(cleaned) == 1 and cleaned[0].lower() == "none":
         return None
     return cleaned or None
@@ -324,8 +329,11 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         intake_source = drop_data.get("intake_source") or None
         raw_players_included = drop_data.get("players_included", drop_data.get("nearby_players"))
         if raw_players_included is None:
-            # The RuneLite plugin sends the participant list as an embed field
-            # named "members" (comma-separated, "none" when empty).
+            # Legacy fallback: pre-5.3 plugins sent the participant list as a
+            # "members" embed field (comma-separated, literal "none" when
+            # empty). Since ~5.3 (NearbyPlayerTracker, plugin commit 84356cc)
+            # the plugin sends "nearby_players" — handled above — and omits it
+            # entirely when nobody is nearby; see services/split_observer.py.
             raw_players_included = drop_data.get("members")
         players_included = _normalize_incoming_players(raw_players_included)
         # How many people the drop was ACTUALLY split between, receiver included.

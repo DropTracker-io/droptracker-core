@@ -614,8 +614,13 @@ async def process_webhook_data(webhook_data):
             if submission_type in ("drop", "npc", "other"):
                 raw_nearby_players = processed_data.get("nearby_players")
                 raw_players_included = processed_data.get("players_included")
-                # The RuneLite plugin sends the participant list as an embed
-                # field named "members" (comma-separated, "none" when empty).
+                # Since ~5.3 (NearbyPlayerTracker, plugin commit 84356cc) the
+                # RuneLite plugin sends the participant list as the
+                # "nearby_players" embed field and omits it entirely when
+                # nobody is nearby. "members" (comma-separated, literal "none"
+                # when empty) is the legacy pre-5.3 field name, kept as a
+                # compatibility alias — see services/split_observer.py for the
+                # version history.
                 raw_members = processed_data.get("members")
                 raw_participants = raw_nearby_players
                 if raw_participants is None:
@@ -675,10 +680,12 @@ async def process_webhook_data(webhook_data):
 # "kill_count": int|null,     // Optional. Kill count at time of drop.
 # "nearby_players": list|string|null, // Optional. List of nearby player names for
 #                             //   point splits. Accepts a JSON array, a
-#                             //   comma-separated string, or a list.
-#                             //   Aliases: "players_included", "members" (the
-#                             //   RuneLite plugin's embed field name; sends the
-#                             //   literal string "none" when empty).
+#                             //   comma-separated string, or a list. Same field
+#                             //   name the RuneLite plugin sends since ~5.3
+#                             //   (omitted entirely when empty). Aliases:
+#                             //   "players_included", and legacy "members"
+#                             //   (pre-5.3 plugin field; sent the literal
+#                             //   string "none" when empty).
 #
 # === COLLECTION LOG SUBMISSION FIELDS ===
 # submission_type: "collection_log"
