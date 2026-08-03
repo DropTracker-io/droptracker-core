@@ -56,6 +56,7 @@ from .seasonal_quest_completion import SeasonalQuestCompletionEntry
 from .drop_split import DropSplit
 from .web import GroupAdmin, GroupEventManager, Announcement, AuditLog, DiscordOutbox, DocsPage, SiteRedirect, Suggestion, SuggestionMessage
 from .dev_tracker import DevProject, DevTask, DevSubtask, DevNote, PROJECT_STATUSES, TASK_STATUSES
+from .known_issues import KnownIssueCategory, KnownIssue, ISSUE_SEVERITIES, ISSUE_STATUSES
 from .knowledgebase import KBDocument, KBChunk, KBIngestState, KB_SOURCE_TYPES
 from .badge import Badge, PlayerBadge
 from .recap import (
@@ -243,6 +244,10 @@ __all__ = [
     "DevNote",
     "PROJECT_STATUSES",
     "TASK_STATUSES",
+    "KnownIssueCategory",
+    "KnownIssue",
+    "ISSUE_SEVERITIES",
+    "ISSUE_STATUSES",
     "Suggestion",
     "SuggestionMessage",
     "KBDocument",

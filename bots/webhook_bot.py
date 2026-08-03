@@ -533,6 +533,8 @@ async def process_submission_with_session(submission_type, embed_data):
         except Exception:
             #print(f"Error recording request: {submission_type} {success}")
             pass
+        if success:
+            _record_status_metrics(embed_data)
         return result
         
     except Exception as e:
@@ -646,9 +648,43 @@ async def on_message_create(event: MessageCreate):
         print(f"Message is not in the target guilds: {message.guild.id}")
 
         
+def _record_status_metrics(embed_data) -> None:
+    """Status-channel counters (#status) for the legacy Discord-webhook path."""
+    try:
+        from services.status_metrics import SOURCE_WEBHOOK, player_key, record_processed
+
+        record_processed(
+            SOURCE_WEBHOOK,
+            player_key(
+                embed_data.get("player"),
+                embed_data.get("player_name"),
+                embed_data.get("acc_hash"),
+            ),
+        )
+    except Exception:
+        pass
+
+
+_status_heartbeat_started = False
+
+
+async def _status_heartbeat_loop():
+    """Liveness signal for the #status channel: beat only while connected, so
+    the panel flips to Offline within ~3 minutes of this bot going down."""
+    while True:
+        try:
+            if bot.is_ready:
+                from services.status_metrics import HEARTBEAT_WEBHOOK_BOT, heartbeat
+
+                heartbeat(HEARTBEAT_WEBHOOK_BOT)
+        except Exception:
+            pass
+        await asyncio.sleep(60)
+
+
 @interactions.listen(Startup)
 async def on_startup(event: Startup):
-    
+
     # Load extensions first (they don't require database)
     try:
         bot.load_extension("services.ticket_system")
@@ -663,6 +699,10 @@ async def on_startup(event: Startup):
     if not _nitro_scheduler_started:
         _nitro_scheduler_started = True
         asyncio.create_task(_nitro_scheduler())
+    global _status_heartbeat_started
+    if not _status_heartbeat_started:
+        _status_heartbeat_started = True
+        asyncio.create_task(_status_heartbeat_loop())
     # Then handle database operations with proper session management
     player_count = 0
     local_session = Session()

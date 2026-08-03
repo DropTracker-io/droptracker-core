@@ -53,6 +53,32 @@ def _get_redis():
     return _redis.Redis(host="127.0.0.1", port=6379, db=0, password=_REDIS_PW)
 
 
+def _record_status_metrics(processed_data) -> None:
+    """Status-channel counters (#status). Fail-open; never blocks processing."""
+    try:
+        from services.status_metrics import SOURCE_API, player_key, record_processed
+
+        record_processed(
+            SOURCE_API,
+            player_key(
+                processed_data.get("player"),
+                processed_data.get("player_name"),
+                processed_data.get("acc_hash"),
+            ),
+        )
+    except Exception:
+        pass
+
+
+def _status_heartbeat(r) -> None:
+    try:
+        from services.status_metrics import HEARTBEAT_CONSUMER, heartbeat
+
+        heartbeat(HEARTBEAT_CONSUMER, r=r)
+    except Exception:
+        pass
+
+
 class _TempFileUpload:
     def __init__(self, file, filename, content_type):
         self.file = file
@@ -209,6 +235,7 @@ async def _process_entry(entry_bytes: bytes) -> None:
                     db_session.commit()
                     _mark_submission_outcome(processed_data, norm_type, response)
                     _push_plugin_notice(db_session, processed_data, response)
+                    _record_status_metrics(processed_data)
                     continue
                 elif world_type != "main":
                     continue
@@ -253,6 +280,7 @@ async def _process_entry(entry_bytes: bytes) -> None:
                 db_session.commit()
                 _mark_submission_outcome(processed_data, norm_type, response)
                 _push_plugin_notice(db_session, processed_data, response)
+                _record_status_metrics(processed_data)
             except Exception:
                 db_session.rollback()
                 raise
@@ -328,6 +356,7 @@ async def _worker(worker_id: int, r, stop: asyncio.Event) -> None:
 
 async def _maintenance(r, stop: asyncio.Event) -> None:
     """Once a minute: log queue health; clean the scoped session while idle."""
+    _status_heartbeat(r)
     while not stop.is_set():
         try:
             await asyncio.wait_for(stop.wait(), timeout=60)
@@ -337,6 +366,7 @@ async def _maintenance(r, stop: asyncio.Event) -> None:
         try:
             depth, dead, processing = await asyncio.to_thread(
                 lambda: (r.llen(QUEUE_KEY), r.llen(DEAD_KEY), r.llen(PROCESSING_KEY)))
+            _status_heartbeat(r)
             log.info("queue depth=%d dead=%d processing=%d in_flight=%d workers=%d",
                      depth, dead, processing, _in_flight, NUM_WORKERS)
             # processing should track in_flight; a persistent excess means

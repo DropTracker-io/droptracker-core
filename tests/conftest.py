@@ -157,6 +157,17 @@ if "db.event_rate_limits" not in sys.modules:
     sys.modules["db.event_rate_limits"] = _mod
     _spec.loader.exec_module(_mod)
 
+# db/group_rename.py — the shared "rename a group everywhere" service. Same
+# shape again (SQLAlchemy-only module imports, sessions passed in), and the
+# config + admin-data routes import it at module level, so it must resolve
+# under the stubbed ``db`` package.
+_GROUP_RENAME_PATH = _Path(__file__).resolve().parent.parent / "db" / "group_rename.py"
+if "db.group_rename" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("db.group_rename", _GROUP_RENAME_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["db.group_rename"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/event_effort.py — the Bingo EHB scoring core. Pure by design
 # (stdlib-only module imports, injected lookups), so load the real module: the
 # effort tests assert on its relevance/EHB decisions directly.
@@ -175,6 +186,26 @@ if "services.event_buyins" not in sys.modules:
     _spec = _importlib_util.spec_from_file_location("services.event_buyins", _BUYINS_PATH)
     _mod = _importlib_util.module_from_spec(_spec)
     sys.modules["services.event_buyins"] = _mod
+    _spec.loader.exec_module(_mod)
+
+# services/status_metrics.py — the #status channel counters. Stdlib-only module
+# imports (Redis access is lazy and injectable), so load the real module: the
+# status tests assert on window sums / heartbeats with a fake Redis.
+_STATUS_METRICS_PATH = _Path(__file__).resolve().parent.parent / "services" / "status_metrics.py"
+if "services.status_metrics" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.status_metrics", _STATUS_METRICS_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.status_metrics"] = _mod
+    _spec.loader.exec_module(_mod)
+
+# services/status_channel.py — the #status card renderers. Module imports are
+# stdlib + the stubbed db.app_logger; interactions is lazy-imported inside the
+# builders, so tests can substitute fake component classes.
+_STATUS_CHANNEL_PATH = _Path(__file__).resolve().parent.parent / "services" / "status_channel.py"
+if "services.status_channel" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.status_channel", _STATUS_CHANNEL_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.status_channel"] = _mod
     _spec.loader.exec_module(_mod)
 
 # services/event_signup.py — the shared sign-up rules (web70a's window gate

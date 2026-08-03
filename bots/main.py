@@ -377,6 +377,18 @@ async def event_board_updates():
         print(f"Event board sweep error: {e}")
 
 
+@Task.create(IntervalTrigger(minutes=1))
+async def status_channel_updates():
+    """#status channel upkeep (services/status_channel.py): edits the service
+    health card every minute and the known-issues card when the admin CP bumps
+    status:issues:rev. The sweep never raises."""
+    try:
+        from services.status_channel import run_status_sweep
+        await run_status_sweep(bot)
+    except Exception as e:
+        print(f"Status channel sweep error: {e}")
+
+
 @Task.create(IntervalTrigger(minutes=2))
 async def event_signup_prompt_retire():
     """Sign-up prompts (services/event_signup_prompt.py): once an event's
@@ -608,6 +620,10 @@ async def create_tasks():
     # warm-ups below starve posting). Fire-and-forget; the task body has its own
     # top-level try/except so it can never surface as an unhandled task error.
     asyncio.create_task(lootboard_updates())
+    # #status channel upkeep: schedule the 1-min sweep and kick an immediate
+    # first render (fire-and-forget; the task body never raises).
+    status_channel_updates.start()
+    asyncio.create_task(status_channel_updates())
     # Cheap and independent — run this first among the warm-ups so the Web
     # API's channel picker has data within seconds of startup instead of
     # waiting behind the slow WOM-sync pass below.
