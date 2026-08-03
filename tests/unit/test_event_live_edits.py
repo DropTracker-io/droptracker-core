@@ -368,6 +368,53 @@ class TestRecomputeCounterRollups:
         assert entry["score_delta"] == -10 and entry["was_completed"] is True
         assert entry["completed"] is False and entry["progress"] == 3
 
+    def test_preserve_completed_holds_the_flag_but_fixes_progress(self):
+        # Retro cleanup (scripts/dedupe_multipath_drops.py): duplicate ledger
+        # rows were deleted, so the fold now falls short of the target. The
+        # task must NOT un-complete — record_match refuses to record anything
+        # after completion, so every qualifying drop since then was discarded
+        # and cannot be recovered. Progress and per-player shares are still
+        # corrected; the flag, its points and its completed_at are held.
+        progress = SimpleNamespace(progress=5, completed=True,
+                                   completed_at=datetime(2026, 7, 19), team_id=1)
+        team = SimpleNamespace(id=1, score=10)
+        s = _S(
+            [(1,)],                                # progress team ids
+            [(1,)],                                # applied completion team ids
+            [progress],                            # locked rollup read
+            [_row(quantity=4)],                    # fold → 4, under target 5
+            [_row(quantity=4, player_id=3)],       # contributors: still awarded
+            [SimpleNamespace(player_id=3, player_name="P")],
+            [],                                    # player-points rewrite delete
+            [(1, 10)],                             # final scores
+        )
+        out = engine.recompute_task_rollups(
+            s, _ev_row(), _task_row(target_value=5), preserve_completed=True)
+        assert progress.completed is True
+        assert progress.completed_at == datetime(2026, 7, 19)
+        assert progress.progress == 4            # the correction that DID land
+        assert team.score == 10                  # points not clawed back
+        entry = out["teams"][1]
+        assert entry["completed"] is True and entry["score_delta"] == 0
+        assert entry["progress"] == 4 and entry["target"] == 5
+
+    def test_preserve_completed_does_not_invent_completion(self):
+        # It only ever HOLDS an existing flag — a rollup that was not complete
+        # still completes strictly on merit.
+        progress = SimpleNamespace(progress=2, completed=False,
+                                   completed_at=None, team_id=1)
+        s = _S(
+            [(1,)],
+            [(1,)],
+            [progress],
+            [_row(quantity=2)],                    # fold → 2, under target 5
+            [(1, 0)],
+        )
+        out = engine.recompute_task_rollups(
+            s, _ev_row(), _task_row(target_value=5), preserve_completed=True)
+        assert progress.completed is False
+        assert out["teams"][1]["completed"] is False
+
     def test_target_lower_awards_completion(self):
         # 5 recorded vs old target 10; lowered to 3 → complete, +points,
         # completed_at from the surviving ledger (not "now").

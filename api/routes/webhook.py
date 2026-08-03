@@ -318,8 +318,8 @@ async def _process_webhook_request(req_start):
     # partially initialized. By call time all modules are fully loaded.
     from data.submissions.common import SubmissionResponse
     from data.submissions.raid_dedupe import (
-        RELOOT_FLAG,
-        RELOOT_REJECT_MESSAGE,
+        duplicate_reject_message,
+        flag_multipath_loot_duplicates,
         flag_raid_reloot_duplicates,
     )
 
@@ -365,6 +365,10 @@ async def _process_webhook_request(req_start):
                 # a second opening of the same reward chest (bank collection
                 # chest, older plugin builds) is rejected, not double-counted.
                 flag_raid_reloot_duplicates(processed_items)
+                # Multi-part boss defense (same module): one kill of the
+                # Grotesque Guardians et al. reaches intake through two loot
+                # events on pre-5.4.0 clients, under two names with two GUIDs.
+                flag_multipath_loot_duplicates(processed_items)
 
                 submission_type = processed_items[0].get("type")
                 g.submission_type = submission_type or "webhook"
@@ -383,12 +387,15 @@ async def _process_webhook_request(req_start):
                         world_type = _normalize_world_type(processed_data.get("world_type"))
                         processed_data["world_type"] = world_type
 
-                        # Flagged re-looted raid bundle: reject instead of
-                        # processing — a second Drop row would double GP and
-                        # credit a phantom KC.
+                        # Flagged duplicate bundle (re-looted raid chest, or a
+                        # multi-part boss kill arriving down a second loot
+                        # event): reject instead of processing — a second Drop
+                        # row would double GP, credit a phantom KC and score
+                        # event tasks twice.
+                        dup_message = duplicate_reject_message(processed_data)
                         if (_normalize_submission_type(submission_type) == "drop"
-                                and processed_data.get(RELOOT_FLAG)):
-                            response = SubmissionResponse(False, RELOOT_REJECT_MESSAGE)
+                                and dup_message):
+                            response = SubmissionResponse(False, dup_message)
                             _mark_submission_outcome(processed_data, "drop", response)
                             continue
 

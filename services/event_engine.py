@@ -4245,7 +4245,8 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
 
 
 def recompute_task_rollups(session, event_row, task_row, *,
-                           old_points: Optional[int] = None) -> dict:
+                           old_points: Optional[int] = None,
+                           preserve_completed: bool = False) -> dict:
     """Re-fold every (task, team) rollup after a LIVE task edit (web68a).
 
     The caller has already mutated + flushed the task row (new target/config/
@@ -4261,6 +4262,19 @@ def recompute_task_rollups(session, event_row, task_row, *,
     ``old_points``: the task's points value BEFORE the edit — when provided
     and a rollup STAYS completed, the team score absorbs the (new − old)
     delta so past awards match the new value.
+
+    ``preserve_completed``: a rollup that is ALREADY completed stays completed
+    even if the surviving ledger no longer reaches the threshold. For retro
+    cleanups that delete bad ledger rows (see
+    ``scripts/dedupe_multipath_drops.py``) this is the honest answer, not a
+    fudge: ``record_match`` refuses to record anything once a (task, team)
+    rollup completes, so every qualifying submission after that moment was
+    silently discarded and is unrecoverable. Re-deriving from what survives
+    would "un-complete" a task the team may well have finished on real drops we
+    never wrote down — visibly revoking a finished task, its points, its bingo
+    cell and any line bonus it fed. Progress, per-player contribution shares
+    and the ledger are still corrected; only the completed flag is held. Not
+    for live task edits, where the ledger IS the whole truth.
 
     Raises ``ValueError("forward_only")`` for kinds with no recomputable
     ledger: manual-only types (custom/ehp_target/ehb_target) and board-game
@@ -4353,6 +4367,12 @@ def recompute_task_rollups(session, event_row, task_row, *,
         new_progress = _derive_applied_progress(session, task, team_id)
         threshold = effective_threshold(session, task, team_id)
         now_completed = new_progress >= threshold if new_progress > 0 else False
+        if preserve_completed and was_completed:
+            # Post-completion credit was never recorded, so the surviving
+            # ledger cannot prove the task is still finished — and cannot
+            # disprove it either. Hold the flag; score, bingo cells and bonuses
+            # then stay untouched while progress/contributions are corrected.
+            now_completed = True
         if progress is None:
             if new_progress <= 0:
                 continue

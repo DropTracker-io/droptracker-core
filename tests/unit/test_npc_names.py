@@ -1,8 +1,11 @@
 """Unit tests for utils/npc_names.py — the NPC spelling/article/alias
 identity rule (suggestion #50). Pure functions, no DB."""
 from utils.npc_names import (
+    ENCOUNTER_NAME_ALIASES,
     MODE_SUFFIXES,
+    MULTI_PATH_LOOT_SOURCES,
     canonical_encounter_name,
+    is_multi_path_loot_source,
     npc_base_slug,
     npc_family_tiers,
     npc_match_key,
@@ -78,11 +81,53 @@ def test_encounter_members_rewrite_to_the_encounter_name():
     # Sources disagree on capitalisation/spacing; the rewrite is slug-based.
     assert canonical_encounter_name("corrupted hunllef") == "The Corrupted Gauntlet"
     assert canonical_encounter_name("  Crystalline  Hunllef ") == "The Gauntlet"
+    # Grotesque Guardians: loot drops from Dusk, so RuneLite's NpcLootReceived
+    # names the guardian while LootReceived names the encounter. Both have
+    # npc_list rows (7851 / 13960), so every GG kill split across two ids until
+    # this was added (2026-08-03).
+    assert canonical_encounter_name("Dusk") == "Grotesque Guardians"
     # Non-members and empties pass through untouched.
     assert canonical_encounter_name("Vorkath") == "Vorkath"
     assert canonical_encounter_name("The Gauntlet") == "The Gauntlet"
     assert canonical_encounter_name("") == ""
     assert canonical_encounter_name(None) is None
+
+
+def test_multi_path_loot_sources():
+    # Encounters whose loot reaches intake through more than one RuneLite loot
+    # event, so an identical bundle twice in a row is ONE kill, not two.
+    assert is_multi_path_loot_source("Grotesque Guardians")
+    # ...addressed by either name, and spelling-insensitively.
+    assert is_multi_path_loot_source("Dusk")
+    assert is_multi_path_loot_source("grotesque guardians")
+    assert is_multi_path_loot_source("Branda the Fire Queen")
+    assert is_multi_path_loot_source("Crystalline Hunllef")
+    assert is_multi_path_loot_source("Araxxor")
+    # Ordinary NPCs must NOT be — AoE slayer legitimately produces two
+    # identical bundles in one tick and both are real.
+    assert not is_multi_path_loot_source("Abyssal demon")
+    assert not is_multi_path_loot_source("Maniacal monkey")
+    assert not is_multi_path_loot_source("Vorkath")
+    # Raids have their own (much longer) re-loot window, not this one.
+    assert not is_multi_path_loot_source("Theatre of Blood")
+    assert not is_multi_path_loot_source("")
+    assert not is_multi_path_loot_source(None)
+
+
+def test_every_multi_path_source_is_its_own_canonical_name():
+    # is_multi_path_loot_source canonicalises before matching, so a set member
+    # that is itself an alias would be unreachable.
+    for name in MULTI_PATH_LOOT_SOURCES:
+        assert canonical_encounter_name(name) == name
+        assert is_multi_path_loot_source(name)
+
+
+def test_encounter_aliases_resolve_to_real_encounters():
+    # A typo'd target would silently mint a second npc_list row instead of
+    # folding onto the encounter's.
+    for member, encounter in ENCOUNTER_NAME_ALIASES.items():
+        assert canonical_encounter_name(member) == encounter
+        assert canonical_encounter_name(encounter) == encounter
 
 
 def test_primary_variants_exclude_alias_spellings():

@@ -134,8 +134,8 @@ async def _process_entry(entry_bytes: bytes) -> None:
     from data import submissions
     from data.submissions.common import SubmissionResponse
     from data.submissions.raid_dedupe import (
-        RELOOT_FLAG,
-        RELOOT_REJECT_MESSAGE,
+        duplicate_reject_message,
+        flag_multipath_loot_duplicates,
         flag_raid_reloot_duplicates,
     )
     from db.models import Player
@@ -168,6 +168,15 @@ async def _process_entry(entry_bytes: bytes) -> None:
     reflagged = flag_raid_reloot_duplicates(processed_items)
     if reflagged:
         log.info("Flagged %d raid re-loot duplicate embed(s) in payload", reflagged)
+
+    # Multi-part boss defense (same module): RuneLite delivers one kill of the
+    # Grotesque Guardians et al. through two loot events, so pre-5.4.0 clients
+    # submit it twice under two names with two GUIDs. Fingerprint the bundle so
+    # the second copy is rejected instead of double-counting loot and events.
+    multipath_flagged = flag_multipath_loot_duplicates(processed_items)
+    if multipath_flagged:
+        log.info("Flagged %d multi-path boss duplicate embed(s) in payload",
+                 multipath_flagged)
 
     db_session = get_db_session()
     tmp_fh = None
@@ -210,13 +219,16 @@ async def _process_entry(entry_bytes: bytes) -> None:
             norm_type = _normalize_submission_type(submission_type)
 
             try:
-                # Flagged re-looted raid bundle: reject instead of processing —
-                # a second Drop row would double GP and credit a phantom KC.
-                if norm_type == "drop" and processed_data.get(RELOOT_FLAG):
+                # Flagged duplicate bundle (re-looted raid chest, or a
+                # multi-part boss kill arriving down a second loot event):
+                # reject instead of processing — a second Drop row would double
+                # GP, credit a phantom KC and score event tasks twice.
+                dup_message = duplicate_reject_message(processed_data)
+                if norm_type == "drop" and dup_message:
                     _mark_submission_outcome(
                         processed_data,
                         norm_type,
-                        SubmissionResponse(False, RELOOT_REJECT_MESSAGE),
+                        SubmissionResponse(False, dup_message),
                     )
                     continue
 

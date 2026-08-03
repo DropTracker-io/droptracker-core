@@ -68,8 +68,14 @@ ENCOUNTER_NAME_ALIASES = {
     # two. Mirrors the plugin's own NpcUtilities.canonicalizeSpecialSource.
     "Corrupted Hunllef": "The Corrupted Gauntlet",
     "Crystalline Hunllef": "The Gauntlet",
+    # Grotesque Guardians: loot drops from Dusk (the second guardian to die),
+    # so RuneLite's NpcLootReceived names "Dusk" while its LootReceived path
+    # names the encounter. Both have npc_list rows (7851 / 13960), so without
+    # this every GG kill split across two ids — and, because the plugin's own
+    # canonicalization only reached one of those paths before v5.4.0, the same
+    # kill was submitted twice under two different names.
+    "Dusk": "Grotesque Guardians",
 }
-
 
 #: ``ENCOUNTER_NAME_ALIASES`` keyed by slug, so a source that disagrees on
 #: capitalisation or punctuation ("corrupted hunllef") still folds.
@@ -86,6 +92,41 @@ def canonical_encounter_name(npc_name: str | None) -> str | None:
     if not npc_name:
         return npc_name
     return _ENCOUNTER_ALIASES_BY_SLUG.get(npc_slug(npc_name), npc_name)
+
+
+#: Canonical encounter names whose loot can reach intake more than once for a
+#: SINGLE kill, because RuneLite delivers it through more than one loot event
+#: (a granular NpcLootReceived/ServerNpcLoot *and* a generic LootReceived).
+#: Mirrors the plugin's ``NpcUtilities.isMultiPathLootSource`` — the union of
+#: its SPECIAL_NPC_NAMES and REMAP_TARGET_NAMES, expressed in canonical form
+#: (sub-NPC names fold to these via ``ENCOUNTER_NAME_ALIASES`` first).
+#:
+#: Membership is what makes same-content duplicate suppression SAFE: ordinary
+#: NPCs can legitimately be multi-killed in one tick with identical loot (AoE
+#: slayer tasks routinely produce two identical rows in the same second), so
+#: content-hash dedup must never apply to them. These encounters cannot be
+#: re-killed inside the dedup window, so identical content inside it is always
+#: one kill arriving twice.
+MULTI_PATH_LOOT_SOURCES = frozenset({
+    "Grotesque Guardians",
+    "Royal Titans",
+    "The Gauntlet",
+    "The Corrupted Gauntlet",
+    "Araxxor",
+    "The Whisperer",
+    "Maggot King",
+})
+
+_MULTI_PATH_SLUGS = frozenset(npc_slug(name) for name in MULTI_PATH_LOOT_SOURCES)
+
+
+def is_multi_path_loot_source(npc_name: str | None) -> bool:
+    """Whether one kill of this encounter can deliver loot through more than
+    one plugin loot event, making identical back-to-back submissions duplicates
+    rather than a genuine double kill. Accepts raw or canonical names."""
+    if not npc_name:
+        return False
+    return npc_slug(canonical_encounter_name(npc_name)) in _MULTI_PATH_SLUGS
 
 
 def npc_match_key(name_or_slug: str | None) -> str:
