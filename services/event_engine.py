@@ -65,7 +65,11 @@ v1 evaluation semantics (task doc table):
   by pet category via :mod:`utils.osrs_pets`, and an absent/empty list means
   "any pet" (the default set, misc excluded).
   Progress unit = 1 per new pet; ``target_value`` is the count to collect
-  (default 1 → completes on the first qualifying pet).
+  (default 1 → completes on the first qualifying pet). DUPLICATE pets are
+  refused (:func:`_pet_is_new`) — this counts acquisitions, so a re-drop of a
+  pet the player owns is not one. ``loot_sweep`` pet entries refuse them too
+  (status quo hold, see there); ``item_collection`` ``pet_items`` ACCEPTS
+  them — a "5 of these 4 items" tile needs the duplicate.
 - ``ehp_target``/``ehb_target``/``custom`` — not auto-evaluated (Task 18
   manual/confirmation only).
 
@@ -510,6 +514,19 @@ def _task_pet_names(task: dict) -> frozenset:
     if pets is None:
         pets = _config_pet_names(task.get("config") or {})
     return pets
+
+
+def _pet_is_new(data: dict) -> bool:
+    """Whether a ``pet`` envelope is a pet the player did not already own.
+
+    The producer sends every pet submission now, duplicates included, because
+    an ``item_collection`` tile listing a pet in ``config.pet_items`` is only
+    satisfiable with them ("5 of these 4 items"). Task types that count
+    ACQUISITIONS rather than drops screen duplicates out with this.
+
+    An absent flag means an envelope queued before the producer sent
+    duplicates at all — it was new by construction, so it reads as new."""
+    return bool((data or {}).get("is_new_pet", True))
 
 
 def _norm_npc_set(raw) -> frozenset:
@@ -1125,6 +1142,13 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
             except (TypeError, ValueError):
                 qty = 1
         elif kind == "pet":
+            if not _pet_is_new(data):
+                # Status quo hold, not a considered scoring rule: duplicates
+                # never reached the engine before the producer stopped gating
+                # them, and enabling them here would silently change scoring in
+                # a running sweep. Whether a duplicate pet is worth sweep points
+                # is an open policy call — delete these two lines to allow it.
+                return None
             raw_name = data.get("pet_name") or data.get("item_name")
             name = _norm(raw_name)
             entry = index.get(name)
@@ -1217,6 +1241,12 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
 
     if task_type == "pet_collection":
         if kind != "pet":
+            return None
+        if not _pet_is_new(data):
+            # A DUPLICATE pet is not a collected pet: "obtain 3 boss pets" must
+            # not be satisfiable by re-killing one boss for a pet you already
+            # own. The producer emits duplicates now (item_collection tiles
+            # need them), so the gate lives here.
             return None
         pet_name = data.get("pet_name") or data.get("item_name")
         if not pet_name:

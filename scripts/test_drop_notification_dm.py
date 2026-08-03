@@ -42,6 +42,7 @@ from api.core import get_db_session
 # Utility imports
 from utils.redis import redis_client
 from utils.format import format_number, replace_placeholders
+from utils.site_urls import player_link
 from services.redis_updates import get_player_list_loot_sum, loot_tracker
 
 # ============================================================================
@@ -407,7 +408,7 @@ class DropNotificationTester:
             "{item_value}": "`" + format_number(total_value) + "`",
             "{quantity}": "`" + str(quantity) + "`",
             "{total_value}": "`" + str(total_value) + "`",
-            "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{player_name}.{player_id}/view)",
+            "{player_name}": player_link(player_name, player_id),
             "{image_url}": image_url or ""
         }
         

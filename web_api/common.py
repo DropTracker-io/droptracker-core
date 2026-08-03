@@ -276,6 +276,12 @@ def cache_set(key: str, value: Any):
     _cache[key] = (time.time(), value)
 
 
+def cache_delete(key: str) -> None:
+    """Evict one entry early — for writes that invalidate a cached derivation
+    (e.g. a group rename changing ``canonslug:group:{id}``)."""
+    _cache.pop(key, None)
+
+
 # --------------------------------------------------------------------------- #
 # Privacy: players excluded from all public surfaces (leaderboards, search,
 # profiles, live feed). A player is hidden when its own `players.hidden` flag

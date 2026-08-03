@@ -12,6 +12,7 @@ from utils.msg_logger import HighThroughputLogger
 from data.submissions import clog_processor, ca_processor, pb_processor, drop_processor
 from utils.format import convert_to_ms, convert_from_ms, get_true_boss_name
 from utils.redis import redis_client
+from utils.site_urls import PREMIUM_URL
 from db.app_logger import AppLogger
 from interactions import AutocompleteContext, BaseContext, GuildText, Permissions, SlashCommand, UnfurledMediaItem, PartialEmoji, ActionRow, Button, ButtonStyle, SlashCommandOption, check, is_owner, Extension, slash_command, slash_option, SlashContext, Embed, OptionType, GuildChannel, SlashCommandChoice
 from interactions.api.events import Startup, Component, ComponentCompletion, ComponentError, ModalCompletion, ModalError, MessageCreate
@@ -198,7 +199,7 @@ class MessageHandler(Extension):
                 SectionComponent(
                     components=[
                         TextDisplayComponent(
-                            content="-# We also offer some additional features for [players who upgrade their accounts](https://www.droptracker.io/groups/upgrades).\n" +
+                            content=f"-# We also offer some additional features for [players who upgrade their accounts]({PREMIUM_URL}).\n" +
                             "-# Please consider subscribing to support the continued development of the project.",
                         ),
                     ],
@@ -206,7 +207,7 @@ class MessageHandler(Extension):
                         label="Upgrade",
                         style=ButtonStyle.LINK,
                         emoji=PartialEmoji(name="supporter", id=1263827303712948304),
-                        url="https://www.droptracker.io/groups/upgrades"
+                        url=PREMIUM_URL
                     )
                 ),
                 SeparatorComponent(divider=True),

@@ -142,7 +142,10 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "vc_to_display_droptracker_users_text", "type": "string", "default": "{member_count} members"},
 
     # --- Misc / integration ---
-    {"key": "group_name", "type": "string", "default": ""},
+    # Not a setting of its own: this is an editable view of groups.group_name,
+    # the column every surface displays. PATCH routes it through
+    # db/group_rename.py; max_length matches that VARCHAR(30) column.
+    {"key": "group_name", "type": "string", "default": "", "max_length": 30},
     {"key": "group_description", "type": "text", "default": ""},
     {"key": "clan_chat_name", "type": "string", "default": ""},
     {"key": "discord_url", "type": "string", "default": ""},
@@ -290,4 +293,14 @@ def coerce_to_storage(key: str, value: Any) -> str:
         return ""
     if not isinstance(value, (str, int)):
         raise ConfigValidationError(key, f"'{key}' must be a string.")
-    return str(value)
+    text_value = str(value)
+    # A declared max_length means "trimmed, bounded string" — trailing spaces
+    # must not push a name over the limit its column can hold.
+    limit = field.get("max_length")
+    if limit is not None:
+        text_value = text_value.strip()
+        if len(text_value) > limit:
+            raise ConfigValidationError(
+                key, f"'{key}' must be {limit} characters or fewer."
+            )
+    return text_value

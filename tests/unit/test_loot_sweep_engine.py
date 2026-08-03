@@ -119,6 +119,14 @@ class TestPetSource:
         env = {"kind": "pet", "data": {"pet_name": "Armadyl helmet"}}
         assert engine.match_task(PET_TASK, env) is None
 
+    def test_duplicate_pet_does_not_score(self):
+        # The producer now emits duplicates (item_collection tiles need them);
+        # sweeps hold the old behaviour so a running event's scoring doesn't
+        # change underneath it. Flip is a two-line delete in match_task.
+        env = {"kind": "pet", "data": {"pet_name": "Pet kree'arra",
+                                       "is_new_pet": False}}
+        assert engine.match_task(PET_TASK, env) is None
+
 
 class TestLootSweepScore:
     def test_group_complete_scores_bonus(self):

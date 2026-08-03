@@ -98,13 +98,14 @@ from utils.hof import (
     select_menu_custom_id,
 )
 from utils.redis import redis_client
+from utils.site_urls import WEBSITE_URL, npc_url
 
 log = logging.getLogger(__name__)
 
 _MEDAL_EMOJIS = {1: "🥇", 2: "🥈", 3: "🥉"}
 _FOOTER_TEXT = (
-    "-# Powered by the [DropTracker](https://www.droptracker.io) • "
-    "[View all Personal Bests](https://www.droptracker.io/personal_bests)"
+    f"-# Powered by the [DropTracker]({WEBSITE_URL}) • "
+    f"[View all Personal Bests]({WEBSITE_URL}/personal-bests)"
 )
 
 # The periodic sweep is now a slow self-heal (deleted-message recovery + loot
@@ -1409,8 +1410,7 @@ class HallOfFame(Extension):
         return f"https://www.droptracker.io/img/npcdb/{npc.npc_id}.png"
 
     def _get_npc_url(self, npc: NpcList) -> str:
-        npc_name = npc.npc_name.replace(" ", "-")
-        return f"https://www.droptracker.io/npcs/{npc_name}.{npc.npc_id}/view"
+        return npc_url(npc.npc_id)
 
     # ------------------------------------------------------------------ #
     # Limits + hashing

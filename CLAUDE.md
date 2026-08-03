@@ -399,6 +399,7 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | NPC name matching / aliases | `utils/npc_names.py` |
 | Item valuation | `utils/ge_value.py`, `utils/value_overrides.py`, `web_api/routes/item_values.py` |
 | Change group configuration options | `web_api/config_registry.py` (+ frontend `packages/api-types`) |
+| Rename a group (name lives in 4 places) | `db/group_rename.py` — every rename path must go through it |
 | Points/premium features | `services/points.py`, `data/submissions/point_awards.py`, `db/models/group_points.py` |
 | Video upload flow | `api/routes/video.py`, `services/video_worker.py`, `utils/b2_storage.py` |
 | XenForo integration | `db/xf/`, `services/xf_services.py` |

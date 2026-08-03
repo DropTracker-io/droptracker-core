@@ -41,6 +41,7 @@ from datetime import datetime, timedelta
 from utils.embeds import get_global_drop_embed
 from utils.download import download_player_image
 from utils.format import normalize_player_display_equivalence
+from utils.site_urls import player_link
 from utils.wiseoldman import fetch_group_members, check_user_by_id, check_user_by_username, _group_member_count as _wom_group_member_count
 from utils import group_config
 from utils.redis import RedisClient, calculate_rank_amongst_groups, get_true_player_total
@@ -712,7 +713,7 @@ def get_formatted_name(player_name:str, group_id: int, existing_session = None):
     db_session = existing_session if use_existing_session else Session()
     try:
         player = db_session.query(Player).filter(Player.player_name == player_name).first()
-        formatted_name = f"[{player.player_name}](https://www.droptracker.io/players/{player.player_id}/view)"
+        formatted_name = player_link(player.player_name, player.player_id)
         url_name = formatted_name
         if player.user:
             user: User = db_session.query(User).filter(User.user_id == player.user.user_id).first()

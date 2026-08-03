@@ -94,6 +94,38 @@ def test_empty_dropsline_fails_open():
     assert _run(api.check_drop("Some New Item", "Zulrah")) is True
 
 
+def test_full_result_page_fails_open():
+    """A result set AT the row limit may have been truncated by the Bucket API,
+    so "the stated NPC isn't in this list" proves nothing. Inconclusive."""
+    limit = SemanticAPI.DROPSLINE_ROW_LIMIT
+    api = _api({"bucket": [{"page_name": f"Monster {i}"} for i in range(limit)]})
+    assert _run(api.check_drop("Coins", "Tombs of Amascut")) is True
+
+
+def test_partial_result_page_is_still_a_confident_negative():
+    """Below the limit the wiki sent everything it had, so a miss is real."""
+    limit = SemanticAPI.DROPSLINE_ROW_LIMIT
+    api = _api({"bucket": [{"page_name": f"Monster {i}"} for i in range(limit - 1)]})
+    assert _run(api.check_drop("Twisted bow", "Goblin")) is False
+
+
+def test_dropsline_query_requests_an_explicit_row_limit():
+    """Regression: a query with no .limit() silently gets the Bucket API's
+    500-row default. "Coins" has 2,069 dropsline rows across 601 sources, so
+    its real Tombs of Amascut source fell outside the slice and every coin
+    drop over 1M from the raid was rejected as a spoof."""
+    seen = []
+    api = SemanticAPI(client=object())
+
+    async def fake_bucket_query(query):
+        seen.append(query)
+        return {"bucket": [{"page_name": "Zulrah"}]}
+
+    api._bucket_query = fake_bucket_query
+    _run(api.check_drop("Tanzanite fang", "Zulrah"))
+    assert f".limit({SemanticAPI.DROPSLINE_ROW_LIMIT})" in seen[0]
+
+
 def test_wiki_error_response_fails_open():
     # _bucket_query returns a dict WITHOUT a 'bucket' key on transport/API error.
     api = _api({})

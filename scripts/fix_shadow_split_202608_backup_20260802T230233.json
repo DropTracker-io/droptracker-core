@@ -1,0 +1,199 @@
+{
+  "taken_at": "2026-08-02T23:02:33.493470",
+  "drop_ids": [
+    180509282,
+    180516134,
+    180517207
+  ],
+  "drops": [
+    {
+      "drop_id": 180509282,
+      "item_id": 27277,
+      "player_id": 5758194,
+      "value": 777800000,
+      "quantity": 1,
+      "date_updated": "2026-08-02T21:49:50",
+      "partition": 202608,
+      "date_added": "2026-08-02T21:49:50",
+      "npc_id": 13970,
+      "image_url": "",
+      "authed": 1,
+      "used_api": 1,
+      "unique_id": "c8df97fe-ea44-41d1-8936-0fc53ffb463d",
+      "video_url": null,
+      "hidden": 0,
+      "source": "manual",
+      "kill_count": null
+    },
+    {
+      "drop_id": 180516134,
+      "item_id": 24777,
+      "player_id": 5033,
+      "value": 7419095,
+      "quantity": 17,
+      "date_updated": "2026-08-02T22:00:00",
+      "partition": 202608,
+      "date_added": "2026-08-02T22:00:00",
+      "npc_id": 9756,
+      "image_url": "",
+      "authed": 1,
+      "used_api": 1,
+      "unique_id": "e9b43641-2718-4d29-b657-8643bbbaefc4",
+      "video_url": null,
+      "hidden": 0,
+      "source": "manual",
+      "kill_count": null
+    },
+    {
+      "drop_id": 180517207,
+      "item_id": 27277,
+      "player_id": 5755880,
+      "value": 777800000,
+      "quantity": 1,
+      "date_updated": "2026-08-02T22:01:29",
+      "partition": 202608,
+      "date_added": "2026-08-02T22:01:29",
+      "npc_id": 13970,
+      "image_url": "",
+      "authed": 1,
+      "used_api": 1,
+      "unique_id": "5934bbc7-34db-4bfe-884c-391ffe5655f3",
+      "video_url": null,
+      "hidden": 0,
+      "source": "manual",
+      "kill_count": null
+    }
+  ],
+  "player_points": [
+    {
+      "id": 184331,
+      "player_id": 5758194,
+      "group_id": 2,
+      "amount": 78,
+      "reason": "drop",
+      "entry_type": null,
+      "entry_id": 180509282,
+      "date_added": "2026-08-02T21:49:50",
+      "date_updated": "2026-08-02T21:49:50"
+    },
+    {
+      "id": 184375,
+      "player_id": 5033,
+      "group_id": 2,
+      "amount": 17,
+      "reason": "drop",
+      "entry_type": null,
+      "entry_id": 180516134,
+      "date_added": "2026-08-02T22:00:00",
+      "date_updated": "2026-08-02T22:00:00"
+    },
+    {
+      "id": 184386,
+      "player_id": 5755880,
+      "group_id": 2,
+      "amount": 78,
+      "reason": "drop",
+      "entry_type": null,
+      "entry_id": 180517207,
+      "date_added": "2026-08-02T22:01:29",
+      "date_updated": "2026-08-02T22:01:29"
+    }
+  ],
+  "notified": [
+    {
+      "id": 171709,
+      "channel_id": "1267605788445245521",
+      "message_id": "1533592710685134950",
+      "status": "sent",
+      "drop_id": 180509282,
+      "clog_id": null,
+      "ca_id": null,
+      "pb_id": null,
+      "group_id": 2,
+      "date_added": "2026-08-02T21:49:55",
+      "date_updated": "2026-08-02T21:49:55",
+      "edited_by": null,
+      "player_id": 5758194,
+      "cached_embed": null
+    },
+    {
+      "id": 171720,
+      "channel_id": "1267605788445245521",
+      "message_id": "1533595270988828734",
+      "status": "sent",
+      "drop_id": 180516134,
+      "clog_id": null,
+      "ca_id": null,
+      "pb_id": null,
+      "group_id": 2,
+      "date_added": "2026-08-02T22:00:05",
+      "date_updated": "2026-08-02T22:00:05",
+      "edited_by": null,
+      "player_id": 5033,
+      "cached_embed": null
+    },
+    {
+      "id": 171721,
+      "channel_id": "1267605788445245521",
+      "message_id": "1533595662388695071",
+      "status": "sent",
+      "drop_id": 180517207,
+      "clog_id": null,
+      "ca_id": null,
+      "pb_id": null,
+      "group_id": 2,
+      "date_added": "2026-08-02T22:01:39",
+      "date_updated": "2026-08-02T22:01:39",
+      "edited_by": null,
+      "player_id": 5755880,
+      "cached_embed": null
+    }
+  ],
+  "drop_splits": [],
+  "player_item_hourly_totals": [
+    {
+      "id": 46531874,
+      "player_id": 5033,
+      "item_id": 24777,
+      "date_hour": "2026-08-02-22",
+      "partition": 202608,
+      "quantity": 17,
+      "total_value": 126124615,
+      "drop_count": 1,
+      "last_drop_time": "2026-08-02T22:00:00"
+    },
+    {
+      "id": 46530601,
+      "player_id": 5758194,
+      "item_id": 27277,
+      "date_hour": "2026-08-02-21",
+      "partition": 202608,
+      "quantity": 1,
+      "total_value": 777800000,
+      "drop_count": 1,
+      "last_drop_time": "2026-08-02T21:49:50"
+    }
+  ],
+  "player_npc_hourly_totals": [
+    {
+      "id": 7827290,
+      "player_id": 5033,
+      "npc_id": 9756,
+      "date_hour": "2026-08-02-22",
+      "partition": 202608,
+      "total_value": 126124615,
+      "drop_count": 1,
+      "last_drop_time": "2026-08-02T22:00:00"
+    },
+    {
+      "id": 7825828,
+      "player_id": 5758194,
+      "npc_id": 13970,
+      "date_hour": "2026-08-02-21",
+      "partition": 202608,
+      "total_value": 778154544,
+      "drop_count": 5,
+      "last_drop_time": "2026-08-02T21:49:50"
+    }
+  ]
+}

@@ -1336,3 +1336,56 @@ class TestItemListPets:
                   target_value=2)
         m = engine.match_task(t, _env("pet", {"pet_name": "Kalphite princess"}))
         assert m == {"mode": "count", "quantity": 1, "matched_target": "Kalphite princess"}
+
+
+# ── duplicate pets (is_new_pet) ───────────────────────────────────────────────
+
+class TestDuplicatePets:
+    """The producer emits EVERY pet submission, duplicates included. Task types
+    that count acquisitions screen them out; item_collection must not, because
+    an any_of tile needing more units than it lists distinct items ("get 5 of
+    these 4") is unsatisfiable without duplicates. Regression: a duplicate Dom
+    was dropped at the producer and never credited a 5-of-4 tile."""
+
+    GLOWY = {"kind": "any_of",
+             "items": ["Mokhaiotl cloth", "Eye of ayak (uncharged)",
+                       "Avernic treads", "Dom"],
+             "pet_items": ["Dom"]}
+
+    def test_item_collection_credits_duplicate_pet(self):
+        t = _task(config=dict(self.GLOWY), target_value=5)
+        m = engine.match_task(
+            t, _env("pet", {"pet_name": "Dom", "is_new_pet": False}))
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "Dom"}
+
+    def test_item_collection_credits_new_pet(self):
+        t = _task(config=dict(self.GLOWY), target_value=5)
+        m = engine.match_task(
+            t, _env("pet", {"pet_name": "Dom", "is_new_pet": True}))
+        assert m == {"mode": "count", "quantity": 1, "matched_target": "Dom"}
+
+    def test_pet_collection_refuses_duplicate(self):
+        t = _task(type="pet_collection", target=None, config={"categories": ["boss"]})
+        assert engine.match_task(
+            t, _env("pet", {"pet_name": "Vorki", "is_new_pet": False})) is None
+        assert engine.match_task(
+            t, _env("pet", {"pet_name": "Vorki", "is_new_pet": True})) is not None
+
+    def test_pet_collection_refuses_duplicate_of_specific_target(self):
+        t = _task(type="pet_collection", target="Baby mole", target_value=1)
+        assert engine.match_task(
+            t, _env("pet", {"pet_name": "Baby mole", "is_new_pet": False})) is None
+
+    def test_pet_collection_refuses_duplicate_from_allow_list(self):
+        t = _task(type="pet_collection", target=None,
+                  config={"pets": ["Nexling", "Vorki"]})
+        assert engine.match_task(
+            t, _env("pet", {"pet_name": "Nexling", "is_new_pet": False})) is None
+
+    # loot_sweep's duplicate refusal is covered in test_loot_sweep_engine.py,
+    # which already builds tasks through LootSweepConfig.matcher_index().
+
+    def test_missing_flag_reads_as_new(self):
+        # Pre-upgrade envelopes carry no flag; they were new by construction.
+        t = _task(type="pet_collection", target="Baby mole")
+        assert engine.match_task(t, _env("pet", {"pet_name": "Baby mole"})) is not None

@@ -1042,6 +1042,10 @@ async def _process_manual_submission(req_start):
                         "quantity": int(quantity),
                         "kill_count": data.get("kill_count", data.get("killcount")),
                         "players_included": nearby_players,
+                        # Party size for split GP tracking, receiver included.
+                        # Carries shares taken by people we can't credit, so the
+                        # divisor matches the real split (see drop_processor).
+                        "split_size": data.get("split_size"),
                     })
                     response = await submissions.drop_processor(processed_data, external_session=db_session)
                     log_phase("drop_processed")

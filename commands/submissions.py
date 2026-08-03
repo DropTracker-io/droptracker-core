@@ -40,6 +40,7 @@ from sqlalchemy import text
 
 from data.submissions.manual_discord import (
     CA_TIERS,
+    MAX_SPLIT_SIZE,
     POLICY_NOTICE,
     POLICY_NOTICE_FALLBACK,
     build_manual_payload,
@@ -50,6 +51,7 @@ from data.submissions.manual_discord import (
 from db.models import Player, User, session
 from utils.npc_names import npc_match_key
 from utils.redis import redis_client
+from utils.submission_messages import friendly_rejection
 
 INTAKE_API_URL = os.getenv("INTAKE_API_URL", "http://127.0.0.1:31323")
 MANUAL_SUBMIT_KEY_HEADER = "X-DT-Manual-Key"
@@ -254,10 +256,13 @@ class SubmissionCommands(Extension):
         if not isinstance(data, dict):
             data = {}
         if resp.status_code >= 400 or data.get("success") is False:
-            detail = data.get("error") or data.get("message") or (
-                f"The submission service returned an error ({resp.status_code})."
+            # Same wording the website shows for the same rejection
+            # (utils/submission_messages.py) — the pipeline's own messages are
+            # written for logs, not for the person who submitted.
+            return False, friendly_rejection(
+                data,
+                fallback=f"The submission service returned an error ({resp.status_code}).",
             )
-            return False, detail
         return True, data
 
     async def _handle_submission(
@@ -379,6 +384,21 @@ class SubmissionCommands(Extension):
         required=False,
         min_value=0,
     )
+    @slash_option(
+        name="split_with",
+        description="Others you split it with, comma-separated (RSNs)",
+        opt_type=OptionType.STRING,
+        required=False,
+        max_length=300,
+    )
+    @slash_option(
+        name="split_size",
+        description="How many people it was split between INCLUDING you (for untracked members)",
+        opt_type=OptionType.INTEGER,
+        required=False,
+        min_value=2,
+        max_value=MAX_SPLIT_SIZE,
+    )
     @_proof_option()
     async def submit_drop(
         self,
@@ -388,12 +408,19 @@ class SubmissionCommands(Extension):
         account: str | None = None,
         quantity: int | None = None,
         value: int | None = None,
+        split_with: str | None = None,
+        split_size: int | None = None,
         proof: Attachment | None = None,
     ):
+        # split_with and split_size are independent on purpose: naming everyone
+        # covers the all-tracked case, while split_size is what lets a share
+        # taken by someone not on the DropTracker still count against the
+        # divisor (e.g. "4 ways, but only 3 of us are tracked").
         await self._handle_submission(
             ctx, "drop", account, proof,
             item_name=item.strip(), npc_name=npc.strip(),
             quantity=quantity, value=value,
+            split_with=split_with, split_size=split_size,
         )
 
     # ------------------------------------------------------------------

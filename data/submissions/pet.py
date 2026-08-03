@@ -201,8 +201,16 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
         except Exception as e:
             debug_print(f"Ticker pet publish failed: {e}")
 
-        # Event engine hook: gated, fire-and-forget LPUSH; new pets only.
-        # Feeds pet_collection tasks (specific pet / category / any pet).
+    if not is_seasonal:
+        # Event engine hook: fire-and-forget LPUSH — DUPLICATES INCLUDED.
+        # `is_new_pet` answers "has DropTracker seen this pet for this player
+        # before", NOT "did a pet drop just happen", and only the latter can
+        # decide event credit. An item_collection task listing a pet in
+        # `config.pet_items` genuinely needs the duplicate: a "5 of these 4
+        # items" tile is unsatisfiable without one, and a pet-flagged name is
+        # refused from drop/clog envelopes, so this is its ONLY credit path.
+        # The flag rides along instead and the MATCHER decides per task type
+        # (pet_collection / loot_sweep reject duplicates — match_task).
         # Never fails the submission.
         try:
             from services.event_engine import queue_submission
@@ -214,7 +222,13 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                     "item_name": pet_name,
                     "npc_name": npc_name,
                     "killcount": killcount,
+                    # None on a duplicate — no player_pets row is written for
+                    # one. submission_guid is what dedupes the ledger anyway.
                     "source_id": getattr(new_pet, "id", None),
+                    # DB-derived bool. Deliberately not the payload's
+                    # `duplicate`, which arrives from the webhook as the STRING
+                    # "true"/"false" (both truthy).
+                    "is_new_pet": is_new_pet,
                 },
                 world_type=world_type, player_name=player_name,
                 # used_api means "came from the plugin" to the events engine

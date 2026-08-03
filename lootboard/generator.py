@@ -121,7 +121,14 @@ async def get_drops_for_group_optimized(player_ids: List[int], partition: str, g
                 Drop.partition == partition_int,
                 Drop.value.isnot(None),
                 Drop.quantity.isnot(None),
-                Drop.item_id.isnot(None)
+                Drop.item_id.isnot(None),
+                # Hidden drops are removed everywhere else — force_update_player
+                # rebuilds Redis with `Drop.hidden != True`, so the website stops
+                # showing them immediately. This board reads the drops table
+                # directly, so without this it kept rendering deleted loot in the
+                # item grid, the player leaderboard and the header total for as
+                # long as the partition lasted.
+                Drop.hidden != True,  # noqa: E712
             )
         )
         if excluded_drop_ids:
@@ -353,6 +360,29 @@ async def get_drops_for_group(player_ids, partition: str, only_include_items_ove
                     player_totals[pid] = max(player_totals[pid] - e["total_value"], 0)
                 total_loot = max(total_loot - e["total_value"], 0)
             recent_drops = [d for d in recent_drops if d.get("drop_id") not in excluded_ids]
+
+    # Apply split GP tracking, so the board's leaderboard panel agrees with the
+    # website's group leaderboard. The per-player Redis totals this panel is
+    # built from are GLOBAL and split-unaware: a split receiver showed the whole
+    # drop here while the site showed only their share, and the participants'
+    # credits were missing altogether. services/split_credits.py owns the
+    # arithmetic so the two surfaces can't drift again.
+    if group_id:
+        try:
+            from services.split_credits import group_has_split_tracking, group_split_deltas
+
+            with get_db_session() as _split_session:
+                if group_has_split_tracking(_split_session, int(group_id)):
+                    deltas = group_split_deltas(
+                        _split_session, int(group_id), player_ids, partition
+                    )
+                    for pid, delta in deltas.items():
+                        if pid in player_totals:
+                            adjusted = max(player_totals[pid] + delta, 0)
+                            total_loot += adjusted - player_totals[pid]
+                            player_totals[pid] = adjusted
+        except Exception as e:
+            print(f"Couldn't apply split credits for group {group_id}: {e}")
 
     # Ensure recent drops are in chronological order (newest first)
     try:
@@ -1283,7 +1313,8 @@ async def get_drops_for_timeframe_from_db(
                 Drop.date_added <= end_time,
                 Drop.value.isnot(None),
                 Drop.quantity.isnot(None),
-                Drop.item_id.isnot(None)
+                Drop.item_id.isnot(None),
+                Drop.hidden != True,  # noqa: E712 — see get_drops_for_group_optimized
             )
         )
         

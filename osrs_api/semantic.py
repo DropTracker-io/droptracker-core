@@ -17,7 +17,17 @@ class SemanticAPI:
     """
     
     WIKI_API_URL = 'https://oldschool.runescape.wiki/api.php'
-    
+
+    # Row cap for the dropsline drop-source query. A query with no .limit()
+    # gets the Bucket API's default of 500 rows *silently* — no truncation
+    # flag, no error — and commonly-dropped items blow straight past it:
+    # "Coins" has 2,069 rows across 601 sources. check_drop() then compared the
+    # NPC against an arbitrary first-500 slice and read "absent" as a confident
+    # negative, so e.g. a real coin drop from "Chest (Tombs of Amascut)" (row
+    # ~1,700) was rejected. Ask for far more than any item legitimately has,
+    # and treat a full page as inconclusive rather than as proof of a spoof.
+    DROPSLINE_ROW_LIMIT = 5000
+
     # Mapping of database names to semantic names for compatibility
     ALT_NAMES = {
         # Semantic name -> our database name
@@ -231,11 +241,13 @@ class SemanticAPI:
             if acceptable_norm != {npc_name.lower().strip()}:
                 print(f"Accepting drop sources {sorted(acceptable)} for {npc_name}")
 
-            # Query the dropsline bucket to find NPCs that drop this item
+            # Query the dropsline bucket to find NPCs that drop this item.
+            # The explicit .limit() is load-bearing: see DROPSLINE_ROW_LIMIT.
             query = (
                 "bucket('dropsline')"
                 ".select('page_name')"
-                f".where('item_name', {self._bucket_quote(item_name)}).run()"
+                f".where('item_name', {self._bucket_quote(item_name)})"
+                f".limit({self.DROPSLINE_ROW_LIMIT}).run()"
             )
 
             result = await self._bucket_query(query)
@@ -275,6 +287,14 @@ class SemanticAPI:
                 if dropped_from.lower().strip() in acceptable_norm:
                     print(f"Drop found & valid for {item_name} from {dropped_from}")
                     return True
+
+            # A full page means the wiki had at least as many drop-source rows
+            # as we asked for, so it may have more that it never sent — "not in
+            # this list" then proves nothing. Inconclusive, so fail open.
+            if len(bucket_data) >= self.DROPSLINE_ROW_LIMIT:
+                print(f"Dropsline results for {item_name!r} hit the "
+                      f"{self.DROPSLINE_ROW_LIMIT}-row query limit; allowing (fail-open)")
+                return True
 
             # Confident negative: the item HAS known drop sources and this NPC
             # is not one of them. This is the only case we reject.

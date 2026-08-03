@@ -4,6 +4,7 @@ import interactions
 from interactions import ComponentContext, Extension, ActionRow, Button, ButtonStyle, FileComponent, PartialEmoji, Permissions, SlashContext, UnfurledMediaItem, listen, slash_command
 from interactions.api.events import Startup, Component, ComponentCompletion, ComponentError, ModalCompletion, ModalError, MessageCreate
 from interactions.models import ContainerComponent, ThumbnailComponent, SeparatorComponent, UserSelectMenu, SlidingWindowSystem, SectionComponent, SeparatorComponent, TextDisplayComponent, ThumbnailComponent, MediaGalleryComponent, MediaGalleryItem, OverwriteType
+from utils.site_urls import PREMIUM_URL, WEBSITE_URL
 
 
 
@@ -143,7 +144,7 @@ async def build_help_components(bot=None):
                 Button(
                     label="Support us",
                     style=ButtonStyle.URL,
-                    url="https://www.droptracker.io/groups/upgrades"
+                    url=PREMIUM_URL
                 )
             ),
             SeparatorComponent(divider=True),
@@ -295,7 +296,7 @@ async def build_clan_setup(bot=None):
                     TextDisplayComponent(
                         content=f"-# If you have all of these, grab your **WiseOldMan Group ID** (3-6 digits maximum, with no hyphens), and use </create-group:{create_group_id}> in your group's Discord server to get started.\n" +
                         "-# Once you create a group, you should be DMed with a welcome message; and a link to configure your group settings.\n\n" +
-                        "-# After creating a group, you can also [click here](https://www.droptracker.io/account/players), then click your group name in the side navigation to find your group config page."
+                        f"-# After creating a group, you can also [click here]({WEBSITE_URL}/dashboard), then click your group name to find your group config page."
                     )
                 ],
                 accessory=ThumbnailComponent(
@@ -335,7 +336,7 @@ async def build_clan_setup(bot=None):
             SectionComponent(
                 components=[
                     TextDisplayComponent(
-                        content="-# We also offer some premium features for groups when they [upgrade their account](https://www.droptracker.io/groups/upgrades).\n" +
+                        content=f"-# We also offer some premium features for groups when they [upgrade their account]({PREMIUM_URL}).\n" +
                         "-# Please consider subscribing to support the development of the project.",
                     ),
                 ],
@@ -343,7 +344,7 @@ async def build_clan_setup(bot=None):
                     label="Upgrade",
                     style=ButtonStyle.LINK,
                     emoji=PartialEmoji(name="supporter", id=1263827303712948304),
-                    url="https://www.droptracker.io/groups/upgrades"
+                    url=PREMIUM_URL
                 )
             ),
             SeparatorComponent(divider=True),

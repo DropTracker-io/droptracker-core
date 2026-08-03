@@ -79,6 +79,11 @@ from db import (
     UserConfiguration,
     UserSubscription,
 )
+from db.group_rename import (
+    GroupRenameError,
+    invalidate_group_name_caches,
+    rename_group,
+)
 from db.entitlements import (
     NITRO_PROVIDER,
     NON_REVENUE_PROVIDERS,
@@ -2237,9 +2242,23 @@ async def admin_data_patch(entity: str, record_id: str):
             if not row:
                 abort_problem(404, "Record not found", f"No {entity} with id {record_id}.")
             before = {k: registry.serialize_value(getattr(row, k, None)) for k in fields}
+            renamed_group = None
             for k, v in fields.items():
+                # A group's name lives in more than the column this browser
+                # edits (settings-editor config row, forum mirror, name-derived
+                # caches) — route it through the shared rename service so a
+                # superadmin edit lands everywhere, like the settings page does.
+                if entity == "groups" and k == "group_name":
+                    try:
+                        rename_group(s, pk_val, v)
+                    except GroupRenameError as e:
+                        abort_problem(422, "Invalid group name", str(e))
+                    renamed_group = pk_val
+                    continue
                 setattr(row, k, v)
             s.commit()
+            if renamed_group is not None:
+                invalidate_group_name_caches(renamed_group)
             after = {k: registry.serialize_value(getattr(row, k, None)) for k in fields}
             return {
                 "entity": entity,

@@ -58,6 +58,20 @@ class TestRegistry:
         assert reg.coerce_to_storage("min_ca_tier_to_notify", "ELITE") == "ELITE"
         assert reg.coerce_to_storage("seasonal_notify_pbs", True) == "1"
 
+    def test_coerce_to_storage_trims_and_bounds_max_length_fields(self):
+        # group_name mirrors groups.group_name VARCHAR(30): trailing whitespace
+        # must not eat into the limit, and an over-long name is rejected rather
+        # than silently truncated by MySQL.
+        assert reg.coerce_to_storage("group_name", "  Sailing warriors  ") == "Sailing warriors"
+        assert reg.coerce_to_storage("group_name", "x" * 30) == "x" * 30
+        assert reg.coerce_to_storage("group_name", "x" * 30 + "  ") == "x" * 30
+        with pytest.raises(reg.ConfigValidationError):
+            reg.coerce_to_storage("group_name", "x" * 31)
+
+    def test_coerce_to_storage_leaves_unbounded_strings_alone(self):
+        # Only fields that declare max_length get the trim treatment.
+        assert reg.coerce_to_storage("group_description", " padded ") == " padded "
+
     def test_coerce_to_storage_rejects_bad(self):
         with pytest.raises(reg.ConfigValidationError):
             reg.coerce_to_storage("notify_pbs", "notabool")

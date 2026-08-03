@@ -24,6 +24,7 @@ from db import Player, User
 from web_api.common import abort_problem, db_session, private_no_store
 from web_api.deps import current_user_id, is_superadmin, json_body, load_user
 from utils.redis import redis_client
+from utils.submission_messages import friendly_rejection
 
 submissions_bp = Blueprint("v1_submissions", __name__)
 
@@ -64,6 +65,9 @@ _CONTENT_TYPE_EXT = {
 # Per-user manual-submission rate limit.
 _RATE_LIMIT = int(os.getenv("WEB_MANUAL_SUBMIT_PER_MIN", "20"))
 
+# Mirrors data/submissions/drop.py::MAX_SPLIT_SIZE (CoX's 100-player cap).
+MAX_SPLIT_SIZE = 100
+
 
 def _rc():
     return getattr(redis_client, "client", None)
@@ -81,6 +85,62 @@ def _rate_limited(user_id: int) -> bool:
         return count > _RATE_LIMIT
     except Exception:
         return False
+
+
+def _parse_split(body, receiver_name: str):
+    """Validate the submit form's split fields -> (other_players, split_size).
+
+    Both are optional and independent: naming people is enough for the common
+    all-tracked case, and a bare size covers "I split with people who aren't on
+    DropTracker". Rejects only what is self-contradictory, since the processor
+    already ignores a size that would shrink the divisor below the names given.
+
+    The receiver is filtered out of the name list (the form pre-fills the
+    submitting account and the pipeline counts the receiver separately, so
+    leaving it in would double-count them and shrink everyone's share).
+    """
+    raw = body.get("split_players")
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        abort_problem(422, "Invalid split", "'split_players' must be a list of player names.")
+
+    receiver_key = receiver_name.strip().lower().replace("_", " ")
+    others, seen = [], set()
+    for entry in raw:
+        name = str(entry or "").strip()
+        if not name:
+            continue
+        if len(name) > 12:  # OSRS display names cap at 12 characters
+            abort_problem(422, "Invalid split", f"“{name}” isn't a valid RuneScape name.")
+        key = name.lower().replace("_", " ")
+        if key == receiver_key or key in seen:
+            continue
+        seen.add(key)
+        others.append(name)
+
+    if len(others) + 1 > MAX_SPLIT_SIZE:
+        abort_problem(422, "Invalid split",
+                      f"A split can involve at most {MAX_SPLIT_SIZE} players.")
+
+    raw_size = body.get("split_size")
+    if raw_size in (None, ""):
+        # Everyone named and nobody else: the party is the people listed.
+        return others, (len(others) + 1 if others else None)
+    try:
+        size = int(raw_size)
+    except (TypeError, ValueError):
+        abort_problem(422, "Invalid split", "'split_size' must be a whole number.")
+    if size < 2 or size > MAX_SPLIT_SIZE:
+        abort_problem(422, "Invalid split",
+                      f"A split has to be between 2 and {MAX_SPLIT_SIZE} players.")
+    if size < len(others) + 1:
+        abort_problem(
+            422, "Invalid split",
+            f"You listed {len(others)} other player(s), so the split is at least "
+            f"{len(others) + 1} ways — but you entered {size}.",
+        )
+    return others, size
 
 
 @submissions_bp.post("/submissions/manual")
@@ -146,6 +206,20 @@ async def manual_submission():
         payload["quantity"] = int(body["quantity"])
     if body.get("notes"):
         payload["notes"] = body["notes"]
+    if sub_type == "drop":
+        # Split tracking. `split_players` are the OTHER people the drop was split
+        # with; `split_size` is how many people it was split between in total,
+        # receiver included — which is NOT len(split_players) + 1 whenever a
+        # share went to someone who isn't tracked here. Groups with
+        # split_gp_tracking on divide by split_size, so an untracked or unnamed
+        # party member still shrinks everyone's cut instead of silently
+        # inflating it. See data/submissions/drop.py::_award_split_gp_credits.
+        split_players, split_size = _parse_split(body, player_name)
+        if split_players:
+            payload["players_included"] = split_players
+        if split_size:
+            payload["split_size"] = split_size
+
     if sub_type == "pb":
         payload["time_ms"] = int(body["time_ms"])
         if body.get("team_size"):
@@ -186,8 +260,18 @@ async def manual_submission():
     except Exception:
         data = {}
 
+    # A *processor* rejection comes back as HTTP 200 with
+    # {"success": false, "message": ...} — only the endpoint's own validation
+    # and parse failures set "error". Reading "error" alone therefore missed
+    # every real rejection and fell through to the status-code fallback, which
+    # showed players the literal string "Intake returned 200."; friendly_rejection
+    # reads message/notice too and puts the reason in player-facing words.
     if resp.status_code >= 400 or (isinstance(data, dict) and data.get("success") is False):
-        detail = (data or {}).get("error") or f"Intake returned {resp.status_code}."
+        detail = friendly_rejection(data)
+        # 5xx, and the shared-secret gate's 401/503, are our problem rather
+        # than a bad submission — don't blame the player's input for them.
+        if resp.status_code >= 500 or resp.status_code in (401, 503):
+            abort_problem(502, "Submission pipeline unavailable", detail)
         abort_problem(422, "Submission rejected", detail)
 
     # The intake pipeline doesn't surface a row id; return a confirmation id.

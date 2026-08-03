@@ -74,7 +74,8 @@ def _verify_high_value_drop_sync(item_name, npc_name, timeout: float = 20.0) -> 
 
 async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
                                    players_included: list, drop_value: int,
-                                   world_type: str = "main") -> int:
+                                   world_type: str = "main",
+                                   split_size: int = None) -> int:
     """
     For groups with split_gp_tracking enabled, distribute group leaderboard GP
     credit equally among all split participants (including the receiver).
@@ -87,6 +88,20 @@ async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
 
     The global leaderboard and individual player:*:total_loot keys are never
     modified here.
+
+    ``split_size`` is the number of people the drop was ACTUALLY split between,
+    including the receiver — the real-world party size. It exists because the
+    denominator and the credit list are different questions: a share taken by
+    someone DropTracker can't credit (not tracked at all, tracked but not in this
+    group, or deliberately left unnamed) still has to shrink everyone else's
+    share. Without it the divisor collapsed to the people we happened to
+    recognise, so a 4-way split with 3 tracked members paid out thirds and
+    over-credited the whole group by a full share. Group-independent by design:
+    the party size is a fact about the kill, not about any one group's roster.
+
+    ``split_size`` only ever RAISES the divisor (``max`` against the people we
+    actually resolved), so a stale or under-counted value can never inflate
+    anyone's credit.
 
     Returns the number of non-receiver participants credited.
     """
@@ -119,15 +134,43 @@ async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
         if is_member:
             valid_participants.append(p)
 
-    if not valid_participants:
+    # Total participants = receiver + everyone else who took a share. Prefer the
+    # submitted party size, but never let it go below the people we resolved
+    # (a bogus small split_size must not inflate credit).
+    resolved_count = 1 + len(valid_participants)
+    try:
+        total_count = max(int(split_size or 0), resolved_count)
+    except (TypeError, ValueError):
+        total_count = resolved_count
+
+    if total_count <= 1:
         return 0
 
-    # Total participants = receiver + valid split members
-    total_count = 1 + len(valid_participants)
     split_value = drop_value // total_count
 
     # Guard: nothing to do if split equals full value (1-way "split")
     if split_value >= drop_value:
+        return 0
+
+    # Uncreditable shares (untracked / out-of-group / unnamed) still shrink
+    # everyone's cut, but there is nobody to hand them to — they are credited to
+    # no one rather than being redistributed.
+    uncredited = total_count - resolved_count
+    if uncredited > 0:
+        print(f"[SplitTracking] Drop {drop.drop_id}: {total_count}-way split, "
+              f"{uncredited} share(s) not creditable (untracked or not in group "
+              f"{group_id}); {split_value} gp each goes to nobody")
+
+    if not valid_participants:
+        # Every share went to someone this group can't credit. The receiver's
+        # reduction is deliberately NOT applied: it is reconstructed on rebuild
+        # from a DropSplit row's split_value (see redis_updates
+        # ._apply_split_receiver_adjustments), so with no rows to anchor it the
+        # reduction would be silently undone by the next force-rebuild. A
+        # consistent no-op beats a reduction that quietly reverts itself.
+        print(f"[SplitTracking] Drop {drop.drop_id}: no split participants are in "
+              f"group {group_id} — leaving the receiver at full group credit "
+              f"(nothing would persist a reduction).")
         return 0
 
     # 1. Adjust receiver's group leaderboard down from full_value to split_value
@@ -195,6 +238,32 @@ def _normalize_incoming_players(players_included):
     return None
 
 
+# A split bigger than a raid team is a typo, not a party. Chambers of Xeric caps
+# at 100 players, which is the largest group content in the game.
+MAX_SPLIT_SIZE = 100
+
+
+def _normalize_split_size(raw, players_included):
+    """Coerce a submitted party size into a trustworthy divisor, or None.
+
+    Returns None for anything absent, unparseable, or too small to matter — the
+    caller then falls back to counting the participants it resolved. A value is
+    only meaningful when it is at least (receiver + named participants); anything
+    lower contradicts the names in the same payload, so it is ignored rather than
+    used to shrink the divisor.
+    """
+    if raw is None or raw is True or raw is False:
+        return None
+    try:
+        size = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if size < 2 or size > MAX_SPLIT_SIZE:
+        return None
+    named = len(players_included or [])
+    return size if size >= named + 1 else None
+
+
 async def drop_processor(drop_data, external_session=None, world_type="main"):
     """Process a drop submission and create notifications when appropriate."""
 
@@ -259,6 +328,11 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             # named "members" (comma-separated, "none" when empty).
             raw_players_included = drop_data.get("members")
         players_included = _normalize_incoming_players(raw_players_included)
+        # How many people the drop was ACTUALLY split between, receiver included.
+        # Lets a submitter account for shares taken by people DropTracker can't
+        # credit (untracked, not in the group, or left unnamed) so the divisor
+        # matches the real party instead of collapsing to whoever we recognise.
+        split_size = _normalize_split_size(drop_data.get("split_size"), players_included)
         debug_print(
             "Drop split payload players_included "
             f"raw_type={type(raw_players_included).__name__} raw_value={raw_players_included} "
@@ -621,16 +695,17 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             split_tracking_enabled = (
                 group_config_values.get((group_id, "split_gp_tracking")) == "1"
             )
-            if split_tracking_enabled and players_included and not is_seasonal:
+            if split_tracking_enabled and (players_included or split_size) and not is_seasonal:
                 try:
                     credited = await _award_split_gp_credits(
                         session=session,
                         drop=drop,
                         group=group,
                         receiver_player_id=player_id,
-                        players_included=players_included,
+                        players_included=players_included or [],
                         drop_value=drop_value,
                         world_type=world_type,
+                        split_size=split_size,
                     )
                     if credited:
                         print(f"[SplitTracking] Split {drop_value} gp across {credited + 1} participants "

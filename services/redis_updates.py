@@ -601,10 +601,11 @@ class RedisLootTracker:
             self._rebuild_period_leaderboards(player_id, daily_drops, player_group_ids,
                                               group_day_deductions=excl_daily or None)
 
-            # Re-apply split GP credits earned as a participant in other players' drops.
-            # These are not in the player's own Drop rows, so they must be reconstructed
-            # from drop_splits separately.
+            # Re-apply split GP credits earned as a participant in other players'
+            # drops, AND re-apply the reductions on drops this player received and
+            # split away. Neither is derivable from the player's own Drop rows.
             self._apply_split_credits(player_id, session_to_use)
+            self._apply_split_receiver_adjustments(player_id, session_to_use)
 
             # Update player's last update timestamp
             player.date_updated = datetime.now()
@@ -688,6 +689,65 @@ class RedisLootTracker:
                 self.add_split_credit(player_id, row.split_value, partition, row.group_id)
         except Exception as e:
             print(f"[RedisLootTracker] _apply_split_credits failed for player {player_id}: {e}")
+
+    def _apply_split_receiver_adjustments(self, player_id: int, session_to_use) -> None:
+        """
+        Re-apply the group-leaderboard REDUCTION on drops this player received
+        and split with others.
+
+        ``update_leaderboards`` rebuilds a group score from the player's own Drop
+        rows at full value, and ``_apply_split_credits`` only replays rows where
+        the player was a *participant*. Without this, a force-rebuild silently
+        restored a split receiver to the drop's full value — every rebuild
+        (including the background one in ``data/player_total_updater.py``) quietly
+        undid the split and handed the receiver back the whole drop.
+
+        Mirrors ``data/submissions/drop.py::_award_split_gp_credits``: the
+        receiver's adjustment is ``split_value - drop_value``, applied once per
+        (drop, group) rather than once per participant row.
+        """
+        try:
+            from db.models.drop_split import DropSplit
+            from db.models import GroupConfiguration, Drop
+
+            # Drops this player RECEIVED that carry split rows.
+            rows = (
+                session_to_use.query(DropSplit, Drop)
+                .join(Drop, Drop.drop_id == DropSplit.drop_id)
+                .filter(Drop.player_id == player_id, Drop.hidden != True)  # noqa: E712
+                .all()
+            )
+            if not rows:
+                return
+
+            enabled_groups = {
+                r.group_id
+                for r in session_to_use.query(GroupConfiguration.group_id)
+                .filter(
+                    GroupConfiguration.group_id.in_({s.group_id for s, _ in rows}),
+                    GroupConfiguration.config_key == "split_gp_tracking",
+                    GroupConfiguration.config_value == "1",
+                )
+                .all()
+            }
+
+            # One adjustment per (drop, group) — a drop split among N participants
+            # has N rows but only ever had its receiver adjusted once.
+            seen = {}
+            for split_row, drop in rows:
+                if split_row.group_id not in enabled_groups:
+                    continue
+                seen.setdefault((drop.drop_id, split_row.group_id), (split_row, drop))
+
+            for (drop_id, group_id), (split_row, drop) in seen.items():
+                drop_value = int(drop.value) * int(drop.quantity)
+                adjustment = int(split_row.split_value) - drop_value
+                if adjustment >= 0:
+                    continue  # 1-way "split" — nothing was ever taken off
+                self.add_split_credit(player_id, adjustment, drop.partition, group_id)
+        except Exception as e:
+            print(f"[RedisLootTracker] _apply_split_receiver_adjustments failed "
+                  f"for player {player_id}: {e}")
 
     def _clear_player_redis_data(self, player_id: int):
         """Clear all Redis data for a player.

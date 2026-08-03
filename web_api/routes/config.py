@@ -28,6 +28,13 @@ import json
 from quart import Blueprint, jsonify
 
 from db import AuditLog, Group, GroupConfiguration, LootboardStyle, NpcList, PersonalBestEntry
+from db.group_rename import (
+    GROUP_NAME_CONFIG_KEY,
+    GroupRenameError,
+    invalidate_group_name_caches,
+    normalize_group_name,
+    rename_group,
+)
 from web_api.common import abort_problem, db_session, private_no_store, _rc
 from web_api.config_registry import (
     ConfigValidationError,
@@ -97,6 +104,14 @@ async def get_group_config(group_id: int):
             )
             stored = {r.config_key: _effective_stored_value(r) for r in rows}
 
+            # `group_name` is an editable view of groups.group_name, not a
+            # setting of its own — read the canonical column so the editor shows
+            # the name the site actually displays. Most groups have no config
+            # row at all (the field rendered blank); those that do may hold a
+            # value from before renaming was wired up (see db/group_rename.py).
+            group_name = s.query(Group.group_name).filter(Group.group_id == group_id).scalar()
+            stored[GROUP_NAME_CONFIG_KEY] = group_name or ""
+
             out = {}
             for key in all_config_keys():
                 field = get_config_field(key)
@@ -161,12 +176,44 @@ async def patch_group_config(group_id: int):
                 abort_problem(422, "Invalid config value", f"Unknown lootboard style id {style_id}.")
             coerced[key] = str(style_id)
 
+    # `group_name` renames the group rather than saving a setting, so validate
+    # it against the column's own rules before anything is written.
+    if GROUP_NAME_CONFIG_KEY in coerced:
+        try:
+            coerced[GROUP_NAME_CONFIG_KEY] = normalize_group_name(coerced[GROUP_NAME_CONFIG_KEY])
+        except GroupRenameError as e:
+            abort_problem(422, "Invalid config value", str(e))
+
     def _apply():
         with db_session() as s:
             user = load_user(s, user_id)
             assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
 
+            renamed = False
             for key, new_value in coerced.items():
+                # `group_name` is the group's actual name rather than a setting
+                # of its own: rename_group writes the canonical column, this
+                # config row and the forum mirror together, so the new name
+                # reaches every surface (db/group_rename.py). Audited against
+                # the column it really changes.
+                if key == GROUP_NAME_CONFIG_KEY:
+                    try:
+                        before = rename_group(s, group_id, new_value).before
+                    except GroupRenameError as e:
+                        abort_problem(422, "Invalid config value", str(e))
+                    renamed = True
+                    s.add(
+                        AuditLog(
+                            actor_user_id=user_id,
+                            group_id=group_id,
+                            action="config.update",
+                            target="groups.group_name",
+                            before=before,
+                            after=new_value,
+                        )
+                    )
+                    continue
+
                 row = (
                     s.query(GroupConfiguration)
                     .filter(
@@ -238,6 +285,10 @@ async def patch_group_config(group_id: int):
                 gc.invalidate(group_id)
             except Exception:
                 pass
+            # A rename additionally invalidates the cached pretty-URL slug the
+            # name derives from.
+            if renamed:
+                invalidate_group_name_caches(group_id)
             return True
 
     await asyncio.to_thread(_apply)

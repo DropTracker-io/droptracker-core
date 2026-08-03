@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-from urllib.parse import quote
 import shutil
 from datetime import datetime, timedelta
 import interactions
@@ -26,6 +25,7 @@ from db.entitlements import has_custom_embeds
 from utils.redis import redis_client
 from utils.messages import confirm_new_npc, confirm_new_item, name_change_message, new_player_message
 from utils.format import format_number, replace_placeholders, convert_from_ms
+from utils.site_urls import PREMIUM_URL, WEBSITE_URL, group_link, player_link
 from db.app_logger import AppLogger
 import osrs_api
 from services.contribution_notifications import format_money
@@ -240,10 +240,9 @@ class NotificationService:
         qp_percentage = str(data.get("qp_percentage") or "N/A")
         submitted_at = self._coerce_int(data.get("timestamp"))
 
-        player_link = f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)"
         embed = interactions.Embed(
             title="Quest Completed",
-            description=f"{player_link} completed **{quest_name}**.",
+            description=f"{player_link(player_name, player_id)} completed **{quest_name}**.",
             color="#5A8DEE",
         )
         embed.add_field(
@@ -269,10 +268,9 @@ class NotificationService:
         location = str(data.get("location") or "").strip()
         region_id = self._coerce_int(data.get("region_id"))
 
-        player_link = f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)"
         embed = interactions.Embed(
             title="Player Death",
-            description=f"{player_link} has died.",
+            description=f"{player_link(player_name, player_id)} has died.",
             color="#B23B3B",
         )
         if source:
@@ -294,10 +292,9 @@ class NotificationService:
         diary_tier = str(data.get("diary_tier") or "").strip()
         diary_label = f"{diary_tier} {diary_name}".strip()
 
-        player_link = f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)"
         embed = interactions.Embed(
             title="Achievement Diary Completed",
-            description=f"{player_link} completed the **{diary_label}** diary.",
+            description=f"{player_link(player_name, player_id)} completed the **{diary_label}** diary.",
             color="#5A8DEE",
         )
         if video_url:
@@ -1201,7 +1198,7 @@ class NotificationService:
             formatted_name = get_formatted_name(player_name, group_id, db_session)
 
             replacements = {
-                "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
+                "{player_name}": player_link(player_name, player_id),
                 "{skill_name}": str(data.get("skill_name") or data.get("skills_names") or ""),
                 "{skills_names}": str(data.get("skills_names") or ""),
                 "{skills_text}": str(skills_text or ""),
@@ -1301,7 +1298,7 @@ class NotificationService:
             formatted_name = get_formatted_name(player_name, group_id, db_session)
 
             replacements = {
-                "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
+                "{player_name}": player_link(player_name, player_id),
                 "{skill_name}": str(data.get("skill_name") or data.get("skills_names") or ""),
                 "{skills_names}": str(data.get("skills_names") or ""),
                 "{skills_text}": str(skills_text or ""),
@@ -1402,7 +1399,7 @@ class NotificationService:
             formatted_name = get_formatted_name(player_name, group_id, db_session)
             if embed_template:
                 replacements = {
-                    "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
+                    "{player_name}": player_link(player_name, player_id),
                     "{quest_name}": str(quest_name),
                     "{quests_completed}": str(data.get("quests_completed") or ""),
                     "{total_quests}": str(data.get("total_quests") or ""),
@@ -1518,7 +1515,7 @@ class NotificationService:
             formatted_name = get_formatted_name(player_name, group_id, db_session)
             if embed_template:
                 replacements = {
-                    "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
+                    "{player_name}": player_link(player_name, player_id),
                     "{source}": str(source),
                     "{killer}": str(source),
                     "{location}": str(location),
@@ -1631,7 +1628,7 @@ class NotificationService:
             formatted_name = get_formatted_name(player_name, group_id, db_session)
             if embed_template:
                 replacements = {
-                    "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
+                    "{player_name}": player_link(player_name, player_id),
                     "{diary_name}": str(diary_name),
                     "{diary_tier}": str(diary_tier),
                     "{timestamp}": str(data.get("timestamp") or ""),
@@ -2288,7 +2285,7 @@ class NotificationService:
                             group_embed.set_footer(global_footer)
                             global_embed = interactions.Embed(
                                 title=f"<:supporter:1263827303712948304> `{user.username}` just upgraded {group.group_name}!",
-                                description=f"{player_name if player_name else f'<@{user.discord_id}>'} just used their [account upgrade benefits](https://www.droptracker.io/groups/upgrades) to unlock premium features for [{group.group_name}](https://www.droptracker.io/groups/{group.group_name}.{group.group_id}/view)",
+                                description=f"{player_name if player_name else f'<@{user.discord_id}>'} just used their [account upgrade benefits]({PREMIUM_URL}) to unlock premium features for {group_link(group.group_name, group.group_id)}",
                                 color="#00f0f0"
                             )
                             global_embed.add_field(
@@ -2402,7 +2399,7 @@ class NotificationService:
                             )
                             embed.add_field(
                                 name="What's next?",
-                                value="You can now [select a group](https://www.droptracker.io/account/premium)" + 
+                                value=f"You can now [select a group]({WEBSITE_URL}/dashboard)" +
                                 " to use your premium features on.\n\n" + 
                                 "If you have any questions, [feel free to reach out in our Discord](https://www.droptracker.io/discord)"
                             )
@@ -2417,7 +2414,7 @@ class NotificationService:
                             embed = interactions.Embed(
                                 title="We're sorry to see you go!",
                                 description=f"Your account upgrade has expired.\n" +
-                                "Please consider [re-upgrading your account](https://www.droptracker.io/groups/upgrades) to continue supporting the project," + 
+                                f"Please consider [re-upgrading your account]({PREMIUM_URL}) to continue supporting the project," +
                                 " and to retain access to your group's premium features.",
                                 color="#f00000"
                             )
@@ -2475,17 +2472,14 @@ class NotificationService:
                 display_name = display_name or user.username
             mention = f"<@{user.discord_id}>" if user and user.discord_id else None
             supporter_text = display_name or mention or "An anonymous supporter"
-            group_link = (
-                f"[{group.group_name}](https://www.droptracker.io/groups/{group.group_name}.{group.group_id}/view)"
-                if group else None
-            )
+            group_md = group_link(group.group_name, group.group_id) if group else None
 
             sent_any = False
             errors = []
 
             # 1) Global supporters channel
-            if group_link:
-                headline = f"**{supporter_text}** just contributed **{per}** toward {group_link}'s premium subscription. Thank you for supporting DropTracker!"
+            if group_md:
+                headline = f"**{supporter_text}** just contributed **{per}** toward {group_md}'s premium subscription. Thank you for supporting DropTracker!"
             else:
                 headline = f"**{supporter_text}** just became a DropTracker supporter with a **{per}** contribution. Thank you for keeping the project alive!"
             global_embed = interactions.Embed(
@@ -2494,7 +2488,7 @@ class NotificationService:
                 color=CONTRIBUTION_COLOR,
             )
             global_embed.add_field(name="Tier", value=tier_name, inline=True)
-            global_embed.add_field(name="Supporting", value=group_link or "DropTracker Premium", inline=True)
+            global_embed.add_field(name="Supporting", value=group_md or "DropTracker Premium", inline=True)
             global_embed.set_thumbnail(BRAND_THUMBNAIL)
             global_embed.set_footer(global_footer)
             try:
@@ -2891,7 +2885,7 @@ class NotificationService:
                 "{item_value}": item_value_text,
                 "{quantity}": "`" + str(quantity) + "`",
                 "{total_value}": "`" + str(total_value) + "`",
-                "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
+                "{player_name}": player_link(player_name, player_id),
                 # Prefer video for display; keep image_url for attachments/local files.
                 "{image_url}": video_url or image_url or "",
                 "{video_url}": video_url or "",
@@ -3392,7 +3386,7 @@ class NotificationService:
             formatted_name = get_formatted_name(player_name, group_id, db_session)
             
             replacements = {
-                "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
+                "{player_name}": player_link(player_name, player_id),
                 "{global_rank}": str(global_placement),
                 "{total_ranked_global}": str(total_ranked_global),
                 "{group_rank}": str(group_placement),
@@ -3500,7 +3494,7 @@ class NotificationService:
         kc_received = milestone if milestone else killcount
         
         value_dict = {
-            "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
+            "{player_name}": player_link(player_name, player_id),
             "{pet_name}": pet_name,
             "{source}": source,
             "{npc_name}": npc_name,
@@ -3678,7 +3672,7 @@ class NotificationService:
                 points_left = "Unknown"
             if embed_template:
                 value_dict = {
-                    "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
+                    "{player_name}": player_link(player_name, player_id),
                     "{task_name}": formatted_task_name,
                     "{current_tier}": actual_tier,
                     "{progress}": progress,
@@ -3824,7 +3818,7 @@ class NotificationService:
             user_count = format_number(redis_client.client.zcard(f"leaderboard:{partition}:group:{group_id}"))
             # Replace placeholders
             replacements = {
-                "{player_name}": f"[{player_name}](https://www.droptracker.io/players/{quote(player_name, safe='')}.{player_id}/view)",
+                "{player_name}": player_link(player_name, player_id),
                 "{player_loot_month}": player_month_total,
                 "{kc_received}": kc,
                 "{item_name}": item_name,

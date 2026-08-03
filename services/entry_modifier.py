@@ -13,7 +13,6 @@ the embed accumulates a small-text audit trail of admin changes.
 
 import json
 from datetime import datetime
-from urllib.parse import quote
 
 import interactions
 from interactions import (
@@ -51,6 +50,7 @@ from db.models import (
 from db.models.drop_split import DropSplit
 from services.redis_updates import RedisLootTracker, loot_tracker, get_player_list_loot_sum
 from utils.redis import redis_client
+from utils.site_urls import player_link
 
 
 # ---------------------------------------------------------------------------
@@ -277,10 +277,7 @@ async def _rebuild_notification_embed(drop, player, item, npc, group_id, db):
         "{item_value}": f"`{format_number(total_value)}`",
         "{quantity}": f"`{quantity}`",
         "{total_value}": f"`{total_value}`",
-        "{player_name}": (
-            f"[{player_name}](https://www.droptracker.io/players/"
-            f"{quote(player_name, safe='')}.{player_id}/view)"
-        ),
+        "{player_name}": player_link(player_name, player_id),
         "{image_url}": video_url or image_url,
         "{video_url}": video_url,
         "{video_link}": f"[Video]({video_url})" if video_url else "",
