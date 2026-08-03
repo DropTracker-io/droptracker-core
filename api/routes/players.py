@@ -344,8 +344,9 @@ async def item_value_modifications():
         "29790", "29792", "29794", "29799", "31109",
     ]
     try:
-        overrides = await asyncio.to_thread(value_overrides.all_active)
-        ids = sorted({int(o["item_id"]) for o in overrides if o.get("item_id") is not None})
+        # Includes name-only override rows resolved to items-table ids — see
+        # utils.value_overrides.active_item_ids.
+        ids = await asyncio.to_thread(value_overrides.active_item_ids)
         if ids:
             return [str(i) for i in ids]
     except Exception:

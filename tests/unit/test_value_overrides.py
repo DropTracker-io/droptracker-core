@@ -100,3 +100,63 @@ def test_flat_bonus_added_to_numerator():
     ov = _ov([_c("Abyssal bludgeon", 1)], divisor=1, flat_bonus=500)
     pm = _price_map(ov, {"Abyssal bludgeon": 1_000})
     assert vo.compute_override_from_prices(ov, pm) == 1_500
+
+
+# --------------------------------------------------------------------------- #
+# active_item_ids(): the plugin-facing force-screenshot id list. Name-only
+# override rows (item_id NULL) MUST be resolved to items-table ids — the
+# 2026-08-03 Maggot King incident: 'Elder venator fang' was valued by name at
+# intake but absent from valued_items.txt, so clients never screenshotted it.
+# --------------------------------------------------------------------------- #
+def _index_with(rows):
+    return {"list": rows, "by_id": {}, "by_name": {}}
+
+
+def test_active_item_ids_explicit_ids_sorted_deduped(monkeypatch):
+    rows = [{"item_id": 31109}, {"item_id": 13274}, {"item_id": 31109}]
+    called = []
+    monkeypatch.setattr(vo, "_get_index", lambda: _index_with(rows))
+    monkeypatch.setattr(vo, "_item_ids_matching_names", lambda names: called.append(names) or set())
+    assert vo.active_item_ids() == [13274, 31109]
+    assert called == []  # no name-only rows -> no DB lookup
+
+
+def test_active_item_ids_resolves_name_only_rows(monkeypatch):
+    rows = [
+        {"item_id": 29799, "item_name": "Araxyte fang"},
+        {"item_id": None, "item_name": "Elder venator fang"},
+        {"item_id": None, "item_name": "  Leviathan's lure "},
+    ]
+    seen = {}
+
+    def fake_lookup(names):
+        seen["names"] = set(names)
+        return {33634, 28325, 28326}
+
+    monkeypatch.setattr(vo, "_get_index", lambda: _index_with(rows))
+    monkeypatch.setattr(vo, "_item_ids_matching_names", fake_lookup)
+    assert vo.active_item_ids() == [28325, 28326, 29799, 33634]
+    # Names are normalised (stripped + lowercased) before the lookup.
+    assert seen["names"] == {"elder venator fang", "leviathan's lure"}
+
+
+def test_active_item_ids_ignores_blank_name_rows(monkeypatch):
+    rows = [{"item_id": 13274}, {"item_id": None, "item_name": "   "}, {"item_id": None}]
+    called = []
+    monkeypatch.setattr(vo, "_get_index", lambda: _index_with(rows))
+    monkeypatch.setattr(vo, "_item_ids_matching_names", lambda names: called.append(names) or set())
+    assert vo.active_item_ids() == [13274]
+    assert called == []
+
+
+def test_active_item_ids_degrades_to_explicit_ids_on_lookup_failure(monkeypatch):
+    rows = [{"item_id": 13274}, {"item_id": None, "item_name": "Elder venator fang"}]
+    monkeypatch.setattr(vo, "_get_index", lambda: _index_with(rows))
+    monkeypatch.setattr(vo, "_item_ids_matching_names", lambda names: set())
+    assert vo.active_item_ids() == [13274]
+
+
+def test_item_ids_matching_names_fails_open_without_db():
+    # In unit tests `db` is a MagicMock stub, so the real query path cannot
+    # produce rows; the contract is an empty set, never an exception.
+    assert vo._item_ids_matching_names(["elder venator fang"]) == set()

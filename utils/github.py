@@ -187,25 +187,19 @@ class GithubPagesUpdater:
 
     def _item_list_contents(self):
         """The deterministic plugin id-list files: ``valued_items.txt`` (active
-        value-override ids, always force-screenshotted), ``untradeable_items.txt``
-        (curated notable untradeables, toggle-gated) and
-        ``server_loot_npc_ids.txt`` (npcs whose loot RuneLite only reports via
-        ServerNpcLoot — see scripts/export_server_loot_npcs.py; publishing it
-        means a new server-loot boss no longer needs a plugin release).
+        value-override ids — including name-only override rows resolved to ids
+        via the items table — always force-screenshotted),
+        ``untradeable_items.txt`` (curated notable untradeables, toggle-gated)
+        and ``server_loot_npc_ids.txt`` (npcs whose loot RuneLite only reports
+        via ServerNpcLoot — see scripts/export_server_loot_npcs.py; publishing
+        it means a new server-loot boss no longer needs a plugin release).
         Publishing them here keeps all three in lockstep with the database /
         curated source without a manual content-repo commit."""
         out = []
         try:
-            from db.models import ItemValueOverride
+            from utils.value_overrides import active_item_ids
 
-            with Session() as s:
-                rows = (
-                    s.query(ItemValueOverride.item_id)
-                    .filter(ItemValueOverride.active.is_(True),
-                            ItemValueOverride.item_id.isnot(None))
-                    .all()
-                )
-            ids = sorted({int(r[0]) for r in rows})
+            ids = active_item_ids()
             if ids:
                 out.append(("content/valued_items.txt", ",".join(str(i) for i in ids)))
         except Exception as e:

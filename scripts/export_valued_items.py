@@ -5,6 +5,8 @@ The RuneLite plugin reads a comma-separated id list from
 0gp drops to screenshot / ask the server to re-value (see
 ``DropTrackerApi.getValuedUntradeables``). This regenerates that list from the
 ``item_value_overrides`` table so it stays in sync with the valuation rules.
+Name-only override rows (``item_id`` NULL, matched by name at intake) are
+resolved to their items-table ids — see ``utils.value_overrides.active_item_ids``.
 
 The content repo is **not** on this box, so this prints/writes the file content
 for you to commit + push to ``droptracker-io.github.io/content/valued_items.txt``
@@ -21,17 +23,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from db.models import ItemValueOverride, session
-
-
-def _active_ids() -> list[int]:
-    rows = (
-        session.query(ItemValueOverride.item_id)
-        .filter(ItemValueOverride.active.is_(True), ItemValueOverride.item_id.isnot(None))
-        .order_by(ItemValueOverride.item_id.asc())
-        .all()
-    )
-    return [int(r[0]) for r in rows]
+from utils.value_overrides import active_item_ids as _active_ids
 
 
 def main() -> int:

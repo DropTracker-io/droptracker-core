@@ -110,3 +110,27 @@ class TestWebhookSetChanged:
     def test_non_json_existing_content_is_changed(self):
         bad = SimpleNamespace(decoded_content=b"<html>error</html>")
         assert self._updater()._webhook_set_changed(bad, ["a"]) is True
+
+
+class TestItemListContents:
+    """valued_items.txt must come from the shared resolver so name-only
+    override rows (item_id NULL, matched by name at intake) reach the plugin's
+    force-screenshot list — the 2026-08-03 Elder venator fang incident."""
+
+    def test_valued_list_uses_shared_resolver(self, monkeypatch):
+        import utils.value_overrides as vo
+
+        monkeypatch.setattr(vo, "active_item_ids", lambda: [28319, 33634])
+        updater = gh.GithubPagesUpdater.__new__(gh.GithubPagesUpdater)
+        contents = dict(updater._item_list_contents())
+        assert contents["content/valued_items.txt"] == "28319,33634"
+
+    def test_empty_resolver_result_publishes_nothing(self, monkeypatch):
+        # An empty id list (e.g. DB unreachable) must not overwrite the
+        # published file with a blank one.
+        import utils.value_overrides as vo
+
+        monkeypatch.setattr(vo, "active_item_ids", lambda: [])
+        updater = gh.GithubPagesUpdater.__new__(gh.GithubPagesUpdater)
+        contents = dict(updater._item_list_contents())
+        assert "content/valued_items.txt" not in contents

@@ -1491,18 +1491,14 @@ async def item_value_item_search():
 
 @admin_bp.get("/admin/item-values/export")
 async def item_value_export():
-    """Comma-separated active item ids for the GitHub Pages valued_items.txt."""
+    """Comma-separated active item ids for the GitHub Pages valued_items.txt.
+
+    Name-only override rows (item_id NULL) are resolved to items-table ids —
+    see utils.value_overrides.active_item_ids."""
     await _require_moderator()
 
     def _load():
-        with db_session() as s:
-            rows = (
-                s.query(ItemValueOverride.item_id)
-                .filter(ItemValueOverride.active.is_(True), ItemValueOverride.item_id.isnot(None))
-                .order_by(ItemValueOverride.item_id.asc())
-                .all()
-            )
-            return [str(r[0]) for r in rows]
+        return [str(i) for i in value_overrides.active_item_ids()]
 
     ids = await asyncio.to_thread(_load)
     return jsonify({"txt": ",".join(ids), "count": len(ids)})

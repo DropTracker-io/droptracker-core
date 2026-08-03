@@ -134,6 +134,54 @@ def all_active() -> List[Dict[str, Any]]:
     return list(_get_index()["list"])
 
 
+def _item_ids_matching_names(names) -> set:
+    """items-table ids whose ``item_name`` matches one of ``names``
+    (case-insensitive). Fails open (empty set) so a DB hiccup degrades the
+    caller to explicit-id coverage instead of an error."""
+    try:
+        from db import ItemList, Session  # lazy: avoids import-time DB touch
+
+        from sqlalchemy import func
+
+        s = Session()
+        try:
+            rows = (
+                s.query(ItemList.item_id)
+                .filter(func.lower(ItemList.item_name).in_(sorted(names)))
+                .all()
+            )
+            return {int(r[0]) for r in rows}
+        finally:
+            s.close()
+    except Exception:
+        return set()
+
+
+def active_item_ids() -> List[int]:
+    """Every item id covered by an active override — the single source for the
+    plugin-facing force-screenshot list (``valued_items.txt`` on GitHub Pages,
+    ``GET /value_mods``, the admin dashboard export).
+
+    Id-keyed rows contribute their id directly. Name-only rows (``item_id``
+    NULL — the Soulreaper axe pieces, Elder venator fang) are resolved to every
+    items-table id sharing that name: :func:`match` values such drops by name
+    at intake, but the client can only check ids, so leaving them out means the
+    drop gets a server-side value and no screenshot (Maggot King fang incident,
+    2026-08-03).
+    """
+    overrides = _get_index()["list"]
+    ids = {int(o["item_id"]) for o in overrides if o.get("item_id") is not None}
+    names = {
+        (o.get("item_name") or "").strip().lower()
+        for o in overrides
+        if o.get("item_id") is None
+    }
+    names.discard("")
+    if names:
+        ids |= _item_ids_matching_names(names)
+    return sorted(ids)
+
+
 def invalidate() -> None:
     """Evict the shared + local caches. Call after any write to the table."""
     global _micro, _micro_expires
