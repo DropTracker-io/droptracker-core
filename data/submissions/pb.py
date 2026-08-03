@@ -169,16 +169,24 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     # leaderboard for this boss could now look different (a faster time, or a
     # brand-new team-size bracket). Drives the near-real-time HOF refresh below.
     pb_row_changed = False
+    # Whether THIS kill demonstrably set the best. A "Personal best: X"
+    # segment (pb_ms) on the message means the game did NOT call this kill a
+    # PB — plugin message merges can pair a slower kill_time with a faster
+    # reported best (ticket #361: ToB's "total completion time" line
+    # overwrites the in-raid time), and a stale stored row must not turn that
+    # into a fake announcement. Only a kill faster than both the stored row
+    # and the reported best earns a notification/points/ticker.
+    beats_reported = pb_ms == 0 or (0 < current_ms < pb_ms)
     if pb_entry:
         # `current_ms == 0` means the kill had no timer ("N/A"), NOT an
         # infinitely fast kill — but `stored > 0` is true for every real row,
         # so an untimed kill used to pass this gate and overwrite a good time
         # with whatever the plugin currently believes its PB is, which can be
         # SLOWER than what we already hold.
-        if current_ms > 0 and pb_entry.personal_best > current_ms:
+        if current_ms > 0 and pb_entry.personal_best > current_ms and beats_reported:
             old_time = pb_entry.personal_best
             pb_entry.personal_best = time_ms
-            pb_entry.new_pb = is_personal_best
+            pb_entry.new_pb = True
             pb_entry.kill_time = current_ms
             pb_entry.date_added = datetime.now()
             pb_entry.image_url = dl_path if dl_path else ""
@@ -188,7 +196,23 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
             pb_row_changed = True
         else:
             is_personal_best = False
+            # Every non-PB kill message still carries the game's standing PB
+            # (pb_ms). When it is faster than the row, the row is stale — a
+            # missed or clobbered earlier submission. Sync it down silently
+            # so PBs self-heal on every kill (mirrors the adventure-log
+            # convention): no notification, no points, no ticker — the HOF
+            # refresh below still fires because the board changed.
+            if 0 < pb_ms < pb_entry.personal_best:
+                pb_entry.personal_best = pb_ms
+                pb_entry.kill_time = pb_ms
+                pb_entry.new_pb = False
+                pb_entry.date_added = datetime.now()
+                pb_row_changed = True
     else:
+        # First row for this (player, npc, team size). time_ms is already
+        # min(kill, reported best), so the create itself "syncs"; the
+        # notification decision still requires the kill to have earned it.
+        is_personal_best = is_personal_best and beats_reported
         pb_entry = pb_model(
             player_id=player_id,
             npc_id=npc_id,
