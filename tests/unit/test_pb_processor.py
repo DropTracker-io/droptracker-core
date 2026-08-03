@@ -178,3 +178,43 @@ class TestNoOp:
         _, notify = _run(_payload(current_ms=0, pb_ms=921600, is_pb=True), row=row)
         assert row.personal_best == 900000
         assert notify.await_count == 0
+
+
+class TestRaidMetricContract:
+    """The ticket #361 report itself, and the two ways it has to keep working.
+
+    Times below are the reporting player's real ones. Their stored ToB 5-scale
+    row held 14:15.60, synced from the adventure log; the raid that earned them
+    the Grandmaster speed achievement (challenge time under 14:15) therefore
+    beat it by construction. Plugin 5.4.1 sends that in-raid time; older
+    clients send the raid's wall-clock total instead.
+    """
+
+    STORED = 855600  # 14:15.60
+
+    def test_the_pb_that_went_missing_now_announces(self):
+        # "Theatre of Blood completion time: 13:58.20 (new personal best)" --
+        # a new-PB line quotes no standing best, so pb_ms is 0.
+        row = _existing_row(self.STORED)
+        _, notify = _run(_payload(current_ms=838200, pb_ms=0, is_pb=True), row=row)
+        assert row.personal_best == 838200
+        assert row.new_pb is True
+        assert notify.await_count > 0
+
+    def test_a_pre_fix_client_still_cannot_clobber_a_good_row(self):
+        # The same raid as seen by a pre-5.4.1 client: kill 24:40.20 against a
+        # 20:45.00 "best", both wall-clock. Slower than the row on every count.
+        row = _existing_row(self.STORED)
+        _, notify = _run(_payload(current_ms=1480200, pb_ms=1245000, is_pb=False), row=row)
+        assert row.personal_best == self.STORED
+        assert notify.await_count == 0
+
+    def test_a_row_already_holding_a_wall_clock_total_heals_silently(self):
+        # Rows seeded by pre-5.4.1 clients are minutes too slow. The next kill
+        # a fixed client reports carries the real standing best, which syncs the
+        # row down -- a metric correction, not an achievement, so it stays quiet.
+        row = _existing_row(1480200)
+        _, notify = _run(_payload(current_ms=1020000, pb_ms=832800, is_pb=False), row=row)
+        assert row.personal_best == 832800
+        assert row.new_pb is False
+        assert notify.await_count == 0
