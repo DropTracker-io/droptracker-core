@@ -14,6 +14,7 @@ from api.routes.players import players_bp
 from api.routes.groups import groups_bp
 from api.routes.group_create import group_create_bp
 from api.routes.group_export import group_export_bp
+from api.routes.personal_bests import personal_bests_bp
 from api.routes.utils import utils_bp
 from api.routes.webhook import webhook_bp
 from api.routes.notifications import notifications_bp
@@ -94,6 +95,7 @@ def create_app() -> Quart:
     app.register_blueprint(groups_bp, url_prefix='/')
     app.register_blueprint(group_create_bp, url_prefix='/')
     app.register_blueprint(group_export_bp, url_prefix='/')
+    app.register_blueprint(personal_bests_bp, url_prefix='/')
     app.register_blueprint(utils_bp, url_prefix='/')
     app.register_blueprint(webhook_bp, url_prefix='/')
     app.register_blueprint(notifications_bp, url_prefix='/')
