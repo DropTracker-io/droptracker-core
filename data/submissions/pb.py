@@ -1,4 +1,14 @@
-"""Personal Best (PB) submissions processors, including TOB batching."""
+"""Personal Best (PB) submission processing.
+
+A submission carries two times: the kill this message describes
+(``current_time_ms``) and, when the game quoted one, the standing personal best
+(``personal_best_ms``). Both are expected on the metric the game itself tracks
+a PB on — the in-raid time for ToB/ToA, not the wall-clock "total completion
+time" the raid also prints. Plugin versions below 5.4.1 sent the total for
+those raids (ticket #361), which is always slower than the stored row, so no
+ToB PB could be recognised; ``selectTimeLine`` in the plugin's ``PbHandler``
+is what normalises that at the source.
+"""
 
 import asyncio
 from datetime import datetime
@@ -191,11 +201,15 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     pb_row_changed = False
     # Whether THIS kill demonstrably set the best. A "Personal best: X"
     # segment (pb_ms) on the message means the game did NOT call this kill a
-    # PB — plugin message merges can pair a slower kill_time with a faster
-    # reported best (ticket #361: ToB's "total completion time" line
-    # overwrites the in-raid time), and a stale stored row must not turn that
-    # into a fake announcement. Only a kill faster than both the stored row
-    # and the reported best earns a notification/points/ticker.
+    # PB — a submission can pair a slower kill_time with a faster reported
+    # best, and a stale stored row must not turn that into a fake
+    # announcement. Only a kill faster than both the stored row and the
+    # reported best earns a notification/points/ticker.
+    #
+    # Keep this even though plugin 5.4.1 fixed the ToB/ToA metric mix-up that
+    # exposed it (ticket #361 — see the module docstring): clients below that
+    # version still send wall-clock raid totals, and they must sync rather
+    # than announce.
     beats_reported = pb_ms == 0 or (0 < current_ms < pb_ms)
     if pb_entry:
         # `current_ms == 0` means the kill had no timer ("N/A"), NOT an
