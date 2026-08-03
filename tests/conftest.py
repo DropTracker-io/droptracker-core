@@ -198,6 +198,16 @@ if "services.status_metrics" not in sys.modules:
     sys.modules["services.status_metrics"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/split_observer.py — TEMP split-source observation counters. Stdlib-
+# only module imports (Redis access is lazy and injectable), same contract as
+# status_metrics; its tests assert counters/bucketing against a fake Redis.
+_SPLIT_OBSERVER_PATH = _Path(__file__).resolve().parent.parent / "services" / "split_observer.py"
+if "services.split_observer" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.split_observer", _SPLIT_OBSERVER_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.split_observer"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/status_channel.py — the #status card renderers. Module imports are
 # stdlib + the stubbed db.app_logger; interactions is lazy-imported inside the
 # builders, so tests can substitute fake component classes.

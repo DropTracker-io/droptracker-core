@@ -580,6 +580,24 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         except Exception:
             pass
 
+        # TEMP (2026-08) split-source observation: records which sources arrive
+        # with nearby players so we can pick where split tracking belongs.
+        # Fail-open; remove this call with services/split_observer.py once the
+        # split-source list is settled.
+        try:
+            if world_type == "main" and envelope_from_plugin(drop_data):
+                from services.split_observer import record_drop
+                record_drop(
+                    npc_id=npc_id,
+                    npc_name=npc_name,
+                    player_name=player_name,
+                    players=players_included,
+                    plugin_version=plugin_version,
+                    guid=guid,
+                )
+        except Exception:
+            pass
+
         debug_print(f"Getting player groups for {player_name}...")
         player_groups = get_player_groups_with_global(session, player)
         log_checkpoint("get_player_groups")

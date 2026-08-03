@@ -117,6 +117,26 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     player_id = player.player_id
     if not user_exists or not authed:
         return
+
+    # TEMP (2026-08) split-source observation: kill-time submissions carry the
+    # authoritative ToB/ToA/CoX roster (unused elsewhere) plus the game's
+    # team_size, both evidence for where split tracking belongs. Fail-open;
+    # remove with services/split_observer.py once the source list is settled.
+    try:
+        if world_type == "main" and envelope_from_plugin(pb_data):
+            from services.split_observer import record_kill_time
+            record_kill_time(
+                npc_id=npc_id,
+                npc_name=npc_name,
+                player_name=player_name,
+                raw_nearby=pb_data.get("nearby_players"),
+                team_size=team_size,
+                plugin_version=plugin_version,
+                guid=unique_id,
+            )
+    except Exception:
+        pass
+
     from db import PersonalBestEntry
 
     pb_model = SeasonalPersonalBestEntry if is_seasonal else PersonalBestEntry
