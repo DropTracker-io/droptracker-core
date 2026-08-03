@@ -425,13 +425,13 @@ class UserCommands(Extension):
                         f"It looks like somebody else may have claimed your account {joined_time}!\\n" +
                         f"<@{owner_discord_id}> (discord id: {owner_discord_id}) currently owns it in our database.\\n" +
                         "If this is some type of mistake, please reach out in our discord server:\\n" +
-                        "https://www.droptracker.io/discord",
+                        "https://discord.gg/droptracker",
                         ephemeral=True)
         elif status == "already_yours":
             await ctx.send(f"It looks like you've already claimed this account ({result.get('player_name')}) {joined_time}\\n" +
                         "\\nSomething not seem right?\\n" +
                         "Please reach out in our discord server:\\n" +
-                        "https://www.droptracker.io/discord",
+                        "https://discord.gg/droptracker",
                         ephemeral=True)
         elif status == "claimed":
             embed = Embed(title="Success!",

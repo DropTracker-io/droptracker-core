@@ -134,7 +134,7 @@ async def build_help_components(bot=None):
                 Button(
                     label="Join our Discord",
                     style=ButtonStyle.URL,
-                    url="https://www.droptracker.io/discord"
+                    url="https://discord.gg/droptracker"
                 ),
                 Button(
                     label="GitHub",

@@ -140,7 +140,7 @@ async def joined_guild_msg(bot: interactions.Client, guild: interactions.Guild):
                                 "**in *your group's* discord server** to register it in our database.",
                                 inline=False)
         welcome_embed.add_field(name="Need some assistance?",
-                                value=f"Check out </help:{await get_command_id(bot, 'help')}> & our [docs](https://www.droptracker.io/wiki).\nFeel free to join our [discord server](https://www.droptracker.io/discord) if you still need help.")
+                                value=f"Check out </help:{await get_command_id(bot, 'help')}> & our [docs](https://www.droptracker.io/wiki).\nFeel free to join our [discord server](https://discord.gg/droptracker) if you still need help.")
         welcome_embed.set_footer(global_footer)
         
         await user.send(f"Hey, <@{owner_id}>!",embeds=[welcome_embed])

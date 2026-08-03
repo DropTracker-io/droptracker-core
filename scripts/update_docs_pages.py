@@ -23,7 +23,7 @@ import sys
 from db.models import DocsPage, session
 
 BOT_INVITE = "https://discord.com/oauth2/authorize?client_id=1172933457010245762"
-DISCORD = "https://www.droptracker.io/discord"
+DISCORD = "https://discord.gg/droptracker"
 
 # slug -> (title, description, category, order, body_md)
 PAGES: dict[str, tuple[str, str, str, int, str]] = {
@@ -161,7 +161,7 @@ that's expected for any Plugin Hub plugin that talks to an external server.
 
 Check that the plugin is enabled, the category you expect is toggled on, and
 you're logged into the account in question. Still stuck? Ask in
-[our Discord](https://www.droptracker.io/discord).
+[our Discord](https://discord.gg/droptracker).
 """,
     ),
 

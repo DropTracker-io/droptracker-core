@@ -84,7 +84,7 @@ async def try_create_user(discord_id: str = None, username: str = None, ctx: Sla
                 # Answer through the interaction (always deliverable) — a DM here
                 # 403s for users with no mutual guild / DMs disabled.
                 return await ctx.send(f"An error occurred attempting to register your account in the database.\n" +
-                                      f"Please reach out for help: https://www.droptracker.io/discord", ephemeral=True)
+                                      f"Please reach out for help: https://discord.gg/droptracker", ephemeral=True)
     if new_user:
         user = new_user
     if not user:

@@ -1422,7 +1422,7 @@ async def try_create_player(bot: interactions.Client, player_name, account_hash)
                         )
                         embed.add_field(
                             name="Is this a mistake?",
-                            value="Reach out in [our discord](https://www.droptracker.io/discord)",
+                            value="Reach out in [our discord](https://discord.gg/droptracker)",
                         )
                         embed.set_footer(global_footer)
                         await user.send(f"Hey, <@{user.discord_id}>", embed=embed)

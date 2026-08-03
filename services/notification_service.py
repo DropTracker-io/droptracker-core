@@ -2401,7 +2401,7 @@ class NotificationService:
                                 name="What's next?",
                                 value=f"You can now [select a group]({WEBSITE_URL}/dashboard)" +
                                 " to use your premium features on.\n\n" + 
-                                "If you have any questions, [feel free to reach out in our Discord](https://www.droptracker.io/discord)"
+                                "If you have any questions, [feel free to reach out in our Discord](https://discord.gg/droptracker)"
                             )
                             embed.set_thumbnail("https://www.droptracker.io/img/droptracker-small.gif")
                             embed.set_footer(global_footer)
@@ -2515,7 +2515,7 @@ class NotificationService:
                 )
                 dm_embed.add_field(
                     name="Manage your subscription",
-                    value=f"[View or change it any time]({manage_url}) — and if you have questions, [reach out in our Discord](https://www.droptracker.io/discord).",
+                    value=f"[View or change it any time]({manage_url}) — and if you have questions, [reach out in our Discord](https://discord.gg/droptracker).",
                 )
                 dm_embed.set_thumbnail(BRAND_THUMBNAIL)
                 dm_embed.set_footer(global_footer)
@@ -3222,7 +3222,7 @@ class NotificationService:
             )
             embed.add_field(
                 name="Is this a mistake?",
-                value="Reach out in [our discord](https://www.droptracker.io/discord)",
+                value="Reach out in [our discord](https://discord.gg/droptracker)",
             )
 
         if embed is None:

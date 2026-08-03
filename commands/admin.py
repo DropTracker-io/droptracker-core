@@ -116,7 +116,7 @@ class ClanCommands(Extension):
             embed.add_field(name=f"WOM group `{result.get('wom_id')}` is now assigned to your Discord server `{result.get('guild_id')}`",
                             value=f"<a:loading:1180923500836421715> Please wait while we initialize some other things for you...",
                             inline=False)
-            embed.set_footer(f"https://www.droptracker.io/discord")
+            embed.set_footer(f"https://discord.gg/droptracker")
 
             await ctx.send(f"Success!\\n", embed=embed, ephemeral=True)
 
@@ -190,7 +190,7 @@ class ClanCommands(Extension):
             description_parts.append("You will have a total of 7 days from the time this message was sent to set our Discord bot up.")
             description_parts.append("-# __If you don't act before then__, **all of your group data will be wiped & the bot will leave your guild**!\\n\\n")
             description_parts.append("**If you need help:**")
-            description_parts.append("- Join our [discord server](https://www.droptracker.io/discord)")
+            description_parts.append("- Join our [discord server](https://discord.gg/droptracker)")
             description_parts.append(f"- Try the </help:{await get_command_id(bot, 'help')}> command")
             description_parts.append("You can also optionally remove our bot from your server now, if you decide you don't want to use it.")
             description_parts.append("**-# We contacted you because you were the owner of the discord guild we were added to.\\nThank you for your time!**")
