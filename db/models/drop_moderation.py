@@ -11,6 +11,10 @@ group's boards/notifications:
                   (kept for audit; readers must NOT exclude it).
 - ``rejected``  — admin rejected a pending row.
 
+``approved``/``rejected`` are not terminal: ``undo_review_for_group`` puts a
+mistaken decision back to ``pending`` and reverses an approval's side effects
+(leaderboard credit, released Discord notification).
+
 The drop row itself is always written and always counts globally and for
 groups without a restrictive policy — one group's policy never affects
 another group or global tracking.
@@ -28,6 +32,17 @@ from .base import Base
 
 # Statuses that keep a drop OFF the group's boards/notifications.
 EXCLUDING_STATUSES = ("excluded", "pending", "rejected")
+
+# The one status under which the drop counts for the group. Kept as a tuple
+# alongside EXCLUDING_STATUSES so the two read as a partition of the states an
+# admin can produce — a transition between the sets is what has side effects
+# (leaderboard credit, group notification) to apply or reverse.
+COUNTING_STATUSES = ("approved",)
+
+# Reviewed decisions a group admin may take back (-> 'pending'). 'excluded' is
+# policy-permanent (block / authorized_only) and was never a human decision, so
+# it is not undoable; 'pending' has nothing to undo yet.
+UNDOABLE_STATUSES = ("approved", "rejected")
 
 
 class DropGroupModeration(Base):

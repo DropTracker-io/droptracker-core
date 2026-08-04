@@ -7,11 +7,14 @@ queue and the approve/reject actions.
   GET    /api/v1/groups/{gid}/manual-submissions            -> { pending, recent }
   POST   /api/v1/groups/{gid}/manual-submissions/{drop_id}/approve
   POST   /api/v1/groups/{gid}/manual-submissions/{drop_id}/reject
+  POST   /api/v1/groups/{gid}/manual-submissions/{drop_id}/undo
 
 Auth: group admin. Approving retro-applies the group's leaderboard credit and
 releases the (gated) group notification; rejecting leaves the drop withheld
 from this group only (it still counts globally / for the player's other
-groups). See services/drop_moderation.py.
+groups). Undo takes a mistaken decision back — the row returns to the queue as
+``pending`` and an approval's credit + notification are reversed. See
+services/drop_moderation.py.
 """
 from __future__ import annotations
 
@@ -97,30 +100,36 @@ async def list_manual_submissions(group_id: int):
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
 
 
-def _review(group_id: int, drop_id: int, approve: bool):
+def _review(group_id: int, drop_id: int, action: str):
+    """Apply one review action ('approve' | 'reject' | 'undo') under the group
+    admin check, audit it, and commit. ``undo`` is the only one whose starting
+    status isn't 'pending', so the audit row reads it off the result."""
     from services.drop_moderation import (
         ModerationError,
         approve_drop_for_group,
         reject_drop_for_group,
+        undo_review_for_group,
     )
 
+    handlers = {
+        "approve": approve_drop_for_group,
+        "reject": reject_drop_for_group,
+        "undo": undo_review_for_group,
+    }
     user_id = current_user_id()
     manage_ids = manageable_guild_ids(user_id)
     with db_session() as s:
         assert_group_admin(s, user_id, group_id, manage_ids)
         try:
-            if approve:
-                result = approve_drop_for_group(s, drop_id, group_id, reviewer_user_id=user_id)
-            else:
-                result = reject_drop_for_group(s, drop_id, group_id, reviewer_user_id=user_id)
+            result = handlers[action](s, drop_id, group_id, reviewer_user_id=user_id)
         except ModerationError as e:
             abort_problem(e.status, e.title, e.detail)
         s.add(AuditLog(
             actor_user_id=user_id,
             group_id=group_id,
-            action=f"manual_submission.{'approve' if approve else 'reject'}",
+            action=f"manual_submission.{action}",
             target=f"drops.{drop_id}.group.{group_id}",
-            before="pending",
+            before=result.get("previous_status", "pending"),
             after=result["status"],
         ))
         s.commit()
@@ -129,11 +138,20 @@ def _review(group_id: int, drop_id: int, approve: bool):
 
 @manual_submissions_bp.post("/groups/<int:group_id>/manual-submissions/<int:drop_id>/approve")
 async def approve_manual_submission(group_id: int, drop_id: int):
-    result = await asyncio.to_thread(_review, group_id, drop_id, True)
+    result = await asyncio.to_thread(_review, group_id, drop_id, "approve")
     return private_no_store(jsonify(result))
 
 
 @manual_submissions_bp.post("/groups/<int:group_id>/manual-submissions/<int:drop_id>/reject")
 async def reject_manual_submission(group_id: int, drop_id: int):
-    result = await asyncio.to_thread(_review, group_id, drop_id, False)
+    result = await asyncio.to_thread(_review, group_id, drop_id, "reject")
+    return private_no_store(jsonify(result))
+
+
+@manual_submissions_bp.post("/groups/<int:group_id>/manual-submissions/<int:drop_id>/undo")
+async def undo_manual_submission(group_id: int, drop_id: int):
+    """Take back an approve/reject: the submission returns to the queue as
+    pending. Undoing an approval also debits the leaderboard credit back out
+    and removes the Discord announcement it released."""
+    result = await asyncio.to_thread(_review, group_id, drop_id, "undo")
     return private_no_store(jsonify(result))

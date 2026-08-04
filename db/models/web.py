@@ -130,7 +130,8 @@ class DiscordOutbox(Base):
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    kind = Column(String(24), nullable=False, default="message")   # message|announcement|forum_post
+    # message|announcement|forum_post|delete_message
+    kind = Column(String(24), nullable=False, default="message")
     channel_id = Column(String(32), nullable=False)
     content = Column(Text, nullable=True)
     embed_json = Column(Text, nullable=True)
@@ -140,6 +141,8 @@ class DiscordOutbox(Base):
     # handed to Discord, so a crash mid-drain leaves evidence instead of a row
     # that looks untouched and gets posted a second time.
     status = Column(String(16), nullable=False, default="pending")
+    # Write-back for sent messages; for kind='delete_message' it is instead
+    # supplied up front and names the message to remove.
     discord_message_id = Column(String(32), nullable=True)
     error = Column(Text, nullable=True)
     actor_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)

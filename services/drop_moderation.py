@@ -28,7 +28,7 @@ _DEFAULT_MIN_VALUE = 2_500_000  # matches drop_processor's fallback
 
 
 class ModerationError(Exception):
-    """Raised by approve/reject; carries an HTTP-ish (status, title, detail)."""
+    """Raised by approve/reject/undo; carries an HTTP-ish (status, title, detail)."""
 
     def __init__(self, status: int, title: str, detail: str):
         super().__init__(detail)
@@ -190,38 +190,75 @@ def group_player_exclusion_totals_by_token(
     return dict(out)
 
 
-# ── Phase 2: review queue (approve / reject a pending manual drop) ────────────
+# ── Phase 2: review queue (approve / reject / undo a manual drop) ─────────────
+
+def _board_tokens(drop_dt: datetime):
+    """(token, ttl or None) for every group board a drop at ``drop_dt`` belongs
+    on. Monthly + all-time always; day/week only inside their retention window
+    (an ancient approval must not resurrect an expired board)."""
+    from utils.partitions import week_token, day_token, month_token, ALL
+
+    now = datetime.now()
+    boards = [(month_token(drop_dt), None), (ALL, None)]
+    if drop_dt >= now - timedelta(seconds=_DAILY_TTL):
+        boards.append((day_token(drop_dt), _DAILY_TTL))
+    if drop_dt >= now - timedelta(seconds=_WEEKLY_TTL):
+        boards.append((week_token(drop_dt), _WEEKLY_TTL))
+    return boards
+
 
 def _credit_group_boards(player_id: int, group_id: int, value: int, drop_dt: datetime) -> None:
     """ZINCRBY a single (player, value) onto ``group_id``'s monthly / daily /
     weekly / all-time boards, keyed to the drop's own date — the mirror of the
     per-group increments the intake path skipped while the drop was withheld.
-    Global boards are never touched (they always counted the drop). Daily/
-    weekly are only credited inside their retention window (an ancient
-    approval must not resurrect an expired board)."""
+    Global boards are never touched (they always counted the drop)."""
     from utils.redis import redis_client
-    from utils.partitions import week_token, day_token, month_token, ALL
 
     if value <= 0:
         return
     conn = getattr(redis_client, "client", None)
     if conn is None:
         return
-    now = datetime.now()
-    # (token, ttl or None). Monthly + all-time always; day/week within window.
-    boards = [(month_token(drop_dt), None), (ALL, None)]
-    if drop_dt >= now - timedelta(seconds=_DAILY_TTL):
-        boards.append((day_token(drop_dt), _DAILY_TTL))
-    if drop_dt >= now - timedelta(seconds=_WEEKLY_TTL):
-        boards.append((week_token(drop_dt), _WEEKLY_TTL))
-
     pipe = conn.pipeline(transaction=True)
-    for token, ttl in boards:
+    for token, ttl in _board_tokens(drop_dt):
         key = f"leaderboard:{token}:group:{group_id}"
         pipe.zincrby(key, value, player_id)
         if ttl:
             pipe.expire(key, ttl)
     pipe.execute()
+
+
+def _debit_group_boards(player_id: int, group_id: int, value: int, drop_dt: datetime) -> None:
+    """Exact reverse of :func:`_credit_group_boards` — used when an approval is
+    undone. Deliberately not a plain negative ZINCRBY:
+
+    - a board key that no longer exists is skipped, so the debit can't
+      *create* an expired daily/weekly board holding a negative score;
+    - TTLs are left alone (a debit must not extend a board's retention);
+    - the resulting score is clamped at 0, so a double-undo or a board that was
+      rebuilt in between can never leave the player sitting below zero. Zero
+      (rather than ZREM) is what a full rebuild would land on for the same
+      player — ``update_leaderboards`` writes ``max(total - deductions, 0)`` —
+      so an undo and a later reconcile agree.
+    """
+    from utils.redis import redis_client
+
+    if value <= 0:
+        return
+    conn = getattr(redis_client, "client", None)
+    if conn is None:
+        return
+    for token, _ttl in _board_tokens(drop_dt):
+        key = f"leaderboard:{token}:group:{group_id}"
+        try:
+            current = conn.zscore(key, player_id)
+            if current is None:
+                continue  # board (or this player's entry) is already gone
+            remaining = conn.zincrby(key, -value, player_id)
+            if remaining is not None and float(remaining) < 0:
+                conn.zadd(key, {str(player_id): 0})
+        except Exception as e:  # noqa: BLE001 — one bad board must not abort the rest
+            print(f"[ManualReview] Board debit failed on {key}: {e}")
 
 
 def _enqueue_approved_drop_notification(session, drop, group_id: int) -> bool:
@@ -275,7 +312,77 @@ def _enqueue_approved_drop_notification(session, drop, group_id: int) -> bool:
     return True
 
 
-def _load_pending_row(session, drop_id: int, group_id: int):
+def _retract_group_notification(session, drop_id: int, group_id: int) -> dict:
+    """Undo the group notification an approval released, whichever stage it
+    reached. Returns ``{"dequeued": n, "deleted": n}``.
+
+    Two stages, because the core bot drains ``notification_queue`` every ~3s:
+
+    - still queued (``pending``): drop the row, so it is never sent. A row the
+      bot has already claimed (``processing``) is left alone — cancelling one
+      mid-send would race the send itself; the ``notified`` row it writes a
+      moment later is then only cleanable by a second undo. That window is ~3s
+      wide and needs the admin to click inside it.
+    - already sent: a ``notified`` row holds the channel + message id. The Web
+      API must never touch Discord (§10.2), so this enqueues a
+      ``delete_message`` outbox row for the bot and drops the ``notified`` row
+      here and now. Dropping it inline rather than after the bot confirms
+      matters: the drop-notification path skips any (player, group, drop) that
+      already has a ``notified`` row, so leaving it in place for the ~10s until
+      the next outbox drain would silently mute an undo-then-re-approve. The
+      outbox row keeps the channel + message id, so nothing is lost if the
+      delete fails.
+    """
+    from db.models import NotificationQueue, NotifiedSubmission
+    from services.discord_outbox import enqueue
+
+    dequeued = 0
+    queued = (
+        session.query(NotificationQueue)
+        .filter(
+            NotificationQueue.notification_type == "drop",
+            NotificationQueue.group_id == group_id,
+            NotificationQueue.status == "pending",
+        )
+        .all()
+    )
+    for row in queued:
+        try:
+            data = json.loads(row.data or "{}")
+        except (ValueError, TypeError):
+            continue
+        if data.get("drop_id") == drop_id:
+            session.delete(row)
+            dequeued += 1
+
+    deleted = 0
+    sent = (
+        session.query(NotifiedSubmission)
+        .filter(
+            NotifiedSubmission.drop_id == drop_id,
+            NotifiedSubmission.group_id == group_id,
+        )
+        .all()
+    )
+    for notified in sent:
+        if not notified.message_id or not notified.channel_id:
+            session.delete(notified)
+            continue
+        enqueue(
+            session,
+            channel_id=str(notified.channel_id),
+            kind="delete_message",
+            discord_message_id=str(notified.message_id),
+            ref_type="notified_submission",
+            ref_id=notified.id,
+            commit=False,
+        )
+        session.delete(notified)
+        deleted += 1
+    return {"dequeued": dequeued, "deleted": deleted}
+
+
+def _load_moderation_row(session, drop_id: int, group_id: int):
     from db.models import DropGroupModeration
 
     return (
@@ -297,7 +404,7 @@ def approve_drop_for_group(session, drop_id: int, group_id: int,
     ``ModerationError`` on a bad state."""
     from db.models import Drop
 
-    row = _load_pending_row(session, drop_id, group_id)
+    row = _load_moderation_row(session, drop_id, group_id)
     if row is None:
         raise ModerationError(404, "Not found", "That submission has no review row for this group.")
     if row.status != "pending":
@@ -331,7 +438,7 @@ def reject_drop_for_group(session, drop_id: int, group_id: int,
     """Reject a pending manual drop: it stays withheld from the group (rejected
     is an excluding status) but never counts. The drop still exists globally /
     for other groups. Caller owns the commit."""
-    row = _load_pending_row(session, drop_id, group_id)
+    row = _load_moderation_row(session, drop_id, group_id)
     if row is None:
         raise ModerationError(404, "Not found", "That submission has no review row for this group.")
     if row.status != "pending":
@@ -341,3 +448,66 @@ def reject_drop_for_group(session, drop_id: int, group_id: int,
     row.reviewed_at = datetime.now()
     session.flush()
     return {"drop_id": drop_id, "group_id": group_id, "status": "rejected"}
+
+
+def undo_review_for_group(session, drop_id: int, group_id: int,
+                          reviewer_user_id: Optional[int] = None) -> dict:
+    """Take back a review decision: the row returns to ``pending`` and lands
+    back in the group's queue for a correct call.
+
+    Undoing an *approval* reverses everything approving did — the group's
+    leaderboard credit is debited back out and the released Discord
+    notification is dequeued or deleted. The status flip alone already fixes
+    every read-path rebuild (lootboards, reconcile, force-update all exclude
+    ``pending``), so no backfill is needed there. Undoing a *rejection* is a
+    plain status flip: rejected and pending are both excluding, so nothing was
+    ever applied.
+
+    The drop row itself is never touched — it has always counted globally and
+    for the player's other groups, and still does. The caller owns the commit.
+    Raises ``ModerationError`` on a row that has no decision to take back.
+    """
+    from db.models import Drop, UNDOABLE_STATUSES
+
+    row = _load_moderation_row(session, drop_id, group_id)
+    if row is None:
+        raise ModerationError(404, "Not found", "That submission has no review row for this group.")
+    if row.status == "pending":
+        raise ModerationError(409, "Nothing to undo",
+                              "That submission is still awaiting review.")
+    if row.status not in UNDOABLE_STATUSES:
+        # 'excluded' — the group's policy withheld it outright; there was no
+        # human decision to reverse. Changing the policy is the way back.
+        raise ModerationError(
+            409, "Not reviewable",
+            "That submission was withheld by this group's manual-submission "
+            "policy, not by a reviewer — there is no decision to undo.")
+
+    previous = row.status
+    row.status = "pending"
+    # The row genuinely has no decision on it again; who undid it (and when)
+    # lives in the audit log.
+    row.reviewed_by_user_id = None
+    row.reviewed_at = None
+    session.flush()
+
+    debited = 0
+    notification = {"dequeued": 0, "deleted": 0}
+    if previous == "approved":
+        drop = session.query(Drop).filter(Drop.drop_id == drop_id).first()
+        if drop is not None:
+            debited = int(drop.value or 0) * int(drop.quantity or 0)
+            drop_dt = drop.date_added or datetime.now()
+            try:
+                _debit_group_boards(drop.player_id, group_id, debited, drop_dt)
+            except Exception as e:
+                print(f"[ManualReview] Board debit failed for drop {drop_id} group {group_id}: {e}")
+            try:
+                notification = _retract_group_notification(session, drop_id, group_id)
+            except Exception as e:
+                print(f"[ManualReview] Notification retract failed for drop {drop_id} "
+                      f"group {group_id}: {e}")
+    return {"drop_id": drop_id, "group_id": group_id, "status": "pending",
+            "previous_status": previous, "debited": debited,
+            "notification_dequeued": notification["dequeued"],
+            "notification_deleted": notification["deleted"]}

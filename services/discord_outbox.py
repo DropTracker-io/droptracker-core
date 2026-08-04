@@ -58,10 +58,16 @@ def enqueue(
     kind: str = "message",
     ref_type: Optional[str] = None,
     ref_id: Optional[int] = None,
+    discord_message_id: Optional[str] = None,
     actor_user_id: Optional[int] = None,
     commit: bool = True,
 ) -> DiscordOutbox:
-    """Insert a pending outbox row. Caller supplies the session."""
+    """Insert a pending outbox row. Caller supplies the session.
+
+    ``discord_message_id`` is normally a write-back field (set by the drain
+    once a message is sent); pass it up front for kinds that *target* an
+    existing message, such as ``delete_message``.
+    """
     row = DiscordOutbox(
         kind=kind,
         channel_id=str(channel_id),
@@ -69,6 +75,7 @@ def enqueue(
         embed_json=json.dumps(embed) if embed else None,
         ref_type=ref_type,
         ref_id=ref_id,
+        discord_message_id=discord_message_id,
         actor_user_id=actor_user_id,
         status="pending",
     )
@@ -139,6 +146,30 @@ def _mark_ref_failed(session, row) -> None:
         pass
 
 
+async def _delete_message(bot, session, row):
+    """Send a ``kind='delete_message'`` outbox row: remove a message the bot
+    posted earlier. Used when a manual-submission approval is undone and its
+    announcement has to come back down (services/drop_moderation.py).
+
+    ``channel_id`` + ``discord_message_id`` name the target; the row's ref (if
+    any) is only there for tracing. A message that is already gone counts as
+    success — the desired end state is "not in the channel", and an admin who
+    deleted it by hand should not leave the row retrying forever.
+    """
+    if not row.discord_message_id:
+        raise RuntimeError("delete_message row has no discord_message_id")
+    channel = await bot.fetch_channel(int(row.channel_id))
+    if channel is None:
+        raise RuntimeError(f"channel {row.channel_id} not found")
+    try:
+        message = await channel.fetch_message(int(row.discord_message_id))
+        if message is not None:
+            await message.delete()
+    except Exception as e:  # noqa: BLE001 — already-deleted / unfetchable is fine
+        print(f"[discord_outbox] message {row.discord_message_id} not deleted "
+              f"(treating as gone): {e}")
+
+
 async def drain_once(bot, session_factory, limit: int = 20) -> int:
     """Send up to ``limit`` pending outbox rows via ``bot``. Returns the number
     processed. Safe to call repeatedly; failures mark the row 'failed'.
@@ -182,6 +213,13 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
             try:
                 if row.kind == "forum_post":
                     await _create_forum_post(bot, session, row)
+                    row.status = "sent"
+                    row.processed_at = datetime.now()
+                    sent += 1
+                    continue
+
+                if row.kind == "delete_message":
+                    await _delete_message(bot, session, row)
                     row.status = "sent"
                     row.processed_at = datetime.now()
                     sent += 1

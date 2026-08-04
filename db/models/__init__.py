@@ -9,7 +9,12 @@ from .group import Group
 from .user_configuration import UserConfiguration
 from .group_patreon import GroupPatreon
 from .drop import Drop
-from .drop_moderation import DropGroupModeration, EXCLUDING_STATUSES
+from .drop_moderation import (
+    DropGroupModeration,
+    COUNTING_STATUSES,
+    EXCLUDING_STATUSES,
+    UNDOABLE_STATUSES,
+)
 from .collection import CollectionLogEntry
 from .combat_achievement import CombatAchievementEntry
 from .personal_best import PersonalBestEntry
@@ -337,7 +342,9 @@ __all__ = [
     "EVENT_TEAM_DISCORD_RETENTIONS",
     "EVENT_TEAM_CHANNEL_KINDS",
     "DropGroupModeration",
+    "COUNTING_STATUSES",
     "EXCLUDING_STATUSES",
+    "UNDOABLE_STATUSES",
     "EVENT_BOARD_SIZES",
     "EVENT_SUBMISSION_POLICIES",
     "EVENT_TASK_PROGRESS_MODES",
