@@ -357,8 +357,11 @@ def _group_records(s, group_id: int, hidden: set, limit: int = 8):
     return out
 
 
-def _player_personal_bests(s, player_id: int, limit: int = 12):
-    """The player's best time per boss, fastest-improved-most-recently first."""
+def _player_personal_bests(s, player_id: int):
+    """The player's best time per boss, fastest-improved-most-recently first.
+
+    Returns every boss (the site collapses past the first dozen client-side);
+    the per-npc dedupe bounds this at one entry per tracked PB boss (~85)."""
     rows = (
         s.query(PersonalBestEntry)
         .filter(
@@ -382,7 +385,7 @@ def _player_personal_bests(s, player_id: int, limit: int = 12):
         best_by_npc.values(),
         key=lambda pb: pb.date_added or datetime.min,
         reverse=True,
-    )[:limit]
+    )
     out = []
     for pb in entries:
         try:
