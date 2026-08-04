@@ -217,15 +217,38 @@ async def get_me():
                         grp = _lookup_group_name(s, gid)
                         group_names[gid] = grp
 
-            groups = [
-                {
+            # Who owns each of these groups (web86a) — one batched query, not
+            # one per group. Exposed only to people who administer the group:
+            # it drives the "transfer ownership" affordance and the ownerless
+            # "claim" prompt, neither of which a plain member can act on.
+            admin_gids = [
+                gid for gid, role in group_roles.items() if is_group_admin_role(role)
+            ]
+            owner_by_group: dict[int, int] = {}
+            if admin_gids:
+                owner_by_group = {
+                    int(g): int(u)
+                    for g, u in s.query(GroupAdmin.group_id, GroupAdmin.user_id)
+                    .filter(
+                        GroupAdmin.group_id.in_(admin_gids),
+                        GroupAdmin.role == "owner",
+                    )
+                    .all()
+                }
+
+            groups = []
+            for gid, role in group_roles.items():
+                entry = {
                     "id": gid,
                     "name": group_names.get(gid) or f"Group {gid}",
                     "role": role,
                     "can_manage_events": is_group_admin_role(role) or gid in mgr_ids,
                 }
-                for gid, role in group_roles.items()
-            ]
+                if is_group_admin_role(role):
+                    # Present-and-null means "this group has no owner" (the
+                    # claim prompt); absent means "you aren't an admin here".
+                    entry["owner_user_id"] = owner_by_group.get(gid)
+                groups.append(entry)
             # Flair for the user's subscribed groups (one query for all).
             group_flair_map = group_flairs(s, [g["id"] for g in groups])
             for g in groups:

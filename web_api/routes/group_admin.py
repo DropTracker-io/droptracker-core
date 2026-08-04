@@ -7,10 +7,13 @@ Members / hidden players / WOM sync / diagnostics (session + group admin):
   POST  /api/v1/groups/{id}/wom-sync
   GET   /api/v1/groups/{id}/diagnostics
 
-Authorized users (post-creation admin management, XF parity):
-  GET    /api/v1/groups/{id}/authorized-users
-  POST   /api/v1/groups/{id}/authorized-users   { identifier }
-  DELETE /api/v1/groups/{id}/authorized-users   { user_id | discord_id }
+Roles & access — one owner + N admins (web86a):
+  GET    /api/v1/groups/{id}/authorized-users   (any admin: read-only roster)
+  POST   /api/v1/groups/{id}/authorized-users   { identifier }            OWNER
+  DELETE /api/v1/groups/{id}/authorized-users   { user_id | discord_id }  OWNER
+  POST   /api/v1/groups/{id}/ownership/transfer { user_id }               OWNER
+  POST   /api/v1/groups/{id}/ownership/claim    (any admin, ownerless only)
+  PATCH  /api/v1/groups/{id}/admin-policy       { discord_perms_grant_admin } OWNER
 
 Group icon (session + group admin):
   POST   /api/v1/groups/{id}/icon               multipart 'file' → { icon_url }
@@ -30,6 +33,7 @@ import time
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, text
+from sqlalchemy.exc import IntegrityError
 
 from quart import Blueprint, jsonify, request
 
@@ -46,8 +50,13 @@ from web_api.common import (
     private_no_store,
 )
 from web_api.deps import (
+    DISCORD_ADMIN_POLICY_KEY,
     assert_group_admin,
+    assert_group_owner,
     current_user_id,
+    discord_perms_grant_admin,
+    group_owner_user_id,
+    is_group_owner,
     is_superadmin,
     json_body,
     load_user,
@@ -62,12 +71,24 @@ def _rc():
 
 
 # --------------------------------------------------------------------------- #
-# Authorized users — who may administer the group besides the creator.
+# Roles & access — who may administer the group.
+#
+# web86a split the flat "authorized user" list into one OWNER plus N ADMINS.
+# Admins configure everything about the group; only the owner changes who is on
+# this list, or hands the group to somebody else. Before that split every
+# authorized user could appoint and evict every other one — including the
+# person who created the group — which is the escalation this closes.
 #
 # Two stores are kept in sync (XF-era parity):
 #   * ``group_admins`` rows            → drive website roles (deps.resolve_group_role)
 #   * ``authed_users`` group config    → JSON list of Discord IDs; drives the
-#     Discord bot's slash-command authorization (commands/utils.py).
+#     Discord bot's slash-command authorization (commands/utils.py) and the
+#     ``authorized_only`` manual-submission policy.
+#
+# ``authed_users`` stays deliberately FLAT — owner and admins alike land in it.
+# The bot has no notion of the split and needs none: it grants no admin rights
+# of its own (there is no slash command that writes this list), so the whole
+# escalation surface is the web endpoints below.
 # --------------------------------------------------------------------------- #
 _AUTHED_USERS_KEY = "authed_users"
 
@@ -157,6 +178,44 @@ def _authorized_entries(s, group_id: int) -> list[dict]:
     return out
 
 
+def _roster_payload(s, group_id: int, viewer_user_id: int, user=None) -> dict:
+    """The full Roles & access view: the roster plus what the viewer may do.
+
+    ``owner_user_id`` is grant-based and may legitimately be ``None`` — a group
+    is ownerless when the migration could not identify its creator, and the UI
+    turns that into a "Claim ownership" prompt. Callers must test it with
+    ``is None``: user_id 0 is a real account.
+    """
+    return {
+        "users": _authorized_entries(s, group_id),
+        "owner_user_id": group_owner_user_id(s, group_id),
+        "can_manage_admins": is_group_owner(s, viewer_user_id, group_id, user=user),
+        "discord_perms_grant_admin": discord_perms_grant_admin(s, group_id),
+    }
+
+
+def _notify_group(s, group_id: int, content: str) -> None:
+    """Announce a roster change in the group's Discord, best-effort.
+
+    Ownership moves are exactly the kind of change a clan should not be able to
+    miss, so they get posted where the members are rather than only into the
+    audit log. Enqueued on the outbox — the web API never opens a gateway
+    connection. Silent when the group has no drop channel configured.
+    """
+    try:
+        from services.discord_outbox import enqueue
+        from utils import group_config as gc
+
+        channel_id = gc.get(s, group_id, gc.DROP_CHANNEL_ID)
+        if not channel_id:
+            return
+        enqueue(s, channel_id=str(channel_id), content=content, commit=False)
+    except Exception:
+        # A missing channel or a wedged outbox must never fail the role change
+        # the caller actually asked for.
+        pass
+
+
 @group_admin_bp.get("/groups/<int:group_id>/authorized-users")
 async def list_authorized_users(group_id: int):
     user_id = current_user_id()
@@ -164,8 +223,10 @@ async def list_authorized_users(group_id: int):
     def _load():
         with db_session() as s:
             user = load_user(s, user_id)
+            # Any admin may SEE the roster — knowing who else administers your
+            # group is useful and leaks nothing. Only changing it is gated.
             assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
-            return {"users": _authorized_entries(s, group_id)}
+            return _roster_payload(s, group_id, user_id, user=user)
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
 
@@ -181,7 +242,7 @@ async def add_authorized_user(group_id: int):
     def _apply():
         with db_session() as s:
             user = load_user(s, user_id)
-            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+            assert_group_owner(s, user_id, group_id, user=user)
 
             target_user = None
             discord_id = None
@@ -230,8 +291,15 @@ async def add_authorized_user(group_id: int):
 
             if not changed:
                 abort_problem(409, "Already authorized", "That user is already authorized.")
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=group_id,
+                action="group.admin.add",
+                target=str(target_user.user_id) if target_user else discord_id,
+                after=f"user={target_user.user_id if target_user else None} "
+                      f"discord={discord_id}",
+            ))
             s.commit()
-            return {"users": _authorized_entries(s, group_id)}
+            return _roster_payload(s, group_id, user_id, user=user)
 
     return jsonify(await asyncio.to_thread(_apply))
 
@@ -248,9 +316,7 @@ async def remove_authorized_user(group_id: int):
     def _apply():
         with db_session() as s:
             user = load_user(s, user_id)
-            caller_role = assert_group_admin(
-                s, user_id, group_id, manageable_guild_ids(user_id), user=user
-            )
+            assert_group_owner(s, user_id, group_id, user=user)
 
             # Resolve the target across both stores.
             target = None
@@ -274,20 +340,16 @@ async def remove_authorized_user(group_id: int):
                     .first()
                 )
             if grant is not None:
+                # The owner is never removable, not even by themselves and not
+                # even by staff: a group with no owner has nobody who can
+                # appoint admins, so the only sanctioned way out of the seat is
+                # to hand it to someone else first.
                 if grant.role == "owner":
-                    if caller_role != "owner":
-                        abort_problem(403, "Owners only", "Only an owner can remove an owner.")
-                    owner_grants = (
-                        s.query(GroupAdmin)
-                        .filter(GroupAdmin.group_id == group_id, GroupAdmin.role == "owner")
-                        .count()
+                    abort_problem(
+                        409,
+                        "Owner cannot be removed",
+                        "Transfer ownership to another admin first, then remove them.",
                     )
-                    if grant.user_id == user_id and owner_grants <= 1:
-                        abort_problem(
-                            409,
-                            "Last owner",
-                            "You are this group's only owner — transfer ownership first.",
-                        )
                 s.delete(grant)
                 removed = True
 
@@ -300,8 +362,254 @@ async def remove_authorized_user(group_id: int):
 
             if not removed:
                 abort_problem(404, "Not authorized", "That user is not on the authorized list.")
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=group_id,
+                action="group.admin.remove",
+                target=str(target.user_id) if target else discord_id,
+                before=f"user={target.user_id if target else None} discord={discord_id}",
+            ))
             s.commit()
-            return {"users": _authorized_entries(s, group_id)}
+            return _roster_payload(s, group_id, user_id, user=user)
+
+    return jsonify(await asyncio.to_thread(_apply))
+
+
+# --------------------------------------------------------------------------- #
+# Ownership (web86a) — handover and, for groups the migration could not
+# attribute, first claim.
+# --------------------------------------------------------------------------- #
+def _display_name(u) -> str:
+    return (getattr(u, "username", None) or f"user {getattr(u, 'user_id', '?')}").strip()
+
+
+@group_admin_bp.post("/groups/<int:group_id>/ownership/transfer")
+async def transfer_ownership(group_id: int):
+    """Hand the group to one of its existing admins.
+
+    The outgoing owner is demoted to ``admin``, not removed — losing the group
+    entirely is never what someone means by "transfer", and they stay on
+    ``authed_users`` so their bot access is uninterrupted.
+    """
+    user_id = current_user_id()
+    body = await json_body()
+    target_user_id = body.get("user_id")
+    if not isinstance(target_user_id, int) or isinstance(target_user_id, bool):
+        abort_problem(422, "Missing target", "Provide the 'user_id' to transfer to.")
+
+    def _apply():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_owner(s, user_id, group_id, user=user)
+
+            owner_id = group_owner_user_id(s, group_id)
+            if owner_id is None:
+                abort_problem(
+                    409,
+                    "No owner",
+                    "This group has no owner to transfer from — claim it first.",
+                )
+            if int(target_user_id) == owner_id:
+                abort_problem(409, "Already owner", "That user already owns this group.")
+
+            target = s.query(User).filter(User.user_id == int(target_user_id)).first()
+            if target is None:
+                abort_problem(404, "User not found", "No such DropTracker user.")
+
+            # Deliberately restricted to existing admins: handing the group to
+            # a stranger should take two visible steps (authorize, then
+            # transfer), each of which lands in the audit log.
+            target_grant = (
+                s.query(GroupAdmin)
+                .filter(
+                    GroupAdmin.group_id == group_id,
+                    GroupAdmin.user_id == int(target_user_id),
+                )
+                .first()
+            )
+            if target_grant is None:
+                abort_problem(
+                    409,
+                    "Not an admin",
+                    "Add them as an admin of this group first, then transfer.",
+                )
+
+            owner_grant = (
+                s.query(GroupAdmin)
+                .filter(
+                    GroupAdmin.group_id == group_id,
+                    GroupAdmin.user_id == owner_id,
+                )
+                .first()
+            )
+            # Demote first and flush: the uix_group_single_owner index (web86a)
+            # rejects a second owner, so the seat must be vacated before it is
+            # filled. Both writes are in one transaction — a failure between
+            # them rolls back to the original owner rather than leaving the
+            # group ownerless.
+            if owner_grant is not None:
+                owner_grant.role = "admin"
+            s.flush()
+            target_grant.role = "owner"
+
+            # Both parties keep bot access; make sure the incoming owner is
+            # actually on the list even if the grant predates the sync.
+            if target.discord_id:
+                row, ids = _load_authed_ids(s, group_id)
+                if str(target.discord_id) not in ids:
+                    ids.append(str(target.discord_id))
+                    _store_authed_ids(s, group_id, row, ids)
+
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=group_id,
+                action="group.ownership.transfer", target=str(target_user_id),
+                before=f"owner={owner_id}", after=f"owner={target_user_id}",
+            ))
+            _notify_group(
+                s,
+                group_id,
+                f"👑 Group ownership transferred to **{_display_name(target)}**.",
+            )
+            s.commit()
+            return _roster_payload(s, group_id, user_id, user=user)
+
+    return jsonify(await asyncio.to_thread(_apply))
+
+
+@group_admin_bp.post("/groups/<int:group_id>/ownership/claim")
+async def claim_ownership(group_id: int):
+    """Take ownership of a group that has none.
+
+    29 groups came out of the web86a migration ownerless — either their creator
+    could not be identified among several equal owner grants, or they never had
+    a ``group_admins`` row at all. Rather than route every one of those through
+    staff, any current admin may claim the seat once. Gated on
+    ``assert_group_admin`` (not on a grant row) precisely because 24 of them
+    have no rows at all, so their only admins are MANAGE_GUILD holders. The
+    audit row and the Discord announcement are what make a bad claim visible.
+    """
+    user_id = current_user_id()
+
+    def _apply():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+
+            if group_owner_user_id(s, group_id) is not None:
+                abort_problem(
+                    409,
+                    "Already owned",
+                    "This group already has an owner. Ask them to transfer it.",
+                )
+
+            me = s.query(User).filter(User.user_id == user_id).first()
+            if me is None:
+                abort_problem(404, "User not found", "Your account could not be loaded.")
+
+            grant = (
+                s.query(GroupAdmin)
+                .filter(GroupAdmin.group_id == group_id, GroupAdmin.user_id == user_id)
+                .first()
+            )
+            if grant is None:
+                s.add(GroupAdmin(
+                    group_id=group_id, user_id=user_id,
+                    role="owner", granted_by=user_id,
+                ))
+            else:
+                grant.role = "owner"
+
+            if me.discord_id:
+                row, ids = _load_authed_ids(s, group_id)
+                if str(me.discord_id) not in ids:
+                    ids.append(str(me.discord_id))
+                    _store_authed_ids(s, group_id, row, ids)
+
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=group_id,
+                action="group.ownership.claim", target=str(user_id),
+                before="owner=None", after=f"owner={user_id}",
+            ))
+            _notify_group(
+                s,
+                group_id,
+                f"👑 **{_display_name(me)}** claimed ownership of this group on "
+                "DropTracker. If that wasn't expected, contact support.",
+            )
+            try:
+                s.commit()
+            except IntegrityError:
+                # Two admins clicked "claim" at the same time. uix_group_single_owner
+                # let exactly one through; tell the loser what happened rather
+                # than handing them a 500.
+                s.rollback()
+                abort_problem(
+                    409,
+                    "Already owned",
+                    "Somebody else just claimed this group. Reload to see who.",
+                )
+            return _roster_payload(s, group_id, user_id, user=user)
+
+    return jsonify(await asyncio.to_thread(_apply))
+
+
+@group_admin_bp.patch("/groups/<int:group_id>/admin-policy")
+async def set_admin_policy(group_id: int):
+    """Owner-only switch: does Discord MANAGE_GUILD still grant site admin?
+
+    Lives here rather than in ``config_registry`` on purpose — PATCH
+    /groups/{id}/config is open to every admin and rejects unregistered keys
+    (422), so registering this one would hand admins the very lever that
+    decides who counts as an admin.
+    """
+    user_id = current_user_id()
+    body = await json_body()
+    value = body.get("discord_perms_grant_admin")
+    if not isinstance(value, bool):
+        abort_problem(
+            422, "Invalid value", "'discord_perms_grant_admin' must be true or false."
+        )
+
+    def _apply():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_owner(s, user_id, group_id, user=user)
+
+            before = discord_perms_grant_admin(s, group_id)
+            row = (
+                s.query(GroupConfiguration)
+                .filter(
+                    GroupConfiguration.group_id == group_id,
+                    GroupConfiguration.config_key == DISCORD_ADMIN_POLICY_KEY,
+                )
+                .first()
+            )
+            stored = "true" if value else "false"
+            if row is None:
+                s.add(GroupConfiguration(
+                    group_id=group_id,
+                    config_key=DISCORD_ADMIN_POLICY_KEY,
+                    config_value=stored,
+                ))
+            else:
+                row.config_value = stored
+
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=group_id,
+                action="group.admin_policy.update",
+                target=f"group_configurations.{DISCORD_ADMIN_POLICY_KEY}",
+                before=str(before), after=stored,
+            ))
+            s.commit()
+
+            # resolve_group_role reads this through group_config's 30s in-process
+            # TTL cache. Dropping it here makes the change immediate for THIS
+            # hypercorn worker; the other one (webapi runs --workers 2) keeps its
+            # own copy for up to 30s. Bounded and acceptable for a policy flip —
+            # but it does mean "turn it off" is not instantly airtight.
+            from utils import group_config as gc
+            gc.invalidate(group_id, DISCORD_ADMIN_POLICY_KEY)
+
+            return _roster_payload(s, group_id, user_id, user=user)
 
     return jsonify(await asyncio.to_thread(_apply))
 

@@ -215,9 +215,20 @@ def resolve_group_role(
     """Derive the user's role on a group (§7.2): 'owner' | 'admin' | 'member'
     | None (not a member and no admin rights).
 
-    Superadmins resolve to 'owner' on every group unconditionally, even ones
-    they've never joined — site staff can administer any group's settings the
-    same way a real group owner would, from `/admin/groups`."""
+    Precedence, highest first (web86a):
+
+    1. superadmin => 'owner' on every group unconditionally, even ones they've
+       never joined — site staff administer any group from `/admin/groups`.
+    2. an explicit ``group_admins`` grant => its own role. This sits ABOVE the
+       Discord check on purpose: a group has exactly one owner, and that grant
+       must outrank a MANAGE_GUILD holder who would otherwise displace them.
+    3. MANAGE_GUILD on the linked Discord guild => 'admin' (NOT 'owner', as it
+       was before web86a). Discord server managers configure the group; they do
+       not inherit the roster powers that only the one real owner holds. The
+       group's owner can switch this implicit path off entirely — see
+       ``discord_perms_grant_admin``.
+    4. plain membership => 'member'.
+    """
     manage_guild_ids = manage_guild_ids or set()
 
     group = s.query(Group).filter(Group.group_id == group_id).first()
@@ -229,11 +240,8 @@ def resolve_group_role(
     if is_superadmin(user):
         return "owner"
 
-    # MANAGE_GUILD on the group's linked Discord guild => owner-level.
-    if group.guild_id and str(group.guild_id) in manage_guild_ids:
-        return "owner"
-
-    # Explicit web grant.
+    # Explicit web grant — authoritative, and checked before Discord so the
+    # owner row always wins.
     grant = (
         s.query(GroupAdmin)
         .filter(GroupAdmin.group_id == group_id, GroupAdmin.user_id == user_id)
@@ -241,6 +249,17 @@ def resolve_group_role(
     )
     if grant:
         return grant.role if grant.role in ("owner", "admin") else "admin"
+
+    # MANAGE_GUILD on the group's linked Discord guild => admin-level, unless
+    # the owner has turned the implicit path off. The policy lookup only runs
+    # once the guild actually matches, so the common no-Discord-rights path
+    # costs nothing extra.
+    if (
+        group.guild_id
+        and str(group.guild_id) in manage_guild_ids
+        and discord_perms_grant_admin(s, group_id)
+    ):
+        return "admin"
 
     # Plain membership (any of the user's players belongs to the group).
     if user:
@@ -252,6 +271,86 @@ def resolve_group_role(
 
 def is_group_admin_role(role: Optional[str]) -> bool:
     return role in ("owner", "admin")
+
+
+# --------------------------------------------------------------------------- #
+# Group ownership (web86a) — exactly one owner per group.
+#
+# The owner is the only person who may change the admin roster or hand the
+# group to someone else; admins configure everything else. ``group_admins``
+# carries a unique index that permits at most one ``role='owner'`` row per
+# group, and these helpers are the only sanctioned way to ask about it.
+# --------------------------------------------------------------------------- #
+
+# Unregistered `group_configurations` key (deliberately absent from
+# config_registry, so PATCH /groups/{id}/config — which any admin may call —
+# rejects it as an unknown key). Only the owner-gated admin-policy route
+# writes it. Absent/unparseable => True, preserving pre-web86a behaviour.
+DISCORD_ADMIN_POLICY_KEY = "discord_perms_grant_admin"
+
+
+def discord_perms_grant_admin(s, group_id: int) -> bool:
+    """Whether Discord MANAGE_GUILD still confers implicit site admin here.
+
+    Read through ``utils.group_config`` (30s in-process TTL cache) rather than
+    a raw query: this sits on ``resolve_group_role``, which every authenticated
+    request hits. Writers must call ``group_config.invalidate(group_id)``.
+    """
+    from utils import group_config as gc
+
+    raw = gc.get(s, group_id, DISCORD_ADMIN_POLICY_KEY, default=None)
+    if raw is None or str(raw).strip() == "":
+        return True  # unset => the pre-web86a behaviour
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+
+def group_owner_user_id(s, group_id: int) -> Optional[int]:
+    """The user_id of the group's one owner, or None when it has none.
+
+    Grant-based ONLY — deliberately no superadmin bypass and no MANAGE_GUILD
+    fallback. This answers "who *is* the owner", which is a different question
+    from "may this caller act as owner" (``is_group_owner``). Keeping staff out
+    of it means superadmins never display as somebody's group owner and never
+    mask an ownerless group from the claim flow.
+    """
+    row = (
+        s.query(GroupAdmin.user_id)
+        .filter(GroupAdmin.group_id == group_id, GroupAdmin.role == "owner")
+        .first()
+    )
+    return int(row[0]) if row else None
+
+
+def is_group_owner(
+    s,
+    user_id: int,
+    group_id: int,
+    user: Optional[User] = None,
+) -> bool:
+    """Whether the caller may exercise owner powers (superadmins may)."""
+    if user is None:
+        user = load_user(s, user_id)
+    if is_superadmin(user):
+        return True
+    if user_id is None:
+        return False
+    return group_owner_user_id(s, group_id) == int(user_id)
+
+
+def assert_group_owner(
+    s,
+    user_id: int,
+    group_id: int,
+    user: Optional[User] = None,
+) -> None:
+    """Abort 403 unless the caller owns the group (or is site staff)."""
+    if not is_group_owner(s, user_id, group_id, user=user):
+        abort_problem(
+            403,
+            "Owner only",
+            "Only this group's owner can change who administers it.",
+            extra={"code": "group_owner_required"},
+        )
 
 
 # --------------------------------------------------------------------------- #

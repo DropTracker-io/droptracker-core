@@ -35,11 +35,22 @@ from .base import Base
 
 
 class GroupAdmin(Base):
-    """Explicit web-granted admin rights on a group, beyond owner/MANAGE_GUILD.
+    """Explicit web-granted rights on a group: exactly one ``owner`` plus any
+    number of ``admin`` rows.
 
-    Role derivation (§7.2) still treats the group's Discord guild MANAGE_GUILD
-    holders and the original creator as owners; this table records grants made
-    from the website and seeds existing owners on rollout.
+    The owner is the only person who may change this table's contents (add or
+    remove admins) or hand the group to somebody else; admins configure
+    everything else about the group. Role derivation lives in
+    ``web_api/deps.resolve_group_role`` and consults this table BEFORE the
+    group's Discord guild, so an owner grant always outranks a MANAGE_GUILD
+    holder — who resolves to ``admin``, not ``owner`` (web86a).
+
+    The single-owner rule is enforced in the database by a unique index over a
+    virtual generated column (``owner_group_id = IF(role='owner', group_id,
+    NULL)``, migration web86a) — NULLs don't collide, so N admins are fine and
+    a second owner is rejected. The column is intentionally absent from this
+    model: nothing reads it, and MariaDB computes it. Ownership handovers must
+    therefore clear the old owner row before writing the new one.
     """
 
     __tablename__ = "group_admins"
