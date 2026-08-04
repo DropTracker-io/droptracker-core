@@ -3079,3 +3079,162 @@ async def admin_pb_blocks_remove(npc_id: int):
     label = ", ".join(b["name"] for b in result.get("bosses", [])) or str(npc_id)
     _audit(actor, "pb_block.remove", label)
     return jsonify({"ok": True, **result})
+
+
+# --------------------------------------------------------------------------- #
+# Split-source policy — where loot-split tracking is allowed to run.
+#
+# The allowlist is global (a fact about the encounter, not about a clan). The
+# mode is the safety catch: "shadow" counts what enforcement would stop without
+# changing any outcome, so the impact is known before anyone flips "enforce".
+# See utils/split_policy.py.
+# --------------------------------------------------------------------------- #
+def _split_policy_state(s) -> dict:
+    from utils import split_policy
+
+    eligible = split_policy.get_eligible(s)
+    names = split_policy.resolve_names(s, list(eligible))
+    sources = [
+        {
+            "npc_id": npc_id,
+            "name": names.get(npc_id, f"Unknown NPC #{npc_id}"),
+            "category": category,
+        }
+        for npc_id, category in sorted(eligible.items())
+    ]
+    sources.sort(key=lambda x: (x["category"], x["name"].lower()))
+    return {
+        "mode": split_policy.get_mode(s),
+        "modes": list(split_policy.VALID_MODES),
+        "enforcing": split_policy.get_mode(s) == split_policy.MODE_ENFORCE,
+        "sources": sources,
+        "npc_ids": sorted(eligible),
+    }
+
+
+@admin_bp.get("/admin/split-policy")
+async def admin_split_policy_get():
+    """The split-source allowlist, the active mode, and the shadow impact."""
+    await _require_moderator()
+
+    def _load():
+        from utils import split_policy
+
+        with db_session() as s:
+            state = _split_policy_state(s)
+            impact = split_policy.impact_snapshot()
+            blocked = impact.get("blocked", {})
+            unknown = [i for i in blocked if i not in set(state["npc_ids"])]
+            names = split_policy.resolve_names(s, unknown) if unknown else {}
+            state["impact"] = {
+                "would_keep": sum(impact.get("allowed", {}).values()),
+                "would_stop": sum(v["count"] for v in blocked.values()),
+                "blocked_sources": sorted(
+                    (
+                        {
+                            "npc_id": npc_id,
+                            "name": info.get("name") or names.get(npc_id, f"Unknown NPC #{npc_id}"),
+                            "count": info["count"],
+                        }
+                        for npc_id, info in blocked.items()
+                    ),
+                    key=lambda x: -x["count"],
+                ),
+            }
+            return state
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@admin_bp.post("/admin/split-policy/mode")
+async def admin_split_policy_set_mode():
+    """Switch the policy mode (off | shadow | enforce).
+
+    Turning on ``enforce`` changes real leaderboard outcomes, so it is
+    confirm-gated and echoes how many splits the shadow counters have already
+    seen it stop.
+    """
+    actor = await _require_moderator()
+    body = await json_body()
+    mode = str(body.get("mode") or "").strip().lower()
+    confirm = bool(body.get("confirm"))
+
+    def _apply():
+        from utils import split_policy
+
+        if mode not in split_policy.VALID_MODES:
+            abort_problem(422, "Invalid mode",
+                          f"Expected one of {', '.join(split_policy.VALID_MODES)}.")
+        with db_session() as s:
+            previous = split_policy.get_mode(s)
+            if mode == split_policy.MODE_ENFORCE and not confirm:
+                stopped = sum(
+                    v["count"] for v in split_policy.impact_snapshot().get("blocked", {}).values()
+                )
+                count = len(split_policy.get_eligible(s))
+                abort_problem(
+                    409, "Confirmation required",
+                    f"Enforcing will restrict split tracking to {count} allowlisted "
+                    f"source(s); shadow mode has counted {stopped} split(s) it would "
+                    f"have stopped. Re-send with confirm=true.",
+                )
+            split_policy.set_mode(s, mode)
+            state = _split_policy_state(s)
+            state["previous_mode"] = previous
+            return state
+
+    result = await asyncio.to_thread(_apply)
+    _audit(actor, "split_policy.mode", mode, before=result.get("previous_mode"), after=mode)
+    return jsonify({"ok": True, **result})
+
+
+@admin_bp.post("/admin/split-policy")
+async def admin_split_policy_add():
+    """Allow split tracking at an NPC (all its variant ids)."""
+    actor = await _require_moderator()
+    body = await json_body()
+    npc_ids = _body_npc_ids(body)
+    category = str(body.get("category") or "").strip() or None
+
+    def _apply():
+        from utils import split_policy
+
+        with db_session() as s:
+            ids = sorted(split_policy.sibling_ids(s, npc_ids) or set(npc_ids))
+            names = split_policy.resolve_names(s, ids)
+            if not names:
+                abort_problem(404, "Unknown NPC", f"No npc_list rows for {npc_ids}.")
+            cat = category or split_policy.CATEGORY_TEAM_BOSS
+            split_policy.add_eligible(s, {i: cat for i in ids})
+            state = _split_policy_state(s)
+            state["added_ids"] = ids
+            state["added_names"] = sorted(set(names.values()))
+            return state
+
+    result = await asyncio.to_thread(_apply)
+    label = ", ".join(result.get("added_names", [])) or str(npc_ids)
+    _audit(actor, "split_policy.add", label)
+    return jsonify({"ok": True, **result})
+
+
+@admin_bp.delete("/admin/split-policy/<int:npc_id>")
+async def admin_split_policy_remove(npc_id: int):
+    """Stop allowing split tracking at an NPC (all its variant ids)."""
+    actor = await _require_moderator()
+
+    def _apply():
+        from utils import split_policy
+
+        with db_session() as s:
+            ids = sorted(split_policy.sibling_ids(s, [npc_id]) or {npc_id})
+            names = split_policy.resolve_names(s, ids)
+            split_policy.remove_eligible(s, ids)
+            state = _split_policy_state(s)
+            state["removed_ids"] = ids
+            state["removed_names"] = sorted(set(names.values()))
+            return state
+
+    result = await asyncio.to_thread(_apply)
+    label = ", ".join(result.get("removed_names", [])) or str(npc_id)
+    _audit(actor, "split_policy.remove", label)
+    return jsonify({"ok": True, **result})

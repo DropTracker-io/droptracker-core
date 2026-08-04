@@ -509,6 +509,20 @@ async def _check_and_award_points(
     if not allow_award:
         return result
 
+    # Global split-source policy: where we don't track splits, shared point
+    # awards collapse to the receiver — the same effect as a group's own
+    # no_split rule, so it reuses that tested path rather than a new one.
+    # Inert unless an admin has set the policy to "enforce" (utils/split_policy).
+    if not force_no_split and incoming_npc_id:
+        try:
+            from utils import split_policy
+
+            if not split_policy.allows_split(incoming_npc_id, session=external_session):
+                force_no_split = True
+                point_log(f"split_policy forced no_split for npc_id={incoming_npc_id}")
+        except Exception:
+            pass
+
     # Optional per-item/per-npc override
     group_point_mods = await get_group_point_mods(group_id, external_session)
     if group_point_mods:

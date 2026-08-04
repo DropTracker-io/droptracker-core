@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "generated_from": "splitscan observation 2026-08-03 -> 2026-08-04 (697 sources)",
+  "criterion": "A source is split-eligible when ONE loot event is shared by a party that killed it together. Company alone is not enough: group content with per-player loot (Wintertodt, GOTR, Trawler) and crowded solo content (thieving, slayer caves, instanced bosses with busy lobbies) are deliberately excluded.",
+  "raid_rooms_excluded": "Individual room bosses (Xarpus, Sotetseg, Bloat, Akkha, Ba-Ba, Scavenger beast, ...) are NOT listed: only the raid chest carries loot worth splitting. Verified against player_npc_hourly_totals - Xarpus is 87k gp across 91,723 drops (0 gp/drop) and Sotetseg 70k across 94,370, against 1-2M gp per raid-chest drop. Two room ids do carry value and are called out for review rather than silently included: Tekton (385M over 182 drops, ~2.1M each - almost certainly misattributed CoX purples) and Cache of runes (3.4B over 10,749).",
+  "entries": [
+    {
+      "encounter": "Theatre of Blood",
+      "category": "raid",
+      "status": "confirmed",
+      "names": [
+        "Theatre of Blood", "Theatre of Blood: Hard Mode", "Theatre of Blood: Entry Mode"
+      ],
+      "note": "The raid chest only. Authoritative roster from varcstrings; 96-100% of drops arrive with a party, averaging 1.1M gp per drop."
+    },
+    {
+      "encounter": "Chambers of Xeric",
+      "category": "raid",
+      "status": "confirmed",
+      "names": ["Chambers of Xeric", "Chambers of Xeric Challenge Mode"],
+      "note": "The raid chest only. Roster from the raid sidepanel widget; 1.7-2.2M gp per drop."
+    },
+    {
+      "encounter": "Tombs of Amascut",
+      "category": "raid",
+      "status": "confirmed",
+      "names": [
+        "Tombs of Amascut", "Tombs of Amascut: Expert Mode", "Tombs of Amascut: Entry Mode"
+      ],
+      "note": "The raid chest only. Lower roster rate (62-82%) than ToB is genuine solo raiding, not missing data."
+    },
+    {
+      "encounter": "Nex",
+      "category": "team_boss",
+      "status": "proposed",
+      "names": ["Nex"],
+      "note": "Mass/team boss with a shared unique. 73% of drops arrive with company, averaging 17 players nearby."
+    },
+    {
+      "encounter": "The Nightmare",
+      "category": "team_boss",
+      "status": "proposed",
+      "names": ["The Nightmare"],
+      "note": "Only non-raid boss the game itself corroborates: 56/56 kill-times reported a team, average 5.4. Phosani's Nightmare is deliberately excluded - it is solo-only content."
+    },
+    {
+      "encounter": "God Wars Dungeon",
+      "category": "team_boss",
+      "status": "proposed",
+      "names": ["General Graardor", "Commander Zilyana", "K'ril Tsutsaroth", "Kree'arra"],
+      "note": "Multi-way, teamed regularly (23-61% of drops with company). Splitting is by clan convention rather than game mechanics - a prime question for the players."
+    },
+    {
+      "encounter": "Wilderness multi-way bosses",
+      "category": "team_boss",
+      "status": "proposed",
+      "names": ["Callisto", "Venenatis", "Vet'ion", "Scorpia"],
+      "note": "Multi-way wilderness, teamed heavily (35-100%). Their singles-plus counterparts Artio, Spindel and Calvar'ion are excluded: observed at 0.0-0.3% company, i.e. always solo."
+    },
+    {
+      "encounter": "Yama",
+      "category": "duo_boss",
+      "status": "proposed",
+      "names": ["Yama"],
+      "note": "Duo content: 1,740 of its company events were exactly one other player."
+    },
+    {
+      "encounter": "Royal Titans",
+      "category": "duo_boss",
+      "status": "proposed",
+      "names": ["Royal Titans"],
+      "note": "Duo content: all 849 company events were exactly one other player."
+    },
+    {
+      "encounter": "The Hueycoatl",
+      "category": "team_boss",
+      "status": "proposed",
+      "names": ["The Hueycoatl"],
+      "note": "Multi-way group boss, 55% of drops with company averaging 7 nearby."
+    },
+    {
+      "encounter": "Corporeal Beast",
+      "category": "team_boss",
+      "status": "question",
+      "names": ["Corporeal Beast"],
+      "note": "Mechanically a mass boss with shared loot and the classic split target, but observed 0/40 kills with company - the modern meta is solo/duo in instances. Included pending player input."
+    }
+  ],
+  "excluded_examples": {
+    "group_content_personal_loot": [
+      "Guardians of the Rift", "Fishing Trawler", "Tempoross", "Wintertodt",
+      "Zalcano", "Castle Wars", "Motherlode Mine"
+    ],
+    "crowded_but_not_shared": [
+      "Knight (Ardougne thieving)", "Master Farmer", "Wealthy Citizen",
+      "Greater Nechryael", "Vyrewatch Sentinel", "Gargoyle", "Dust devil",
+      "Seed pack", "Bird nest", "Clue caskets"
+    ],
+    "instanced_solo_with_busy_lobby": [
+      "The Gauntlet", "The Corrupted Gauntlet", "Kraken"
+    ],
+    "always_solo": [
+      "Zulrah", "Vorkath", "Araxxor", "Alchemical Hydra", "Grotesque Guardians",
+      "Duke Sucellus", "Vardorvis", "The Whisperer", "The Leviathan",
+      "Phantom Muspah", "Phosani's Nightmare", "Doom of Mokhaiotl",
+      "Fortis Colosseum", "TzKal-Zuk", "TzTok-Jad"
+    ],
+    "open_questions": [
+      "Kalphite Queen", "Giant Mole", "Dagannoth Rex", "Dagannoth Prime", "Dagannoth Supreme"
+    ]
+  }
+}

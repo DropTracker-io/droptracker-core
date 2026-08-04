@@ -648,6 +648,24 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             instant_update_group_ids = {row[0] for row in instant_update_rows}
 
         log_checkpoint("group_config_queries")
+
+        # Split-source policy: whether this NPC is a place we track splits at
+        # all. Group-independent (a fact about the kill, not about a roster), so
+        # it is resolved once here rather than per group. Ships in shadow mode:
+        # allows_split() only ever returns False once an admin sets the policy
+        # to "enforce" — until then it just counts what enforcement would stop.
+        split_source_allowed = True
+        try:
+            from utils import split_policy
+
+            split_source_allowed = split_policy.allows_split(
+                npc_id, npc_name=npc_name, session=session
+            )
+        except Exception as e:
+            # A policy read must never cost a submission its splits.
+            print(f"[SplitPolicy] Eligibility check failed for npc_id={npc_id}: {e}")
+        log_checkpoint("split_policy")
+
         sent_group_notifications = []
         debug_print(f"Processing notifications for {len(player_groups)} groups...")
         has_awarded_points = False
@@ -722,22 +740,36 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                 group_config_values.get((group_id, "split_gp_tracking")) == "1"
             )
             if split_tracking_enabled and (players_included or split_size) and not is_seasonal:
+                # A split really was about to run here: count it against the
+                # source policy (per group, since split credit is per group)
+                # before deciding whether the policy lets it through.
                 try:
-                    credited = await _award_split_gp_credits(
-                        session=session,
-                        drop=drop,
-                        group=group,
-                        receiver_player_id=player_id,
-                        players_included=players_included or [],
-                        drop_value=drop_value,
-                        world_type=world_type,
-                        split_size=split_size,
-                    )
-                    if credited:
-                        print(f"[SplitTracking] Split {drop_value} gp across {credited + 1} participants "
-                              f"for group {group_id} (drop_id={drop.drop_id}, receiver={player_id})")
-                except Exception as e:
-                    print(f"[SplitTracking] Failed to apply split credits for group {group_id}: {e}")
+                    from utils import split_policy
+
+                    split_policy.record_split_event(npc_id, npc_name, session=session)
+                except Exception:
+                    pass
+                if not split_source_allowed:
+                    print(f"[SplitPolicy] Skipped split for group {group_id}: {npc_name} "
+                          f"(npc_id={npc_id}) is not a split-eligible source "
+                          f"(drop_id={getattr(drop, 'drop_id', '?')})")
+                else:
+                    try:
+                        credited = await _award_split_gp_credits(
+                            session=session,
+                            drop=drop,
+                            group=group,
+                            receiver_player_id=player_id,
+                            players_included=players_included or [],
+                            drop_value=drop_value,
+                            world_type=world_type,
+                            split_size=split_size,
+                        )
+                        if credited:
+                            print(f"[SplitTracking] Split {drop_value} gp across {credited + 1} participants "
+                                  f"for group {group_id} (drop_id={drop.drop_id}, receiver={player_id})")
+                    except Exception as e:
+                        print(f"[SplitTracking] Failed to apply split credits for group {group_id}: {e}")
 
             min_value_raw = group_config_values.get((group_id, f"{config_prefix}minimum_value_to_notify"))
             try:
