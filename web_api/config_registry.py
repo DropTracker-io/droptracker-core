@@ -99,6 +99,15 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "seasonal": True,
     },
 
+    # --- Achievement diaries ---
+    {
+        "key": "min_diary_tier_to_notify",
+        "type": "select",
+        "default": "EASY",
+        "options": ["EASY", "MEDIUM", "HARD", "ELITE"],
+        "seasonal": True,
+    },
+
     # --- Board settings ---
     # boardstyle: a lootboards-table row id chosen via the preview picker
     # (GET /lootboard-styles). Existence is validated in the PATCH route —

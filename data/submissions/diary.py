@@ -120,6 +120,18 @@ async def diary_processor(diary_data, external_session=None, world_type="main"):
             print(f"Diary notifications are disabled for group {group.group_name}")
             continue
 
+        tier_order = ["easy", "medium", "hard", "elite"]
+        if group_id != 2 and diary_tier.lower() in tier_order:
+            min_tier_raw = gc.get(session, group_id, f"{config_prefix}min_diary_tier_to_notify")
+            if min_tier_raw and str(min_tier_raw).lower() in tier_order:
+                min_tier_index = tier_order.index(str(min_tier_raw).lower())
+                diary_tier_index = tier_order.index(diary_tier.lower())
+                if diary_tier_index < min_tier_index:
+                    debug_print(
+                        f"Skipping {diary_name} ({diary_tier}) as it's below minimum tier {min_tier_raw} for group {group.group_name}"
+                    )
+                    continue
+
         # Screenshot requirement (treat video submissions as satisfying it too)
         if await screenshot_required(session, group_id):
             if not image_url and not video_key and not video_url:
