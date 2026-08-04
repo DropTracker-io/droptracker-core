@@ -237,41 +237,56 @@ def get_extension_from_content_type(content_type):
     return 'jpg'  # Default to jpg if content type is not provided
 
 
+NPC_IMG_DIR = '/store/droptracker/disc/static/assets/img/npcdb'
+# All HOF thumbnails are contain-fit onto a square canvas of this size so
+# wildly different wiki thumbnail aspect ratios (174px-688px tall, all at a
+# fixed 280px width) don't render as inconsistently-sized boss icons.
+NPC_IMG_CANONICAL_SIZE = (280, 280)
+
+
+def normalize_npc_image(image: Image.Image) -> Image.Image:
+    """Contain-fit `image` onto a transparent NPC_IMG_CANONICAL_SIZE canvas, centered."""
+    image = image.convert("RGBA")
+    fitted = image.copy()
+    fitted.thumbnail(NPC_IMG_CANONICAL_SIZE, Image.LANCZOS)
+    canvas = Image.new("RGBA", NPC_IMG_CANONICAL_SIZE, (0, 0, 0, 0))
+    offset = (
+        (NPC_IMG_CANONICAL_SIZE[0] - fitted.width) // 2,
+        (NPC_IMG_CANONICAL_SIZE[1] - fitted.height) // 2,
+    )
+    canvas.paste(fitted, offset, fitted)
+    return canvas
+
+
 async def get_npc_image_url(npc_name, npc_id):
     """
-        Requires the EXACT npc name be passed, and may (oftentimes) fail due to different pathing on the RS wiki
+        Requires the EXACT npc name be passed, and may (oftentimes) fail due to different pathing on the RS wiki.
+        Downloads the wiki thumbnail (if not already cached on disk), normalizes it to
+        NPC_IMG_CANONICAL_SIZE, and returns the CDN URL. Returns None if the image
+        could not be fetched.
     """
-    os.makedirs('/store/droptracker/disc/static/assets/img/npcdb',exist_ok=True)
-    base_url = "https://oldschool.runescape.wiki/images/thumb/TzKal-Zuk.png/280px-TzKal-Zuk.png"
-    if not os.path.exists(f'/static/assets/img/npcdb/{npc_id}.png'):
-        try:
-            npc_name = normalize_npc_name(npc_name)
-            url = f"https://oldschool.runescape.wiki/images/thumb/{npc_name}.png/280px-{npc_name}.png"
-            ## save it here
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    # Ensure the request was successful
-                    if response.status != 200:
-                        print(f"Failed to fetch image for npc {npc_name}. HTTP status: {response.status}")
-                        return None
+    os.makedirs(NPC_IMG_DIR, exist_ok=True)
+    file_path = f"{NPC_IMG_DIR}/{npc_id}.png"
+    cdn_url = f"https://www.droptracker.io/img/npcdb/{npc_id}.png"
+    if os.path.exists(file_path):
+        return cdn_url
+    try:
+        normalized_name = normalize_npc_name(npc_name)
+        url = f"https://oldschool.runescape.wiki/images/thumb/{normalized_name}.png/280px-{normalized_name}.png"
+        async with aiohttp.ClientSession() as http_session:
+            async with http_session.get(url) as response:
+                if response.status != 200:
+                    print(f"Failed to fetch image for npc {npc_name}. HTTP status: {response.status}")
+                    return None
+                image_data = await response.read()
+        image = Image.open(BytesIO(image_data))
+        normalized_image = normalize_npc_image(image)
+        normalized_image.save(file_path, "PNG")
+        return cdn_url
+    except Exception as e:
+        print("We were unable to load the npc image:", e)
+        return None
 
-                    # Read the response content
-                    image_data = await response.read()
-
-                    # Load the image data into a PIL Image object
-                    image = Image.open(BytesIO(image_data))
-                    file_path = f"/store/droptracker/disc/static/assets/img/npcdb/{npc_id}.png"
-                    image.save(file_path, "PNG")
-                    return f"https://www.droptracker.io/img/npcdb/{npc_id}.png"
-
-        except Exception as e:
-            print("We were unable to load the npc image:", e)
-        finally:
-            await aiohttp.ClientSession().close()
-    else:
-        return f"https://www.droptracker.io/img/npcdb/{npc_id}.png"
-            
-    
 
 def replace_placeholders(embed: interactions.Embed, value_dict: dict, global_server: bool = False):
 

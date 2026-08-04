@@ -80,10 +80,11 @@ from db.models import (
     session,
 )
 from db.ops import get_formatted_name
-from utils.format import convert_from_ms, format_number
+from utils.format import NPC_IMG_DIR, convert_from_ms, format_number, get_npc_image_url
 from utils.hof import (
     DIRECTORY_BOTTOM_KEY,
     DIRECTORY_KEY,
+    RAID_GROUPS,
     SEPULCHRE_CANONICAL,
     SYNC_NOTE_TEXT,
     BossPlanEntry,
@@ -576,7 +577,7 @@ class HallOfFame(Extension):
         cfg = self._load_group_config(group_id)
         if not cfg.channel_id or not cfg.individual_messages:
             return
-        resolved = self._resolve_entries(group_id, build_boss_plan(cfg.boss_names))
+        resolved = await self._resolve_entries(group_id, build_boss_plan(cfg.boss_names))
         match = next(((e, npcs) for e, npcs in resolved if e.display_name == display_name), None)
         if match is None:
             return
@@ -688,7 +689,7 @@ class HallOfFame(Extension):
                     cfg.pb_entries = min(10, value)
         return cfg
 
-    def _resolve_entries(
+    async def _resolve_entries(
         self, group_id: int, entries: List[BossPlanEntry]
     ) -> List[Tuple[BossPlanEntry, List[NpcList]]]:
         """Attach NpcList rows to each plan entry, dropping unresolvable bosses.
@@ -708,11 +709,23 @@ class HallOfFame(Extension):
                         break
                 if npc:
                     npcs.append(npc)
+                    await self._ensure_npc_image(npc)
                 else:
                     log.warning("HOF: group %d boss '%s' not in NpcList", group_id, name)
             if npcs:
                 resolved.append((entry, npcs))
         return resolved
+
+    async def _ensure_npc_image(self, npc: NpcList) -> None:
+        """Best-effort on-demand fetch of a boss's HOF thumbnail if it's not cached
+        on disk yet (e.g. a newly-minted NpcList row). Failures are non-fatal —
+        `_get_npc_img_url` falls back to a same-raid image if one is missing."""
+        if os.path.exists(f"{NPC_IMG_DIR}/{npc.npc_id}.png"):
+            return
+        try:
+            await get_npc_image_url(npc.npc_name, npc.npc_id)
+        except Exception:
+            log.warning("HOF: failed to fetch image for npc '%s' (%d)", npc.npc_name, npc.npc_id, exc_info=True)
 
     async def _reconcile_group(self, group_id: int, stats: CycleStats):
         self._begin_fresh_read()
@@ -742,7 +755,7 @@ class HallOfFame(Extension):
             # request to tear the channel down — leave existing messages alone.
             log.warning("HOF: group %d has no bosses configured, skipping", group_id)
             return
-        resolved = self._resolve_entries(group_id, build_boss_plan(cfg.boss_names))
+        resolved = await self._resolve_entries(group_id, build_boss_plan(cfg.boss_names))
         if not resolved:
             log.error("HOF: group %d — none of %d configured bosses resolved, skipping",
                       group_id, len(cfg.boss_names))
@@ -1190,13 +1203,25 @@ class HallOfFame(Extension):
             SectionComponent(
                 components=[TextDisplayComponent(content=f"## {canonical_name} 🏆")],
                 accessory=ThumbnailComponent(
-                    media=UnfurledMediaItem(url=self._get_npc_img_url(npcs[0])),
+                    media=UnfurledMediaItem(url=self._get_npc_img_url(self._group_thumbnail_npc(canonical_name, npcs))),
                 ),
             ),
             SeparatorComponent(divider=True),
             *grouped_components,
             *self._trailing_components(directory_url),
         )]
+
+    def _group_thumbnail_npc(self, canonical_name: str, npcs: List[NpcList]) -> NpcList:
+        """Prefer the base/normal-mode NPC's artwork for a raid group's thumbnail
+        (e.g. plain 'Theatre of Blood' over 'Theatre of Blood: Hard Mode') —
+        it's the mode most groups configure first and the one most likely to
+        already have a cached image. `_get_npc_img_url` still falls back across
+        modes if this particular one's file is missing."""
+        for variant_name in RAID_GROUPS.get(canonical_name, []):
+            for npc in npcs:
+                if npc.npc_name == variant_name:
+                    return npc
+        return npcs[0]
 
     def _trailing_components(self, directory_url: Optional[str]) -> List[BaseComponent]:
         trailing: List[BaseComponent] = [TextDisplayComponent(content=_FOOTER_TEXT)]
@@ -1407,7 +1432,29 @@ class HallOfFame(Extension):
         return f"[{npc_name}]({self._get_npc_url(npc)})"
 
     def _get_npc_img_url(self, npc: NpcList) -> str:
+        if os.path.exists(f"{NPC_IMG_DIR}/{npc.npc_id}.png"):
+            return f"https://www.droptracker.io/img/npcdb/{npc.npc_id}.png"
+        fallback = self._raid_fallback_npc(npc.npc_name, exclude_npc_id=npc.npc_id)
+        if fallback:
+            return f"https://www.droptracker.io/img/npcdb/{fallback.npc_id}.png"
         return f"https://www.droptracker.io/img/npcdb/{npc.npc_id}.png"
+
+    def _raid_fallback_npc(self, npc_name: str, exclude_npc_id: Optional[int] = None) -> Optional[NpcList]:
+        """If `npc_name` is a raid-mode variant and its own artwork is missing,
+        find another mode of the same raid (base/normal mode first) that already
+        has an image on disk, so the thumbnail isn't a broken image."""
+        canonical = canonical_display_name(npc_name)
+        variants = RAID_GROUPS.get(canonical)
+        if not variants:
+            return None
+        for variant_name in variants:
+            for candidate in npc_name_candidates(variant_name):
+                candidate_npc = session.query(NpcList).filter(NpcList.npc_name == candidate).first()
+                if not candidate_npc or candidate_npc.npc_id == exclude_npc_id:
+                    continue
+                if os.path.exists(f"{NPC_IMG_DIR}/{candidate_npc.npc_id}.png"):
+                    return candidate_npc
+        return None
 
     def _get_npc_url(self, npc: NpcList) -> str:
         return npc_url(npc.npc_id)
@@ -1572,7 +1619,7 @@ class HallOfFame(Extension):
                 await ctx.send("This group no longer exists.", ephemeral=True)
                 return
             cfg = self._load_group_config(group_id)
-            resolved = self._resolve_entries(group_id, build_boss_plan(cfg.boss_names))
+            resolved = await self._resolve_entries(group_id, build_boss_plan(cfg.boss_names))
             match = next(
                 ((entry, npcs) for entry, npcs in resolved if entry.display_name == selection),
                 None,
