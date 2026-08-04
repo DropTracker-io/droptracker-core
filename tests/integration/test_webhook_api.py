@@ -45,6 +45,20 @@ class TestHealthEndpoints:
 
 # ── Webhook submission routing ────────────────────────────────────────────────
 
+@pytest.fixture
+def direct_dispatch(monkeypatch):
+    """Pin POST /webhook to the in-request dispatch path.
+
+    ``_QUEUE_MODE`` is read from the environment at import time, and this box's
+    ``.env`` carries the production ``WEBHOOK_QUEUE_MODE=true`` — so without
+    this the route enqueues to Redis and never reaches a processor. The routing
+    assertions below would then pass vacuously on the 400 the queue acceptor
+    returns for a non-multipart body. The queue path itself is covered by
+    ``test_queue_mode_enqueues_instead_of_dispatching``.
+    """
+    monkeypatch.setattr("api.routes.webhook._QUEUE_MODE", False)
+
+
 class TestWebhookRouting:
     """Verify that POST /webhook routes to the correct processor based on 'type'."""
 
@@ -72,26 +86,31 @@ class TestWebhookRouting:
             )
         return base
 
-    async def test_drop_type_calls_drop_processor(self, client):
+    async def test_drop_type_calls_drop_processor(self, client, direct_dispatch):
         from data.submissions.common import SubmissionResponse
 
+        # The route reaches processors as `submissions.drop_processor(...)`
+        # (`from data import submissions`), so the attribute lives on the
+        # package, not on api.routes.webhook.
         with patch(
-            "api.routes.webhook.drop_processor",
+            "data.submissions.drop_processor",
             new_callable=AsyncMock,
             return_value=SubmissionResponse(success=True, message="ok"),
         ) as mock_proc:
             payload_json = json.dumps(self._make_payload("drop"))
             response = await client.post(
                 "/webhook",
-                data={"payload_json": payload_json},
+                # `files=` (even empty) is what makes Quart's client send
+                # multipart/form-data; with `data=` the route rejects the body
+                # before dispatching and the assertion below never runs.
+                form={"payload_json": payload_json},
+                files={},
             )
 
-        assert response.status_code in (200, 400, 422)
-        # If the route reached the processor, it was called
-        if response.status_code == 200:
-            assert mock_proc.called
+        assert response.status_code == 200, await response.get_data(as_text=True)
+        assert mock_proc.called
 
-    async def test_pb_type_calls_pb_processor(self, client):
+    async def test_pb_type_calls_pb_processor(self, client, direct_dispatch):
         from data.submissions.common import SubmissionResponse
 
         pb_fields = {
@@ -100,19 +119,46 @@ class TestWebhookRouting:
             "team_size": "Solo",
         }
         with patch(
-            "api.routes.webhook.pb_processor",
+            "data.submissions.pb_processor",
             new_callable=AsyncMock,
             return_value=SubmissionResponse(success=True, message="ok"),
         ) as mock_proc:
-            payload_json = json.dumps(self._make_payload("pb", extra=pb_fields))
+            # The wire type is "personal_best" (aliases: kill_time, npc_kill) —
+            # "pb" is only the internal processor name and the route rejects it
+            # as unsupported.
+            payload_json = json.dumps(self._make_payload("personal_best", extra=pb_fields))
             response = await client.post(
                 "/webhook",
-                data={"payload_json": payload_json},
+                # `files=` (even empty) is what makes Quart's client send
+                # multipart/form-data; with `data=` the route rejects the body
+                # before dispatching and the assertion below never runs.
+                form={"payload_json": payload_json},
+                files={},
             )
 
-        assert response.status_code in (200, 400, 422)
-        if response.status_code == 200:
-            assert mock_proc.called
+        assert response.status_code == 200, await response.get_data(as_text=True)
+        assert mock_proc.called
+
+    async def test_queue_mode_enqueues_instead_of_dispatching(self, client, monkeypatch):
+        """The live intake path (WEBHOOK_QUEUE_MODE=true in prod) must not dispatch.
+
+        `/webhook` validates, stashes and RPUSHes; droptracker-webhook-consumer
+        does the real work. Pinning this keeps the two routing tests above from
+        quietly re-becoming assertions about a path production doesn't take.
+        """
+        monkeypatch.setattr("api.routes.webhook._QUEUE_MODE", True)
+
+        with patch(
+            "data.submissions.drop_processor", new_callable=AsyncMock
+        ) as mock_proc:
+            response = await client.post(
+                "/webhook",
+                form={"payload_json": json.dumps(self._make_payload("drop"))},
+                files={},
+            )
+
+        assert response.status_code == 200, await response.get_data(as_text=True)
+        assert not mock_proc.called
 
     async def test_missing_payload_json_returns_error(self, client):
         response = await client.post("/webhook", data={})

@@ -79,8 +79,10 @@ _STUBS = [
     "utils.ge_value",
     "utils.download",
     "utils.logger",
+    # NOTE: utils.video_storage is deliberately NOT stubbed. It is pure (stdlib
+    # + the stubbed utils.b2_storage above), and tests/test_video_storage.py
+    # asserts on its real key-building and path-traversal behaviour.
     "utils.b2_storage",
-    "utils.video_storage",
     "utils.messages",
     "utils.encrypter",
     "utils.patreon",

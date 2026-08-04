@@ -28,7 +28,11 @@ def test_player_claims_against_dt_migrate_test():
     output = proc.stdout + "\n" + proc.stderr
     if proc.returncode != 0 and (
             "Can't connect" in output or "Connection refused" in output
-            or "Access denied" in output):
+            or "Access denied" in output
+            # alembic.ini is gitignored, so a fresh clone or a git worktree has
+            # no test-DB URL at all; configparser reports the absent file as a
+            # missing section rather than raising on read.
+            or "No section: 'alembic'" in output):
         pytest.skip(f"test DB unavailable: {output[-500:]}")
     assert proc.returncode == 0, f"integration script failed:\n{output[-4000:]}"
     assert "ALL PLAYER CLAIM INTEGRATION ASSERTIONS PASSED" in output
