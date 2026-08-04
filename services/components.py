@@ -79,11 +79,19 @@ async def build_help_components(bot=None):
     pingme_id          = await _cid("pingme")
     my_points_id       = await _cid("my-points")
     group_points_id    = await _cid("group-points")
+    # Sub-commands are cached under their full "<base> <sub>" name, and every
+    # sub-command carries the *base* command's ID — which is exactly what the
+    # </submit drop:ID> mention syntax expects.
+    submit_id          = await _cid("submit drop")
     create_group_id    = await _cid("create-group")
     sync_wom_id        = await _cid("sync-wom")
     reset_points_id    = await _cid("reset-group-points")
     force_sync_id      = await _cid("force-group-sync")
     player_faq_id      = await _cid("send_player_faq")
+    split_tracking_id  = await _cid("toggle-split-tracking")
+    add_points_id      = await _cid("add-group-points")
+    remove_points_id   = await _cid("remove-group-points")
+    points_audit_id    = await _cid("group-points-audit")
 
     return [
         ContainerComponent(
@@ -111,6 +119,8 @@ async def build_help_components(bot=None):
                     f"-# </pingme:{pingme_id}> - Toggle whether you get pinged when your submissions are sent to Discord.\n"
                     f"-# </my-points:{my_points_id}> - View your earned points across all groups.\n"
                     f"-# </group-points:{group_points_id}> - View this server's group point standings.\n"
+                    f"-# </submit drop:{submit_id}> - Manually submit something you received, if the plugin missed it.\n"
+                    "-# > Swap `drop` for `clog`, `pb`, `ca` or `pet` to submit any other achievement type.\n"
                 )
             ),
             SeparatorComponent(divider=True),
@@ -119,9 +129,15 @@ async def build_help_components(bot=None):
                     "**Group Leader / Admin Commands**\n"
                     f"-# </create-group:{create_group_id}> - Create a new group in the DropTracker database.\n"
                     f"-# </sync-wom:{sync_wom_id}> - Request an immediate WiseOldMan membership sync (1-hour cooldown).\n"
-                    f"-# </reset-group-points:{reset_points_id}> - Reset your group's points back to zero.\n"
                     f"-# </force-group-sync:{force_sync_id}> - Force a WiseOldMan membership sync for your group.\n"
+                    f"-# </toggle-split-tracking:{split_tracking_id}> - Enable or disable split GP tracking for your group.\n"
+                    f"-# </add-group-points:{add_points_id}> - Manually add points to a member's balance.\n"
+                    f"-# </remove-group-points:{remove_points_id}> - Manually remove points from a member's balance.\n"
+                    f"-# </group-points-audit:{points_audit_id}> - View recent manual point adjustments for your group.\n"
+                    f"-# </reset-group-points:{reset_points_id}> - Reset your group's points back to zero.\n"
                     f"-# </send_player_faq:{player_faq_id}> - Post a player FAQ/setup message to a channel.\n"
+                    "-# > Right-click menus: **Modify Entry** (on a drop notification) to edit or delete it, "
+                    "and **Player Lookup** (on a member) to view their tracked accounts.\n"
                 )
             ),
             SeparatorComponent(divider=True),
@@ -199,6 +215,7 @@ async def build_player_setup(bot=None):
     dm_settings_id = await _cid("dm-settings")
     hideme_id      = await _cid("hideme")
     pingme_id      = await _cid("pingme")
+    submit_id      = await _cid("submit drop")
 
     return [
         ContainerComponent(
@@ -219,6 +236,9 @@ async def build_player_setup(bot=None):
                         f"-# > 3. (Optionally) Claim your in-game-name using the </claim-rsn:{claim_rsn_id}> command to associate your Discord account with your character(s).\n\n" +
                         "-# **How can I get pinged when my account(s) have notifications sent?**\n" +
                         f"-# > Using the </claim-rsn:{claim_rsn_id}> command, entering your in-game-name **exactly as it appears**.\n\n" +
+                        "-# **What if the plugin missed something I received?**\n" +
+                        f"-# > Use the </submit drop:{submit_id}> command to send it in manually. Swap `drop` for `clog`, `pb`, `ca` or `pet` to submit any other achievement type.\n" +
+                        "-# > You can only submit for accounts you've claimed, and your group leaders may require a screenshot before it counts.\n\n" +
                         "-# **How can I prevent my submissions from being shared to the global DropTracker discord channels?**\n" +
                         f"-# > Using the </hideme:{hideme_id}> command, and selecting which account(s)/context(s) you want to be hidden from.\n\n" +
                         "-# **How can I get (or not get) pinged by the <@1172933457010245762> bot when my account(s) have notifications sent?**\n" +
@@ -271,6 +291,10 @@ async def build_clan_setup(bot=None):
     reset_points_id   = await _cid("reset-group-points")
     force_sync_id     = await _cid("force-group-sync")
     player_faq_id     = await _cid("send_player_faq")
+    split_tracking_id = await _cid("toggle-split-tracking")
+    add_points_id     = await _cid("add-group-points")
+    remove_points_id  = await _cid("remove-group-points")
+    points_audit_id   = await _cid("group-points-audit")
 
     return [
         ContainerComponent(
@@ -311,8 +335,14 @@ async def build_clan_setup(bot=None):
                     "**Additional Admin Commands**\n"
                     f"-# </sync-wom:{sync_wom_id}> - Request an immediate WiseOldMan membership sync for your group (1-hour cooldown).\n"
                     f"-# </force-group-sync:{force_sync_id}> - Force a full WiseOldMan membership sync bypassing the cooldown (admin only).\n"
+                    f"-# </toggle-split-tracking:{split_tracking_id}> - Enable or disable split GP tracking, so raid loot is credited evenly among splitters.\n"
+                    f"-# </add-group-points:{add_points_id}> - Manually add points to one of your members' balances.\n"
+                    f"-# </remove-group-points:{remove_points_id}> - Manually remove points from one of your members' balances.\n"
+                    f"-# </group-points-audit:{points_audit_id}> - View a log of recent manual point adjustments in your group.\n"
                     f"-# </reset-group-points:{reset_points_id}> - Reset all group points back to zero (irreversible).\n"
                     f"-# </send_player_faq:{player_faq_id}> - Post a player FAQ/setup message to a channel in your server.\n"
+                    "-# > You can also right-click any drop notification the bot posted and choose **Modify Entry** "
+                    "to correct or delete it, or right-click a member and choose **Player Lookup** to see their tracked accounts.\n"
                 )
             ),
             SeparatorComponent(divider=True),
