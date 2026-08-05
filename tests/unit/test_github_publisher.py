@@ -112,6 +112,39 @@ class TestWebhookSetChanged:
         assert self._updater()._webhook_set_changed(bad, ["a"]) is True
 
 
+class TestSummarizePublish:
+    """The change lines fed to the Discord automation channel. Empty list ==
+    the run changed nothing and only the status message gets refreshed."""
+
+    def test_no_changes_is_empty(self):
+        assert gh.summarize_publish([], [], 0) == []
+        assert gh.summarize_publish([], [], 0, {"tested": 120, "deleted": 0}) == []
+        assert gh.summarize_publish([], [], 0, None) == []
+
+    def test_full_run_produces_all_lines(self):
+        files = [("content/core.json", "x"), ("content/news.txt", "y")]
+        lines = gh.summarize_publish(files, ["content/20260701.json"], 1,
+                                     {"tested": 120, "deleted": 5})
+        assert lines == [
+            "Committed 2 file(s): core.json, news.txt",
+            "1 webhook file(s) rotated",
+            "Pruned 1 stale dated file(s)",
+            "Deleted 5 dead webhook(s) (of 120 tested)",
+        ]
+
+    def test_filename_enumeration_capped(self):
+        files = [(f"content/f{i}.txt", "x") for i in range(9)]
+        lines = gh.summarize_publish(files, [], 0)
+        assert lines[0].startswith("Committed 9 file(s): ")
+        assert "+3 more" in lines[0]
+        assert "f6.txt" not in lines[0]
+
+    def test_dead_webhook_line_only_when_deleted(self):
+        assert gh.summarize_publish([], [], 0, {"tested": 120, "deleted": 0}) == []
+        lines = gh.summarize_publish([], [], 0, {"tested": 80, "deleted": 2})
+        assert lines == ["Deleted 2 dead webhook(s) (of 80 tested)"]
+
+
 class TestItemListContents:
     """valued_items.txt must come from the shared resolver so name-only
     override rows (item_id NULL, matched by name at intake) reach the plugin's

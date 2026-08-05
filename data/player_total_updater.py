@@ -508,13 +508,23 @@ async def github_update_loop():
             await send_watchdog_heartbeat()
 
             # Pass watchdog instance to prevent timeout during webhook checking
-            await updater.update_github_pages(watchdog)
+            changes = await updater.update_github_pages(watchdog)
 
             # Send watchdog heartbeat after GitHub update
             await send_watchdog_heartbeat()
 
+            # Best-effort automation-channel report (internally bounded, never
+            # raises — the watchdog cadence is preserved).
+            from services.automation_updates import report_run
+            await report_run("github_pages", ok=True, changes=changes or [])
+
         except Exception as e:
             print(f"Error in GitHub update loop: {e}")
+            try:
+                from services.automation_updates import report_run
+                await report_run("github_pages", ok=False, changes=[], error=str(e)[:400])
+            except Exception:
+                pass
 
         # Re-check every 10 minutes; the 30-minute Redis gate above sets the
         # effective publish cadence. Runs are cheap now — the updater commits

@@ -43,6 +43,25 @@ def _git_blob_sha(content: str) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
+def summarize_publish(files_to_update, deletions, webhook_files_changed, webhook_check=None):
+    """Human-readable change lines for one publish run, for the automation
+    status channel. An empty list means the run changed nothing."""
+    changes = []
+    if files_to_update:
+        names = [path.rsplit("/", 1)[-1] for path, _content in files_to_update]
+        shown = ", ".join(names[:6]) + (f", +{len(names) - 6} more" if len(names) > 6 else "")
+        changes.append(f"Committed {len(names)} file(s): {shown}")
+    if webhook_files_changed:
+        changes.append(f"{webhook_files_changed} webhook file(s) rotated")
+    if deletions:
+        changes.append(f"Pruned {len(deletions)} stale dated file(s)")
+    deleted = (webhook_check or {}).get("deleted", 0)
+    if deleted:
+        tested = (webhook_check or {}).get("tested", 0)
+        changes.append(f"Deleted {deleted} dead webhook(s) (of {tested} tested)")
+    return changes
+
+
 def _stale_dated_paths(paths, today_str: str, keep_days: int = STALE_AFTER_DAYS):
     """The dated content files (see DATED_FILE_RE) more than ``keep_days``
     before ``today_str`` (YYYYMMDD). Non-dated paths are never returned."""
@@ -148,6 +167,8 @@ class GithubPagesUpdater:
             raise
 
     async def update_github_pages(self, watchdog=None):
+        """Run one publish cycle; returns human-readable change lines (empty
+        list when nothing changed)."""
         global total_hooks
 
         with Session() as s:
@@ -155,8 +176,9 @@ class GithubPagesUpdater:
 
         # Liveness-check the webhooks we are about to publish (dead ones are
         # deleted from the DB, so the fetch below only sees working hooks).
-        await check_limited_webhooks(120, watchdog)
-        await asyncio.to_thread(self._update_github_pages)
+        webhook_check = await check_limited_webhooks(120, watchdog)
+        changes = await asyncio.to_thread(self._update_github_pages)
+        return (changes or []) + summarize_publish([], [], 0, webhook_check)
 
     def _webhook_set_changed(self, content_file, new_chunk) -> bool:
         """True when a published webhook file's DECRYPTED url set differs from
@@ -231,6 +253,9 @@ class GithubPagesUpdater:
         compare for deterministic text) so a no-change cycle makes zero commits
         and triggers zero GitHub Pages builds. Stale dated files are pruned in
         the same commit.
+
+        Returns the ``summarize_publish`` change lines for the run (empty list
+        when nothing was committed).
         """
         try:
             listing = {f.path: f for f in self.repo.get_contents("content", ref=self.branch)}
@@ -252,11 +277,11 @@ class GithubPagesUpdater:
             encrypted_webhooks = self.fetch_webhooks_from_database(limit=120)
         except Exception as e:
             print(f"Error fetching webhook URLs from the database: {e}")
-            return
+            return []
 
         if len(encrypted_webhooks) < 30:
             print("Generated list is too short:", len(encrypted_webhooks))
-            return
+            return []
 
         chunk_size = 40
         webhook_chunks = [encrypted_webhooks[i:i + chunk_size]
@@ -303,7 +328,7 @@ class GithubPagesUpdater:
 
         if not files_to_update and not deletions:
             print("GitHub Pages content unchanged; skipping commit.")
-            return
+            return []
 
         print(f"Committing {len(files_to_update)} file update(s)"
               + (f" + {len(deletions)} stale deletion(s)" if deletions else "")
@@ -314,6 +339,7 @@ class GithubPagesUpdater:
             branch=self.branch,
             deletions=deletions,
         )
+        return summarize_publish(files_to_update, deletions, webhook_files_changed)
 
     def _prepare_news_update(self, listing=None):
         """
@@ -620,6 +646,10 @@ async def check_limited_webhooks(limit=80, watchdog=None):
     Args:
         limit: Maximum number of webhooks to check
         watchdog: SystemdWatchdog instance to notify during long operations
+
+    Returns:
+        ``{"tested": n, "deleted": n}`` — or ``None`` when the check itself
+        errored out.
     """
     print(f"Checking up to {limit} webhooks before GitHub update...")
     try:
@@ -657,8 +687,10 @@ async def check_limited_webhooks(limit=80, watchdog=None):
             
             #print(f"Checked {len(webhooks)} webhooks: {passed} passed, {failed} failed")
         print("Limited webhook check completed")
+        return {"tested": len(webhooks), "deleted": failed}
     except Exception as e:
         print(f"Error checking webhooks: {e}")
+        return None
 
 async def check_webhooks():
     """

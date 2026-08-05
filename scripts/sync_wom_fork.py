@@ -240,6 +240,18 @@ def notify(title: str, *lines: str) -> None:
         log(f"notification failed: {e}")
 
 
+def report_status(ok: bool, changes: list[str], error: str | None = None) -> None:
+    """Best-effort report to the Discord automation channel. Never fails the
+    run (the reporter itself swallows everything, but the import can fail on a
+    broken venv — exactly when this script still needs its exit code)."""
+    try:
+        from services.automation_updates import report_run_sync
+
+        report_run_sync("wom_sync", ok=ok, changes=changes, error=error)
+    except Exception as e:
+        log(f"automation status report failed: {e}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -250,6 +262,8 @@ def main() -> int:
 
     remote = remote_head()
     if not remote:
+        if args.apply:
+            report_status(False, [], "git ls-remote against the wom.py fork failed")
         return 1
     installed = installed_sha()
     pinned = pinned_sha()
@@ -259,9 +273,13 @@ def main() -> int:
         # Pin drift with a correct install is worth fixing but not worth a
         # restart: what is running is already right.
         if pinned != remote and args.apply:
-            log(f"install current; correcting stale pin: {update_pin(remote)}")
+            pin_status = update_pin(remote)
+            log(f"install current; correcting stale pin: {pin_status}")
+            report_status(True, [f"Corrected stale requirements pin: {pin_status}"])
         else:
             log("up to date, nothing to do")
+            if args.apply:
+                report_status(True, [])  # status-message refresh only
         return 0
 
     if not args.apply:
@@ -275,6 +293,9 @@ def main() -> int:
         notify("wom.py auto-sync FAILED",
                f"BLOCKED: could not install fork commit {remote[:7]} — pip failed. "
                f"Still running {(installed or 'unknown')[:7]}; services untouched.")
+        report_status(False, [],
+                      f"Could not install fork commit {remote[:7]} — pip failed; "
+                      f"still running {(installed or 'unknown')[:7]}, services untouched")
         return 1
 
     ok, detail = verify(before)
@@ -287,6 +308,10 @@ def main() -> int:
                ("Rolled back to " + installed[:7] + "; services were never restarted.")
                if rolled_back else
                "ROLLBACK ALSO FAILED — the venv may be broken, needs a human now.")
+        report_status(False, [],
+                      f"Fork commit {remote[:7]} failed verification: {detail[:200]} — "
+                      + ("rolled back, services never restarted"
+                         if rolled_back else "ROLLBACK ALSO FAILED, needs a human"))
         return 1
 
     log(f"verified: {detail}")
@@ -304,6 +329,16 @@ def main() -> int:
         f"Pin: {pin_status}. Restarted: {', '.join(restarted) or 'none'}."
         + (f" FAILED TO RESTART: {', '.join(failed)}." if failed else ""),
     )
+    changes = [
+        f"wom.py fork updated {(installed or 'none')[:7]} → {remote[:7]}",
+        f"Enum: {detail}",
+        f"Pin: {pin_status}",
+        f"Restarted: {', '.join(restarted) or 'none'}",
+    ]
+    if failed:
+        report_status(False, changes, f"Failed to restart: {', '.join(failed)}")
+    else:
+        report_status(True, changes)
     return 1 if failed else 0
 
 

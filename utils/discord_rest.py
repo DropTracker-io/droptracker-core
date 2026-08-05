@@ -126,6 +126,15 @@ class DiscordRest:
         data = await self._request("POST", f"/channels/{channel_id}/messages", payload)
         return str((data or {}).get("id") or "") or None
 
+    async def edit_message(self, channel_id: str, message_id: str, message: dict) -> None:
+        payload = {k: v for k, v in (message or {}).items() if v not in (None, [], "")}
+        await self._request(
+            "PATCH", f"/channels/{channel_id}/messages/{message_id}", payload
+        )
+
+    async def delete_message(self, channel_id: str, message_id: str) -> None:
+        await self._request("DELETE", f"/channels/{channel_id}/messages/{message_id}")
+
     async def send_dm(self, discord_user_id: str, message: dict) -> Optional[str]:
         channel_id = await self.open_dm(discord_user_id)
         return await self.post_message(channel_id, message)
