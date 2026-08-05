@@ -241,67 +241,87 @@ class SemanticAPI:
             if acceptable_norm != {npc_name.lower().strip()}:
                 print(f"Accepting drop sources {sorted(acceptable)} for {npc_name}")
 
-            # Query the dropsline bucket to find NPCs that drop this item.
-            # The explicit .limit() is load-bearing: see DROPSLINE_ROW_LIMIT.
-            query = (
-                "bucket('dropsline')"
-                ".select('page_name')"
-                f".where('item_name', {self._bucket_quote(item_name)})"
-                f".limit({self.DROPSLINE_ROW_LIMIT}).run()"
-            )
+            # Charged megarares (Tumeken's shadow, Scythe of vitur,
+            # Sanguinesti staff, …) only ever DROP in their "(uncharged)"
+            # form, and that is the only name the dropsline bucket indexes.
+            # A submission carrying the charged name therefore got zero rows
+            # and sailed through the not-indexed fail-open below — which is
+            # how a "Tumeken's shadow from Dossier" (a container-open
+            # inventory-diff artifact) was accepted on 2026-08-05. When the
+            # submitted name has no rows, retry with the droppable variant:
+            # its source list is authoritative for the charged form too,
+            # because the charged form provably drops nowhere.
+            lookup_names = [item_name]
+            base_name = str(item_name or "").strip()
+            if base_name and not base_name.lower().endswith("(uncharged)"):
+                lookup_names.append(f"{base_name} (uncharged)")
 
-            result = await self._bucket_query(query)
+            for lookup_name in lookup_names:
+                # Query the dropsline bucket to find NPCs that drop this item.
+                # The explicit .limit() is load-bearing: see DROPSLINE_ROW_LIMIT.
+                query = (
+                    "bucket('dropsline')"
+                    ".select('page_name')"
+                    f".where('item_name', {self._bucket_quote(lookup_name)})"
+                    f".limit({self.DROPSLINE_ROW_LIMIT}).run()"
+                )
 
-            # FAIL-OPEN on anything inconclusive. This check exists to block
-            # spoofed high-value submissions, and a spoof can only be proven
-            # POSITIVELY — the wiki lists real drop sources for the item and
-            # this NPC isn't among them. Every other outcome (wiki
-            # unavailable/rate-limited, malformed query, or the item simply
-            # not indexed in `dropsline`) is *inconclusive* and must NOT be
-            # treated as a spoof, or we silently reject legitimate drops.
-            # `_bucket_query` returns a dict WITHOUT a 'bucket' key on transport
-            # or API error (a successful query always includes 'bucket', even
-            # when the list is empty), which lets us tell "the wiki couldn't
-            # answer" apart from "the item has no drop sources".
-            if 'bucket' not in result:
-                print(f"Dropsline lookup unavailable for {item_name!r}; allowing (fail-open)")
-                return True
+                result = await self._bucket_query(query)
 
-            bucket_data = result['bucket']
-            if not bucket_data:
-                # The wiki has no drop-source rows for this item at all (new
-                # item, name variant that didn't match, or a wiki gap). Absence
-                # of data is not proof of a spoof — allow.
-                print(f"No dropsline data for {item_name!r}; allowing (fail-open)")
-                return True
-
-            # Check if any of the returned NPCs match our target NPC
-            for drop_entry in bucket_data:
-                dropped_from = drop_entry.get('page_name', '')
-
-                # Remove any subpage references (e.g., "NPC name#Normal")
-                if "#" in dropped_from:
-                    dropped_from = dropped_from.split("#")[0]
-
-                # Check if this drop source matches our NPC name (or an alias).
-                if dropped_from.lower().strip() in acceptable_norm:
-                    print(f"Drop found & valid for {item_name} from {dropped_from}")
+                # FAIL-OPEN on anything inconclusive. This check exists to block
+                # spoofed high-value submissions, and a spoof can only be proven
+                # POSITIVELY — the wiki lists real drop sources for the item and
+                # this NPC isn't among them. Every other outcome (wiki
+                # unavailable/rate-limited, malformed query, or the item simply
+                # not indexed in `dropsline`) is *inconclusive* and must NOT be
+                # treated as a spoof, or we silently reject legitimate drops.
+                # `_bucket_query` returns a dict WITHOUT a 'bucket' key on transport
+                # or API error (a successful query always includes 'bucket', even
+                # when the list is empty), which lets us tell "the wiki couldn't
+                # answer" apart from "the item has no drop sources".
+                if 'bucket' not in result:
+                    print(f"Dropsline lookup unavailable for {lookup_name!r}; allowing (fail-open)")
                     return True
 
-            # A full page means the wiki had at least as many drop-source rows
-            # as we asked for, so it may have more that it never sent — "not in
-            # this list" then proves nothing. Inconclusive, so fail open.
-            if len(bucket_data) >= self.DROPSLINE_ROW_LIMIT:
-                print(f"Dropsline results for {item_name!r} hit the "
-                      f"{self.DROPSLINE_ROW_LIMIT}-row query limit; allowing (fail-open)")
-                return True
+                bucket_data = result['bucket']
+                if not bucket_data:
+                    # No rows under this name — try the next variant before
+                    # concluding the item isn't indexed at all.
+                    continue
 
-            # Confident negative: the item HAS known drop sources and this NPC
-            # is not one of them. This is the only case we reject.
-            sources = sorted({e.get('page_name', '') for e in bucket_data})
-            print(f"No valid drop found for {item_name} from {npc_name} "
-                  f"(wiki sources: {sources})")
-            return False
+                # Check if any of the returned NPCs match our target NPC
+                for drop_entry in bucket_data:
+                    dropped_from = drop_entry.get('page_name', '')
+
+                    # Remove any subpage references (e.g., "NPC name#Normal")
+                    if "#" in dropped_from:
+                        dropped_from = dropped_from.split("#")[0]
+
+                    # Check if this drop source matches our NPC name (or an alias).
+                    if dropped_from.lower().strip() in acceptable_norm:
+                        print(f"Drop found & valid for {item_name} from {dropped_from}")
+                        return True
+
+                # A full page means the wiki had at least as many drop-source rows
+                # as we asked for, so it may have more that it never sent — "not in
+                # this list" then proves nothing. Inconclusive, so fail open.
+                if len(bucket_data) >= self.DROPSLINE_ROW_LIMIT:
+                    print(f"Dropsline results for {lookup_name!r} hit the "
+                          f"{self.DROPSLINE_ROW_LIMIT}-row query limit; allowing (fail-open)")
+                    return True
+
+                # Confident negative: the item HAS known drop sources and this NPC
+                # is not one of them. This is the only case we reject.
+                sources = sorted({e.get('page_name', '') for e in bucket_data})
+                print(f"No valid drop found for {item_name} from {npc_name} "
+                      f"(matched dropsline name {lookup_name!r}; wiki sources: {sources})")
+                return False
+
+            # The wiki has no drop-source rows for this item under any name we
+            # tried (new item, name variant that didn't match, or a wiki gap).
+            # Absence of data is not proof of a spoof — allow.
+            print(f"No dropsline data for {item_name!r}; allowing (fail-open)")
+            return True
 
         except Exception as e:
             # Any unexpected error (network, parsing, …) is inconclusive — the

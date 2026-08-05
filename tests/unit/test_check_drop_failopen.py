@@ -126,6 +126,77 @@ def test_dropsline_query_requests_an_explicit_row_limit():
     assert f".limit({SemanticAPI.DROPSLINE_ROW_LIMIT})" in seen[0]
 
 
+def _api_by_name(results_by_lookup_name):
+    """SemanticAPI whose fake bucket query answers per queried item name.
+
+    ``results_by_lookup_name`` maps the exact dropsline item_name being queried
+    to that query's response dict. Also records the queries it saw."""
+    api = SemanticAPI(client=object())
+    api.seen_queries = []
+
+    async def fake_bucket_query(query):
+        api.seen_queries.append(query)
+        for name, response in results_by_lookup_name.items():
+            if api._bucket_quote(name) in query:
+                return response
+        raise AssertionError(f"unexpected dropsline query: {query}")
+
+    api._bucket_query = fake_bucket_query
+    return api
+
+
+def test_uncharged_variant_gives_confident_negative():
+    """Regression (2026-08-05): 'Tumeken's shadow from Dossier'. The charged
+    name has NO dropsline rows (only the '(uncharged)' form drops, from the
+    ToA chest), so the old code failed open for ANY stated source. The
+    variant's source list is authoritative — the charged form drops nowhere."""
+    api = _api_by_name({
+        "Tumeken's shadow": {"bucket": []},
+        "Tumeken's shadow (uncharged)": {"bucket": [{"page_name": "Chest (Tombs of Amascut)"}]},
+    })
+    assert _run(api.check_drop("Tumeken's shadow", "Dossier")) is False
+
+
+def test_uncharged_variant_source_match_allows():
+    # Same retry, but the stated NPC IS the variant's source (via alias):
+    # a mis-named but genuinely ToA-sourced submission must not be rejected.
+    api = _api_by_name({
+        "Tumeken's shadow": {"bucket": []},
+        "Tumeken's shadow (uncharged)": {"bucket": [{"page_name": "Chest (Tombs of Amascut)"}]},
+    })
+    assert _run(api.check_drop("Tumeken's shadow", "Tombs of Amascut")) is True
+
+
+def test_variant_not_queried_when_primary_name_has_rows():
+    api = _api_by_name({"Scythe of vitur (uncharged)": {"bucket": [{"page_name": "Monumental chest"}]}})
+    assert _run(api.check_drop("Scythe of vitur (uncharged)", "Theatre of Blood")) is True
+    assert len(api.seen_queries) == 1
+
+
+def test_uncharged_name_gets_no_double_suffix():
+    # A name already ending in "(uncharged)" with no rows anywhere: exactly one
+    # query (no "... (uncharged) (uncharged)") and the not-indexed fail-open.
+    api = _api_by_name({"Tumeken's shadow (uncharged)": {"bucket": []}})
+    assert _run(api.check_drop("Tumeken's shadow (uncharged)", "Dossier")) is True
+    assert len(api.seen_queries) == 1
+
+
+def test_variant_also_unindexed_fails_open():
+    api = _api_by_name({
+        "Some New Item": {"bucket": []},
+        "Some New Item (uncharged)": {"bucket": []},
+    })
+    assert _run(api.check_drop("Some New Item", "Zulrah")) is True
+
+
+def test_wiki_error_on_variant_query_fails_open():
+    api = _api_by_name({
+        "Tumeken's shadow": {"bucket": []},
+        "Tumeken's shadow (uncharged)": {},
+    })
+    assert _run(api.check_drop("Tumeken's shadow", "Dossier")) is True
+
+
 def test_wiki_error_response_fails_open():
     # _bucket_query returns a dict WITHOUT a 'bucket' key on transport/API error.
     api = _api({})
