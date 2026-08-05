@@ -92,7 +92,7 @@ def _wire(monkeypatch, session, *, superadmin=True, user_id=7):
     monkeypatch.setattr(
         devtrk, "load_user",
         lambda s, uid: SimpleNamespace(
-            id=uid, username="owner", is_superadmin=superadmin, is_moderator=False),
+            id=uid, username="owner", is_superadmin=superadmin, is_developer=False),
     )
     monkeypatch.setattr(devtrk, "PROJECT_STATUSES", PROJECT_STATUSES)
     monkeypatch.setattr(devtrk, "TASK_STATUSES", TASK_STATUSES)

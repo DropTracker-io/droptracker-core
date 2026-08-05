@@ -18,7 +18,7 @@ Every endpoint independently enforces superadmin (403 otherwise):
   GET  /api/v1/admin/audit?action=&actor_user_id=&group_id=&q=&page=&limit=
   GET  /api/v1/admin/users/{id}/overview
   POST /api/v1/admin/users/{id}/superadmin       { grant: bool }
-  POST /api/v1/admin/users/{id}/moderator        { grant: bool } (+ profile badge)
+  POST /api/v1/admin/users/{id}/developer        { grant: bool } (+ profile badge)
   GET    /api/v1/admin/badges
   POST   /api/v1/admin/badges                    { key, name, ... } (upsert)
   DELETE /api/v1/admin/badges/{key}              (soft delete)
@@ -95,7 +95,14 @@ from db.entitlements import (
 from web_api import admin_registry as registry
 from web_api import billing
 from web_api.common import abort_problem, db_session, parse_page, private_no_store
-from web_api.deps import assert_moderator, assert_superadmin, current_user_id, json_body, load_user
+from web_api.deps import (
+    assert_developer,
+    assert_superadmin,
+    current_user_id,
+    is_superadmin,
+    json_body,
+    load_user,
+)
 from utils import value_overrides
 from web_api.entitlements_registry import (
     EntitlementValidationError,
@@ -199,18 +206,35 @@ async def _require_superadmin() -> int:
     return user_id
 
 
-async def _require_moderator() -> int:
-    """Moderator-or-superadmin gate for the shared moderation surfaces
-    (pb-blocks, item values). Every mutation below is audit-logged with the
-    actor, so superadmins can review moderator activity in /admin/audit."""
+async def _require_developer() -> int:
+    """Developer-or-superadmin gate for the shared developer surfaces
+    (pb-blocks, item values, diagnostics). Every mutation below is
+    audit-logged with the actor, so superadmins can review developer
+    activity in /admin/audit."""
     user_id = current_user_id()
 
     def _check():
         with db_session() as s:
-            assert_moderator(load_user(s, user_id))
+            assert_developer(load_user(s, user_id))
 
     await asyncio.to_thread(_check)
     return user_id
+
+
+async def _require_developer_ctx() -> tuple[int, bool]:
+    """Like _require_developer, but also reports whether the caller is a full
+    superadmin — used by shared read surfaces that redact or restrict what
+    plain developers can see."""
+    user_id = current_user_id()
+
+    def _check():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_developer(user)
+            return is_superadmin(user)
+
+    superadmin = await asyncio.to_thread(_check)
+    return user_id, superadmin
 
 
 def _audit(actor_user_id, action, target, before=None, after=None):
@@ -729,7 +753,9 @@ async def admin_patch_shop_item(item_id: int):
 
 @admin_bp.get("/admin/services")
 async def admin_services():
-    await _require_superadmin()
+    # Status is developer-visible (diagnostics); actions and journal logs
+    # below stay superadmin-only (blast radius + raw-log secret exposure).
+    await _require_developer()
     # Registry order, not alphabetical — the frontend groups by category and
     # the registry encodes the intended layout.
     statuses = await asyncio.to_thread(
@@ -1122,7 +1148,7 @@ async def admin_discord_send():
 # --------------------------------------------------------------------------- #
 @admin_bp.get("/admin/lookup")
 async def admin_lookup():
-    await _require_superadmin()
+    await _require_developer()
     q = (request.args.get("q") or "").strip()
     if not q:
         return jsonify({"results": []})
@@ -1440,7 +1466,7 @@ def _apply_override_fields(row, fields: dict) -> None:
 
 @admin_bp.get("/admin/item-values")
 async def list_item_values():
-    await _require_moderator()
+    await _require_developer()
 
     def _load():
         with db_session() as s:
@@ -1470,7 +1496,7 @@ async def list_item_values():
 
 @admin_bp.get("/admin/item-values/item-search")
 async def item_value_item_search():
-    await _require_moderator()
+    await _require_developer()
     q = (request.args.get("q") or "").strip()
     if len(q) < 2:
         return jsonify([])
@@ -1495,7 +1521,7 @@ async def item_value_export():
 
     Name-only override rows (item_id NULL) are resolved to items-table ids —
     see utils.value_overrides.active_item_ids."""
-    await _require_moderator()
+    await _require_developer()
 
     def _load():
         return [str(i) for i in value_overrides.active_item_ids()]
@@ -1506,7 +1532,7 @@ async def item_value_export():
 
 @admin_bp.post("/admin/item-values")
 async def create_item_value():
-    actor = await _require_moderator()
+    actor = await _require_developer()
     body = await json_body()
     fields = _validate_override_body(body, require_item=True)
 
@@ -1534,7 +1560,7 @@ async def create_item_value():
 
 @admin_bp.patch("/admin/item-values/<int:override_id>")
 async def update_item_value(override_id: int):
-    actor = await _require_moderator()
+    actor = await _require_developer()
     body = await json_body()
     fields = _validate_override_body(body, require_item=False)
     if not fields:
@@ -1565,7 +1591,7 @@ async def update_item_value(override_id: int):
 
 @admin_bp.delete("/admin/item-values/<int:override_id>")
 async def delete_item_value(override_id: int):
-    actor = await _require_moderator()
+    actor = await _require_developer()
 
     def _apply():
         with db_session() as s:
@@ -1586,7 +1612,9 @@ async def delete_item_value(override_id: int):
 # --------------------------------------------------------------------------- #
 @admin_bp.get("/admin/overview")
 async def admin_overview():
-    await _require_superadmin()
+    # Developers see operational tiles; the business metrics (subscription
+    # count + MRR) are superadmin-only.
+    _, superadmin = await _require_developer_ctx()
 
     def _load():
         stats = []
@@ -1613,43 +1641,45 @@ async def admin_overview():
                 "key": "drops_today", "label": "Drops today",
                 "value": _count(s.query(Drop).filter(Drop.date_added >= day_start)),
             })
-            stats.append({
-                "key": "active_subscriptions", "label": "Active subscriptions",
-                "value": _count(
-                    s.query(GroupSubscription).filter(
-                        GroupSubscription.status == "active",
-                        # Nitro-boost credit isn't a subscription; keep comps + legacy NULL.
-                        or_(
-                            GroupSubscription.provider.is_(None),
-                            GroupSubscription.provider != NITRO_PROVIDER,
-                        ),
-                    )
-                ),
-            })
+            if superadmin:
+                stats.append({
+                    "key": "active_subscriptions", "label": "Active subscriptions",
+                    "value": _count(
+                        s.query(GroupSubscription).filter(
+                            GroupSubscription.status == "active",
+                            # Nitro-boost credit isn't a subscription; keep comps + legacy NULL.
+                            or_(
+                                GroupSubscription.provider.is_(None),
+                                GroupSubscription.provider != NITRO_PROVIDER,
+                            ),
+                        )
+                    ),
+                })
             # Headline MRR — the full breakdown lives on /admin/subscriptions.
             # Comped grants and Nitro-boost credit (NON_REVENUE_PROVIDERS) keep
             # their entitlements but are not income, so they are excluded from
             # every revenue figure.
-            try:
-                tiers_by_key = {t.key: t for t in s.query(SubscriptionTier).all()}
-                mrr = sum(
-                    leg_monthly_cents(leg, tiers_by_key)
-                    for leg in s.query(GroupSubscription).all()
-                    if subscription_is_live(leg) and leg.provider not in NON_REVENUE_PROVIDERS
-                )
-                for u in s.query(UserSubscription).all():
-                    if not subscription_is_live(u) or u.provider in NON_REVENUE_PROVIDERS:
-                        continue
-                    tier = tiers_by_key.get(u.tier_key) if u.tier_key else None
-                    amount = u.amount_cents if u.amount_cents else (tier.price_cents if tier else 0)
-                    mrr += _monthly_cents(amount, tier.interval if tier else "month")
-                stats.append({
-                    "key": "mrr", "label": "Monthly recurring revenue",
-                    "value": f"${mrr / 100:,.2f}",
-                    "hint": "Live paid subscriptions, monthly-normalized (comped excluded)",
-                })
-            except Exception:
-                pass
+            if superadmin:
+                try:
+                    tiers_by_key = {t.key: t for t in s.query(SubscriptionTier).all()}
+                    mrr = sum(
+                        leg_monthly_cents(leg, tiers_by_key)
+                        for leg in s.query(GroupSubscription).all()
+                        if subscription_is_live(leg) and leg.provider not in NON_REVENUE_PROVIDERS
+                    )
+                    for u in s.query(UserSubscription).all():
+                        if not subscription_is_live(u) or u.provider in NON_REVENUE_PROVIDERS:
+                            continue
+                        tier = tiers_by_key.get(u.tier_key) if u.tier_key else None
+                        amount = u.amount_cents if u.amount_cents else (tier.price_cents if tier else 0)
+                        mrr += _monthly_cents(amount, tier.interval if tier else "month")
+                    stats.append({
+                        "key": "mrr", "label": "Monthly recurring revenue",
+                        "value": f"${mrr / 100:,.2f}",
+                        "hint": "Live paid subscriptions, monthly-normalized (comped excluded)",
+                    })
+                except Exception:
+                    pass
             stats.append({
                 "key": "pending_discord_outbox", "label": "Pending Discord outbox",
                 "value": _count(
@@ -2171,14 +2201,27 @@ def _apply_search(query, spec, q: str):
     return query
 
 
+def _assert_data_entity_readable(spec, superadmin: bool) -> None:
+    """Developers only get the entities flagged developer_readable in the
+    registry — the rest carry PII, billing identifiers or config secrets."""
+    if not superadmin and not spec.get("developer_readable"):
+        abort_problem(
+            403,
+            "Forbidden",
+            "This entity is not available to developers.",
+            extra={"code": "staff_required"},
+        )
+
+
 @admin_bp.get("/admin/data/<entity>")
 async def admin_data_list(entity: str):
-    await _require_superadmin()
+    _, superadmin = await _require_developer_ctx()
     q = (request.args.get("q") or "").strip()
     page, limit = parse_page(request, default_limit=50, max_limit=registry.MAX_LIMIT)
 
     def _load():
         spec = registry.get_spec(entity)
+        _assert_data_entity_readable(spec, superadmin)
         model = spec["model"]
         with db_session() as s:
             query = _apply_search(s.query(model), spec, q)
@@ -2194,7 +2237,9 @@ async def admin_data_list(entity: str):
                 "entity": entity,
                 "columns": spec["columns"],
                 "rows": [registry.serialize_row(spec, r) for r in rows],
-                "editable": spec["editable"],
+                # Developers are read-only here; PATCH is superadmin-gated and
+                # an empty editable list keeps the UI from offering edit forms.
+                "editable": spec["editable"] if superadmin else [],
                 "meta": {"page": page, "limit": limit, "total": int(total)},
             }
 
@@ -2203,10 +2248,11 @@ async def admin_data_list(entity: str):
 
 @admin_bp.get("/admin/data/<entity>/<record_id>")
 async def admin_data_get(entity: str, record_id: str):
-    await _require_superadmin()
+    _, superadmin = await _require_developer_ctx()
 
     def _load():
         spec = registry.get_spec(entity)
+        _assert_data_entity_readable(spec, superadmin)
         model = spec["model"]
         pk_val = registry.coerce_pk(spec, record_id)
         with db_session() as s:
@@ -2217,7 +2263,7 @@ async def admin_data_get(entity: str, record_id: str):
                 "entity": entity,
                 "id": registry.serialize_value(pk_val),
                 "record": registry.serialize_row(spec, row),
-                "editable": spec["editable"],
+                "editable": spec["editable"] if superadmin else [],
             }
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
@@ -2276,7 +2322,7 @@ async def admin_data_patch(entity: str, record_id: str):
 # --------------------------------------------------------------------------- #
 @admin_bp.get("/admin/logs")
 async def admin_logs():
-    await _require_superadmin()
+    await _require_developer()
     source = (request.args.get("source") or "").strip()
     try:
         limit = int(request.args.get("limit", 200))
@@ -2332,22 +2378,54 @@ def _actor_map(s, rows) -> dict:
     }
 
 
-def _serialize_audit_row(r, actors: dict) -> dict:
+# Audit rows are developer-visible, but the raw before/after payloads can
+# embed sensitive values (billing rows written by data.update, Discord
+# message bodies, group-config secrets). Developers only get payloads for
+# action families whose diffs are known safe; everything else still shows
+# actor/action/target with the payload redacted. Superadmins see everything.
+_AUDIT_PAYLOAD_SAFE_PREFIXES = (
+    "pb_block.",
+    "item_value.",
+    "split_policy.",
+    "event.library.",
+    "service.",
+    "status.",
+    "devtracker.",
+    "user.developer_",
+    "user.moderator_",  # historical rows from before the rename
+    "user.superadmin_",
+)
+
+
+def _audit_payload_visible(action, target) -> bool:
+    action = action or ""
+    if action.startswith(_AUDIT_PAYLOAD_SAFE_PREFIXES):
+        return True
+    if action == "data.update" and target:
+        entity = str(target).split(":", 1)[0]
+        spec = registry.ENTITY_REGISTRY.get(entity)
+        return bool(spec and spec.get("developer_readable"))
+    return False
+
+
+def _serialize_audit_row(r, actors: dict, include_payloads: bool = True) -> dict:
+    show = include_payloads or _audit_payload_visible(r.action, r.target)
     return {
         "id": r.id,
         "actor": actors.get(r.actor_user_id) if r.actor_user_id else None,
         "group_id": r.group_id,
         "action": r.action,
         "target": r.target,
-        "before": r.before,
-        "after": r.after,
+        "before": r.before if show else None,
+        "after": r.after if show else None,
+        "redacted": not show,
         "created_at": int(r.created_at.timestamp()) if r.created_at else None,
     }
 
 
 @admin_bp.get("/admin/audit")
 async def admin_audit_log():
-    await _require_superadmin()
+    _, superadmin = await _require_developer_ctx()
     action = (request.args.get("action") or "").strip()
     actor_raw = (request.args.get("actor_user_id") or "").strip()
     group_raw = (request.args.get("group_id") or "").strip()
@@ -2378,7 +2456,10 @@ async def admin_audit_log():
             )
 
             actors = _actor_map(s, rows)
-            entries = [_serialize_audit_row(r, actors) for r in rows]
+            entries = [
+                _serialize_audit_row(r, actors, include_payloads=superadmin)
+                for r in rows
+            ]
             return {
                 "entries": entries,
                 "meta": {"page": page, "limit": limit, "total": int(total)},
@@ -2546,7 +2627,7 @@ async def admin_user_overview(user_id: int):
                     "discord_id": str(user.discord_id) if user.discord_id else None,
                     "username": user.username,
                     "is_superadmin": bool(getattr(user, "is_superadmin", False)),
-                    "is_moderator": bool(getattr(user, "is_moderator", False)),
+                    "is_developer": bool(getattr(user, "is_developer", False)),
                     "public": bool(user.public),
                     "hidden": bool(user.hidden),
                     "date_added": int(user.date_added.timestamp()) if user.date_added else None,
@@ -2597,23 +2678,23 @@ async def admin_set_user_superadmin(user_id: int):
     return jsonify({"ok": True})
 
 
-# The profile badge that moderator status carries. Created on first grant;
+# The profile badge that developer status carries. Created on first grant;
 # awarded to every player account the user owns (slot "p:{player_id}" —
 # the manual-award slot, so revoking frees it for a future re-grant).
-_MODERATOR_BADGE = {
-    "key": "moderator",
-    "name": "Moderator",
-    "description": "DropTracker site moderator.",
+_DEVELOPER_BADGE = {
+    "key": "developer",
+    "name": "Developer",
+    "description": "DropTracker site developer.",
     "icon_emoji": "\U0001F6E1\uFE0F",  # shield
     "tone": "sky",
     "semantic": "permanent",
 }
 
 
-@admin_bp.post("/admin/users/<int:user_id>/moderator")
-async def admin_set_user_moderator(user_id: int):
-    """Grant/revoke the moderator flag (superadmin only). Also awards or
-    revokes the "moderator" profile badge on all the user's player accounts,
+@admin_bp.post("/admin/users/<int:user_id>/developer")
+async def admin_set_user_developer(user_id: int):
+    """Grant/revoke the developer flag (superadmin only). Also awards or
+    revokes the "developer" profile badge on all the user's player accounts,
     and audit-logs the change."""
     actor = await _require_superadmin()
     body = await json_body()
@@ -2629,12 +2710,12 @@ async def admin_set_user_moderator(user_id: int):
             user = s.query(User).filter(User.user_id == user_id).first()
             if not user:
                 abort_problem(404, "User not found", f"No user with id {user_id}.")
-            before = bool(getattr(user, "is_moderator", False))
-            user.is_moderator = grant
+            before = bool(getattr(user, "is_developer", False))
+            user.is_developer = grant
 
-            badge = s.query(Badge).filter(Badge.key == _MODERATOR_BADGE["key"]).first()
+            badge = s.query(Badge).filter(Badge.key == _DEVELOPER_BADGE["key"]).first()
             if badge is None and grant:
-                badge = Badge(active=True, criteria=None, scope="global", **_MODERATOR_BADGE)
+                badge = Badge(active=True, criteria=None, scope="global", **_DEVELOPER_BADGE)
                 s.add(badge)
                 s.flush()
 
@@ -2646,7 +2727,7 @@ async def admin_set_user_moderator(user_id: int):
                     for pid in player_ids:
                         award_badge(
                             s, badge, pid, slot_key=f"p:{pid}",
-                            context={"note": "site moderator"}, awarded_by=actor,
+                            context={"note": "site developer"}, awarded_by=actor,
                         )
                 else:
                     active = (
@@ -2666,7 +2747,7 @@ async def admin_set_user_moderator(user_id: int):
     before = await asyncio.to_thread(_apply)
     _audit(
         actor,
-        "user.moderator_grant" if grant else "user.moderator_revoke",
+        "user.developer_grant" if grant else "user.developer_revoke",
         f"user:{user_id}",
         before=json.dumps(before),
         after=json.dumps(grant),
@@ -2967,7 +3048,7 @@ def _body_npc_ids(body) -> list:
 @admin_bp.get("/admin/pb-blocks")
 async def admin_pb_blocks_list():
     """Currently-blocked bosses (grouped by name, with remaining PB counts)."""
-    await _require_moderator()
+    await _require_developer()
 
     def _load():
         from utils import pb_blocklist
@@ -2982,7 +3063,7 @@ async def admin_pb_blocks_list():
 @admin_bp.get("/admin/pb-blocks/search")
 async def admin_pb_blocks_search():
     """Search npc_list for bosses to block; annotate impact + current state."""
-    await _require_moderator()
+    await _require_developer()
     q = (request.args.get("q") or "").strip()
     if not q:
         return private_no_store(jsonify({"results": []}))
@@ -3029,7 +3110,7 @@ async def admin_pb_blocks_add():
     Destructive: requires ``confirm=true``; without it, returns 409 echoing the
     number of rows that would be deleted so the UI can hard-confirm first.
     """
-    actor = await _require_moderator()
+    actor = await _require_developer()
     body = await json_body()
     seed_ids = _body_npc_ids(body)
     confirm = bool(body.get("confirm"))
@@ -3063,7 +3144,7 @@ async def admin_pb_blocks_add():
 @admin_bp.delete("/admin/pb-blocks/<int:npc_id>")
 async def admin_pb_blocks_remove(npc_id: int):
     """Unblock a boss (all its variant ids). Purged rows are NOT restored."""
-    actor = await _require_moderator()
+    actor = await _require_developer()
 
     def _apply():
         from utils import pb_blocklist
@@ -3115,7 +3196,7 @@ def _split_policy_state(s) -> dict:
 @admin_bp.get("/admin/split-policy")
 async def admin_split_policy_get():
     """The split-source allowlist, the active mode, and the shadow impact."""
-    await _require_moderator()
+    await _require_developer()
 
     def _load():
         from utils import split_policy
@@ -3154,7 +3235,7 @@ async def admin_split_policy_set_mode():
     confirm-gated and echoes how many splits the shadow counters have already
     seen it stop.
     """
-    actor = await _require_moderator()
+    actor = await _require_developer()
     body = await json_body()
     mode = str(body.get("mode") or "").strip().lower()
     confirm = bool(body.get("confirm"))
@@ -3191,7 +3272,7 @@ async def admin_split_policy_set_mode():
 @admin_bp.post("/admin/split-policy")
 async def admin_split_policy_add():
     """Allow split tracking at an NPC (all its variant ids)."""
-    actor = await _require_moderator()
+    actor = await _require_developer()
     body = await json_body()
     npc_ids = _body_npc_ids(body)
     category = str(body.get("category") or "").strip() or None
@@ -3220,7 +3301,7 @@ async def admin_split_policy_add():
 @admin_bp.delete("/admin/split-policy/<int:npc_id>")
 async def admin_split_policy_remove(npc_id: int):
     """Stop allowing split tracking at an NPC (all its variant ids)."""
-    actor = await _require_moderator()
+    actor = await _require_developer()
 
     def _apply():
         from utils import split_policy

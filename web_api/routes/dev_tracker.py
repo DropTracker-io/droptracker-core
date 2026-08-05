@@ -1,8 +1,8 @@
-"""Internal dev tracker — the owner's project/task/note board (superadmin CMS).
+"""Internal dev tracker — the owner's project/task/note board (developer CMS).
 
 Backs ``/admin/projects`` on the site: a lightweight in-house Trello for
 tracking features (planned / in progress / done) with per-task subtask
-checklists and free-form Markdown notes. Strictly superadmin-facing; codebase
+checklists and free-form Markdown notes. Staff-facing (developer role); codebase
 agents use ``scripts/project_tracker.py`` against the same tables instead
 (they have DB access but no Discord-OAuth session).
 
@@ -10,7 +10,7 @@ Hierarchy and rules live on the models (db/models/dev_tracker.py). Completion
 is explicit at every level — checking all subtasks never auto-completes the
 task — and every completable thing takes an optional completion note.
 
-All endpoints are superadmin only:
+All endpoints are developer-or-superadmin:
   GET    /api/v1/admin/dev/projects                     -> ProjectSummary[]
   POST   /api/v1/admin/dev/projects                     -> ProjectDetail
   GET    /api/v1/admin/dev/projects/{id}                -> ProjectDetail
@@ -36,7 +36,7 @@ from sqlalchemy import func
 
 from db import DevNote, DevProject, DevSubtask, DevTask, PROJECT_STATUSES, TASK_STATUSES
 from web_api.common import abort_problem, db_session, private_no_store
-from web_api.deps import assert_superadmin, current_user_id, json_body, load_user
+from web_api.deps import assert_developer, current_user_id, json_body, load_user
 
 dev_tracker_bp = Blueprint("v1_dev_tracker", __name__)
 
@@ -202,10 +202,10 @@ def _validate_note(body: dict, *, require_core: bool) -> dict:
 # Shared bits
 # ---------------------------------------------------------------------------
 
-def _require_superadmin(s, actor: int) -> str:
-    """Assert superadmin and return the author label written to new rows."""
+def _require_developer(s, actor: int) -> str:
+    """Assert developer (or superadmin) and return the author label written to new rows."""
     user = load_user(s, actor)
-    assert_superadmin(user)
+    assert_developer(user)
     username = getattr(user, "username", None) if user else None
     return (username or f"user:{actor}")[:80]
 
@@ -260,7 +260,7 @@ async def list_projects():
 
     def _load():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             projects = (
                 s.query(DevProject)
                 .order_by(DevProject.order.asc(), DevProject.updated_at.desc())
@@ -321,7 +321,7 @@ async def create_project():
 
     def _create():
         with db_session() as s:
-            author = _require_superadmin(s, actor)
+            author = _require_developer(s, actor)
             p = DevProject(author=author, **fields)
             s.add(p)
             s.commit()
@@ -338,7 +338,7 @@ async def get_project(project_id: int):
 
     def _load():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             p = _get_or_404(s, DevProject, project_id, "Project")
             return _project_detail(p)
 
@@ -356,7 +356,7 @@ async def update_project(project_id: int):
 
     def _apply():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             p = _get_or_404(s, DevProject, project_id, "Project")
             _apply_completion_stamp(p, fields, "completed")
             for k, v in fields.items():
@@ -376,7 +376,7 @@ async def delete_project(project_id: int):
 
     def _delete():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             p = _get_or_404(s, DevProject, project_id, "Project")
             name = p.name
             s.delete(p)
@@ -401,7 +401,7 @@ async def create_task(project_id: int):
 
     def _create():
         with db_session() as s:
-            author = _require_superadmin(s, actor)
+            author = _require_developer(s, actor)
             _get_or_404(s, DevProject, project_id, "Project")
             t = DevTask(project_id=project_id, author=author, **fields)
             if t.status == "done":
@@ -426,7 +426,7 @@ async def update_task(task_id: int):
 
     def _apply():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             t = _get_or_404(s, DevTask, task_id, "Task")
             _apply_completion_stamp(t, fields, "done")
             for k, v in fields.items():
@@ -447,7 +447,7 @@ async def delete_task(task_id: int):
 
     def _delete():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             t = _get_or_404(s, DevTask, task_id, "Task")
             title = t.title
             _touch_project(s, t.project_id)
@@ -472,7 +472,7 @@ async def create_subtask(task_id: int):
 
     def _create():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             t = _get_or_404(s, DevTask, task_id, "Task")
             st = DevSubtask(task_id=task_id, **fields)
             if st.done:
@@ -496,7 +496,7 @@ async def update_subtask(subtask_id: int):
 
     def _apply():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             st = _get_or_404(s, DevSubtask, subtask_id, "Subtask")
             if "done" in fields and fields["done"] != bool(st.done):
                 st.completed_at = datetime.now() if fields["done"] else None
@@ -518,7 +518,7 @@ async def delete_subtask(subtask_id: int):
 
     def _delete():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             st = _get_or_404(s, DevSubtask, subtask_id, "Subtask")
             t = s.query(DevTask).filter(DevTask.id == st.task_id).first()
             if t:
@@ -548,7 +548,7 @@ async def create_note(project_id: int):
 
     def _create():
         with db_session() as s:
-            author = _require_superadmin(s, actor)
+            author = _require_developer(s, actor)
             _get_or_404(s, DevProject, project_id, "Project")
             resolved_task_id = None
             if task_id is not None:
@@ -577,7 +577,7 @@ async def update_note(note_id: int):
 
     def _apply():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             n = _get_or_404(s, DevNote, note_id, "Note")
             for k, v in fields.items():
                 setattr(n, k, v)
@@ -595,7 +595,7 @@ async def delete_note(note_id: int):
 
     def _delete():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             n = _get_or_404(s, DevNote, note_id, "Note")
             _touch_project(s, n.project_id)
             s.delete(n)

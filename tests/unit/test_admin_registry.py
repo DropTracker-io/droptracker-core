@@ -49,6 +49,22 @@ class TestEntityWhitelist:
     def test_audit_log_is_read_only(self):
         assert reg.get_spec("audit_log")["editable"] == []
 
+    def test_role_flags_not_editable(self):
+        # Role grants must go through /admin/users/{id}/{superadmin,developer}
+        # (audited, self-revoke-guarded, badge-synced) — never the data editor.
+        users = reg.get_spec("users")
+        assert "is_superadmin" not in users["editable"]
+        assert "is_developer" not in users["editable"]
+
+    def test_developer_readable_is_a_tight_allowlist(self):
+        # Developers may only READ entities explicitly flagged; everything
+        # carrying PII, billing identifiers or message content stays off.
+        readable = {
+            name for name in reg.list_entities()
+            if reg.get_spec(name).get("developer_readable")
+        }
+        assert readable == {"players", "groups"}
+
 
 # ── Editable-field validation ─────────────────────────────────────────────────
 

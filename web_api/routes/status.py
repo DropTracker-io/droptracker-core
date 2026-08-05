@@ -1,4 +1,4 @@
-"""Service status + known-issues board — public read, superadmin CRUD.
+"""Service status + known-issues board — public read, developer CRUD.
 
 Feeds three surfaces from one source of truth:
   * the #status Discord channel (core bot renders from DB/Redis directly),
@@ -8,7 +8,7 @@ Feeds three surfaces from one source of truth:
 Public:
   GET /api/v1/status                     -> { services, categories[] } (open issues only)
 
-Admin (superadmin only; every write audit-logs and bumps status:issues:rev so
+Admin (developer-or-superadmin; every write audit-logs and bumps status:issues:rev so
 the core bot re-renders the channel within its next sweep):
   GET    /api/v1/admin/status/issues            -> { categories: [...incl. resolved] }
   POST   /api/v1/admin/status/categories        { name, emoji?, order? }
@@ -29,7 +29,7 @@ from quart import Blueprint, jsonify
 
 from db import ISSUE_SEVERITIES, ISSUE_STATUSES, KnownIssue, KnownIssueCategory
 from web_api.common import abort_problem, db_session, private_no_store, with_cache_headers
-from web_api.deps import assert_superadmin, current_user_id, json_body, load_user
+from web_api.deps import assert_developer, current_user_id, json_body, load_user
 
 status_bp = Blueprint("v1_status", __name__)
 
@@ -79,10 +79,10 @@ def _load_tree(s, *, include_resolved: bool) -> list[dict]:
     return out
 
 
-def _require_superadmin(s, actor) -> str:
-    """Assert superadmin and return a display label for created_by stamps."""
+def _require_developer(s, actor) -> str:
+    """Assert developer (or superadmin) and return a display label for created_by stamps."""
     user = load_user(s, actor)
-    assert_superadmin(user)
+    assert_developer(user)
     username = getattr(user, "username", None)
     return (username or f"user:{actor}")[:80]
 
@@ -202,7 +202,7 @@ async def admin_issues():
 
     def _load():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             return _load_tree(s, include_resolved=True)
 
     categories = await asyncio.to_thread(_load)
@@ -215,7 +215,7 @@ async def admin_create_category():
 
     def _check():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
 
     await asyncio.to_thread(_check)
     body = await json_body()
@@ -241,7 +241,7 @@ async def admin_update_category(category_id: int):
 
     def _check():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
 
     await asyncio.to_thread(_check)
     body = await json_body()
@@ -269,7 +269,7 @@ async def admin_delete_category(category_id: int):
 
     def _delete():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             cat = s.get(KnownIssueCategory, category_id)
             if cat is None:
                 abort_problem(404, "Not found", "No such category.")
@@ -291,7 +291,7 @@ async def admin_create_issue():
 
     def _check():
         with db_session() as s:
-            return _require_superadmin(s, actor)
+            return _require_developer(s, actor)
 
     author = await asyncio.to_thread(_check)
     body = await json_body()
@@ -321,7 +321,7 @@ async def admin_update_issue(issue_id: int):
 
     def _check():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
 
     await asyncio.to_thread(_check)
     body = await json_body()
@@ -357,7 +357,7 @@ async def admin_delete_issue(issue_id: int):
 
     def _delete():
         with db_session() as s:
-            _require_superadmin(s, actor)
+            _require_developer(s, actor)
             issue = s.get(KnownIssue, issue_id)
             if issue is None:
                 abort_problem(404, "Not found", "No such issue.")

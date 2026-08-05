@@ -442,18 +442,18 @@ def assert_superadmin(user: Optional[User]) -> None:
         )
 
 
-def is_moderator(user: Optional[User]) -> bool:
-    """Site moderator (or superadmin — staff implies moderator)."""
-    return is_superadmin(user) or bool(user and getattr(user, "is_moderator", False))
+def is_developer(user: Optional[User]) -> bool:
+    """Site developer (or superadmin — staff implies developer)."""
+    return is_superadmin(user) or bool(user and getattr(user, "is_developer", False))
 
 
-def assert_moderator(user: Optional[User]) -> None:
-    if not is_moderator(user):
+def assert_developer(user: Optional[User]) -> None:
+    if not is_developer(user):
         abort_problem(
             403,
             "Forbidden",
-            "Moderator access is required.",
-            extra={"code": "moderator_required"},
+            "Developer access is required.",
+            extra={"code": "developer_required"},
         )
 
 

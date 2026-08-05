@@ -83,15 +83,15 @@ class TestDenyRestricted:
 class TestDepsReasonCodes:
     def test_superadmin_denial_carries_code(self):
         with pytest.raises(ProblemException) as exc:
-            deps.assert_superadmin(SimpleNamespace(is_superadmin=False, is_moderator=False))
+            deps.assert_superadmin(SimpleNamespace(is_superadmin=False, is_developer=False))
         assert exc.value.status == 403
         assert exc.value.extra == {"code": "staff_required"}
 
-    def test_moderator_denial_carries_code(self):
+    def test_developer_denial_carries_code(self):
         with pytest.raises(ProblemException) as exc:
-            deps.assert_moderator(SimpleNamespace(is_superadmin=False, is_moderator=False))
+            deps.assert_developer(SimpleNamespace(is_superadmin=False, is_developer=False))
         assert exc.value.status == 403
-        assert exc.value.extra == {"code": "moderator_required"}
+        assert exc.value.extra == {"code": "developer_required"}
 
 
 # ── full request path: GET /events/<id> through the app ─────────────────────

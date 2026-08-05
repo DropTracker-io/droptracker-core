@@ -2,8 +2,8 @@
 
 POST/PATCH/DELETE /api/v1/event-task-library[/{id}] — the write side of the
 library is site-staff only (curated + globally-public presets shape every
-clan's pickers); moderators and superadmins both qualify. The real
-``assert_moderator`` runs against a fake user carrying the staff flags.
+clan's pickers); developers and superadmins both qualify. The real
+``assert_developer`` runs against a fake user carrying the staff flags.
 Same scripted-session harness as the other event route tests;
 ``validate_task_payload`` is stubbed (its own contract is covered by the
 task-validation tests).
@@ -57,15 +57,15 @@ class FakeRow:
         self.__dict__.update(base)
 
 
-def _wire(monkeypatch, session, *, moderator=True, superadmin=False, user_id=7):
+def _wire(monkeypatch, session, *, developer=True, superadmin=False, user_id=7):
     monkeypatch.setattr(evadm, "current_user_id", lambda: user_id)
     monkeypatch.setattr(evadm, "db_session", lambda: _SessionCM(session))
-    # The real deps.assert_moderator runs against this fake user, so the
-    # flags decide the auth outcome (superadmin implies moderator in deps).
+    # The real deps.assert_developer runs against this fake user, so the
+    # flags decide the auth outcome (superadmin implies developer in deps).
     monkeypatch.setattr(
         evadm, "load_user",
         lambda s, uid: SimpleNamespace(
-            id=uid, is_moderator=moderator, is_superadmin=superadmin),
+            id=uid, is_developer=developer, is_superadmin=superadmin),
     )
     monkeypatch.setattr(evadm, "EventTaskLibraryItem", FakeRow)
     monkeypatch.setattr(evadm, "EVENT_TASK_TYPES", _TASK_TYPES)
@@ -80,9 +80,9 @@ def _wire(monkeypatch, session, *, moderator=True, superadmin=False, user_id=7):
 
 
 class TestLibraryAdminAuth:
-    async def test_create_denied_for_non_moderator(self, client, monkeypatch):
+    async def test_create_denied_for_non_developer(self, client, monkeypatch):
         s = _S()
-        _wire(monkeypatch, s, moderator=False)
+        _wire(monkeypatch, s, developer=False)
         r = await client.post(
             "/api/v1/event-task-library",
             json={"name": "X", "type": "kc_target", "target": "Zulrah", "target_value": 5},
@@ -90,22 +90,22 @@ class TestLibraryAdminAuth:
         assert r.status_code == 403
         assert not s.committed
 
-    async def test_patch_denied_for_non_moderator(self, client, monkeypatch):
+    async def test_patch_denied_for_non_developer(self, client, monkeypatch):
         s = _S()
-        _wire(monkeypatch, s, moderator=False)
+        _wire(monkeypatch, s, developer=False)
         r = await client.patch("/api/v1/event-task-library/11", json={"name": "Y"})
         assert r.status_code == 403
 
-    async def test_delete_denied_for_non_moderator(self, client, monkeypatch):
+    async def test_delete_denied_for_non_developer(self, client, monkeypatch):
         s = _S()
-        _wire(monkeypatch, s, moderator=False)
+        _wire(monkeypatch, s, developer=False)
         r = await client.delete("/api/v1/event-task-library/11")
         assert r.status_code == 403
 
     async def test_superadmin_flag_alone_suffices(self, client, monkeypatch):
-        # Staff implies moderator: is_superadmin without is_moderator passes.
+        # Staff implies developer: is_superadmin without is_developer passes.
         s = _S([])
-        _wire(monkeypatch, s, moderator=False, superadmin=True)
+        _wire(monkeypatch, s, developer=False, superadmin=True)
         r = await client.post(
             "/api/v1/event-task-library",
             json={"name": "X", "type": "kc_target", "target": "Zulrah", "target_value": 5},

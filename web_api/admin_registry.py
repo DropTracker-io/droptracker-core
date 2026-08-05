@@ -14,6 +14,10 @@ ORM models. Each entity declares:
                       Never includes primary keys or sensitive columns.
   * ``search_text`` - text columns matched with ``ILIKE %q%`` for the ``q`` param.
   * ``search_int``  - integer columns matched by exact id when ``q`` is numeric.
+  * ``developer_readable`` - if True, site developers may READ this entity
+                      (list/get only — PATCH is always superadmin). Leave
+                      unset for anything carrying PII, billing identifiers,
+                      credentials or private message content.
 
 Everything here is pure data + validation so it can be unit-tested without a live
 DB. The actual query execution lives in ``web_api/routes/admin.py``.
@@ -58,6 +62,7 @@ ENTITY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "editable": ["player_name", "total_level", "hidden"],
         "search_text": ["player_name"],
         "search_int": ["player_id", "wom_id"],
+        "developer_readable": True,
     },
     "groups": {
         "model": Group,
@@ -69,6 +74,7 @@ ENTITY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "editable": ["group_name", "description", "invite_url", "icon_url"],
         "search_text": ["group_name"],
         "search_int": ["group_id", "wom_id"],
+        "developer_readable": True,
     },
     "users": {
         "model": User,
@@ -77,9 +83,13 @@ ENTITY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "columns": [
             "user_id", "discord_id", "username", "xf_user_id", "public",
             "global_ping", "group_ping", "never_ping", "hidden",
-            "is_superadmin", "patreon_group", "premium_group", "date_added",
+            "is_superadmin", "is_developer", "patreon_group", "premium_group",
+            "date_added",
         ],
-        "editable": ["username", "public", "hidden", "is_superadmin"],
+        # Role flags are NOT editable here — grants must go through the
+        # dedicated /admin/users/{id}/{superadmin,developer} endpoints, which
+        # audit the change, guard self-revoke and sync the profile badge.
+        "editable": ["username", "public", "hidden"],
         "search_text": ["username", "discord_id"],
         "search_int": ["user_id"],
     },
