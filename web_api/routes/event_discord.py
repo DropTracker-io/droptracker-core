@@ -367,6 +367,46 @@ def _parse_message_config(value) -> str:
     return json.dumps(_effective_message_config(value))
 
 
+def _validate_channels_against_cache(guild_id: str, channels: dict,
+                                     grandfathered: set) -> None:
+    """422 when a new/changed channel id isn't in the bot's channel cache for
+    ``guild_id`` (or is a forum) — only while the cache is warm; a cold cache
+    never blocks saving (manual-id entry must always work). Ids in
+    ``grandfathered`` (already stored for this scope while the guild is
+    unchanged) are skipped entirely: a channel deleted on Discord drops out
+    of the cache, and re-validating kinds the admin didn't touch would wedge
+    the whole form until every stale kind was cleared — the admin must be
+    able to clear/repoint one kind at a time."""
+    to_check = {kind: cid for kind, cid in channels.items()
+                if cid not in grandfathered}
+    if not to_check:
+        return
+    cached = _guild_channels(guild_id)
+    if cached is None:
+        _request_channel_refresh(guild_id)
+        return
+    known = {str(c.get("id")): c for c in cached}
+    for kind, channel_id in to_check.items():
+        if channel_id not in known:
+            # Could be a typo/foreign channel — or one created moments
+            # ago that the bot's cache hasn't caught up with. Ask the
+            # bot to re-fetch (drained within ~15s) so a retry works.
+            _request_channel_refresh(guild_id)
+            abort_problem(
+                422, "Channel not in guild",
+                f"Channel {channel_id} ({kind}) isn't in the bot's list "
+                f"of this server's channels. If you just created it, "
+                "wait a moment and save again; otherwise check the id.",
+            )
+        # A forum itself isn't messageable — only its threads are.
+        if known[channel_id].get("type") == "forum":
+            abort_problem(
+                422, "Forum channel selected",
+                f"Channel {channel_id} ({kind}) is a forum — pick one of "
+                "its threads instead.",
+            )
+
+
 def _clean_snowflake(value, what: str) -> str:
     """Snowflakes travel as strings (JS numbers lose precision past 2^53)."""
     if isinstance(value, int) and not isinstance(value, bool):
@@ -535,7 +575,10 @@ async def put_event_discord(event_id: int):
 
     `guild_id: null` clears the whole config. Channel ids are validated
     against the bot's channel cache for the chosen guild *when it's warm*
-    (a cold cache never blocks saving — manual-id entry must always work)."""
+    (a cold cache never blocks saving — manual-id entry must always work).
+    Ids already stored for this scope are grandfathered while the guild is
+    unchanged, so a channel deleted on Discord (gone from the cache) can't
+    block saves that only touch other kinds."""
     user_id = current_user_id()
     body = await json_body()
 
@@ -590,32 +633,8 @@ async def put_event_discord(event_id: int):
             if channel_id in (None, ""):
                 continue  # unset this kind
             channels[kind] = _clean_snowflake(channel_id, f"channels.{kind}")
-
-        # Validate channel membership against the bot cache when it's warm.
-        cached = _guild_channels(guild_id)
-        if cached is not None:
-            known = {str(c.get("id")): c for c in cached}
-            for kind, channel_id in channels.items():
-                if channel_id not in known:
-                    # Could be a typo/foreign channel — or one created moments
-                    # ago that the bot's cache hasn't caught up with. Ask the
-                    # bot to re-fetch (drained within ~15s) so a retry works.
-                    _request_channel_refresh(guild_id)
-                    abort_problem(
-                        422, "Channel not in guild",
-                        f"Channel {channel_id} ({kind}) isn't in the bot's list "
-                        f"of this server's channels. If you just created it, "
-                        "wait a moment and save again; otherwise check the id.",
-                    )
-                # A forum itself isn't messageable — only its threads are.
-                if known[channel_id].get("type") == "forum":
-                    abort_problem(
-                        422, "Forum channel selected",
-                        f"Channel {channel_id} ({kind}) is a forum — pick one of "
-                        "its threads instead.",
-                    )
-        else:
-            _request_channel_refresh(guild_id)
+        # Cache validation happens inside _apply — grandfathering needs the
+        # stored rows to know which ids the admin didn't actually change.
 
     def _apply():
         with db_session() as s:
@@ -652,6 +671,23 @@ async def put_event_discord(event_id: int):
             if guild_id is not None and str(guild_id) != current_guild:
                 _assert_can_target_guild(s, user_id, guild_id)
 
+            existing = {
+                row.kind: row
+                for row in s.query(EventChannel)
+                .filter(EventChannel.event_id == event_id)
+                .all()
+                if (getattr(row, "group_id", None) or None) == scope_group_id
+            }
+            if guild_id is not None:
+                # Grandfather ids already stored for this scope (guild
+                # unchanged): a channel deleted on Discord is gone from the
+                # cache, and untouched kinds must not block the save.
+                grandfathered = (
+                    {str(r.channel_id) for r in existing.values()}
+                    if str(guild_id) == current_guild else set()
+                )
+                _validate_channels_against_cache(guild_id, channels, grandfathered)
+
             if scope_group_id is not None:
                 if part is None:  # accepted participant always has a row, but be safe
                     abort_problem(404, "Not a participant",
@@ -670,13 +706,6 @@ async def put_event_discord(event_id: int):
                 if per_group_provided:
                     ev.per_group_discord = per_group_value
 
-            existing = {
-                row.kind: row
-                for row in s.query(EventChannel)
-                .filter(EventChannel.event_id == event_id)
-                .all()
-                if (getattr(row, "group_id", None) or None) == scope_group_id
-            }
             for kind, row in existing.items():
                 if kind not in channels:
                     s.delete(row)
