@@ -328,3 +328,82 @@ def test_plugin_copy_check_unresolvable_item_is_not_covered(monkeypatch):
     assert asyncio.run(
         cb._plugin_copy_exists(object(), object(), parsed, datetime(2026, 8, 5))
     ) is False
+
+
+# ── personal bests from broadcasts ───────────────────────────────────────────
+
+def test_pb_time_parsing_display_formats():
+    assert cb._pb_time_to_ms("1:04") == 64_000
+    assert cb._pb_time_to_ms("21:55.80") == 21 * 60_000 + 55_800
+    assert cb._pb_time_to_ms("0:31.20") == 31_200
+    assert cb._pb_time_to_ms("garbage") == 0
+    assert cb._pb_time_to_ms(None) == 0
+
+
+def test_pb_bracket_from_broadcast_line():
+    raid = cb.parse_broadcast(
+        "Raid Leader has achieved a new Chambers of Xeric (Team Size: 5) personal best: 21:55.80"
+    )
+    solo = cb.parse_broadcast("Speed Runner has achieved a new Vorkath personal best: 1:04.")
+    assert cb._pb_bracket(raid) == "5"
+    assert cb._pb_bracket(solo) == "Solo"
+
+
+def test_pb_coverage_requires_equal_or_faster_stored_time(monkeypatch):
+    """Plugin-user reconciliation for PBs: covered iff the stored
+    (player, boss, bracket) row is already equal-or-faster. The query chain is
+    faked; the decision — and that npc resolution failure means NOT covered —
+    is what's under test."""
+    from datetime import datetime
+
+    monkeypatch.setattr(cb, "_resolve_pb_npc", lambda _s, _a: (14176, "Yama"))
+
+    class _Col:
+        def __eq__(self, other):
+            return ("eq", other)
+
+        def __le__(self, other):
+            return ("le", other)
+
+        def __gt__(self, other):
+            return ("gt", other)
+
+    class _PB:
+        id = _Col()
+        player_id = _Col()
+        npc_id = _Col()
+        team_size = _Col()
+        personal_best = _Col()
+
+    import db.models as dm
+
+    monkeypatch.setattr(dm, "PersonalBestEntry", _PB)
+
+    class _Query:
+        def __init__(self, row):
+            self._row = row
+
+        def filter(self, *_a):
+            return self
+
+        def first(self):
+            return self._row
+
+    class _Session:
+        def __init__(self, row):
+            self._row = row
+
+        def query(self, *_a):
+            return _Query(self._row)
+
+    class _Subject:
+        player_id = 7
+
+    parsed = cb.parse_broadcast("Speed Runner has achieved a new Vorkath personal best: 1:04.")
+    stamp = datetime(2026, 8, 5, 12, 0, 0)
+    assert asyncio.run(cb._plugin_copy_exists(_Session(("row",)), _Subject(), parsed, stamp)) is True
+    assert asyncio.run(cb._plugin_copy_exists(_Session(None), _Subject(), parsed, stamp)) is False
+
+    # Unresolvable boss → not covered (record path skips it independently).
+    monkeypatch.setattr(cb, "_resolve_pb_npc", lambda _s, _a: (None, None))
+    assert asyncio.run(cb._plugin_copy_exists(_Session(("row",)), _Subject(), parsed, stamp)) is False

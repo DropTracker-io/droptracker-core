@@ -3,8 +3,8 @@
 The plugin's clan-relay feature (``relayClanBroadcasts``) forwards in-game
 ``CLAN_MESSAGE`` system broadcasts verbatim as ``type=clan_broadcast``
 payloads. This processor turns the ones we track (item/raid/clue drops, pets,
-collection log slots — ``utils.clan_broadcasts.TRACKED_KINDS``) into records
-for clanmates who do NOT run the plugin themselves. Everything about a chat
+collection log slots, personal bests — ``utils.clan_broadcasts.TRACKED_KINDS``)
+into records for clanmates who do NOT run the plugin themselves. Everything about a chat
 row is deliberately second-class next to a plugin submission:
 
 - The RELAYER authenticates like any submitter (``ensure_player_and_auth``,
@@ -297,14 +297,105 @@ def _record_group_exclusions(session, drop_id, exclusions: dict) -> None:
         )
 
 
+def _pb_time_to_ms(time_text) -> int:
+    """Broadcast display time ("21:55.80", "1:04") → milliseconds, 0 on junk."""
+    from utils.format import convert_to_ms
+
+    try:
+        ms = convert_to_ms(str(time_text or "").strip().rstrip("."))
+        return max(int(ms), 0) if ms else 0
+    except Exception:
+        return 0
+
+
+def _resolve_pb_npc(session, activity):
+    """PB activity text → ``(npc_id, canonical_name)`` or ``(None, None)``.
+
+    Resolve-only, deliberately: unlike ``ensure_npc_id_for_player`` this NEVER
+    mints an npc_list row — a garbled or novel activity string from chat
+    skips the PB rather than polluting the boss list. Same canonicalization +
+    variant-slug matching the plugin path uses, so both paths land on one row.
+    """
+    from sqlalchemy import bindparam
+    from sqlalchemy import text as sql_text
+
+    from db.models import NpcList
+    from utils.npc_names import (
+        canonical_encounter_name,
+        npc_match_variants,
+        npc_primary_rank_sql_expr,
+        npc_primary_variants,
+        npc_slug_sql_expr,
+    )
+
+    name = canonical_encounter_name(clean_broadcast_text(activity))
+    if not name:
+        return None, None
+    row = (
+        session.query(NpcList.npc_id, NpcList.npc_name)
+        .filter(NpcList.npc_name == name)
+        .first()
+    )
+    if row:
+        return int(row[0]), row[1]
+    variants = npc_match_variants(name)
+    if not variants:
+        return None, None
+    norm = session.execute(
+        sql_text(
+            f"SELECT n.npc_id, n.npc_name FROM npc_list n "
+            f"WHERE {npc_slug_sql_expr('n.npc_name')} IN :variants "
+            f"ORDER BY {npc_primary_rank_sql_expr('n.npc_name')} ASC, n.npc_id ASC "
+            f"LIMIT 1"
+        ).bindparams(
+            bindparam("variants", expanding=True),
+            bindparam("primary_variants", expanding=True),
+        ),
+        {"variants": variants, "primary_variants": npc_primary_variants(name)},
+    ).first()
+    if norm:
+        return int(norm[0]), norm[1]
+    return None, None
+
+
+def _pb_bracket(parsed) -> str:
+    """Canonical team-size label for a PB broadcast (raids carry it in the
+    line; everything else brackets Solo, same default the plugin path uses)."""
+    from utils.npc_names import sanitize_team_size
+
+    return sanitize_team_size(parsed.extra.get("team_size") or "Solo")
+
+
 async def _plugin_copy_exists(session, subject, parsed, stamp) -> bool:
     """Did the subject's own plugin (or a manual submit) already record this?
 
     Matching is deliberately loose — same player, same item, close in time —
     because a broadcast line carries no guid, npc or kc to match harder on.
     Pets and clog slots are once-per-item, so bare existence answers those.
-    Anything that isn't a ``clan_chat`` row counts as coverage.
+    A PB is covered when the stored (player, boss, bracket) time is already
+    equal or faster. Anything that isn't a ``clan_chat`` row counts as
+    coverage.
     """
+    if parsed.kind == "personal_best":
+        ms = _pb_time_to_ms(parsed.extra.get("time_text"))
+        npc_id, _name = _resolve_pb_npc(session, parsed.extra.get("activity"))
+        if not npc_id or ms <= 0:
+            # Unresolvable either way — the record path will skip it too.
+            return False
+        from db.models import PersonalBestEntry
+
+        return (
+            session.query(PersonalBestEntry.id)
+            .filter(
+                PersonalBestEntry.player_id == subject.player_id,
+                PersonalBestEntry.npc_id == npc_id,
+                PersonalBestEntry.team_size == _pb_bracket(parsed),
+                PersonalBestEntry.personal_best > 0,
+                PersonalBestEntry.personal_best <= ms,
+            )
+            .first()
+        ) is not None
+
     item = await ensure_item_by_name(session, parsed.item_name)
     if not item:
         return False
@@ -560,6 +651,11 @@ async def clan_broadcast_processor(
             session, use_external_session, parsed, subject, subject_group_ids,
             bound_groups, cc_guid,
         )
+    if parsed.kind == "personal_best":
+        return await _process_chat_pb(
+            session, use_external_session, parsed, subject, subject_group_ids,
+            cc_guid, stamp,
+        )
     return SubmissionResponse(True, f"Broadcast kind '{parsed.kind}' is not tracked")
 
 
@@ -718,6 +814,156 @@ async def _process_chat_drop(
         f"groups={sorted(qualifying)} notified={notified}"
     )
     return SubmissionResponse(True, f"Recorded chat drop for {subject.player_name}")
+
+
+async def _process_chat_pb(
+    session, use_external_session, parsed, subject, subject_group_ids, cc_guid, stamp,
+):
+    """Record a broadcast personal best, mirroring pb_processor's write gate.
+
+    The invariant that matters (ticket #361 territory): a chat time may only
+    CREATE a bracket row or IMPROVE it — a stored faster time is never
+    overwritten. Bracket comes from the broadcast itself for raids
+    ("(Team Size: N)"); everything else is Solo, the same default the plugin
+    path applies. Unknown activities skip rather than minting NPCs. No group
+    points, no DMs — chat rows stay second-class (module docstring).
+    """
+    if not await ensure_can_create(session, cc_guid, "pb"):
+        _stat("duplicate_guid")
+        return SubmissionResponse(True, "PB broadcast already recorded")
+
+    time_ms = _pb_time_to_ms(parsed.extra.get("time_text"))
+    if time_ms <= 0:
+        _stat("pb_unparsed_time")
+        return SubmissionResponse(True, "PB time not parseable; skipped")
+    npc_id, boss_name = _resolve_pb_npc(session, parsed.extra.get("activity"))
+    if not npc_id:
+        _stat("pb_npc_unresolved")
+        return SubmissionResponse(
+            True, f"PB activity {parsed.extra.get('activity')!r} is not a known boss; skipped"
+        )
+    team_size = _pb_bracket(parsed)
+
+    from db.models import PersonalBestEntry
+
+    old_time = None
+    row = (
+        session.query(PersonalBestEntry)
+        .filter(
+            PersonalBestEntry.player_id == subject.player_id,
+            PersonalBestEntry.npc_id == npc_id,
+            PersonalBestEntry.team_size == team_size,
+        )
+        .first()
+    )
+    if row is not None:
+        if row.personal_best and 0 < row.personal_best <= time_ms:
+            _stat("pb_not_better")
+            return SubmissionResponse(True, "Stored PB is already equal or faster")
+        old_time = row.personal_best
+        row.personal_best = time_ms
+        row.kill_time = time_ms
+        row.new_pb = True
+        row.date_added = stamp
+    else:
+        row = PersonalBestEntry(
+            player_id=subject.player_id,
+            npc_id=npc_id,
+            team_size=team_size,
+            new_pb=True,
+            personal_best=time_ms,
+            kill_time=time_ms,
+            date_added=stamp,
+            image_url="",
+            video_url=None,
+            used_api=False,
+            unique_id=cc_guid,
+        )
+        # SAVEPOINT like pb_processor: a unique_id replay must discard only
+        # this row, never poison the caller's staged work.
+        try:
+            with session.begin_nested():
+                session.add(row)
+                session.flush()
+        except Exception:
+            debug_print("[ClanBroadcast] PB row create failed (likely replay)")
+            return SubmissionResponse(True, "PB broadcast already recorded")
+    if use_external_session:
+        session.flush()
+    else:
+        session.commit()
+    _stat("pbs_recorded")
+
+    # Near-real-time HOF refresh + top-25 ticker, mirroring pb_processor.
+    try:
+        redis_client.client.rpush(
+            "hof:refresh:queue",
+            json.dumps({"player_id": int(subject.player_id), "npc_id": int(npc_id)}),
+        )
+    except Exception:
+        pass
+    try:
+        from services.realtime import publish_feed_personal_best
+        from utils.format import convert_from_ms
+        from utils.pb_rank import pb_board_rank
+
+        ranked = pb_board_rank(session, npc_id, team_size, subject.player_id)
+        if ranked is not None and ranked[0] <= 25:
+            publish_feed_personal_best(
+                player_id=subject.player_id,
+                player_name=subject.player_name,
+                npc_id=npc_id,
+                npc_name=boss_name,
+                time_ms=time_ms,
+                time_display=convert_from_ms(time_ms),
+                team_size=team_size,
+                rank=ranked[0],
+            )
+    except Exception as e:
+        debug_print(f"[ClanBroadcast] Ticker PB publish failed: {e}")
+
+    # Group notifications: same notify_pbs + screenshot gates as pb_processor.
+    from utils import group_config as gc
+
+    bulk = gc.get_bulk(session, sorted(set(subject_group_ids)), ["notify_pbs"])
+    notified = 0
+    for gid in sorted(set(subject_group_ids)):
+        if not gc.is_truthy(bulk.get((gid, "notify_pbs"))):
+            continue
+        if await screenshot_required(session, gid):
+            continue
+        notification_data = {
+            "player_name": subject.player_name,
+            "player_id": subject.player_id,
+            "pb_id": row.id,
+            "guid": cc_guid,
+            "npc_id": npc_id,
+            "boss_name": boss_name,
+            "time_ms": time_ms,
+            "old_time_ms": old_time,
+            "team_size": team_size,
+            "kill_time_ms": time_ms,
+            "image_url": "",
+            "video_key": None,
+            "group_points_awarded": 0,
+            "group_points_receiver_total": 0,
+            "group_points_member_count": 0,
+            "group_points_members_awarded": [],
+            "world_type": "main",
+            "plugin_version": None,
+            "via_clan_broadcast": True,
+        }
+        await create_notification(
+            "pb", subject.player_id, notification_data, gid,
+            existing_session=session if use_external_session else None,
+        )
+        notified += 1
+
+    return SubmissionResponse(
+        True,
+        f"Recorded chat PB for {subject.player_name}: {boss_name} ({team_size}) "
+        f"in {time_ms}ms ({notified} groups notified)",
+    )
 
 
 async def _process_chat_pet(

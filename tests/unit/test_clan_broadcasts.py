@@ -167,11 +167,6 @@ def test_collection_log_with_trailing_period():
         ),
         ("Noble Five has reached 78,000,000 XP in Fishing.", "xp_milestone", "Noble Five"),
         (
-            "Speed Runner has achieved a new Vorkath personal best: 1:04.",
-            "personal_best",
-            "Speed Runner",
-        ),
-        (
             "Victor Locke has been invited into the clan by IRuneNakey.",
             "invite",
             "Victor Locke",
@@ -213,12 +208,27 @@ def test_expelled_extracts_the_expelled_player():
     assert parsed.player == "Rule Breaker"
 
 
-def test_raid_pb_with_team_size_classifies_as_pb():
+def test_raid_pb_carries_bracket_activity_and_time():
     parsed = parse_broadcast(
         "Raid Leader has achieved a new Chambers of Xeric (Team Size: 5) personal best: 21:55.80"
     )
     assert parsed is not None
     assert parsed.kind == "personal_best"
+    assert parsed.tracked
+    assert parsed.player == "Raid Leader"
+    assert parsed.extra == {
+        "activity": "Chambers of Xeric",
+        "team_size": "5",
+        "time_text": "21:55.80",
+    }
+
+
+def test_solo_pb_has_no_bracket_in_line():
+    parsed = parse_broadcast("Speed Runner has achieved a new Vorkath personal best: 1:04.")
+    assert parsed is not None
+    assert parsed.kind == "personal_best"
+    assert parsed.tracked
+    assert parsed.extra == {"activity": "Vorkath", "team_size": None, "time_text": "1:04"}
 
 
 # --- unknown ---------------------------------------------------------------
@@ -237,11 +247,12 @@ def test_player_chatter_that_mentions_drops_does_not_false_positive():
     assert parse_broadcast("imagine if I received a drop lol") is None
 
 
-def test_tracked_kinds_is_exactly_v1():
+def test_tracked_kinds_is_exactly_v2():
     assert TRACKED_KINDS == {
         "item_drop",
         "raid_drop",
         "clue_item",
         "pet",
         "collection_log",
+        "personal_best",
     }

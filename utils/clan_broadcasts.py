@@ -36,12 +36,15 @@ __all__ = [
     "parse_broadcast",
 ]
 
-#: Kinds the clan_broadcast processor records in v1. The rest are
-#: classify-only: recognized (so they don't pollute the unknown metric) but
-#: intentionally not tracked from chat — plugin submissions carry strictly
-#: richer data for every one of them.
+#: Kinds the clan_broadcast processor records. The rest are classify-only:
+#: recognized (so they don't pollute the unknown metric) but intentionally
+#: not tracked from chat — plugin submissions carry strictly richer data for
+#: every one of them. personal_best joined in v2 (2026-08-05): the broadcast
+#: line carries activity, time and — for raids — an explicit team size,
+#: which is enough for the PB boards when the write gate never overwrites a
+#: faster stored time.
 TRACKED_KINDS = frozenset(
-    {"item_drop", "raid_drop", "clue_item", "pet", "collection_log"}
+    {"item_drop", "raid_drop", "clue_item", "pet", "collection_log", "personal_best"}
 )
 
 _TAG_RE = re.compile(r"<[^>]*>")
@@ -215,6 +218,9 @@ _PB_RE = re.compile(
     r"^(?P<player>.+?) has achieved a new (?P<activity>.+?) personal best: "
     r"(?P<time>[\d:.]+)\.?$"
 )
+#: Raid PB activities embed the bracket: "Chambers of Xeric (Team Size: 5)".
+#: Solo-boss broadcasts carry no size (the processor brackets those "Solo").
+_PB_TEAM_SIZE_RE = re.compile(r"\s*\(Team [Ss]ize:\s*(?P<size>[^)]+)\)\s*")
 _PK_WIN_RE = re.compile(
     r"^(?P<player>.+?) has defeated (?P<loser>.+?) and received "
     r"\((?P<value>[\d,]+) coins\) worth of loot!?$"
@@ -241,6 +247,29 @@ def _classified(kind: str, player_group: str = "player"):
         return ParsedBroadcast(kind=kind, player=m[player_group])
 
     return build
+
+
+def _pb(m) -> ParsedBroadcast:
+    """Tracked since v2: activity (bracket stripped), raw team size and the
+    display time travel in ``extra``; the processor owns resolution/parsing —
+    this module stays pure text."""
+    activity = m["activity"]
+    team_size = None
+    size_match = _PB_TEAM_SIZE_RE.search(activity)
+    if size_match:
+        team_size = size_match.group("size").strip()
+        activity = _PB_TEAM_SIZE_RE.sub(" ", activity).strip()
+    return ParsedBroadcast(
+        kind="personal_best",
+        player=m["player"],
+        # The time class is greedy over '.', so it swallows the sentence's
+        # trailing period ("... personal best: 1:04.") — strip it here.
+        extra={
+            "activity": activity,
+            "team_size": team_size,
+            "time_text": m["time"].rstrip("."),
+        },
+    )
 
 
 def _pk_win(m) -> ParsedBroadcast:
@@ -277,7 +306,7 @@ _MATCHERS = (
     (_DIARY_RE, _classified("diary")),
     (_XP_RE, _classified("xp_milestone")),
     (_LEVEL_RE, _classified("level_up")),
-    (_PB_RE, _classified("personal_best")),
+    (_PB_RE, _pb),
     (_PK_WIN_RE, _pk_win),
     (_INVITE_RE, _classified("invite")),
     (_EXPELLED_RE, _classified("expelled", player_group="player")),
