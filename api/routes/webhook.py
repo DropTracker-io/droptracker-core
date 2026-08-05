@@ -505,6 +505,14 @@ async def _process_webhook_request(req_start):
                                     g.submission_type = submission_type
                                     response = await submissions.death_processor(processed_data, external_session=db_session)
                                     log_phase("death_processed")
+                                case "clan_broadcast":
+                                    g.submission_type = "clan_broadcast"
+                                    response = await submissions.clan_broadcast_processor(processed_data, external_session=db_session)
+                                    log_phase("clan_broadcast_processed")
+                                case "clan_chat":
+                                    g.submission_type = "clan_chat"
+                                    response = await submissions.clan_chat_processor(processed_data, external_session=db_session)
+                                    log_phase("clan_chat_processed")
                                 case "diary" | "achievement_diary" | "diary_completion":
                                     submission_type = "diary"
                                     g.submission_type = submission_type

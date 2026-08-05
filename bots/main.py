@@ -316,6 +316,51 @@ last_xf_transfer = datetime.now() - timedelta(seconds=10)
 message_data_logger = HighThroughputLogger("/store/droptracker/disc/data/logs/msg_tracker.json")
 
 
+@listen(MessageCreate)
+async def on_clan_bridge_message(event: MessageCreate):
+    """Discord→game direction of the clan chat bridge.
+
+    Human messages in a group's configured bridge channel are sanitized and
+    fanned out to the plugin inboxes of clan members whose plugin is present
+    (services/clan_chat_bridge). The channel routing table is a 60s-cached
+    config scan, so the fast path for every other message is one dict miss.
+    Bot authors are ignored — that includes our own mirrored game lines, which
+    is what makes the loop structurally impossible.
+    """
+    message = event.message
+    try:
+        author = getattr(message, "author", None)
+        if author is None or getattr(author, "bot", False):
+            return
+        from services.clan_chat_bridge import bridge_channel_map, fan_out_discord_message
+
+        route = bridge_channel_map(session).get(str(message.channel.id))
+        if route is None:
+            return
+        _group_id, clan_slug = route
+        content = (message.content or "").strip()
+        if getattr(message, "attachments", None):
+            content = f"{content} [attachment]".strip()
+        if not content:
+            return
+        sender = getattr(author, "display_name", None) or getattr(author, "username", "Discord")
+        await asyncio.to_thread(fan_out_discord_message, clan_slug, sender, content)
+    except Exception as e:
+        print(f"[ClanChatBridge] Discord->game handling failed: {e}")
+
+
+@Task.create(IntervalTrigger(seconds=3))
+async def clan_chat_mirror_drain():
+    """Game→Discord direction: drain staged clan chat lines and post them,
+    batched per bridge channel (services/clan_chat_bridge.drain_and_send)."""
+    try:
+        from services.clan_chat_bridge import drain_and_send
+
+        await drain_and_send(bot)
+    except Exception as e:
+        print(f"[ClanChatBridge] mirror drain failed: {e}")
+
+
 
 @app.errorhandler(Exception)
 async def handle_exception(e):
@@ -606,6 +651,7 @@ async def create_tasks():
     event_board_updates.start()
     event_signup_prompt_retire.start()
     badge_cycle.start()
+    clan_chat_mirror_drain.start()
     # Lootboard POSTING is user-visible and must stay with the interval tasks
     # above — NEVER gated behind the multi-minute, rate-limited guild-cache /
     # WOM warm-ups below. It previously sat after `await cache_guild_channels()`

@@ -157,6 +157,19 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "group_name", "type": "string", "default": "", "max_length": 30},
     {"key": "group_description", "type": "text", "default": ""},
     {"key": "clan_chat_name", "type": "string", "default": ""},
+    # --- Clan broadcast tracking (chat-relayed drops for non-plugin members) ---
+    # Gate + storage floor for data/submissions/clan_broadcast.py. Broadcasts
+    # only bind to a group when clan_broadcast_tracking is on AND the group's
+    # clan_chat_name matches the relaying member's in-game clan. Chat rows are
+    # authed=False / source='clan_chat' and never feed events, points or splits.
+    {"key": "clan_broadcast_tracking", "type": "boolean", "default": False},
+    {"key": "clan_broadcast_min_value", "type": "int", "default": 0, "min": 0},
+    # --- Clan chat bridge (two-way game ↔ Discord chat sync) ---
+    # services/clan_chat_bridge.py + data/submissions/clan_chat.py. Requires
+    # clan_chat_name; one toggle drives both directions (game lines mirrored
+    # into the channel, channel messages shown in game for plugin users).
+    {"key": "clan_chat_bridge_enabled", "type": "boolean", "default": False},
+    {"key": "channel_id_clan_chat_bridge", "type": "channel", "default": None},
     {"key": "discord_url", "type": "string", "default": ""},
     {"key": "auto_provision_members", "type": "boolean", "default": False},
     {"key": "export_api_key", "type": "string", "default": None},

@@ -90,6 +90,20 @@ async def get_notifications():
         return jsonify({"error": "Player not found"}), 404
 
     player_id, active_event = resolved
+
+    # Chat-bridge presence heartbeat: a plugin polling with ?clan=<name> is
+    # online in that clan, which is what Discord→game fan-out delivers
+    # against. Lazy import + best-effort (conftest stubs services.*).
+    raw_clan = request.args.get("clan")
+    if raw_clan:
+        try:
+            from services.clan_chat_bridge import stamp_presence
+            from utils.clan_broadcasts import clan_slug
+
+            stamp_presence(player_id, clan_slug(raw_clan))
+        except Exception as e:
+            print(f"/notifications presence stamp failed: {e}")
+
     wait_seconds = parse_wait_seconds(request.args.get("wait"))
 
     if wait_seconds <= 0:

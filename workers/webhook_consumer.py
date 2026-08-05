@@ -280,6 +280,10 @@ async def _process_entry(entry_bytes: bytes) -> None:
                         response = await submissions.pet_processor(processed_data, external_session=db_session)
                     case "adventure_log":
                         response = await submissions.adventure_log_processor(processed_data, external_session=db_session)
+                    case "clan_broadcast":
+                        response = await submissions.clan_broadcast_processor(processed_data, external_session=db_session)
+                    case "clan_chat":
+                        response = await submissions.clan_chat_processor(processed_data, external_session=db_session)
                     case _:
                         log.warning("Unknown submission type %r; skipping", norm_type)
                         _mark_submission_outcome(

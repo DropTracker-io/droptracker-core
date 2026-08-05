@@ -830,6 +830,14 @@ async def ensure_can_create(session, unique_id, submission_type) -> bool:
                     Drop.unique_id == unique_id,
                     Drop.used_api == True,
                 ).first()
+            case "clan_broadcast":
+                # Chat-relayed drops use a DETERMINISTIC content guid
+                # ("cc:..."), so the same broadcast replayed late must match
+                # its original row regardless of transport flags — no
+                # used_api filter (chat rows are written used_api=False).
+                return session.query(Drop).filter(
+                    Drop.unique_id == unique_id,
+                ).first()
             case "pb":
                 return session.query(PersonalBestEntry).filter(
                     PersonalBestEntry.unique_id == unique_id,

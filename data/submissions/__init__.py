@@ -19,6 +19,8 @@ Modules:
 """
 
 # Re-export processors for backward compatibility
+from .clan_broadcast import clan_broadcast_processor  # noqa: F401
+from .clan_chat import clan_chat_processor  # noqa: F401
 from .drop import drop_processor  # noqa: F401
 from .pb import pb_processor  # noqa: F401
 from .ca import ca_processor  # noqa: F401
@@ -38,6 +40,8 @@ from .common import (
 )
 
 __all__ = [
+    "clan_broadcast_processor",
+    "clan_chat_processor",
     "drop_processor",
     "pb_processor",
     "ca_processor",
