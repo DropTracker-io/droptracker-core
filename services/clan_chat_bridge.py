@@ -29,30 +29,8 @@ inside functions so unit tests can load this file under the conftest stubs.
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
-
-# ─── TEMPORARY TEST OVERRIDE (2026-08-05) — DELETE WHEN TESTING IS DONE ─────
-# While the .env line CLAN_CHAT_BRIDGE_TEST_CHANNEL=<channel_id> is present,
-# ALL bridge traffic is rerouted to that single channel and the per-group
-# opt-in gates are bypassed: every authed relayer's clan chat mirrors there,
-# and messages typed there fan out to every clan that has a present plugin.
-# Currently pointed at channel 1534554246064640172 in the test server
-# (guild 1524033258143350856).
-#
-# To disable: remove the .env line and restart droptracker-core,
-# droptracker-webhook-consumer and droptracker-api. To remove entirely:
-# delete this block and its three call sites (bridge_bound_groups,
-# bridge_channel_map, online_player_ids — all marked "TEST OVERRIDE").
-TEST_OVERRIDE_ENV = "CLAN_CHAT_BRIDGE_TEST_CHANNEL"
-TEST_OVERRIDE_ALL_CLANS = "*"
-
-
-def test_override_channel() -> str | None:
-    """The test channel id, or None when the override is off (normal mode)."""
-    return (os.getenv(TEST_OVERRIDE_ENV) or "").strip() or None
-# ─── END TEMPORARY TEST OVERRIDE ─────────────────────────────────────────────
 
 #: Game → Discord staging list (JSON entries; see push_mirror_line).
 MIRROR_LIST_KEY = "chatbridge:out"
@@ -158,25 +136,20 @@ def online_player_ids(clan_slug: str) -> list:
     if not clan_slug:
         return []
     try:
-        client = _redis()
-        # TEST OVERRIDE: "*" means every clan with a present plugin.
-        if clan_slug == TEST_OVERRIDE_ALL_CLANS:
-            keys = list(client.scan_iter(PRESENCE_KEY_TEMPLATE.format(clan_slug="*"), count=1000))
-        else:
-            keys = [PRESENCE_KEY_TEMPLATE.format(clan_slug=clan_slug)]
+        key = PRESENCE_KEY_TEMPLATE.format(clan_slug=clan_slug)
         now = time.time()
-        out: set = set()
-        for key in keys:
-            client.zremrangebyscore(key, "-inf", now - PRESENCE_KEY_TTL_SECONDS)
-            members = client.zrangebyscore(key, now - PRESENCE_FRESH_SECONDS, "+inf")
-            for member in members or []:
-                try:
-                    if isinstance(member, bytes):
-                        member = member.decode("utf-8")
-                    out.add(int(member))
-                except (TypeError, ValueError):
-                    continue
-        return sorted(out)
+        client = _redis()
+        client.zremrangebyscore(key, "-inf", now - PRESENCE_KEY_TTL_SECONDS)
+        members = client.zrangebyscore(key, now - PRESENCE_FRESH_SECONDS, "+inf")
+        out = []
+        for member in members or []:
+            try:
+                if isinstance(member, bytes):
+                    member = member.decode("utf-8")
+                out.append(int(member))
+            except (TypeError, ValueError):
+                continue
+        return out
     except Exception:
         return []
 
@@ -188,11 +161,6 @@ def bridge_bound_groups(session, relayer_player_id, clan_slug: str) -> dict:
     clan: bridge enabled + channel set + ``clan_chat_name`` matches. Same
     trust shape as broadcast binding — a line only reaches channels of groups
     the authed relayer belongs to."""
-    # TEST OVERRIDE: accept every authed relayer, route to the test channel.
-    override = test_override_channel()
-    if override:
-        return {0: override}
-
     from sqlalchemy import text as sql_text
 
     from utils import group_config as gc
@@ -225,11 +193,6 @@ def bridge_channel_map(session) -> dict:
     """``{channel_id_str: (group_id, clan_slug)}`` for every fully-configured
     bridge — the MessageCreate listener's routing table. Cached in-process for
     60s so the listener never queries per message."""
-    # TEST OVERRIDE: the test channel is the only bridge, for every clan.
-    override = test_override_channel()
-    if override:
-        return {override: (0, TEST_OVERRIDE_ALL_CLANS)}
-
     now = time.monotonic()
     if now < _channel_map_cache["expires"]:
         return _channel_map_cache["map"]

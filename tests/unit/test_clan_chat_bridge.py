@@ -98,25 +98,3 @@ def test_batch_lines_drops_incomplete_entries():
 
 def test_mirror_message_cap_constant_is_under_discord_limit():
     assert bridge.MIRROR_MESSAGE_MAX_CHARS <= 2000
-
-
-# ── TEMPORARY test-channel override (delete with the override block) ────────
-# The override short-circuits BEFORE any db/redis import, so these run pure.
-
-def test_override_off_by_default(monkeypatch):
-    monkeypatch.delenv(bridge.TEST_OVERRIDE_ENV, raising=False)
-    assert bridge.test_override_channel() is None
-    monkeypatch.setenv(bridge.TEST_OVERRIDE_ENV, "   ")
-    assert bridge.test_override_channel() is None
-
-
-def test_override_binds_any_relayer_to_the_test_channel(monkeypatch):
-    monkeypatch.setenv(bridge.TEST_OVERRIDE_ENV, "1534554246064640172")
-    assert bridge.bridge_bound_groups(None, 123, "any-clan") == {0: "1534554246064640172"}
-
-
-def test_override_routes_only_the_test_channel_for_all_clans(monkeypatch):
-    monkeypatch.setenv(bridge.TEST_OVERRIDE_ENV, "1534554246064640172")
-    assert bridge.bridge_channel_map(None) == {
-        "1534554246064640172": (0, bridge.TEST_OVERRIDE_ALL_CLANS)
-    }
