@@ -391,6 +391,18 @@ async def _maintenance(r, stop: asyncio.Event) -> None:
             if processing > _in_flight:
                 log.warning("%d entry(s) stranded in %s — reclaimed on next restart",
                             processing - _in_flight, PROCESSING_KEY)
+            # Plugin-user clan broadcasts whose grace window expired: record
+            # the chat fallback unless the subject's own submission arrived
+            # (data/submissions/clan_broadcast.py reconciliation). Runs before
+            # the connection reset so the two never interleave.
+            try:
+                from data.submissions.clan_broadcast import process_due_deferred_broadcasts
+
+                replayed = await process_due_deferred_broadcasts()
+                if replayed:
+                    log.info("Replayed %d deferred clan broadcast(s)", replayed)
+            except Exception:
+                log.debug("deferred clan-broadcast sweep failed:\n%s", traceback.format_exc())
             if _in_flight == 0:
                 from api.core import reset_db_connections
                 reset_db_connections()

@@ -153,3 +153,178 @@ def test_bound_groups_bad_floor_defaults_to_zero(monkeypatch):
         },
     )
     assert _bound_group_ids(_FakeSession([10]), _FakePlayer(), _clan_slug("Clan")) == {10: 0}
+
+
+# ── plugin-user reconciliation: defer + sweep ────────────────────────────────
+
+import asyncio
+import json
+
+from data.submissions import clan_broadcast as cb
+
+
+class _FakeRedis:
+    """Just enough of a Redis client for the deferred ZSET round-trip."""
+
+    def __init__(self):
+        self.zsets = {}
+
+    def zadd(self, key, mapping):
+        self.zsets.setdefault(key, {}).update(mapping)
+
+    def zrangebyscore(self, key, _lo, hi, start=0, num=None):
+        due = sorted(
+            (m for m, s in self.zsets.get(key, {}).items() if s <= hi),
+            key=lambda m: self.zsets[key][m],
+        )
+        return due[start: start + num if num else None]
+
+    def zrem(self, key, member):
+        return 1 if self.zsets.get(key, {}).pop(member, None) is not None else 0
+
+
+@pytest.fixture
+def fake_redis(monkeypatch):
+    fake = _FakeRedis()
+    monkeypatch.setattr(cb.redis_client, "client", fake, raising=False)
+    return fake
+
+
+def test_defer_parks_original_payload_with_grace(fake_redis, monkeypatch):
+    monkeypatch.setattr(cb, "PLUGIN_GRACE_SECONDS", 300)
+    payload = {"message": "X received a drop: Y", "_received_at": "2026-08-05 10:00:00"}
+    assert cb._defer_broadcast(payload, "main") is True
+    (member, score), = fake_redis.zsets[cb.DEFERRED_ZSET_KEY].items()
+    entry = json.loads(member)
+    assert entry["broadcast_data"] == payload
+    assert entry["world_type"] == "main"
+    # Due in the future — the sweep must not pick it up yet.
+    assert cb.process_due_deferred_broadcasts.__name__  # module sanity
+    assert score > __import__("time").time() + 200
+
+
+def test_sweep_replays_only_due_entries_with_replay_flag(fake_redis, monkeypatch):
+    monkeypatch.setattr(cb, "PLUGIN_GRACE_SECONDS", -1)  # due immediately
+    cb._defer_broadcast({"message": "due"}, "main")
+    monkeypatch.setattr(cb, "PLUGIN_GRACE_SECONDS", 3600)  # far future
+    cb._defer_broadcast({"message": "not yet"}, "main")
+
+    calls = []
+
+    async def fake_processor(broadcast_data, external_session=None, world_type="main",
+                             _deferred_replay=False):
+        calls.append((broadcast_data, world_type, _deferred_replay))
+
+    monkeypatch.setattr(cb, "clan_broadcast_processor", fake_processor)
+    replayed = asyncio.run(cb.process_due_deferred_broadcasts())
+    assert replayed == 1
+    assert calls == [({"message": "due"}, "main", True)]
+    # The undue entry is still parked.
+    assert len(fake_redis.zsets[cb.DEFERRED_ZSET_KEY]) == 1
+
+
+def test_sweep_retries_failed_replay_then_drops(fake_redis, monkeypatch):
+    monkeypatch.setattr(cb, "PLUGIN_GRACE_SECONDS", -1)
+    cb._defer_broadcast({"message": "boom"}, "main")
+
+    async def exploding_processor(*_a, **_k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(cb, "clan_broadcast_processor", exploding_processor)
+
+    for expected_attempts in (1, 2):
+        assert asyncio.run(cb.process_due_deferred_broadcasts()) == 0
+        entries = [json.loads(m) for m in fake_redis.zsets[cb.DEFERRED_ZSET_KEY]]
+        assert [e["attempts"] for e in entries] == [expected_attempts]
+        # Force the retry due now.
+        key = cb.DEFERRED_ZSET_KEY
+        fake_redis.zsets[key] = {m: 0 for m in fake_redis.zsets[key]}
+
+    # Third failure exhausts DEFERRED_MAX_ATTEMPTS — entry is dropped.
+    assert asyncio.run(cb.process_due_deferred_broadcasts()) == 0
+    assert fake_redis.zsets[cb.DEFERRED_ZSET_KEY] == {}
+
+
+def test_plugin_copy_check_matches_non_chat_drop_in_window(monkeypatch):
+    """Drops: covered iff a non-clan_chat row for player+item exists in the
+    look-back window. The query chain is faked; the assertion is on the
+    decision, not the SQL."""
+    from datetime import datetime
+
+    class _Item:
+        item_id = 999
+
+    async def fake_ensure_item(_session, _name):
+        return _Item()
+
+    monkeypatch.setattr(cb, "ensure_item_by_name", fake_ensure_item)
+    # db.models is conftest-stubbed (MagicMock columns don't support >=, and
+    # the real sqlalchemy or_() rejects MagicMock operands). The SQL itself
+    # isn't under test here — only the covered/missing decision.
+    import sqlalchemy
+
+    import db.models as dm
+
+    monkeypatch.setattr(sqlalchemy, "or_", lambda *clauses: ("or", clauses))
+
+    class _Col:
+        def __eq__(self, other):
+            return ("eq", other)
+
+        def __ne__(self, other):
+            return ("ne", other)
+
+        def __ge__(self, other):
+            return ("ge", other)
+
+        def is_(self, other):
+            return ("is", other)
+
+    class _Drop:
+        drop_id = _Col()
+        player_id = _Col()
+        item_id = _Col()
+        date_added = _Col()
+        source = _Col()
+
+    monkeypatch.setattr(dm, "Drop", _Drop)
+
+    class _Query:
+        def __init__(self, row):
+            self._row = row
+
+        def filter(self, *_a, **_k):
+            return self
+
+        def first(self):
+            return self._row
+
+    class _Session:
+        def __init__(self, row):
+            self._row = row
+
+        def query(self, *_a, **_k):
+            return _Query(self._row)
+
+    class _Subject:
+        player_id = 7
+
+    parsed = cb.parse_broadcast("Alice received a drop: Twisted bow (1,000,000 coins)")
+    stamp = datetime(2026, 8, 5, 12, 0, 0)
+    covered = asyncio.run(cb._plugin_copy_exists(_Session(("row",)), _Subject(), parsed, stamp))
+    missing = asyncio.run(cb._plugin_copy_exists(_Session(None), _Subject(), parsed, stamp))
+    assert covered is True
+    assert missing is False
+
+
+def test_plugin_copy_check_unresolvable_item_is_not_covered(monkeypatch):
+    from datetime import datetime
+
+    async def fake_ensure_item(_session, _name):
+        return None
+
+    monkeypatch.setattr(cb, "ensure_item_by_name", fake_ensure_item)
+    parsed = cb.parse_broadcast("Alice received a drop: Twisted bow")
+    assert asyncio.run(
+        cb._plugin_copy_exists(object(), object(), parsed, datetime(2026, 8, 5))
+    ) is False

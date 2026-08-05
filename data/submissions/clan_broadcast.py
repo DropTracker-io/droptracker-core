@@ -14,8 +14,15 @@ row is deliberately second-class next to a plugin submission:
   (``auto_provision_members``), whose stub-healing path then makes chat rows
   follow the player when they later install the plugin.
 - A subject whose row carries a real (non ``wom_temp_``) account hash runs the
-  plugin: their own structured submission is strictly richer, so the chat copy
-  is dropped entirely ("plugin wins") rather than deduped after the fact.
+  plugin, and their own structured submission is strictly richer — but the
+  plugin can miss a drop (client closed, plugin disabled, mobile). So instead
+  of dropping the chat copy outright, it is RECONCILED: if a matching plugin
+  submission already exists the copy is suppressed; otherwise the broadcast is
+  parked in Redis (``clanchat:deferred``) for ``PLUGIN_GRACE_SECONDS`` and
+  replayed by the webhook consumer's maintenance sweep — recorded only if the
+  plugin copy STILL hasn't arrived. The grace window is what prevents the
+  double-count race (broadcast relays beat the subject's own submission by
+  seconds routinely; both directions are covered by deciding late).
 - Rows are written ``authed=False``, ``source='clan_chat'`` — the single
   filter handle every surface can use. Events v2, group/global points and
   split credits are never fed from here (this processor simply never calls
@@ -42,7 +49,9 @@ queue redelivery must be a no-op:
 
 import asyncio
 import hashlib
-from datetime import datetime
+import json
+import time
+from datetime import datetime, timedelta
 
 # NOTE: utils.format (name normalization) is imported lazily inside the
 # functions that need it — at module scope it pulls in db/ops and closes an
@@ -97,6 +106,18 @@ GUID_BUCKET_SECONDS = 600
 #: Per-relayer ceiling. A real clan channel broadcasts nowhere near this;
 #: sustained bursts above it are a spoofing/loop signal, not gameplay.
 RELAYER_RATE_LIMIT_PER_MIN = 30
+
+#: Plugin-user reconciliation. A broadcast about a plugin user is held this
+#: long before the chat copy is recorded, giving their own (richer) submission
+#: time to arrive — it usually lags the broadcast only by image upload + queue
+#: latency, but backlogs run minutes, so the grace is generous. The look-back
+#: is wider than the grace so a plugin copy that BEAT the broadcast is found
+#: too.
+PLUGIN_GRACE_SECONDS = 300
+PLUGIN_COPY_LOOKBACK_SECONDS = 600
+DEFERRED_ZSET_KEY = "clanchat:deferred"
+DEFERRED_BATCH = 25
+DEFERRED_MAX_ATTEMPTS = 3
 
 _sentinel_npc_id = None
 
@@ -276,6 +297,127 @@ def _record_group_exclusions(session, drop_id, exclusions: dict) -> None:
         )
 
 
+async def _plugin_copy_exists(session, subject, parsed, stamp) -> bool:
+    """Did the subject's own plugin (or a manual submit) already record this?
+
+    Matching is deliberately loose — same player, same item, close in time —
+    because a broadcast line carries no guid, npc or kc to match harder on.
+    Pets and clog slots are once-per-item, so bare existence answers those.
+    Anything that isn't a ``clan_chat`` row counts as coverage.
+    """
+    item = await ensure_item_by_name(session, parsed.item_name)
+    if not item:
+        return False
+
+    if parsed.kind in ("item_drop", "raid_drop", "clue_item"):
+        from sqlalchemy import or_
+
+        from db.models import Drop
+
+        window_start = stamp - timedelta(seconds=PLUGIN_COPY_LOOKBACK_SECONDS)
+        return (
+            session.query(Drop.drop_id)
+            .filter(
+                Drop.player_id == subject.player_id,
+                Drop.item_id == item.item_id,
+                Drop.date_added >= window_start,
+                or_(Drop.source.is_(None), Drop.source != "clan_chat"),
+            )
+            .first()
+        ) is not None
+
+    if parsed.kind == "pet":
+        from db.models import PlayerPet
+
+        return (
+            session.query(PlayerPet.player_id)
+            .filter(
+                PlayerPet.player_id == subject.player_id,
+                PlayerPet.item_id == item.item_id,
+            )
+            .first()
+        ) is not None
+
+    if parsed.kind == "collection_log":
+        from db.models import CollectionLogEntry
+
+        return (
+            session.query(CollectionLogEntry.log_id)
+            .filter(
+                CollectionLogEntry.player_id == subject.player_id,
+                CollectionLogEntry.item_id == item.item_id,
+            )
+            .first()
+        ) is not None
+
+    return False
+
+
+def _defer_broadcast(broadcast_data, world_type) -> bool:
+    """Park a plugin-user broadcast for the grace window (see module docstring).
+
+    The ORIGINAL payload is stored, so the replay recomputes everything —
+    including ``received_at`` (the payload's ``_received_at`` survives the
+    round-trip) and the deterministic guid — exactly as the first pass did.
+    """
+    try:
+        entry = json.dumps(
+            {"broadcast_data": broadcast_data, "world_type": world_type, "attempts": 0}
+        )
+        redis_client.client.zadd(
+            DEFERRED_ZSET_KEY, {entry: time.time() + PLUGIN_GRACE_SECONDS}
+        )
+        return True
+    except Exception as e:
+        print(f"[ClanBroadcast] defer failed: {e}")
+        return False
+
+
+async def process_due_deferred_broadcasts(limit: int = DEFERRED_BATCH) -> int:
+    """Replay deferred plugin-user broadcasts whose grace window has expired.
+
+    Called by the webhook consumer's maintenance tick (~1/min). Each entry is
+    claimed with ZREM before processing so a concurrent sweeper can't double-
+    run it; a failed replay gets one delayed retry, then is dropped — the
+    deterministic-guid layer makes a lost entry safe to re-relay. Returns the
+    number of entries replayed.
+    """
+    try:
+        client = redis_client.client
+        due = client.zrangebyscore(
+            DEFERRED_ZSET_KEY, "-inf", time.time(), start=0, num=int(limit)
+        )
+    except Exception:
+        return 0
+    replayed = 0
+    for raw in due or []:
+        try:
+            if not client.zrem(DEFERRED_ZSET_KEY, raw):
+                continue
+        except Exception:
+            continue
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        try:
+            entry = json.loads(text)
+            await clan_broadcast_processor(
+                entry.get("broadcast_data") or {},
+                world_type=entry.get("world_type", "main"),
+                _deferred_replay=True,
+            )
+            replayed += 1
+        except Exception as e:
+            print(f"[ClanBroadcast] deferred replay failed: {e}")
+            try:
+                entry = json.loads(text)
+                attempts = int(entry.get("attempts") or 0) + 1
+                if attempts < DEFERRED_MAX_ATTEMPTS:
+                    entry["attempts"] = attempts
+                    client.zadd(DEFERRED_ZSET_KEY, {json.dumps(entry): time.time() + 60})
+            except Exception:
+                pass
+    return replayed
+
+
 def _notification_gate(group_id, group_config_values, unit_value, total_value):
     """Mirror drop_processor's per-group announce criteria."""
     from utils import group_config as gc
@@ -289,8 +431,16 @@ def _notification_gate(group_id, group_config_values, unit_value, total_value):
     return int(unit_value) >= min_value or (send_stacks and int(total_value) > min_value)
 
 
-async def clan_broadcast_processor(broadcast_data, external_session=None, world_type="main"):
-    """Process one relayed clan broadcast line. See module docstring."""
+async def clan_broadcast_processor(
+    broadcast_data, external_session=None, world_type="main", _deferred_replay=False
+):
+    """Process one relayed clan broadcast line. See module docstring.
+
+    ``_deferred_replay=True`` marks the second pass of the plugin-user
+    reconciliation (process_due_deferred_broadcasts): the multi-relayer
+    dedupe and rate limit were already paid on the first pass and are
+    skipped, and the plugin-user branch records instead of deferring again.
+    """
 
     session, use_external_session = select_session_and_flag(external_session)
 
@@ -326,7 +476,7 @@ async def clan_broadcast_processor(broadcast_data, external_session=None, world_
     if not relayer or not user_exists or not authed:
         _stat("relayer_auth_failed")
         return SubmissionResponse(False, "Relayer failed auth check")
-    if not _relayer_within_rate_limit(relayer.player_id):
+    if not _deferred_replay and not _relayer_within_rate_limit(relayer.player_id):
         _stat("rate_limited")
         return SubmissionResponse(False, "Clan broadcast rate limit exceeded")
 
@@ -343,10 +493,13 @@ async def clan_broadcast_processor(broadcast_data, external_session=None, world_
         )
 
     # Layer-1 dedupe: collapse the same line arriving from several relayers.
-    seen_key = f"clanchat:seen:{clan_slug}:{hashlib.sha256(message.encode('utf-8')).hexdigest()[:24]}"
-    if not _bundle_is_new(seen_key, RELAY_SEEN_TTL_SECONDS):
-        _stat("duplicate_relay")
-        return SubmissionResponse(True, "Broadcast already relayed by another clanmate")
+    # Skipped on deferred replay — the first pass already claimed the line
+    # (and marked this key) before parking it.
+    if not _deferred_replay:
+        seen_key = f"clanchat:seen:{clan_slug}:{hashlib.sha256(message.encode('utf-8')).hexdigest()[:24]}"
+        if not _bundle_is_new(seen_key, RELAY_SEEN_TTL_SECONDS):
+            _stat("duplicate_relay")
+            return SubmissionResponse(True, "Broadcast already relayed by another clanmate")
 
     subject, subject_group_ids = _find_subject_in_groups(
         session, str(parsed.player).strip(), list(bound_groups)
@@ -358,13 +511,37 @@ async def clan_broadcast_processor(broadcast_data, external_session=None, world_
             f"'{parsed.player}' is not on the roster of a bound group — "
             "chat tracking never creates players; run a WOM member sync",
         )
-    if subject.account_hash and not _is_temp_account_hash(subject.account_hash):
-        # Plugin wins: their own structured submission carries exact item ids,
-        # KC, screenshots. Recording the chat echo would double-count.
-        _stat("suppressed_plugin_user")
-        return SubmissionResponse(True, f"{subject.player_name} uses the plugin; chat copy ignored")
-
     stamp = received_at(broadcast_data)
+
+    if subject.account_hash and not _is_temp_account_hash(subject.account_hash):
+        # Plugin-user reconciliation. Their own structured submission is
+        # strictly richer, so it wins whenever it exists — but the plugin can
+        # miss a drop (client closed, plugin off, mobile), so the chat copy is
+        # a fallback, decided AFTER the grace window instead of never.
+        if await _plugin_copy_exists(session, subject, parsed, stamp):
+            _stat("suppressed_plugin_covered")
+            return SubmissionResponse(
+                True, f"{subject.player_name}'s own submission covers this; chat copy ignored"
+            )
+        if not _deferred_replay:
+            if _defer_broadcast(broadcast_data, world_type):
+                _stat("deferred_plugin_user")
+                return SubmissionResponse(
+                    True,
+                    f"{subject.player_name} uses the plugin; chat copy deferred "
+                    f"{PLUGIN_GRACE_SECONDS}s pending their own submission",
+                )
+            # Redis defer unavailable: keep the conservative pre-reconciliation
+            # behaviour — suppressing risks a missed record, recording risks a
+            # double-count, and only one of those is self-healing.
+            _stat("suppressed_plugin_user")
+            return SubmissionResponse(
+                True, f"{subject.player_name} uses the plugin; chat copy ignored"
+            )
+        # Grace expired and still no plugin copy: the plugin missed it —
+        # record the chat fallback below.
+        _stat("recovered_plugin_gap")
+
     cc_guid = _deterministic_guid(clan_slug, message, stamp)
     await asyncio.sleep(0)
 
