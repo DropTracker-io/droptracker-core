@@ -72,6 +72,7 @@ WATCHED_UNITS = [
     ("droptracker-hof", "Hall of Fame bot"),
     ("droptracker-heartbeat", "Heartbeat bot"),
     ("droptracker-video-worker", "Video worker"),
+    ("droptracker-adminbot", "Admin/KB bot"),
 ]
 
 # The ports that actually serve players. A unit can be "active" while its
