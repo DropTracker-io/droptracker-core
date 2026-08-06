@@ -599,6 +599,39 @@ class NotificationService:
         except Exception:
             return False, ""
 
+    def _resolve_group_channel_id(self, db_session, group_id, primary_key,
+                                  fallback_key='channel_id_to_post_loot'):
+        """Resolve the channel a per-type notification should be sent to.
+
+        Returns the dedicated channel id when the group has one configured,
+        otherwise the fallback (drops) channel, otherwise "". A value is
+        configured when it is non-empty and not the legacy "0" unset
+        sentinel.
+
+        This MUST agree with GROUP_CHANNEL_NOTIFICATION_KEYS /
+        group_has_notification_channel in data/submissions/common.py, which
+        gates enqueueing on the same key pair. When the two disagree the
+        notification is queued as deliverable and then dropped here with
+        "No channel configured" — which is exactly how clog notifications
+        were lost for groups that had a drops channel but no clog channel.
+        """
+        keys = [primary_key]
+        if fallback_key and fallback_key != primary_key:
+            keys.append(fallback_key)
+        rows = db_session.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == group_id,
+            GroupConfiguration.config_key.in_(keys),
+        ).all()
+        by_key = {row.config_key: row for row in rows}
+        for key in keys:
+            row = by_key.get(key)
+            if row is None:
+                continue
+            value = str(row.config_value or "").strip()
+            if value and value != "0":
+                return value
+        return ""
+
     async def _fetch_sendable_channel(self, channel_id):
         """Fetch a Discord channel and verify it can actually receive messages.
 
@@ -3256,11 +3289,11 @@ class NotificationService:
             group_id = notification.group_id
             player_id = notification.player_id
             
-            # Get channel ID for this group
-            channel_id_config = db_session.query(GroupConfiguration).filter(
-                GroupConfiguration.group_id == group_id,
-                GroupConfiguration.config_key == 'channel_id_to_post_pb'
-            ).first()
+            # Dedicated PB channel, falling back to the loot channel (the
+            # config editor documents this fallback).
+            channel_id = self._resolve_group_channel_id(
+                db_session, group_id, 'channel_id_to_post_pb'
+            )
             pb_id = data.get('pb_id', None)
             if pb_id:
                 existing_notification = db_session.query(NotifiedSubmission).filter(
@@ -3271,32 +3304,14 @@ class NotificationService:
                 if existing_notification:
                     print(f"PB was already notified... Skipping")
                     return
-            
-            
-            if not channel_id_config:
+
+            if not channel_id:
                 notification.status = 'failed'
                 notification.error_message = f"No channel configured for group {group_id}"
                 db_session.commit()
                 return
-            
-            channel = None
-            channel_error = None
-            channel_id = channel_id_config.config_value
-            if channel_id != "":
-                channel, channel_error = await self._fetch_sendable_channel(channel_id)
-            else:
-                channel_id_config = db_session.query(GroupConfiguration).filter(
-                GroupConfiguration.group_id == group_id,
-                GroupConfiguration.config_key == 'channel_id_to_post_loot'
-                ).first()
-                if channel_id_config:
-                    channel_id = channel_id_config.config_value
-                    channel, channel_error = await self._fetch_sendable_channel(channel_id)
-                else:
-                    notification.status = 'failed'
-                    notification.error_message = f"No channel configured for group {group_id}"
-                    db_session.commit()
-                    return
+
+            channel, channel_error = await self._fetch_sendable_channel(channel_id)
             if channel is None:
                 notification.status = 'failed'
                 notification.error_message = channel_error or f"Channel not found for group {group_id}"
@@ -3570,18 +3585,17 @@ class NotificationService:
             player_id = notification.player_id
             #print("Got raw CA data:", data)
             
-            # Get channel ID for this group
-            channel_id_config = db_session.query(GroupConfiguration).filter(
-                GroupConfiguration.group_id == group_id,
-                GroupConfiguration.config_key == 'channel_id_to_post_ca'
-            ).first()
-            
-            if not channel_id_config:
+            # Dedicated CA channel, falling back to the loot channel (the
+            # config editor documents this fallback).
+            channel_id = self._resolve_group_channel_id(
+                db_session, group_id, 'channel_id_to_post_ca'
+            )
+            if not channel_id:
                 notification.status = 'failed'
                 notification.error_message = f"No channel configured for group {group_id}"
                 db_session.commit()
                 return
-            
+
             ca_id = data.get('ca_id', None)
             if ca_id:
                 existing_notification = db_session.query(NotifiedSubmission).filter(
@@ -3592,25 +3606,8 @@ class NotificationService:
                 if existing_notification:
                     print(f"CA was already notified... Skipping")
                     return
-            
-            channel = None
-            channel_error = None
-            channel_id = channel_id_config.config_value
-            if channel_id != "":
-                channel, channel_error = await self._fetch_sendable_channel(channel_id)
-            else:
-                channel_id_config = db_session.query(GroupConfiguration).filter(
-                GroupConfiguration.group_id == group_id,
-                GroupConfiguration.config_key == 'channel_id_to_post_loot'
-                ).first()
-                if channel_id_config:
-                    channel_id = channel_id_config.config_value
-                    channel, channel_error = await self._fetch_sendable_channel(channel_id)
-                else:
-                    notification.status = 'failed'
-                    notification.error_message = f"No channel configured for group {group_id}"
-                    db_session.commit()
-                    return
+
+            channel, channel_error = await self._fetch_sendable_channel(channel_id)
             if channel is None:
                 notification.status = 'failed'
                 notification.error_message = channel_error or f"Channel not found for group {group_id}"
@@ -3744,19 +3741,18 @@ class NotificationService:
             group_id = notification.group_id
             player_id = notification.player_id
             #print(f"Found a collection log notification to send in {group_id}")
-            
-            # Get channel ID for this group
-            channel_id_config = db_session.query(GroupConfiguration).filter(
-                GroupConfiguration.group_id == group_id,
-                GroupConfiguration.config_key == 'channel_id_to_post_clog'
-            ).first()
-            #print(f"Found a channel id config for {group_id}")
-            if not channel_id_config or not channel_id_config.config_value:
+
+            # Dedicated collection-log channel, falling back to the loot
+            # channel (the config editor documents this fallback).
+            channel_id = self._resolve_group_channel_id(
+                db_session, group_id, 'channel_id_to_post_clog'
+            )
+            if not channel_id:
                 notification.status = 'failed'
                 notification.error_message = f"No channel configured for group {group_id}"
                 db_session.commit()
                 return
-            
+
             clog_id = data.get('clog_id', data.get('log_id', None))
             if clog_id:
         
@@ -3768,25 +3764,7 @@ class NotificationService:
                 if existing_notification:
                     print(f"Drop was already notified... Skipping")
                     return
-            channel = None
-            channel_error = None
-            channel_id = channel_id_config.config_value
-            if channel_id and channel_id != "" and len(str(channel_id)) > 10:
-                channel, channel_error = await self._fetch_sendable_channel(channel_id)
-            else:
-                channel_id_config = db_session.query(GroupConfiguration).filter(
-                GroupConfiguration.group_id == group_id,
-                GroupConfiguration.config_key == 'channel_id_to_post_loot'
-                ).first()
-                if channel_id_config:
-                    channel_id = channel_id_config.config_value
-                    channel, channel_error = await self._fetch_sendable_channel(channel_id)
-                else:
-                    #print(f"Invalid channel id: {channel_id}")
-                    notification.status = 'failed'
-                    notification.error_message = f"Invalid channel id: {channel_id}"
-                    db_session.commit()
-                    return
+            channel, channel_error = await self._fetch_sendable_channel(channel_id)
             if not channel:
                 #print(f"Channel not found for group {group_id} (id was passed as {channel_id})")
                 notification.status = 'failed'
