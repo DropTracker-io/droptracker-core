@@ -164,6 +164,10 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # authed=False / source='clan_chat' and never feed events, points or splits.
     {"key": "clan_broadcast_tracking", "type": "boolean", "default": False},
     {"key": "clan_broadcast_min_value", "type": "int", "default": 0, "min": 0},
+    # Relayed broadcasts can never carry a screenshot, so only_send_messages_
+    # with_images would otherwise record chat rows and notify nothing. Default
+    # True: opting into tracking opts into its imageless notifications.
+    {"key": "clan_broadcast_notify_without_images", "type": "boolean", "default": True},
     # --- Clan chat bridge (two-way game ↔ Discord chat sync) ---
     # services/clan_chat_bridge.py + data/submissions/clan_chat.py. Requires
     # clan_chat_name; one toggle drives both directions (game lines mirrored

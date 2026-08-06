@@ -96,9 +96,18 @@ db = DatabaseOperations()
 TRACKING_KEY = "clan_broadcast_tracking"
 MIN_VALUE_KEY = "clan_broadcast_min_value"
 CLAN_NAME_KEY = "clan_chat_name"
+#: Escape hatch from the images-only gate. ``only_send_messages_with_images``
+#: is aimed at plugin submissions, which CAN carry a screenshot; a relayed
+#: broadcast never can, so that setting alone left a group recording chat rows
+#: and notifying nothing — the tracking feature silently half-dead. Defaults ON
+#: (opting into tracking is opting into imageless notifications from it); a
+#: group that would rather have silence than an imageless embed turns it off.
+NOTIFY_WITHOUT_IMAGES_KEY = "clan_broadcast_notify_without_images"
 
-#: Sentinel npc_list row chat drops attach to: broadcast text names no NPC,
-#: and inventing one per item would pollute real drop-source leaderboards.
+#: Fallback npc_list row for chat drops whose line names no resolvable source
+#: (untradeables, wordings without a "from X" clause, novel/garbled names).
+#: Chat text must never mint an npc_list row, and inventing one per item would
+#: pollute real drop-source leaderboards.
 SENTINEL_NPC_NAME = "Clan Broadcast"
 
 #: Seconds two relays of the same line are collapsed for. Longer than
@@ -317,12 +326,18 @@ def _pb_time_to_ms(time_text) -> int:
 
 
 def _resolve_pb_npc(session, activity):
-    """PB activity text → ``(npc_id, canonical_name)`` or ``(None, None)``.
+    """PB activity text → ``(npc_id, canonical_name)``; see :func:`_resolve_npc`."""
+    return _resolve_npc(session, activity)
+
+
+def _resolve_npc(session, name_text):
+    """Broadcast NPC/activity text → ``(npc_id, canonical_name)`` or ``(None, None)``.
 
     Resolve-only, deliberately: unlike ``ensure_npc_id_for_player`` this NEVER
-    mints an npc_list row — a garbled or novel activity string from chat
-    skips the PB rather than polluting the boss list. Same canonicalization +
-    variant-slug matching the plugin path uses, so both paths land on one row.
+    mints an npc_list row — a garbled or novel name from chat skips (PBs) or
+    falls back to the sentinel (drops) rather than polluting the boss list.
+    Same canonicalization + variant-slug matching the plugin path uses, so both
+    paths land on one row.
     """
     from sqlalchemy import bindparam
     from sqlalchemy import text as sql_text
@@ -336,7 +351,7 @@ def _resolve_pb_npc(session, activity):
         npc_slug_sql_expr,
     )
 
-    name = canonical_encounter_name(clean_broadcast_text(activity))
+    name = canonical_encounter_name(clean_broadcast_text(name_text))
     if not name:
         return None, None
     row = (
@@ -548,6 +563,24 @@ def _mirror_to_bridge(session, relayer, clan_slug: str, message: str, deferred_r
         return 0
 
 
+async def _images_gate_blocks(session, group_id) -> bool:
+    """Whether this group's images-only setting suppresses a chat notification.
+
+    Only bites when the group ALSO turned :data:`NOTIFY_WITHOUT_IMAGES_KEY`
+    off — see that constant. Governs every broadcast kind so drops, PBs, pets
+    and clog slots behave the same way; before the key existed drops and PBs
+    were gated while pets and clogs notified regardless.
+    """
+    if not await screenshot_required(session, group_id):
+        return False
+    from utils import group_config as gc
+
+    if gc.is_truthy(gc.get(session, group_id, NOTIFY_WITHOUT_IMAGES_KEY, "1")):
+        return False
+    _stat("notify_blocked_images")
+    return True
+
+
 def _notification_gate(group_id, group_config_values, unit_value, total_value):
     """Mirror drop_processor's per-group announce criteria."""
     from utils import group_config as gc
@@ -749,9 +782,19 @@ async def _process_chat_drop(
         _stat("below_min_value")
         return SubmissionResponse(True, "Drop below every bound group's clan broadcast minimum")
 
-    npc_id = await _ensure_sentinel_npc_id(session)
+    # Attribute to the source the line named ("... from Alchemical Hydra") when
+    # it resolves to a real npc_list row; the sentinel covers the rest —
+    # untradeables and wordings that print no source, and novel/garbled names,
+    # which must never mint a boss row from chat text.
+    npc_id, npc_name = _resolve_npc(session, parsed.extra.get("source"))
     if npc_id is None:
-        return SubmissionResponse(False, "Sentinel NPC row unavailable")
+        npc_id = await _ensure_sentinel_npc_id(session)
+        npc_name = SENTINEL_NPC_NAME
+        _stat("drop_npc_sentinel")
+        if npc_id is None:
+            return SubmissionResponse(False, "Sentinel NPC row unavailable")
+    else:
+        _stat("drop_npc_resolved")
 
     drop = await db.create_drop_object(
         item_id=item.item_id,
@@ -808,7 +851,7 @@ async def _process_chat_drop(
     try:
         redis_updates.add_to_player(
             subject, drop, world_type="main",
-            item_name=parsed.item_name, npc_name=SENTINEL_NPC_NAME,
+            item_name=parsed.item_name, npc_name=npc_name,
             exclude_group_ids=set(exclusions),
         )
     except Exception as e:
@@ -825,15 +868,13 @@ async def _process_chat_drop(
     for gid in sorted(qualifying):
         if not _notification_gate(gid, group_config_values, unit_value, total_value):
             continue
-        if await screenshot_required(session, gid):
-            # Chat relays never carry screenshots; a group demanding images
-            # gets silence, not an imageless embed.
+        if await _images_gate_blocks(session, gid):
             continue
         notification_data = {
             "drop_id": drop.drop_id,
             "guid": cc_guid,
             "item_name": parsed.item_name,
-            "npc_name": SENTINEL_NPC_NAME,
+            "npc_name": npc_name,
             "value": unit_value,
             "quantity": parsed.quantity,
             "total_value": total_value,
@@ -862,7 +903,8 @@ async def _process_chat_drop(
 
     debug_print(
         f"[ClanBroadcast] Recorded {parsed.item_name} x{parsed.quantity} "
-        f"({total_value} gp) for {subject.player_name} via {clean_broadcast_text(clan_name)}; "
+        f"({total_value} gp) from {npc_name} for {subject.player_name} "
+        f"via {clean_broadcast_text(clan_name)}; "
         f"groups={sorted(qualifying)} notified={notified}"
     )
     return SubmissionResponse(True, f"Recorded chat drop for {subject.player_name}")
@@ -982,7 +1024,7 @@ async def _process_chat_pb(
     for gid in sorted(set(subject_group_ids)):
         if not gc.is_truthy(bulk.get((gid, "notify_pbs"))):
             continue
-        if await screenshot_required(session, gid):
+        if await _images_gate_blocks(session, gid):
             continue
         notification_data = {
             "player_name": subject.player_name,
@@ -1071,6 +1113,8 @@ async def _process_chat_pet(
     source = skilling_pet_source(parsed.item_name)
     notified = 0
     for gid in sorted(set(subject_group_ids)):
+        if await _images_gate_blocks(session, gid):
+            continue
         notification_data = {
             "group_id": gid,
             "player_name": subject.player_name,
@@ -1125,6 +1169,8 @@ async def _process_chat_clog(
     _stat("clogs_notified")
     notified = 0
     for gid in sorted(set(subject_group_ids)):
+        if await _images_gate_blocks(session, gid):
+            continue
         notification_data = {
             "player_name": subject.player_name,
             "player_id": subject.player_id,

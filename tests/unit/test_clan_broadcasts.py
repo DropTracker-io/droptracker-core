@@ -68,6 +68,40 @@ def test_item_drop_with_ironman_icon_prefix():
     assert parsed.item_name == "Magic seed"
 
 
+def test_item_drop_names_its_source():
+    """The live wording (2026-08-06): value, then "from <NPC>". Before this was
+    handled the whole tail landed in item_name and the drop was lost."""
+    parsed = parse_broadcast(
+        "Hydra Hunter received a drop: Hydra's claw (48,810,952 coins) from Alchemical Hydra."
+    )
+    assert parsed.kind == "item_drop"
+    assert parsed.item_name == "Hydra's claw"
+    assert parsed.value_gp == 48810952
+    assert parsed.extra["source"] == "Alchemical Hydra"
+
+
+def test_item_drop_source_without_a_value():
+    parsed = parse_broadcast("Bandos Fan received a drop: Bandos hilt from General Graardor.")
+    assert parsed.item_name == "Bandos hilt"
+    assert parsed.value_gp is None
+    assert parsed.extra["source"] == "General Graardor"
+
+
+def test_item_drop_source_with_quantity_and_parenthesized_name():
+    parsed = parse_broadcast(
+        "Slayer Main received a drop: 2 x Black mask (10) (2,400,000 coins) from Cave horror."
+    )
+    assert parsed.quantity == 2
+    assert parsed.item_name == "Black mask (10)"
+    assert parsed.value_gp == 2400000
+    assert parsed.extra["source"] == "Cave horror"
+
+
+def test_item_drop_without_a_source_reports_none():
+    parsed = parse_broadcast("Zuk Enjoyer received a drop: Infernal cape.")
+    assert parsed.extra.get("source") is None
+
+
 # --- raid_drop / clue_item -------------------------------------------------
 
 def test_raid_drop_has_no_value_in_text():
@@ -89,6 +123,17 @@ def test_clue_item_without_value():
     assert parsed.kind == "clue_item"
     assert parsed.item_name == "3rd age full helmet"
     assert parsed.value_gp is None
+
+
+def test_clue_item_tolerates_a_source_clause():
+    """Unverified wording, carried defensively: if Jagex ever prints a source
+    for clue items, the item must not absorb it (that loses the broadcast)."""
+    parsed = parse_broadcast(
+        "Clue Solver received a clue item: Ranger boots (36,460,467 coins) from a hard clue scroll."
+    )
+    assert parsed.item_name == "Ranger boots"
+    assert parsed.value_gp == 36460467
+    assert parsed.extra["source"] == "a hard clue scroll"
 
 
 # --- pet -------------------------------------------------------------------

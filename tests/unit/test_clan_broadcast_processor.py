@@ -409,6 +409,70 @@ def test_pb_coverage_requires_equal_or_faster_stored_time(monkeypatch):
     assert asyncio.run(cb._plugin_copy_exists(_Session(("row",)), _Subject(), parsed, stamp)) is False
 
 
+# ── drop source attribution (resolve-only, sentinel fallback) ────────────────
+
+def test_resolve_npc_matches_the_named_source():
+    class _Query:
+        def __init__(self, row):
+            self._row = row
+
+        def filter(self, *_a):
+            return self
+
+        def first(self):
+            return self._row
+
+    class _Session:
+        def __init__(self, row):
+            self._row = row
+
+        def query(self, *_a):
+            return _Query(self._row)
+
+    assert cb._resolve_npc(_Session((8615, "Alchemical Hydra")), "Alchemical Hydra") == (
+        8615, "Alchemical Hydra"
+    )
+
+
+def test_resolve_npc_without_a_source_never_queries():
+    """Untradeables and source-less wordings fall through to the sentinel
+    before any DB work — a None session would raise if they didn't."""
+    assert cb._resolve_npc(None, None) == (None, None)
+    assert cb._resolve_npc(None, "") == (None, None)
+
+
+# ── images-only gate vs a source that can never have an image ───────────────
+
+def _images_gate(monkeypatch, images_only, override=None):
+    async def fake_required(_session, _gid):
+        return images_only
+
+    from utils import group_config as gc
+
+    monkeypatch.setattr(cb, "screenshot_required", fake_required)
+    monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        gc, "get",
+        lambda _s, _g, _k, default=None: default if override is None else override,
+    )
+    return asyncio.run(cb._images_gate_blocks(object(), 7))
+
+
+def test_images_gate_is_moot_without_the_images_only_setting(monkeypatch):
+    assert _images_gate(monkeypatch, images_only=False) is False
+
+
+def test_images_gate_defaults_to_notifying_anyway(monkeypatch):
+    """Key unset = notify: a relayed broadcast can never carry a screenshot, so
+    honouring images-only here would silently void clan broadcast tracking."""
+    assert _images_gate(monkeypatch, images_only=True) is False
+
+
+def test_images_gate_blocks_only_when_the_group_opts_out(monkeypatch):
+    assert _images_gate(monkeypatch, images_only=True, override="0") is True
+    assert _images_gate(monkeypatch, images_only=True, override="1") is False
+
+
 # ── chat-bridge mirror: independent of every tracking decision ───────────────
 
 class _MirrorSpy:

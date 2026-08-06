@@ -120,21 +120,33 @@ def _int(raw, default=1) -> int:
 # terminated by the literal verb phrase cannot over-capture. Trailing periods
 # are optional everywhere: Jagex is inconsistent across broadcast kinds.
 
+# Drops name their source after the coin figure ("... received a drop: Hydra's
+# claw (48,810,952 coins) from Alchemical Hydra."). Both clauses are optional
+# and independently so — untradeables print no value, and some wordings print
+# no source — but the suffix is NOT optional to handle: without it the lazy
+# item group swallows "(48,810,952 coins) from Alchemical Hydra" whole, the
+# item fails to resolve and the whole broadcast is dropped on the floor. The
+# source is captured so the drop can attach to the real npc_list row.
 _ITEM_DROP_RE = re.compile(
     r"^(?P<player>.+?) received a drop: "
     r"(?:(?P<quantity>[\d,]+) x )?"
     r"(?P<item>.+?)"
-    r"(?: \((?P<value>[\d,]+) coins\))?\.?$"
+    r"(?: \((?P<value>[\d,]+) coins\))?"
+    r"(?: from (?P<source>.+?))?\.?$"
 )
 
 _RAID_DROP_RE = re.compile(
     r"^(?P<player>.+?) received special loot from a raid: (?P<item>.+?)\.?$"
 )
 
+# Same optional source clause as drops: unverified for clue items (no such
+# line has been seen in the wild yet), carried defensively because the failure
+# mode if Jagex prints one is silent loss of the whole broadcast.
 _CLUE_ITEM_RE = re.compile(
     r"^(?P<player>.+?) received a clue item: "
     r"(?P<item>.+?)"
-    r"(?: \((?P<value>[\d,]+) coins\))?\.?$"
+    r"(?: \((?P<value>[\d,]+) coins\))?"
+    r"(?: from (?P<source>.+?))?\.?$"
 )
 
 _CLOG_RE = re.compile(
@@ -157,6 +169,15 @@ _PET_RE = re.compile(
 )
 
 
+def _source_extra(m) -> dict:
+    """``{"source": name}`` when the line named where the loot came from."""
+    try:
+        source = (m["source"] or "").strip()
+    except IndexError:
+        return {}
+    return {"source": source} if source else {}
+
+
 def _item_drop(m) -> ParsedBroadcast:
     return ParsedBroadcast(
         kind="item_drop",
@@ -164,6 +185,7 @@ def _item_drop(m) -> ParsedBroadcast:
         item_name=m["item"],
         quantity=_int(m["quantity"]),
         value_gp=_gp(m["value"]),
+        extra=_source_extra(m),
     )
 
 
@@ -177,6 +199,7 @@ def _clue_item(m) -> ParsedBroadcast:
         player=m["player"],
         item_name=m["item"],
         value_gp=_gp(m["value"]),
+        extra=_source_extra(m),
     )
 
 
