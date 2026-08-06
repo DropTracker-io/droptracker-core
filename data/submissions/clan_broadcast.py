@@ -40,9 +40,11 @@ This intake ALSO owns the broadcast half of the two-way chat bridge. ``CLAN_MESS
 lines reach the server only as ``clan_broadcast`` payloads, but in game they sit
 in the same chat box as player speech, so ``_mirror_to_bridge`` stages the raw
 line for the group's bridge channel (``services/clan_chat_bridge``) right after
-relayer auth — ahead of the parse, the tracked-kind filter, the tracking group
-binding and any record or notification, none of which the mirror depends on.
-Bridge and tracking are independent opt-ins; a group may run either alone.
+relayer auth — ahead of the tracked-kind filter, the tracking group binding and
+any record or notification, none of which the mirror depends on. Bridge and
+tracking are independent opt-ins; a group may run either alone. The parse runs
+first only so ``MIRROR_SUPPRESSED_KINDS`` can drop channel-presence churn;
+anything else, including a line that fails to parse at all, still mirrors.
 
 Dedupe is three-layered, because N clanmates may relay the same line and
 queue redelivery must be a no-op:
@@ -103,6 +105,14 @@ CLAN_NAME_KEY = "clan_chat_name"
 #: (opting into tracking is opting into imageless notifications from it); a
 #: group that would rather have silence than an imageless embed turns it off.
 NOTIFY_WITHOUT_IMAGES_KEY = "clan_broadcast_notify_without_images"
+
+#: Broadcast kinds NOT worth mirroring into the bridge channel. Clan-channel
+#: presence churn ("X has joined." / "X has left.") is the overwhelming majority
+#: of a busy clan's broadcast volume — 95 of 101 lines on a sample day — and
+#: carries nothing a Discord reader wants; in game it is a one-line status blip,
+#: in a mirror channel it is a wall. Membership changes (invite, left_clan,
+#: expelled) are rare and meaningful, so they still sync.
+MIRROR_SUPPRESSED_KINDS = frozenset({"presence"})
 
 #: Fallback npc_list row for chat drops whose line names no resolvable source
 #: (untradeables, wordings without a "from X" clause, novel/garbled names).
@@ -532,20 +542,29 @@ async def process_due_deferred_broadcasts(limit: int = DEFERRED_BATCH) -> int:
     return replayed
 
 
-def _mirror_to_bridge(session, relayer, clan_slug: str, message: str, deferred_replay: bool) -> int:
+def _mirror_to_bridge(
+    session, relayer, clan_slug: str, message: str, parsed, deferred_replay: bool
+) -> int:
     """Mirror the raw broadcast line into the clan's two-way bridge channels.
 
     Independent of everything the tracking half decides: the bridge channel is
     a SYNCED view of the in-game clan chat box, which shows broadcasts next to
-    player speech, so the line goes out whether or not it parses, is a tracked
-    kind, belongs to an opted-in group or produces a record and a notification.
-    The two features are separate opt-ins (``clan_chat_bridge_enabled`` +
-    channel vs ``clan_broadcast_tracking``) and either can be on alone.
+    player speech, so the line goes out whether or not it is a tracked kind,
+    belongs to an opted-in group or produces a record and a notification. The
+    two features are separate opt-ins (``clan_chat_bridge_enabled`` + channel
+    vs ``clan_broadcast_tracking``) and either can be on alone.
+
+    The one thing that stops a line is :data:`MIRROR_SUPPRESSED_KINDS`. That is
+    a deny-list rather than a whitelist on purpose: an unrecognized line still
+    mirrors, so a Jagex rewording can never silently stop the chat sync.
 
     Deferred replays (the plugin-user grace window) skip it — their first pass
     already mirrored the line, minutes earlier. Returns channels staged.
     """
     if deferred_replay:
+        return 0
+    if parsed is not None and parsed.kind in MIRROR_SUPPRESSED_KINDS:
+        _stat("bridge_suppressed_kind")
         return 0
     try:
         from services.clan_chat_bridge import mirror_broadcast_line, relayer_within_rate_limit
@@ -638,10 +657,10 @@ async def clan_broadcast_processor(
     if not clan_slug:
         return SubmissionResponse(False, "Missing clan name")
 
-    mirrored = _mirror_to_bridge(session, relayer, clan_slug, message, _deferred_replay)
+    parsed = parse_broadcast(message)
+    mirrored = _mirror_to_bridge(session, relayer, clan_slug, message, parsed, _deferred_replay)
     mirror_note = f" (mirrored to {mirrored} bridge channel(s))" if mirrored else ""
 
-    parsed = parse_broadcast(message)
     if parsed is None:
         _stat("unparsed")
         _log_unknown_broadcast(message)

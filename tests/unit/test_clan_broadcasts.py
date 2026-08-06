@@ -217,6 +217,9 @@ def test_collection_log_with_trailing_period():
             "Victor Locke",
         ),
         ("Quitter has left the clan.", "left_clan", "Quitter"),
+        ("Goldens Acc has joined.", "presence", "Goldens Acc"),
+        ("HerbRager has left.", "presence", "HerbRager"),
+        ("Channel Tail has joined the clan channel.", "presence", "Channel Tail"),
         ("Main Dangler has been defeated by Koishi Fumo in The Wilderness.", "pk", "Main Dangler"),
         (
             "Generous One has deposited 5,000,000 coins into the coffer.",
@@ -251,6 +254,18 @@ def test_expelled_extracts_the_expelled_player():
     parsed = parse_broadcast("Strict Mod has expelled Rule Breaker from the clan.")
     assert parsed.kind == "expelled"
     assert parsed.player == "Rule Breaker"
+
+
+def test_presence_does_not_swallow_membership_departures():
+    """"has left." is a channel logout; "has left the clan." is a departure.
+    Presence is the noisy one the bridge drops, so the two must never merge."""
+    assert parse_broadcast("Quitter has left the clan.").kind == "left_clan"
+    assert parse_broadcast("Quitter has left.").kind == "presence"
+
+
+def test_presence_records_its_direction():
+    assert parse_broadcast("Logger On has joined.").extra["direction"] == "joined"
+    assert parse_broadcast("Logger Off has left.").extra["direction"] == "left"
 
 
 def test_raid_pb_carries_bracket_activity_and_time():

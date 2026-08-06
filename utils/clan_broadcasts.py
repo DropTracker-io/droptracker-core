@@ -256,6 +256,15 @@ _INVITE_RE = re.compile(
     r"^(?P<player>.+?) has been invited into the clan by (?P<inviter>.+?)\.?$"
 )
 _LEFT_RE = re.compile(r"^(?P<player>.+?) has left the clan\.?$")
+#: Clan-channel presence churn — a member logging in or out of the channel, NOT
+#: joining or leaving the clan (_INVITE_RE / _LEFT_RE cover membership). By far
+#: the highest-volume broadcast there is: 95 of 101 lines on a sample day, which
+#: is why they used to dominate the unknown-shape bucket. The optional
+#: "the [clan] channel" tail is defensive; the wild wording stops at the verb.
+_PRESENCE_RE = re.compile(
+    r"^(?P<player>.+?) has (?P<direction>joined|left)"
+    r"(?: the (?:clan )?channel)?\.?$"
+)
 _EXPELLED_RE = re.compile(
     r"^(?P<mod>.+?) has expelled (?P<player>.+?) from the clan\.?$"
 )
@@ -315,10 +324,17 @@ def _coffer(m) -> ParsedBroadcast:
     return ParsedBroadcast(kind=kind, player=m["player"], value_gp=_gp(m["value"]))
 
 
+def _presence(m) -> ParsedBroadcast:
+    return ParsedBroadcast(
+        kind="presence", player=m["player"], extra={"direction": m["direction"]}
+    )
+
+
 # Order matters only where prefixes overlap: the more specific "clue item" /
 # "collection log" / "special loot" phrasings never collide with the generic
 # "received a drop", so this is documentation more than necessity. PK-loss is
-# last of the "has been" family so invite/expelled win first.
+# last of the "has been" family so invite/expelled win first, and presence sits
+# after _LEFT_RE so "has left the clan." stays a membership departure.
 _MATCHERS = (
     (_ITEM_DROP_RE, _item_drop),
     (_RAID_DROP_RE, _raid_drop),
@@ -334,6 +350,7 @@ _MATCHERS = (
     (_INVITE_RE, _classified("invite")),
     (_EXPELLED_RE, _classified("expelled", player_group="player")),
     (_LEFT_RE, _classified("left_clan")),
+    (_PRESENCE_RE, _presence),
     (_PK_LOSS_RE, _pk_loss),
     (_COFFER_RE, _coffer),
 )

@@ -482,7 +482,7 @@ class _MirrorSpy:
         self.calls = []
         self.staged = staged
 
-    def __call__(self, _session, _relayer, clan_slug, message, deferred_replay):
+    def __call__(self, _session, _relayer, clan_slug, message, _parsed, deferred_replay):
         self.calls.append((clan_slug, message, deferred_replay))
         return self.staged
 
@@ -567,25 +567,45 @@ def _fake_bridge_module(monkeypatch, allowed=True, staged=2, boom=False):
     monkeypatch.setitem(sys.modules, "services.clan_chat_bridge", module)
 
 
+def _mirror(parsed=None, deferred=False):
+    return cb._mirror_to_bridge(object(), _FakePlayer(), "clan", "a line", parsed, deferred)
+
+
 def test_mirror_to_bridge_stages_and_counts(monkeypatch):
     monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
     _fake_bridge_module(monkeypatch, staged=2)
-    assert cb._mirror_to_bridge(object(), _FakePlayer(), "clan", "a line", False) == 2
+    assert _mirror() == 2
 
 
 def test_mirror_to_bridge_skips_deferred_replays(monkeypatch):
     _fake_bridge_module(monkeypatch, staged=2)
     # The first pass mirrored this line minutes ago; the replay must not repeat it.
-    assert cb._mirror_to_bridge(object(), _FakePlayer(), "clan", "a line", True) == 0
+    assert _mirror(deferred=True) == 0
 
 
 def test_mirror_to_bridge_respects_the_bridge_rate_limit(monkeypatch):
     monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
     _fake_bridge_module(monkeypatch, allowed=False)
-    assert cb._mirror_to_bridge(object(), _FakePlayer(), "clan", "a line", False) == 0
+    assert _mirror() == 0
 
 
 def test_mirror_failure_never_costs_the_tracking_record(monkeypatch):
     monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
     _fake_bridge_module(monkeypatch, boom=True)
-    assert cb._mirror_to_bridge(object(), _FakePlayer(), "clan", "a line", False) == 0
+    assert _mirror() == 0
+
+
+def test_channel_presence_churn_is_never_mirrored(monkeypatch):
+    monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
+    _fake_bridge_module(monkeypatch, staged=2)
+    assert _mirror(parsed=cb.parse_broadcast("Logger On has joined.")) == 0
+    assert _mirror(parsed=cb.parse_broadcast("Logger Off has left.")) == 0
+    # Membership churn is rare and meaningful — it still syncs.
+    assert _mirror(parsed=cb.parse_broadcast("Quitter has left the clan.")) == 2
+
+
+def test_unparsed_lines_still_mirror_so_a_rewording_cannot_mute_the_bridge(monkeypatch):
+    monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
+    _fake_bridge_module(monkeypatch, staged=2)
+    assert cb.parse_broadcast("Brand new Jagex wording") is None
+    assert _mirror(parsed=None) == 2
