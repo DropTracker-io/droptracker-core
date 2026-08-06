@@ -50,19 +50,36 @@ TRACKED_KINDS = frozenset(
 _TAG_RE = re.compile(r"<[^>]*>")
 _WS_RE = re.compile(r"\s+")
 
+#: Machine-readable metadata Jagex prefixes to some broadcasts, pipe-terminated:
+#: ``CA_ID:112|hype mann has completed a master combat task: ...``. It is aimed
+#: at clients that key off the id, so it must reach neither a Discord reader nor
+#: a pattern — an unstripped marker occupies ^ and silently kills the whole kind.
+#: Deliberately generic (repeated markers and future keys fold too) but tight
+#: enough that no broadcast prose or player name can match it: SCREAMING_KEY,
+#: digits, pipe. The id is dropped; every kind we parse is identified by text.
+_METADATA_PREFIX_RE = re.compile(r"^(?:[A-Z][A-Z0-9_]*:\d+\|)+")
+
 
 def clean_broadcast_text(raw) -> str:
     """Client markup + whitespace normalization for one broadcast line.
 
-    Strips ``<img=..>``/``<col=..>`` spans, folds non-breaking spaces (Jagex
-    renders them inside player names) to plain spaces, and collapses runs of
-    whitespace. Returns ``""`` for anything non-string-like.
+    Strips ``<img=..>``/``<col=..>`` spans and leading Jagex metadata markers
+    (see :data:`_METADATA_PREFIX_RE`), folds non-breaking spaces (Jagex renders
+    them inside player names) to plain spaces, and collapses runs of whitespace.
+    Returns ``""`` for anything non-string-like.
+
+    This is the single choke point for BOTH consumers — the bridge mirror stages
+    the cleaned text and every pattern matches against it — so whatever is
+    stripped here is gone from Discord and from parsing alike.
     """
     if raw is None:
         return ""
     text = _TAG_RE.sub("", str(raw))
     text = text.replace(" ", " ")
-    return _WS_RE.sub(" ", text).strip()
+    text = _WS_RE.sub(" ", text).strip()
+    # After the tag/whitespace pass: a marker can sit behind a colour span, and
+    # the pattern anchors on ^.
+    return _METADATA_PREFIX_RE.sub("", text).strip()
 
 
 def clan_slug(raw_clan_name) -> str:
@@ -226,6 +243,14 @@ def _pet(m) -> ParsedBroadcast:
 # minimum useful (subject player where unambiguous).
 
 _QUEST_RE = re.compile(r"^(?P<player>.+?) has completed a quest: (?P<quest>.+?)\.?$")
+#: "... has completed a master combat task: Perfect Crystalline Hunllef." The
+#: tier is matched loosely rather than enumerated (easy…grandmaster, with "an"
+#: before elite): the literal "combat task:" already makes this unambiguous, and
+#: a tier we don't know about must still classify. Arrives behind a CA_ID marker
+#: that clean_broadcast_text has already removed.
+_CA_RE = re.compile(
+    r"^(?P<player>.+?) has completed (?:an? )?(?P<tier>\w+) combat task: (?P<task>.+?)\.?$"
+)
 _DIARY_RE = re.compile(
     r"^(?P<player>.+?) has completed the (?P<tier>Easy|Medium|Hard|Elite) "
     r"(?P<diary>.+?) diary\.?$"
@@ -324,6 +349,17 @@ def _coffer(m) -> ParsedBroadcast:
     return ParsedBroadcast(kind=kind, player=m["player"], value_gp=_gp(m["value"]))
 
 
+def _combat_achievement(m) -> ParsedBroadcast:
+    """Classify-only: the plugin's own CA submissions carry the tier, task and a
+    screenshot. Tier and task travel in ``extra`` so tracking them from chat
+    later needs no parser change."""
+    return ParsedBroadcast(
+        kind="combat_achievement",
+        player=m["player"],
+        extra={"tier": m["tier"], "task": m["task"]},
+    )
+
+
 def _presence(m) -> ParsedBroadcast:
     return ParsedBroadcast(
         kind="presence", player=m["player"], extra={"direction": m["direction"]}
@@ -342,6 +378,7 @@ _MATCHERS = (
     (_CLOG_RE, _clog),
     (_PET_RE, _pet),
     (_QUEST_RE, _classified("quest")),
+    (_CA_RE, _combat_achievement),
     (_DIARY_RE, _classified("diary")),
     (_XP_RE, _classified("xp_milestone")),
     (_LEVEL_RE, _classified("level_up")),

@@ -23,6 +23,28 @@ def test_clean_strips_markup_nbsp_and_whitespace():
     assert clean_broadcast_text("   ") == ""
 
 
+def test_clean_strips_jagex_metadata_markers():
+    """Machine-readable prefixes must reach neither Discord nor the patterns."""
+    assert clean_broadcast_text(
+        "CA_ID:112|hype mann has completed a master combat task: Perfect Crystalline Hunllef."
+    ) == "hype mann has completed a master combat task: Perfect Crystalline Hunllef."
+    # Behind a colour span, and repeated markers.
+    assert clean_broadcast_text("<col=ff0000>CA_ID:9|X has joined.") == "X has joined."
+    assert clean_broadcast_text("CA_ID:1|B:2|X has joined.") == "X has joined."
+
+
+def test_clean_leaves_broadcast_prose_alone():
+    """The marker pattern must not bite real text that merely contains a pipe,
+    a colon or digits — a mangled line is worse than an unstripped one."""
+    for text in (
+        "Trader received a drop: Rune scimitar (15,000 coins).",
+        "Pipe Fan has joined.|",
+        "lowercase_id:12|X has joined.",
+        "CA_ID:abc|X has joined.",
+    ):
+        assert clean_broadcast_text(text) == text
+
+
 # --- item_drop -------------------------------------------------------------
 
 def test_item_drop_with_value():
@@ -254,6 +276,41 @@ def test_expelled_extracts_the_expelled_player():
     parsed = parse_broadcast("Strict Mod has expelled Rule Breaker from the clan.")
     assert parsed.kind == "expelled"
     assert parsed.player == "Rule Breaker"
+
+
+def test_combat_achievement_survives_its_metadata_marker():
+    """The live shape (2026-08-06): unhandled, it was the only non-presence
+    line in the unknown bucket, and it mirrored the raw CA_ID into Discord."""
+    parsed = parse_broadcast(
+        "CA_ID:112|hype mann has completed a master combat task: Perfect Crystalline Hunllef."
+    )
+    assert parsed.kind == "combat_achievement"
+    assert parsed.player == "hype mann"
+    assert parsed.extra == {"tier": "master", "task": "Perfect Crystalline Hunllef"}
+    assert not parsed.tracked
+
+
+@pytest.mark.parametrize(
+    "line,tier",
+    [
+        ("CA_ID:1|X has completed an elite combat task: Peach Conjurer.", "elite"),
+        ("CA_ID:2|X has completed a grandmaster combat task: Denying the Healers II.", "grandmaster"),
+        ("CA_ID:3|X has completed a hard combat task: Whack-a-Mole.", "hard"),
+        # A tier we've never seen must still classify, not fall to unknown.
+        ("CA_ID:4|X has completed a legendary combat task: Something New.", "legendary"),
+    ],
+)
+def test_combat_achievement_tiers(line, tier):
+    parsed = parse_broadcast(line)
+    assert parsed.kind == "combat_achievement"
+    assert parsed.extra["tier"] == tier
+
+
+def test_combat_achievement_does_not_shadow_quests_or_diaries():
+    assert parse_broadcast("Quester has completed a quest: Dragon Slayer II.").kind == "quest"
+    assert parse_broadcast(
+        "Diary Andy has completed the Elite Lumbridge & Draynor diary."
+    ).kind == "diary"
 
 
 def test_presence_does_not_swallow_membership_departures():
