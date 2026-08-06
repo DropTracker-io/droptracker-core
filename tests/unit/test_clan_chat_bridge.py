@@ -7,6 +7,7 @@ are lazy inside the functions under test, so the pure paths never touch them.
 """
 
 import importlib.util
+import json
 import os
 import sys
 
@@ -98,3 +99,140 @@ def test_batch_lines_drops_incomplete_entries():
 
 def test_mirror_message_cap_constant_is_under_discord_limit():
     assert bridge.MIRROR_MESSAGE_MAX_CHARS <= 2000
+
+
+# ── broadcast lines (no speaker) ────────────────────────────────────────────
+
+def test_batch_renders_broadcasts_without_a_sender():
+    entries = [
+        {"channel_id": "111", "kind": "broadcast",
+         "message": "Alice received a drop: Twisted bow (1,000,000 coins)."},
+        {"channel_id": "111", "kind": "chat", "sender": "Bob", "message": "gz"},
+    ]
+    batches = bridge.batch_lines_by_channel(entries)
+    assert batches["111"] == [
+        "📢 *Alice received a drop: Twisted bow (1,000,000 coins).*",
+        "**Bob**: gz",
+    ]
+
+
+def test_broadcast_message_is_still_markdown_escaped():
+    entries = [{"channel_id": "111", "kind": "broadcast", "message": "a *b* _c_"}]
+    assert bridge.batch_lines_by_channel(entries)["111"] == [r"📢 *a \*b\* \_c\_*"]
+
+
+def test_broadcast_entry_still_needs_a_message():
+    entries = [
+        {"channel_id": "111", "kind": "broadcast", "message": ""},
+        {"channel_id": "", "kind": "broadcast", "message": "hi"},
+    ]
+    assert bridge.batch_lines_by_channel(entries) == {}
+
+
+def test_entries_without_a_kind_read_as_chat():
+    """Lines staged before broadcasts were mirrored are still in Redis."""
+    entries = [{"channel_id": "111", "sender": "Alice", "message": "hi"}]
+    assert bridge.batch_lines_by_channel(entries) == {"111": ["**Alice**: hi"]}
+
+
+# ── broadcast mirroring (bound groups + per-group first-sight claim) ─────────
+
+class _FakeRedis:
+    """Just enough for the SET NX claims and the staging pipeline."""
+
+    def __init__(self):
+        self.keys = {}
+        self.pushed = []
+        self.counters = {}
+
+    def set(self, key, _value, nx=False, ex=None):
+        if nx and key in self.keys:
+            return None
+        self.keys[key] = ex
+        return True
+
+    def incr(self, key):
+        self.counters[key] = self.counters.get(key, 0) + 1
+        return self.counters[key]
+
+    def expire(self, key, _ttl):
+        return True
+
+    def pipeline(self):
+        return self
+
+    def rpush(self, _key, value):
+        self.pushed.append(value)
+
+    def ltrim(self, *_a):
+        return True
+
+    def execute(self):
+        return [None]
+
+
+def _mirror_env(monkeypatch, bound):
+    fake = _FakeRedis()
+    monkeypatch.setattr(bridge, "_redis", lambda: fake)
+    monkeypatch.setattr(bridge, "bridge_bound_groups", lambda *_a, **_k: bound)
+    return fake
+
+
+def test_broadcast_mirrors_once_per_bridged_group(monkeypatch):
+    fake = _mirror_env(monkeypatch, {10: "111", 11: "222"})
+    line = "Alice received a drop: Twisted bow."
+
+    assert bridge.mirror_broadcast_line(None, 42, "my-clan", line) == 2
+    entries = [json.loads(p) for p in fake.pushed]
+    assert [(e["group_id"], e["channel_id"], e["kind"]) for e in entries] == [
+        (10, "111", "broadcast"), (11, "222", "broadcast")
+    ]
+    assert all(e["message"] == line for e in entries)
+    # A second relayer's copy of the same line is collapsed, per group.
+    assert bridge.mirror_broadcast_line(None, 99, "my-clan", line) == 0
+    assert len(fake.pushed) == 2
+
+
+def test_broadcast_mirror_claim_is_per_group_not_per_clan(monkeypatch):
+    """Two groups bridging one clan through different relayers both get it."""
+    fake = _mirror_env(monkeypatch, {10: "111"})
+    line = "Bob received a drop: Scythe of vitur."
+    assert bridge.mirror_broadcast_line(None, 42, "my-clan", line) == 1
+
+    monkeypatch.setattr(bridge, "bridge_bound_groups", lambda *_a, **_k: {11: "222"})
+    assert bridge.mirror_broadcast_line(None, 99, "my-clan", line) == 1
+    assert len(fake.pushed) == 2
+
+
+def test_broadcast_mirror_no_bridge_stages_nothing(monkeypatch):
+    fake = _mirror_env(monkeypatch, {})
+    assert bridge.mirror_broadcast_line(None, 42, "my-clan", "anything") == 0
+    assert fake.pushed == []
+
+
+def test_broadcast_mirror_ignores_blank_line_and_clan(monkeypatch):
+    fake = _mirror_env(monkeypatch, {10: "111"})
+    assert bridge.mirror_broadcast_line(None, 42, "my-clan", "   ") == 0
+    assert bridge.mirror_broadcast_line(None, 42, "", "a real line") == 0
+    assert fake.pushed == []
+
+
+# ── shared bridge rate budget ───────────────────────────────────────────────
+
+def test_rate_limit_is_shared_and_capped(monkeypatch):
+    fake = _FakeRedis()
+    monkeypatch.setattr(bridge, "_redis", lambda: fake)
+    for _ in range(bridge.BRIDGE_RATE_LIMIT_PER_MIN):
+        assert bridge.relayer_within_rate_limit(42) is True
+    assert bridge.relayer_within_rate_limit(42) is False
+    # Per relayer, not global.
+    assert bridge.relayer_within_rate_limit(43) is True
+
+
+def test_rate_limit_fails_open_when_redis_is_down(monkeypatch):
+    def boom():
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(bridge, "_redis", boom)
+    assert bridge.relayer_within_rate_limit(42) is True
+    assert bridge._claim_first_sight("k", 60) is True

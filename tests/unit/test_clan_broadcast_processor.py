@@ -407,3 +407,121 @@ def test_pb_coverage_requires_equal_or_faster_stored_time(monkeypatch):
     # Unresolvable boss → not covered (record path skips it independently).
     monkeypatch.setattr(cb, "_resolve_pb_npc", lambda _s, _a: (None, None))
     assert asyncio.run(cb._plugin_copy_exists(_Session(("row",)), _Subject(), parsed, stamp)) is False
+
+
+# ── chat-bridge mirror: independent of every tracking decision ───────────────
+
+class _MirrorSpy:
+    """Stands in for _mirror_to_bridge, recording what it was handed."""
+
+    def __init__(self, staged=1):
+        self.calls = []
+        self.staged = staged
+
+    def __call__(self, _session, _relayer, clan_slug, message, deferred_replay):
+        self.calls.append((clan_slug, message, deferred_replay))
+        return self.staged
+
+
+@pytest.fixture
+def mirror_spy(monkeypatch):
+    """Processor stubbed down to the mirror decision — session selection,
+    relayer auth, rate limiting and the ops counters aren't under test here."""
+    spy = _MirrorSpy()
+
+    async def fake_auth(_session, _name, _hash, _key):
+        return _FakePlayer(), True, True
+
+    monkeypatch.setattr(cb, "select_session_and_flag", lambda _ext: (object(), False))
+    monkeypatch.setattr(cb, "ensure_player_and_auth", fake_auth)
+    monkeypatch.setattr(cb, "_mirror_to_bridge", spy)
+    monkeypatch.setattr(cb, "_relayer_within_rate_limit", lambda _pid: True)
+    monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
+    monkeypatch.setattr(cb, "_log_unknown_broadcast", lambda _t: None)
+    return spy
+
+
+def _payload(message):
+    return {
+        "message": message,
+        "clan_name": "The Best Clan",
+        "player_name": "Relayer",
+        "acc_hash": "12345",
+    }
+
+
+def test_unrecognized_broadcast_is_still_mirrored(mirror_spy):
+    line = "Some brand new Jagex wording nobody has a pattern for!"
+    response = asyncio.run(cb.clan_broadcast_processor(_payload(line)))
+    assert mirror_spy.calls == [(cb._clan_slug("The Best Clan"), line, False)]
+    assert response.success is True
+    assert "mirrored" in response.message
+
+
+def test_untracked_kind_is_still_mirrored(mirror_spy):
+    line = "Quester has completed a quest: Dragon Slayer II."
+    response = asyncio.run(cb.clan_broadcast_processor(_payload(line)))
+    assert [call[1] for call in mirror_spy.calls] == [line]
+    assert response.success is True
+    assert "not tracked" in response.message
+    assert "mirrored" in response.message
+
+
+def test_mirror_happens_when_no_group_tracks_broadcasts(mirror_spy, monkeypatch):
+    """Bridge-only groups: the tracking binding is empty, chat still syncs."""
+    monkeypatch.setattr(cb, "_bound_group_ids", lambda *_a: {})
+    line = "Alice received a drop: Twisted bow (1,000,000 coins)."
+    response = asyncio.run(cb.clan_broadcast_processor(_payload(line)))
+    assert [call[1] for call in mirror_spy.calls] == [line]
+    assert response.success is True
+    assert "clan broadcast tracking" in response.message
+
+
+def test_unauthenticated_relayer_never_reaches_the_mirror(mirror_spy, monkeypatch):
+    async def fake_auth(*_a):
+        return None, False, False
+
+    monkeypatch.setattr(cb, "ensure_player_and_auth", fake_auth)
+    response = asyncio.run(cb.clan_broadcast_processor(_payload("Anything at all")))
+    assert mirror_spy.calls == []
+    assert response.success is False
+
+
+def _fake_bridge_module(monkeypatch, allowed=True, staged=2, boom=False):
+    import sys
+    import types
+
+    module = types.ModuleType("services.clan_chat_bridge")
+
+    def mirror(_session, _pid, _slug, _message):
+        if boom:
+            raise RuntimeError("redis down")
+        return staged
+
+    module.mirror_broadcast_line = mirror
+    module.relayer_within_rate_limit = lambda _pid: allowed
+    monkeypatch.setitem(sys.modules, "services.clan_chat_bridge", module)
+
+
+def test_mirror_to_bridge_stages_and_counts(monkeypatch):
+    monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
+    _fake_bridge_module(monkeypatch, staged=2)
+    assert cb._mirror_to_bridge(object(), _FakePlayer(), "clan", "a line", False) == 2
+
+
+def test_mirror_to_bridge_skips_deferred_replays(monkeypatch):
+    _fake_bridge_module(monkeypatch, staged=2)
+    # The first pass mirrored this line minutes ago; the replay must not repeat it.
+    assert cb._mirror_to_bridge(object(), _FakePlayer(), "clan", "a line", True) == 0
+
+
+def test_mirror_to_bridge_respects_the_bridge_rate_limit(monkeypatch):
+    monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
+    _fake_bridge_module(monkeypatch, allowed=False)
+    assert cb._mirror_to_bridge(object(), _FakePlayer(), "clan", "a line", False) == 0
+
+
+def test_mirror_failure_never_costs_the_tracking_record(monkeypatch):
+    monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
+    _fake_bridge_module(monkeypatch, boom=True)
+    assert cb._mirror_to_bridge(object(), _FakePlayer(), "clan", "a line", False) == 0

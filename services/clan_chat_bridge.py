@@ -3,11 +3,16 @@
 Game → Discord: the plugin relays ``CLAN_CHAT`` player lines as
 ``type=clan_chat`` payloads; ``data/submissions/clan_chat.py`` authenticates
 the relayer, binds groups, dedupes across relayers and calls
-:func:`push_mirror_line`. Lines land on a Redis list (``chatbridge:out``)
-drained every couple of seconds by the core bot (:func:`drain_and_send`),
-which batches per channel into one message — a busy clan burst becomes one
-Discord send, not a rate-limit pileup. Deliberately Redis-backed and lossy on
-restart: mirrored chatter is ephemeral display, not data.
+:func:`push_mirror_line`. ``CLAN_MESSAGE`` system broadcasts arrive on the
+other intake (``type=clan_broadcast``, whose job is tracking non-plugin
+clanmates) and are mirrored from there via :func:`mirror_broadcast_line` —
+the channel is a SYNCED view of the clan chat box, so a broadcast belongs in
+it whether or not the tracking half parses or records anything. Lines of both
+kinds land on one Redis list (``chatbridge:out``) drained every couple of
+seconds by the core bot (:func:`drain_and_send`), which batches per channel
+into one message — a busy clan burst becomes one Discord send, not a
+rate-limit pileup. Deliberately Redis-backed and lossy on restart: mirrored
+chatter is ephemeral display, not data.
 
 Discord → game: the core bot's MessageCreate listener matches messages
 against :func:`bridge_channel_map` (60s-cached config scan), sanitizes, and
@@ -28,6 +33,7 @@ inside functions so unit tests can load this file under the conftest stubs.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -38,6 +44,27 @@ MIRROR_LIST_KEY = "chatbridge:out"
 MIRROR_DRAIN_BATCH = 200
 #: Cap on one batched Discord message (Discord's hard cap is 2000).
 MIRROR_MESSAGE_MAX_CHARS = 1800
+
+#: Staged line kinds: player speech (rendered with its sender) and clan system
+#: broadcasts (no speaker — drops, pets, level-ups, joins, ...). Entries staged
+#: before broadcasts were mirrored carry no kind and read as chat.
+MIRROR_KIND_CHAT = "chat"
+MIRROR_KIND_BROADCAST = "broadcast"
+#: Marks a system broadcast in the mirror channel — the game colours these
+#: differently in the chat box; Discord gets a prefix instead of a fake sender.
+BROADCAST_PREFIX = "📢"
+
+#: Per-relayer, per-minute ceiling on lines staged for the bridge. ONE budget
+#: for both kinds: it is one relayer feeding one channel, and the thing being
+#: capped is Discord spam. Chattier than the broadcast-tracking limit, still far
+#: above any human clan's rate — a sustained breach is a spoof or a loop.
+BRIDGE_RATE_LIMIT_PER_MIN = 120
+
+#: Multi-relayer collapse window for broadcasts. Wider than the chat window
+#: (``clan_chat.CHAT_SEEN_TTL_SECONDS``) because broadcasts are Jagex-generated:
+#: an identical line inside a minute is the same event seen by a second relayer,
+#: never two people typing the same thing.
+BROADCAST_SEEN_TTL_SECONDS = 60
 
 #: Presence heartbeat per clan: ZSET of player_ids scored by last-poll time.
 PRESENCE_KEY_TEMPLATE = "chatbridge:presence:{clan_slug}"
@@ -240,17 +267,45 @@ def invalidate_channel_map() -> None:
 
 # ── game → Discord ──────────────────────────────────────────────────────────
 
-def push_mirror_line(group_id, channel_id, sender, message, rank=None) -> bool:
-    """Stage one game chat line for the bot's batched channel send."""
+def relayer_within_rate_limit(relayer_player_id) -> bool:
+    """Per-relayer ceiling on lines staged for the bridge this minute.
+
+    Shared by both game→Discord intakes (chat lines and broadcast mirroring),
+    so one relayer cannot dodge the cap by spreading traffic across the two.
+    Fails open — Redis trouble must not silence a clan's chat."""
+    try:
+        minute = int(time.time() // 60)
+        key = f"chatbridge:rate:{int(relayer_player_id)}:{minute}"
+        client = _redis()
+        count = client.incr(key)
+        if count == 1:
+            client.expire(key, 120)
+        return int(count) <= BRIDGE_RATE_LIMIT_PER_MIN
+    except Exception:
+        return True
+
+
+def _claim_first_sight(key: str, ttl: int) -> bool:
+    """``SET NX`` claim so only the first relayer's copy of a line is staged.
+    Fails open: a doubled display line beats a missing one."""
+    try:
+        return bool(_redis().set(key, "1", nx=True, ex=ttl))
+    except Exception:
+        return True
+
+
+def _stage_entry(group_id, channel_id, kind, message, sender=None, rank=None) -> bool:
     try:
         entry = {
             "group_id": int(group_id),
             "channel_id": str(channel_id),
-            "sender": str(sender or "")[:32],
-            "rank": str(rank or "")[:32] or None,
+            "kind": kind,
             "message": str(message or ""),
             "ts": int(time.time()),
         }
+        if kind == MIRROR_KIND_CHAT:
+            entry["sender"] = str(sender or "")[:32]
+            entry["rank"] = str(rank or "")[:32] or None
         client = _redis()
         pipe = client.pipeline()
         pipe.rpush(MIRROR_LIST_KEY, json.dumps(entry))
@@ -262,6 +317,48 @@ def push_mirror_line(group_id, channel_id, sender, message, rank=None) -> bool:
     except Exception as e:
         print(f"[ClanChatBridge] mirror push failed: {e}")
         return False
+
+
+def push_mirror_line(group_id, channel_id, sender, message, rank=None) -> bool:
+    """Stage one game chat line (player speech) for the batched channel send."""
+    return _stage_entry(
+        group_id, channel_id, MIRROR_KIND_CHAT, message, sender=sender, rank=rank
+    )
+
+
+def push_mirror_broadcast(group_id, channel_id, message) -> bool:
+    """Stage one clan system broadcast (no speaker) for the batched send."""
+    return _stage_entry(group_id, channel_id, MIRROR_KIND_BROADCAST, message)
+
+
+def mirror_broadcast_line(session, relayer_player_id, clan_slug: str, message: str) -> int:
+    """Mirror one ``CLAN_MESSAGE`` broadcast into this clan's bridge channels.
+
+    Called from the clan_broadcast intake ahead of every tracking decision —
+    parse, tracked-kind filter, group binding, record, notify — because the
+    bridge is a synced chat view, not a record of what we tracked. Returns the
+    number of channels staged (0 = no bridged group, or another relayer's copy
+    got there first).
+
+    The first-sight claim is per GROUP, not per clan: N clanmates relay one
+    broadcast and each channel must show it once, but two groups bridging the
+    same clan through different relayers must both receive it.
+    """
+    if not clan_slug or not str(message or "").strip():
+        return 0
+    bound = bridge_bound_groups(session, relayer_player_id, clan_slug)
+    if not bound:
+        return 0
+    digest = hashlib.sha256(str(message).encode("utf-8")).hexdigest()[:24]
+    staged = 0
+    for group_id, channel_id in bound.items():
+        if not _claim_first_sight(
+            f"chatbridge:seenbc:{group_id}:{digest}", BROADCAST_SEEN_TTL_SECONDS
+        ):
+            continue
+        if push_mirror_broadcast(group_id, channel_id, message):
+            staged += 1
+    return staged
 
 
 def drain_mirror_lines(limit: int = MIRROR_DRAIN_BATCH) -> list:
@@ -289,13 +386,20 @@ def batch_lines_by_channel(entries: list) -> dict:
 
     Lines arrive pre-sanitized relative to the GAME (client markup already
     meaningless) but not Discord: sender and message are markdown-escaped
-    here, at the last moment before send."""
+    here, at the last moment before send. Broadcasts have no sender and render
+    with :data:`BROADCAST_PREFIX` instead, keeping system lines visually apart
+    from player speech the way the game's chat colours do."""
     batches: dict = {}
     for entry in entries:
         channel_id = str(entry.get("channel_id") or "")
         message = sanitize_game_line(entry.get("message"))
+        if not channel_id or not message:
+            continue
+        if str(entry.get("kind") or MIRROR_KIND_CHAT) == MIRROR_KIND_BROADCAST:
+            batches.setdefault(channel_id, []).append(f"{BROADCAST_PREFIX} *{message}*")
+            continue
         sender = sanitize_game_line(entry.get("sender"))
-        if not channel_id or not message or not sender:
+        if not sender:
             continue
         batches.setdefault(channel_id, []).append(f"**{sender}**: {message}")
     return batches

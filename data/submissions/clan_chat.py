@@ -15,44 +15,24 @@ only shared pieces are the binding rule and the dedupe idiom.
 """
 
 import hashlib
-from datetime import datetime
 
 from utils.clan_broadcasts import clan_slug, clean_broadcast_text
 
 from .common import (
-    RedisClient,
     SubmissionResponse,
     ensure_player_and_auth,
     select_session_and_flag,
 )
 from .raid_dedupe import _bundle_is_new
 
-redis_client = RedisClient()
-
 #: Repeated identical lines are legitimate in chat ("gz", "grats") — keep the
 #: multi-relayer window short, like the interval between two humans typing the
 #: same thing, not the interval between two relayers seeing one line.
 CHAT_SEEN_TTL_SECONDS = 10
 
-#: Chat is chattier than broadcasts; still far above any human channel's rate.
-RELAYER_RATE_LIMIT_PER_MIN = 120
-
 #: Defensive caps (the client caps chat at ~80 visible chars already).
 MESSAGE_MAX_CHARS = 200
 SENDER_MAX_CHARS = 32
-
-
-def _relayer_within_rate_limit(relayer_player_id: int) -> bool:
-    try:
-        minute = int(datetime.now().timestamp() // 60)
-        key = f"chatbridge:rate:{relayer_player_id}:{minute}"
-        client = redis_client.client
-        count = client.incr(key)
-        if count == 1:
-            client.expire(key, 120)
-        return int(count) <= RELAYER_RATE_LIMIT_PER_MIN
-    except Exception:
-        return True
 
 
 async def clan_chat_processor(chat_data, external_session=None, world_type="main"):
@@ -76,14 +56,19 @@ async def clan_chat_processor(chat_data, external_session=None, world_type="main
     )
     if not relayer or not user_exists or not authed:
         return SubmissionResponse(False, "Relayer failed auth check")
-    if not _relayer_within_rate_limit(relayer.player_id):
+
+    from services.clan_chat_bridge import (
+        bridge_bound_groups,
+        push_mirror_line,
+        relayer_within_rate_limit,
+    )
+
+    if not relayer_within_rate_limit(relayer.player_id):
         return SubmissionResponse(False, "Clan chat rate limit exceeded")
 
     slug = clan_slug(clan_name)
     if not slug:
         return SubmissionResponse(False, "Missing clan name")
-
-    from services.clan_chat_bridge import bridge_bound_groups, push_mirror_line
 
     bound = bridge_bound_groups(session, relayer.player_id, slug)
     if not bound:

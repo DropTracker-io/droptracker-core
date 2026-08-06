@@ -36,6 +36,14 @@ Group binding: a broadcast belongs to the groups OF THE RELAYER whose
 requires an authed plugin account that is a member of the group, and the blast
 radius is capped to groups that explicitly opted in.
 
+This intake ALSO owns the broadcast half of the two-way chat bridge. ``CLAN_MESSAGE``
+lines reach the server only as ``clan_broadcast`` payloads, but in game they sit
+in the same chat box as player speech, so ``_mirror_to_bridge`` stages the raw
+line for the group's bridge channel (``services/clan_chat_bridge``) right after
+relayer auth — ahead of the parse, the tracked-kind filter, the tracking group
+binding and any record or notification, none of which the mirror depends on.
+Bridge and tracking are independent opt-ins; a group may run either alone.
+
 Dedupe is three-layered, because N clanmates may relay the same line and
 queue redelivery must be a no-op:
 1. Redis ``SET NX EX`` on (clan, message) — collapses concurrent relayers
@@ -509,6 +517,37 @@ async def process_due_deferred_broadcasts(limit: int = DEFERRED_BATCH) -> int:
     return replayed
 
 
+def _mirror_to_bridge(session, relayer, clan_slug: str, message: str, deferred_replay: bool) -> int:
+    """Mirror the raw broadcast line into the clan's two-way bridge channels.
+
+    Independent of everything the tracking half decides: the bridge channel is
+    a SYNCED view of the in-game clan chat box, which shows broadcasts next to
+    player speech, so the line goes out whether or not it parses, is a tracked
+    kind, belongs to an opted-in group or produces a record and a notification.
+    The two features are separate opt-ins (``clan_chat_bridge_enabled`` +
+    channel vs ``clan_broadcast_tracking``) and either can be on alone.
+
+    Deferred replays (the plugin-user grace window) skip it — their first pass
+    already mirrored the line, minutes earlier. Returns channels staged.
+    """
+    if deferred_replay:
+        return 0
+    try:
+        from services.clan_chat_bridge import mirror_broadcast_line, relayer_within_rate_limit
+
+        if not relayer_within_rate_limit(relayer.player_id):
+            _stat("bridge_rate_limited")
+            return 0
+        mirrored = mirror_broadcast_line(session, relayer.player_id, clan_slug, message)
+        if mirrored:
+            _stat("bridge_mirrored")
+        return mirrored
+    except Exception as e:
+        # Mirroring is display; never let it cost the tracking record.
+        print(f"[ClanBroadcast] bridge mirror failed: {e}")
+        return 0
+
+
 def _notification_gate(group_id, group_config_values, unit_value, total_value):
     """Mirror drop_processor's per-group announce criteria."""
     from utils import group_config as gc
@@ -529,8 +568,9 @@ async def clan_broadcast_processor(
 
     ``_deferred_replay=True`` marks the second pass of the plugin-user
     reconciliation (process_due_deferred_broadcasts): the multi-relayer
-    dedupe and rate limit were already paid on the first pass and are
-    skipped, and the plugin-user branch records instead of deferring again.
+    dedupe, the rate limit and the bridge mirror were already paid on the
+    first pass and are skipped, and the plugin-user branch records instead of
+    deferring again.
     """
 
     session, use_external_session = select_session_and_flag(external_session)
@@ -550,37 +590,49 @@ async def clan_broadcast_processor(
 
     _stat("relayed")
     message = clean_broadcast_text(message_raw)
-    parsed = parse_broadcast(message)
-    if parsed is None:
-        _stat("unparsed")
-        _log_unknown_broadcast(message)
-        return SubmissionResponse(False, "Unrecognized clan broadcast")
-    _stat(f"kind:{parsed.kind}")
-    if parsed.kind not in TRACKED_KINDS or not parsed.player:
-        # Recognized-but-untracked (quests, PKs, roster churn, ...): a clean
-        # no-op, not a rejection — the relayer did nothing wrong.
-        return SubmissionResponse(True, f"Broadcast kind '{parsed.kind}' is not tracked")
 
+    # Auth runs BEFORE parsing (it used to follow it) because the chat-bridge
+    # mirror below depends on it: only an authenticated clanmate's line may
+    # reach a Discord channel.
     relayer, authed, user_exists = await ensure_player_and_auth(
         session, str(relayer_name).strip(), str(account_hash), auth_key
     )
     if not relayer or not user_exists or not authed:
         _stat("relayer_auth_failed")
         return SubmissionResponse(False, "Relayer failed auth check")
-    if not _deferred_replay and not _relayer_within_rate_limit(relayer.player_id):
-        _stat("rate_limited")
-        return SubmissionResponse(False, "Clan broadcast rate limit exceeded")
 
     clan_slug = _clan_slug(clan_name)
     if not clan_slug:
         return SubmissionResponse(False, "Missing clan name")
+
+    mirrored = _mirror_to_bridge(session, relayer, clan_slug, message, _deferred_replay)
+    mirror_note = f" (mirrored to {mirrored} bridge channel(s))" if mirrored else ""
+
+    parsed = parse_broadcast(message)
+    if parsed is None:
+        _stat("unparsed")
+        _log_unknown_broadcast(message)
+        return SubmissionResponse(mirrored > 0, f"Unrecognized clan broadcast{mirror_note}")
+    _stat(f"kind:{parsed.kind}")
+    if parsed.kind not in TRACKED_KINDS or not parsed.player:
+        # Recognized-but-untracked (quests, PKs, roster churn, ...): a clean
+        # no-op, not a rejection — the relayer did nothing wrong, and the line
+        # still belongs in the bridge channel.
+        return SubmissionResponse(
+            True, f"Broadcast kind '{parsed.kind}' is not tracked{mirror_note}"
+        )
+
+    if not _deferred_replay and not _relayer_within_rate_limit(relayer.player_id):
+        _stat("rate_limited")
+        return SubmissionResponse(False, f"Clan broadcast rate limit exceeded{mirror_note}")
+
     bound_groups = _bound_group_ids(session, relayer, clan_slug)
     if not bound_groups:
         _stat("no_bound_group")
         return SubmissionResponse(
-            False,
+            mirrored > 0,
             "No group of yours has clan broadcast tracking enabled for this clan "
-            "(check the group's clan_chat_name setting)",
+            f"(check the group's clan_chat_name setting){mirror_note}",
         )
 
     # Layer-1 dedupe: collapse the same line arriving from several relayers.
