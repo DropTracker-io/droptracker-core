@@ -15,6 +15,12 @@ class GroupEmbed(Base):
     group_id = Column(Integer, ForeignKey('groups.group_id'), nullable=False, default=1)
     color = Column(String(7), nullable=True)
     title = Column(String(255), nullable=False)
+    # Discord renders titles as plain text, so a markdown link in `title` is
+    # dead on arrival — this is the only way to make one clickable. May carry
+    # placeholders ({npc_id}, {item_id}, …), resolved in utils.format
+    # .replace_placeholders; NULL keeps the wiki auto-link for titles that
+    # mention {npc_name}/{item_name}.
+    url = Column(String(200), nullable=True)
     description = Column(String(1000), nullable=True)
     thumbnail = Column(String(200))
     timestamp = Column(Boolean, nullable=True, default=False)

@@ -11,7 +11,9 @@ from utils.format import (
     get_extension_from_content_type,
     normalize_player_display_equivalence,
     normalize_claim_rsn_input,
+    replace_placeholders,
     replace_placeholders_in_text,
+    strip_title_markdown,
 )
 
 
@@ -254,3 +256,111 @@ class TestReplacePlaceholdersInText:
     def test_empty_text(self):
         result = replace_placeholders_in_text("", {"{player_name}": "Alice"})
         assert result == ""
+
+
+# ── strip_title_markdown ──────────────────────────────────────────────────────
+
+class TestStripTitleMarkdown:
+    """Discord renders embed titles as plain text, so the sender flattens them."""
+
+    def test_masked_link_becomes_its_label(self):
+        assert (
+            strip_title_markdown("[Beast Owned](https://www.droptracker.io/players/1)")
+            == "Beast Owned"
+        )
+
+    def test_player_link_inside_a_sentence(self):
+        assert (
+            strip_title_markdown("[Ron](https://www.droptracker.io/players/1) Planked!")
+            == "Ron Planked!"
+        )
+
+    def test_bold(self):
+        assert strip_title_markdown("**Levels achieved:** {skills_text}") == (
+            "Levels achieved: {skills_text}"
+        )
+
+    def test_code_ticks(self):
+        assert strip_title_markdown("New `Zulrah` Personal Best") == "New Zulrah Personal Best"
+
+    def test_italic_and_strikethrough(self):
+        assert strip_title_markdown("*a* ~~b~~ ___c___") == "a b c"
+
+    def test_lone_underscore_in_a_name_survives(self):
+        # OSRS display names carry underscores (the plugin submits `Beast_Owned`).
+        assert strip_title_markdown("Beast_Owned Planked!") == "Beast_Owned Planked!"
+
+    def test_plain_text_untouched(self):
+        assert strip_title_markdown(":tada: Zulrah :tada:") == ":tada: Zulrah :tada:"
+
+    def test_empty_and_none(self):
+        assert strip_title_markdown("") == ""
+        assert strip_title_markdown(None) is None
+
+
+# ── replace_placeholders (title + url) ────────────────────────────────────────
+
+class _StubEmbed:
+    """conftest stubs `interactions`, so a real Embed here is a MagicMock whose
+    attribute writes never stick. replace_placeholders only touches these."""
+
+    def __init__(self, title=None, url=None, description=None):
+        self.title = title
+        self.url = url
+        self.description = description
+        self.footer = None
+        self.fields = []
+        self.thumbnail = None
+        self.image = None
+
+
+def _embed(title, url=None):
+    return _StubEmbed(title=title, url=url)
+
+
+class TestReplacePlaceholdersTitle:
+    def test_player_name_in_title_is_flattened(self):
+        """The reported bug: {player_name} resolves to a markdown link."""
+        embed = _embed("{player_name} Planked!")
+        out = replace_placeholders(
+            embed, {"{player_name}": "[Ron](https://www.droptracker.io/players/1)"}
+        )
+        assert out.title == "Ron Planked!"
+        assert out.url is None
+
+    def test_npc_name_token_still_auto_links_the_wiki(self):
+        embed = _embed(":tada: {npc_name} :tada:")
+        out = replace_placeholders(embed, {"{npc_name}": "Theatre of Blood"})
+        assert out.title == ":tada: Theatre of Blood :tada:"
+        assert out.url == "https://oldschool.runescape.wiki/w/Theatre_of_Blood"
+
+    def test_item_name_token_still_auto_links_the_wiki(self):
+        embed = _embed("{item_name}")
+        out = replace_placeholders(embed, {"{item_name}": "Abyssal whip"})
+        assert out.url == "https://oldschool.runescape.wiki/w/Abyssal_whip"
+
+    def test_custom_url_wins_over_wiki_autolink(self):
+        embed = _embed("{npc_name}", url="https://www.droptracker.io/npcs/{npc_id}")
+        out = replace_placeholders(embed, {"{npc_name}": "Zulrah", "{npc_id}": "2042"})
+        assert out.url == "https://www.droptracker.io/npcs/2042"
+
+    def test_custom_url_makes_a_plain_title_clickable(self):
+        embed = _embed("A new drop!", url="https://www.droptracker.io/")
+        out = replace_placeholders(embed, {})
+        assert out.url == "https://www.droptracker.io/"
+
+    def test_unresolved_url_placeholder_is_dropped_not_sent(self):
+        # Discord rejects the whole embed on a malformed url.
+        embed = _embed("A new drop!", url="https://www.droptracker.io/npcs/{npc_id}")
+        out = replace_placeholders(embed, {})
+        assert out.url == "https://www.droptracker.io/npcs/{npc_id}"
+
+    def test_junk_url_is_dropped(self):
+        embed = _embed("A new drop!", url="{image_url}")
+        out = replace_placeholders(embed, {"{image_url}": ""})
+        assert out.url is None
+
+    def test_title_without_tokens_gets_no_url(self):
+        embed = _embed("New Combat Achievement")
+        out = replace_placeholders(embed, {})
+        assert out.url is None

@@ -376,7 +376,12 @@ class DatabaseOperations:
                     stored_embed = db_session.query(GroupEmbed).filter(GroupEmbed.group_id == 1,
                                                                     GroupEmbed.embed_type == embed_type).first()
                 if stored_embed:
+                    # `url` is what makes the title clickable — markdown in a
+                    # title never renders. replace_placeholders resolves any
+                    # placeholders in it and falls back to the wiki auto-link
+                    # when it is NULL.
                     embed = Embed(title=stored_embed.title,
+                                  url=stored_embed.url or None,
                                   description=stored_embed.description,
                                   color=stored_embed.color)
                     current_time = datetime.now()

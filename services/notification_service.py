@@ -1232,6 +1232,7 @@ class NotificationService:
 
             replacements = {
                 "{player_name}": player_link(player_name, player_id),
+                "{player_name_plain}": player_name,
                 "{skill_name}": str(data.get("skill_name") or data.get("skills_names") or ""),
                 "{skills_names}": str(data.get("skills_names") or ""),
                 "{skills_text}": str(skills_text or ""),
@@ -1332,6 +1333,7 @@ class NotificationService:
 
             replacements = {
                 "{player_name}": player_link(player_name, player_id),
+                "{player_name_plain}": player_name,
                 "{skill_name}": str(data.get("skill_name") or data.get("skills_names") or ""),
                 "{skills_names}": str(data.get("skills_names") or ""),
                 "{skills_text}": str(skills_text or ""),
@@ -1433,6 +1435,7 @@ class NotificationService:
             if embed_template:
                 replacements = {
                     "{player_name}": player_link(player_name, player_id),
+                    "{player_name_plain}": player_name,
                     "{quest_name}": str(quest_name),
                     "{quests_completed}": str(data.get("quests_completed") or ""),
                     "{total_quests}": str(data.get("total_quests") or ""),
@@ -1549,6 +1552,7 @@ class NotificationService:
             if embed_template:
                 replacements = {
                     "{player_name}": player_link(player_name, player_id),
+                    "{player_name_plain}": player_name,
                     "{source}": str(source),
                     "{killer}": str(source),
                     "{location}": str(location),
@@ -1662,6 +1666,7 @@ class NotificationService:
             if embed_template:
                 replacements = {
                     "{player_name}": player_link(player_name, player_id),
+                    "{player_name_plain}": player_name,
                     "{diary_name}": str(diary_name),
                     "{diary_tier}": str(diary_tier),
                     "{timestamp}": str(data.get("timestamp") or ""),
@@ -2919,6 +2924,7 @@ class NotificationService:
                 "{quantity}": "`" + str(quantity) + "`",
                 "{total_value}": "`" + str(total_value) + "`",
                 "{player_name}": player_link(player_name, player_id),
+                "{player_name_plain}": player_name,
                 # Prefer video for display; keep image_url for attachments/local files.
                 "{image_url}": video_url or image_url or "",
                 "{video_url}": video_url or "",
@@ -3402,6 +3408,7 @@ class NotificationService:
             
             replacements = {
                 "{player_name}": player_link(player_name, player_id),
+                "{player_name_plain}": player_name,
                 "{global_rank}": str(global_placement),
                 "{total_ranked_global}": str(total_ranked_global),
                 "{group_rank}": str(group_placement),
@@ -3510,6 +3517,7 @@ class NotificationService:
         
         value_dict = {
             "{player_name}": player_link(player_name, player_id),
+            "{player_name_plain}": player_name,
             "{pet_name}": pet_name,
             "{source}": source,
             "{npc_name}": npc_name,
@@ -3670,6 +3678,7 @@ class NotificationService:
             if embed_template:
                 value_dict = {
                     "{player_name}": player_link(player_name, player_id),
+                    "{player_name_plain}": player_name,
                     "{task_name}": formatted_task_name,
                     "{current_tier}": actual_tier,
                     "{progress}": progress,
@@ -3797,6 +3806,7 @@ class NotificationService:
             # Replace placeholders
             replacements = {
                 "{player_name}": player_link(player_name, player_id),
+                "{player_name_plain}": player_name,
                 "{player_loot_month}": player_month_total,
                 "{kc_received}": kc,
                 "{item_name}": item_name,

@@ -67,6 +67,7 @@ def _serialize_embed(row: GroupEmbed) -> dict:
     return {
         "embed_type": row.embed_type,
         "title": row.title or "",
+        "url": row.url or None,
         "description": row.description or "",
         "color": row.color or None,
         "thumbnail": row.thumbnail or None,
@@ -171,6 +172,9 @@ def _validate_body(body: dict) -> dict:
 
     return {
         "title": title,
+        # Discord renders titles as plain text; `url` is the only way to make
+        # one clickable (a markdown link in `title` shows its raw brackets).
+        "url": _optional_url(body, "url"),
         "description": description,
         "color": color,
         "thumbnail": _optional_url(body, "thumbnail"),
@@ -265,6 +269,7 @@ async def put_group_embed(group_id: int, embed_type: str):
                 s.add(row)
 
             row.title = data["title"]
+            row.url = data["url"]
             row.description = data["description"]
             row.color = data["color"]
             row.thumbnail = data["thumbnail"]

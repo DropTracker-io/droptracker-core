@@ -288,24 +288,82 @@ async def get_npc_image_url(npc_name, npc_id):
         return None
 
 
+# Discord renders an embed *title* as plain text — masked links, bold, code
+# ticks and the rest all show up with their markers intact. Descriptions and
+# field values DO render markdown, so this flattening is title-only.
+#
+# The masked-link case is the one that bites: {player_name} resolves to
+# `[Name](profile_url)` (utils/site_urls.player_link), which reads fine in a
+# description but lands in a title as literal brackets and a raw URL.
+_TITLE_MD_LINK = re.compile(r"\[([^\[\]]*)\]\(\s*<?[^)\s]*>?(?:\s+\"[^\"]*\")?\s*\)")
+
+# Paired emphasis markers only, so a lone marker character survives. Single
+# `_underscore_` is deliberately absent: OSRS display names legitimately
+# contain underscores (the plugin submits `Beast_Owned`), and stripping them
+# would corrupt names for the sake of an italic nobody writes in a title.
+_TITLE_MD_MARKERS = (
+    re.compile(r"\*\*\*(.+?)\*\*\*", re.S),
+    re.compile(r"\*\*(.+?)\*\*", re.S),
+    re.compile(r"\*(.+?)\*", re.S),
+    re.compile(r"___(.+?)___", re.S),
+    re.compile(r"__(.+?)__", re.S),
+    re.compile(r"~~(.+?)~~", re.S),
+    re.compile(r"`+([^`]+)`+"),
+)
+
+
+def strip_title_markdown(text):
+    """Flatten Discord markdown that an embed title cannot render.
+
+    ``[Name](url)`` becomes ``Name``; ``**bold**``, ``~~strike~~`` and
+    `` `code` `` lose their markers. Everything else is left alone.
+    """
+    if not text:
+        return text
+    out = _TITLE_MD_LINK.sub(r"\1", str(text))
+    for pattern in _TITLE_MD_MARKERS:
+        out = pattern.sub(r"\1", out)
+    return out
+
+
+def _wiki_url(name) -> str:
+    return f"https://oldschool.runescape.wiki/w/{str(name or '').replace(' ', '_')}"
+
+
 def replace_placeholders(embed: interactions.Embed, value_dict: dict, global_server: bool = False):
 
     # Replace placeholders in the embed title
     #print("replace_placeholders called with value_dict:", value_dict)
     if embed.title:
-        if "{npc_name}" in embed.title:
-            embed.title = replace_placeholders_in_text(embed.title, value_dict)
-            formatted_npc_name = value_dict.get('{npc_name}', '').replace(" ", "_")
-            wiki_url = f"https://oldschool.runescape.wiki/w/{formatted_npc_name}"
-            embed.url = wiki_url
-        elif "{item_name}" in embed.title:
-            embed.title = replace_placeholders_in_text(embed.title, value_dict)
-            formatted_item_name = value_dict.get('{item_name}', '').replace(" ", "_")
-            wiki_url = f"https://oldschool.runescape.wiki/w/{formatted_item_name}"
-            embed.url = wiki_url
+        # A stored template url (group_embeds.url) wins and may carry its own
+        # placeholders. Only when it is blank do we fall back to the historical
+        # behaviour: link the title at the wiki page for whichever of
+        # {npc_name}/{item_name} the *template* mentioned.
+        custom_url = embed.url
+        title_has_npc = "{npc_name}" in embed.title
+        title_has_item = "{item_name}" in embed.title
+
+        embed.title = strip_title_markdown(
+            replace_placeholders_in_text(embed.title, value_dict)
+        )
+
+        resolved_url = ""
+        if custom_url:
+            resolved_url = replace_placeholders_in_text(custom_url, value_dict).strip()
+            # An unresolved placeholder leaves a non-URL behind; Discord rejects
+            # the whole embed for a malformed url, so drop it rather than send it.
+            if not resolved_url.lower().startswith(("http://", "https://")):
+                resolved_url = ""
+
+        if resolved_url:
+            embed.url = resolved_url
+        elif title_has_npc:
+            embed.url = _wiki_url(value_dict.get("{npc_name}", ""))
+        elif title_has_item:
+            embed.url = _wiki_url(value_dict.get("{item_name}", ""))
         else:
-            embed.title = replace_placeholders_in_text(embed.title, value_dict)
-    
+            embed.url = None
+
     # Replace placeholders in the embed description
     if embed.description:
         if "{kc_received}" in embed.description:
