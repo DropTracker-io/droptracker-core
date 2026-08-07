@@ -786,6 +786,42 @@ async def preview_token(group_id: int):
     return private_no_store(jsonify(payload))
 
 
+# --- abuse reports -----------------------------------------------------------
+
+
+@sites_bp.post("/sites/report")
+async def report_site():
+    """Anonymous abuse report for a tenant site (the footer link's target).
+
+    Stored as an AuditLog row (actor NULL) so it lands in the existing admin
+    audit browser; per-IP rate limited. Deliberately returns ok even for
+    unknown sites so the endpoint can't be used to enumerate subdomains.
+    """
+    body = await json_body()
+    sub = str(body.get("site") or "").strip().lower()
+    reason = str(body.get("reason") or "").strip()
+    if not reason or len(reason) > 2000:
+        abort_problem(422, "Invalid report", "A reason of at most 2000 characters is required.")
+
+    ip = (request.headers.get("X-Real-IP") or request.remote_addr or "unknown").strip()
+    ip_key = int(hashlib.sha256(ip.encode()).hexdigest()[:8], 16)
+    if _rate_limited("report", ip_key, 5, 3600):
+        abort_problem(429, "Slow down", "Too many reports from this address; try again later.")
+
+    def _apply():
+        with db_session() as s:
+            site = s.query(GroupSite).filter(GroupSite.subdomain == sub).first()
+            _audit(
+                s, None, site.group_id if site else 0, "site.report_received",
+                f"group_sites.{sub or 'unknown'}",
+                after={"reason": reason[:2000], "known_site": site is not None},
+            )
+            s.commit()
+
+    await asyncio.to_thread(_apply)
+    return jsonify({"ok": True})
+
+
 # --- public render projections ----------------------------------------------
 
 
