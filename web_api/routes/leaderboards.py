@@ -171,10 +171,18 @@ async def leaderboards_players():
     group_id = None
     npc_id = None
     if scope.startswith("group:"):
+        # Plain "group:{gid}" or the combined "group:{gid}:npc:{nid}" form
+        # (per-group per-NPC boards; the Redis keys have always existed —
+        # npc_leaderboard_key(token, npc_id, group_id=...) — only this scope
+        # grammar was missing).
         try:
-            group_id = int(scope.split(":", 1)[1])
+            parts = scope.split(":")
+            group_id = int(parts[1])
+            if len(parts) >= 4 and parts[2] == "npc":
+                npc_id = int(parts[3])
         except Exception:
             group_id = None
+            npc_id = None
     elif scope.startswith("npc:"):
         try:
             npc_id = int(scope.split(":", 1)[1])

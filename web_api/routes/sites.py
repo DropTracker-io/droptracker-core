@@ -121,8 +121,10 @@ def _page_summary(p: GroupSitePage) -> dict:
     }
 
 
-def _site_admin_view(site: GroupSite) -> dict:
+def _site_admin_view(site: GroupSite, s=None) -> dict:
+    roster_public = _roster_enabled(s, site.group_id) if s is not None else False
     return {
+        "roster_public": roster_public,
         "site_id": site.site_id,
         "group_id": site.group_id,
         "subdomain": site.subdomain,
@@ -318,7 +320,7 @@ async def get_group_site(group_id: int):
             user = load_user(s, user_id)
             assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
             site = _load_site(s, group_id)
-            return {"site": _site_admin_view(site) if site else None, "tos_version": TOS_VERSION}
+            return {"site": _site_admin_view(site, s) if site else None, "tos_version": TOS_VERSION}
 
     payload = await asyncio.to_thread(_load)
     return private_no_store(jsonify(payload))
@@ -409,7 +411,7 @@ async def claim_site(group_id: int):
             _audit(s, user_id, group_id, "site.claim", f"group_sites.{sub}",
                    after={"subdomain": sub, "tos_version": TOS_VERSION})
             s.commit()
-            return _site_admin_view(site)
+            return _site_admin_view(site, s)
 
     saved = await asyncio.to_thread(_apply)
     return private_no_store(jsonify({"ok": True, "site": saved}))
@@ -458,6 +460,10 @@ async def update_site(group_id: int):
                     "Each nav item needs a page_slug or an https://" " or site-relative href.",
                 )
 
+    roster_public = body.get("roster_public")
+    if roster_public is not None and not isinstance(roster_public, bool):
+        abort_problem(422, "Invalid setting", "'roster_public' must be a boolean.")
+
     css_source = body.get("custom_css_source")
     css_out = None
     if css_source is not None:
@@ -504,11 +510,35 @@ async def update_site(group_id: int):
                 changed["custom_css_sha"] = _sha(css_source)
                 site.custom_css_source = css_source
                 site.custom_css = css_out
+            if roster_public is not None:
+                from db.models import GroupConfiguration
+
+                row = (
+                    s.query(GroupConfiguration)
+                    .filter(
+                        GroupConfiguration.group_id == group_id,
+                        GroupConfiguration.config_key == ROSTER_CONFIG_KEY,
+                    )
+                    .first()
+                )
+                value = "1" if roster_public else "0"
+                if row is None:
+                    s.add(
+                        GroupConfiguration(
+                            group_id=group_id,
+                            config_key=ROSTER_CONFIG_KEY,
+                            config_value=value,
+                            updated_at=datetime.utcnow(),
+                        )
+                    )
+                else:
+                    row.config_value = value
+                changed["roster_public"] = roster_public
             if changed:
                 _audit(s, user_id, group_id, "site.update",
                        f"group_sites.{site.subdomain}", after=changed)
             s.commit()
-            return _site_admin_view(site)
+            return _site_admin_view(site, s)
 
     saved = await asyncio.to_thread(_apply)
     return private_no_store(jsonify({"ok": True, "site": saved}))
@@ -714,7 +744,7 @@ async def _set_site_published(group_id: int, publish: bool):
                    "site.publish" if publish else "site.unpublish",
                    f"group_sites.{site.subdomain}")
             s.commit()
-            return _site_admin_view(site)
+            return _site_admin_view(site, s)
 
     saved = await asyncio.to_thread(_apply)
     return private_no_store(jsonify({"ok": True, "site": saved}))
@@ -784,6 +814,86 @@ async def preview_token(group_id: int):
 
     payload = await asyncio.to_thread(_load)
     return private_no_store(jsonify(payload))
+
+
+# --- public member roster -----------------------------------------------------
+
+ROSTER_CONFIG_KEY = "public_members_list"
+_ROSTER_MAX = 100
+
+
+def _roster_enabled(s, group_id: int) -> bool:
+    from db.models import GroupConfiguration
+
+    row = (
+        s.query(GroupConfiguration)
+        .filter(
+            GroupConfiguration.group_id == group_id,
+            GroupConfiguration.config_key == ROSTER_CONFIG_KEY,
+        )
+        .first()
+    )
+    return bool(row and str(row.config_value).strip().lower() in ("1", "true", "yes", "on"))
+
+
+@sites_bp.get("/groups/<int:group_id>/site-roster")
+async def site_roster(group_id: int):
+    """Public member roster for the member_roster site block.
+
+    Deliberately opt-in: gated on the ``public_members_list`` group config
+    (default OFF; the points_leaderboard_public pattern — an unregistered key
+    written only by the site settings PUT, so generic config PATCH can't flip
+    it). Honors both privacy layers: the global hidden_player_ids() union and
+    the group's own IgnoredPlayer rows.
+    """
+    try:
+        limit = min(max(int(request.args.get("limit", 25)), 1), _ROSTER_MAX)
+    except ValueError:
+        limit = 25
+
+    def _load():
+        from db.models import IgnoredPlayer, Player
+        from web_api.common import hidden_player_ids, money, player_month_totals
+        from utils.partitions import resolve_period
+
+        with db_session() as s:
+            if not _roster_enabled(s, group_id):
+                abort_problem(
+                    404, "Roster not public", "This group does not share its member list."
+                )
+            ignored = {
+                pid
+                for (pid,) in s.query(IgnoredPlayer.player_id)
+                .filter(IgnoredPlayer.group_id == group_id)
+                .all()
+            }
+            hidden = hidden_player_ids()
+            rows = (
+                s.query(Player.player_id, Player.player_name)
+                .join(Player.groups)
+                .filter(Group.group_id == group_id)
+                .all()
+            )
+            visible = [
+                (pid, name)
+                for pid, name in rows
+                if pid not in ignored and pid not in hidden and name
+            ]
+            token = resolve_period("month")
+            totals = player_month_totals([pid for pid, _ in visible], token)
+            members = [
+                {
+                    "id": pid,
+                    "name": name,
+                    "monthly_loot": money(int(totals.get(pid, 0) or 0)),
+                }
+                for pid, name in visible
+            ]
+            members.sort(key=lambda m: m["monthly_loot"]["value"], reverse=True)
+            return {"members": members[:limit], "total": len(members)}
+
+    payload = await asyncio.to_thread(_load)
+    return with_cache_headers(jsonify(payload), max_age=300)
 
 
 # --- Wise Old Man group achievements -----------------------------------------
