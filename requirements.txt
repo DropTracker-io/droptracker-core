@@ -111,3 +111,5 @@ sentry-sdk==2.64.0
 # Local semantic embeddings (CPU/ONNX, no torch). Optional at runtime.
 fastembed==0.8.0
 numpy==2.4.6
+nh3
+tinycss2
