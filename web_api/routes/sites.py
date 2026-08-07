@@ -347,6 +347,7 @@ async def get_site_meta(group_id: int):
                 "reserved_subdomains": sorted(RESERVED_SUBDOMAINS),
                 "schema_version": SCHEMA_VERSION,
                 "tos_version": TOS_VERSION,
+                "sites_domain": (os.getenv("SITES_DOMAIN") or "").strip(),
             }
 
     payload = await asyncio.to_thread(_load)
