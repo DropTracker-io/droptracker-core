@@ -786,6 +786,76 @@ async def preview_token(group_id: int):
     return private_no_store(jsonify(payload))
 
 
+# --- Wise Old Man group achievements -----------------------------------------
+
+_WOM_ACH_CACHE_TTL = 1800  # 30 min — WOM API budget is shared with the sync jobs
+_WOM_ACH_NEG_TTL = 300  # remember failures briefly so a WOM outage can't hammer it
+
+
+@sites_bp.get("/groups/<int:group_id>/wom-achievements")
+async def wom_group_achievements(group_id: int):
+    """Recent WOM achievements for a group (public; the wom_achievements site
+    block). One upstream call per group per 30 minutes regardless of traffic;
+    fails soft to an empty list so a WOM outage never breaks a page render."""
+    try:
+        limit = min(max(int(request.args.get("limit", 10)), 1), 25)
+    except ValueError:
+        limit = 10
+
+    def _load():
+        conn = _rc()
+        cache_key = f"wom:group_achievements:{group_id}"
+        if conn is not None:
+            try:
+                cached = conn.get(cache_key)
+                if cached:
+                    return json.loads(cached)
+            except Exception:
+                pass
+
+        with db_session() as s:
+            group = s.query(Group).filter(Group.group_id == group_id).first()
+            wom_id = getattr(group, "wom_id", None) if group else None
+        items: list[dict] = []
+        if wom_id:
+            try:
+                import requests as rq
+
+                headers = {"User-Agent": "DropTracker.io sites-v1"}
+                api_key = (os.getenv("WOM_API_KEY") or "").strip()
+                if api_key:
+                    headers["x-api-key"] = api_key
+                resp = rq.get(
+                    f"https://api.wiseoldman.net/v2/groups/{int(wom_id)}/achievements",
+                    params={"limit": 25},
+                    headers=headers,
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                for a in resp.json():
+                    player = a.get("player") or {}
+                    items.append(
+                        {
+                            "player_name": player.get("displayName") or "",
+                            "name": a.get("name") or "",
+                            "metric": a.get("metric") or "",
+                            "created_at": a.get("createdAt") or "",
+                        }
+                    )
+            except Exception:
+                items = []
+        if conn is not None:
+            try:
+                ttl = _WOM_ACH_CACHE_TTL if items else _WOM_ACH_NEG_TTL
+                conn.setex(cache_key, ttl, json.dumps(items))
+            except Exception:
+                pass
+        return items
+
+    items = await asyncio.to_thread(_load)
+    return with_cache_headers(jsonify({"items": items[:limit]}), max_age=300)
+
+
 # --- abuse reports -----------------------------------------------------------
 
 

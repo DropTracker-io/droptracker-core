@@ -121,6 +121,7 @@ BLOCK_TYPES: tuple[str, ...] = (
     "buttons",
     "divider",
     "custom_html",
+    "wom_achievements",
 )
 
 # Palette keys the theme wrapper will forward as CSS custom properties.
