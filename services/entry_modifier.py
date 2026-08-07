@@ -207,7 +207,7 @@ async def _rebuild_notification_embed(drop, player, item, npc, group_id, db):
         next((i for i, g in enumerate(sorted_groups) if g["id"] == group_id), 0) + 1
     )
 
-    formatted_name = get_formatted_name(player_name, group_id, db)
+    formatted_name = get_formatted_name(player_name, group_id, db, player_id=player_id)
 
     global_rank_str = (
         f"`{global_rank}`/`{total_global_players}`"

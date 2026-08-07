@@ -1384,7 +1384,7 @@ class HallOfFame(Extension):
         if player is None:
             return "Unknown"
         try:
-            return get_formatted_name(player.player_name, group_id, session)
+            return get_formatted_name(player.player_name, group_id, session, player_id=player.player_id)
         except Exception:
             return player.player_name or "Unknown"
 

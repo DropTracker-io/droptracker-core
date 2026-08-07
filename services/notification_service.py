@@ -1228,7 +1228,7 @@ class NotificationService:
                     else:
                         skills_text = f"{sn} {nl}"
 
-            formatted_name = get_formatted_name(player_name, group_id, db_session)
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
 
             replacements = {
                 "{player_name}": player_link(player_name, player_id),
@@ -1328,7 +1328,7 @@ class NotificationService:
             image_url = data.get("image_url") or ""
             skills_text = data.get("skills_text") or ""
 
-            formatted_name = get_formatted_name(player_name, group_id, db_session)
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
 
             replacements = {
                 "{player_name}": player_link(player_name, player_id),
@@ -1429,7 +1429,7 @@ class NotificationService:
 
             video_url = self._maybe_get_video_url(db_session, data)
 
-            formatted_name = get_formatted_name(player_name, group_id, db_session)
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
             if embed_template:
                 replacements = {
                     "{player_name}": player_link(player_name, player_id),
@@ -1545,7 +1545,7 @@ class NotificationService:
 
             video_url = self._maybe_get_video_url(db_session, data)
 
-            formatted_name = get_formatted_name(player_name, group_id, db_session)
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
             if embed_template:
                 replacements = {
                     "{player_name}": player_link(player_name, player_id),
@@ -1658,7 +1658,7 @@ class NotificationService:
 
             video_url = self._maybe_get_video_url(db_session, data)
 
-            formatted_name = get_formatted_name(player_name, group_id, db_session)
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
             if embed_template:
                 replacements = {
                     "{player_name}": player_link(player_name, player_id),
@@ -2878,7 +2878,7 @@ class NotificationService:
                                    'total': group_total})
             sorted_groups = sorted(group_totals, key=lambda x: x['total'], reverse=True)
             group_to_group_rank = str(next((i for i, g in enumerate(sorted_groups) if g['id'] == group_id), 0) + 1)
-            formatted_name = get_formatted_name(player_name, group_id, db_session)
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
             content = f"{formatted_name} received a drop:"
             # Build rank strings safely
             if global_rank is not None and total_global_players is not None:
@@ -3398,7 +3398,7 @@ class NotificationService:
             if group_placement is None:
                 group_placement = "`?`"
                 # Replace placeholders
-            formatted_name = get_formatted_name(player_name, group_id, db_session)
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
             
             replacements = {
                 "{player_name}": player_link(player_name, player_id),
@@ -3527,7 +3527,7 @@ class NotificationService:
         value_dict["{image_url}"] = video_url or (data.get("image_url") or "")
         try:
             channel, channel_error = await self._fetch_sendable_channel(channel_id_config.config_value)
-            formatted_name = get_formatted_name(player_name, group_id, db_session)
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
             if channel:
                 embed = replace_placeholders(embed_template, value_dict)
                 embed = self._finalize_group_points_embed(embed)
@@ -3692,7 +3692,7 @@ class NotificationService:
             embed = self._finalize_group_points_embed(embed)
             
             # Send message
-            formatted_name = get_formatted_name(player_name, group_id, db_session)
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
             content = f"{formatted_name} has completed a combat achievement!"
             
             if image_url:
@@ -3817,7 +3817,7 @@ class NotificationService:
             embed = self._finalize_group_points_embed(embed)
             
             # Send message
-            formatted_name = get_formatted_name(player_name, group_id, db_session)
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
             content = f"{formatted_name} has added an item to their collection log!"
             
             video_attachment, video_local_path = (None, None)

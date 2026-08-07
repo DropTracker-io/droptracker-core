@@ -691,20 +691,84 @@ class DatabaseOperations:
         
         return drop
 
-def get_formatted_name(player_name:str, group_id: int, existing_session = None):
+def resolve_player_for_display(db_session, player_name: str, player_id = None):
+    """Find the Player row behind a notification payload's (name, id) pair.
+
+    Resolution order is id, exact name, then OSRS display equivalence. The last
+    step matters: the RuneLite plugin submits the RSN exactly as the game
+    spells it (``Beast_Owned``) while we store WOM's canonical form, which
+    folds ``_`` and ``-`` to spaces (``Beast Owned``). ``utf8mb4_general_ci``
+    does not treat those as equal, so a strict name match misses for every
+    player whose RSN contains an underscore or a hyphen.
+
+    Returns None when nothing matches -- callers must not assume a row.
+    """
+    if player_id is not None:
+        try:
+            pid = int(player_id)
+        except (TypeError, ValueError):
+            pid = None
+        if pid is not None:
+            player = db_session.query(Player).filter(Player.player_id == pid).first()
+            if player:
+                return player
+
+    if not player_name:
+        return None
+
+    player = db_session.query(Player).filter(Player.player_name == player_name).first()
+    if player:
+        return player
+
+    # WOM's spelling is the folded one, so try it directly before falling back
+    # to the scan below -- this hits the index and catches every case we have
+    # actually observed.
+    folded = str(player_name).replace("_", " ").replace("-", " ")
+    if folded != player_name:
+        player = db_session.query(Player).filter(Player.player_name == folded).first()
+        if player:
+            return player
+
+    # Last resort, and the only branch that also covers the reverse direction
+    # (a stored ``Itz_Baal`` from WOM group import vs a submitted ``Itz Baal``).
+    normalized = normalize_player_display_equivalence(player_name)
+    if not normalized:
+        return None
+    return (
+        db_session.query(Player)
+        .filter(
+            func.lower(
+                func.replace(func.replace(func.trim(Player.player_name), "_", " "), "-", " ")
+            )
+            == normalized
+        )
+        .first()
+    )
+
+
+def get_formatted_name(player_name:str, group_id: int, existing_session = None, player_id = None):
     """Get a formatted name for a player.
-    
+
     Formats a player's name with a link to their profile and handles pinging in Discord.
-    
+
     Args:
         player_name (str): OSRS username
         group_id (int): ID of the group to get the formatted name for
         existing_session (Session, optional): Database session to use. Defaults to None.
+        player_id (int, optional): Authoritative player id when the caller has
+            one. Every notification payload carries it alongside the name, and
+            it is the only identifier that cannot be spelled two ways.
     Returns:
         str: The Discord-formatted name with ping-privacy considerations
 
     Note:
         This method handles pinging in Discord based on the user's settings.
+
+        Never raises on an unknown player. It used to dereference the result of
+        a strict name lookup, so every notification for an underscore- or
+        hyphen-named RSN died with an AttributeError -- which
+        notification_service classifies as non-transient, marking the row
+        `failed` and dropping the message for good.
     """
     # Use the caller's session when given; otherwise a short-lived one. The old
     # fallback was the module-global scoped session, whose read transaction
@@ -712,7 +776,9 @@ def get_formatted_name(player_name:str, group_id: int, existing_session = None):
     use_existing_session = existing_session is not None
     db_session = existing_session if use_existing_session else Session()
     try:
-        player = db_session.query(Player).filter(Player.player_name == player_name).first()
+        player = resolve_player_for_display(db_session, player_name, player_id)
+        if player is None:
+            return str(player_name or "Unknown")
         formatted_name = player_link(player.player_name, player.player_id)
         url_name = formatted_name
         if player.user:
