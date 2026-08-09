@@ -402,11 +402,16 @@ def replace_placeholders(embed: interactions.Embed, value_dict: dict, global_ser
                 continue
 
             if field_value:
+                field_values = value_dict
                 if field_value == "{team_size}":
-                    if value_dict.get("{team_size}", None) != "Solo":
-                        original_value = value_dict["{team_size}"]
-                        value_dict["{team_size}"] = f"{original_value} players"
-                field_value = replace_placeholders_in_text(field_value, value_dict)
+                    team_size = value_dict.get("{team_size}", None)
+                    # Suffix in a local copy: mutating value_dict would compound
+                    # into "4 players players" on a second field that references
+                    # {team_size}, and a template can carry one even when the
+                    # caller supplies no team size at all.
+                    if team_size is not None and team_size != "Solo":
+                        field_values = {**value_dict, "{team_size}": f"{team_size} players"}
+                field_value = replace_placeholders_in_text(field_value, field_values)
 
             # If group-point placeholders are still present after replacement,
             # data was unavailable for this event; suppress that field.

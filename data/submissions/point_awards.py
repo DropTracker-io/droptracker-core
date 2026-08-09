@@ -18,6 +18,8 @@ from db.models import (
     Player,
     user_group_association,
 )
+from db.ops import resolve_player_for_display
+from utils.format import normalize_player_display_equivalence
 import time
 
 # player_points.reason column width (String(125) in db/models/group_points.py)
@@ -770,16 +772,24 @@ def _extract_scalar(value):
 
 
 def _get_player_id_by_name(player_name, session):
-    # OSRS treats spaces and underscores as equivalent in player names.
-    # Try exact match first (fast path), then fall back to normalized lookup.
-    row = session.query(Player.player_id).filter(Player.player_name.ilike(player_name)).first()
-    if row is None and (" " in player_name or "_" in player_name):
-        alt_name = player_name.replace(" ", "_") if " " in player_name else player_name.replace("_", " ")
-        row = session.query(Player.player_id).filter(Player.player_name.ilike(alt_name)).first()
-    player_id = _extract_scalar(row)
+    """Resolve a submitted RSN to a player_id across the display-name gap.
+
+    The plugin submits the RSN exactly as the game spells it ("X-tra",
+    "Beast_Owned") — it does no normalization — while WOM, our identity source,
+    folds both "-" and "_" to spaces, so the row we stored is usually "x tra".
+    utf8mb4_general_ci does not treat those as equal, so a lookup that folds
+    only underscores loses every hyphenated participant: they resolve to
+    nothing and are skipped, missing their share of a split's points.
+
+    Delegates to db.ops.resolve_player_for_display so the point path and the
+    Discord notification path agree on who a submitted name belongs to.
+    """
+    player = resolve_player_for_display(session, player_name)
+    if player is None:
+        return None
     try:
-        return int(player_id) if player_id is not None else None
-    except Exception:
+        return int(player.player_id)
+    except (TypeError, ValueError):
         return None
 
 
@@ -823,17 +833,23 @@ def _normalize_player_names(players_included, receiver_player_name):
         raw_source = players_included
     normalized = []
     seen = set()
-    receiver_name = str(receiver_player_name).strip().lower() if receiver_player_name else None
+    # Fold "-"/"_"/spacing on both sides of the comparison: the receiver's name
+    # comes from the DB in WOM's folded spelling ("x tra") while participants
+    # arrive in the plugin's ("X-tra"), so a plain lowercase match leaves a
+    # hyphen-RSN receiver in their own participant list — and once the lookup
+    # below can resolve that spelling, they are paid a split share on top of
+    # the receiver award.
+    receiver_key = normalize_player_display_equivalence(receiver_player_name) if receiver_player_name else None
     for raw_name in raw_source:
         name = str(raw_name).strip() if raw_name is not None else ""
         if not name:
             continue
-        lowered = name.lower()
-        if receiver_name and lowered == receiver_name:
+        key = normalize_player_display_equivalence(name)
+        if receiver_key and key == receiver_key:
             continue
-        if lowered in seen:
+        if key in seen:
             continue
-        seen.add(lowered)
+        seen.add(key)
         normalized.append(name)
     return normalized
 

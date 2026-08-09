@@ -73,6 +73,17 @@ MAX_SPLIT_SIZE = 100
 MAX_RSN_LENGTH = 12  # OSRS display names cap at 12 characters
 
 
+def _rsn_key(name: str) -> str:
+    """Fold an RSN to the key two spellings of one account share.
+
+    OSRS renders "_" and "-" as spaces and WOM stores the folded form, so
+    "X-tra", "X_tra" and "x tra" are all the same player. Kept inline rather
+    than importing utils.format's normalize_player_display_equivalence so this
+    module stays free of the Discord/DB/PIL imports that module drags in.
+    """
+    return " ".join(str(name or "").replace("_", " ").replace("-", " ").split()).lower()
+
+
 def parse_split_players(raw: str | None, receiver_name: str) -> list[str]:
     """Parse the ``/submit drop`` ``split_with`` option into RSNs.
 
@@ -87,7 +98,7 @@ def parse_split_players(raw: str | None, receiver_name: str) -> list[str]:
     """
     if not raw or not raw.strip():
         return []
-    receiver_key = receiver_name.strip().lower().replace("_", " ")
+    receiver_key = _rsn_key(receiver_name)
     others: list[str] = []
     seen: set[str] = set()
     for part in raw.replace("\n", ",").split(","):
@@ -96,7 +107,7 @@ def parse_split_players(raw: str | None, receiver_name: str) -> list[str]:
             continue
         if len(name) > MAX_RSN_LENGTH:
             raise ValueError(f"“{name}” isn't a valid RuneScape name (max 12 characters).")
-        key = name.lower().replace("_", " ")
+        key = _rsn_key(name)
         if key == receiver_key or key in seen:
             continue
         seen.add(key)

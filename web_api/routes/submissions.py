@@ -87,6 +87,16 @@ def _rate_limited(user_id: int) -> bool:
         return False
 
 
+def _rsn_key(name: str) -> str:
+    """Fold an RSN to the key two spellings of one account share.
+
+    OSRS renders "_" and "-" as spaces and WOM stores the folded form, so
+    "X-tra", "X_tra" and "x tra" are all the same player. Mirrors
+    ``_rsn_key`` in data/submissions/manual_discord.py.
+    """
+    return " ".join(str(name or "").replace("_", " ").replace("-", " ").split()).lower()
+
+
 def _parse_split(body, receiver_name: str):
     """Validate the submit form's split fields -> (other_players, split_size).
 
@@ -105,7 +115,7 @@ def _parse_split(body, receiver_name: str):
     if not isinstance(raw, list):
         abort_problem(422, "Invalid split", "'split_players' must be a list of player names.")
 
-    receiver_key = receiver_name.strip().lower().replace("_", " ")
+    receiver_key = _rsn_key(receiver_name)
     others, seen = [], set()
     for entry in raw:
         name = str(entry or "").strip()
@@ -113,7 +123,7 @@ def _parse_split(body, receiver_name: str):
             continue
         if len(name) > 12:  # OSRS display names cap at 12 characters
             abort_problem(422, "Invalid split", f"“{name}” isn't a valid RuneScape name.")
-        key = name.lower().replace("_", " ")
+        key = _rsn_key(name)
         if key == receiver_key or key in seen:
             continue
         seen.add(key)

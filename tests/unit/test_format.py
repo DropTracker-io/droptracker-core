@@ -364,3 +364,44 @@ class TestReplacePlaceholdersTitle:
         embed = _embed("New Combat Achievement")
         out = replace_placeholders(embed, {})
         assert out.url is None
+
+
+# ── replace_placeholders (fields / {team_size}) ───────────────────────────────
+
+class _StubField:
+    def __init__(self, name, value):
+        self.name = name
+        self.value = value
+
+
+def _embed_with_fields(*fields):
+    embed = _StubEmbed(title="A new personal best!")
+    embed.fields = [_StubField(name, value) for name, value in fields]
+    return embed
+
+
+class TestReplacePlaceholdersTeamSizeField:
+    def test_missing_team_size_does_not_raise(self):
+        """A template field can reference {team_size} on an embed type whose
+        caller supplies none — that must not abort the whole render."""
+        embed = _embed_with_fields(("Team Size", "{team_size}"))
+        out = replace_placeholders(embed, {"{player_name}": "Ron"})
+        assert out.fields[0].value == "{team_size}"
+
+    def test_two_team_size_fields_both_render_once(self):
+        embed = _embed_with_fields(
+            ("Team Size", "{team_size}"), ("Players", "{team_size}")
+        )
+        out = replace_placeholders(embed, {"{team_size}": "4"})
+        assert [f.value for f in out.fields] == ["4 players", "4 players"]
+
+    def test_solo_is_left_alone(self):
+        embed = _embed_with_fields(("Team Size", "{team_size}"))
+        out = replace_placeholders(embed, {"{team_size}": "Solo"})
+        assert out.fields[0].value == "Solo"
+
+    def test_callers_value_dict_is_not_mutated(self):
+        embed = _embed_with_fields(("Team Size", "{team_size}"))
+        value_dict = {"{team_size}": "4"}
+        replace_placeholders(embed, value_dict)
+        assert value_dict == {"{team_size}": "4"}

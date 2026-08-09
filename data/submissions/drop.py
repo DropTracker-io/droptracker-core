@@ -72,6 +72,48 @@ def _verify_high_value_drop_sync(item_name, npc_name, timeout: float = 20.0) -> 
         return True
 
 
+def _resolve_split_participants(session, players_included, receiver_player_id):
+    """Submitted participant names -> the distinct non-receiver Player rows.
+
+    The plugin submits the RSN exactly as the game spells it ("X-tra",
+    "Beast_Owned") — it does no normalization — while WOM, our identity source,
+    folds both "-" and "_" to spaces, so the row we stored is usually "x tra".
+    Neither spelling is wrong and utf8mb4_general_ci does not treat them as
+    equal, so resolution has to fold both separators in both directions. A
+    lookup that only knows about underscores drops every hyphenated
+    participant (X-tra, Tzuk-Kal-Lag, NoX-EvilAce, …): they resolve to nothing
+    and silently miss their share of the split.
+
+    Two filters ride along, both of which only matter once the folding above
+    makes more names resolve:
+
+    * the receiver is dropped by **id**, not name — they are counted separately
+      (they anchor the divisor and take the receiver adjustment), and upstream
+      only filters them out of the list by name, which cannot see through the
+      spelling gap;
+    * a payload naming one account twice ("X-tra" and "x tra") now resolves to
+      the same row twice, and must still be credited once.
+    """
+    from db.ops import resolve_player_for_display
+
+    participants = []
+    seen_player_ids = set()
+    for name in players_included or []:
+        p = resolve_player_for_display(session, name)
+        if p is None:
+            continue
+        try:
+            if int(p.player_id) == int(receiver_player_id):
+                continue
+        except (TypeError, ValueError):
+            pass
+        if p.player_id in seen_player_ids:
+            continue
+        seen_player_ids.add(p.player_id)
+        participants.append(p)
+    return participants
+
+
 async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
                                    players_included: list, drop_value: int,
                                    world_type: str = "main",
@@ -106,23 +148,16 @@ async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
     Returns the number of non-receiver participants credited.
     """
     from db.models.drop_split import DropSplit
-    from db.models import Player, user_group_association
+    from db.models import user_group_association
 
     group_id = group.group_id
     partition = drop.partition
 
-    # Resolve included player names to Player rows that are in this group.
-    # OSRS treats spaces and underscores as equivalent in player names, and the
-    # plugin normalizes underscores to spaces before submitting.
+    # Keep only the resolved participants who are members of this group — split
+    # credit is a per-group statement, so an outsider's share is uncreditable
+    # here (it still shrinks everyone's cut, via the divisor below).
     valid_participants = []
-    for name in players_included:
-        p = session.query(Player).filter(Player.player_name.ilike(name)).first()
-        if p is None and (" " in name or "_" in name):
-            alt_name = name.replace(" ", "_") if " " in name else name.replace("_", " ")
-            p = session.query(Player).filter(Player.player_name.ilike(alt_name)).first()
-        if p is None:
-            continue
-        # Verify the player is a member of this group
+    for p in _resolve_split_participants(session, players_included, receiver_player_id):
         is_member = (
             session.query(user_group_association)
             .filter(
