@@ -28,6 +28,7 @@ from .notified_submission import NotifiedSubmission
 from .notification_queue import NotificationQueue
 from .player_notification_prefs import PlayerNotificationPrefs
 from .embed import GroupEmbed, Field
+from .site import GroupSite, GroupSitePage
 from .guild_meta import Guild, GroupWomAssociation, GroupPersonalBestMessage, LBUpdate
 from .webhooks import Webhook, BackupWebhook, WebhookPendingDeletion, NewWebhook
 from .lootboard import LootboardStyle
@@ -195,6 +196,8 @@ __all__ = [
     "NotificationQueue",
     "PlayerNotificationPrefs",
     "GroupEmbed",
+    "GroupSite",
+    "GroupSitePage",
     "Field",
     "Guild",
     "GroupWomAssociation",

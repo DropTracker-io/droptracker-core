@@ -62,6 +62,13 @@ ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
         "help": "Configure a custom point system: award rules per submission type, per-item/NPC overrides, timed boosts, and points leaderboards.",
         "default": False,
     },
+    {
+        "key": "custom_site",
+        "label": "Custom clan website",
+        "category": "features",
+        "help": "A multi-page mini-site for the group on its own subdomain of the sites domain, built from blocks with live DropTracker data.",
+        "default": False,
+    },
 ]
 
 # User-scoped ("supporter") entitlements — granted by a user_subscriptions row
