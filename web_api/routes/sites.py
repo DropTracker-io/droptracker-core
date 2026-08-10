@@ -116,6 +116,7 @@ def _page_summary(p: GroupSitePage) -> dict:
         "position": p.position,
         "published": bool(p.published),
         "has_draft_changes": bool(p.published_blocks != p.draft_blocks),
+        "custom_css_source": p.custom_css_source or "",
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
         "published_at": p.published_at.isoformat() if p.published_at else None,
     }
@@ -631,6 +632,30 @@ async def update_page(group_id: int, page_id: int):
     if position is not None and (not isinstance(position, int) or not 0 <= position <= 100):
         abort_problem(422, "Invalid position", "'position' must be an integer 0-100.")
 
+    # Page-scoped stylesheet — same validate-and-reject contract as the
+    # site-level sheet, so an author sees why a save failed rather than
+    # silently losing rules.
+    page_css_source = body.get("custom_css_source")
+    page_css_out = None
+    if page_css_source is not None:
+        if not isinstance(page_css_source, str):
+            abort_problem(422, "Invalid CSS", "'custom_css_source' must be a string.")
+        if len(page_css_source.encode("utf-8", "replace")) > MAX_CUSTOM_CSS_BYTES:
+            abort_problem(
+                422, "Invalid CSS",
+                f"Page CSS is limited to {MAX_CUSTOM_CSS_BYTES // 1024} KB.",
+            )
+        if page_css_source.strip():
+            try:
+                page_css_out = sanitize_css(page_css_source)
+            except CssValidationError as e:
+                abort_problem(
+                    422, "CSS rejected", " | ".join(e.problems[:20]),
+                    extra={"problems": e.problems[:50]},
+                )
+        else:
+            page_css_out = ""
+
     def _apply():
         with db_session() as s:
             user = load_user(s, user_id)
@@ -647,6 +672,9 @@ async def update_page(group_id: int, page_id: int):
                 page.title = title.strip()
             if position is not None:
                 page.position = position
+            if page_css_source is not None:
+                page.custom_css_source = page_css_source
+                page.custom_css = page_css_out
             if blocks is not None:
                 page.draft_blocks = json.dumps(blocks)
                 page.schema_version = SCHEMA_VERSION
@@ -850,6 +878,9 @@ async def site_roster(group_id: int):
         limit = min(max(int(request.args.get("limit", 25)), 1), _ROSTER_MAX)
     except ValueError:
         limit = 25
+    sort = (request.args.get("sort") or "monthly").strip().lower()
+    if sort not in ("monthly", "all_time", "name"):
+        sort = "monthly"
 
     def _load():
         from db.models import IgnoredPlayer, Player
@@ -879,18 +910,33 @@ async def site_roster(group_id: int):
                 for pid, name in rows
                 if pid not in ignored and pid not in hidden and name
             ]
-            token = resolve_period("month")
-            totals = player_month_totals([pid for pid, _ in visible], token)
+            ids = [pid for pid, _ in visible]
+            # Two batched Redis passes (each is pipelined internally), not 2·N.
+            monthly = player_month_totals(ids, resolve_period("month"))
+            all_time = player_month_totals(ids, resolve_period("all"))
+
             members = [
                 {
                     "id": pid,
                     "name": name,
-                    "monthly_loot": money(int(totals.get(pid, 0) or 0)),
+                    "monthly_loot": money(int(monthly.get(pid, 0) or 0)),
+                    "all_time_loot": money(int(all_time.get(pid, 0) or 0)),
                 }
                 for pid, name in visible
             ]
+            # Rank is always by monthly GP and is assigned BEFORE the display
+            # sort, so "#3" means third in the clan this month no matter how
+            # the visitor chooses to order the list.
             members.sort(key=lambda m: m["monthly_loot"]["value"], reverse=True)
-            return {"members": members[:limit], "total": len(members)}
+            for i, m in enumerate(members):
+                m["rank"] = i + 1
+
+            if sort == "name":
+                members.sort(key=lambda m: m["name"].lower())
+            elif sort == "all_time":
+                members.sort(key=lambda m: m["all_time_loot"]["value"], reverse=True)
+
+            return {"members": members[:limit], "total": len(members), "sort": sort}
 
     payload = await asyncio.to_thread(_load)
     return with_cache_headers(jsonify(payload), max_age=300)
@@ -1080,6 +1126,7 @@ async def site_page(sub: str, slug: str):
                 "title": page.title,
                 "group_id": site.group_id,
                 "blocks": json.loads(raw or "[]"),
+                "custom_css": page.custom_css or "",
                 "schema_version": page.schema_version,
                 "preview": preview,
                 "published_at": page.published_at.isoformat() if page.published_at else None,

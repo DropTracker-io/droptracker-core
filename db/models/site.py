@@ -92,6 +92,11 @@ class GroupSitePage(Base):
     # writes draft_blocks; the public renderer only ever reads published_blocks.
     draft_blocks = Column(LONGTEXT, nullable=False)
     published_blocks = Column(LONGTEXT, nullable=True)
+    # Page-scoped stylesheet, same contract as the site-level pair: *_source
+    # round-trips in the editor, custom_css is the validated + scoped output
+    # and the only column ever served.
+    custom_css = Column(MEDIUMTEXT, nullable=True)
+    custom_css_source = Column(MEDIUMTEXT, nullable=True)
     schema_version = Column(Integer, nullable=False, default=1)
     published = Column(Boolean, nullable=False, default=False)
     updated_at = Column(
