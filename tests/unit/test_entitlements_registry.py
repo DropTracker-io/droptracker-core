@@ -20,6 +20,7 @@ class TestEntitlementsRegistry:
             "custom_embeds": False,
             "video_submissions": False,
             "custom_points": False,
+            "custom_site": False,
         }
 
     def test_resolve_explicit_defaults(self):
