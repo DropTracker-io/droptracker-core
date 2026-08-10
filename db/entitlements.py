@@ -384,6 +384,27 @@ def effective_group_tiers(s, group_ids) -> Dict[int, Any]:
     return out
 
 
+def _sites_beta_group_ids() -> set:
+    """Staged-rollout allowlist for the custom_site entitlement.
+
+    ``SITES_BETA_GROUP_IDS`` (comma/space-separated group ids) grants
+    ``custom_site`` to specific groups without touching any tier row — the
+    launch plan keeps the entitlement off every tier until the feature opens
+    generally, and per-group entitlements have no other override mechanism
+    (the pool only selects a tier). Applied inside the resolver so every
+    consumer — dashboard gating, Server Actions, API write gates, and the
+    public render gate — sees the same answer.
+    """
+    raw = os.getenv("SITES_BETA_GROUP_IDS", "")
+    out = set()
+    for part in raw.replace(",", " ").split():
+        try:
+            out.add(int(part))
+        except ValueError:
+            continue
+    return out
+
+
 def resolve_group_entitlements(s, group_id: int) -> Dict[str, Any]:
     """Resolved entitlement map for ``group_id`` from its subscription pool.
 
@@ -396,10 +417,14 @@ def resolve_group_entitlements(s, group_id: int) -> Dict[str, Any]:
         # Live payments below the cheapest paid tier (or none) → free plan.
         tier = _load_fallback_tier(s)
     if tier is None:
-        return default_entitlements()
+        entitlements = default_entitlements()
+    else:
+        stored = parse_stored_entitlements(tier.entitlements)
+        entitlements = resolve_tier_entitlements(stored)
 
-    stored = parse_stored_entitlements(tier.entitlements)
-    return resolve_tier_entitlements(stored)
+    if group_id in _sites_beta_group_ids():
+        entitlements["custom_site"] = True
+    return entitlements
 
 
 # Badge-linked complimentary grant: users holding an active badge with this
