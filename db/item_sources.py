@@ -23,8 +23,13 @@ from __future__ import annotations
 
 from sqlalchemy import bindparam, text
 
-#: Most NPC entries any one item resolves to.
-SOURCES_LIMIT = 100
+#: Most NPC entries any one item resolves to. Must exceed the wiki's most
+#: widely-sourced item ("Coins": 601 distinct sources) — the query keeps the
+#: RAREST rows, so a cap below the real source count silently hides the
+#: common-table ones: Uncut diamond has ~453 sources and a 100-cap cut off
+#: everything below 1/8,192, including every GWD boss's 1/2,501 gem-table
+#: line, so the event task-form source picker couldn't offer Kree'arra.
+SOURCES_LIMIT = 1000
 
 # Tracked-drop fallback: the wiki table misses whole activity sources (e.g.
 # Wintertodt's reward cart has zero wiki rows), so NPCs we've actually OBSERVED
@@ -35,6 +40,14 @@ SOURCES_LIMIT = 100
 TRACKED_SOURCE_SCAN_ROWS = 50_000
 TRACKED_SOURCE_MIN_DROPS = 5
 TRACKED_SOURCE_MIN_PLAYERS = 3
+
+#: Skip the tracked-drop fallback scan once the wiki already knows this many
+#: sources for the item. The scan exists to fill wiki GAPS (new content with
+#: no wiki rows); an item with 100+ wiki sources has no gap worth the ~10s
+#: 50k-row random-read scan. Decoupled from SOURCES_LIMIT: the cap had to grow
+#: past the largest real source list (601), which would otherwise have turned
+#: the scan back ON for exactly the ubiquitous items where it is most costly.
+OBSERVED_FALLBACK_MAX_WIKI_SOURCES = 100
 
 
 def variant_item_ids(s, item_name: str | None, fallback_id: int) -> list[int]:
@@ -182,9 +195,14 @@ def source_npc_rows(s, item_ids, *, limit: int = SOURCES_LIMIT) -> tuple[int, li
     # The observed scan is a wiki-GAP fallback whose extras are discarded
     # once the list is full, and it costs a random row read per sampled
     # drop (~10s for an item as common as Uncut ruby, which has no gap to
-    # fill — its wiki table alone overflows the cap). Skip it when the
-    # wiki rows already fill the list: identical output, none of the cost.
-    observed = observed_source_rows(s, ids) if len(rows) < limit else []
+    # fill — the wiki already lists hundreds of sources for it). Skip it
+    # once the wiki rows show no meaningful gap or already fill a small
+    # caller-imposed cap: identical output, none of the cost.
+    observed = (
+        observed_source_rows(s, ids)
+        if len(rows) < min(OBSERVED_FALLBACK_MAX_WIKI_SOURCES, limit)
+        else []
+    )
 
     npcs: list[dict] = []
     seen_names = set()
