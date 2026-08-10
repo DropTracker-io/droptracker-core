@@ -422,6 +422,22 @@ def resolve_group_entitlements(s, group_id: int) -> Dict[str, Any]:
         stored = parse_stored_entitlements(tier.entitlements)
         entitlements = resolve_tier_entitlements(stored)
 
+    if not entitlements.get("events") and tier is not None:
+        # web65a rate-limited grant: an enabled event-rate-limit rule with
+        # max_events > 0 gives the tier event access even though its ``events``
+        # entitlement is off. Folded in HERE so every consumer — the
+        # subscription payload the frontend gates on, the API gates, the
+        # lifecycle sweep — sees the same answer; the frequency cap still
+        # binds at activation (check_activation_rate_limit).
+        try:
+            from db.event_rate_limits import rules_for_tier
+
+            if any(r["max_events"] > 0 for r in rules_for_tier(s, tier.key).values()):
+                entitlements["events"] = True
+        except Exception:
+            # Fail closed: a rules-lookup error must not unlock event access.
+            pass
+
     if group_id in _sites_beta_group_ids():
         entitlements["custom_site"] = True
     return entitlements
