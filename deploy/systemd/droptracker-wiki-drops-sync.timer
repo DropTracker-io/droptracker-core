@@ -1,0 +1,21 @@
+# Weekly trigger for droptracker-wiki-drops-sync.service (Thu ~05:15 UTC).
+#
+# Thursday: OSRS game updates land Wednesdays, so wiki editors have had a
+# day to fill in new drop tables. Same quiet maintenance window as the
+# other weekly timers (before the 08:30 backup).
+#
+# Install:  sudo cp deploy/systemd/droptracker-wiki-drops-sync.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now droptracker-wiki-drops-sync.timer
+
+[Unit]
+Description=Weekly DropTracker wiki drop-table resync (Thu ~05:15 UTC)
+
+[Timer]
+OnCalendar=Thu *-*-* 05:15:00 UTC
+RandomizedDelaySec=900
+Persistent=true
+Unit=droptracker-wiki-drops-sync.service
+
+[Install]
+WantedBy=timers.target

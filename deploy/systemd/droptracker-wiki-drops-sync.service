@@ -1,0 +1,31 @@
+# Weekly resync of the wiki drop tables (xenforo.dt_npc_loot).
+# Triggered by droptracker-wiki-drops-sync.timer — do not enable the service itself.
+#
+# Replaces the dead XenForo SemanticDropUpdater pipeline: the OSRS Wiki
+# removed Semantic MediaWiki (action=ask no longer exists), so the legacy
+# lazy scrape had been silently returning nothing and the table was frozen
+# at whatever each NPC's last pre-removal scrape captured (found via
+# Kree'arra missing its gem-table lines, 2026-08-10). This pulls the
+# `dropsline` bucket from the wiki's Bucket API (~39k rows, 8 requests)
+# and rewrites only NPCs whose stored rows differ — a no-change run writes
+# nothing. See scripts/sync_wiki_drops.py for mapping/parsing details.
+#
+# Manual dry run:  cd /store/droptracker/disc && venv/bin/python -m scripts.sync_wiki_drops
+# Manual real run: sudo systemctl start droptracker-wiki-drops-sync.service
+# Watch it:        journalctl -u droptracker-wiki-drops-sync.service -f
+
+[Unit]
+Description=DropTracker wiki drop-table resync (Bucket API -> dt_npc_loot)
+Wants=network-online.target
+After=network-online.target mariadb.service mysql.service
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.sync_wiki_drops --apply
+# 8 paced API requests + change-gated rewrites; a full-drift run is minutes.
+TimeoutStartSec=1h
+# Reference data, never urgent.
+Nice=15
+IOSchedulingClass=idle
