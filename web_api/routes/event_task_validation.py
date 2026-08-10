@@ -88,9 +88,9 @@ MAX_KC_NPCS = 10
 # from: config.source_npcs (single-item) / config.item_npcs (per-item map). The
 # picker seeds the restriction with EVERY known wiki drop source of the item
 # (the configurator then prunes), so this cap must clear the item-page source
-# limit (web_api/routes/items.py _SOURCES_LIMIT) or seeding a high-source item
+# limit (db/item_sources.py SOURCES_LIMIT) or seeding a high-source item
 # would 422 on save.
-MAX_SOURCE_NPCS = 100
+MAX_SOURCE_NPCS = 1000
 
 # Loot Sweep (loot_sweep kind) config bounds — v2 (nested groups). Kept in sync
 # with services/loot_sweep.py, which can't be imported here (this module's

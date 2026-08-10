@@ -225,6 +225,29 @@ class TestSources:
         # total + wiki only — the drop scan never ran.
         assert s.execute.call_count == 2
 
+    def test_sources_query_covers_the_most_sourced_wiki_item(self):
+        """Regression: the source list was capped at the 100 rarest wiki rows,
+        so gem-drop-table sources vanished — Kree'arra drops Uncut diamond at
+        1/2,501 but ranked ~246 of 453 sources, past a cutoff of 1/8,192. The
+        DB must be asked for enough rows to cover the wiki's most-sourced item
+        ("Coins": 601 distinct sources)."""
+        wiki = [(3162, "Kree'arra", "1", 0.0004, 1, 1)]
+        with self._db(wiki_rows=wiki) as s:
+            items._sources([1617])
+        lim = s.execute.call_args_list[1].args[1]["lim"]
+        assert lim > 601
+
+    def test_observed_scan_skipped_once_wiki_knows_plenty_of_sources(self):
+        """The drop scan exists to fill wiki GAPS. An item the wiki already
+        credits with 100+ sources has no gap worth a ~10s 50k-row scan, even
+        when those rows no longer fill the (now larger) source cap."""
+        wiki = [(i, f"NPC {i}", "1", 0.001, 1, 1) for i in range(100)]
+        with self._db(wiki_rows=wiki, observed_rows=[(999, "Never reached")]) as s:
+            out = items._sources([1621, 1622])
+        assert "Never reached" not in {n["name"] for n in out["npcs"]}
+        # total + wiki only — the drop scan never ran.
+        assert s.execute.call_count == 2
+
     def test_alias_members_survive_the_union(self):
         """A merged display alias must still carry the real recorded names the
         task engine matches drops by."""

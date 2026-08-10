@@ -798,6 +798,16 @@ def test_single_item_too_many_source_npcs_rejected(_stub_src_npcs):
     assert exc.value.status == 422
 
 
+def test_source_npc_cap_clears_the_item_source_list_limit():
+    """The picker seeds a restriction with EVERY wiki drop source of the item
+    and the configurator prunes from there, so the save-side cap must admit
+    the largest list the picker can hand back — otherwise seeding a
+    high-source item (Uncut diamond: ~453 sources) 422s before the user
+    touches anything."""
+    from db.item_sources import SOURCES_LIMIT
+    assert etv.MAX_SOURCE_NPCS >= SOURCES_LIMIT
+
+
 def test_any_of_item_npcs_attached(_stub_src_npcs):
     out = _validate({
         "type": "item_collection", "target_value": 1,
