@@ -38,6 +38,11 @@ class GroupSite(Base):
     # reused: it is nullable on name collisions and never validated as a
     # hostname label.
     subdomain = Column(String(32), nullable=False)
+    # What the subdomain does: render the block builder, bounce to the group's
+    # DropTracker profile, or bounce to redirect_url. A claimed address is
+    # useful even to clans that never build a page.
+    mode = Column(String(16), nullable=False, default="builder")
+    redirect_url = Column(String(500), nullable=True)
     theme_key = Column(String(32), nullable=False, default="dusk")
     palette = Column(LONGTEXT, nullable=True)  # JSON {"--dt-gold": "#ffb83f", ...}
     nav = Column(LONGTEXT, nullable=True)  # JSON [{"page_slug"|"href", "label"}, ...]

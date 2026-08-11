@@ -82,6 +82,43 @@ IMG_BASE = "https://www.droptracker.io/img"
 TOS_VERSION = "2026-08-07"
 THEME_KEYS = ("dusk", "parchment", "wilderness")
 
+# What a claimed subdomain does. "builder" renders the block pages; the other
+# two make the address a pure redirect, which is all a lot of clans want.
+SITE_MODES = ("builder", "group_page", "redirect")
+
+
+def _redirect_url_error(url: str) -> str | None:
+    """Reject anything that isn't a plain https:// link, and anything pointing
+    back at the sites domain — a subdomain redirecting to itself (or to another
+    tenant) is a redirect loop, not a feature."""
+    if not isinstance(url, str) or not url.strip():
+        return "A destination URL is required for a redirect site."
+    url = url.strip()
+    if len(url) > 500:
+        return "That URL is too long (500 characters max)."
+    if not url.lower().startswith("https://"):
+        return "The destination must be a full https:// URL."
+    host = url[len("https://"):].split("/", 1)[0].split("@")[-1].split(":", 1)[0].lower()
+    if not host or "." not in host:
+        return "That doesn't look like a valid web address."
+    domain = (os.getenv("SITES_DOMAIN") or "").strip().lower()
+    if domain and (host == domain or host.endswith("." + domain)):
+        return f"A redirect can't point back at {domain} — that would loop."
+    return None
+
+
+def _resolved_redirect_target(site: GroupSite) -> str | None:
+    """Absolute URL this subdomain should bounce visitors to, or None when it
+    renders its own pages."""
+    if site.mode == "redirect":
+        return (site.redirect_url or "").strip() or None
+    if site.mode == "group_page":
+        # Numeric id is always valid; the profile itself canonicalises to the
+        # slug, so this survives clan renames.
+        base = (os.getenv("WEB_SITE_URL") or "https://www.droptracker.io/").rstrip("/")
+        return f"{base}/groups/{site.group_id}"
+    return None
+
 _PREVIEW_TTL_SECONDS = 15 * 60
 _SECRET = os.getenv("JWT_TOKEN_KEY") or os.getenv("ENCRYPTION_KEY") or "dev-insecure-web-secret"
 
@@ -136,6 +173,9 @@ def _site_admin_view(site: GroupSite, s=None) -> dict:
         "site_id": site.site_id,
         "group_id": site.group_id,
         "subdomain": site.subdomain,
+        "mode": site.mode or "builder",
+        "redirect_url": site.redirect_url or "",
+        "redirect_target": _resolved_redirect_target(site),
         "theme_key": site.theme_key,
         "palette": json.loads(site.palette) if site.palette else {},
         "nav": json.loads(site.nav) if site.nav else [],
@@ -472,6 +512,22 @@ async def update_site(group_id: int):
     if roster_public is not None and not isinstance(roster_public, bool):
         abort_problem(422, "Invalid setting", "'roster_public' must be a boolean.")
 
+    mode = body.get("mode")
+    if mode is not None and mode not in SITE_MODES:
+        abort_problem(
+            422, "Invalid mode", f"'mode' must be one of {', '.join(SITE_MODES)}."
+        )
+    redirect_url = body.get("redirect_url")
+    if redirect_url is not None and not isinstance(redirect_url, str):
+        abort_problem(422, "Invalid setting", "'redirect_url' must be a string.")
+    # Validate the destination whenever the resulting site would be a custom
+    # redirect — either because this request sets that mode, or because it
+    # only changes the URL on a site already in it.
+    if mode == "redirect" or (redirect_url and mode is None):
+        err = _redirect_url_error(redirect_url or "")
+        if err:
+            abort_problem(422, "Invalid destination", err)
+
     css_source = body.get("custom_css_source")
     css_out = None
     if css_source is not None:
@@ -518,6 +574,27 @@ async def update_site(group_id: int):
                 changed["custom_css_sha"] = _sha(css_source)
                 site.custom_css_source = css_source
                 site.custom_css = css_out
+            if mode is not None and mode != site.mode:
+                changed["mode"] = mode
+                site.mode = mode
+                # A redirect has no draft to review, so requiring a separate
+                # Publish click would just be a step that looks broken.
+                # Choosing the mode (with a valid destination) is the intent.
+                if mode in ("group_page", "redirect") and not site.published:
+                    site.published = True
+                    if site.published_at is None:
+                        site.published_at = datetime.utcnow()
+                    changed["auto_published"] = True
+            if redirect_url is not None:
+                changed["redirect_url"] = redirect_url.strip()
+                site.redirect_url = redirect_url.strip() or None
+            # Switching INTO redirect mode without ever supplying a URL would
+            # leave a dead subdomain; catch it here rather than at render.
+            if (site.mode == "redirect") and not (site.redirect_url or "").strip():
+                abort_problem(
+                    422, "Invalid destination",
+                    "A redirect site needs a destination URL.",
+                )
             if roster_public is not None:
                 from db.models import GroupConfiguration
 
@@ -1183,6 +1260,9 @@ async def resolve_site():
             return {
                 "status": "ok",
                 "subdomain": site.subdomain,
+                # Redirect modes short-circuit rendering in the tenant layout.
+                "mode": site.mode or "builder",
+                "redirect_target": _resolved_redirect_target(site),
                 "group_id": site.group_id,
                 "group_name": (group.group_name if group else "") or "",
                 "icon_url": getattr(group, "icon_url", None),
