@@ -6,8 +6,13 @@ from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+import web_api.routes.events as evr
 from web_api import common as web_common
-from web_api.routes import items, npcs
+from web_api.routes import items, npc_source_aliases, npcs
+
+from tests.unit.test_event_auth_modes import _S, _SessionCM
 
 
 class FakeRedisHash:
@@ -268,3 +273,84 @@ class TestSources:
             again = items._sources([3140, 2513])  # same set, either order
         assert first == again
         assert s.execute.call_count == queries  # second call served from cache
+
+
+class TestAliasSearchEntries:
+    """npc_source_aliases.alias_search_entries: the synthetic autocomplete rows
+    prepended to /events/meta/npcs. They must carry the same fields as a real
+    NPC row so the picker renders an alias identically to a monster it added."""
+
+    def test_matching_alias_carries_icon_and_tracked(self):
+        [entry] = npc_source_aliases.alias_search_entries("winter")
+        assert entry == {
+            "id": 13974,
+            "name": "Wintertodt",
+            "icon_url": "https://www.droptracker.io/img/npcdb/13974.png",
+            # An alias only exists for an activity whose loot is recorded under
+            # its member NPCs, so it is always a real tracked source.
+            "tracked": True,
+        }
+
+    def test_non_matching_query_is_empty(self):
+        assert npc_source_aliases.alias_search_entries("graardor") == []
+
+    def test_below_min_length_is_empty(self):
+        assert npc_source_aliases.alias_search_entries("w") == []
+
+
+class TestSearchNpcsEndpoint:
+    """GET /events/meta/npcs — NPC autocomplete for the task-form source picker.
+    Each result carries icon_url + a `tracked` flag (any form id with drop
+    history) so a monster added via search matches the source-picker rows."""
+
+    @pytest.fixture()
+    def client(self):
+        import web_api
+
+        return web_api.create_app().test_client()
+
+    def _wire(self, monkeypatch, session):
+        monkeypatch.setattr(evr, "current_user_id", lambda: 1)
+        monkeypatch.setattr(evr, "db_session", lambda: _SessionCM(session))
+
+    async def test_results_are_enriched_with_icon_and_tracked(self, client, monkeypatch):
+        # Batch 1: deduped (min id, name) rows. Batch 2: the names that have
+        # any tracked form id — only Kree'arra here.
+        s = _S(
+            [(3162, "Kree'arra"), (2215, "General Graardor")],
+            [("Kree'arra",)],
+        )
+        self._wire(monkeypatch, s)
+        r = await client.get("/api/v1/events/meta/npcs?q=arra")
+        assert r.status_code == 200
+        assert (await r.get_json()) == [
+            {
+                "id": 3162,
+                "name": "Kree'arra",
+                "icon_url": "https://www.droptracker.io/img/npcdb/3162.png",
+                "tracked": True,
+            },
+            {
+                "id": 2215,
+                "name": "General Graardor",
+                "icon_url": "https://www.droptracker.io/img/npcdb/2215.png",
+                "tracked": False,
+            },
+        ]
+
+    async def test_no_matches_skips_the_tracked_probe(self, client, monkeypatch):
+        # Only one scripted batch: an empty name list must NOT issue the
+        # tracked-names query (the scripted session asserts on an extra query).
+        s = _S([])
+        self._wire(monkeypatch, s)
+        r = await client.get("/api/v1/events/meta/npcs?q=zzzzz")
+        assert r.status_code == 200
+        assert (await r.get_json()) == []
+
+    async def test_short_query_returns_empty_without_touching_db(self, client, monkeypatch):
+        # < 2 chars short-circuits before any query (zero scripted batches).
+        s = _S()
+        self._wire(monkeypatch, s)
+        r = await client.get("/api/v1/events/meta/npcs?q=a")
+        assert r.status_code == 200
+        assert (await r.get_json()) == []

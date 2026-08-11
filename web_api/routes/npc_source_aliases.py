@@ -27,6 +27,10 @@ NPC_SOURCE_ALIASES: tuple[dict, ...] = (
     },
 )
 
+#: CDN base for NPC icons. Duplicated (not imported) to keep this module
+#: dependency-free — `items.py`/`search.py` each define their own the same way.
+_IMG_BASE = "https://www.droptracker.io/img"
+
 _BY_ALIAS = {g["name"].lower(): g for g in NPC_SOURCE_ALIASES}
 _BY_MEMBER = {m.lower(): g for g in NPC_SOURCE_ALIASES for m in g["members"]}
 
@@ -52,14 +56,22 @@ def expand_source_names(name) -> list[str]:
 
 
 def alias_search_entries(query: str) -> list[dict]:
-    """Synthetic ``{id, name}`` autocomplete rows for aliases matching
-    ``query`` (substring, case-insensitive) — prepended to NPC search results
-    so "winter…" surfaces "Wintertodt" as a first-class pick."""
+    """Synthetic ``{id, name, icon_url, tracked}`` autocomplete rows for aliases
+    matching ``query`` (substring, case-insensitive) — prepended to NPC search
+    results so "winter…" surfaces "Wintertodt" as a first-class pick, rendering
+    with the same fields as real NPC rows. ``tracked`` is always True: an alias
+    only exists because an activity's loot is recorded under its member NPCs, so
+    it is a real tracked source by construction."""
     q = str(query or "").strip().lower()
     if len(q) < 2:
         return []
     return [
-        {"id": g["npc_id"], "name": g["name"]}
+        {
+            "id": g["npc_id"],
+            "name": g["name"],
+            "icon_url": f"{_IMG_BASE}/npcdb/{g['npc_id']}.png",
+            "tracked": True,
+        }
         for g in NPC_SOURCE_ALIASES
         if q in g["name"].lower()
     ]
