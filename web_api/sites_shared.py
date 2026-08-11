@@ -92,10 +92,18 @@ def page_slug_error(slug: str) -> str | None:
 # --- limits (served by the meta endpoint; the editor never hardcodes them) --
 MAX_PAGES_PER_SITE = 8
 MAX_BLOCKS_PER_PAGE = 30
-MAX_CUSTOM_HTML_BLOCKS_PER_PAGE = 3
+# Raw HTML is the highest-risk block type, but the controls that actually
+# contain it are the save-time sanitizer, the tenant CSP, and the byte caps
+# below — not a low count. The original 3 was arbitrary and made ordinary
+# hand-built pages (a staff roster of sections, say) impossible to finish.
+MAX_CUSTOM_HTML_BLOCKS_PER_PAGE = 12
 MAX_CUSTOM_HTML_BYTES = 32 * 1024  # per block, source size — reject, never truncate
 MAX_CUSTOM_CSS_BYTES = 64 * 1024  # site-wide
-MAX_PAGE_JSON_BYTES = 128 * 1024  # serialized draft_blocks
+# Serialized draft_blocks. Custom HTML stores BOTH source and sanitized output,
+# so each such block costs roughly twice its source — at 128 KB a page ran out
+# of room after two full-size HTML blocks, well before the count cap, which
+# surfaced as a second confusing rejection right after raising the first.
+MAX_PAGE_JSON_BYTES = 512 * 1024
 MAX_NAV_ITEMS = 12
 MAX_PALETTE_KEYS = 24
 

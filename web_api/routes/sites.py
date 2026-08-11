@@ -83,7 +83,10 @@ _SECRET = os.getenv("JWT_TOKEN_KEY") or os.getenv("ENCRYPTION_KEY") or "dev-inse
 
 # Publish/draft-save rate limits (Redis fixed windows, suggestions.py pattern).
 _PUBLISH_PER_HOUR = int(os.getenv("WEB_SITE_PUBLISHES_PER_HOUR", "30"))
-_SAVES_PER_HOUR = int(os.getenv("WEB_SITE_SAVES_PER_HOUR", "60"))
+# Draft saves are cheap and an active building session is bursty — a single
+# afternoon of iterating on one page blows past 60, which reads to the author
+# as "the editor stopped saving".
+_SAVES_PER_HOUR = int(os.getenv("WEB_SITE_SAVES_PER_HOUR", "240"))
 _SLUG_CHANGES_PER_30D = int(os.getenv("WEB_SITE_SLUG_CHANGES_PER_30D", "2"))
 
 
