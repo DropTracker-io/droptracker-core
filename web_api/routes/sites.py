@@ -87,6 +87,20 @@ THEME_KEYS = ("dusk", "parchment", "wilderness")
 SITE_MODES = ("builder", "group_page", "redirect")
 
 
+# Fields that only mean something for a builder site. Touching any of these,
+# or selecting builder mode, is what requires the subscription — claiming an
+# address and pointing it somewhere is free for every group.
+BUILDER_ONLY_FIELDS = ("theme_key", "palette", "nav", "custom_css_source", "roster_public")
+
+
+def _assert_builder_access(s, user_id: int, group_id: int, user) -> None:
+    """Group admin AND the custom_site entitlement (superadmins bypass)."""
+    assert_group_entitlement(
+        s, user_id, group_id, ENTITLEMENT,
+        manage_guild_ids=manageable_guild_ids(user_id), user=user,
+    )
+
+
 def _redirect_url_error(url: str) -> str | None:
     """Reject anything that isn't a plain https:// link, and anything pointing
     back at the sites domain — a subdomain redirecting to itself (or to another
@@ -368,7 +382,18 @@ async def get_group_site(group_id: int):
             user = load_user(s, user_id)
             assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
             site = _load_site(s, group_id)
-            return {"site": _site_admin_view(site, s) if site else None, "tos_version": TOS_VERSION}
+            # The tab is open to every group (redirect modes are free); this
+            # tells the UI whether to offer the builder half or upsell it.
+            from web_api.deps import is_superadmin
+
+            can_build = bool(
+                is_superadmin(user) or group_has_entitlement(group_id, ENTITLEMENT)
+            )
+            return {
+                "site": _site_admin_view(site, s) if site else None,
+                "tos_version": TOS_VERSION,
+                "can_build": can_build,
+            }
 
     payload = await asyncio.to_thread(_load)
     return private_no_store(jsonify(payload))
@@ -418,10 +443,10 @@ async def claim_site(group_id: int):
     def _apply():
         with db_session() as s:
             user = load_user(s, user_id)
-            assert_group_entitlement(
-                s, user_id, group_id, ENTITLEMENT,
-                manage_guild_ids=manageable_guild_ids(user_id), user=user,
-            )
+            # Claiming an address is open to every group: a subdomain that just
+            # redirects is useful on its own. Building pages on it is what the
+            # custom_site entitlement gates (see _assert_builder_access).
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
             if _load_site(s, group_id) is not None:
                 abort_problem(409, "Already claimed", "This group already has a site.")
             taken = s.query(GroupSite).filter(GroupSite.subdomain == sub).first()
@@ -549,13 +574,20 @@ async def update_site(group_id: int):
         else:
             css_out = ""
 
+    # Only the builder half is subscription-gated. A request that just points
+    # the address somewhere needs group admin; one that configures pages,
+    # theming or selects builder mode needs the entitlement too.
+    touches_builder = any(body.get(f) is not None for f in BUILDER_ONLY_FIELDS) or mode == "builder"
+
     def _apply():
         with db_session() as s:
             user = load_user(s, user_id)
-            assert_group_entitlement(
-                s, user_id, group_id, ENTITLEMENT,
-                manage_guild_ids=manageable_guild_ids(user_id), user=user,
-            )
+            if touches_builder:
+                _assert_builder_access(s, user_id, group_id, user)
+            else:
+                assert_group_admin(
+                    s, user_id, group_id, manageable_guild_ids(user_id), user=user
+                )
             site = _load_site(s, group_id)
             if site is None:
                 abort_problem(404, "No site", "Claim a subdomain first.")
@@ -842,13 +874,14 @@ async def _set_site_published(group_id: int, publish: bool):
     def _apply():
         with db_session() as s:
             user = load_user(s, user_id)
-            assert_group_entitlement(
-                s, user_id, group_id, ENTITLEMENT,
-                manage_guild_ids=manageable_guild_ids(user_id), user=user,
-            )
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
             site = _load_site(s, group_id)
             if site is None:
                 abort_problem(404, "No site", "Claim a subdomain first.")
+            # Publishing pages is the gated act; taking a redirect address
+            # on or offline is not.
+            if (site.mode or "builder") == "builder":
+                _assert_builder_access(s, user_id, group_id, user)
             site.published = publish
             if publish and site.published_at is None:
                 site.published_at = datetime.utcnow()
@@ -1237,7 +1270,12 @@ def _render_gate(site: GroupSite) -> str:
         return "suspended"
     if not site.published:
         return "unavailable"
-    if not group_has_entitlement(site.group_id, ENTITLEMENT):
+    # Redirect addresses keep working for every group; only rendered pages
+    # need the subscription. A lapsed builder site therefore goes dark, but
+    # the group can switch it to a redirect and keep the address alive.
+    if (site.mode or "builder") == "builder" and not group_has_entitlement(
+        site.group_id, ENTITLEMENT
+    ):
         return "unavailable"
     return "ok"
 
