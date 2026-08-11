@@ -37,6 +37,7 @@ import json
 import os
 import time
 from datetime import datetime
+from typing import Any
 
 from quart import Blueprint, jsonify, request
 
@@ -75,6 +76,9 @@ from web_api.sites_shared import (
 sites_bp = Blueprint("v1_sites", __name__)
 
 ENTITLEMENT = "custom_site"
+# Same first-party asset host the rest of the API hands out; allowed by the
+# tenant CSP's img-src.
+IMG_BASE = "https://www.droptracker.io/img"
 TOS_VERSION = "2026-08-07"
 THEME_KEYS = ("dusk", "parchment", "wilderness")
 
@@ -950,6 +954,98 @@ async def site_roster(group_id: int):
 _WOM_ACH_CACHE_TTL = 1800  # 30 min — WOM API budget is shared with the sync jobs
 _WOM_ACH_NEG_TTL = 300  # remember failures briefly so a WOM outage can't hammer it
 
+# --- achievement icons -------------------------------------------------------
+# WOM reports a `metric` per achievement ("araxxor", "overall",
+# "tombs_of_amascut_expert"). Three sources, in order, all first-party assets
+# under /img so the tenant CSP needs no new host:
+#
+#   1. static/assets/img/metrics/{metric}.png — the skill + boss + activity art
+#      already used by the event task tiles; keyed by the WOM metric namespace.
+#   2. the same file under a singular alias: WOM says `clue_scrolls_elite`
+#      while the asset is `clue_scroll_elite.png`.
+#   3. npcdb/{npc_id}.png for bosses newer than the metrics art (Yama, Doom of
+#      Mokhaiotl, Maggot King …), resolved through npc_match_key so spelling and
+#      alias differences fold the same way they do everywhere else.
+#
+# Anything still unresolved renders without an icon rather than a broken image.
+_ASSET_ROOT = "/store/droptracker/disc/static/assets/img"
+_METRIC_ITEM_ICONS = {
+    # Activities with no metric art but an obvious in-game item.
+    "collections_logged": 22711,  # Collection log
+    "soul_wars_zeal": 25344,  # Soul cape
+}
+_icon_cache: dict[str, Any] = {"metrics": None, "npc": None, "npc_files": None, "at": 0.0}
+_ICON_CACHE_TTL = 3600
+
+
+def _icon_tables() -> tuple[set, dict, set]:
+    """(metric asset names, npc match key -> npc_id, npc icon ids) — cached."""
+    now = time.time()
+    if _icon_cache["metrics"] is not None and now - _icon_cache["at"] < _ICON_CACHE_TTL:
+        return _icon_cache["metrics"], _icon_cache["npc"], _icon_cache["npc_files"]
+
+    try:
+        metrics = {
+            f[:-4] for f in os.listdir(f"{_ASSET_ROOT}/metrics") if f.endswith(".png")
+        }
+    except OSError:
+        metrics = set()
+    try:
+        npc_files = {
+            f[:-4] for f in os.listdir(f"{_ASSET_ROOT}/npcdb") if f.endswith(".png")
+        }
+    except OSError:
+        npc_files = set()
+
+    npc_by_key: dict[str, int] = {}
+    try:
+        from utils.npc_names import npc_match_key
+
+        from db.models import NpcList
+
+        with db_session() as s:
+            for npc_id, name in s.query(NpcList.npc_id, NpcList.npc_name).all():
+                key = npc_match_key(name or "")
+                if key and key not in npc_by_key:
+                    npc_by_key[key] = npc_id
+    except Exception:
+        npc_by_key = {}
+
+    _icon_cache.update(
+        {"metrics": metrics, "npc": npc_by_key, "npc_files": npc_files, "at": now}
+    )
+    return metrics, npc_by_key, npc_files
+
+
+def achievement_icon_url(metric: str) -> str | None:
+    """First-party icon for a WOM achievement metric, or None."""
+    metric = (metric or "").strip().lower()
+    if not metric:
+        return None
+    metrics, npc_by_key, npc_files = _icon_tables()
+
+    if metric in metrics:
+        return f"{IMG_BASE}/metrics/{metric}.png"
+
+    # WOM pluralises the clue-scroll metrics; the asset names are singular.
+    alias = metric.replace("clue_scrolls_", "clue_scroll_")
+    if alias in metrics:
+        return f"{IMG_BASE}/metrics/{alias}.png"
+
+    item_id = _METRIC_ITEM_ICONS.get(metric)
+    if item_id:
+        return f"{IMG_BASE}/itemdb/{item_id}.png"
+
+    try:
+        from utils.npc_names import npc_match_key
+
+        npc_id = npc_by_key.get(npc_match_key(metric.replace("_", " ")))
+    except Exception:
+        npc_id = None
+    if npc_id and str(npc_id) in npc_files:
+        return f"{IMG_BASE}/npcdb/{npc_id}.png"
+    return None
+
 
 @sites_bp.get("/groups/<int:group_id>/wom-achievements")
 async def wom_group_achievements(group_id: int):
@@ -993,11 +1089,14 @@ async def wom_group_achievements(group_id: int):
                 resp.raise_for_status()
                 for a in resp.json():
                     player = a.get("player") or {}
+                    metric = a.get("metric") or ""
                     items.append(
                         {
                             "player_name": player.get("displayName") or "",
                             "name": a.get("name") or "",
-                            "metric": a.get("metric") or "",
+                            "metric": metric,
+                            # Resolved once per cache fill, not per request.
+                            "icon_url": achievement_icon_url(metric),
                             "created_at": a.get("createdAt") or "",
                         }
                     )
