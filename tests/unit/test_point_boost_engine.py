@@ -3,7 +3,9 @@
 
 Covers window/reason/target matching, the legacy scalar ``target_id`` path,
 the multi-target ``target_ids`` JSON path, and all four operations including
-``add_per_member`` (+value per in-group participant present).
+``add_per_member`` (+value × the count the caller passes — the award pipeline
+passes 1 per split share and the full present-member count when the receiver
+keeps the whole pot; see ``test_point_awards_boost_split.py``).
 """
 
 import json

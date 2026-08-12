@@ -256,10 +256,12 @@ async def modify_for_event(
         if operation == "set":
             return int(op_value)
         if operation == "add_per_member":
-            # +value per in-group participant present (receiver included).
-            # Counting is independent of split settings/policy: the admin
-            # scheduled this boost deliberately, so a solo drop still gets
-            # one share and a clan mass scales with attendance.
+            # +value × present_member_count. The caller controls the count so
+            # the TOTAL boost per submission is always value × members present:
+            # when a split applies, each share is modified with count=1 (+value
+            # per person); when the receiver keeps the whole pot (sharing off,
+            # no_split, solo), they get the full value × N. Counting members is
+            # independent of split settings/policy — attendance always matters.
             try:
                 member_count = max(1, int(present_member_count))
             except Exception:
@@ -634,7 +636,10 @@ async def _check_and_award_points(
     # Resolve listed participants to in-group players ONCE. The list feeds the
     # require_group_only gate, split shares, and the add_per_member boost count
     # — the latter two must agree, and the count must work even when point
-    # sharing is disabled or split policy forces no_split.
+    # sharing is disabled or split policy forces no_split. The add_per_member
+    # contract: total boost per submission = value × present_member_count. When
+    # a split applies each recipient's share is boosted with count=1 (+value
+    # each); when the receiver keeps the whole pot they get the full value × N.
     in_group_participants = []
     if included_player_names:
         seen_participant_ids = set()
@@ -682,6 +687,10 @@ async def _check_and_award_points(
         f"submission_point_limits min={min_submission_pts} max={max_submission_pts}"
     )
 
+    # True once split shares have been paid out — the receiver's remaining
+    # share is then boosted with count=1 like everyone else's; otherwise the
+    # receiver holds the whole pot and add_per_member scales by attendance.
+    split_applied = False
     if force_no_split:
         point_log("no_split rule matched; only receiver can be awarded")
     if not included_player_names:
@@ -712,20 +721,23 @@ async def _check_and_award_points(
                     f"receiver_share={receiver_share}"
                 )
 
+                split_applied = True
                 for target_player_id, target_player_name in valid_share_targets:
-                    points_to_award = per_target_share
-                    if points_to_award > 0:
-                        points_to_award = await modify_for_event(
-                            reason,
-                            group_id,
-                            target_player_id,
-                            points_to_award,
-                            item_id=item_id,
-                            npc_id=npc_id,
-                            submission_timestamp=submission_timestamp,
-                            present_member_count=present_member_count,
-                            external_session=external_session,
-                        )
+                    # Boost each share with count=1 so an add_per_member boost
+                    # pays +value once per person (total = value × N across the
+                    # split), and so a zero floor-share can still be lifted by
+                    # an active add/set/add_per_member boost window.
+                    points_to_award = await modify_for_event(
+                        reason,
+                        group_id,
+                        target_player_id,
+                        per_target_share,
+                        item_id=item_id,
+                        npc_id=npc_id,
+                        submission_timestamp=submission_timestamp,
+                        present_member_count=1,
+                        external_session=external_session,
+                    )
                     points_to_award = _apply_submission_point_bounds(
                         points_to_award,
                         min_submission_pts=min_submission_pts,
@@ -764,7 +776,7 @@ async def _check_and_award_points(
         item_id=item_id,
         npc_id=npc_id,
         submission_timestamp=submission_timestamp,
-        present_member_count=present_member_count,
+        present_member_count=1 if split_applied else present_member_count,
         external_session=external_session,
     )
     point_award = _apply_submission_point_bounds(

@@ -77,7 +77,8 @@ class GroupPointTimedEvent(Base):
     target_ids = Column[str](Text, nullable=True)
 
     # Operation to apply to the computed points: "multiply", "add", "set",
-    # or "add_per_member" (+value per in-group participant present, receiver included)
+    # or "add_per_member" (total bonus = value × in-group participants present,
+    # receiver included; with sharing on each member's share gets +value once)
     operation = Column[str](String(125), nullable=False, default="multiply")
     operation_value = Column[int](Integer, nullable=False, default=1)
     description = Column[str](String(255), nullable=True)
