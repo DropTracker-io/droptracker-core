@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from quart import Blueprint, jsonify, request
 from sqlalchemy import func
@@ -249,6 +249,23 @@ def _parse_dt(value, field: str) -> datetime:
             raw = raw[:-1] + "+00:00"
         dt = datetime.fromisoformat(raw)
         return dt.replace(tzinfo=None)
+    except Exception:
+        abort_problem(400, "Invalid date", f"'{field}' must be an ISO-8601 datetime.")
+
+
+def _parse_epoch(value, field: str) -> int:
+    """ISO-8601 datetime → unix seconds, honoring an explicit UTC offset.
+
+    Aware inputs ("…T13:00:00Z", "…+02:00") convert exactly; naive inputs
+    keep the legacy behavior of being read in server-local time. Boosts use
+    this instead of _parse_dt so admins get the precise instant they picked
+    regardless of their timezone.
+    """
+    try:
+        raw = str(value).strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        return int(datetime.fromisoformat(raw).timestamp())
     except Exception:
         abort_problem(400, "Invalid date", f"'{field}' must be an ISO-8601 datetime.")
 
@@ -634,7 +651,7 @@ async def delete_point_list_entry(group_id: int, entry_id: int):
 # --------------------------------------------------------------------------- #
 OPERATIONS = ("multiply", "add", "set", "add_per_member")
 TARGET_TYPES = ("any", "item", "npc")
-MAX_BOOSTS_PER_GROUP = 50
+MAX_BOOSTS_PER_GROUP = 100
 MAX_BOOST_TARGETS = 25
 
 
@@ -667,8 +684,10 @@ def _boosts_payload(s, group_id: int) -> list[dict]:
         target_names = [names.get(tid) or f"#{tid}" for tid in ids]
         out.append({
             "id": r.id,
-            "start_at": datetime.fromtimestamp(int(r.start_time_unix)).isoformat(),
-            "end_at": datetime.fromtimestamp(int(r.end_time_unix)).isoformat(),
+            # Aware UTC ISO ("+00:00") so browsers render the exact instant
+            # in the viewer's local timezone instead of guessing.
+            "start_at": datetime.fromtimestamp(int(r.start_time_unix), tz=timezone.utc).isoformat(),
+            "end_at": datetime.fromtimestamp(int(r.end_time_unix), tz=timezone.utc).isoformat(),
             "event_type": r.event_type or "any",
             "target_type": r.target_type or "any",
             # Legacy scalar pair (single-target rows only) + the full lists.
@@ -687,12 +706,10 @@ def _boosts_payload(s, group_id: int) -> list[dict]:
 def _validate_boost_body(s, body: dict, *, partial: bool = False) -> dict:
     out: dict = {}
     if not partial or "start_at" in body or "end_at" in body:
-        start = _parse_dt(body.get("start_at"), "start_at") if (not partial or "start_at" in body) else None
-        end = _parse_dt(body.get("end_at"), "end_at") if (not partial or "end_at" in body) else None
-        if start is not None:
-            out["start_time_unix"] = int(start.timestamp())
-        if end is not None:
-            out["end_time_unix"] = int(end.timestamp())
+        if not partial or "start_at" in body:
+            out["start_time_unix"] = _parse_epoch(body.get("start_at"), "start_at")
+        if not partial or "end_at" in body:
+            out["end_time_unix"] = _parse_epoch(body.get("end_at"), "end_at")
     if not partial or "event_type" in body:
         event_type = str(body.get("event_type") or "any").strip().lower()
         if event_type not in EVENT_TYPES:
