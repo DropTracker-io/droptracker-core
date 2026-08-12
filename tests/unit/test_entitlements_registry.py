@@ -20,6 +20,7 @@ class TestEntitlementsRegistry:
             "custom_embeds": False,
             "video_submissions": False,
             "custom_points": False,
+            "ai_task_gen_daily": 5,
             "custom_site": False,
         }
 

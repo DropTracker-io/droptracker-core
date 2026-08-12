@@ -3865,6 +3865,80 @@ async def list_event_kinds():
     return private_no_store(jsonify(await asyncio.to_thread(_read)))
 
 
+@events_bp.get("/events/meta/ai-quota")
+async def ai_task_quota_status():
+    """Remaining AI task generations for the caller in ``group_id``.
+
+    Read-only; safe to poll. Backs the "try describing a task instead" panel
+    in the task builder so it can show the allowance (and hide itself for
+    tiers where the feature is off) before anyone spends one."""
+    user_id = current_user_id()
+    raw_gid = (request.args.get("group_id") or "").strip()
+    group_id = int(raw_gid) if raw_gid.isdigit() else None
+
+    def _read():
+        from db.ai_task_quota import status as quota_status
+
+        with db_session() as s:
+            user = load_user(s, user_id)
+            if group_id is not None:
+                _assert_event_admin(s, user_id, group_id)
+            elif not is_superadmin(user):
+                abort_problem(403, "Forbidden", "Global events are managed by site staff.")
+            return quota_status(s, group_id, user_id, is_superadmin=is_superadmin(user))
+
+    return private_no_store(jsonify(await asyncio.to_thread(_read)))
+
+
+@events_bp.post("/events/meta/ai-quota/consume")
+async def ai_task_quota_consume():
+    """Charge one AI task generation against the group's daily allowance.
+
+    Separate from generation itself, which runs in the Next.js BFF (it owns
+    the Claude CLI session). The BFF charges here first and calls
+    ``/events/meta/ai-quota/refund`` if the generation then fails, so a failed
+    attempt doesn't cost the group a unit."""
+    user_id = current_user_id()
+    body = await json_body(required=False) or {}
+    raw_gid = body.get("group_id")
+    group_id = int(raw_gid) if isinstance(raw_gid, int) or str(raw_gid or "").isdigit() else None
+
+    def _charge():
+        from db.ai_task_quota import QuotaExceeded, consume
+
+        with db_session() as s:
+            user = load_user(s, user_id)
+            if group_id is not None:
+                _assert_event_admin(s, user_id, group_id)
+            elif not is_superadmin(user):
+                abort_problem(403, "Forbidden", "Global events are managed by site staff.")
+            try:
+                return consume(s, group_id, user_id, is_superadmin=is_superadmin(user))
+            except QuotaExceeded as exc:
+                abort_problem(
+                    429, "Daily limit reached", exc.detail, extra={"code": exc.code}
+                )
+
+    return private_no_store(jsonify(await asyncio.to_thread(_charge)))
+
+
+@events_bp.post("/events/meta/ai-quota/refund")
+async def ai_task_quota_refund():
+    """Hand back a charge whose generation failed. Best-effort, always 200."""
+    user_id = current_user_id()
+    body = await json_body(required=False) or {}
+    raw_gid = body.get("group_id")
+    group_id = int(raw_gid) if isinstance(raw_gid, int) or str(raw_gid or "").isdigit() else None
+
+    def _refund():
+        from db.ai_task_quota import refund
+
+        refund(group_id, user_id)
+        return {"ok": True}
+
+    return private_no_store(jsonify(await asyncio.to_thread(_refund)))
+
+
 # A name only counts as "receivable" once this many drop-rollup rows exist
 # across its item ids — a single misreported drop (e.g. the one historical
 # charged "Scythe of vitur" row) must not resurrect an untrackable variant.

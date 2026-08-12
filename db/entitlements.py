@@ -63,6 +63,19 @@ ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
         "default": False,
     },
     {
+        # Daily allowance for AI-assisted event task generation. Each accepted
+        # description costs one unit against a rolling 24h per-group counter
+        # (db/ai_task_quota.py). 0 blocks the feature outright; the free-tier
+        # default is a small taste rather than nothing, because the constraint
+        # is shared machine capacity, not per-request billing.
+        "key": "ai_task_gen_daily",
+        "label": "AI task generations / day",
+        "category": "features",
+        "help": "How many event tasks a group may generate per day by describing them in plain English (the 'try describing a task instead' panel in the task builder). 0 disables the feature for the tier.",
+        "kind": "int",
+        "default": 5,
+    },
+    {
         "key": "custom_site",
         "label": "Custom clan website",
         "category": "features",
