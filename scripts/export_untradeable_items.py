@@ -30,6 +30,15 @@ import argparse
 
 # (item_id, item name) — names are documentation only; the export is ids.
 NOTABLE_UNTRADEABLES = [
+    # Activity-tracking sources (plugin >= 5.5.0 synthetic drops): screenshot
+    # the pyramid top and the trawling trophy fish, all 0gp untradeables.
+    (6970, "Pyramid top"),
+    (31408, "Giant blue krill"),
+    (31412, "Golden haddock"),
+    (31416, "Orangefin"),
+    (31420, "Huge halibut"),
+    (31424, "Purplefin"),
+    (31428, "Swift marlin"),
     (5553, "Rogue top"),
     (6665, "Mudskipper hat"),
     (6666, "Flippers"),

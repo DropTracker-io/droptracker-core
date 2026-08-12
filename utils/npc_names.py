@@ -50,6 +50,11 @@ NPC_ALIASES = {
     # under the single encounter "Royal Titans".
     "branda-the-fire-queen": "royal-titans",
     "eldric-the-ice-king": "royal-titans",
+    # Activity-tracking sources (plugin >= 5.5.0 synthetic drops) — protect
+    # against shorthand spellings from future intake paths.
+    "mta": "mage-training-arena",
+    "agility-pyramid-laps": "agility-pyramid",
+    "trawling": "deep-sea-trawling",
 }
 
 #: Multi-boss encounters where the plugin/source may name the individual boss
