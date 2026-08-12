@@ -304,6 +304,74 @@ def _normalize_split_size(raw, players_included):
     return size if size >= named + 1 else None
 
 
+def _normalize_raid_party_size(raw):
+    """Plugin-reported raid party size (receiver included), or None.
+
+    Unlike ``_normalize_split_size``, 1 is a *valid* value here — it is the
+    plugin's proof that the raid was solo, which is exactly the case the
+    evidence exists for. Sent by plugin >= 5.4.3 on raid-sourced submissions
+    only (max of the game's own team-size varbits sampled through the raid,
+    the live read, and named-participants + 1 — see the plugin's
+    ``NearbyPlayerTracker.computeRaidPartySize``).
+    """
+    if raw is None or raw is True or raw is False:
+        return None
+    try:
+        size = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return size if 1 <= size <= MAX_SPLIT_SIZE else None
+
+
+def _apply_raid_party_evidence(players_included, split_size, raid_party_size, roster_source):
+    """Reconcile the participant list with the raid-party evidence beside it.
+
+    The plugin sends the evidence behind its participant list, not just the
+    list, so the server never has to take a roster on faith:
+
+    - **Proven solo** (``raid_party_size == 1`` or ``roster_source == "solo"``):
+      nobody else was in the raid, so any claimed participants are impossible
+      and the whole split is off — participants and divisor both cleared. This
+      is the hard guarantee that a roster bug (the 2026-08-11 incident: a solo
+      CoX credited a RuneLite party member who had logged off 57 minutes
+      earlier) or a stale client can never again share credit from a solo raid.
+    - **Proven team** (``raid_party_size >= 2``): the party size floors the
+      split divisor, so raiders DropTracker can't resolve still shrink every
+      tracked player's cut instead of silently inflating it. Like the manual
+      ``split_size``, it can only ever *raise* the divisor.
+    - **No evidence** (absent — pre-5.4.3 client, or non-raid): unchanged.
+
+    Returns ``(players_included, split_size, note, stripped)``: ``note`` is a
+    human-readable reason when the evidence changed anything (else None), and
+    ``stripped`` is True when a proven-solo raid had claimed participants
+    removed — the exact signature of the leak this gate exists to stop.
+    """
+    normalized_source = str(roster_source or "").strip().lower() or None
+    if raid_party_size == 1 or normalized_source == "solo":
+        if players_included:
+            note = (
+                f"solo raid (raid_party_size={raid_party_size}, "
+                f"roster_source={normalized_source}): stripped impossible "
+                f"participants {players_included}"
+            )
+            return None, None, note, True
+        return None, None, None, False
+    if raid_party_size is not None and raid_party_size >= 2:
+        if not players_included:
+            # No one to credit, so no split will run; leaving split_size alone
+            # keeps the split block (and its policy counters) dormant.
+            return players_included, split_size, None, False
+        floored = max(split_size or 0, raid_party_size)
+        note = None
+        if floored != (split_size or 0):
+            note = (
+                f"raid_party_size={raid_party_size} floors the split divisor "
+                f"(was {split_size})"
+            )
+        return players_included, floored, note, False
+    return players_included, split_size, None, False
+
+
 async def drop_processor(drop_data, external_session=None, world_type="main"):
     """Process a drop submission and create notifications when appropriate."""
 
@@ -376,10 +444,24 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         # credit (untracked, not in the group, or left unnamed) so the divisor
         # matches the real party instead of collapsing to whoever we recognise.
         split_size = _normalize_split_size(drop_data.get("split_size"), players_included)
+        # Raid-party evidence (plugin >= 5.4.3, raid-sourced only): the party
+        # size the game itself reported plus which source produced the roster.
+        # Reconciled against the participant list BEFORE anything consumes it —
+        # points, GP splits, the events queue and the observer all see the
+        # gated result, so a proven-solo raid can never share credit.
+        raid_party_size = _normalize_raid_party_size(drop_data.get("raid_party_size"))
+        roster_source = drop_data.get("roster_source")
+        players_included, split_size, evidence_note, solo_stripped = _apply_raid_party_evidence(
+            players_included, split_size, raid_party_size, roster_source
+        )
+        if evidence_note:
+            print(f"[RaidPartyGuard] {player_name} / {npc_name} "
+                  f"(guid={guid}): {evidence_note}")
         debug_print(
             "Drop split payload players_included "
             f"raw_type={type(raw_players_included).__name__} raw_value={raw_players_included} "
-            f"normalized_type={type(players_included).__name__} normalized_value={players_included}"
+            f"normalized_type={type(players_included).__name__} normalized_value={players_included} "
+            f"raid_party_size={raid_party_size} roster_source={roster_source} split_size={split_size}"
         )
 
         config_prefix = get_config_prefix(world_type)
@@ -637,6 +719,9 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                     players=players_included,
                     plugin_version=plugin_version,
                     guid=guid,
+                    party_size=raid_party_size,
+                    roster_source=roster_source,
+                    solo_stripped=solo_stripped,
                 )
         except Exception:
             pass

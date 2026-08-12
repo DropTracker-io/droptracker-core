@@ -52,8 +52,31 @@ This is the most complex processor. All others follow a similar but simpler patt
 ```
 npc_name, value, item_id, item_name, quantity,
 player_name, acc_hash, guid, kill_count,
-nearby_players (list, for split tracking)
+nearby_players (list, for split tracking),
+raid_party_size + roster_source (raid submissions, plugin >= 5.4.3)
 ```
+
+**Raid-party evidence gate.** For raid-sourced submissions the plugin sends
+the evidence behind its participant list, not just the list: `raid_party_size`
+(max of the game's own team-size varbits sampled through the raid, the live
+read, and named participants + 1) and `roster_source`
+(`authoritative | solo | proximity-fallback`). `_apply_raid_party_evidence`
+reconciles the list against them *before* anything consumes it:
+
+- proven solo (`raid_party_size == 1` or `roster_source == "solo"`) → any
+  claimed participants are impossible and are stripped; no points sharing, no
+  GP split. This is the guarantee that a client roster bug can never again
+  credit people who were not in the raid (the 2026-08-11 solo-CoX incident,
+  where a stale RuneLite party member was credited).
+- proven team (`raid_party_size >= 2`, participants present) → the party size
+  floors the GP-split divisor (like the manual `split_size`, it can only
+  *raise* it), so untracked raiders shrink every tracked share instead of
+  silently inflating them.
+- absent (pre-5.4.3 client, non-raid, manual) → behavior unchanged.
+
+Gate activity is observable: `[RaidPartyGuard]` lines in the consumer journal,
+and the TEMP split observer records `ps`/`rs` on samples plus a
+`solo_stripped` counter per NPC (`splitscan:npc:{id}`).
 
 ### Step 2.2 — Deduplication
 

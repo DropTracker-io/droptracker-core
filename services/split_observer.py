@@ -160,7 +160,8 @@ def _histogram_field(nearby_count: int) -> str:
 
 
 def _record(kind_prefix: str, *, npc_id, npc_name, player_name, players,
-            plugin_version, guid, r=None, now=None) -> None:
+            plugin_version, guid, r=None, now=None,
+            party_size=None, roster_source=None, solo_stripped=False) -> None:
     conn = _conn(r)
     if conn is None or npc_id is None:
         return
@@ -191,13 +192,20 @@ def _record(kind_prefix: str, *, npc_id, npc_name, player_name, players,
                     pipe.hincrby(hkey, f"{kind_prefix}with_players", 1)
                     pipe.hincrby(hkey, f"{kind_prefix}players_sum", len(players))
                     pipe.hincrby(hkey, f"{kind_prefix}{_histogram_field(len(players))}", 1)
+        # Raid-party evidence (plugin >= 5.4.3): how often the processor's
+        # solo gate fires, so "the bug can't recur" is verifiable in prod.
+        if new_kill and solo_stripped:
+            pipe.hincrby(hkey, f"{kind_prefix}solo_stripped", 1)
         pipe.expire(hkey, _TTL)
         if new_kill and capable and players:
             skey = _samples_key(npc_id)
-            sample = json.dumps(
-                {"p": str(player_name or ""), "n": players[:20], "k": kind_prefix or "drop", "t": ts},
-                separators=(",", ":"),
-            )
+            sample_data = {"p": str(player_name or ""), "n": players[:20],
+                           "k": kind_prefix or "drop", "t": ts}
+            if party_size is not None:
+                sample_data["ps"] = int(party_size)
+            if roster_source:
+                sample_data["rs"] = str(roster_source)
+            sample = json.dumps(sample_data, separators=(",", ":"))
             pipe.lpush(skey, sample)
             pipe.ltrim(skey, 0, _SAMPLE_CAP - 1)
             pipe.expire(skey, _TTL)
@@ -207,10 +215,16 @@ def _record(kind_prefix: str, *, npc_id, npc_name, player_name, players,
 
 
 def record_drop(*, npc_id, npc_name, player_name, players, plugin_version,
-                guid, r=None, now=None) -> None:
-    """Observe an accepted plugin drop. ``players`` = normalized nearby list."""
+                guid, r=None, now=None,
+                party_size=None, roster_source=None, solo_stripped=False) -> None:
+    """Observe an accepted plugin drop. ``players`` = normalized nearby list
+    (post-gate); ``party_size``/``roster_source`` = the plugin's raid-party
+    evidence when sent; ``solo_stripped`` = the processor's solo gate removed
+    claimed participants from this submission."""
     _record("", npc_id=npc_id, npc_name=npc_name, player_name=player_name,
-            players=players, plugin_version=plugin_version, guid=guid, r=r, now=now)
+            players=players, plugin_version=plugin_version, guid=guid, r=r, now=now,
+            party_size=party_size, roster_source=roster_source,
+            solo_stripped=solo_stripped)
 
 
 def record_kill_time(*, npc_id, npc_name, player_name, raw_nearby, team_size,
