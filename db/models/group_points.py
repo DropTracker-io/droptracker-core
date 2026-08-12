@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, Integer, DateTime, ForeignKey, String
+from sqlalchemy import Boolean, Column, Integer, DateTime, ForeignKey, String, Text
 from sqlalchemy import func
 from sqlalchemy.orm import relationship
 
@@ -70,10 +70,14 @@ class GroupPointTimedEvent(Base):
     # Target selection:
     # - target_type: "any", "item", or "npc"
     # - target_id: specific item_id/npc_id, or NULL/0 to apply to any of that type
+    # - target_ids: JSON int array for multi-target boosts; when set it wins
+    #   over target_id (which stays NULL on multi-target rows)
     target_type = Column[str](String(125), nullable=False, default="any")
     target_id = Column[int](Integer, nullable=True)
+    target_ids = Column[str](Text, nullable=True)
 
-    # Operation to apply to the computed points: "multiply", "add", or "set"
+    # Operation to apply to the computed points: "multiply", "add", "set",
+    # or "add_per_member" (+value per in-group participant present, receiver included)
     operation = Column[str](String(125), nullable=False, default="multiply")
     operation_value = Column[int](Integer, nullable=False, default=1)
     description = Column[str](String(255), nullable=True)

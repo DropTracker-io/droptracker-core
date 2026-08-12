@@ -632,8 +632,21 @@ async def delete_point_list_entry(group_id: int, entry_id: int):
 # --------------------------------------------------------------------------- #
 # Timed boosts (group_point_events)
 # --------------------------------------------------------------------------- #
-OPERATIONS = ("multiply", "add", "set")
+OPERATIONS = ("multiply", "add", "set", "add_per_member")
 TARGET_TYPES = ("any", "item", "npc")
+MAX_BOOSTS_PER_GROUP = 50
+MAX_BOOST_TARGETS = 25
+
+
+def _boost_target_id_list(row) -> list[int]:
+    """All target ids on a boost row: JSON target_ids first, scalar fallback."""
+    raw = getattr(row, "target_ids", None)
+    if raw:
+        try:
+            return [int(v) for v in json.loads(raw) if v is not None]
+        except Exception:
+            pass
+    return [int(row.target_id)] if row.target_id else []
 
 
 def _boosts_payload(s, group_id: int) -> list[dict]:
@@ -643,26 +656,26 @@ def _boosts_payload(s, group_id: int) -> list[dict]:
         .order_by(GroupPointTimedEvent.start_time_unix.desc())
         .all()
     )
-    item_ids = {int(r.target_id) for r in rows if r.target_type == "item" and r.target_id}
-    npc_ids = {int(r.target_id) for r in rows if r.target_type == "npc" and r.target_id}
+    item_ids = {tid for r in rows if r.target_type == "item" for tid in _boost_target_id_list(r)}
+    npc_ids = {tid for r in rows if r.target_type == "npc" for tid in _boost_target_id_list(r)}
     items, npcs = _name_maps(s, item_ids, npc_ids)
     now = int(time.time())
     out = []
     for r in rows:
-        target_name = None
-        if r.target_id:
-            if r.target_type == "item":
-                target_name = items.get(int(r.target_id))
-            elif r.target_type == "npc":
-                target_name = npcs.get(int(r.target_id))
+        ids = _boost_target_id_list(r)
+        names = items if r.target_type == "item" else npcs if r.target_type == "npc" else {}
+        target_names = [names.get(tid) or f"#{tid}" for tid in ids]
         out.append({
             "id": r.id,
             "start_at": datetime.fromtimestamp(int(r.start_time_unix)).isoformat(),
             "end_at": datetime.fromtimestamp(int(r.end_time_unix)).isoformat(),
             "event_type": r.event_type or "any",
             "target_type": r.target_type or "any",
-            "target_id": int(r.target_id) if r.target_id else None,
-            "target_name": target_name,
+            # Legacy scalar pair (single-target rows only) + the full lists.
+            "target_id": ids[0] if len(ids) == 1 else None,
+            "target_name": target_names[0] if len(ids) == 1 else None,
+            "target_ids": ids,
+            "target_names": target_names,
             "operation": r.operation or "multiply",
             "operation_value": int(r.operation_value),
             "description": r.description or "",
@@ -690,18 +703,37 @@ def _validate_boost_body(s, body: dict, *, partial: bool = False) -> dict:
         if target_type not in TARGET_TYPES:
             abort_problem(400, "Invalid value", f"target_type must be one of {', '.join(TARGET_TYPES)}.")
         out["target_type"] = target_type
-        target_id = body.get("target_id")
-        if target_type == "any" or target_id in (None, "", 0, "0"):
-            out["target_id"] = None
-        else:
+
+        # Collect requested targets: target_ids list preferred, scalar fallback.
+        raw_ids = body.get("target_ids")
+        if raw_ids in (None, ""):
+            scalar = body.get("target_id")
+            raw_ids = [] if scalar in (None, "", 0, "0") else [scalar]
+        if not isinstance(raw_ids, list):
+            abort_problem(400, "Invalid value", "target_ids must be a list of integers.")
+        target_ids: list[int] = []
+        for raw in raw_ids:
             try:
-                target_id = int(target_id)
+                tid = int(raw)
             except Exception:
-                abort_problem(400, "Invalid value", "target_id must be an integer.")
+                abort_problem(400, "Invalid value", "target_ids must be a list of integers.")
+            if tid > 0 and tid not in target_ids:
+                target_ids.append(tid)
+        if len(target_ids) > MAX_BOOST_TARGETS:
+            abort_problem(400, "Too many targets", f"A boost can target at most {MAX_BOOST_TARGETS} {target_type}s.")
+
+        if target_type == "any" or not target_ids:
+            out["target_id"] = None
+            out["target_ids"] = None
+        else:
             col = ItemList.item_id if target_type == "item" else NpcList.npc_id
-            if not s.query(col).filter(col == target_id).first():
-                abort_problem(400, "Invalid value", f"No {target_type} with id {target_id}.")
-            out["target_id"] = target_id
+            found = {int(row[0]) for row in s.query(col).filter(col.in_(target_ids)).all()}
+            missing = [tid for tid in target_ids if tid not in found]
+            if missing:
+                abort_problem(400, "Invalid value", f"No {target_type} with id {missing[0]}.")
+            # Canonical storage: single target stays on the scalar column.
+            out["target_id"] = target_ids[0] if len(target_ids) == 1 else None
+            out["target_ids"] = json.dumps(target_ids) if len(target_ids) > 1 else None
     if not partial or "operation" in body:
         operation = str(body.get("operation") or "multiply").strip().lower()
         if operation not in OPERATIONS:
@@ -737,6 +769,13 @@ async def create_point_boost(group_id: int):
             fields = _validate_boost_body(s, body)
             if fields["end_time_unix"] <= fields["start_time_unix"]:
                 abort_problem(400, "Invalid window", "end_at must be after start_at.")
+            existing = (
+                s.query(func.count(GroupPointTimedEvent.id))
+                .filter(GroupPointTimedEvent.group_id == group_id)
+                .scalar()
+            )
+            if int(existing or 0) >= MAX_BOOSTS_PER_GROUP:
+                abort_problem(400, "Too many boosts", f"A group can have at most {MAX_BOOSTS_PER_GROUP} timed boosts. Remove one first.")
             row = GroupPointTimedEvent(group_id=group_id, **fields)
             s.add(row)
             s.commit()

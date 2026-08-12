@@ -144,6 +144,21 @@ def _normalize_unix_seconds(value):
         return None
 
 
+def _parse_boost_target_ids(raw) -> list[int]:
+    """Parse a GroupPointTimedEvent.target_ids JSON array into a list of ints.
+
+    Returns [] for NULL/empty/malformed values so callers can fall back to the
+    legacy scalar target_id column.
+    """
+    if raw in (None, ""):
+        return []
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return [int(v) for v in parsed if v is not None]
+    except Exception:
+        return []
+
+
 async def modify_for_event(
     reason,
     group_id,
@@ -152,6 +167,7 @@ async def modify_for_event(
     item_id=None,
     npc_id=None,
     submission_timestamp=None,
+    present_member_count=None,
     external_session=None,
 ) -> int:
     from data.submissions.common import select_session_and_flag
@@ -199,16 +215,23 @@ async def modify_for_event(
             target_id = int(event.target_id) if event.target_id not in (None, "") else 0
         except Exception:
             target_id = 0
+        target_ids = _parse_boost_target_ids(getattr(event, "target_ids", None))
 
         applies = False
         if target_type == "any":
             applies = True
         elif target_type == "item":
             if item_id is not None:
-                applies = (target_id == 0) or (target_id == int(item_id))
+                if target_ids:
+                    applies = int(item_id) in target_ids
+                else:
+                    applies = (target_id == 0) or (target_id == int(item_id))
         elif target_type == "npc":
             if npc_id is not None:
-                applies = (target_id == 0) or (target_id == int(npc_id))
+                if target_ids:
+                    applies = int(npc_id) in target_ids
+                else:
+                    applies = (target_id == 0) or (target_id == int(npc_id))
         else:
             # Unknown target type; ignore the event
             continue
@@ -232,6 +255,16 @@ async def modify_for_event(
             return int(default_value) + op_value
         if operation == "set":
             return int(op_value)
+        if operation == "add_per_member":
+            # +value per in-group participant present (receiver included).
+            # Counting is independent of split settings/policy: the admin
+            # scheduled this boost deliberately, so a solo drop still gets
+            # one share and a clan mass scales with attendance.
+            try:
+                member_count = max(1, int(present_member_count))
+            except Exception:
+                member_count = 1
+            return int(default_value) + op_value * member_count
 
     return default_value
 
@@ -598,36 +631,51 @@ async def _check_and_award_points(
         f"normalized_players_included={included_player_names} force_no_split={force_no_split}"
     )
 
+    # Resolve listed participants to in-group players ONCE. The list feeds the
+    # require_group_only gate, split shares, and the add_per_member boost count
+    # — the latter two must agree, and the count must work even when point
+    # sharing is disabled or split policy forces no_split.
+    in_group_participants = []
+    if included_player_names:
+        seen_participant_ids = set()
+        for participant_name in included_player_names:
+            try:
+                participant_id = _get_player_id_by_name(participant_name, session)
+                if participant_id is None:
+                    point_log(
+                        f"participant='{participant_name}' not found in DB; skipping"
+                    )
+                    continue
+                if participant_id in seen_participant_ids or participant_id == receiver_player_id:
+                    continue
+                if not await check_split_capability(group_id, participant_id, external_session):
+                    point_log(
+                        f"participant='{participant_name}' id={participant_id} "
+                        f"not in group; skipping"
+                    )
+                    continue
+                seen_participant_ids.add(participant_id)
+                in_group_participants.append((participant_id, participant_name))
+            except Exception as e:
+                point_log(f"participant='{participant_name}' resolution error: {e}")
+                continue
+        point_log(
+            f"in_group_participants={in_group_participants} "
+            f"count={len(in_group_participants)}"
+        )
+    # Receiver + resolved in-group participants present at the submission.
+    present_member_count = 1 + len(in_group_participants)
+
     # Optional group-only eligibility gate:
     # When enabled, points are awarded only for solo content or for group content
     # where at least one additional listed participant is in this same group.
     require_group_only = await check_points_require_group_only_mode(group_id, external_session)
     point_log(f"require_group_only={require_group_only}")
-    if require_group_only and included_player_names:
-        has_in_group_participant = False
-        for participant_name in included_player_names:
-            participant_id = _get_player_id_by_name(participant_name, session)
-            if participant_id is None:
-                point_log(
-                    f"require_group_only participant='{participant_name}' not found in DB"
-                )
-                continue
-            if await check_split_capability(group_id, participant_id, external_session):
-                has_in_group_participant = True
-                point_log(
-                    f"require_group_only participant='{participant_name}' id={participant_id} in group"
-                )
-                break
-            else:
-                point_log(
-                    f"require_group_only participant='{participant_name}' id={participant_id} not in group"
-                )
-                continue
-        if not has_in_group_participant:
-            point_log(
-                f"require_group_only blocked all points for reason={reason}"
-            )
-            return result
+    if require_group_only and included_player_names and not in_group_participants:
+        point_log(
+            f"require_group_only blocked all points for reason={reason}"
+        )
+        return result
 
     min_submission_pts, max_submission_pts = await get_group_submission_point_limits(group_id, external_session)
     point_log(
@@ -645,26 +693,7 @@ async def _check_and_award_points(
             f"split_method={split_method}"
         )
         if should_share_points:
-            valid_share_targets = []
-            for nearby_player in included_player_names:
-                try:
-                    nearby_player_id = _get_player_id_by_name(nearby_player, session)
-                    if nearby_player_id is None:
-                        point_log(
-                            f"split_target='{nearby_player}' not found in DB; skipping"
-                        )
-                        continue
-                    check_split_capable = await check_split_capability(group_id, nearby_player_id, external_session)
-                    if not check_split_capable:
-                        point_log(
-                            f"split_target='{nearby_player}' id={nearby_player_id} "
-                            f"not in group; skipping"
-                        )
-                        continue
-                    valid_share_targets.append((nearby_player_id, nearby_player))
-                except Exception as e:
-                    point_log(f"split_target='{nearby_player}' resolution error: {e}")
-                    continue
+            valid_share_targets = in_group_participants
             point_log(
                 f"valid_share_targets={valid_share_targets} target_count={len(valid_share_targets)}"
             )
@@ -694,6 +723,7 @@ async def _check_and_award_points(
                             item_id=item_id,
                             npc_id=npc_id,
                             submission_timestamp=submission_timestamp,
+                            present_member_count=present_member_count,
                             external_session=external_session,
                         )
                     points_to_award = _apply_submission_point_bounds(
@@ -734,6 +764,7 @@ async def _check_and_award_points(
         item_id=item_id,
         npc_id=npc_id,
         submission_timestamp=submission_timestamp,
+        present_member_count=present_member_count,
         external_session=external_session,
     )
     point_award = _apply_submission_point_bounds(
