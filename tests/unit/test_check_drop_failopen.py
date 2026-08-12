@@ -10,6 +10,7 @@ drop. This regression guards the fix for that class of false rejection.
 import asyncio
 import importlib.util
 import os
+from datetime import date, timedelta
 
 # The test suite stubs the whole `osrs_api` package as a MagicMock (see
 # tests/conftest.py), so import the real SemanticAPI straight from its source
@@ -175,10 +176,10 @@ def test_variant_not_queried_when_primary_name_has_rows():
 
 def test_uncharged_name_gets_no_double_suffix():
     # A name already ending in "(uncharged)" with no rows anywhere: exactly one
-    # query (no "... (uncharged) (uncharged)") and the not-indexed fail-open.
+    # dropsline query (no "... (uncharged) (uncharged)") and a fail-open.
     api = _api_by_name({"Tumeken's shadow (uncharged)": {"bucket": []}})
     assert _run(api.check_drop("Tumeken's shadow (uncharged)", "Dossier")) is True
-    assert len(api.seen_queries) == 1
+    assert sum("bucket('dropsline')" in q for q in api.seen_queries) == 1
 
 
 def test_variant_also_unindexed_fails_open():
@@ -195,6 +196,111 @@ def test_wiki_error_on_variant_query_fails_open():
         "Tumeken's shadow (uncharged)": {},
     })
     assert _run(api.check_drop("Tumeken's shadow", "Dossier")) is True
+
+
+def _api_by_bucket(dropsline=None, infobox=None):
+    """SemanticAPI whose fake query answers per bucket table.
+
+    Defaults to an empty-but-successful result for either table, which is the
+    combination that used to fail open unconditionally."""
+    api = SemanticAPI(client=object())
+    api.seen_queries = []
+
+    async def fake_bucket_query(query):
+        api.seen_queries.append(query)
+        wanted = infobox if "bucket('infobox_item')" in query else dropsline
+        return {"bucket": []} if wanted is None else wanted
+
+    api._bucket_query = fake_bucket_query
+    return api
+
+
+def _released(days_ago: int) -> str:
+    """A wiki-format release date ("28 August 2024") `days_ago` in the past."""
+    d = date.today() - timedelta(days=days_ago)
+    return f"{d.day} {d:%B} {d.year}"
+
+
+def test_never_dropped_item_is_a_confident_negative():
+    """Regression (2026-08-10): a phantom 42M "Noxious halberd from Rogues'
+    Chest". The halberd is assembled from Araxxor components, so NOTHING in the
+    game drops it and dropsline has no rows under any name — which the old code
+    read as "item not indexed" and waved through without ever looking at the
+    NPC. A wiki-indexed item with no drop sources anywhere makes every claimed
+    NPC source false."""
+    api = _api_by_bucket(
+        dropsline={"bucket": []},
+        infobox={"bucket": [{"release_date": _released(700)}]},
+    )
+    assert _run(api.check_drop("Noxious halberd", "Rogues' Chest")) is False
+
+
+def test_never_dropped_item_is_rejected_for_every_source():
+    # The other container-open artifacts from the same week. No source saves
+    # them: nothing drops the item, so the source is irrelevant.
+    api = _api_by_bucket(
+        dropsline={"bucket": []},
+        infobox={"bucket": [{"release_date": _released(400)}]},
+    )
+    for npc in ("Bird nest", "Dossier", "Araxxor", "Zulrah"):
+        assert _run(api.check_drop("Emberlight", npc)) is False, npc
+
+
+def test_item_the_wiki_does_not_know_still_fails_open():
+    # No infobox page under this name -> our spelling, an unhandled variant, or
+    # a wiki gap. Absence of data is still not proof of a spoof.
+    api = _api_by_bucket(dropsline={"bucket": []}, infobox={"bucket": []})
+    assert _run(api.check_drop("Some New Item", "Zulrah")) is True
+
+
+def test_recently_released_item_fails_open():
+    """A drop table nobody has written up yet must not read as proof that
+    nothing drops the item — that would reject real loot from a new boss in
+    exactly the days it is busiest."""
+    api = _api_by_bucket(
+        dropsline={"bucket": []},
+        infobox={"bucket": [{"release_date": _released(3)}]},
+    )
+    assert _run(api.check_drop("Brand New Drop", "Brand New Boss")) is True
+
+
+def test_newest_variant_governs_the_grace_period():
+    # An old variant and one released yesterday share a name. dropsline is
+    # queried by NAME, so the new variant's undocumented drop table is
+    # indistinguishable from a name nothing drops.
+    api = _api_by_bucket(
+        dropsline={"bucket": []},
+        infobox={"bucket": [{"release_date": _released(900)},
+                            {"release_date": _released(1)}]},
+    )
+    assert _run(api.check_drop("Reused Item Name", "Some Boss")) is True
+
+
+def test_unparseable_release_date_fails_open():
+    api = _api_by_bucket(
+        dropsline={"bucket": []},
+        infobox={"bucket": [{"release_date": "sometime in 2024"}]},
+    )
+    assert _run(api.check_drop("Odd Item", "Zulrah")) is True
+
+
+def test_missing_release_date_fails_open():
+    api = _api_by_bucket(dropsline={"bucket": []}, infobox={"bucket": [{}]})
+    assert _run(api.check_drop("Odd Item", "Zulrah")) is True
+
+
+def test_infobox_lookup_error_fails_open():
+    # No 'bucket' key == transport/API error, so the item's age is unknown.
+    api = _api_by_bucket(dropsline={"bucket": []}, infobox={})
+    assert _run(api.check_drop("Noxious halberd", "Rogues' Chest")) is True
+
+
+def test_infobox_probe_is_skipped_when_dropsline_has_rows():
+    # The probe is an extra wiki round-trip on the hot path; it may only run on
+    # the rare no-rows-anywhere branch.
+    api = _api_by_bucket(dropsline={"bucket": [{"page_name": "Zulrah"}]})
+    assert _run(api.check_drop("Tanzanite fang", "Zulrah")) is True
+    assert not any("infobox_item" in q for q in api.seen_queries)
 
 
 def test_wiki_error_response_fails_open():

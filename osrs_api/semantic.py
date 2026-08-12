@@ -7,6 +7,7 @@ replacing the deprecated Semantic MediaWiki (SMW) API.
 
 import json
 import html
+from datetime import date, datetime
 from typing import Dict, List, Optional, Union, Any
 from urllib.parse import quote
 
@@ -27,6 +28,14 @@ class SemanticAPI:
     # ~1,700) was rejected. Ask for far more than any item legitimately has,
     # and treat a full page as inconclusive rather than as proof of a spoof.
     DROPSLINE_ROW_LIMIT = 5000
+
+    # How long an item must have existed on the wiki before an empty
+    # drop-source list is read as "the game never drops this". dropsline rows
+    # come from {{DropsLine}} templates editors add to monster pages, so a
+    # just-released item can have an infobox page hours before its drop table
+    # is written up — precisely when its first >1M drops land. Below this age
+    # "no rows" stays inconclusive.
+    NEW_ITEM_GRACE_DAYS = 30
 
     # Mapping of database names to semantic names for compatibility
     ALT_NAMES = {
@@ -198,6 +207,62 @@ class SemanticAPI:
         item_id = await self.get_item_id(item_name)
         return item_id is not None
     
+    @classmethod
+    def _parse_wiki_release_date(cls, value: Any) -> Optional[date]:
+        """Parse an infobox ``release_date`` cell ("28 August 2024") to a date.
+
+        None when the cell is empty or in a shape we don't recognise — the
+        caller treats an unknown age as "could be brand new".
+        """
+        if isinstance(value, list):
+            value = value[0] if value else None
+        if not value:
+            return None
+        try:
+            return datetime.strptime(str(value).strip(), "%d %B %Y").date()
+        except ValueError:
+            return None
+
+    async def _nothing_drops_item(self, item_name: str) -> bool:
+        """Is this an item the game provably never drops?
+
+        True only when the wiki HAS an ``infobox_item`` page under this name
+        and every variant sharing the name is older than
+        ``NEW_ITEM_GRACE_DAYS`` — so an empty dropsline result means "no
+        monster drops this", not "nobody has documented it yet".
+
+        False on anything short of that (name the wiki doesn't know, missing
+        or unparseable release date, failed lookup), which keeps the caller on
+        its fail-open path.
+        """
+        query = (
+            "bucket('infobox_item')"
+            ".select('release_date')"
+            f".where('item_name', {self._bucket_quote(item_name)})"
+            ".limit(50).run()"
+        )
+        result = await self._bucket_query(query)
+        if 'bucket' not in result:
+            return False
+
+        rows = result['bucket']
+        if not rows:
+            # No item page under this name: our spelling, a variant we don't
+            # handle, or a wiki gap. Says nothing about drop sources.
+            return False
+
+        released = [
+            self._parse_wiki_release_date(row.get('release_date')) for row in rows
+        ]
+        if not all(released):
+            # At least one variant's age is unknown, and it could be today's.
+            return False
+
+        # Judge by the NEWEST variant sharing the name: dropsline is queried by
+        # name, so a just-released variant with an unwritten drop table is
+        # indistinguishable from a name nothing drops.
+        return (date.today() - max(released)).days > self.NEW_ITEM_GRACE_DAYS
+
     async def check_drop(self, item_name: str, npc_name: str) -> bool:
         """
         Check if an item drops from a specific NPC.
@@ -317,9 +382,32 @@ class SemanticAPI:
                       f"(matched dropsline name {lookup_name!r}; wiki sources: {sources})")
                 return False
 
-            # The wiki has no drop-source rows for this item under any name we
-            # tried (new item, name variant that didn't match, or a wiki gap).
-            # Absence of data is not proof of a spoof — allow.
+            # No drop-source rows under any name we tried. Two very different
+            # situations land here, and only one of them is inconclusive:
+            #
+            #  * the wiki has no item page under this name at all (our
+            #    spelling, a variant we don't handle, a genuine wiki gap) —
+            #    proves nothing either way;
+            #  * the wiki DOES know the item and no monster's drop table lists
+            #    it, i.e. nothing in the game drops it. Player-assembled and
+            #    imbued gear lives here — Noxious halberd, Emberlight, Purging
+            #    staff, Brimstone ring, Archers ring (i) — and for those every
+            #    claimed NPC source is false by construction.
+            #
+            # The second case is the one this check exists to catch and used
+            # to wave through. RuneLite's container-open loot records (bird
+            # nests, Dossiers, Rogues' Chest — LootRecordType.EVENT) compute
+            # loot by inventory diff, so an in-game inventory glitch invents
+            # "loot" out of the player's own gear, which is exactly the
+            # never-dropped items above. That is how a phantom 42M "Noxious
+            # halberd from Rogues' Chest" was accepted on 2026-08-10, and a
+            # 782M "Tumeken's shadow from Dossier" before it.
+            if await self._nothing_drops_item(item_name):
+                print(f"Nothing in the game drops {item_name!r} (wiki-indexed item "
+                      f"with no dropsline rows); rejecting the claimed "
+                      f"{npc_name} source")
+                return False
+
             print(f"No dropsline data for {item_name!r}; allowing (fail-open)")
             return True
 
