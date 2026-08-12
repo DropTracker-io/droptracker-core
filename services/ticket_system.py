@@ -26,9 +26,14 @@ from utils.format import format_number
 from utils.redis import redis_client
 
 SUPPORT_ROLE_ID = 1176291872143052831
-# Same role ids the close-permission checks use — a message author holding any
-# of these counts as "staff" for the opposing-party ping.
-STAFF_ROLE_IDS = {1342871954885050379, 1176291872143052831}
+# Ticket-helper role: members may read + reply in every ticket (the TICKETS
+# category carries a matching overwrite, and each new ticket channel is granted
+# it explicitly below), but they do NOT get the close-ticket permission.
+TICKETS_ROLE_ID = 1210785661649686539
+# A message author holding any of these counts as "staff" for the opposing-party
+# ping — their replies notify the ticket opener. Superset of the role ids the
+# close-permission checks use: TICKETS_ROLE_ID replies as staff but cannot close.
+STAFF_ROLE_IDS = {1342871954885050379, 1176291872143052831, TICKETS_ROLE_ID}
 
 # Inactivity lifecycle: warn once a ticket has been idle this long, then
 # auto-archive it this much later unless a human reply resets the clock.
@@ -762,13 +767,29 @@ class Tickets(Extension):
                     name=f"{author_name}-{ticket_type}-{ticket_number}"
                 )
                 await ticket_channel.add_permission(
-                    target=ctx.author, 
-                    type=OverwriteType.MEMBER, 
+                    target=ctx.author,
+                    type=OverwriteType.MEMBER,
                     allow=[Permissions.VIEW_CHANNEL, Permissions.SEND_MESSAGES, Permissions.READ_MESSAGE_HISTORY]
                 )
             except Exception as e:
                 print(f"Error creating ticket channel: {e}")
                 return await ctx.send("Failed to create ticket channel. Please try again later.", ephemeral=True)
+            try:
+                # Ticket-helper role: granted explicitly so access never depends
+                # on the category-overwrite snapshot Discord takes at creation.
+                # Non-fatal: the snapshot already carries the category overwrite.
+                await ticket_channel.add_permission(
+                    target=TICKETS_ROLE_ID,
+                    type=OverwriteType.ROLE,
+                    allow=[
+                        Permissions.VIEW_CHANNEL,
+                        Permissions.SEND_MESSAGES,
+                        Permissions.READ_MESSAGE_HISTORY,
+                        Permissions.SEND_MESSAGES_IN_THREADS,
+                    ],
+                )
+            except Exception as e:
+                print(f"[tickets] helper-role grant failed on {ticket_channel.id}: {e}")
             
             # Create and save the ticket to database immediately
             ticket = Ticket(
