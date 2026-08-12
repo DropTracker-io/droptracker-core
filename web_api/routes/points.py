@@ -242,24 +242,13 @@ def _parse_target_ids(body: dict, s) -> tuple:
     return item_id, npc_id
 
 
-def _parse_dt(value, field: str) -> datetime:
-    try:
-        raw = str(value).strip()
-        if raw.endswith("Z"):
-            raw = raw[:-1] + "+00:00"
-        dt = datetime.fromisoformat(raw)
-        return dt.replace(tzinfo=None)
-    except Exception:
-        abort_problem(400, "Invalid date", f"'{field}' must be an ISO-8601 datetime.")
-
-
 def _parse_epoch(value, field: str) -> int:
     """ISO-8601 datetime → unix seconds, honoring an explicit UTC offset.
 
     Aware inputs ("…T13:00:00Z", "…+02:00") convert exactly; naive inputs
-    keep the legacy behavior of being read in server-local time. Boosts use
-    this instead of _parse_dt so admins get the precise instant they picked
-    regardless of their timezone.
+    keep the legacy behavior of being read in server-local time. User-defined
+    instants (boosts, seasons) parse through this so admins get the precise
+    moment they picked regardless of their timezone.
     """
     try:
         raw = str(value).strip()
@@ -268,6 +257,16 @@ def _parse_epoch(value, field: str) -> int:
         return int(datetime.fromisoformat(raw).timestamp())
     except Exception:
         abort_problem(400, "Invalid date", f"'{field}' must be an ISO-8601 datetime.")
+
+
+def _parse_user_dt(value, field: str) -> datetime:
+    """ISO-8601 datetime → naive-UTC datetime (offset honored, then dropped).
+
+    For DateTime columns compared against server-written naive-UTC values
+    (player_points.date_added et al). Naive-UTC, NOT naive-local: keep the
+    stored domain independent of the box timezone.
+    """
+    return datetime.fromtimestamp(_parse_epoch(value, field), tz=timezone.utc).replace(tzinfo=None)
 
 
 def _int_in_range(body: dict, key: str, lo: int, hi: int, default=None) -> int:
@@ -282,12 +281,14 @@ def _int_in_range(body: dict, key: str, lo: int, hi: int, default=None) -> int:
 
 
 def _season_payload(row: GroupPointSeason) -> dict:
-    now = datetime.now()
+    # Columns hold naive-UTC; emit aware ISO so browsers render the exact
+    # instant in the viewer's local timezone (same contract as boosts).
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     return {
         "id": row.id,
         "name": row.name,
-        "start_at": row.start_at.isoformat() if row.start_at else None,
-        "end_at": row.end_at.isoformat() if row.end_at else None,
+        "start_at": row.start_at.replace(tzinfo=timezone.utc).isoformat() if row.start_at else None,
+        "end_at": row.end_at.replace(tzinfo=timezone.utc).isoformat() if row.end_at else None,
         "active": bool(row.start_at and row.end_at and row.start_at <= now <= row.end_at),
     }
 
@@ -886,8 +887,8 @@ async def create_point_season(group_id: int):
             name = str(body.get("name") or "").strip()
             if not (1 <= len(name) <= 100):
                 abort_problem(400, "Invalid name", "Season name must be 1–100 characters.")
-            start = _parse_dt(body.get("start_at"), "start_at")
-            end = _parse_dt(body.get("end_at"), "end_at")
+            start = _parse_user_dt(body.get("start_at"), "start_at")
+            end = _parse_user_dt(body.get("end_at"), "end_at")
             if end <= start:
                 abort_problem(400, "Invalid window", "end_at must be after start_at.")
             row = GroupPointSeason(group_id=group_id, name=name, start_at=start, end_at=end)
@@ -919,9 +920,9 @@ async def update_point_season(group_id: int, season_id: int):
                     abort_problem(400, "Invalid name", "Season name must be 1–100 characters.")
                 row.name = name
             if "start_at" in body:
-                row.start_at = _parse_dt(body.get("start_at"), "start_at")
+                row.start_at = _parse_user_dt(body.get("start_at"), "start_at")
             if "end_at" in body:
-                row.end_at = _parse_dt(body.get("end_at"), "end_at")
+                row.end_at = _parse_user_dt(body.get("end_at"), "end_at")
             if row.end_at <= row.start_at:
                 abort_problem(400, "Invalid window", "end_at must be after start_at.")
             s.commit()
