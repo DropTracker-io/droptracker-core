@@ -67,6 +67,7 @@ def build_pb_message(
     character_image_url: Optional[str] = None,
     screenshot_url: Optional[str] = None,
     profile_url: Optional[str] = None,
+    note: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The message payload for a new personal best.
 
@@ -142,6 +143,11 @@ def build_pb_message(
     if profile_url:
         children.append(_separator(divider=False))
         children.append(_text(f"-# [View {player_name}'s profile]({profile_url})"))
+
+    if note:
+        # Small print for anything the reader needs to know about the message
+        # itself — a pending-review marker, or that this is a sample.
+        children.append(_text(f"-# {note}"))
 
     return {
         # V2 messages carry no content or embeds; the container is the message.

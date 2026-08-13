@@ -69,6 +69,11 @@ def test_omits_stats_that_are_unknown():
     assert "Global rank" not in body
 
 
+def test_note_is_rendered_as_small_print():
+    msg = build_pb_message(**BASE, note="Pending review")
+    assert any(t.startswith("-# Pending review") for t in texts(msg))
+
+
 def test_ranks_are_formatted_with_totals():
     msg = build_pb_message(**BASE, global_rank=214, global_total=12905)
     assert any("#214 of 12,905" in t for t in texts(msg))
