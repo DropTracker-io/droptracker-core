@@ -200,6 +200,15 @@ if "services.plugin_manifest" not in sys.modules:
     sys.modules["services.plugin_manifest"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/pb_components.py — the Components V2 personal best layout. Pure
+# dict-building with no gateway or DB, so load the real module.
+_PB_COMPONENTS_PATH = _Path(__file__).resolve().parent.parent / "services" / "pb_components.py"
+if "services.pb_components" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.pb_components", _PB_COMPONENTS_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.pb_components"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/player_model.py — validation/storage of uploaded character models.
 # Stdlib-only; the tests assert on its rejection of malformed GLB containers and
 # path-traversal fingerprints.

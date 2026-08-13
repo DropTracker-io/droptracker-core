@@ -77,6 +77,9 @@ async def render_gear_image(player_id: int, fingerprint: str) -> Optional[str]:
             scale=2.0,
             timeout=_RENDER_TIMEOUT_SECONDS,
             ready_js=_READY_JS,
+            # A Discord client can be light or dark; a baked-in background
+            # rectangle looks broken on whichever one we did not assume.
+            transparent=True,
         )
     except Exception as exc:
         print(f"Could not render gear image for player {player_id}: {exc}")
