@@ -47,6 +47,12 @@ SCOPE_GROUP = "group"
 SCOPE_PLAYER = "player"
 RECAP_SCOPES = (SCOPE_GROUP, SCOPE_PLAYER)
 
+# `recap_snapshots` is shared with the Clan Log, which stores its boards under
+# scope `clan_log` (see db/models/clan_log.SCOPE_CLAN_LOG). Every reader and
+# sweep here therefore has to keep filtering on an explicit scope — a query that
+# selects "all snapshots for period X" without one will pick up boards that are
+# not recaps and have a different payload shape.
+
 # How a card reached its audience.
 DELIVERY_DM = "dm"
 DELIVERY_CHANNEL = "channel"

@@ -63,7 +63,12 @@ class TestEntityWhitelist:
             name for name in reg.list_entities()
             if reg.get_spec(name).get("developer_readable")
         }
-        assert readable == {"players", "groups"}
+        # The Clan Log catalog is public game data — which uniques exist and
+        # which boss drops them — with no subject beyond an item id, so it
+        # carries none of the things this allowlist exists to keep back.
+        assert readable == {
+            "players", "groups", "clan_log_sections", "clan_log_items",
+        }
 
 
 # ── Editable-field validation ─────────────────────────────────────────────────

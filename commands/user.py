@@ -792,3 +792,58 @@ class UserCommands(Extension):
             text=f"WOM ID: {result['wom_id']} • Duration: {result['duration_seconds']:.1f}s"
         )
         await ctx.send(embed=embed, ephemeral=True)
+    @slash_command(name="clan-log",
+                   description="See which boss uniques your clan has obtained, and what's still missing")
+    @slash_option(name="period",
+                  description="all (default), a year like 2026, or a month like 2026-08",
+                  required=False,
+                  opt_type=OptionType.STRING)
+    async def clan_log_cmd(self, ctx: SlashContext, period: str = "all"):
+        """Post the clan's unique-completion card.
+
+        Public rather than ephemeral: a completion board is something a clan
+        shows each other, and the reason the standing-message config exists at
+        all is that people want it visible. The card is rendered from the
+        stored board, so this costs a screenshot at worst and a Redis hit at
+        best — never a recompute.
+        """
+        self._refresh_session()
+
+        from interactions import ActionRow, Button, ButtonStyle
+        from services.clan_log import is_valid_period
+        from services.clan_log_discord import board_url, build_card_payload
+
+        period = (period or "all").strip() or "all"
+        if not is_valid_period(period):
+            return await ctx.send(
+                "That period doesn't look right — use `all`, a year like `2026`, "
+                "or a month like `2026-08`.",
+                ephemeral=True,
+            )
+
+        group = self._get_group_for_guild(ctx.guild_id)
+        if not group:
+            return await ctx.send(
+                "This Discord server isn't linked to a DropTracker clan yet.",
+                ephemeral=True,
+            )
+
+        # Rendering the card is a headless screenshot; Discord's 3s window is
+        # not enough on a cold cache.
+        await ctx.defer()
+
+        text, file, _state_hash = await build_card_payload(session, group.group_id, period)
+        if text is None:
+            return await ctx.send(
+                "This clan doesn't have a Clan Log yet — it's built the first time "
+                "we sweep your drops. Ask an admin to enable it, or check back shortly.",
+                ephemeral=True,
+            )
+
+        components = ActionRow(
+            Button(label="Open the full board", style=ButtonStyle.URL,
+                   url=board_url(group.group_id))
+        )
+        if file is not None:
+            return await ctx.send(content=text, files=file, components=components)
+        return await ctx.send(content=text, components=components)

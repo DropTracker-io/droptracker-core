@@ -31,6 +31,8 @@ from typing import Any, Dict, List
 from db import (
     Announcement,
     AuditLog,
+    ClanLogItem,
+    ClanLogSection,
     DiscordOutbox,
     Group,
     GroupConfiguration,
@@ -191,6 +193,37 @@ ENTITY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "editable": ["status"],
         "search_text": ["kind", "status", "channel_id"],
         "search_int": ["id", "ref_id", "actor_user_id"],
+    },
+    # The Clan Log catalog is curated, and new OSRS content arrives every few
+    # weeks — editing it here is what keeps "add Yama's uniques" from being a
+    # deploy. Both are public game facts, so developers may read them.
+    "clan_log_sections": {
+        "model": ClanLogSection,
+        "pk": "id",
+        "columns": [
+            "id", "slug", "label", "category", "npc_keys", "sort_order",
+            "enabled", "created_at", "updated_at",
+        ],
+        "editable": ["label", "category", "npc_keys", "sort_order", "enabled"],
+        "search_text": ["slug", "label", "category"],
+        "search_int": ["id"],
+        "developer_readable": True,
+    },
+    "clan_log_items": {
+        "model": ClanLogItem,
+        "pk": "id",
+        "columns": [
+            "id", "section_id", "item_id", "item_name", "variant_item_ids",
+            "attributable", "source_hint", "sort_order", "enabled",
+            "created_at", "updated_at",
+        ],
+        "editable": [
+            "item_name", "variant_item_ids", "attributable", "source_hint",
+            "sort_order", "enabled",
+        ],
+        "search_text": ["item_name", "source_hint"],
+        "search_int": ["id", "section_id", "item_id"],
+        "developer_readable": True,
     },
 }
 

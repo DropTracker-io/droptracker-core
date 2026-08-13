@@ -422,6 +422,56 @@ async def event_board_updates():
         print(f"Event board sweep error: {e}")
 
 
+@Task.create(IntervalTrigger(minutes=20))
+async def clan_log_refresh():
+    """Clan Log: advance each enabled clan's ledger, then repost what changed.
+
+    Two halves on purpose. The ledger tail is cheap and unconditional (a
+    ``drop_id > cursor`` range over ~300 catalogued items, measured at a tenth
+    of a second for an idle clan), so every enabled clan's board stays current
+    on the website whether or not it posts to Discord. Only clans with
+    ``clan_log_enabled`` get the standing message, and only when their board
+    actually moved — see services/clan_log_discord.
+    """
+    session = None
+    try:
+        from db.models.base import Session
+        from services.clan_log import load_catalog, refresh_group
+        from services.clan_log_discord import refresh_standing_messages
+        from db.models import GroupConfiguration
+
+        session = Session()
+        rows = (
+            session.query(GroupConfiguration.group_id)
+            .filter(
+                GroupConfiguration.config_key == "clan_log_enabled",
+                GroupConfiguration.config_value.in_(
+                    ["1", "true", "True", "yes", "on"]
+                ),
+            )
+            .all()
+        )
+        group_ids = sorted({int(r[0]) for r in rows})
+        if not group_ids:
+            return
+
+        catalog = load_catalog(session)
+        for group_id in group_ids:
+            try:
+                refresh_group(session, group_id, catalog=catalog)
+                session.commit()
+            except Exception as e:
+                session.rollback()
+                print(f"Clan Log refresh failed for group {group_id}: {e}")
+
+        await refresh_standing_messages(bot, session)
+    except Exception as e:
+        print(f"Clan Log refresh error: {e}")
+    finally:
+        if session is not None:
+            session.close()
+
+
 @Task.create(IntervalTrigger(minutes=1))
 async def status_channel_updates():
     """#status channel upkeep (services/status_channel.py): edits the service
@@ -652,6 +702,7 @@ async def create_tasks():
     event_signup_prompt_retire.start()
     badge_cycle.start()
     clan_chat_mirror_drain.start()
+    clan_log_refresh.start()
     # Lootboard POSTING is user-visible and must stay with the interval tasks
     # above — NEVER gated behind the multi-minute, rate-limited guild-cache /
     # WOM warm-ups below. It previously sat after `await cache_guild_channels()`

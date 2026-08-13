@@ -213,6 +213,21 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "recap_post_hour", "type": "int", "default": 12, "min": 0, "max": 23},
     # IANA name (e.g. "America/New_York"). Empty means UTC.
     {"key": "recap_timezone", "type": "string", "default": None},
+
+    # --- Clan Log ---
+    # The standing "how far through every boss's uniques are we" message, edited
+    # in place as members pull things (services/clan_log.py builds the board,
+    # the core bot's refresher posts it). Off by default: it is a message the
+    # bot owns and keeps editing in someone's channel, which no clan should get
+    # without asking. The board itself is always available on the website and
+    # through /clan-log, for every group and every tier.
+    {"key": "clan_log_enabled", "type": "boolean", "default": False},
+    # Where the standing message lives. Unlike the recap this does NOT fall back
+    # to the lootboard channel — an ever-editing message would fight the
+    # lootboard for the same slot.
+    {"key": "clan_log_channel_id", "type": "channel", "default": None},
+    # The message the bot edits. Written by the bot, not by an admin.
+    {"key": "clan_log_message_id", "type": "string", "default": None},
 ]
 
 _BY_KEY = {f["key"]: f for f in GROUP_CONFIG_FIELDS}
