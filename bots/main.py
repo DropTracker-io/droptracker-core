@@ -435,34 +435,60 @@ async def clan_log_refresh():
     """
     session = None
     try:
+        import time
+
+        from sqlalchemy import text
+
         from db.models.base import Session
         from services.clan_log import load_catalog, refresh_group
         from services.clan_log_discord import refresh_standing_messages
-        from db.models import GroupConfiguration
+        from utils.redis import redis_client
 
         session = Session()
-        rows = (
-            session.query(GroupConfiguration.group_id)
-            .filter(
-                GroupConfiguration.config_key == "clan_log_enabled",
-                GroupConfiguration.config_value.in_(
-                    ["1", "true", "True", "yes", "on"]
-                ),
-            )
-            .all()
-        )
-        group_ids = sorted({int(r[0]) for r in rows})
+        # Every group that HAS a board, not just the ones posting to Discord:
+        # the website board should not go stale because a clan chose not to
+        # dedicate a channel to it.
+        rows = session.execute(
+            text("SELECT DISTINCT group_id FROM clan_log_firsts ORDER BY group_id")
+        ).fetchall()
+        group_ids = [int(r[0]) for r in rows]
         if not group_ids:
             return
 
+        # Round-robin under a wall-clock budget. Each tail is a tenth of a
+        # second for an idle clan, but the count grows with adoption, and this
+        # task shares an event loop with everything else the bot does — so it
+        # takes a bounded bite per cycle and resumes where it stopped.
+        resume_after = 0
+        try:
+            resume_after = int(redis_client.get("clan_log:refresh_cursor") or 0)
+        except Exception:
+            pass
+        ordered = [g for g in group_ids if g > resume_after] + [
+            g for g in group_ids if g <= resume_after
+        ]
+
         catalog = load_catalog(session)
-        for group_id in group_ids:
+        deadline = time.monotonic() + 120
+        last = resume_after
+        for group_id in ordered:
+            if time.monotonic() > deadline:
+                break
             try:
                 refresh_group(session, group_id, catalog=catalog)
                 session.commit()
             except Exception as e:
                 session.rollback()
                 print(f"Clan Log refresh failed for group {group_id}: {e}")
+            last = group_id
+        try:
+            # Wrap around once every group has had its turn.
+            redis_client.set(
+                "clan_log:refresh_cursor",
+                str(0 if last >= group_ids[-1] else last),
+            )
+        except Exception:
+            pass
 
         await refresh_standing_messages(bot, session)
     except Exception as e:
