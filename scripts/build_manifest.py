@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from db.models import PluginManifestSection, Session
@@ -41,6 +42,24 @@ def _bust_cache() -> None:
         print(f"Could not invalidate {CACHE_KEY} ({exc}); it expires on its own")
 
 
+def _load_generated(key):
+    """Generated payloads that are too large to keep inline in DEFAULT_SECTIONS.
+
+    The combat achievement registry is 398 entries derived from RuneLite's
+    VarbitID constants; it lives beside this script so regenerating it after a
+    RuneLite update is a file swap rather than a code edit.
+    """
+    if key != "combat_achievement_tasks":
+        return None
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca_registry.json")
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError) as exc:
+        print(f"Could not read {path} ({exc}); leaving {key} empty")
+        return None
+
+
 def _canonical(payload) -> str:
     """Stable JSON so an unchanged section compares equal across runs."""
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -53,7 +72,8 @@ def build(apply: bool) -> int:
 
         created, updated, unchanged = [], [], []
         for key, spec in DEFAULT_SECTIONS.items():
-            wanted = _canonical(spec["payload"])
+            generated = _load_generated(key)
+            wanted = _canonical(generated if generated is not None else spec["payload"])
             row = existing.get(key)
             if row is None:
                 created.append(key)

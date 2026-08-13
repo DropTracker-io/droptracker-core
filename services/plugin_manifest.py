@@ -38,6 +38,18 @@ DEFAULT_SECTIONS: Dict[str, Dict[str, Any]] = {
             "the previous one fills up."
         ),
     },
+    "combat_achievement_tasks": {
+        # Populated by scripts/build_manifest.py from RuneLite's generated
+        # VarbitID constants (see scripts/ca_registry.json). Empty here rather
+        # than inlined because it is 398 entries of generated data, not a
+        # hand-maintained default.
+        "payload": [],
+        "description": (
+            "Per-task combat achievement varbits with the boss each belongs to. "
+            "Lets the plugin report which individual tasks are done, so progress "
+            "can be shown per boss the way the in-game interface does."
+        ),
+    },
     "quest_ids": {
         "payload": [],
         "description": (

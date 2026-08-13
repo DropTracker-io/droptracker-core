@@ -506,6 +506,25 @@ async def player_profile(player_id: int):
                     payload["personal_bests"] = pbs
             except Exception:
                 pass
+            # Character model, when the player has uploaded one. Best-effort:
+            # the profile must render for the overwhelming majority who have
+            # not, so any failure here just omits the viewer.
+            try:
+                from db.models import PlayerState
+                from services.player_model import model_exists
+
+                state = (
+                    s.query(PlayerState)
+                    .filter(PlayerState.player_id == player_id)
+                    .first()
+                )
+                if state is not None and state.model_fingerprint:
+                    payload["model_fingerprint"] = state.model_fingerprint
+                    payload["model_has_pet"] = model_exists(
+                        player_id, state.model_fingerprint, pet=True
+                    )
+            except Exception:
+                pass
             points = _player_points(s, player_id)
             if points is not None:
                 payload["points"] = points

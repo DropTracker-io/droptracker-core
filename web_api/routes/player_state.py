@@ -10,6 +10,8 @@ error — most players will not have synced when this first ships.
 """
 from __future__ import annotations
 
+import json
+
 from quart import Blueprint, jsonify
 
 from db import ItemList, NpcList, PersonalBestEntry, Player
@@ -41,6 +43,83 @@ DIARY_AREA_NAMES = {
 }
 
 QUEST_STATE_NAMES = {0: "not_started", 1: "in_progress", 2: "finished"}
+
+# The task registry is reference data that changes only when the manifest is
+# rebuilt, so it is read once per process rather than per request.
+_CA_REGISTRY_CACHE = None
+
+
+def _combat_achievement_registry(s):
+    """Task varbit -> boss, from the manifest section the plugin also reads.
+
+    Read from the manifest rather than duplicated here so the site and the
+    client can never disagree about which task belongs to which boss.
+    """
+    global _CA_REGISTRY_CACHE
+    if _CA_REGISTRY_CACHE is not None:
+        return _CA_REGISTRY_CACHE
+
+    from db.models import PluginManifestSection
+
+    row = (
+        s.query(PluginManifestSection)
+        .filter(PluginManifestSection.key == "combat_achievement_tasks")
+        .first()
+    )
+    registry = {}
+    if row is not None:
+        try:
+            for entry in json.loads(row.payload):
+                varbit = entry.get("varbit")
+                boss = entry.get("boss")
+                if isinstance(varbit, int) and boss:
+                    registry[varbit] = boss
+        except (TypeError, ValueError):
+            registry = {}
+
+    _CA_REGISTRY_CACHE = registry
+    return registry
+
+
+def _combat_achievement_bosses(s, player_id: int):
+    """Completed/total combat achievements per boss, ordered as the game does.
+
+    Bosses with no completions are still listed: "0/9" is the information a
+    player is looking for, and hiding them would make the page look like it only
+    knows about content they have already done.
+    """
+    registry = _combat_achievement_registry(s)
+    if not registry:
+        return []
+
+    row = (
+        s.query(PlayerCombatAchievementVarps)
+        .filter(PlayerCombatAchievementVarps.player_id == player_id)
+        .first()
+    )
+    if row is None or not row.completed_tasks:
+        return []
+
+    try:
+        completed = set(json.loads(row.completed_tasks))
+    except (TypeError, ValueError):
+        return []
+
+    totals = {}
+    done = {}
+    for varbit, boss in registry.items():
+        totals[boss] = totals.get(boss, 0) + 1
+        if varbit in completed:
+            done[boss] = done.get(boss, 0) + 1
+
+    out = [
+        {"boss": boss, "completed": done.get(boss, 0), "total": total}
+        for boss, total in totals.items()
+    ]
+    # Most-complete first, then alphabetical - a player scanning this wants to
+    # see what they have finished and what is nearly finished.
+    out.sort(key=lambda b: (-(b["completed"] / b["total"] if b["total"] else 0), b["boss"]))
+    return out
 
 
 def _player_or_none(s, player_id: int):
@@ -131,6 +210,8 @@ async def achievements(player_id: int):
 
             state = _state_for(s, player_id)
 
+            ca_bosses = _combat_achievement_bosses(s, player_id)
+
             ca_row = (
                 s.query(PlayerCombatAchievementVarps)
                 .filter(PlayerCombatAchievementVarps.player_id == player_id)
@@ -177,10 +258,10 @@ async def achievements(player_id: int):
                 "account_type": state.account_type if state else None,
                 "combat_level": state.combat_level if state else None,
                 "combat_achievements": {
-                    # Task *count* only. Mapping a completion bit back to a
-                    # specific task needs a task registry we do not have yet, and
-                    # a wrong mapping would name the wrong achievements.
                     "tasks_completed": ca_row.tasks_completed if ca_row else None,
+                    # Per-boss progress, the way the in-game interface groups it.
+                    # Empty when the client had no task registry to read.
+                    "bosses": ca_bosses,
                 },
                 "quests": quest_counts,
                 "diaries": sorted(diaries.values(), key=lambda d: d["area_id"]),

@@ -128,6 +128,13 @@ def _apply_snapshot(player_name, acc_hash, snapshot):
         varps = parse_int_map(
             snapshot.get("ca_varps"), limit=MAX_VARPS, min_key=1, min_value=None
         )
+        # Individually completed task varbits, when the client had a registry.
+        raw_tasks = snapshot.get("ca_tasks")
+        completed_tasks = []
+        if isinstance(raw_tasks, list):
+            for value in raw_tasks[:1000]:
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    completed_tasks.append(value)
         diary_tiers = parse_diary_tiers(snapshot.get("diary_tiers"))
         skills = parse_skills(snapshot.get("skills"))
 
@@ -161,7 +168,7 @@ def _apply_snapshot(player_name, acc_hash, snapshot):
         _upsert_items(db_session, player_id, previous_items, items)
         _upsert_quests(db_session, player_id, previous_quests, quests)
         _upsert_diaries(db_session, player_id, previous_diaries, diary_tiers)
-        _upsert_combat_achievements(db_session, player_id, varps)
+        _upsert_combat_achievements(db_session, player_id, varps, completed_tasks)
 
         db_session.commit()
 
@@ -321,14 +328,14 @@ def _upsert_diaries(db_session, player_id, previous, incoming):
             )
 
 
-def _upsert_combat_achievements(db_session, player_id, varps):
+def _upsert_combat_achievements(db_session, player_id, varps, completed_tasks=None):
     """Stores the raw completion bits plus a task count.
 
     Skipped entirely when the client sent no varps — that means it had no
     manifest, not that the player completed nothing, and overwriting real data
     with an empty set would look like mass un-completion.
     """
-    if not varps:
+    if not varps and not completed_tasks:
         return
 
     row = (
@@ -343,5 +350,12 @@ def _upsert_combat_achievements(db_session, player_id, varps):
     merged = deserialize_varps(row.varps)
     merged.update(varps)
 
-    row.varps = serialize_varps(merged)
-    row.tasks_completed = count_completed_combat_achievements(merged)
+    if varps:
+        row.varps = serialize_varps(merged)
+        row.tasks_completed = count_completed_combat_achievements(merged)
+
+    # The per-task list is replaced wholesale rather than merged: it is a
+    # complete read of the registry, so an absent task means "not completed",
+    # not "not seen". Merging would make an un-completed task impossible.
+    if completed_tasks is not None and completed_tasks:
+        row.completed_tasks = json.dumps(sorted(set(completed_tasks)), separators=(",", ":"))

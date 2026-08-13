@@ -110,6 +110,11 @@ class PlayerCombatAchievementVarps(Base):
     varps = Column(Text, nullable=False)
     # Denormalised so leaderboards and profile headers do not decode every row.
     tasks_completed = Column(Integer, nullable=True)
+    # JSON array of the task varbits reported complete, when the client had a
+    # task registry to read. Enables the per-boss breakdown the in-game
+    # interface shows; the raw varps above remain the complete truth, including
+    # tasks the registry has no entry for.
+    completed_tasks = Column(Text, nullable=True)
     points = Column(Integer, nullable=True)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
