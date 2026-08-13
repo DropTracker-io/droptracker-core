@@ -51,10 +51,10 @@ _CLOG_STRUCTURE_CACHE = None
 
 
 def _combat_achievement_registry(s):
-    """Task varbit -> boss, from the manifest section the plugin also reads.
+    """The cache-derived task registry: every task with its varp and bit.
 
-    Read from the manifest rather than duplicated here so the site and the
-    client can never disagree about which task belongs to which boss.
+    Read from the manifest so the site and any client share one definition.
+    Cached per process — it changes only when the extractor is re-run.
     """
     global _CA_REGISTRY_CACHE
     if _CA_REGISTRY_CACHE is not None:
@@ -67,60 +67,98 @@ def _combat_achievement_registry(s):
         .filter(PluginManifestSection.key == "combat_achievement_tasks")
         .first()
     )
-    registry = {}
+    tasks = []
     if row is not None:
         try:
-            for entry in json.loads(row.payload):
-                varbit = entry.get("varbit")
-                boss = entry.get("boss")
-                if isinstance(varbit, int) and boss:
-                    registry[varbit] = boss
+            loaded = json.loads(row.payload)
+            if isinstance(loaded, dict):
+                tasks = loaded.get("tasks") or []
         except (TypeError, ValueError):
-            registry = {}
+            tasks = []
 
-    _CA_REGISTRY_CACHE = registry
-    return registry
+    _CA_REGISTRY_CACHE = tasks
+    return tasks
 
 
-def _combat_achievement_bosses(s, player_id: int):
-    """Completed/total combat achievements per boss, ordered as the game does.
+def _combat_achievements_for(s, player_id: int):
+    """Decode a player's stored varps into named, tiered, per-monster tasks.
 
-    Bosses with no completions are still listed: "0/9" is the information a
-    player is looking for, and hiding them would make the page look like it only
-    knows about content they have already done.
+    The varps are what the client sends; the registry says which (varp, bit)
+    each task lives at. Decoding here rather than at write time means a registry
+    fix applies retroactively to everything already stored.
     """
-    registry = _combat_achievement_registry(s)
-    if not registry:
-        return []
+    tasks = _combat_achievement_registry(s)
+    if not tasks:
+        return None
 
     row = (
         s.query(PlayerCombatAchievementVarps)
         .filter(PlayerCombatAchievementVarps.player_id == player_id)
         .first()
     )
-    if row is None or not row.completed_tasks:
-        return []
+    if row is None:
+        return None
 
-    try:
-        completed = set(json.loads(row.completed_tasks))
-    except (TypeError, ValueError):
-        return []
+    from services.state_sync import deserialize_varps
 
-    totals = {}
-    done = {}
-    for varbit, boss in registry.items():
-        totals[boss] = totals.get(boss, 0) + 1
-        if varbit in completed:
-            done[boss] = done.get(boss, 0) + 1
+    varps = deserialize_varps(row.varps)
 
-    out = [
-        {"boss": boss, "completed": done.get(boss, 0), "total": total}
-        for boss, total in totals.items()
-    ]
-    # Most-complete first, then alphabetical - a player scanning this wants to
-    # see what they have finished and what is nearly finished.
-    out.sort(key=lambda b: (-(b["completed"] / b["total"] if b["total"] else 0), b["boss"]))
-    return out
+    by_monster = {}
+    by_tier = {}
+    completed_total = 0
+
+    for task in tasks:
+        varp = task.get("varp")
+        bit = task.get("bit")
+        if not isinstance(varp, int) or not isinstance(bit, int):
+            continue
+
+        # Mask to 32 bits: the client sends signed ints, so a varp with its top
+        # bit set arrives negative.
+        value = varps.get(varp, 0) & 0xFFFFFFFF
+        done = bool(value & (1 << bit))
+        if done:
+            completed_total += 1
+
+        tier = task.get("tier") or "Unknown"
+        tier_entry = by_tier.setdefault(tier, {"tier": tier, "completed": 0, "total": 0})
+        tier_entry["total"] += 1
+        if done:
+            tier_entry["completed"] += 1
+
+        monster = task.get("monster") or "Other"
+        entry = by_monster.setdefault(
+            monster, {"monster": monster, "completed": 0, "total": 0, "tasks": []}
+        )
+        entry["total"] += 1
+        if done:
+            entry["completed"] += 1
+        entry["tasks"].append({
+            "name": task.get("name") or "",
+            "description": task.get("description") or "",
+            "tier": tier,
+            "type": task.get("type") or "",
+            "completed": done,
+        })
+
+    tier_order = {"Easy": 0, "Medium": 1, "Hard": 2, "Elite": 3, "Master": 4, "Grandmaster": 5}
+    for entry in by_monster.values():
+        entry["tasks"].sort(key=lambda t: (tier_order.get(t["tier"], 9), t["name"]))
+
+    monsters = sorted(
+        by_monster.values(),
+        # Most-complete first, then alphabetical: a player scanning this wants
+        # to see what is finished and what is nearly finished.
+        key=lambda m: (-(m["completed"] / m["total"] if m["total"] else 0), m["monster"]),
+    )
+    tiers = sorted(by_tier.values(), key=lambda t: tier_order.get(t["tier"], 9))
+
+    return {
+        "completed": completed_total,
+        "total": len(tasks),
+        "tiers": tiers,
+        "monsters": monsters,
+    }
 
 
 def _collection_log_structure(s):
@@ -290,7 +328,7 @@ async def achievements(player_id: int):
 
             state = _state_for(s, player_id)
 
-            ca_bosses = _combat_achievement_bosses(s, player_id)
+            combat = _combat_achievements_for(s, player_id)
 
             ca_row = (
                 s.query(PlayerCombatAchievementVarps)
@@ -338,10 +376,14 @@ async def achievements(player_id: int):
                 "account_type": state.account_type if state else None,
                 "combat_level": state.combat_level if state else None,
                 "combat_achievements": {
-                    "tasks_completed": ca_row.tasks_completed if ca_row else None,
-                    # Per-boss progress, the way the in-game interface groups it.
-                    # Empty when the client had no task registry to read.
-                    "bosses": ca_bosses,
+                    "tasks_completed": (
+                        combat["completed"] if combat
+                        else (ca_row.tasks_completed if ca_row else None)
+                    ),
+                    "total": combat["total"] if combat else None,
+                    # Per-tier and per-monster, decoded from the stored varps.
+                    "tiers": combat["tiers"] if combat else [],
+                    "monsters": combat["monsters"] if combat else [],
                 },
                 "quests": quest_counts,
                 "diaries": sorted(diaries.values(), key=lambda d: d["area_id"]),

@@ -43,11 +43,11 @@ DEFAULT_SECTIONS: Dict[str, Dict[str, Any]] = {
         # VarbitID constants (see scripts/ca_registry.json). Empty here rather
         # than inlined because it is 398 entries of generated data, not a
         # hand-maintained default.
-        "payload": [],
+        "payload": {},
         "description": (
-            "Per-task combat achievement varbits with the boss each belongs to. "
-            "Lets the plugin report which individual tasks are done, so progress "
-            "can be shown per boss the way the in-game interface does."
+            "Combat achievement tasks from the game cache: name, tier, monster, "
+            "type, and the varp/bit that records completion. The varp/bit pair is "
+            "what lets stored varps be decoded into named tasks."
         ),
     },
     "quest_ids": {

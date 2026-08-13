@@ -51,7 +51,10 @@ def _load_generated(key):
     """
     if key != "combat_achievement_tasks":
         return None
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca_registry.json")
+    # Extracted from the game cache by scripts/cache/extract-ca-tasks.mjs, which
+    # is the only source carrying the varp/bit each task lives at — the join
+    # that turns stored varps into named tasks.
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca_tasks.json")
     try:
         with open(path) as fh:
             return json.load(fh)
