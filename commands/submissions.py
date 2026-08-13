@@ -8,6 +8,13 @@ Discord-side manual submissions, mirroring the website's /submit form:
 - /submit pb     — a new personal best kill time
 - /submit ca     — a completed combat achievement task
 - /submit pet    — a pet drop
+- /submit proof  — attach a screenshot to a submission already awaiting review
+
+Proof stays OPTIONAL (plenty of submissions never touch an event), but the
+``proof`` option is the first optional option on every subcommand, and a
+proofless submission that the events engine actually parked for admin review
+gets an ephemeral nudge plus a way to attach the screenshot afterwards —
+see data/submissions/manual_proof.py.
 
 Item / NPC / boss options autocomplete against the live catalog using the
 same queries as the website's search (tracked entries first, duplicate
@@ -22,6 +29,7 @@ high-value verification, per-group manual-submission policies, notifications
 and events — applies identically to Discord and web submissions.
 """
 
+import asyncio
 import os
 
 import httpx
@@ -33,9 +41,11 @@ from interactions import (
     OptionType,
     SlashCommandChoice,
     SlashContext,
+    listen,
     slash_command,
     slash_option,
 )
+from interactions.api.events import MessageCreate
 from sqlalchemy import text
 
 from data.submissions.manual_discord import (
@@ -48,7 +58,27 @@ from data.submissions.manual_discord import (
     payload_to_form,
     summarize_submission,
 )
+from data.submissions.manual_proof import (
+    PROOF_ATTACH_LOOKBACK_SECONDS,
+    PROOF_CONTENT_TYPES,
+    PROOF_MAX_BYTES,
+    PROOF_POLL_DELAYS,
+    PROOF_PROMPT_LOOKBACK_SECONDS,
+    attach_proof_url,
+    attached_summary_text,
+    clear_awaiting_proof,
+    events_active,
+    latest_batch,
+    load_awaiting_proof,
+    pending_proof_rows,
+    proof_attachment_error,
+    proof_extension,
+    proof_prompt_text,
+    stash_awaiting_proof,
+)
 from db.models import Player, User, session
+from utils.download import download_player_image
+from utils.format import get_command_id
 from utils.npc_names import npc_match_key
 from utils.redis import redis_client
 from utils.submission_messages import friendly_rejection
@@ -61,12 +91,10 @@ INTAKE_TIMEOUT_SECONDS = 45.0
 # their throughput by alternating surfaces (web_api/routes/submissions.py).
 _RATE_LIMIT_PER_MIN = int(os.getenv("WEB_MANUAL_SUBMIT_PER_MIN", "20"))
 
-_PROOF_MAX_BYTES = 10 * 1024 * 1024  # matches the web form's 10 MB cap
-_PROOF_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
-
 _COLOR_SUCCESS = 0x2ECC71
 _COLOR_REJECTED = 0xE67E22
 _COLOR_ERROR = 0xE74C3C
+_COLOR_PROOF_PROMPT = 0x3498DB
 
 _TYPE_LABELS = {
     "drop": "Drop",
@@ -108,9 +136,13 @@ def _account_option(required: bool = False):
 
 
 def _proof_option():
+    """Optional everywhere, but declared directly under the last REQUIRED option
+    of each subcommand: interactions.py builds the option list by inserting each
+    decorator at index 0, so the top-to-bottom decorator order is what Discord's
+    picker shows — and an optional option may not precede a required one."""
     return slash_option(
         name="proof",
-        description="Screenshot proof (PNG/JPEG/WebP/GIF, max 10 MB)",
+        description="Screenshot of it — needed if this counts towards an event (PNG/JPEG/WebP/GIF, 10 MB)",
         opt_type=OptionType.ATTACHMENT,
         required=False,
     )
@@ -130,16 +162,11 @@ class SubmissionCommands(Extension):
     # Shared plumbing
     # ------------------------------------------------------------------
 
-    def _resolve_player(self, ctx: SlashContext, account: str | None):
-        """(player, error_message): the claimed player this submission is for.
-
-        Mirrors the web rule: you can only submit for accounts you own. With
-        one claimed account it's implicit; with several the account option
-        (autocompleted) picks one.
-        """
-        user = session.query(User).filter(User.discord_id == str(ctx.author.id)).first()
+    def _claimed_players(self, discord_id):
+        """(players, error_message): every RSN this Discord account has claimed."""
+        user = session.query(User).filter(User.discord_id == str(discord_id)).first()
         if user is None:
-            return None, (
+            return [], (
                 "You don't have a DropTracker account yet. Claim your RuneScape "
                 "account with `/claim-rsn` first, then try again."
             )
@@ -150,10 +177,22 @@ class SubmissionCommands(Extension):
             .all()
         )
         if not players:
-            return None, (
+            return [], (
                 "You haven't claimed any RuneScape accounts yet. Claim one with "
                 "`/claim-rsn` first — manual submissions only count for accounts you own."
             )
+        return players, None
+
+    def _resolve_player(self, ctx: SlashContext, account: str | None):
+        """(player, error_message): the claimed player this submission is for.
+
+        Mirrors the web rule: you can only submit for accounts you own. With
+        one claimed account it's implicit; with several the account option
+        (autocompleted) picks one.
+        """
+        players, err = self._claimed_players(ctx.author.id)
+        if err:
+            return None, err
         if account:
             wanted = account.strip().lower()
             for p in players:
@@ -214,11 +253,11 @@ class SubmissionCommands(Extension):
         (warning text returned alongside None bytes).
         """
         content_type = (proof.content_type or "").split(";")[0].strip().lower()
-        if content_type not in _PROOF_CONTENT_TYPES:
+        if content_type not in PROOF_CONTENT_TYPES:
             return None, None, None, (
                 "That proof file type isn't supported — attach a PNG, JPEG, WebP or GIF image."
             )
-        if (proof.size or 0) > _PROOF_MAX_BYTES:
+        if (proof.size or 0) > PROOF_MAX_BYTES:
             return None, None, None, "Proof screenshots are capped at 10 MB."
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
@@ -337,10 +376,154 @@ class SubmissionCommands(Extension):
         embed.set_footer(text="Manual submission • notifications post shortly if it was accepted")
         if image is not None and proof is not None:
             embed.set_thumbnail(url=proof.url)
-        return await ctx.send(embed=embed, ephemeral=True)
+        sent = await ctx.send(embed=embed, ephemeral=True)
+        if image is None:
+            # Only nags when the events engine actually parked this submission
+            # for review — a casual submission outside any event stays silent.
+            await self._prompt_for_proof(ctx, player, summary)
+        return sent
 
     def _error_embed(self, message: str, title: str = "Couldn't submit that") -> Embed:
         return Embed(title=title, description=message, color=_COLOR_ERROR)
+
+    # ------------------------------------------------------------------
+    # Proof follow-up (data/submissions/manual_proof.py)
+    # ------------------------------------------------------------------
+
+    async def _prompt_for_proof(self, ctx: SlashContext, player, summary: str):
+        """Ask for a screenshot iff this proofless submission landed in an
+        event's review queue.
+
+        "Qualifies" is decided by reading back the pending ``EventCompletion``
+        rows the events worker wrote for this player — the engine's own verdict,
+        not a second copy of its matching rules. The worker applies the queue
+        asynchronously, so the rows appear a beat after /submit returns; this
+        runs after the confirmation embed has already been sent, and only when
+        the ``events:active`` gate says an event is running at all.
+        """
+        conn = getattr(redis_client, "client", None)
+        if not events_active(conn):
+            return
+        rows = []
+        try:
+            for delay in PROOF_POLL_DELAYS:
+                await asyncio.sleep(delay)
+                rows = pending_proof_rows(
+                    session, [player.player_id], PROOF_PROMPT_LOOKBACK_SECONDS
+                )
+                if rows:
+                    break
+        except Exception as e:
+            print(f"[submit] proof prompt lookup failed: {e}")
+            return
+        if not rows:
+            return
+        stash_awaiting_proof(
+            conn, ctx.author.id,
+            player_id=player.player_id, player_name=player.player_name,
+            completion_ids=[r["id"] for r in rows],
+            channel_id=getattr(ctx, "channel_id", None), summary=summary,
+        )
+        embed = Embed(
+            title="📸 One screenshot away",
+            description=proof_prompt_text(summary, rows, await self._proof_command_hint()),
+            color=_COLOR_PROOF_PROMPT,
+        )
+        try:
+            await ctx.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            print(f"[submit] proof prompt send failed: {e}")
+
+    async def _proof_command_hint(self) -> str:
+        """A clickable `</submit proof:id>` mention when the command id is
+        known, else the plain command text."""
+        try:
+            cmd_id = await get_command_id(self.bot, "submit")
+            if str(cmd_id).isdigit():
+                return f"</submit proof:{cmd_id}>"
+        except Exception:
+            pass
+        return "`/submit proof`"
+
+    async def _host_proof(self, player, proof: Attachment, entry_id: int):
+        """Store a follow-up screenshot where the submission pipeline stores the
+        ones attached up front (static/assets/img/user-upload, served at /img)
+        and return its public URL. Discord's own CDN links are signed and expire,
+        so they can't be persisted as ``EventCompletion.proof_url``."""
+        try:
+            _path, url = await download_player_image(
+                submission_type="proof",
+                file_name="proof",
+                player=player,
+                attachment_url=proof.url,
+                file_extension=proof_extension(proof.content_type, proof.filename),
+                entry_id=entry_id,
+                entry_name="proof",
+            )
+            return url
+        except Exception as e:
+            print(f"[submit] proof upload failed: {e}")
+            return None
+
+    async def _attach_proof(self, discord_id, proof: Attachment, players, registry):
+        """Attach ``proof`` to the caller's still-pending completions and return
+        the reply embed. Shared by `/submit proof` and the DM upload path."""
+        err = proof_attachment_error(proof.content_type, proof.size)
+        if err:
+            return self._error_embed(err, title="Couldn't use that screenshot")
+
+        player_ids = [p.player_id for p in players]
+        try:
+            rows = pending_proof_rows(session, player_ids, PROOF_ATTACH_LOOKBACK_SECONDS)
+        except Exception as e:
+            print(f"[submit] pending-proof lookup failed: {e}")
+            rows = []
+        # The registry pins the submission they were prompted about; without it
+        # (expired, or they never saw the prompt) fall back to their newest
+        # batch of rows still waiting on a screenshot.
+        wanted = {int(cid) for cid in ((registry or {}).get("completion_ids") or [])}
+        targets = [r for r in rows if r["id"] in wanted] or latest_batch(rows)
+        if not targets:
+            return self._error_embed(
+                "Nothing of yours is waiting on a screenshot right now. Attach one "
+                "with the `proof` option when you submit — or if an admin already "
+                "reviewed it, ask them to take another look.",
+                title="Nothing to attach it to",
+            )
+
+        by_id = {p.player_id: p for p in players}
+        owner = by_id.get(targets[0]["player_id"]) or players[0]
+        url = await self._host_proof(owner, proof, targets[0]["id"])
+        if url is None:
+            return self._error_embed(
+                "Couldn't save that screenshot — try again in a moment.",
+                title="Couldn't attach it",
+            )
+        try:
+            updated = attach_proof_url(session, [t["id"] for t in targets], player_ids, url)
+        except Exception as e:
+            print(f"[submit] proof attach failed: {e}")
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            return self._error_embed(
+                "Couldn't save that screenshot — try again in a moment.",
+                title="Couldn't attach it",
+            )
+
+        clear_awaiting_proof(getattr(redis_client, "client", None), discord_id)
+        if updated <= 0:
+            return self._error_embed(
+                attached_summary_text(targets, updated), title="Nothing to attach it to"
+            )
+        embed = Embed(
+            title="Screenshot attached",
+            description=attached_summary_text(targets, updated),
+            color=_COLOR_SUCCESS,
+        )
+        embed.set_thumbnail(url=url)
+        return embed
 
     # ------------------------------------------------------------------
     # /submit drop
@@ -350,7 +533,7 @@ class SubmissionCommands(Extension):
         name="submit",
         description="Manually submit something you received to the DropTracker",
         sub_cmd_name="drop",
-        sub_cmd_description="Submit a drop you received from an NPC or boss",
+        sub_cmd_description="Submit a drop you received from an NPC or boss — screenshot proof recommended",
     )
     @slash_option(
         name="item",
@@ -368,6 +551,7 @@ class SubmissionCommands(Extension):
         autocomplete=True,
         max_length=100,
     )
+    @_proof_option()
     @_account_option()
     @slash_option(
         name="quantity",
@@ -399,7 +583,6 @@ class SubmissionCommands(Extension):
         min_value=2,
         max_value=MAX_SPLIT_SIZE,
     )
-    @_proof_option()
     async def submit_drop(
         self,
         ctx: SlashContext,
@@ -431,7 +614,7 @@ class SubmissionCommands(Extension):
         name="submit",
         description="Manually submit something you received to the DropTracker",
         sub_cmd_name="clog",
-        sub_cmd_description="Submit a new collection log unlock",
+        sub_cmd_description="Submit a new collection log unlock — screenshot proof recommended",
     )
     @slash_option(
         name="item",
@@ -441,6 +624,7 @@ class SubmissionCommands(Extension):
         autocomplete=True,
         max_length=100,
     )
+    @_proof_option()
     @_account_option()
     @slash_option(
         name="source",
@@ -458,7 +642,6 @@ class SubmissionCommands(Extension):
         min_value=0,
         max_value=1_000_000,
     )
-    @_proof_option()
     async def submit_clog(
         self,
         ctx: SlashContext,
@@ -481,7 +664,7 @@ class SubmissionCommands(Extension):
         name="submit",
         description="Manually submit something you received to the DropTracker",
         sub_cmd_name="pb",
-        sub_cmd_description="Submit a new personal best kill time",
+        sub_cmd_description="Submit a new personal best kill time — screenshot proof recommended",
     )
     @slash_option(
         name="boss",
@@ -498,6 +681,7 @@ class SubmissionCommands(Extension):
         required=True,
         max_length=20,
     )
+    @_proof_option()
     @_account_option()
     @slash_option(
         name="team_size",
@@ -507,7 +691,6 @@ class SubmissionCommands(Extension):
         min_value=1,
         max_value=100,
     )
-    @_proof_option()
     async def submit_pb(
         self,
         ctx: SlashContext,
@@ -539,7 +722,7 @@ class SubmissionCommands(Extension):
         name="submit",
         description="Manually submit something you received to the DropTracker",
         sub_cmd_name="ca",
-        sub_cmd_description="Submit a completed combat achievement task",
+        sub_cmd_description="Submit a completed combat achievement task — screenshot proof recommended",
     )
     @slash_option(
         name="task",
@@ -556,8 +739,8 @@ class SubmissionCommands(Extension):
         required=True,
         choices=[SlashCommandChoice(name=t.capitalize(), value=t) for t in CA_TIERS],
     )
-    @_account_option()
     @_proof_option()
+    @_account_option()
     async def submit_ca(
         self,
         ctx: SlashContext,
@@ -578,7 +761,7 @@ class SubmissionCommands(Extension):
         name="submit",
         description="Manually submit something you received to the DropTracker",
         sub_cmd_name="pet",
-        sub_cmd_description="Submit a pet drop",
+        sub_cmd_description="Submit a pet drop — screenshot proof recommended",
     )
     @slash_option(
         name="pet",
@@ -588,6 +771,7 @@ class SubmissionCommands(Extension):
         autocomplete=True,
         max_length=100,
     )
+    @_proof_option()
     @_account_option()
     @slash_option(
         name="source",
@@ -605,7 +789,6 @@ class SubmissionCommands(Extension):
         min_value=0,
         max_value=1_000_000,
     )
-    @_proof_option()
     async def submit_pet(
         self,
         ctx: SlashContext,
@@ -619,6 +802,73 @@ class SubmissionCommands(Extension):
             ctx, "pet", account, proof,
             item_name=pet.strip(), npc_name=(source or "").strip() or None, kc=kc,
         )
+
+    # ------------------------------------------------------------------
+    # /submit proof
+    # ------------------------------------------------------------------
+
+    @slash_command(
+        name="submit",
+        description="Manually submit something you received to the DropTracker",
+        sub_cmd_name="proof",
+        sub_cmd_description="Add a screenshot to a submission of yours that is waiting for an admin to review it",
+    )
+    @slash_option(
+        name="screenshot",
+        description="The screenshot proving the submission you already made (PNG/JPEG/WebP/GIF, max 10 MB)",
+        opt_type=OptionType.ATTACHMENT,
+        required=True,
+    )
+    async def submit_proof(self, ctx: SlashContext, screenshot: Attachment):
+        """Attach proof after the fact, so a held submission doesn't have to be
+        made again. A modal can't take a file and neither can a button, so a
+        command option is the only in-channel way to hand us an upload — the
+        core bot has no GUILD_MESSAGES intent (bots/main.py) and therefore never
+        sees a screenshot posted in a channel."""
+        await ctx.defer(ephemeral=True)
+        self._refresh_session()
+
+        players, err = self._claimed_players(ctx.author.id)
+        if err:
+            return await ctx.send(embed=self._error_embed(err), ephemeral=True)
+
+        registry = load_awaiting_proof(getattr(redis_client, "client", None), ctx.author.id)
+        embed = await self._attach_proof(ctx.author.id, screenshot, players, registry)
+        return await ctx.send(embed=embed, ephemeral=True)
+
+    @listen(MessageCreate)
+    async def on_proof_dm(self, event: MessageCreate):
+        """Attach a screenshot DM'd to the bot to whatever the sender was just
+        prompted about.
+
+        DMs are the only message surface available: the core bot identifies with
+        ``Intents.DIRECT_MESSAGES | Intents.GUILD_INTEGRATIONS`` (bots/main.py),
+        so uploads posted in a guild channel never reach the gateway at all —
+        `/submit proof` covers that case. Gated on the awaiting-proof registry,
+        so an unrelated DM costs one Redis GET and nothing else.
+        """
+        message = getattr(event, "message", None)
+        if message is None or getattr(message, "_guild_id", None) is not None:
+            return
+        try:
+            author = getattr(message, "author", None)
+            if author is None or getattr(author, "bot", False):
+                return
+            attachments = getattr(message, "attachments", None) or []
+            if not attachments:
+                return
+            conn = getattr(redis_client, "client", None)
+            registry = load_awaiting_proof(conn, author.id)
+            if registry is None:
+                return
+            self._refresh_session()
+            players, err = self._claimed_players(author.id)
+            if err:
+                return
+            embed = await self._attach_proof(author.id, attachments[0], players, registry)
+            await message.reply(embed=embed)
+        except Exception as e:
+            print(f"[submit] proof DM handling failed: {e}")
 
     # ------------------------------------------------------------------
     # Autocompletes

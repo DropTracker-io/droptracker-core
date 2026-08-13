@@ -356,9 +356,11 @@ class TestRecomputeCounterRollups:
             [(1,)],                    # applied completion team ids
             [progress],                # locked rollup read
             [_row(quantity=3)],        # surviving ledger fold → 3
+            [team],                    # t60 leader snapshot (first score write)
             [team],                    # score RMW
             [],                        # player-points delete
             [(1, 0)],                  # final scores for SSE frames
+            [team],                    # t60 leader compare (unchanged → silent)
         )
         out = engine.recompute_task_rollups(
             s, _ev_row(), _task_row(target_value=5), old_points=10)
@@ -428,11 +430,13 @@ class TestRecomputeCounterRollups:
             [progress],
             [_row(quantity=3), _row(quantity=2)],  # fold → 5
             [(ledger_ts,)],                        # honest completed_at
+            [team],                                # t60 leader snapshot
             [team],                                # score RMW
             [_row(quantity=5, player_id=3)],       # contributors: ledger
             [SimpleNamespace(player_id=3, player_name="P")],
             [],                                    # player-points rewrite delete
             [(1, 10)],                             # final scores
+            [team],                                # t60 leader compare (silent)
         )
         out = engine.recompute_task_rollups(
             s, _ev_row(), _task_row(target_value=3), old_points=10)
@@ -456,11 +460,13 @@ class TestRecomputeCounterRollups:
             [(1,)],
             [progress],
             [_row(quantity=5)],                    # fold → 5, still ≥ target 5
+            [team],                                # t60 leader snapshot
             [team],                                # score RMW (delta path)
             [_row(quantity=5, player_id=3)],       # contributors
             [SimpleNamespace(player_id=3, player_name="P")],
             [],                                    # player-points rewrite delete
             [(1, 25)],
+            [team],                                # t60 leader compare (silent)
         )
         out = engine.recompute_task_rollups(
             s, _ev_row(), _task_row(points=25), old_points=10)

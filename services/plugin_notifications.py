@@ -11,8 +11,10 @@ Per-player Redis inbox (``plugin:notify:{player_id}``) drained by
   ``/webhook`` response ``notice`` channel that queue mode silenced).
 
 Safety contract: inbox entries are typed data only —
-``{id, type, ts, event?, data}``. The server never sends display strings or
-markup for event types; the plugin owns rendering via a hardcoded
+``{id, type, ts, priority, event?, data}`` (``priority`` is the display
+importance hint described at :data:`PRIORITY_FOR_TYPE`; a client that does not
+know it treats every entry as ``normal``). The server never sends display
+strings or markup for event types; the plugin owns rendering via a hardcoded
 type→renderer registry and silently drops unknown types. The one exception is
 ``submission_notice`` (legacy processor notice text), which the plugin renders
 as sanitized plain chat gated by its existing receiveInGameMessages toggle.
@@ -80,6 +82,19 @@ TASKS_LIMIT = 60
 REQUIREMENTS_LIMIT = 12
 MEMBERS_LIMIT = 60
 
+# Team submissions feed (t68): the viewer's own team's scoring ledger, in the
+# shape the plugin's RecentSubmission renderer already consumes. Cached per
+# TEAM rather than per viewer — one completion wakes a whole roster's clients
+# at once and every teammate reads the identical list (audit P0-14's lesson).
+# The TTL is the freshness/cost trade: the query is a 10-row indexed read, so
+# half a minute keeps the feed live without letting a 60-player roster turn a
+# poll burst into 60 reads.
+TEAM_SUBMISSIONS_LIMIT = 10
+TEAM_SUBMISSIONS_CACHE_SECONDS = 30
+TEAM_SUBMISSIONS_KEY_TEMPLATE = "plugin:team_subs:{team_id}"
+# Ledger statuses that actually scored — rejected/revoked rows never show.
+CREDITED_STATUSES = ("auto", "confirmed", "manual")
+
 # Which notification_queue event types are delivered in-game, and to whom.
 # Types absent here (event_pending, event_activation_failed,
 # event_signup_prompt, event_pot) are Discord admin/announcement concerns
@@ -118,6 +133,56 @@ WEB_PREF_TYPES = (
     "event_window_closed",
 )
 
+# Broadcast importance (t66): the plugin styles/queues pop-ups by this, so a
+# raid drop that just finished a tile no longer reads like the next 50-KC
+# tick. The distinguishing data was already on the wire (event_completion
+# carries cell_idxs) — it was simply never labelled. Additive and
+# versionless like the rest of the envelope: a client that predates the field
+# (or sees a value it doesn't know) must treat it as PRIORITY_NORMAL.
+PRIORITY_HIGH = "high"
+PRIORITY_NORMAL = "normal"
+PRIORITY_LOW = "low"
+
+# Baseline importance per type. event_completion is the one type whose
+# importance depends on its payload (see :func:`derive_priority`).
+PRIORITY_FOR_TYPE = {
+    "event_completion": PRIORITY_NORMAL,
+    # The noisy one: progress ticks and KC/XP milestones alike.
+    "event_task_progress": PRIORITY_LOW,
+    "event_line": PRIORITY_HIGH,
+    "event_blackout": PRIORITY_HIGH,
+    "event_lead_change": PRIORITY_HIGH,
+    "event_started": PRIORITY_HIGH,
+    "event_ended": PRIORITY_HIGH,
+    # Recurring schedules (web82a): a scoring window opening/closing is this
+    # event starting/ending as far as a player in game is concerned.
+    "event_window_opened": PRIORITY_HIGH,
+    "event_window_closed": PRIORITY_HIGH,
+    # Board game: a move or a roll prompt is an action to take, not a
+    # headline — the completion that earned the roll carries the weight.
+    "event_board_turn": PRIORITY_NORMAL,
+    "event_board_roll_prompt": PRIORITY_NORMAL,
+    "submission_notice": PRIORITY_NORMAL,
+}
+
+
+def derive_priority(notification_type: str, data: dict) -> str:
+    """How loudly the plugin should announce one broadcast.
+
+    Pure and payload-only: this runs inside the envelope builder on the
+    event-apply path, so it may never query anything. Unknown types resolve
+    to ``PRIORITY_NORMAL`` — the same value old plugin builds assume for a
+    missing field.
+    """
+    if notification_type == "event_completion":
+        # cell_idxs is emitted for every completion (empty on non-bingo
+        # events, or when the completion marked no new cell), so a non-empty
+        # list means exactly "this one finished a tile".
+        cell_idxs = (data or {}).get("cell_idxs")
+        if isinstance(cell_idxs, (list, tuple)) and len(cell_idxs) > 0:
+            return PRIORITY_HIGH
+    return PRIORITY_FOR_TYPE.get(notification_type, PRIORITY_NORMAL)
+
 
 def _redis():
     """Raw redis handle (the RedisClient wrapper exposes no pipeline/list-trim ops)."""
@@ -134,12 +199,13 @@ def build_envelope(notification_type: str, data: dict, event: dict = None,
                    now: int = None) -> dict:
     """The typed wire envelope. Versionless by design: future needs are new
     ``type`` strings (which unaware plugins drop), never mutations of existing
-    ones."""
+    ones — or, as with ``priority``, a new optional field older builds ignore."""
     ts = int(now if now is not None else time.time())
     envelope = {
         "id": f"{ts}-{uuid.uuid4().hex[:8]}",
         "type": notification_type,
         "ts": ts,
+        "priority": derive_priority(notification_type, data),
         "data": dict(data or {}),
     }
     if isinstance(event, dict) and event.get("id") is not None:
@@ -710,6 +776,132 @@ def _event_window_fields(session, event) -> dict:
         return {}
 
 
+def team_submission_entries(rows, tasks_by_id, item_ids_by_name) -> list:
+    """A team's scoring ledger rendered as RecentSubmission dicts. Pure.
+
+    ``rows``: newest-first ledger dicts ``{player_id, player_name,
+    source_type, task_id, matched_target, quantity, proof_url,
+    date_received}``.
+    ``tasks_by_id``: ``{task_id: {"label", "type", "icon_path"}}`` — the task
+    a row credited supplies its source line and its fallback icon.
+    ``item_ids_by_name``: ``{normalized item name: item_id}``.
+
+    Field names are the plugin's ``RecentSubmission`` model verbatim so the
+    existing renderer takes this list unchanged; optional keys are omitted
+    rather than sent as null.
+    """
+    from web_api.task_tiles import _fmt_num
+
+    entries = []
+    for row in rows or []:
+        task = tasks_by_id.get(row.get("task_id")) or {}
+        item_name = row.get("matched_target")
+        item_id = item_ids_by_name.get(_norm_name(item_name)) if item_name else None
+        # NULL source_type only happens on hand-awarded rows.
+        submission_type = str(row.get("source_type") or "manual")
+        entry = {
+            "player_name": row.get("player_name") or f"Player {row.get('player_id')}",
+            "submission_type": submission_type,
+            "source_name": task.get("label"),
+            "date_received": row.get("date_received"),
+            "display_name": item_name or task.get("label"),
+        }
+        # ``quantity`` is raw GP on a loot_value task and an item/point count
+        # everywhere else — only the former is a "value" worth printing.
+        quantity = row.get("quantity")
+        is_gp = task.get("type") == "loot_value"
+        if is_gp and quantity:
+            entry["value"] = _fmt_num(quantity)
+        icon_path = f"itemdb/{item_id}.png" if item_id else task.get("icon_path")
+        if icon_path:
+            entry["image_path"] = icon_path
+        proof_path = _img_relative(row.get("proof_url"))
+        if proof_path:
+            entry["submission_image_path"] = proof_path
+        if item_id:
+            detail = {
+                "type": "clog_item" if submission_type == "clog" else "item",
+                "name": item_name,
+                "id": item_id,
+            }
+            if not is_gp:
+                try:
+                    detail["quantity"] = max(int(quantity or 1), 1)
+                except (TypeError, ValueError):
+                    pass
+            entry["data"] = [detail]
+        entries.append(entry)
+    return entries
+
+
+def _team_recent_submissions(session, event_id, team_id, tasks_by_id) -> list:
+    """The team's last :data:`TEAM_SUBMISSIONS_LIMIT` scoring rows for this
+    event, RecentSubmission-shaped. Per-team cached; never raises (an empty
+    feed beats a failed /event_state)."""
+    key = TEAM_SUBMISSIONS_KEY_TEMPLATE.format(team_id=int(team_id))
+    try:
+        cached = _redis().get(key)
+        if cached is not None:
+            if isinstance(cached, bytes):
+                cached = cached.decode("utf-8")
+            return json.loads(cached)
+    except Exception:
+        pass
+
+    try:
+        from sqlalchemy import func
+
+        from db.models import EventCompletion, ItemList, Player
+
+        rows = (
+            session.query(
+                EventCompletion.player_id, Player.player_name,
+                EventCompletion.source_type, EventCompletion.task_id,
+                EventCompletion.matched_target, EventCompletion.quantity,
+                EventCompletion.proof_url, EventCompletion.created_at,
+            )
+            .outerjoin(Player, Player.player_id == EventCompletion.player_id)
+            .filter(EventCompletion.event_id == int(event_id),
+                    EventCompletion.team_id == int(team_id),
+                    EventCompletion.status.in_(CREDITED_STATUSES),
+                    # Bonus rows (line/blackout awards) carry no player: they
+                    # are scoring events, not submissions.
+                    EventCompletion.player_id.isnot(None))
+            .order_by(EventCompletion.id.desc())
+            .limit(TEAM_SUBMISSIONS_LIMIT)
+            .all()
+        )
+        ledger = [{
+            "player_id": r[0], "player_name": r[1], "source_type": r[2],
+            "task_id": r[3], "matched_target": r[4], "quantity": r[5],
+            "proof_url": r[6],
+            "date_received": r[7].isoformat() if r[7] else None,
+        } for r in rows]
+
+        item_ids: dict = {}
+        names = {e["matched_target"] for e in ledger if e["matched_target"]}
+        if names:
+            for iid, name in (
+                session.query(func.min(ItemList.item_id), ItemList.item_name)
+                .filter(ItemList.item_name.in_(sorted(names)), ItemList.noted.is_(False))
+                .group_by(ItemList.item_name)
+                .all()
+            ):
+                item_ids[_norm_name(name)] = int(iid)
+
+        entries = team_submission_entries(ledger, tasks_by_id, item_ids)
+    except Exception as e:
+        print(f"[plugin_notifications] team submissions lookup failed: {e}")
+        return []
+
+    try:
+        _redis().setex(key, TEAM_SUBMISSIONS_CACHE_SECONDS,
+                       json.dumps(entries, default=str))
+    except Exception:
+        pass
+    return entries
+
+
 def compose_event_state(session, player_id) -> dict:
     """The plugin's HUD/Events-tab state: one entry per active event the
     player is rostered in. All composition happens here so the client stays a
@@ -841,7 +1033,7 @@ def compose_event_state(session, player_id) -> dict:
                                   EventCompletion.matched_target)
                     .filter(EventCompletion.task_id.in_(listed_ids),
                             EventCompletion.team_id == team.id,
-                            EventCompletion.status.in_(("auto", "confirmed", "manual")),
+                            EventCompletion.status.in_(CREDITED_STATUSES),
                             EventCompletion.matched_target.isnot(None))
                     .all()
                 )
@@ -951,6 +1143,17 @@ def compose_event_state(session, player_id) -> dict:
         except Exception as e:
             print(f"[plugin_notifications] roster lookup failed: {e}")
 
+        # What the team has actually put on the board, newest first — the
+        # team-scoped sibling of the player panel's recent submissions. Tasks
+        # and tiles are already loaded, so the feed costs one indexed read
+        # per team per TEAM_SUBMISSIONS_CACHE_SECONDS.
+        team_recent_submissions = _team_recent_submissions(
+            session, event.id, team.id,
+            {t.id: {"label": t.label, "type": t.type,
+                    "icon_path": (tiles.get(t.id) or {}).get("icon_path")}
+             for t in task_rows},
+        )
+
         entries.append({
             "event": {"id": event.id, "name": event.name, "kind": event.kind,
                       "has_bingo": bool(event.has_bingo),
@@ -978,6 +1181,7 @@ def compose_event_state(session, player_id) -> dict:
             "tasks": tasks_payload,
             "members": members,
             "members_total": members_total,
+            "team_recent_submissions": team_recent_submissions,
             "board": {
                 "available": bool(event.has_bingo or event.kind == "board_game"),
                 "team_id": team.id,

@@ -309,6 +309,27 @@ def _require_target_value(tv, *, what: str, lo: int = 1, hi: int | None = None) 
     return tv
 
 
+def _min_value_keys(config: dict | None, *, what: str) -> dict:
+    """The validated ``min_value`` (+ optional ``min_value_strict``) of a
+    cumulative-GP scope, as the keys ``services/event_engine`` reads — empty
+    when unset (0/absent), which is the no-threshold behaviour every existing
+    task keeps.
+
+    A cumulative-GP tile counts every drop, so without a floor a "10B GP" task
+    queues bones and ashes for review one by one (t58). Under the threshold a
+    drop still counts toward the total; it just auto-applies instead of
+    queueing (``min_value_strict`` opts into not counting it at all).
+    """
+    cfg = config or {}
+    raw = cfg.get("min_value")
+    if raw is None or raw == "" or raw == 0:
+        return {}
+    keys = {"min_value": _require_target_value(raw, what=what)}
+    if cfg.get("min_value_strict"):
+        keys["min_value_strict"] = True
+    return keys
+
+
 def _parse_config(raw) -> dict | None:
     """Accept a dict or JSON string; None when absent; 422 on garbage."""
     if raw is None or raw == "":
@@ -444,7 +465,8 @@ def _validated_metric_path(s, path: dict, pi: int) -> dict:
 
     ``kc`` needs at least one NPC (a kill of any listed NPC counts, kc_target
     semantics) and a kill-count ``need``; ``loot_value`` folds drop GP toward
-    a GP ``need``, optionally restricted to source NPCs.
+    a GP ``need``, optionally restricted to source NPCs and to a per-drop
+    ``min_value`` review floor.
     """
     metric = path.get("metric")
     npcs_raw = path.get("npcs")
@@ -487,6 +509,8 @@ def _validated_metric_path(s, path: dict, pi: int) -> dict:
     norm: dict = {"metric": metric, "need": need}
     if canonical_npcs:
         norm["npcs"] = canonical_npcs
+    if metric == "loot_value":
+        norm.update(_min_value_keys(path, what=f"Path {pi} minimum drop value"))
     label = path.get("label")
     if isinstance(label, str) and label.strip():
         norm["label"] = label.strip()[:80]
@@ -973,7 +997,11 @@ def validate_task_payload(s, body: dict) -> dict:
                 if canonical not in sources:
                     sources.append(canonical)
         target = ""
-        config = {"source_npcs": sources} if sources else None
+        # Rebuilt from scratch (unknown keys are dropped), so the review floor
+        # has to be carried across explicitly or it would never reach the engine.
+        rebuilt = {"source_npcs": sources} if sources else {}
+        rebuilt.update(_min_value_keys(config, what="Minimum drop value"))
+        config = rebuilt or None
 
     elif ttype == "pet_collection":
         from utils.osrs_pets import canonical_pet_name, pet_categories

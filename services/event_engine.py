@@ -115,6 +115,13 @@ ACTIVE_EVENTS_TTL_SECONDS = 180
 # only reopen the ≤30s race, never silently drop earned credit.
 ENDED_TOMBSTONE_KEY = "events:ended:{event_id}"
 ENDED_TOMBSTONE_TTL_SECONDS = 48 * 3600
+# The team an ``event_lead_change`` was last ANNOUNCED for — the only place a
+# previous leader is persisted, and the cross-lane claim that keeps concurrent
+# applies from each announcing the same hand-over (see _claim_lead_change).
+# The TTL bounds the keyspace; it is refreshed on every claim and a missing key
+# announces, so expiry costs nothing.
+LEAD_WATERMARK_KEY = "events:{event_id}:leadteam"
+LEAD_WATERMARK_TTL_SECONDS = 30 * 24 * 3600
 ADMIN_BUMP_CHANNEL = "rt:event-admin"      # pubsub bump on event/task/roster mutations
 
 _STATE_KEY_TTL = 60 * 60 * 24 * 60         # 60 days for xp-baseline / kc-dedupe keys
@@ -357,7 +364,8 @@ def _path_need(path: dict) -> int:
 
 def _metric_paths_from_config(config: dict, resolve_wom: bool = False) -> tuple:
     """Normalized metric-path entries of an ``any_path`` config:
-    ``({"idx", "metric", "npcs": frozenset, "need"[, "wom_metrics"]}, ...)``.
+    ``({"idx", "metric", "npcs": frozenset, "need", "min_value", "min_strict"
+    [, "wom_metrics"]}, ...)``.
     ``idx`` is the position in ``config.paths`` (item paths keep their slots).
     ``resolve_wom`` additionally maps each kc path's NPCs to WOM hiscores
     metrics (state-load only — it does name lookups)."""
@@ -365,8 +373,10 @@ def _metric_paths_from_config(config: dict, resolve_wom: bool = False) -> tuple:
     for idx, path in enumerate((config or {}).get("paths") or []):
         if not isinstance(path, dict) or path.get("metric") not in PATH_METRICS:
             continue
+        min_value, min_strict = _min_value_gate(path)
         entry = {"idx": idx, "metric": path["metric"],
-                 "npcs": _norm_npc_set(path.get("npcs")), "need": _path_need(path)}
+                 "npcs": _norm_npc_set(path.get("npcs")), "need": _path_need(path),
+                 "min_value": min_value, "min_strict": min_strict}
         if resolve_wom and path["metric"] == "kc":
             entry["wom_metrics"] = _task_wom_metrics("kc_target", entry["npcs"])
         out.append(entry)
@@ -383,6 +393,54 @@ def _metric_paths(task: dict) -> tuple:
     if _list_kind(task) != "any_path":
         return ()
     return _metric_paths_from_config(task.get("config") or {})
+
+
+# ── cumulative-GP minimum drop value (t58) ────────────────────────────────────
+
+
+def _min_value_gate(scope: dict) -> tuple:
+    """``(min_value, strict)`` of a cumulative-GP scope — a ``loot_value``
+    task's ``config`` or one ``any_path`` loot-value path.
+
+    ``min_value`` 0 (absent, or garbage that can't be read as a count of GP)
+    means unset: every drop counts and follows the normal review policy, which
+    is exactly the behaviour that predates this gate. Set, sub-threshold drops
+    still fold into the GP total but skip review (:func:`completion_status`) —
+    the total stays honest while the queue stays free of bones-and-ashes
+    traffic — unless ``min_value_strict``, which drops them from the match
+    entirely so they never count at all."""
+    if not isinstance(scope, dict):
+        return 0, False
+    try:
+        min_value = max(int(scope.get("min_value") or 0), 0)
+    except (TypeError, ValueError):
+        return 0, False
+    return min_value, bool(min_value and scope.get("min_value_strict"))
+
+
+def _loot_min_value(task: dict, path_idx: Optional[int] = None) -> tuple:
+    """The ``(min_value, strict)`` gate one cumulative-GP match answers to: the
+    ``loot_value`` task's own config, or the ``any_path`` loot-value path at
+    ``path_idx``. ``(0, False)`` — unset — for every other task/path shape."""
+    if path_idx is None:
+        if task.get("type") != "loot_value":
+            return 0, False
+        return _min_value_gate(task.get("config") or {})
+    for path in _metric_paths(task):
+        if path.get("idx") == path_idx and path.get("metric") == "loot_value":
+            return int(path.get("min_value") or 0), bool(path.get("min_strict"))
+    return 0, False
+
+
+def _drop_value(envelope: dict) -> Optional[int]:
+    """GP value of a drop envelope, or None when it isn't a drop / carries no
+    readable value (the value-aware gates then stay out of the way)."""
+    if envelope.get("kind") != "drop":
+        return None
+    try:
+        return int((envelope.get("data") or {}).get("total_value") or 0)
+    except (TypeError, ValueError):
+        return None
 
 
 def _match_kc_scope(task: dict, match: dict, npc_norm: str):
@@ -1218,6 +1276,12 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
         if value <= 0:
             return None
         config = task.get("config") or {}
+        # ``config.min_value`` only skips REVIEW for sub-threshold drops (they
+        # still count — see completion_status); the opt-in strict flag is the
+        # one that stops them counting.
+        min_value, min_strict = _min_value_gate(config)
+        if min_strict and value < min_value:
+            return None
         sources = {_norm(n) for n in (config.get("source_npcs") or []) if _norm(n)}
         if task.get("target"):
             sources.add(_norm(task["target"]))
@@ -1308,6 +1372,10 @@ def match_task_all(task: dict, envelope: dict) -> list:
             elif path["metric"] == "loot_value" and value > 0:
                 if path["npcs"] and npc not in path["npcs"]:
                     continue
+                # Sub-threshold drops still count (they only skip review) —
+                # unless the path opted into the strict gate.
+                if path.get("min_strict") and value < int(path.get("min_value") or 0):
+                    continue
                 matches.append({"mode": "count", "quantity": value, "path": path["idx"]})
     elif kind == "wom_kc":
         metric = str(data.get("boss_metric") or "").strip().lower()
@@ -1332,12 +1400,26 @@ def accepts_submission_source(event: dict, envelope: dict) -> bool:
     return True
 
 
-def completion_status(event: dict, task: dict, envelope: dict) -> str:
+def completion_status(event: dict, task: dict, envelope: dict,
+                      path_idx: Optional[int] = None) -> str:
     """Initial ledger-row status for a match (pure; no I/O): ``pending`` when
     the task or event forces confirmation (PRD D3), or when the event's
     ``confirm_non_api`` policy holds a submission that didn't come from the
     plugin (manual web/command submissions; plugin traffic via either the
-    API or the Discord webhook reader auto-applies); ``auto`` otherwise."""
+    API or the Discord webhook reader auto-applies); ``auto`` otherwise.
+
+    One exception, and it is deliberate (t58): a cumulative-GP scope with a
+    ``min_value`` auto-applies drops UNDER that threshold whatever the review
+    policy says. A "10B GP" tile reviewed drop-by-drop drowns its admins in
+    bones and ashes, so the threshold is the admin's own statement of what is
+    worth looking at — the small stuff still counts toward the total, it just
+    doesn't queue. ``path_idx`` picks the any_path metric path the match was
+    made against (None = the task's own config)."""
+    min_value, _ = _loot_min_value(task, path_idx)
+    if min_value:
+        value = _drop_value(envelope)
+        if value is not None and value < min_value:
+            return "auto"
     if task.get("requires_confirmation") or event.get("requires_confirmation"):
         return "pending"
     if (event.get("submission_policy") == "confirm_non_api"
@@ -2691,7 +2773,7 @@ def grant_free_cells(session, event) -> int:
     return inserted
 
 
-def reconcile_bingo_bonuses(session, event) -> dict:
+def reconcile_bingo_bonuses(session, event, *, announce_lead: bool = True) -> dict:
     """Re-derive every team's bonus set from the current board state.
 
     Used after a *live* board replace (implicit lifecycle lets a never-
@@ -2700,6 +2782,10 @@ def reconcile_bingo_bonuses(session, event) -> dict:
     lines). Idempotent. ``event`` is the ORM row or an engine event dict.
     Returns {team_id: {"revoked": [...], "awarded": [...]}} for teams that
     changed.
+
+    ``announce_lead=False`` for callers that bracket a WIDER batch of score
+    writes with their own :func:`_leader_snapshot` (recompute_task_rollups) —
+    two nested compares over the same hand-over would announce it twice.
     """
     from db.models import EventTeam
 
@@ -2707,6 +2793,7 @@ def reconcile_bingo_bonuses(session, event) -> dict:
     summary: dict = {}
     if not ev.get("has_bingo"):
         return summary
+    lead_before = _leader_snapshot(session, ev) if announce_lead else _NO_LEAD_SNAPSHOT
     for team in session.query(EventTeam).filter(EventTeam.event_id == ev["id"]).all():
         revoked = _unwind_bonuses(session, ev, team.id)
         awarded = [a["note"] for a in evaluate_bingo_bonuses(session, ev, team.id)]
@@ -2714,6 +2801,7 @@ def reconcile_bingo_bonuses(session, event) -> dict:
             summary[team.id] = {"revoked": revoked, "awarded": awarded}
     if summary:
         session.flush()
+        _announce_lead_change(session, ev, lead_before, reason="board_edit")
     return summary
 
 
@@ -2934,6 +3022,197 @@ def _current_leader(session, event_id: int, strict: bool = False):
     return (rows[0].id, round(float(rows[0].score or 0), 2))
 
 
+#: :func:`_leader_snapshot` sentinel — "nothing to compare later, skip". Kept
+#: distinct from ``None``, which is a real snapshot meaning "no sole leader".
+_NO_LEAD_SNAPSHOT = object()
+
+#: Channel kinds an ``event_lead_change`` can land in (KIND_FOR_TYPE plus its
+#: announcements fallback) — see :func:`_warn_unroutable_lead_change`.
+_LEAD_CHANGE_KINDS = ("leaderboard", "announcements")
+
+
+def _leader_snapshot(session, event: dict):
+    """Who leads BEFORE a batch of score writes, for :func:`_announce_lead_change`.
+
+    The snapshot/compare pair has to bracket EVERY score write one apply
+    performs, not just the first. Bracketing the base task points alone
+    announced tile-driven overtakes and silently missed every bingo
+    line/blackout overtake (t60: "only the first tile and the final lead change
+    before the blackout") — those bonuses score after that window closed.
+    """
+    if event.get("id") is None:
+        return _NO_LEAD_SNAPSHOT
+    return _current_leader(session, event["id"], strict=True)
+
+
+def _lead_changes_announceable(event_row) -> bool:
+    """Whether an ADMIN-driven score correction on this event should announce.
+
+    Live/draft: yes — a revoke or a task edit that changes who is winning is
+    exactly what the leaderboard channel is for. Past: no — the standings are
+    settled, the wrap-up has posted, and retro cleanups (see
+    ``scripts/dedupe_multipath_drops.py``) would resurrect a finished event's
+    channel weeks later. The scoring paths don't consult this: a completion
+    that announces is announcing its own message anyway.
+    """
+    return (getattr(event_row, "status", None) or "active") != "past"
+
+
+def _team_representative_player(session, team_id):
+    """Any roster member of ``team_id``. ``notification_queue.player_id`` is NOT
+    NULL and admin-driven score changes have no acting player, so one is
+    borrowed from the team that took the lead rather than dropping the row (the
+    in-game fan-out resolves its own audience from the roster regardless)."""
+    if team_id is None:
+        return None
+    try:
+        from db.models import EventTeamMember
+
+        row = (session.query(EventTeamMember.player_id)
+               .filter(EventTeamMember.team_id == team_id)
+               .order_by(EventTeamMember.player_id.asc())
+               .first())
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _warn_unroutable_lead_change(session, event: dict) -> None:
+    """Log a lead change that has nowhere to post.
+
+    ``event_lead_change`` targets the 'leaderboard' channel and falls back to
+    'announcements'; with neither configured (and no per-team channel wanting
+    it) the sender parks the row as ``skipped`` while completions keep posting
+    to 'completions' — which reads to organisers as "lead changes don't fire".
+    """
+    try:
+        from db.models import EventChannel
+
+        routed = (session.query(EventChannel.id)
+                  .filter(EventChannel.event_id == event["id"],
+                          EventChannel.kind.in_(_LEAD_CHANGE_KINDS),
+                          EventChannel.channel_id.isnot(None))
+                  .first())
+        if routed:
+            return
+        from services.event_team_discord import team_channel_interest
+
+        if team_channel_interest(session, event["id"], "event_lead_change"):
+            return
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "event_lead_change for event %s (%s) has no leaderboard/announcements "
+            "channel configured — the message will be skipped",
+            event["id"], event.get("name"))
+    except Exception:
+        pass  # unit-test stubs / transient read — never break an apply
+
+
+def _claim_lead_change(event_id, team_id) -> bool:
+    """Take cross-lane ownership of announcing ``team_id``'s hand-over.
+
+    The apply lanes run concurrently (``workers/event_consumer.LANES``, sharded
+    by player) on READ COMMITTED sessions, so a lane's post-apply standings read
+    sees the OTHER lanes' *committed* score writes. On a busy event several
+    lanes therefore observe the same hand-over and each would enqueue its own
+    ``event_lead_change`` — naming the right team but stamped with its own,
+    unrelated completion. Nothing downstream dedupes them: the
+    notification_queue unique index cannot collide across different
+    player/task/``at`` payloads.
+
+    The ``SET .. GET`` swap is the compare-and-set: exactly one caller gets back
+    a value other than ``team_id`` — the one that moved the watermark — and only
+    that caller announces.
+
+    Every degraded path announces rather than going silent (a duplicate is
+    recoverable; missed announcements are the bug t60 fixed): no Redis handle, a
+    Redis error, and a missing key (fresh event, worker restart, TTL) all return
+    True, the miss re-seeding the watermark with the team that just took the
+    lead. The caller has already established from its own before/after snapshot
+    that the lead moved, so that is not a spurious announcement. The claim is
+    not transactional: an apply that rolls back after claiming skips one.
+    """
+    try:
+        from utils.redis import redis_client
+
+        conn = getattr(redis_client, "client", None)
+        if conn is None:
+            return True
+        previous = conn.set(LEAD_WATERMARK_KEY.format(event_id=int(event_id)),
+                            str(int(team_id)), ex=LEAD_WATERMARK_TTL_SECONDS,
+                            get=True)
+    except Exception:
+        return True
+    if isinstance(previous, bytes):
+        previous = previous.decode("utf-8", "replace")
+    return previous is None or str(previous) != str(int(team_id))
+
+
+def _announce_lead_change(session, event: dict, previous_leader, player_id=None,
+                          *, reason: str = "score",
+                          extra: Optional[dict] = None) -> Optional[dict]:
+    """Enqueue ``event_lead_change`` when the sole leader changed hands since
+    ``previous_leader`` (a :func:`_leader_snapshot`). Exactly one comparison per
+    batch of score writes, made after the LAST of them — never mid-apply.
+
+    Tie semantics are deliberate and inherited from ``_current_leader(strict=
+    True)``: a shared top score has no sole leader, so *tying* the lead
+    announces nothing (nobody took it) and the move that BREAKS the tie
+    announces its winner. Dropping from sole first place into a tie is silent
+    for the same reason — the standings message carries the detail.
+
+    The new leader need not be the team whose score just moved: a revoke hands
+    the lead to somebody else without touching their row. The snapshot compare
+    is therefore only the *local* half of the test — it says "the lead looks
+    different from where this transaction started", which under concurrent
+    lanes is also true for lanes that merely READ somebody else's hand-over.
+    :func:`_claim_lead_change` is the half that decides who announces it.
+    """
+    if previous_leader is _NO_LEAD_SNAPSHOT:
+        return None
+    session.flush()
+    new_leader = _current_leader(session, event["id"], strict=True)
+    if new_leader is None:
+        return None
+    if previous_leader is not None and previous_leader[0] == new_leader[0]:
+        return None
+    team_id, team_score = new_leader
+    if not _claim_lead_change(event["id"], team_id):
+        return None
+    if player_id is None:
+        player_id = _team_representative_player(session, team_id)
+    payload = {
+        "team_id": team_id,
+        # int, not the 2dp float _current_leader returns: the plugin types
+        # EventNotification.Data.teamScore as Integer and gson's nextInt()
+        # throws on a fractional value, discarding the whole already-drained
+        # /notifications batch — and loot_sweep scores are fractional. Neither
+        # lead-change renderer prints it (event_message_layouts' lead-change
+        # tokens are team_name/task_label/lead_via_line, and the legacy embed
+        # in event_notifications shows standings), so 2dp buys nothing here.
+        "team_score": int(round(team_score)),
+        "previous_team_id": previous_leader[0] if previous_leader else None,
+        # NOT "reason": that token already means "why a lifecycle step failed"
+        # in services/event_message_layouts, and the token map is shared by
+        # every notification type.
+        "lead_reason": reason,
+        # notification_queue is uniquely indexed on (type, player, group, data)
+        # and _enqueue_notification swallows the collision, so a byte-identical
+        # payload inside the prune window is dropped silently — the same team
+        # retaking the lead at the same score (revoke → re-award, or a see-saw
+        # between two fixed scores) never posted a second time. team_score, the
+        # caller's ledger row id and this stamp make every genuine hand-over its
+        # own row. Not rendered; discriminator only.
+        "at": datetime.now().isoformat(timespec="microseconds"),
+    }
+    if extra:
+        payload.update(extra)
+    _warn_unroutable_lead_change(session, event)
+    _enqueue_notification(session, "event_lead_change", event, player_id, payload)
+    return payload
+
+
 def _loot_sweep_applied_rows(session, task: dict, team_id) -> list:
     """Applied ledger rows for one loot_sweep (task, team) — the recompute
     input for its running score (same status set as the item-list rollups)."""
@@ -3023,19 +3302,17 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
     progress.completed = False
 
     team_score = None
-    lead_changed_to = None
+    # Leader before this receipt scores; compared once at the end of the apply
+    # (_announce_lead_change) instead of around the write itself.
+    lead_before = _NO_LEAD_SNAPSHOT
     if delta and team_id is not None:
-        previous_leader = _current_leader(session, event["id"], strict=True)
+        lead_before = _leader_snapshot(session, event)
         team = (session.query(EventTeam).filter(EventTeam.id == team_id)
                 .with_for_update().first())  # P0-7: locked score RMW
         if team is not None:
             team.score = round(float(team.score or 0) + delta, 2)
             team_score = team.score
             session.flush()
-            new_leader = _current_leader(session, event["id"], strict=True)
-            if (new_leader is not None and new_leader[0] == team_id
-                    and (previous_leader is None or previous_leader[0] != team_id)):
-                lead_changed_to = new_leader
 
     # Contribution split over the whole running total (by receipt share), so
     # end-of-event player points track who fed the sweep — rewritten each time.
@@ -3186,17 +3463,16 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
             })
             _enqueue_notification(session, "event_sweep_set", event, player_id, set_payload)
 
-    if lead_changed_to:
-        # Enrich the lead-change with the receipt that triggered it (item +
-        # points), so the message can name the drop that took the lead.
-        _enqueue_notification(session, "event_lead_change", event, player_id, {
-            "team_id": team_id,
-            "team_score": lead_changed_to[1],
-            "task_id": task["id"],
-            "task_label": task.get("label"),
-            "received_item": completion.matched_target,
-            "points": delta,
-        })
+    # Enrich the lead-change with the receipt that triggered it (item + points),
+    # so the message can name the drop that took the lead.
+    _announce_lead_change(session, event, lead_before, player_id,
+                          reason="completion", extra={
+                              "task_id": task["id"],
+                              "task_label": task.get("label"),
+                              "received_item": completion.matched_target,
+                              "points": delta,
+                              "completion_id": completion.id,
+                          })
     return result
 
 
@@ -3353,22 +3629,23 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
 
     team_score = None
     points = int(task.get("points") or 0)
-    lead_changed_to = None
+    # Leader BEFORE any of this apply's score writes — the task's own points
+    # here AND the bingo line/blackout bonuses _complete_bingo_cells awards
+    # below. Compared once at the end (_announce_lead_change): comparing around
+    # the write below alone announced tile overtakes and missed every
+    # bonus-driven one (t60). A zero-point tile still snapshots on a bingo
+    # event, where it can finish a line worth points; off the board it moves no
+    # score at all, so it skips the standings reads entirely.
+    lead_before = _NO_LEAD_SNAPSHOT
+    if team_id is not None and (points or event.get("has_bingo")):
+        lead_before = _leader_snapshot(session, event)
     if points and team_id is not None:
-        # Strict leaders only: a tie has no leader, so tying the top score
-        # never announces a lead change, while later breaking that tie does.
-        previous_leader = _current_leader(session, event["id"], strict=True)
         team = (session.query(EventTeam).filter(EventTeam.id == team_id)
                 .with_for_update().first())  # P0-7: locked score RMW
         if team is not None:
             team.score = int(team.score or 0) + points
             team_score = team.score
             session.flush()
-            new_leader = _current_leader(session, event["id"], strict=True)
-            if (new_leader is not None and new_leader[0] == team_id
-                    and (previous_leader is None
-                         or previous_leader[0] != team_id)):
-                lead_changed_to = new_leader
     result["points"] = points
     if team_score is not None:
         result["team_score"] = team_score
@@ -3513,13 +3790,13 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
             "team_count": len(ranked),
         })
     _enqueue_notification(session, "event_completion", event, player_id, notification)
-    if lead_changed_to:
-        _enqueue_notification(session, "event_lead_change", event, player_id, {
-            "team_id": team_id,
-            "team_score": lead_changed_to[1],
-            "task_id": task["id"],
-            "task_label": task.get("label"),
-        })
+    # After the task points AND any line/blackout bonus this completion earned.
+    _announce_lead_change(session, event, lead_before, player_id,
+                          reason="completion", extra={
+                              "task_id": task["id"],
+                              "task_label": task.get("label"),
+                              "completion_id": completion.id,
+                          })
     return result
 
 
@@ -3765,7 +4042,7 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
         return None
 
     data = envelope.get("data") or {}
-    status = completion_status(event, task, envelope)
+    status = completion_status(event, task, envelope, path_idx)
     guid = envelope.get("guid")
     if guid and path_idx is not None:
         # Truncate the base BEFORE suffixing so a long guid (the WOM
@@ -4138,6 +4415,17 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
     event = _event_to_dict(event_row)
     task = _task_to_dict(task_row)
     team_id = completion.team_id
+    # Taking points BACK hands the lead over just as much as scoring does, and
+    # the team that inherits it is not the one whose row moved — so the
+    # snapshot covers the whole revoke (points, bonus unwind) and the compare
+    # is event-wide. Announced, not suppressed: an admin correction that
+    # changes who is winning is exactly what the leaderboard channel is for.
+    # Deliberate exception: an event that already ENDED keeps its correction
+    # quiet — its standings are settled and its channel has moved on.
+    lead_before = (_leader_snapshot(session, event)
+                   if _lead_changes_announceable(event_row) else _NO_LEAD_SNAPSHOT)
+    lead_extra = {"task_id": task["id"], "task_label": task.get("label"),
+                  "completion_id": completion.id}
 
     if (completion.source_type or "") == "bonus":
         # A directly-revoked bonus row has no progress/cell state of its own —
@@ -4155,11 +4443,16 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
         if team_score is not None:
             frame["team_score"] = team_score
         _publish(event["id"], frame)
+        _announce_lead_change(session, event, lead_before, completion.player_id,
+                              reason="revoke", extra=lead_extra)
         return {"progress": None, "completed": None, "team_score": team_score,
                 "revoked_bonuses": [completion.note]}
 
     if _list_kind(task) == "loot_sweep":
-        return _revoke_loot_sweep(session, event, task, team_id, completion)
+        summary = _revoke_loot_sweep(session, event, task, team_id, completion)
+        _announce_lead_change(session, event, lead_before, completion.player_id,
+                              reason="revoke", extra=lead_extra)
+        return summary
 
     new_progress = _derive_applied_progress(session, task, team_id)
 
@@ -4240,6 +4533,9 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
     if revoked_bonuses:
         frame["revoked_bonuses"] = revoked_bonuses
     _publish(event["id"], frame)
+    # After the points unwind AND the bonus unwind above.
+    _announce_lead_change(session, event, lead_before, completion.player_id,
+                          reason="revoke", extra=lead_extra)
     return {"progress": new_progress, "completed": now_completed,
             "team_score": team_score, "revoked_bonuses": revoked_bonuses}
 
@@ -4322,6 +4618,13 @@ def recompute_task_rollups(session, event_row, task_row, *,
     new_points = int(task.get("points") or 0)
     is_sweep = _list_kind(task) == "loot_sweep"
     teams_summary: dict = {}
+    # One snapshot for the whole re-fold (every team's delta plus the bonus
+    # reconcile below), compared once at the end — a live task edit that moves
+    # several teams at once is still a single hand-over. Taken lazily, right
+    # before the FIRST score write: a re-fold that moves no score (the common
+    # case) issues no standings queries at all.
+    lead_before = _NO_LEAD_SNAPSHOT
+    announce_lead = _lead_changes_announceable(event_row)
 
     for team_id in sorted(t for t in team_ids if t is not None):
         # P0-7: locked read — same progress→team lock order as apply/revoke.
@@ -4349,6 +4652,8 @@ def recompute_task_rollups(session, event_row, task_row, *,
             progress.completed = False
             team_score = None
             if delta:
+                if announce_lead and lead_before is _NO_LEAD_SNAPSHOT:
+                    lead_before = _leader_snapshot(session, event)
                 team = (session.query(EventTeam).filter(EventTeam.id == team_id)
                         .with_for_update().first())  # P0-7: locked score RMW
                 if team is not None:
@@ -4402,6 +4707,8 @@ def recompute_task_rollups(session, event_row, task_row, *,
             score_delta += new_points - int(old_points)
         team_score = None
         if score_delta:
+            if announce_lead and lead_before is _NO_LEAD_SNAPSHOT:
+                lead_before = _leader_snapshot(session, event)
             team = (session.query(EventTeam).filter(EventTeam.id == team_id)
                     .with_for_update().first())  # P0-7: locked score RMW
             if team is not None:
@@ -4449,8 +4756,13 @@ def recompute_task_rollups(session, event_row, task_row, *,
 
     session.flush()
     # One event-wide bonus reconcile: unwinds lines the new state no longer
-    # holds, awards ones it now satisfies; adjusts team scores itself.
-    bonuses = reconcile_bingo_bonuses(session, event_row)
+    # holds, awards ones it now satisfies; adjusts team scores itself. It only
+    # runs its own lead compare when this event announces at all AND we have no
+    # snapshot to bracket it with — two nested compares over the same hand-over
+    # would announce it twice.
+    bonuses = reconcile_bingo_bonuses(
+        session, event_row,
+        announce_lead=announce_lead and lead_before is _NO_LEAD_SNAPSHOT)
 
     # Publish AFTER the reconcile so each frame carries the team's final score.
     touched = set(teams_summary) | set(bonuses)
@@ -4477,4 +4789,7 @@ def recompute_task_rollups(session, event_row, task_row, *,
                 frame["bonuses"] = b
             _publish(event["id"], frame)
 
+    _announce_lead_change(session, event, lead_before, reason="task_edit",
+                          extra={"task_id": task["id"],
+                                 "task_label": task.get("label")})
     return {"teams": teams_summary, "bonuses": bonuses}

@@ -210,9 +210,28 @@ async def update_boards():
     
     print("Completed lootboard update loop. Waiting 2 minutes to continue")
 
+async def update_event_team_boards():
+    """Per-team event lootboards (lootboard/team_boards.py), piggy-backing on
+    this subprocess's 2-minute cadence.
+
+    Gated on the EVENT_TEAM_LOOTBOARDS env flag (off by default) and fully
+    isolated: any failure in here must never affect the group boards above,
+    which have already been written by the time this runs."""
+    try:
+        from lootboard.team_boards import feature_enabled, sweep_team_boards
+
+        if not feature_enabled():
+            return
+        written = await sweep_team_boards()
+        print(f"Generated {len(written)} event team board(s)")
+    except Exception as e:
+        print(f"Error updating event team boards: {e}")
+
+
 async def startup():
     print("Starting lootboard update loop")
     await lootboard_update_loop()
+    await update_event_team_boards()
 
 if __name__ == "__main__":
     asyncio.run(startup())

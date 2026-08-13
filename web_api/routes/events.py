@@ -23,6 +23,7 @@ global events where group_id is NULL):
   GET    /api/v1/events/{id}/players        -> event-wide player contribution leaderboard
   GET    /api/v1/events/{id}/players/{playerId} -> one player's items/tasks/activity
   GET    /api/v1/events/{id}/teams          -> standings rollup (items/GP/contributors per team)
+  GET    /api/v1/events/{id}/teams/{teamId}/contributions -> paginated submission log (w/ proof)
   POST   /api/v1/events/{id}/teams          { EventTeamInput } -> { id }
   POST   /api/v1/events/{id}/teams/{teamId}/members   { player_id } -> { ok }
   POST   /api/v1/events/{id}/teams/{teamId}/members/bulk { names } -> { added, skipped }
@@ -86,6 +87,7 @@ from web_api.common import (abort_problem, db_session, hidden_player_ids, money,
 from web_api.event_loot import loot_gp_by_player
 from web_api.event_players import (
     count_contributions,
+    is_metric_task,
     norm_item_name,
     rank_players,
     task_contributions,
@@ -1096,7 +1098,12 @@ _TEAMS_TOP_CONTRIBUTORS = 3   # contributor chips per team on the Teams tab
 async def get_event_team(event_id: int, team_id: int):
     """Public team detail: standings context, roster with per-member
     contribution counts, per-task progress, and the recent applied-ledger
-    activity feed (no admin notes or proof URLs)."""
+    activity feed (no admin notes or proof URLs).
+
+    ``activity`` stays the raw, proof-free feed it has always been — the
+    readable submission log with screenshots is its own paginated endpoint,
+    :func:`get_event_team_contributions`, so this payload doesn't grow a
+    per-row image URL that most callers never render."""
     viewer_id = optional_user_id()
 
     def _load():
@@ -1375,6 +1382,245 @@ async def get_event_team(event_id: int, team_id: int):
                 "activity": activity,
                 "viewer": viewer_block,
             }
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(404, "Team not found", f"No team {team_id} in event {event_id}.")
+    if viewer_id is not None:
+        return private_no_store(jsonify(payload))
+    return with_cache_headers(jsonify(payload), max_age=15)
+
+
+# --- Team contribution log (t62) ---------------------------------------------
+
+# The points fold is cumulative per (team, task), so a row can only be priced
+# by reading this team's ledger from the start of the event — but the BUILT log
+# is capped so neither the cached blob nor the response grows without bound on
+# a runaway ledger. Older-than-cap entries stay reachable through the
+# event-wide completion history (which paginates the same rows).
+_TEAM_LOG_MAX_ENTRIES = 500
+_TEAM_LOG_PAGE = 25
+
+
+def _fold_team_log(rows: list) -> tuple[list, int]:
+    """Fold one team's projected ledger entries into the submission log.
+
+    ``rows`` is ``[(fold_key, entry), ...]`` oldest-first, where ``fold_key``
+    is the row's ``(real player_id, task_id)`` — real, not the masked display
+    id, so two hidden players can never merge into one run.
+
+    A row that scored, an organizer/bonus award, anything carrying a note, and
+    every discrete acquisition (item / pet / PB) keeps its own line. Only the
+    progress ticks a METRIC task mints per kill or drop roll up, into ONE entry
+    per key with ``collapsed`` set, ``quantity`` summed, ``created_at`` the
+    newest tick and ``collapsed_since`` the oldest — and with the item name and
+    proof dropped, because a run spans many drops and no single one names it.
+
+    Returns ``(entries newest-first, raw ticks folded away)``."""
+    entries: list = []
+    folds: dict = {}
+    folded = 0
+    for key, e in rows:
+        if (_is_completion_entry(e) or e.get("note")
+                or not is_metric_task(e.get("task_type"))):
+            entries.append(e)
+            continue
+        folded += 1
+        prev = folds.get(key)
+        if prev is None:
+            e["collapsed"] = 1
+            e["collapsed_since"] = e["created_at"]
+            e["matched_target"] = None
+            e["item_id"] = None
+            e["proof_url"] = None
+            folds[key] = e
+            entries.append(e)
+            continue
+        prev["collapsed"] += 1
+        prev["quantity"] += e["quantity"]
+        prev["created_at"] = e["created_at"]
+        prev["completion_id"] = e["completion_id"]
+    # A rolled-up line sorts by its LATEST tick, so the log is sorted rather
+    # than simply reversed out of the oldest-first append order.
+    entries.sort(key=lambda e: (e["created_at"] or 0, e["completion_id"]), reverse=True)
+    return entries, folded
+
+
+@events_bp.get("/events/<int:event_id>/teams/<int:team_id>/contributions")
+async def get_event_team_contributions(event_id: int, team_id: int):
+    """One team's submission log — who contributed what, when, and the
+    screenshot that backs it.
+
+    Visibility is deliberately the SAME rule as the event-wide completion
+    history (:func:`get_completion_history`), so the platform can't disagree
+    with itself about one ledger row: applied rows (``auto``/``confirmed``/
+    ``manual``) on **public** tasks are public, a hidden player reads as
+    "Hidden player" to non-admins, and event admins additionally see hidden
+    tasks and real RSNs. ``proof_url`` rides along because that history already
+    publishes it for these exact rows (as do loot-sweep receipts and prize-pot
+    buy-ins) — a submission log without the screenshot is the very thing this
+    replaces. Admin-only material still stays out: ``note`` is only ever the
+    organizer's manual-award reason, laundered through ``display_note``.
+
+    Noise reduction is the point. An item / pet / PB row is a discrete
+    acquisition and gets its own line; the progress ticks a METRIC task mints
+    per drop or kill (xp/kc/skill/loot GP — :func:`is_metric_task`) fold into
+    ONE rolled-up line per (player, task) carrying ``collapsed`` and the summed
+    ``quantity`` instead of 400 separate lines. Rows that actually scored, and
+    manual/bonus awards, always stand alone.
+
+    ``page``/``limit`` paginate the built log, newest-first;
+    ``meta.folded_updates`` reports how many raw ticks the fold swallowed and
+    ``meta.truncated`` marks a ledger longer than the cap."""
+    from db import Player
+
+    viewer_id = optional_user_id()
+    page, limit = parse_page(request, default_limit=_TEAM_LOG_PAGE, max_limit=50)
+
+    def _load():
+        from services.event_engine import display_note
+
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                _deny_restricted(ev, viewer_id)
+                return None
+            team = (
+                s.query(EventTeam)
+                .filter(EventTeam.id == team_id, EventTeam.event_id == event_id)
+                .first()
+            )
+            if team is None:
+                return None
+            is_admin = _is_event_admin(s, viewer_id, ev)
+
+            task_rows = s.query(EventTask).filter(EventTask.event_id == event_id).all()
+            tasks = {t.id: t for t in task_rows}
+            visible_task_ids = (
+                set(tasks) if is_admin
+                else {t.id for t in task_rows if (t.visibility or "public") == "public"}
+            )
+            base = {
+                "event_id": event_id,
+                "team_id": team_id,
+                "team_name": team.name,
+                "is_admin": bool(is_admin),
+            }
+            empty = {**base, "entries": [],
+                     "meta": {"page": page, "limit": limit, "total": 0,
+                              "folded_updates": 0, "truncated": False}}
+            if not visible_task_ids:
+                return empty
+
+            # Cache the BUILT log per (team, ledger version, viewer class) the
+            # way the completion history does: a team page is polled by every
+            # member at once, and paging must not re-fold the ledger. Version
+            # is this team's newest row id, so another team scoring can't bust
+            # it. A revoke mints no id, so it can linger for the TTL.
+            built = None
+            cache_key = None
+            try:
+                from utils.redis import redis_client as _rc
+
+                version = (
+                    s.query(func.max(EventCompletion.id))
+                    .filter(EventCompletion.event_id == event_id,
+                            EventCompletion.team_id == team_id)
+                    .scalar() or 0
+                )
+                # v2 = entries carry ``completed``; a pre-fix blob still inside
+                # its TTL would read as all-progress.
+                cache_key = (f"events:{event_id}:teamlog:v2:{team_id}:"
+                             f"{'admin' if is_admin else 'pub'}:{version}")
+                cached = _rc.client.get(cache_key)
+                if cached:
+                    built = json.loads(cached)
+            except Exception:
+                cache_key = None
+
+            if built is None:
+                rows = (
+                    s.query(EventCompletion)
+                    .filter(EventCompletion.event_id == event_id,
+                            EventCompletion.team_id == team_id,
+                            EventCompletion.status.in_(_APPLIED_STATUSES),
+                            EventCompletion.task_id.in_(visible_task_ids))
+                    .order_by(EventCompletion.created_at.asc(),
+                              EventCompletion.id.asc())
+                    .all()
+                )
+                if not rows:
+                    return empty
+
+                # Exact despite the team filter: both folds (threshold crossing
+                # and loot_sweep receipt decay) are keyed by (task, team) and
+                # never read across teams, so these rows price identically to
+                # the event-wide history's.
+                points_by_row, completed_rows = _history_fold(tasks, rows)
+
+                pids = {r.player_id for r in rows if r.player_id}
+                pnames: dict = {}
+                phidden: set = set()
+                if pids:
+                    for pid, name, hidden in (
+                        s.query(Player.player_id, Player.player_name, Player.hidden)
+                        .filter(Player.player_id.in_(pids)).all()
+                    ):
+                        pnames[pid] = name
+                        if hidden:
+                            phidden.add(pid)
+                hidden_global = hidden_player_ids()
+                item_ids = _resolve_item_ids(s, {r.matched_target for r in rows})
+
+                def _entry(r) -> dict:
+                    masked = bool(r.player_id
+                                  and (r.player_id in phidden
+                                       or r.player_id in hidden_global)
+                                  and not is_admin)
+                    task = tasks.get(r.task_id)
+                    return {
+                        "completion_id": r.id,
+                        "task_id": r.task_id,
+                        "task_label": task.label if task else None,
+                        "task_type": task.type if task else None,
+                        "player_id": None if masked else r.player_id,
+                        "player_name": ("Hidden player" if masked
+                                        else pnames.get(r.player_id)),
+                        "hidden": masked,
+                        "matched_target": r.matched_target,
+                        "item_id": (item_ids.get(norm_item_name(r.matched_target))
+                                    if r.matched_target else None),
+                        "quantity": int(r.quantity or 1),
+                        "points": score_num(points_by_row.get(r.id, 0.0)),
+                        "completed": r.id in completed_rows,
+                        "source_type": r.source_type,
+                        "note": display_note(r.note),
+                        "proof_url": r.proof_url,
+                        "created_at": _ts(r.created_at),
+                    }
+
+                entries, folded_updates = _fold_team_log(
+                    [((r.player_id, r.task_id), _entry(r)) for r in rows]
+                )
+                built = {"entries": entries[:_TEAM_LOG_MAX_ENTRIES],
+                         "folded_updates": folded_updates,
+                         "truncated": len(entries) > _TEAM_LOG_MAX_ENTRIES}
+                if cache_key is not None:
+                    try:
+                        from utils.redis import redis_client as _rc
+
+                        _rc.client.set(cache_key, json.dumps(built), ex=30)
+                    except Exception:
+                        pass
+
+            rows_out = built["entries"]
+            start = (page - 1) * limit
+            return {**base, "entries": rows_out[start:start + limit],
+                    "meta": {"page": page, "limit": limit, "total": len(rows_out),
+                             "folded_updates": built["folded_updates"],
+                             "truncated": built["truncated"]}}
 
     payload = await asyncio.to_thread(_load)
     if payload is None:
@@ -2479,15 +2725,22 @@ async def get_loot_sweep_receipts(event_id: int):
     return with_cache_headers(jsonify(payload), max_age=15)
 
 
-def _history_points(tasks: dict, all_rows: list) -> dict:
-    """``{completion_id: points that row credited}``.
+def _history_fold(tasks: dict, all_rows: list) -> tuple[dict, set]:
+    """``({completion_id: points that row credited}, {ids that COMPLETED})``.
 
-    loot_sweep tasks use the exact incremental receipt fold; every other task
+    The two travel separately because a task's face ``points`` is legitimately
+    allowed to be 0 — a bingo tile scored purely by line/blackout bonuses is
+    worth 0 on its own — so "this row scored" is NOT "this row finished
+    something" and no caller may infer one from the other.
+
+    loot_sweep tasks use the exact incremental receipt fold, and every receipt
+    that matched a configured item is a discrete acquisition (decay pricing the
+    n-th duplicate at 0 doesn't demote it to a progress tick). Every other task
     type credits its face ``points`` to the row that pushes a team's summed
     progress across the completion threshold (exact for simple count tasks, a
-    reasonable approximation for distinct/grouped goals) and 0 to partial rows.
-    The task's face value travels separately as ``task_points`` so the UI never
-    has to infer it."""
+    reasonable approximation for distinct/grouped goals) and 0 to partial rows;
+    that crossing row is the completion. The task's face value travels
+    separately as ``task_points`` so the UI never has to infer it."""
     from collections import defaultdict
 
     from services.event_engine import _task_to_dict, completion_threshold
@@ -2498,6 +2751,7 @@ def _history_points(tasks: dict, all_rows: list) -> dict:
         by_task[r.task_id].append(r)
 
     out: dict = {}
+    completed: set = set()
     for task_id, rows in by_task.items():
         task = tasks.get(task_id)
         if task is None:
@@ -2505,7 +2759,12 @@ def _history_points(tasks: dict, all_rows: list) -> dict:
                 out[r.id] = 0.0
             continue
         if task.type == "loot_sweep":
-            out.update(receipt_points_by_row(rows, LootSweepConfig(task.config)))
+            config = LootSweepConfig(task.config)
+            out.update(receipt_points_by_row(rows, config))
+            keys = {k for it in config.all_items() for k in it.match_keys}
+            for r in rows:
+                if r.matched_target and norm_item_name(r.matched_target) in keys:
+                    completed.add(r.id)
             continue
         try:
             threshold = max(int(completion_threshold(_task_to_dict(task))), 1)
@@ -2524,7 +2783,73 @@ def _history_points(tasks: dict, all_rows: list) -> dict:
                 if before < threshold <= after:
                     pts = face
                     done.add(tid)
+                    completed.add(r.id)
             out[r.id] = pts
+    return out, completed
+
+
+_HISTORY_MODES = ("all", "completions", "progress")
+# Admin actions that are never "progress" even when they land mid-threshold:
+# a manual award and a bingo line/blackout bonus are each a discrete event a
+# reader wants to see (bonus rows carry their granted points in ``quantity``,
+# so the threshold fold can't price them — see award_bingo_bonuses).
+_HISTORY_NOTABLE_SOURCES = ("manual", "bonus")
+
+
+def _is_completion_entry(e: dict) -> bool:
+    """True when a history entry finished something, as opposed to nudging a
+    number forward.
+
+    Keyed off the ``completed`` flag :func:`_history_fold` sets on exactly the
+    row that crossed a task's completion threshold (and on every matched
+    loot_sweep receipt) — NOT off credited points: a zero-point task is legal
+    and common, and pricing its finishing row at 0.0 must not demote it to a
+    progress tick. A loot_value task's 400 intermediate drops and a kc task's
+    49 non-final kills carry no flag."""
+    return bool(e.get("completed")) or (e.get("source_type") in _HISTORY_NOTABLE_SOURCES)
+
+
+def _collapse_progress(entries: list) -> list:
+    """Fold each run of consecutive progress rows by the same (player, task,
+    team) into one "advanced N times" entry.
+
+    A GP/KC task mints a ledger row per drop/kill, so one active player buries
+    the timeline in ticks that say nothing individually. The codebase already
+    treats repeated rows on those task types as a SINGLE contribution
+    (:func:`web_api.event_players.is_metric_task`); this is that rule applied to
+    the timeline. Only adjacent, non-scoring, note-less rows on metric tasks
+    merge, so nothing that earned points or carries an organizer's note is ever
+    hidden behind a count, and a masked "Hidden player" row never merges at all.
+
+    ``entries`` is newest-first and stays that way; merged rows gain
+    ``collapsed`` (rows folded in) and ``collapsed_since`` (the oldest folded
+    row's timestamp), and drop ``matched_target`` because the items/targets
+    across a run aren't one name."""
+
+    def _mergeable(e: dict) -> bool:
+        # player_id is required, not just compared: a masked row reaches a
+        # non-admin viewer as (None, "Hidden player"), so two different hidden
+        # players would otherwise fold into one run.
+        return (not _is_completion_entry(e) and not e.get("note")
+                and e.get("player_id") is not None
+                and is_metric_task(e.get("task_type")))
+
+    out: list = []
+    for e in entries:
+        prev = out[-1] if out else None
+        if (prev is not None and _mergeable(e) and _mergeable(prev)
+                and prev.get("task_id") == e.get("task_id")
+                and prev.get("team_id") == e.get("team_id")
+                and prev.get("player_id") == e.get("player_id")):
+            merged = dict(prev)
+            merged["collapsed"] = int(prev.get("collapsed") or 1) + 1
+            merged["quantity"] = int(prev.get("quantity") or 0) + int(e.get("quantity") or 0)
+            merged["collapsed_since"] = e.get("created_at")
+            merged["matched_target"] = None
+            merged["proof_url"] = prev.get("proof_url") or e.get("proof_url")
+            out[-1] = merged
+            continue
+        out.append(e)
     return out
 
 
@@ -2538,7 +2863,17 @@ async def get_completion_history(event_id: int):
     tasks and the real RSN behind a hidden player (whose identity is otherwise
     masked to "Hidden player" — the completion itself always stays visible so
     public point totals reconcile, which is what keeps an event auditable and
-    fair). Filter with ``teamId``, ``taskId`` and ``player``; paginated."""
+    fair). Filter with ``teamId``, ``taskId``, ``player``, ``sourceType`` and
+    ``taskType`` (the last two comma-separated); paginated.
+
+    ``mode`` picks what a "row" is worth showing (t54 — a loot_value or kc task
+    mints a ledger row per drop/kill, which drowns the timeline): ``all``
+    (default, the raw ledger), ``completions`` (only rows that actually
+    completed something — see :func:`_is_completion_entry`) or ``progress``
+    (only the ticks). Whenever progress rows are included, consecutive ticks by
+    one player on one metric task fold into a single ``collapsed`` entry unless
+    ``collapse=0``. ``meta`` reports both bucket sizes so a caller can offer the
+    switch honestly."""
     from db import Player
 
     viewer_id = optional_user_id()
@@ -2552,9 +2887,21 @@ async def get_completion_history(event_id: int):
         except (TypeError, ValueError):
             abort_problem(422, f"Invalid {name}", f"'{name}' must be an integer.")
 
+    def _csv_set(name: str):
+        raw = (request.args.get(name) or "").strip()
+        vals = {v.strip() for v in raw.split(",") if v.strip()}
+        return vals or None
+
     team_arg = _int_or_none("teamId")
     task_arg = _int_or_none("taskId")
     player_q = (request.args.get("player") or "").strip()
+    mode = (request.args.get("mode") or "all").strip().lower()
+    if mode not in _HISTORY_MODES:
+        abort_problem(422, "Invalid mode",
+                      f"'mode' must be one of {', '.join(_HISTORY_MODES)}.")
+    source_filter = _csv_set("sourceType")
+    type_filter = _csv_set("taskType")
+    collapse = (request.args.get("collapse") or "1").strip() not in ("0", "false")
     page, limit = parse_page(request, default_limit=50, max_limit=100)
 
     def _load():
@@ -2585,7 +2932,9 @@ async def get_completion_history(event_id: int):
             }
             if not visible_task_ids:
                 return {**base, "entries": [],
-                        "meta": {"page": page, "limit": limit, "total": 0}}
+                        "meta": {"page": page, "limit": limit, "total": 0,
+                                 "mode": mode, "completions_total": 0,
+                                 "progress_total": 0}}
 
             # Batch 2 scale rework. The per-row points are a stateful fold
             # over the ordered ledger (cumulative threshold crossing per
@@ -2609,8 +2958,10 @@ async def get_completion_history(event_id: int):
                         .filter(EventCompletion.event_id == event_id)
                         .scalar() or 0
                     )
+                    # v2 = entries carry ``completed``; a pre-fix blob still
+                    # inside its TTL would read as all-progress.
                     cache_key = (
-                        f"events:{event_id}:history:"
+                        f"events:{event_id}:history:v2:"
                         f"{'admin' if is_admin else 'pub'}:{version}")
                     cached = _rc.client.get(cache_key)
                     if cached:
@@ -2635,7 +2986,7 @@ async def get_completion_history(event_id: int):
                               EventCompletion.id.asc())
                     .all()
                 )
-                points_by_row = _history_points(tasks, all_rows)
+                points_by_row, completed_rows = _history_fold(tasks, all_rows)
 
                 team_names = dict(
                     s.query(EventTeam.id, EventTeam.name)
@@ -2677,6 +3028,7 @@ async def get_completion_history(event_id: int):
                         "matched_target": r.matched_target,
                         "quantity": int(r.quantity or 1),
                         "points": score_num(points_by_row.get(r.id, 0.0)),
+                        "completed": r.id in completed_rows,
                         "source_type": r.source_type,
                         "status": r.status,
                         "proof_url": r.proof_url,
@@ -2691,18 +3043,44 @@ async def get_completion_history(event_id: int):
                     except Exception:
                         pass
 
+            # View filters run over the BUILT list, not in SQL — deliberately.
+            # Unlike teamId/taskId (which the points fold is keyed by, so
+            # pushing them down stays exact), dropping progress rows from the
+            # query would change what the cumulative fold sees and mis-price
+            # the very rows we keep. Filtering here also keeps every mode on
+            # the 30s Redis fast path above, which caches the unfiltered
+            # superset once per ledger version for all viewers.
+            entries = entries_all
+            if source_filter is not None:
+                entries = [e for e in entries
+                           if (e.get("source_type") or "") in source_filter]
+            if type_filter is not None:
+                entries = [e for e in entries
+                           if (e.get("task_type") or "") in type_filter]
             if player_q:
                 needle = player_q.lower()
-                entries = [e for e in entries_all
+                entries = [e for e in entries
                            if e.get("player_name")
                            and needle in e["player_name"].lower()]
-            else:
-                entries = entries_all
+
+            # Counted before `mode` narrows, so the UI can label its toggle
+            # ("N progress updates hidden") without a second request.
+            completions_total = sum(1 for e in entries if _is_completion_entry(e))
+            progress_total = len(entries) - completions_total
+            if mode == "completions":
+                entries = [e for e in entries if _is_completion_entry(e)]
+            elif mode == "progress":
+                entries = [e for e in entries if not _is_completion_entry(e)]
+            if mode != "completions" and collapse:
+                entries = _collapse_progress(entries)
 
             total = len(entries)
             start = (page - 1) * limit
             return {**base, "entries": entries[start:start + limit],
-                    "meta": {"page": page, "limit": limit, "total": total}}
+                    "meta": {"page": page, "limit": limit, "total": total,
+                             "mode": mode,
+                             "completions_total": completions_total,
+                             "progress_total": progress_total}}
 
     payload = await asyncio.to_thread(_load)
     if payload is None:

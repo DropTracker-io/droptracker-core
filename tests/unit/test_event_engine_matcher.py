@@ -1087,6 +1087,103 @@ class TestSubmissionPolicy:
         assert engine.handle_envelope(None, _FakeRedis(), state, env) == []
 
 
+# ── loot_value minimum drop value (t58) ──────────────────────────────────────
+
+def _gp_task(min_value=None, strict=False, **kw):
+    config = {}
+    if min_value is not None:
+        config["min_value"] = min_value
+    if strict:
+        config["min_value_strict"] = True
+    return _task(type="loot_value", target_value=1_000_000_000, config=config, **kw)
+
+
+def _drop(value, npc="Zulrah"):
+    return _env("drop", {"item_name": "Bones", "npc_name": npc, "total_value": value})
+
+
+class TestLootValueMinimum:
+    """``config.min_value`` keeps sub-threshold drops counting toward the GP
+    total but out of the review queue; ``min_value_strict`` opts into not
+    counting them at all. Unset = the pre-t58 behaviour, exactly."""
+
+    REVIEW_EVERYTHING = dict(requires_confirmation=True,
+                             submission_policy="confirm_non_api")
+
+    def test_below_threshold_still_counts(self):
+        assert engine.match_task(_gp_task(100_000), _drop(500)) \
+            == {"mode": "count", "quantity": 500}
+
+    def test_below_threshold_skips_review(self):
+        ev = _event(**self.REVIEW_EVERYTHING)
+        t = _gp_task(100_000, requires_confirmation=True)
+        assert engine.completion_status(ev, t, _drop(99_999)) == "auto"
+
+    def test_at_or_above_threshold_follows_review_policy(self):
+        ev = _event(**self.REVIEW_EVERYTHING)
+        t = _gp_task(100_000, requires_confirmation=True)
+        assert engine.completion_status(ev, t, _drop(100_000)) == "pending"
+        assert engine.completion_status(ev, t, _drop(5_000_000)) == "pending"
+
+    def test_unset_reviews_every_drop_as_before(self):
+        ev = _event(**self.REVIEW_EVERYTHING)
+        for task in (_gp_task(), _gp_task(0), _gp_task("junk")):
+            assert engine.completion_status(ev, task, _drop(1)) == "pending"
+            assert engine.match_task(task, _drop(1)) == {"mode": "count", "quantity": 1}
+
+    def test_threshold_does_not_force_review_on_an_open_event(self):
+        # The gate only ever removes review, never adds it.
+        assert engine.completion_status(_event(), _gp_task(100_000), _drop(50_000)) == "auto"
+        assert engine.completion_status(_event(), _gp_task(100_000), _drop(50_000_000)) == "auto"
+
+    def test_other_task_types_are_untouched(self):
+        # A min_value on a non-loot_value task is meaningless, not a bypass.
+        ev = _event(**self.REVIEW_EVERYTHING)
+        t = _task(target="Bones", config={"min_value": 100_000})
+        assert engine.completion_status(ev, t, _drop(1)) == "pending"
+
+    def test_valueless_envelopes_still_review(self):
+        ev = _event(**self.REVIEW_EVERYTHING)
+        t = _gp_task(100_000, requires_confirmation=True)
+        assert engine.completion_status(ev, t, _env("clog", {"item_name": "Bones"})) == "pending"
+        assert engine.completion_status(ev, t, {"used_api": False}) == "pending"
+
+    def test_strict_mode_discards_sub_threshold_drops(self):
+        t = _gp_task(100_000, strict=True)
+        assert engine.match_task(t, _drop(99_999)) is None
+        assert engine.match_task(t, _drop(100_000)) == {"mode": "count", "quantity": 100_000}
+
+    def test_strict_flag_alone_is_inert(self):
+        # No threshold to be strict about — every drop counts.
+        t = _gp_task(strict=True)
+        assert engine.match_task(t, _drop(1)) == {"mode": "count", "quantity": 1}
+
+    def test_metric_path_threshold_is_per_path(self):
+        cfg = {"kind": "any_path", "paths": [
+            {"metric": "loot_value", "need": 10_000_000, "min_value": 100_000},
+            {"metric": "loot_value", "need": 10_000_000},
+        ]}
+        t = _task(config=cfg, requires_confirmation=True)
+        ev = _event(**self.REVIEW_EVERYTHING)
+        # Both paths credit the junk drop; only the one with the floor skips review.
+        assert engine.match_task_all(t, _drop(500)) == [
+            {"mode": "count", "quantity": 500, "path": 0},
+            {"mode": "count", "quantity": 500, "path": 1},
+        ]
+        assert engine.completion_status(ev, t, _drop(500), 0) == "auto"
+        assert engine.completion_status(ev, t, _drop(500), 1) == "pending"
+        assert engine.completion_status(ev, t, _drop(500_000), 0) == "pending"
+
+    def test_metric_path_strict_mode_drops_the_path_only(self):
+        cfg = {"kind": "any_path", "paths": [
+            {"metric": "loot_value", "need": 10_000_000,
+             "min_value": 100_000, "min_value_strict": True},
+            {"metric": "kc", "npcs": ["Zulrah"], "need": 500},
+        ]}
+        assert engine.match_task_all(_task(config=cfg), _drop(500)) == [
+            {"mode": "kc", "quantity": 1, "path": 1}]
+
+
 # ── bingo events only track tasks bound to a board tile ──────────────────────
 
 class TestBingoBoardScoping:

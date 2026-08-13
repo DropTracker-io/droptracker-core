@@ -8,7 +8,8 @@
   Responses to wait-requests carry ``long_poll: true`` so the plugin can
   detect servers that predate the param and fall back to fixed-interval polls.
 - GET /event_state — the Enhanced Display HUD / Events-tab state (focus task,
-  standings, team info) for every active event the player is rostered in.
+  standings, team info, the team's recent scoring submissions) for every
+  active event the player is rostered in.
 - GET /events/<id>/board.png — the server-rendered board (bingo grid /
   board-game track), team-scoped, roster-gated, Redis-cached.
 

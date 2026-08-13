@@ -1053,6 +1053,50 @@ def test_config_too_large_rejected(monkeypatch):
     assert "too large" in (exc.value.title or "").lower()
 
 
+# ── loot_value minimum drop value (t58) ──────────────────────────────────────
+# The validator rebuilds loot_value config from scratch, so the review floor
+# only reaches the engine if it is carried across explicitly.
+
+def test_loot_value_min_value_survives_validation(_stub_path_npcs):
+    out = _validate({"type": "loot_value", "target_value": 1_000_000_000,
+                     "config": {"source_npcs": ["zulrah"], "min_value": 100_000}})
+    assert _cfg(out) == {"source_npcs": ["Zulrah"], "min_value": 100_000}
+
+
+def test_loot_value_min_value_without_source_npcs():
+    out = _validate({"type": "loot_value", "target_value": 1_000_000_000,
+                     "config": {"min_value": 250_000, "min_value_strict": True}})
+    assert _cfg(out) == {"min_value": 250_000, "min_value_strict": True}
+
+
+def test_loot_value_unset_min_value_stays_config_free():
+    for config in ({}, {"min_value": 0}, {"min_value": None}, {"min_value_strict": True}):
+        out = _validate({"type": "loot_value", "target_value": 1_000_000, "config": config})
+        assert out["config"] is None
+
+
+def test_loot_value_garbage_min_value_rejected():
+    for bad in ("100k", -1, 1.5):
+        with pytest.raises(ProblemException) as exc:
+            _validate({"type": "loot_value", "target_value": 1_000_000,
+                       "config": {"min_value": bad}})
+        assert exc.value.status == 422
+        assert "minimum drop value" in (exc.value.detail or "").lower()
+
+
+def test_metric_path_min_value_survives_validation(_stub_path_npcs):
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "any_path", "paths": [
+            {"metric": "loot_value", "need": 10_000_000, "min_value": 100_000},
+            {"metric": "kc", "npcs": ["Zulrah"], "need": 500, "min_value": 100_000},
+        ]},
+    })
+    paths = _cfg(out)["paths"]
+    assert paths[0] == {"metric": "loot_value", "need": 10_000_000, "min_value": 100_000}
+    assert "min_value" not in paths[1]  # meaningless on a kill-count path
+
+
 # ── goal magnitude (web69a) ──────────────────────────────────────────────────
 # target_value is BIGINT, so multi-billion goals must validate rather than
 # reach MySQL as an out-of-range INT (error 1264 -> a 500 on save).
