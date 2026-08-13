@@ -47,6 +47,7 @@ QUEST_STATE_NAMES = {0: "not_started", 1: "in_progress", 2: "finished"}
 # The task registry is reference data that changes only when the manifest is
 # rebuilt, so it is read once per process rather than per request.
 _CA_REGISTRY_CACHE = None
+_CLOG_STRUCTURE_CACHE = None
 
 
 def _combat_achievement_registry(s):
@@ -122,6 +123,36 @@ def _combat_achievement_bosses(s, player_id: int):
     return out
 
 
+def _collection_log_structure(s):
+    """Tabs -> pages -> item ids, from the manifest the wiki sync populates.
+
+    Cached per process: it is reference data that only changes when the sync
+    runs, and it is read on every collection log page view.
+    """
+    global _CLOG_STRUCTURE_CACHE
+    if _CLOG_STRUCTURE_CACHE is not None:
+        return _CLOG_STRUCTURE_CACHE
+
+    from db.models import PluginManifestSection
+
+    row = (
+        s.query(PluginManifestSection)
+        .filter(PluginManifestSection.key == "collection_log")
+        .first()
+    )
+    structure = []
+    if row is not None:
+        try:
+            loaded = json.loads(row.payload)
+            if isinstance(loaded, list):
+                structure = loaded
+        except (TypeError, ValueError):
+            structure = []
+
+    _CLOG_STRUCTURE_CACHE = structure
+    return structure
+
+
 def _player_or_none(s, player_id: int):
     return s.query(Player).filter(Player.player_id == player_id).first()
 
@@ -145,7 +176,16 @@ def _item_names(s, item_ids):
 
 @player_state_bp.get("/players/<int:player_id>/collection-log")
 async def collection_log(player_id: int):
-    """Every collection log slot we know this player has filled."""
+    """The player's collection log, grouped into the game's tabs and pages.
+
+    Every slot the game defines is returned, obtained or not: an empty slot is
+    the point of a collection log, and a page that only listed what a player
+    already has would be useless for deciding what to go after.
+
+    Slots the structure does not define are dropped rather than shown. Before
+    the structure existed this endpoint returned whatever had been recorded,
+    which included things that are not collection log slots at all.
+    """
 
     def _load():
         with db_session() as s:
@@ -153,38 +193,78 @@ async def collection_log(player_id: int):
                 return None
 
             state = _state_for(s, player_id)
-            rows = (
-                s.query(PlayerCollectionLogItem)
+            structure = _collection_log_structure(s)
+
+            obtained = {
+                row.item_id: row.quantity
+                for row in s.query(PlayerCollectionLogItem)
                 .filter(PlayerCollectionLogItem.player_id == player_id)
-                .order_by(PlayerCollectionLogItem.item_id)
-                .limit(MAX_ITEMS_RETURNED)
                 .all()
-            )
-            names = _item_names(s, [r.item_id for r in rows])
+            }
 
-            items = [
-                {
-                    "item_id": r.item_id,
-                    "name": names.get(r.item_id) or f"Item {r.item_id}",
-                    "quantity": r.quantity,
-                    "icon": f"{IMG_BASE}/itemdb/{r.item_id}.png",
-                }
-                for r in rows
-            ]
+            # Every id the log actually contains, so anything else can be
+            # ignored and so names can be fetched in one query.
+            defined_ids = {
+                item_id
+                for tab in structure
+                for page in tab.get("pages", [])
+                for item_id in page.get("items", [])
+            }
+            names = _item_names(s, defined_ids)
 
-            # The game's own counters, which stay correct even when we hold no
-            # item rows at all — so progress is honest before any full read.
-            slots = state.clog_slots if state else None
-            slots_total = state.clog_slots_total if state else None
+            tabs = []
+            total_slots = 0
+            total_obtained = 0
+            for tab in structure:
+                pages = []
+                for page in tab.get("pages", []):
+                    items = []
+                    page_obtained = 0
+                    for item_id in page.get("items", []):
+                        quantity = obtained.get(item_id, 0)
+                        if quantity > 0:
+                            page_obtained += 1
+                        items.append({
+                            "item_id": item_id,
+                            "name": names.get(item_id) or f"Item {item_id}",
+                            "quantity": quantity,
+                            "obtained": quantity > 0,
+                        })
+                    if not items:
+                        continue
+                    total_slots += len(items)
+                    total_obtained += page_obtained
+                    pages.append({
+                        "name": page.get("name") or "Unknown",
+                        "obtained": page_obtained,
+                        "total": len(items),
+                        "items": items,
+                    })
+                if pages:
+                    tabs.append({
+                        "name": tab.get("name") or "Unknown",
+                        "obtained": sum(p["obtained"] for p in pages),
+                        "total": sum(p["total"] for p in pages),
+                        "pages": pages,
+                    })
+
+            # Recorded slots the structure does not know about. Usually means
+            # the structure is out of date after a game update, so it is worth
+            # surfacing rather than hiding.
+            unknown = len([i for i in obtained if i not in defined_ids])
 
             return {
                 "player_id": player_id,
-                "slots": slots,
-                "slots_total": slots_total,
-                # Distinct from `slots`: what we can actually show, versus what
-                # the game says they have. They differ until a full read runs.
-                "items_known": len(items),
-                "items": items,
+                # What the game itself reports, which stays right even when our
+                # structure or our item rows lag behind.
+                "slots": state.clog_slots if state else None,
+                "slots_total": state.clog_slots_total if state else None,
+                # What we can actually account for against the known structure.
+                "obtained": total_obtained,
+                "total": total_slots,
+                "unknown_recorded": unknown,
+                "has_structure": bool(structure),
+                "tabs": tabs,
                 "last_synced": state.last_synced_at.isoformat() if state and state.last_synced_at else None,
                 "has_synced": state is not None,
             }

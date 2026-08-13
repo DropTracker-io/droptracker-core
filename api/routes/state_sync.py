@@ -102,6 +102,38 @@ async def state_sync():
     return jsonify({"accepted": True, **result}), 200
 
 
+# Reference data, so it is read once per process rather than per snapshot.
+_KNOWN_SLOTS_CACHE = None
+
+
+def _known_collection_log_slots(db_session):
+    """Every item id the collection log actually contains, or None if unknown."""
+    global _KNOWN_SLOTS_CACHE
+    if _KNOWN_SLOTS_CACHE is not None:
+        return _KNOWN_SLOTS_CACHE
+
+    from db.models import PluginManifestSection
+
+    row = (
+        db_session.query(PluginManifestSection)
+        .filter(PluginManifestSection.key == "collection_log")
+        .first()
+    )
+    slots = set()
+    if row is not None:
+        try:
+            for tab in json.loads(row.payload):
+                for page in tab.get("pages", []):
+                    for item_id in page.get("items", []):
+                        if isinstance(item_id, int):
+                            slots.add(item_id)
+        except (TypeError, ValueError):
+            slots = set()
+
+    _KNOWN_SLOTS_CACHE = slots
+    return slots
+
+
 def _resolve_player_id(db_session, player_name, acc_hash):
     """Hash-first identity, matching /notifications and /load_config."""
     player = db_session.query(Player).filter(Player.account_hash == acc_hash).first()
@@ -122,6 +154,14 @@ def _apply_snapshot(player_name, acc_hash, snapshot):
             return None
 
         items = parse_int_map(snapshot.get("items"), limit=MAX_ITEMS, min_key=1, min_value=1)
+        # Keep only real collection log slots. A client reports whatever the
+        # interface transmitted, which has included things that are not slots at
+        # all; storing those put coins and ordinary equipment on players'
+        # collection log pages. Skipped entirely when the structure is unknown,
+        # so a stale manifest cannot silently reject a whole log.
+        known_slots = _known_collection_log_slots(db_session)
+        if known_slots:
+            items = {i: q for i, q in items.items() if i in known_slots}
         quests = parse_int_map(snapshot.get("quests"), limit=MAX_QUESTS, min_key=0, min_value=0)
         # min_value=None: a varp with its top bit set arrives as a negative
         # signed int, and dropping those would lose 32 completed tasks each.
