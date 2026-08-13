@@ -969,6 +969,16 @@ class EventTeamDiscord(Base):
     board_message_id = Column(String(32), nullable=True)
     board_state_hash = Column(String(64), nullable=True)
     board_updated_at = Column(DateTime, nullable=True)
+    # The team channel's lootboard post (web93a): a SECOND bot-owned message
+    # carrying the team's generated event lootboard PNG
+    # (``lootboard/team_boards.py``), posted directly beneath the board post
+    # above and edited in place. ``loot_state_hash`` is the delivered image's
+    # content signature, so a tick whose PNG has not changed costs no Discord
+    # call at all. Deliberately never pinned — the board post is the pinned
+    # one — and only ever written while ``EVENT_TEAM_LOOTBOARDS`` is on.
+    loot_message_id = Column(String(32), nullable=True)
+    loot_state_hash = Column(String(64), nullable=True)
+    loot_updated_at = Column(DateTime, nullable=True)
     # Natural-end grace deadline (retention 'delete_48h'): the bot tears the
     # role/channel down once now > delete_after. NULL = no scheduled teardown
     # (either still live, or an immediate delete_pending from a team removal).

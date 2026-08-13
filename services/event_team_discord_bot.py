@@ -19,7 +19,9 @@ back to ``pending``. Sessions are opened per tick and always closed
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
 from datetime import datetime
 
 from sqlalchemy import and_, or_
@@ -729,6 +731,14 @@ async def refresh_team_board_posts_once(bot, session_factory, redis_client,
         return
     async with _BOARD_POST_LOCK:
         await _board_post_pass(bot, session_factory, redis_client, render_budget)
+        # The lootboard post rides the same tick (it is the board post's
+        # neighbour and must land after it), but it is strictly downstream:
+        # its own try/except means a lootboard problem can never regress the
+        # primary board post above.
+        try:
+            await _loot_post_pass(bot, session_factory)
+        except Exception as exc:  # noqa: BLE001 — never break the board pass
+            print(f"[team-loot] pass failed: {exc}")
 
 
 async def _board_post_pass(bot, session_factory, redis_client,
@@ -797,5 +807,367 @@ async def _board_post_pass(bot, session_factory, redis_client,
                     session.rollback()
                     print(f"[team-board] post refresh failed "
                           f"(event {event_id}, team {row.team_id}): {exc}")
+    finally:
+        session.close()
+
+
+# --------------------------------------------------------------------------- #
+# Team-channel lootboard posts (web93a)
+# --------------------------------------------------------------------------- #
+# The second message in a team channel: the team's event lootboard PNG, posted
+# directly beneath the primary board post and edited in place forever after, so
+# the pair reads as one continuously-updated block.
+#
+# The image itself is NOT produced here. ``lootboard/team_boards.py`` renders it
+# in a different process (``droptracker-lootboards``, mtime-throttled to one
+# render per team per hour) onto the shared ``/img`` tree; this pass only
+# delivers whatever is on disk. Consequences that shape the code below:
+#   * the PNG is frequently absent (feature off, generator hasn't reached this
+#     team yet, private event) — that is a normal state, never an error;
+#   * it is rewritten on a timer rather than on change, so an unchanged image
+#     must be recognised by CONTENT (``loot_state_hash``), not by mtime alone;
+#   * it is delivered as an ATTACHMENT, not as its public /img URL: media
+#     galleries fed external URLs spin forever in the Discord client (see
+#     services/event_board_image.py).
+#
+# Discord round trips — not disk reads — are the expensive part, so the tick
+# bounds ATTEMPTS, not rows: at most LOOT_POST_WRITE_BUDGET Discord operations
+# per 60s tick (~300/hour, enough to converge a hundred teams inside 20 minutes
+# on a cold rollout without ever bursting). A failed attempt costs the same
+# round trip as a successful one — and a 403 additionally counts toward
+# Discord's invalid-request ban budget — so failures are charged too, and the
+# row is stamped so it rotates to the BACK of the stalest-first queue instead
+# of leading it again 60 seconds later. Without both halves a systematically
+# broken channel (bot lost View Channel, channel deleted while the row still
+# reads 'synced', missing Attach Files) would re-issue up to
+# LOOT_POST_SCAN_LIMIT requests every single tick, forever.
+LOOT_POST_WRITE_BUDGET = 5
+# Ceiling on rows examined per tick (a stat() each). Only rows whose event is
+# still active are candidates, so this is far above any real deployment.
+LOOT_POST_SCAN_LIMIT = 200
+
+
+def _png_mtime(path: str):
+    """Modification time of a generated board, or None when it isn't there."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+# Every complete PNG ends with its zero-length IEND chunk; a file caught
+# mid-encode does not.
+_PNG_EOF = b"IEND\xaeB`\x82"
+
+
+def _read_png(path: str):
+    """``(bytes, mtime)`` of a COMPLETE board image, or ``(None, None)``.
+
+    The generator runs in another process (``droptracker-lootboards``) and
+    rewrites this file IN PLACE — ``Image.save(path)``: no temp file, no
+    rename, no lock — so a plain read can land mid-encode and come back with a
+    truncated image. That is worse here than a torn frame would normally be,
+    because the bytes we read are hashed into ``loot_state_hash`` and stamped
+    into ``loot_updated_at``: a broken picture would not just be uploaded, it
+    would be cached as 'delivered' and frozen in the team channel until the
+    next hourly regeneration.
+
+    So both ends are checked: the file must be unchanged (size + mtime) across
+    the read, AND it must carry PNG's end-of-image marker — size/mtime alone
+    are stable in the gap between two of the writer's buffer flushes. A
+    rejected read is not an error and is never logged; the next tick simply
+    re-reads the finished file.
+    """
+    try:
+        before = os.stat(path)
+        with open(path, "rb") as handle:
+            data = handle.read()
+        after = os.stat(path)
+    except OSError:
+        return None, None
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        return None, None  # rewritten underneath us
+    if len(data) != after.st_size or not data.endswith(_PNG_EOF):
+        return None, None  # truncated / still being encoded
+    return data, after.st_mtime
+
+
+def _delivered_stamp(mtime: float) -> datetime:
+    """The ``loot_updated_at`` value meaning "THIS file has been delivered".
+
+    Deliberately the delivered file's own mtime rather than ``now()``: the
+    mtime skip below asks "has the PNG been rewritten since we delivered it?",
+    and a wall-clock stamp answers "no" for a regeneration that landed between
+    our read and our stamp — silently discarding the newer image for an hour.
+    A file's mtime cannot outrun the file.
+    """
+    return datetime.fromtimestamp(mtime)
+
+
+def _loot_state_hash(png: bytes, title: str) -> str:
+    """Content signature of what the lootboard message would show. Equal hash
+    means an identical image + heading, which means no Discord call."""
+    digest = hashlib.sha256()
+    digest.update(png or b"")
+    digest.update(b"\x00")
+    digest.update((title or "").encode("utf-8", "replace"))
+    return digest.hexdigest()
+
+
+def _loot_post_is_below_board(row) -> bool:
+    """Whether our lootboard message still sits UNDER the primary board post.
+
+    Discord orders a channel by message id (snowflakes are time-ordered), so
+    the answer is pure arithmetic — no API call. It only ever flips to False
+    when the board post is re-created (someone deleted it and
+    ``_refresh_one_board_post`` sent a new one, with a newer/larger id), which
+    would leave our older lootboard stranded ABOVE it.
+
+    Unparseable/absent ids answer True: this decides whether a message gets
+    deleted, so it never guesses.
+    """
+    try:
+        return int(row.loot_message_id) > int(row.board_message_id)
+    except (TypeError, ValueError):
+        return True
+
+
+def _team_loot_payload(event, row, team, png):
+    """``(components, file)`` for one team's lootboard message.
+
+    Deliberately minimal: a heading naming the team + event and the board
+    image as an attachment. No links or footer — the primary board post
+    immediately above already carries them — and no ``content=``, which V2
+    component messages cannot have (the heading is a text display)."""
+    import io
+
+    import interactions
+
+    from lootboard.team_boards import board_title
+    from services.event_message_layouts import build_components, render_message_spec
+
+    layout = {"blocks": [
+        {"type": "text", "content": "## \U0001F4B0 {board_title} — team loot"},
+        {"type": "text",
+         "content": "-# Every drop your team has banked during this event. "
+                    "Updates automatically."},
+    ]}
+    spec = render_message_spec(
+        layout, {"board_title": board_title(event, team)}, deep_link=False)
+    filename = f"team-loot-{event.id}-{row.team_id}.png"
+    loot_file = interactions.File(io.BytesIO(png), file_name=filename)
+    return build_components(spec, image_ref=f"attachment://{filename}"), loot_file
+
+
+async def _delete_stale_loot_post(channel, message_id) -> None:
+    """Best-effort delete of a lootboard message THIS code posted (the only
+    message it ever deletes) — used to re-seat it under a re-created board
+    post."""
+    try:
+        stale = await channel.fetch_message(message_id=message_id)
+        if stale is not None:
+            await stale.delete()
+    except Exception:
+        pass  # already gone / no permission — the repost below still fixes order
+
+
+async def _refresh_one_loot_post(bot, session, event, row):
+    """Post/edit one team channel's lootboard message.
+
+    Returns ``(wrote, attempted)`` — whether the row changed (the caller
+    commits it) and whether a Discord round trip was ATTEMPTED. The tick
+    budget counts attempts, not successes: a fetch/send that comes back 403 or
+    404 costs the same request as one that works, so a broken row must spend
+    budget exactly like a healthy one (see LOOT_POST_WRITE_BUDGET). Every
+    failure path that returns rather than raises also stamps
+    ``loot_updated_at``, which is what sends the row to the back of the
+    stalest-first queue instead of straight back to the front."""
+    from db.models import EventTeam
+    from lootboard.team_boards import board_group_id, board_title, team_board_path
+
+    if not row.board_message_id:
+        # "Directly beneath" is a matter of post ORDER, and Discord orders by
+        # message id. The lootboard therefore may never be created before the
+        # board post exists — it lands on this pass or the next one, once
+        # _refresh_one_board_post has sent the post it belongs under.
+        return False, False
+
+    team = session.query(EventTeam).filter(EventTeam.id == row.team_id).first()
+    if team is None:
+        return False, False
+
+    path = team_board_path(board_group_id(event, team), event.id, row.team_id)
+    mtime = _png_mtime(path)
+    if mtime is None:
+        # No image yet (or ever): the generator is another process on an hourly
+        # throttle and the feature may be off for it. Silent by design — this
+        # runs every 60s per team and must not log a word about it.
+        return False, False
+
+    below = _loot_post_is_below_board(row)
+    # The stamp IS the delivered file's mtime (see _delivered_stamp), so this
+    # reads "the PNG has not been rewritten since we delivered it". The +1s
+    # slack absorbs MySQL DATETIME's second granularity; a genuine regeneration
+    # (hourly at most) is never inside it.
+    if (row.loot_message_id and below and row.loot_updated_at
+            and mtime <= row.loot_updated_at.timestamp() + 1.0):
+        # Nothing has rewritten the PNG since we last delivered it: no file
+        # read, no hash, no Discord call. This is the overwhelmingly common tick.
+        return False, False
+
+    # Release the read transaction before the slow half (disk read + upload) —
+    # same idle-in-transaction hygiene as the board post above.
+    session.commit()
+    png, png_mtime = _read_png(path)
+    if not png:
+        # Absent, unreadable, or caught mid-encode by the other process. Change
+        # nothing (least of all the stamps — a torn image must never be cached
+        # as delivered) and re-read the finished file on the next tick.
+        return False, False
+    state_hash = _loot_state_hash(png, board_title(event, team))
+    if row.loot_message_id and below and row.loot_state_hash == state_hash:
+        # The generator rewrites on a timer, not on change, so a fresh mtime
+        # usually carries an identical image. Stamp the row (the mtime skip
+        # above then covers the next hour of ticks) and touch nothing else.
+        row.loot_updated_at = _delivered_stamp(png_mtime)
+        return True, False
+
+    channel = await bot.fetch_channel(int(row.channel_id))
+    if channel is None or not callable(getattr(channel, "send", None)):
+        # Gone (deleted while the row still reads 'synced') or invisible to the
+        # bot — smart_cache swallows the 403 and hands back a channel object we
+        # cannot send through. Either way the fetch was a real request: charge
+        # it and stamp the row so this permanently-broken channel rotates to the
+        # back of the queue rather than leading every tick.
+        row.loot_updated_at = datetime.now()
+        return True, True
+
+    components, loot_file = _team_loot_payload(event, row, team, png)
+
+    message = None
+    if row.loot_message_id and below:
+        try:
+            message = await channel.fetch_message(message_id=row.loot_message_id)
+        except Exception:
+            message = None  # deleted / inaccessible — repost below
+    elif row.loot_message_id:
+        # The board post was re-created, so it now sits UNDER our lootboard.
+        # Drop ours (we own it) and repost it beneath the new post to keep the
+        # pair in order.
+        await _delete_stale_loot_post(channel, row.loot_message_id)
+        row.loot_message_id = None
+
+    if message is not None:
+        # attachments=[] drops the previous upload so files don't accumulate.
+        await message.edit(components=components, files=loot_file, attachments=[])
+    else:
+        message = await channel.send(components=components, files=loot_file)
+        row.loot_message_id = str(message.id)
+        # NOT pinned: the board post above is the channel's pinned message, and
+        # a second pin would bury it in the pins list.
+    row.loot_state_hash = state_hash
+    row.loot_updated_at = _delivered_stamp(png_mtime)
+    return True, True
+
+
+def _stamp_loot_backoff(session, row) -> None:
+    """After a failed delivery attempt, push the row to the BACK of the queue.
+
+    The rollback that precedes this discards whatever the failed attempt set,
+    which would leave ``loot_updated_at`` at its old (usually NULL) value —
+    and NULL sorts FIRST in the stalest-first ordering. A handful of
+    permanently broken channels would therefore monopolise every tick's budget
+    forever, re-uploading the same images into 403s. Stamping the attempt
+    makes a failure rotate exactly like a success: retried on a later tick,
+    and (once the row has a message) not before the next hourly regeneration
+    changes the PNG. Same doctrine as the reconciler above — no retry storm on
+    a permanent Forbidden.
+
+    Best-effort: if even this write fails the DB is the problem, and the
+    candidate query will fail next tick anyway.
+    """
+    try:
+        row.loot_updated_at = datetime.now()
+        session.commit()
+    except Exception:  # noqa: BLE001 — never mask the original failure
+        session.rollback()
+
+
+def _loot_candidate_rows(session):
+    """``[(row, event)]`` for every team channel that already has its primary
+    board post and whose event is still running, stalest delivery first.
+
+    Rows are ordered by ``loot_updated_at`` (NULL — never delivered — first),
+    so a cold start converges front-to-back and a delivered row rotates to the
+    end of the queue."""
+    from db.models import Event, EventTeamDiscord
+
+    return (session.query(EventTeamDiscord, Event)
+            .join(Event, Event.id == EventTeamDiscord.event_id)
+            .filter(EventTeamDiscord.sync_status == "synced",
+                    EventTeamDiscord.channel_id.isnot(None),
+                    EventTeamDiscord.board_message_id.isnot(None),
+                    Event.status == "active")
+            .order_by(EventTeamDiscord.loot_updated_at.asc(),
+                      EventTeamDiscord.id.asc())
+            .limit(LOOT_POST_SCAN_LIMIT)
+            .all())
+
+
+async def _loot_post_pass(bot, session_factory,
+                          write_budget: int = LOOT_POST_WRITE_BUDGET) -> None:
+    """One lootboard-delivery pass, run right after the board-post pass.
+
+    ``write_budget`` bounds Discord ATTEMPTS, not successes: a row that fails
+    spends budget and is stamped (``_stamp_loot_backoff``) so it rotates to the
+    back of the stalest-first queue. Both halves are load-bearing — the whole
+    pass holds ``_BOARD_POST_LOCK``, so an unbounded retry storm here would
+    also starve the primary board-post refresh.
+
+    A complete no-op while ``EVENT_TEAM_LOOTBOARDS`` is off: the flag is
+    checked before a session is even opened."""
+    from lootboard.team_boards import event_is_public, feature_enabled
+
+    if not feature_enabled():
+        return
+
+    session = session_factory()
+    try:
+        try:
+            candidates = _loot_candidate_rows(session)
+        except Exception as exc:
+            session.rollback()
+            print(f"[team-loot] candidate query failed: {exc}")
+            return
+
+        attempts = 0
+        for row, event in candidates:
+            if not event_is_public(event):
+                # Private events are never rendered to the public /img tree, so
+                # there is nothing to deliver (and nothing to leak).
+                continue
+            try:
+                wrote, attempted = await _refresh_one_loot_post(
+                    bot, session, event, row)
+                if wrote:
+                    session.commit()
+            except Exception as exc:  # noqa: BLE001 — isolate per row
+                session.rollback()
+                # A raise from in there is a spent Discord round trip in all but
+                # the rarest cases (Forbidden on send/edit, 5xx, connection
+                # reset), so charge it — an uncharged failure is what turns the
+                # 5/tick cap into LOOT_POST_SCAN_LIMIT requests per tick — and
+                # stamp the row so it stops leading the queue.
+                attempted = True
+                _stamp_loot_backoff(session, row)
+                print(f"[team-loot] post refresh failed "
+                      f"(event {getattr(event, 'id', None)}, "
+                      f"team {row.team_id}): {exc}")
+            if attempted:
+                attempts += 1
+                if attempts >= write_budget:
+                    # Out of Discord budget for this tick. Untouched rows keep
+                    # their older stamp and lead the ordering next tick.
+                    return
     finally:
         session.close()

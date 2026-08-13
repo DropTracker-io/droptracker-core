@@ -1,8 +1,12 @@
 """Unit tests for the pure helpers of services/event_team_discord_bot.py
-(channel intro copy + name/color parsing). Loaded by file path — module-level
-imports are sqlalchemy/stdlib only, so the conftest stubs never interfere."""
+(channel intro copy + name/color parsing) and for the team-channel lootboard
+delivery pass (web93a). Loaded by file path — module-level imports are
+sqlalchemy/stdlib only, so the conftest stubs never interfere."""
+import asyncio
 import importlib.util
+import os
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -175,6 +179,606 @@ class TestSyncMembersOutcomes:
             {"99": "error"}, set(), state={"99"})
         assert not converged
         assert state == {"99"}
+
+
+class _Msg:
+    """A bot-owned Discord message: records edits, deletes and pins."""
+
+    def __init__(self, message_id):
+        self.id = message_id
+        self.edits = []
+        self.deleted = False
+        self.pinned = False
+
+    async def edit(self, **kwargs):
+        self.edits.append(kwargs)
+
+    async def delete(self):
+        self.deleted = True
+
+    async def pin(self):
+        self.pinned = True
+
+
+class _Channel:
+    def __init__(self, *messages, next_id=9000):
+        self.messages = {str(m.id): m for m in messages}
+        self.sends = []
+        self._next_id = next_id
+
+    async def fetch_message(self, message_id=None):
+        message = self.messages.get(str(message_id))
+        if message is None:
+            raise RuntimeError("Unknown Message")
+        return message
+
+    async def send(self, **kwargs):
+        self._next_id += 1
+        message = _Msg(self._next_id)
+        self.messages[str(message.id)] = message
+        self.sends.append(kwargs)
+        return message
+
+
+class _Bot:
+    def __init__(self, channel):
+        self.channel = channel
+        self.fetched = []
+
+    async def fetch_channel(self, channel_id):
+        self.fetched.append(channel_id)
+        return self.channel
+
+
+class _Session:
+    """Chainable stand-in: ``first()`` answers the EventTeam lookup, ``all()``
+    the candidate-row query."""
+
+    def __init__(self, team=None, rows=None):
+        self.team = team
+        self.rows = rows or []
+        self.commits = 0
+        self.rollbacks = 0
+        self.closed = False
+
+    def query(self, *args):
+        return self
+
+    def join(self, *args, **kwargs):
+        return self
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def order_by(self, *args, **kwargs):
+        return self
+
+    def limit(self, *args, **kwargs):
+        return self
+
+    def first(self):
+        return self.team
+
+    def all(self):
+        return self.rows
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def close(self):
+        self.closed = True
+
+
+def _install_fake_layouts(monkeypatch):
+    """``services`` is a bare MagicMock under the conftest stubs, so the
+    payload builder's lazy ``from services.event_message_layouts import ...``
+    cannot resolve ('services' is not a package). Register a minimal
+    stand-in implementing the two functions it uses, so the test can assert on
+    the resolved heading and the attachment:// reference."""
+    import types
+
+    module = types.ModuleType("services.event_message_layouts")
+
+    def render_message_spec(layout, context, **kwargs):
+        blocks = []
+        for block in layout.get("blocks") or []:
+            content = block["content"]
+            for key, value in (context or {}).items():
+                content = content.replace("{" + key + "}", str(value))
+            blocks.append({"type": "text", "content": content})
+        return {"blocks": blocks}
+
+    def build_components(spec, image_ref=None, **kwargs):
+        return {"blocks": spec["blocks"], "image_ref": image_ref}
+
+    module.render_message_spec = render_message_spec
+    module.build_components = build_components
+    monkeypatch.setitem(sys.modules, "services.event_message_layouts", module)
+    return module
+
+
+class TestTeamLootPosts:
+    """Delivery of the per-team lootboard: a SECOND, continuously-updated
+    message that must live directly beneath the team's primary board post."""
+
+    # A *complete* stand-in image: signature, some payload, and PNG's IEND
+    # terminator — the delivery pass refuses anything that does not end with
+    # it, because the generator writes this file in place from another process
+    # and a truncated read must never be uploaded (let alone cached).
+    PNG = b"\x89PNG\r\n\x1a\n" + b"team-loot-payload" + b"\x00\x00\x00\x00IEND\xaeB`\x82"
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def _event(self, **kw):
+        base = {"id": 42, "group_id": 7, "name": "Summer Bingo",
+                "status": "active", "visibility": "public"}
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def _team_row(self, **kw):
+        return SimpleNamespace(id=3, name="Red", group_id=None, auto_clan=False,
+                               **kw)
+
+    def _row(self, **kw):
+        base = {"id": 1, "event_id": 42, "team_id": 3, "group_id": 7,
+                "guild_id": "9", "channel_id": "123", "sync_status": "synced",
+                "board_message_id": "100", "loot_message_id": None,
+                "loot_state_hash": None, "loot_updated_at": None}
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def _setup(self, monkeypatch, tmp_path, *, png=PNG):
+        """Point the generator's path helper at a temp PNG (or a missing one
+        when ``png`` is None) and make the payload builder resolvable."""
+        from lootboard import team_boards as tb
+
+        path = tmp_path / "lootboard.png"
+        if png is not None:
+            path.write_bytes(png)
+        monkeypatch.setenv(tb.FEATURE_FLAG_ENV, "1")
+        monkeypatch.setattr(tb, "team_board_path", lambda *a, **k: str(path))
+        _install_fake_layouts(monkeypatch)
+        return path
+
+    def _hash_for(self, event, team, png=PNG):
+        from lootboard import team_boards as tb
+
+        return bot_mod._loot_state_hash(png, tb.board_title(event, team))
+
+    # -- ordering ---------------------------------------------------------- #
+    def test_nothing_posted_before_the_board_post_exists(self, tmp_path, monkeypatch):
+        # Discord orders by message id, so a lootboard created before the board
+        # post would sit ABOVE it forever.
+        self._setup(monkeypatch, tmp_path)
+        event, row = self._event(), self._row(board_message_id=None)
+        channel, session = _Channel(), _Session(team=self._team_row())
+        bot = _Bot(channel)
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (False, False)
+        assert not bot.fetched and not channel.sends
+        assert row.loot_message_id is None
+
+    def test_first_post_stores_the_message_id_and_is_not_pinned(self, tmp_path,
+                                                                monkeypatch):
+        self._setup(monkeypatch, tmp_path)
+        event, team, row = self._event(), self._team_row(), self._row()
+        channel, session = _Channel(), _Session(team=team)
+        bot = _Bot(channel)
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (True, True)
+        assert len(channel.sends) == 1
+        assert channel.sends[0]["files"] is not None
+        assert row.loot_message_id == "9001"
+        assert int(row.loot_message_id) > int(row.board_message_id)  # beneath it
+        assert row.loot_state_hash == self._hash_for(event, team)
+        assert row.loot_updated_at is not None
+        # The board post is the channel's pinned message; a second pin would
+        # bury it.
+        assert channel.messages["9001"].pinned is False
+        # Read transaction released before the disk read + upload.
+        assert session.commits >= 1
+
+    # -- cheap no-op ------------------------------------------------------- #
+    def test_unchanged_image_makes_no_discord_call(self, tmp_path, monkeypatch):
+        self._setup(monkeypatch, tmp_path)
+        event, team = self._event(), self._team_row()
+        row = self._row(loot_message_id="9001",
+                        loot_state_hash=self._hash_for(event, team),
+                        loot_updated_at=datetime.now())
+        channel, session = _Channel(_Msg(9001)), _Session(team=team)
+        bot = _Bot(channel)
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (False, False)
+        assert not bot.fetched  # no channel fetch, no message fetch, no edit
+        assert not channel.sends and not channel.messages["9001"].edits
+
+    def test_rewritten_but_identical_image_only_restamps(self, tmp_path,
+                                                         monkeypatch):
+        # The generator rewrites on a timer, not on change: a fresh mtime with
+        # identical bytes must still cost zero Discord calls.
+        self._setup(monkeypatch, tmp_path)
+        event, team = self._event(), self._team_row()
+        stale = datetime.now() - timedelta(hours=2)
+        row = self._row(loot_message_id="9001",
+                        loot_state_hash=self._hash_for(event, team),
+                        loot_updated_at=stale)
+        channel, session = _Channel(_Msg(9001)), _Session(team=team)
+        bot = _Bot(channel)
+
+        wrote, called = self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row))
+        assert (wrote, called) == (True, False)
+        assert row.loot_updated_at > stale
+        assert not bot.fetched and not channel.sends
+        assert not channel.messages["9001"].edits
+
+    # -- in-place update --------------------------------------------------- #
+    def test_changed_image_edits_in_place_and_clears_attachments(self, tmp_path,
+                                                                 monkeypatch):
+        self._setup(monkeypatch, tmp_path)
+        event, team = self._event(), self._team_row()
+        existing = _Msg(9001)
+        row = self._row(loot_message_id="9001", loot_state_hash="stale-hash",
+                        loot_updated_at=datetime.now() - timedelta(hours=2))
+        channel, session = _Channel(existing), _Session(team=team)
+        bot = _Bot(channel)
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (True, True)
+        assert not channel.sends  # edited, never reposted
+        assert len(existing.edits) == 1
+        # attachments=[] drops the previous upload so files don't accumulate.
+        assert existing.edits[0]["attachments"] == []
+        assert existing.edits[0]["files"] is not None
+        assert row.loot_message_id == "9001"
+        assert row.loot_state_hash == self._hash_for(event, team)
+
+    def test_vanished_message_is_reposted(self, tmp_path, monkeypatch):
+        self._setup(monkeypatch, tmp_path)
+        event, team = self._event(), self._team_row()
+        row = self._row(loot_message_id="9001", loot_state_hash="stale-hash",
+                        loot_updated_at=datetime.now() - timedelta(hours=2))
+        channel, session = _Channel(), _Session(team=team)  # 9001 is gone
+        bot = _Bot(channel)
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (True, True)
+        assert len(channel.sends) == 1
+        assert row.loot_message_id == "9001"
+        assert row.loot_state_hash == self._hash_for(event, team)
+
+    # -- re-created board post --------------------------------------------- #
+    def test_recreated_board_post_recreates_the_lootboard_beneath_it(
+            self, tmp_path, monkeypatch):
+        # The board post was deleted and re-sent, so its id is now NEWER than
+        # ours: our message sits above it. Delete ours (the only message this
+        # code owns) and repost underneath — even though the image is unchanged.
+        self._setup(monkeypatch, tmp_path)
+        event, team = self._event(), self._team_row()
+        ours = _Msg(4000)
+        row = self._row(board_message_id="5000", loot_message_id="4000",
+                        loot_state_hash=self._hash_for(event, team),
+                        loot_updated_at=datetime.now())
+        channel, session = _Channel(ours), _Session(team=team)
+        bot = _Bot(channel)
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (True, True)
+        assert ours.deleted is True
+        assert len(channel.sends) == 1
+        assert row.loot_message_id == "9001"
+        assert int(row.loot_message_id) > int(row.board_message_id)
+
+    def test_ordering_check_is_pure_arithmetic(self):
+        below = bot_mod._loot_post_is_below_board
+        assert below(SimpleNamespace(loot_message_id="200", board_message_id="100"))
+        assert not below(SimpleNamespace(loot_message_id="100", board_message_id="200"))
+        # Never guesses when an id is missing/unparseable — this decides a delete.
+        assert below(SimpleNamespace(loot_message_id=None, board_message_id="100"))
+        assert below(SimpleNamespace(loot_message_id="x", board_message_id="100"))
+
+    # -- missing image ----------------------------------------------------- #
+    def test_missing_png_is_a_silent_no_op(self, tmp_path, monkeypatch):
+        # The generator is a different process on an hourly throttle: "no image
+        # yet" is a normal state, every 60s, forever.
+        self._setup(monkeypatch, tmp_path, png=None)
+        event, row = self._event(), self._row()
+        channel, session = _Channel(), _Session(team=self._team_row())
+        bot = _Bot(channel)
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (False, False)
+        assert not bot.fetched and not channel.sends
+        assert row.loot_message_id is None and row.loot_state_hash is None
+
+    # -- the pass ---------------------------------------------------------- #
+    def test_flag_off_is_a_complete_no_op(self, monkeypatch):
+        from lootboard import team_boards as tb
+
+        monkeypatch.delenv(tb.FEATURE_FLAG_ENV, raising=False)
+
+        def factory():
+            raise AssertionError("opened a session with the feature flag off")
+
+        self._run(bot_mod._loot_post_pass(object(), factory))
+
+    def test_pass_delivers_and_respects_the_write_budget(self, tmp_path,
+                                                         monkeypatch):
+        self._setup(monkeypatch, tmp_path)
+        event = self._event()
+        rows = [self._row(id=n, team_id=n) for n in (1, 2, 3)]
+        channel = _Channel()
+        session = _Session(team=self._team_row(),
+                           rows=[(row, event) for row in rows])
+        bot = _Bot(channel)
+
+        self._run(bot_mod._loot_post_pass(bot, lambda: session, write_budget=1))
+
+        assert len(channel.sends) == 1          # bounded burst on a cold start
+        assert rows[0].loot_message_id == "9001"
+        assert rows[1].loot_message_id is None  # converges on the next tick
+        assert session.commits >= 1 and session.closed is True
+
+    def test_pass_skips_private_events(self, tmp_path, monkeypatch):
+        # A private event is never rendered to the public /img tree; there is
+        # nothing to deliver even if a stale PNG exists on disk.
+        self._setup(monkeypatch, tmp_path)
+        event = self._event(visibility="private")
+        row = self._row()
+        channel = _Channel()
+        session = _Session(team=self._team_row(), rows=[(row, event)])
+
+        self._run(bot_mod._loot_post_pass(_Bot(channel), lambda: session))
+
+        assert not channel.sends and row.loot_message_id is None
+
+    def test_row_failure_rolls_back_and_does_not_poison_the_pass(self, tmp_path,
+                                                                 monkeypatch):
+        self._setup(monkeypatch, tmp_path)
+        event = self._event()
+        bad, good = self._row(id=1, team_id=1), self._row(id=2, team_id=2)
+        channel = _Channel()
+        session = _Session(team=self._team_row(), rows=[(bad, event), (good, event)])
+
+        class _AngryBot(_Bot):
+            async def fetch_channel(self, channel_id):
+                self.fetched.append(channel_id)
+                if len(self.fetched) == 1:
+                    raise RuntimeError("Forbidden")
+                return self.channel
+
+        self._run(bot_mod._loot_post_pass(_AngryBot(channel), lambda: session))
+
+        assert session.rollbacks == 1
+        assert bad.loot_message_id is None
+        assert good.loot_message_id == "9001"
+
+    # -- failures are charged, and back off -------------------------------- #
+    def test_raising_rows_spend_the_tick_budget(self, tmp_path, monkeypatch):
+        # A 403/404/5xx costs the same round trip as a success (and 403s count
+        # toward Discord's invalid-request ban budget), so a failure MUST spend
+        # budget. Counting only successes made the real ceiling
+        # LOOT_POST_SCAN_LIMIT requests per tick, forever, whenever something
+        # systematic broke the write.
+        self._setup(monkeypatch, tmp_path)
+        event = self._event()
+        rows = [self._row(id=n, team_id=n) for n in range(1, 7)]
+        session = _Session(team=self._team_row(),
+                           rows=[(row, event) for row in rows])
+
+        class _BrokenBot(_Bot):
+            async def fetch_channel(self, channel_id):
+                self.fetched.append(channel_id)
+                raise RuntimeError("403 Forbidden: Missing Access")
+
+        bot = _BrokenBot(_Channel())
+        self._run(bot_mod._loot_post_pass(bot, lambda: session, write_budget=2))
+
+        assert len(bot.fetched) == 2  # not one request per candidate row
+        assert session.rollbacks == 2
+
+    def test_failed_row_is_stamped_so_it_stops_leading_the_queue(
+            self, tmp_path, monkeypatch):
+        # Rows are ordered stalest-first with NULL first, so a rolled-back row
+        # that keeps its NULL loot_updated_at re-leads the queue 60s later and
+        # monopolises the budget. The failure stamp rotates it to the back.
+        self._setup(monkeypatch, tmp_path)
+        event = self._event()
+        rows = [self._row(id=n, team_id=n) for n in (1, 2)]
+        session = _Session(team=self._team_row(),
+                           rows=[(row, event) for row in rows])
+
+        class _BrokenBot(_Bot):
+            async def fetch_channel(self, channel_id):
+                self.fetched.append(channel_id)
+                raise RuntimeError("Forbidden")
+
+        self._run(bot_mod._loot_post_pass(
+            _BrokenBot(_Channel()), lambda: session, write_budget=1))
+
+        assert rows[0].loot_updated_at is not None  # spent + rotated
+        assert rows[0].loot_message_id is None      # nothing was delivered
+        assert rows[1].loot_updated_at is None      # untouched: budget spent
+        assert session.commits >= 1                 # the stamp was persisted
+
+    def test_unusable_channel_spends_budget_and_backs_off(self, tmp_path,
+                                                          monkeypatch):
+        # smart_cache swallows a 403 on fetch_channel and hands back a bare
+        # BaseChannel with no send(); the HTTP GET still happened.
+        self._setup(monkeypatch, tmp_path)
+        event, row = self._event(), self._row()
+        session = _Session(team=self._team_row())
+
+        class _BlindBot(_Bot):
+            async def fetch_channel(self, channel_id):
+                self.fetched.append(channel_id)
+                return SimpleNamespace()  # no .send
+
+        bot = _BlindBot(None)
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (True, True)
+        assert row.loot_updated_at is not None
+        assert row.loot_message_id is None and row.loot_state_hash is None
+
+    def test_deleted_channel_spends_budget_and_backs_off(self, tmp_path,
+                                                         monkeypatch):
+        # Channel deleted while the row still reads sync_status='synced':
+        # interactions turns the 404 into None.
+        self._setup(monkeypatch, tmp_path)
+        event, row = self._event(), self._row()
+        session = _Session(team=self._team_row())
+
+        class _GoneBot(_Bot):
+            async def fetch_channel(self, channel_id):
+                self.fetched.append(channel_id)
+                return None
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            _GoneBot(None), session, event, row)) == (True, True)
+        assert row.loot_updated_at is not None
+        assert row.loot_message_id is None
+
+    def test_stamped_failure_goes_quiet_until_the_png_changes(self, tmp_path,
+                                                              monkeypatch):
+        # A row that HAS been delivered and then fails is quiet until the
+        # generator rewrites the image: the mtime skip covers it, so a
+        # permanent Forbidden costs one attempt per regeneration, not one per
+        # tick.
+        path = self._setup(monkeypatch, tmp_path)
+        event, team = self._event(), self._team_row()
+        row = self._row(loot_message_id="9001", loot_state_hash="stale-hash",
+                        loot_updated_at=datetime.now() - timedelta(hours=2))
+        session = _Session(team=team)
+
+        class _BlindBot(_Bot):
+            async def fetch_channel(self, channel_id):
+                self.fetched.append(channel_id)
+                return SimpleNamespace()
+
+        bot = _BlindBot(None)
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (True, True)
+        # Second tick, same unchanged PNG: not even a channel fetch.
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (False, False)
+        assert len(bot.fetched) == 1
+        # ...until the generator rewrites it.
+        os.utime(path, (os.path.getmtime(path) + 3600,) * 2)
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (True, True)
+        assert len(bot.fetched) == 2
+
+    # -- torn reads --------------------------------------------------------- #
+    def test_truncated_png_is_never_uploaded_or_cached(self, tmp_path,
+                                                       monkeypatch):
+        # The generator saves in place from another process, so a read can land
+        # mid-encode. A torn frame must not be posted — and above all must not
+        # be hashed/stamped as delivered, which would freeze it in the channel
+        # until the next hourly regeneration.
+        self._setup(monkeypatch, tmp_path, png=self.PNG[:-8])  # no IEND
+        event, row = self._event(), self._row()
+        channel, session = _Channel(), _Session(team=self._team_row())
+        bot = _Bot(channel)
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (False, False)
+        assert not bot.fetched and not channel.sends
+        assert row.loot_message_id is None and row.loot_state_hash is None
+        assert row.loot_updated_at is None  # nothing cached: retried next tick
+
+    def test_png_rewritten_during_the_read_is_rejected(self, tmp_path,
+                                                       monkeypatch):
+        # The completeness check cannot see a tear that happens to leave a
+        # valid trailer, so the file must also be unchanged across the read.
+        path = tmp_path / "lootboard.png"
+        path.write_bytes(self.PNG)
+        real_stat = bot_mod.os.stat
+        seen = []
+
+        def moving_stat(target, *args, **kwargs):
+            result = real_stat(target, *args, **kwargs)
+            if str(target) != str(path):
+                return result
+            seen.append(target)
+            return SimpleNamespace(st_size=result.st_size + len(seen) - 1,
+                                   st_mtime_ns=result.st_mtime_ns + len(seen) - 1,
+                                   st_mtime=result.st_mtime)
+
+        monkeypatch.setattr(bot_mod.os, "stat", moving_stat)
+        assert bot_mod._read_png(str(path)) == (None, None)
+
+    def test_complete_png_reads_back_with_its_mtime(self, tmp_path):
+        path = tmp_path / "lootboard.png"
+        path.write_bytes(self.PNG)
+
+        png, mtime = bot_mod._read_png(str(path))
+
+        assert png == self.PNG
+        assert mtime == path.stat().st_mtime
+
+    def test_delivery_stamp_is_the_files_mtime_not_wall_clock(self, tmp_path,
+                                                              monkeypatch):
+        # Stamping now() marks a regeneration that landed between the read and
+        # the stamp as "already delivered", and the mtime skip then discards
+        # the newer image until the following hourly render.
+        path = self._setup(monkeypatch, tmp_path)
+        event, team, row = self._event(), self._team_row(), self._row()
+        rendered_at = os.path.getmtime(path) - 30
+        os.utime(path, (rendered_at, rendered_at))
+        channel, session = _Channel(), _Session(team=team)
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            _Bot(channel), session, event, row)) == (True, True)
+        assert row.loot_updated_at == datetime.fromtimestamp(rendered_at)
+        assert row.loot_updated_at < datetime.now()
+
+    def test_image_regenerated_during_delivery_is_still_delivered(
+            self, tmp_path, monkeypatch):
+        # v2 is written while v1 is being uploaded: its mtime is newer than the
+        # file we read but still older than wall clock. With a wall-clock stamp
+        # the mtime skip swallowed it for an hour.
+        path = self._setup(monkeypatch, tmp_path)
+        event, team, row = self._event(), self._team_row(), self._row()
+        v1_mtime = os.path.getmtime(path) - 30
+        os.utime(path, (v1_mtime, v1_mtime))
+        channel, session = _Channel(), _Session(team=team)
+        bot = _Bot(channel)
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (True, True)
+
+        v2 = b"\x89PNG\r\n\x1a\n" + b"v2-payload" + b"\x00\x00\x00\x00IEND\xaeB`\x82"
+        path.write_bytes(v2)
+        os.utime(path, (v1_mtime + 5, v1_mtime + 5))  # still in the past
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (True, True)
+        assert len(channel.messages["9001"].edits) == 1  # v2 actually landed
+        assert row.loot_state_hash == self._hash_for(event, team, png=v2)
+
+    # -- payload ----------------------------------------------------------- #
+    def test_payload_references_the_attachment_not_a_url(self, monkeypatch):
+        # Media galleries fed an external URL spin forever in the client, so the
+        # image must be delivered as an upload the message references.
+        _install_fake_layouts(monkeypatch)
+        event, team, row = self._event(), self._team_row(), self._row()
+
+        components, loot_file = bot_mod._team_loot_payload(
+            event, row, team, self.PNG)
+
+        assert components["image_ref"] == "attachment://team-loot-42-3.png"
+        assert loot_file is not None
+        heading = components["blocks"][0]["content"]
+        assert heading.startswith("## ")
+        assert "Red" in heading and "Summer Bingo" in heading
+        assert "loot" in heading.lower()
 
 
 def _install_fake_interactions_errors():
