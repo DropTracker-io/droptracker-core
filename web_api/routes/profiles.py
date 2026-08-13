@@ -393,6 +393,9 @@ def _player_personal_bests(s, player_id: int):
         except Exception:
             date_ts = 0
         out.append({
+            # Needed to fetch the loadout this time was set with; the npc/team
+            # pair is not unique enough to look a row up by.
+            "pb_id": int(pb.id),
             "npc_id": int(pb.npc_id),
             "boss": names.get(pb.npc_id, f"NPC {pb.npc_id}"),
             "time_ms": int(pb.personal_best),

@@ -200,6 +200,16 @@ if "services.plugin_manifest" not in sys.modules:
     sys.modules["services.plugin_manifest"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/player_model.py — validation/storage of uploaded character models.
+# Stdlib-only; the tests assert on its rejection of malformed GLB containers and
+# path-traversal fingerprints.
+_PLAYER_MODEL_PATH = _Path(__file__).resolve().parent.parent / "services" / "player_model.py"
+if "services.player_model" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.player_model", _PLAYER_MODEL_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.player_model"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/loadout.py — decoding of the PB gear/inventory wire format.
 # Stdlib-only; the tests assert on its handling of malformed client input.
 _LOADOUT_PATH = _Path(__file__).resolve().parent.parent / "services" / "loadout.py"

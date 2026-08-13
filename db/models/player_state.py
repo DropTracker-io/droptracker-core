@@ -65,6 +65,10 @@ class PlayerState(Base):
     # What triggered the sync (login, interval, clog-open, ...) — the difference
     # between a routine sync and a suspicious one is usually here.
     last_sync_source = Column(String(32), nullable=True)
+    # Fingerprint of the character model we currently hold for this player.
+    # Lets the renderer find the right file without listing a directory, and
+    # tells the upload endpoint whether it already has this outfit.
+    model_fingerprint = Column(String(32), nullable=True)
     last_synced_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

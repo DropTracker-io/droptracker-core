@@ -224,6 +224,20 @@ class NotificationService:
             values["{group_points_receiver_total}"] = str(receiver_total)
         return values
 
+    @staticmethod
+    def _gear_image_url(player_id):
+        """Public URL of the player's rendered character, or "" if there is none.
+
+        Best-effort: most players will not have uploaded a model, and a
+        decorative picture must never delay or break a notification.
+        """
+        try:
+            from services.gear_image import gear_image_for_player
+
+            return gear_image_for_player(player_id) or ""
+        except Exception:
+            return ""
+
     def _plugin_version_placeholder_map(self, data: dict) -> dict:
         return {"{plugin_version}": str(data.get("plugin_version") or "")}
 
@@ -3425,6 +3439,12 @@ class NotificationService:
             replacements["{video_link}"] = f"[Video]({video_url})" if video_url else ""
             # Prefer video for display; keep screenshot in data["image_url"] for attachments
             replacements["{image_url}"] = video_url or (data.get("image_url") or "")
+            # Character render, when one already exists for this player's current
+            # outfit. Looked up, never rendered here: the notification path must
+            # not wait on a multi-second screenshot, and the image is produced
+            # when the model is uploaded. Empty string when absent, so a template
+            # referencing it degrades to nothing rather than a broken image.
+            replacements["{gear_image_url}"] = self._gear_image_url(player_id)
             
             embed = replace_placeholders(embed_template, replacements)
             embed = self._finalize_group_points_embed(embed)

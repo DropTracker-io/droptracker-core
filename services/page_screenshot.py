@@ -104,6 +104,12 @@ class _CDP:
 def _launch(profile_dir: str, home: str) -> subprocess.Popen:
     cmd = [
         _CHROMIUM, "--headless=new", "--no-sandbox", "--disable-gpu",
+        # --disable-gpu above turns off hardware acceleration, not WebGL: ANGLE
+        # still rasterises in software via SwiftShader, which newer chromium
+        # refuses to do for WebGL unless explicitly allowed. Without this flag a
+        # WebGL page (the character model render) gets a null context and draws
+        # nothing, while every other page is unaffected.
+        "--enable-unsafe-swiftshader",
         "--disable-dev-shm-usage", "--hide-scrollbars",
         "--no-first-run", "--no-default-browser-check", "--disable-extensions",
         "--disable-background-networking", "--force-color-profile=srgb",
@@ -147,7 +153,7 @@ async def _browser_ws_url(port: int) -> str:
 
 async def _capture(ws_url: str, url: str, *, width: int, scale: float,
                    timeout: float, max_height: int,
-                   viewport_height: int) -> bytes:
+                   viewport_height: int, ready_js: str | None = None) -> bytes:
     # max_size=None: a full-page base64 PNG easily exceeds the 1 MiB ws default.
     async with websockets.connect(ws_url, max_size=None,
                                   open_timeout=10) as ws:
@@ -179,7 +185,13 @@ async def _capture(ws_url: str, url: str, *, width: int, scale: float,
                     "expression": _READY_JS, "returnByValue": True,
                 }, session_id=sid)
                 if res.get("result", {}).get("value") is True:
-                    break
+                    if not ready_js:
+                        break
+                    extra = await cdp.send("Runtime.evaluate", {
+                        "expression": ready_js, "returnByValue": True,
+                    }, session_id=sid)
+                    if extra.get("result", {}).get("value") is True:
+                        break
                 await asyncio.sleep(0.15)
             try:
                 await cdp.send("Runtime.evaluate", {
@@ -210,12 +222,19 @@ async def _capture(ws_url: str, url: str, *, width: int, scale: float,
 
 async def screenshot_url(url: str, *, width: int = 1100, scale: float = 2.0,
                          timeout: float = 30.0, max_height: int = 8000,
-                         viewport_height: int = 1080) -> bytes:
+                         viewport_height: int = 1080,
+                         ready_js: str | None = None) -> bytes:
     """Render ``url`` in headless chromium and return a full-page PNG.
 
     ``width`` is the CSS layout width; ``scale`` is the device pixel ratio (2 =
     retina-crisp). Raises on failure — callers that must fail open
     (:mod:`services.event_board_image`) wrap this in try/except.
+
+    ``ready_js`` is an optional JavaScript expression polled alongside the
+    built-in probe; the capture waits for it to return true. The built-in probe
+    only knows about the DOM and ``<img>`` elements, so anything drawn
+    asynchronously into a canvas (the WebGL character render) must signal its
+    own readiness or it will be photographed blank.
 
     ``viewport_height`` is the emulated window height, and the floor on the
     captured height: chromium reports ``cssContentSize`` as at least the
@@ -233,7 +252,8 @@ async def screenshot_url(url: str, *, width: int = 1100, scale: float = 2.0,
         ws_url = await _browser_ws_url(port)
         return await _capture(ws_url, url, width=width, scale=scale,
                               timeout=timeout, max_height=max_height,
-                              viewport_height=viewport_height)
+                              viewport_height=viewport_height,
+                              ready_js=ready_js)
     finally:
         if proc is not None and proc.poll() is None:
             proc.terminate()
