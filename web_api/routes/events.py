@@ -4499,7 +4499,8 @@ async def search_npcs():
         return jsonify([])
 
     def _search():
-        from db import NpcList
+        from db import NpcList, PlayerNpcHourlyTotals
+        from web_api.routes.items import IMG_BASE
         from web_api.routes.npc_source_aliases import alias_search_entries
 
         with db_session() as s:
@@ -4512,10 +4513,38 @@ async def search_npcs():
                 .limit(15)
                 .all()
             )
+            # A name is `tracked` if ANY of its form ids has drop history —
+            # mirrors the flag on /events/meta/item-sources so a monster added
+            # via search renders (and warns) the same. One indexed probe over
+            # the ≤15 result names (idx_npc_date_hour). Checking every form id,
+            # not just the min we return, avoids flagging a boss "never seen"
+            # when its tracked drops land on a different form's id.
+            names = [n for _, n in rows]
+            tracked_names = set()
+            if names:
+                tracked_names = {
+                    n
+                    for (n,) in s.query(NpcList.npc_name)
+                    .join(
+                        PlayerNpcHourlyTotals,
+                        PlayerNpcHourlyTotals.npc_id == NpcList.npc_id,
+                    )
+                    .filter(NpcList.npc_name.in_(names))
+                    .distinct()
+                    .all()
+                }
         # Source aliases ("Wintertodt" for its reward containers) lead the
         # list — task validators expand them back to the real recorded names.
         entries = alias_search_entries(q)
-        entries.extend({"id": i, "name": n} for i, n in rows)
+        entries.extend(
+            {
+                "id": i,
+                "name": n,
+                "icon_url": f"{IMG_BASE}/npcdb/{i}.png",
+                "tracked": n in tracked_names,
+            }
+            for i, n in rows
+        )
         return entries[:15]
 
     return jsonify(await asyncio.to_thread(_search))
