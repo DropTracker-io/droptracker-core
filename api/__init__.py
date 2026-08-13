@@ -20,6 +20,7 @@ from api.routes.webhook import webhook_bp
 from api.routes.notifications import notifications_bp
 from api.routes.video import video_bp
 from api.routes.manifest import manifest_bp
+from api.routes.state_sync import state_sync_bp
 from api.worker import create_blueprint as create_worker_blueprint
 
 
@@ -102,6 +103,7 @@ def create_app() -> Quart:
     app.register_blueprint(notifications_bp, url_prefix='/')
     app.register_blueprint(video_bp, url_prefix='/')
     app.register_blueprint(manifest_bp, url_prefix='/')
+    app.register_blueprint(state_sync_bp, url_prefix='/')
 
     @app.before_serving
     async def _start_monitor():

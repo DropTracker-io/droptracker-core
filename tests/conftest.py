@@ -200,6 +200,25 @@ if "services.plugin_manifest" not in sys.modules:
     sys.modules["services.plugin_manifest"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/loadout.py — decoding of the PB gear/inventory wire format.
+# Stdlib-only; the tests assert on its handling of malformed client input.
+_LOADOUT_PATH = _Path(__file__).resolve().parent.parent / "services" / "loadout.py"
+if "services.loadout" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.loadout", _LOADOUT_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.loadout"] = _mod
+    _spec.loader.exec_module(_mod)
+
+# services/state_sync.py — snapshot parsing/decoding/diffing. Stdlib-only and
+# free of DB access by design, so load the real module: the sync tests assert on
+# its hostile-input handling and diff rules directly.
+_STATE_SYNC_PATH = _Path(__file__).resolve().parent.parent / "services" / "state_sync.py"
+if "services.state_sync" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.state_sync", _STATE_SYNC_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.state_sync"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/status_metrics.py — the #status channel counters. Stdlib-only module
 # imports (Redis access is lazy and injectable), so load the real module: the
 # status tests assert on window sums / heartbeats with a fake Redis.
