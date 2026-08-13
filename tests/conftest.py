@@ -190,6 +190,16 @@ if "services.event_buyins" not in sys.modules:
     sys.modules["services.event_buyins"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/plugin_manifest.py — assembly + versioning of the manifest served to
+# plugin clients. Stdlib-only by design (sections are duck-typed, the ORM model
+# is never imported), so load the real module and assert on it directly.
+_PLUGIN_MANIFEST_PATH = _Path(__file__).resolve().parent.parent / "services" / "plugin_manifest.py"
+if "services.plugin_manifest" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.plugin_manifest", _PLUGIN_MANIFEST_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.plugin_manifest"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/status_metrics.py — the #status channel counters. Stdlib-only module
 # imports (Redis access is lazy and injectable), so load the real module: the
 # status tests assert on window sums / heartbeats with a fake Redis.

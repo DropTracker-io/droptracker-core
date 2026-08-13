@@ -4,6 +4,7 @@ from .user import User
 from .npc import NpcList
 from .item import ItemList
 from .item_value_override import ItemValueOverride
+from .plugin_manifest import PluginManifestSection
 from .player import Player, IgnoredPlayer
 from .group import Group
 from .user_configuration import UserConfiguration
@@ -177,6 +178,7 @@ __all__ = [
     "NpcList",
     "ItemList",
     "ItemValueOverride",
+    "PluginManifestSection",
     "Player",
     "IgnoredPlayer",
     "Group",
