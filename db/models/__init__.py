@@ -6,6 +6,7 @@ from .item import ItemList
 from .item_value_override import ItemValueOverride
 from .plugin_manifest import PluginManifestSection
 from .pb_loadout import PersonalBestLoadout
+from .component_layout import GroupComponentLayout
 from .player_state import (
     PlayerState,
     PlayerCollectionLogItem,
@@ -188,6 +189,7 @@ __all__ = [
     "ItemValueOverride",
     "PluginManifestSection",
     "PersonalBestLoadout",
+    "GroupComponentLayout",
     "PlayerState",
     "PlayerCollectionLogItem",
     "PlayerCombatAchievementVarps",

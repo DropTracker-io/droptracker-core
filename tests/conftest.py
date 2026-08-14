@@ -200,6 +200,16 @@ if "services.plugin_manifest" not in sys.modules:
     sys.modules["services.plugin_manifest"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/component_layout.py — validation + rendering of group-authored V2
+# layouts. Stdlib-only at import time (the placeholder helper is imported
+# lazily), so the real module loads under the stubbed packages.
+_COMPONENT_LAYOUT_PATH = _Path(__file__).resolve().parent.parent / "services" / "component_layout.py"
+if "services.component_layout" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.component_layout", _COMPONENT_LAYOUT_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.component_layout"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/pb_components.py — the Components V2 personal best layout. Pure
 # dict-building with no gateway or DB, so load the real module.
 _PB_COMPONENTS_PATH = _Path(__file__).resolve().parent.parent / "services" / "pb_components.py"

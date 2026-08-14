@@ -3445,11 +3445,40 @@ class NotificationService:
             # when the model is uploaded. Empty string when absent, so a template
             # referencing it degrades to nothing rather than a broken image.
             replacements["{gear_image_url}"] = self._gear_image_url(player_id)
+
+            # Components V2, when this group has an active layout for personal
+            # bests. Everyone else keeps the embed exactly as before — Discord
+            # will not accept both in one message, so this is either/or, and any
+            # failure here falls through to the embed rather than dropping the
+            # notification.
+            component_payload = None
+            try:
+                from services.component_layout import (
+                    load_active_layout,
+                    render_layout,
+                    to_interactions_components,
+                )
+
+                layout = load_active_layout(db_session, group_id, "pb")
+                if layout is not None:
+                    rendered = render_layout(layout, replacements)
+                    if rendered is not None:
+                        component_payload = to_interactions_components(rendered)
+            except Exception as exc:
+                print(f"Component layout render failed for group {group_id}: {exc}")
+                component_payload = None
             
             embed = replace_placeholders(embed_template, replacements)
             embed = self._finalize_group_points_embed(embed)
             
             # Send message
+            if component_payload is not None:
+                # A V2 message carries no content and no embeds; everything the
+                # message says lives inside the components.
+                sent = await self._send(channel, components=component_payload)
+                notification.status = 'sent'
+                return sent
+
             content = f"{formatted_name} has achieved a new personal best:"
             video_attachment, video_local_path = (None, None)
             if video_url:
