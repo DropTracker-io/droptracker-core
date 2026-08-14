@@ -63,6 +63,28 @@ def publish_event_update(event_id: int, data: dict) -> None:
     publish_event("event_update", f"event:{int(event_id)}", data)
 
 
+def publish_chat_message(thread_id: int, payload: dict,
+                         audience: Optional[Iterable[int]] = None) -> None:
+    """Publish a chat entry to ``rt:chat:{thread_id}`` (web96a).
+
+    Two frames with deliberately different weights:
+
+    * ``chat_message`` on ``rt:chat:{id}`` carries the full entry. That scope is
+      membership-gated when the client subscribes (``web_api/routes/realtime``),
+      so it is the only place message content travels.
+    * ``chat_unread`` on ``rt:user:{uid}`` carries only the thread id — enough
+      to light a badge for someone who is not on the page. It goes to a wider
+      audience (every admin of every participating clan), so it must never
+      include the body.
+
+    Best-effort; never raises.
+    """
+    publish_event("chat_message", f"chat:{int(thread_id)}", payload)
+    hint = {"thread_id": int(thread_id), "message_id": payload.get("id")}
+    for user_id in (audience or []):
+        publish_event("chat_unread", f"user:{int(user_id)}", hint)
+
+
 IMG_BASE = "https://www.droptracker.io/img"
 
 FEED_HISTORY_KEY = "feed:recent"

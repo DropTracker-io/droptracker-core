@@ -54,9 +54,24 @@ def _wire_events(monkeypatch, session, user_id=7):
     monkeypatch.setattr(evr, "_bump", lambda *a, **k: None)
 
 
-def _wire_participants(monkeypatch, session, user_id=7):
+def _wire_participants(monkeypatch, session, user_id=7, *, notify=False):
+    """Wire the participant routes onto a scripted session.
+
+    ``notify`` is off by default: web96a hangs chat-thread creation and Discord
+    DMs off every invite/accept/remove, and those issue their own queries that
+    these scripted sessions deliberately do not anticipate. This file tests the
+    ROSTER; the notification behaviour has its own tests
+    (tests/unit/test_event_invites.py + test_event_invite_notifications.py).
+    The route imports them lazily, so the patch must land on the service
+    module's attributes, not on ``epr``.
+    """
     monkeypatch.setattr(epr, "current_user_id", lambda: user_id)
     monkeypatch.setattr(epr, "db_session", lambda: _SessionCM(session))
+    if not notify:
+        import services.event_invites as _invites
+
+        for name in ("announce_invite", "announce_response", "announce_withdrawal"):
+            monkeypatch.setattr(_invites, name, lambda *a, **k: None)
 
 
 def _patch_roles(monkeypatch, module, *, superadmin=False, roles=None,

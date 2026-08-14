@@ -60,6 +60,7 @@ def enqueue(
     ref_id: Optional[int] = None,
     discord_message_id: Optional[str] = None,
     actor_user_id: Optional[int] = None,
+    components: Optional[list] = None,
     commit: bool = True,
 ) -> DiscordOutbox:
     """Insert a pending outbox row. Caller supplies the session.
@@ -67,12 +68,19 @@ def enqueue(
     ``discord_message_id`` is normally a write-back field (set by the drain
     once a message is sent); pass it up front for kinds that *target* an
     existing message, such as ``delete_message``.
+
+    ``kind='dm'`` sends a direct message; ``channel_id`` then holds the
+    recipient's Discord **user** id and the drain opens the DM channel itself.
+
+    ``components`` is a list of ``{"label", "url"}`` link buttons (web96a).
+    Link buttons only — see :func:`_build_components`.
     """
     row = DiscordOutbox(
         kind=kind,
         channel_id=str(channel_id),
         content=content,
         embed_json=json.dumps(embed) if embed else None,
+        components_json=json.dumps(components) if components else None,
         ref_type=ref_type,
         ref_id=ref_id,
         discord_message_id=discord_message_id,
@@ -83,6 +91,51 @@ def enqueue(
     if commit:
         session.commit()
     return row
+
+
+# Discord allows 5 buttons per action row; we never need more than a couple.
+_MAX_COMPONENT_BUTTONS = 5
+
+
+def _build_components(raw: Optional[str]):
+    """Turn ``components_json`` into an ActionRow of LINK buttons, or None.
+
+    **Link buttons only, by design.** A URL button produces no interaction
+    event, so the outbox stays a fire-and-forget queue and the bot needs no
+    custom_id routing, no state table and no handler to keep in sync with
+    whatever queued the row. Anything needing a callback belongs in a bot
+    extension, not here.
+    """
+    if not raw:
+        return None
+    try:
+        entries = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(entries, list) or not entries:
+        return None
+
+    try:
+        from interactions import ActionRow, Button, ButtonStyle
+    except Exception:
+        return None
+
+    buttons = []
+    for entry in entries[:_MAX_COMPONENT_BUTTONS]:
+        if not isinstance(entry, dict):
+            continue
+        url = entry.get("url")
+        label = entry.get("label")
+        # Discord rejects a link button without an http(s) URL; drop rather
+        # than let one malformed entry fail the whole send.
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            continue
+        buttons.append(
+            Button(style=ButtonStyle.LINK, label=str(label or "Open")[:80], url=url)
+        )
+    if not buttons:
+        return None
+    return [ActionRow(*buttons)]
 
 
 _FORUM_NAME_PREFIX = {"suggestion": "\N{ELECTRIC LIGHT BULB} ", "bug": "\N{BUG} "}
@@ -170,6 +223,59 @@ async def _delete_message(bot, session, row):
               f"(treating as gone): {e}")
 
 
+def _message_kwargs(row) -> dict:
+    """Shared content/embed/component payload for the plain-send kinds."""
+    kwargs = {}
+    if row.content:
+        kwargs["content"] = row.content[:2000]
+        allowed = _allowed_mentions_for(kwargs["content"])
+        if allowed is not None:
+            kwargs["allowed_mentions"] = allowed
+    if row.embed_json:
+        try:
+            from interactions import Embed
+
+            data = json.loads(row.embed_json)
+            kwargs["embeds"] = [Embed.from_dict(data)]
+        except Exception:
+            pass
+    components = _build_components(getattr(row, "components_json", None))
+    if components:
+        kwargs["components"] = components
+    return kwargs
+
+
+class DMClosed(Exception):
+    """The recipient does not accept DMs from us (or no longer exists).
+
+    Not a failure to retry: the row is marked ``sent`` with the reason
+    recorded, exactly as ``services/recap_delivery.py`` treats a bounced recap.
+    Retrying forever would produce the same bounce every drain, and the
+    website's own inbox is already the fallback for these notices.
+    """
+
+
+async def _send_dm(bot, session, row):
+    """Send a ``kind='dm'`` row. ``channel_id`` holds a Discord USER id."""
+    try:
+        user = await bot.fetch_user(int(row.channel_id))
+    except Exception as e:  # noqa: BLE001 — unknown/deleted account
+        raise DMClosed(str(e)) from e
+    if user is None:
+        raise DMClosed(f"user {row.channel_id} not found")
+
+    kwargs = _message_kwargs(row)
+    if not kwargs:
+        raise RuntimeError("dm row has no content, embed or components")
+    try:
+        message = await user.send(**kwargs)
+    except Exception as e:  # noqa: BLE001
+        # Closed DMs surface as Forbidden; treat any send refusal as closed
+        # rather than guessing at the library's exception taxonomy.
+        raise DMClosed(str(e)) from e
+    return message
+
+
 async def drain_once(bot, session_factory, limit: int = 20) -> int:
     """Send up to ``limit`` pending outbox rows via ``bot``. Returns the number
     processed. Safe to call repeatedly; failures mark the row 'failed'.
@@ -225,24 +331,24 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
                     sent += 1
                     continue
 
+                if row.kind == "dm":
+                    try:
+                        await _send_dm(bot, session, row)
+                    except DMClosed as e:
+                        # Delivered as far as we're concerned — see DMClosed.
+                        row.status = "sent"
+                        row.error = f"dm not delivered: {str(e)[:400]}"
+                    else:
+                        row.status = "sent"
+                    row.processed_at = datetime.now()
+                    sent += 1
+                    continue
+
                 channel = await bot.fetch_channel(int(row.channel_id))
                 if channel is None:
                     raise RuntimeError(f"channel {row.channel_id} not found")
 
-                kwargs = {}
-                if row.content:
-                    kwargs["content"] = row.content[:2000]
-                    allowed = _allowed_mentions_for(kwargs["content"])
-                    if allowed is not None:
-                        kwargs["allowed_mentions"] = allowed
-                if row.embed_json:
-                    try:
-                        from interactions import Embed
-
-                        data = json.loads(row.embed_json)
-                        kwargs["embeds"] = [Embed.from_dict(data)]
-                    except Exception:
-                        pass
+                kwargs = _message_kwargs(row)
 
                 message = await channel.send(**kwargs) if kwargs else None
                 row.status = "sent"

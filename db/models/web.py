@@ -141,11 +141,17 @@ class DiscordOutbox(Base):
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    # message|announcement|forum_post|delete_message
+    # message|announcement|forum_post|delete_message|dm
     kind = Column(String(24), nullable=False, default="message")
+    # A channel snowflake for every kind EXCEPT 'dm', where it holds the
+    # recipient's Discord *user* id (the drain opens the DM channel itself).
     channel_id = Column(String(32), nullable=False)
     content = Column(Text, nullable=True)
     embed_json = Column(Text, nullable=True)
+    # JSON list of link buttons: [{"label": ..., "url": ...}]. LINK-style
+    # buttons only — they raise no interaction, so the bot needs no component
+    # handler and the outbox stays a fire-and-forget queue (web96a).
+    components_json = Column(Text, nullable=True)
     ref_type = Column(String(24), nullable=True)   # e.g. 'announcement'
     ref_id = Column(Integer, nullable=True)
     # pending|sending|sent|failed. `sending` is a claim taken before the row is

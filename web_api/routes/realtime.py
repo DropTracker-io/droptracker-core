@@ -98,10 +98,33 @@ def _may_watch_event(user_id, event_id: int) -> bool:
         return False
 
 
+def _may_read_thread(user_id, thread_id: int) -> bool:
+    """Whether ``user_id`` may subscribe to a chat thread's frames (web96a).
+
+    Runs the same membership check the HTTP chat routes use, once per
+    connection. Chat frames carry message bodies, so this fails closed on any
+    error — an unreadable thread must never fall through to "public".
+    """
+    if user_id is None:
+        return False
+    try:
+        from db.models import ChatThread
+        from services.chat import resolve_membership
+        from web_api.common import db_session
+
+        with db_session() as s:
+            thread = s.query(ChatThread).filter(ChatThread.id == thread_id).first()
+            if thread is None:
+                return False
+            return resolve_membership(s, thread, user_id) is not None
+    except Exception:
+        return False
+
+
 async def _authorize_channels(raw: str) -> list[str]:
     """Validate + filter requested channels. Drops private ``player:`` scopes
-    unless a valid session is present, and ``event:`` scopes the viewer may
-    not see."""
+    unless a valid session is present, and ``event:``/``chat:``/``user:`` scopes
+    the viewer may not see."""
     user_id = None
     have_session = False
     try:
@@ -117,10 +140,33 @@ async def _authorize_channels(raw: str) -> list[str]:
             continue
         # "event:{id}" is public like "group:*" for PUBLIC events (live event
         # pages, Task 17); private ones are gated below.
-        if ch not in _PUBLIC_EXACT_SCOPES and not ch.startswith(("group:", "player:", "npc:", "event:")):
+        if ch not in _PUBLIC_EXACT_SCOPES and not ch.startswith(
+            ("group:", "player:", "npc:", "event:", "chat:", "user:")
+        ):
             continue
         if ch.startswith("player:") and not have_session:
             continue  # private feed requires a session
+        if ch.startswith("user:"):
+            # web96a: unlike the `player:` branch above — which only asks that
+            # SOME session exists — this compares identities. A user scope
+            # carries that person's badge hints and nobody else may listen.
+            if not have_session:
+                continue
+            try:
+                if int(ch.split(":", 1)[1]) != int(user_id):
+                    continue
+            except (IndexError, ValueError, TypeError):
+                continue
+        if ch.startswith("chat:"):
+            if not have_session:
+                continue
+            try:
+                thread_id = int(ch.split(":", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            allowed = await asyncio.to_thread(_may_read_thread, user_id, thread_id)
+            if not allowed:
+                continue
         if ch.startswith("event:"):
             try:
                 event_id = int(ch.split(":", 1)[1])

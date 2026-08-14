@@ -232,6 +232,35 @@ if "services.event_signup" not in sys.modules:
     sys.modules["services.event_signup"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/chat.py (web96a) — the threaded-messaging domain layer. Same shape
+# again: stdlib-only module imports, every DB/Redis/web_api touch lazy inside a
+# function. The chat routes and the invite flow both delegate their access
+# decisions to it, so tests must exercise the real thing.
+#
+# NOTE the extra `setattr` on the stubbed parent package: `import services.chat
+# as chat` binds the name via `getattr(services, "chat")`, and a MagicMock
+# happily invents that attribute — so registering sys.modules alone hands the
+# test a mock and every assertion silently passes against it.
+_CHAT_PATH = _Path(__file__).resolve().parent.parent / "services" / "chat.py"
+if "services.chat" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.chat", _CHAT_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.chat"] = _mod
+    _spec.loader.exec_module(_mod)
+    setattr(sys.modules["services"], "chat", _mod)
+
+# services/event_invites.py (web96a) — clan-vs-clan challenge notifications.
+# Imports services.chat lazily, so it must be registered after it.
+_INVITES_PATH = _Path(__file__).resolve().parent.parent / "services" / "event_invites.py"
+if "services.event_invites" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location(
+        "services.event_invites", _INVITES_PATH
+    )
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.event_invites"] = _mod
+    _spec.loader.exec_module(_mod)
+    setattr(sys.modules["services"], "event_invites", _mod)
+
 # ── SQLAlchemy column expression stub ─────────────────────────────────────────
 # Real SQLAlchemy column attributes implement comparison operators to return
 # BinaryExpression objects.  When tests do `Model.date_added > cutoff`,

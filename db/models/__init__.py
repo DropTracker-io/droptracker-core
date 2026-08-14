@@ -62,6 +62,25 @@ from .seasonal_quest_completion import SeasonalQuestCompletionEntry
 from .drop_split import DropSplit
 from .web import GroupAdmin, GroupEventManager, Announcement, AuditLog, DiscordOutbox, DocsPage, SiteRedirect, Suggestion, SuggestionMessage
 from .dev_tracker import DevProject, DevTask, DevSubtask, DevNote, PROJECT_STATUSES, TASK_STATUSES
+from .file_transfer import (
+    FileTransfer,
+    FileTransferVersion,
+    TRANSFER_MAX_BYTES,
+    TRANSFER_RETENTION_DAYS,
+    TRANSFER_UPLOADER_ROLES,
+)
+from .chat import (
+    ChatThread,
+    ChatParticipant,
+    ChatMessage,
+    ChatRead,
+    CHAT_THREAD_KINDS,
+    CHAT_THREAD_STATUSES,
+    CHAT_PARTY_TYPES,
+    CHAT_MESSAGE_KINDS,
+    CHAT_BODY_MAX_CHARS,
+    CHAT_MAX_ATTACHMENTS,
+)
 from .known_issues import KnownIssueCategory, KnownIssue, ISSUE_SEVERITIES, ISSUE_STATUSES
 from .knowledgebase import KBDocument, KBChunk, KBIngestState, KB_SOURCE_TYPES
 from .badge import Badge, PlayerBadge
@@ -264,6 +283,21 @@ __all__ = [
     "DevNote",
     "PROJECT_STATUSES",
     "TASK_STATUSES",
+    "FileTransfer",
+    "FileTransferVersion",
+    "TRANSFER_MAX_BYTES",
+    "TRANSFER_RETENTION_DAYS",
+    "TRANSFER_UPLOADER_ROLES",
+    "ChatThread",
+    "ChatParticipant",
+    "ChatMessage",
+    "ChatRead",
+    "CHAT_THREAD_KINDS",
+    "CHAT_THREAD_STATUSES",
+    "CHAT_PARTY_TYPES",
+    "CHAT_MESSAGE_KINDS",
+    "CHAT_BODY_MAX_CHARS",
+    "CHAT_MAX_ATTACHMENTS",
     "KnownIssueCategory",
     "KnownIssue",
     "ISSUE_SEVERITIES",

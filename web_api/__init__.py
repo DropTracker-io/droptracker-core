@@ -25,6 +25,7 @@ from web_api.routes.admin import admin_bp
 from web_api.routes.announcements import announcements_bp
 from web_api.routes.auth import auth_bp
 from web_api.routes.badges import badges_bp
+from web_api.routes.chat import chat_bp
 from web_api.routes.config import config_bp
 from web_api.routes.dev_tracker import dev_tracker_bp
 from web_api.routes.docs import docs_bp
@@ -39,6 +40,7 @@ from web_api.routes.event_participants import event_participants_bp
 from web_api.routes.event_prizes import event_prizes_bp
 from web_api.routes.event_templates import event_templates_bp
 from web_api.routes.events import events_bp
+from web_api.routes.file_transfers import file_transfers_bp
 from web_api.routes.group_admin import group_admin_bp
 from web_api.routes.item_values import item_values_bp
 from web_api.routes.items import items_bp
@@ -85,6 +87,13 @@ def _load_openapi() -> dict:
 
 def create_app() -> Quart:
     app = Quart(__name__)
+
+    # Quart defaults MAX_CONTENT_LENGTH to 16 MiB, which silently 413s the
+    # 25 MB file-transfer uploads (web95a). Raise the ceiling to 25 MB plus
+    # room for multipart framing; the per-endpoint caps (25 MB transfers,
+    # 10 MB proof images) are what actually bound each upload, and they
+    # produce a readable error instead of a bare 413.
+    app.config["MAX_CONTENT_LENGTH"] = 28 * 1024 * 1024
 
     logging.getLogger("quart.serving").setLevel(logging.ERROR)
     logging.getLogger("hypercorn.access").disabled = True
@@ -156,6 +165,18 @@ def create_app() -> Quart:
     async def _method_not_allowed(_e):
         return problem(405, "Method not allowed")
 
+    @app.errorhandler(413)
+    async def _payload_too_large(_e):
+        # Quart's own MAX_CONTENT_LENGTH ceiling, hit before any route sees the
+        # body — so the upload endpoints' friendlier per-file caps never run.
+        # Answer in the same RFC-7807 shape as everything else rather than
+        # Quart's HTML page, which the BFF cannot parse.
+        return problem(
+            413,
+            "Request too large",
+            "The upload exceeded the maximum request size.",
+        )
+
     @app.errorhandler(500)
     async def _server_error(_e):
         return problem(500, "Internal server error")
@@ -165,6 +186,7 @@ def create_app() -> Quart:
     app.register_blueprint(announcements_bp, url_prefix=API_PREFIX)
     app.register_blueprint(auth_bp, url_prefix=API_PREFIX)
     app.register_blueprint(badges_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(chat_bp, url_prefix=API_PREFIX)
     app.register_blueprint(config_bp, url_prefix=API_PREFIX)
     app.register_blueprint(dev_tracker_bp, url_prefix=API_PREFIX)
     app.register_blueprint(docs_bp, url_prefix=API_PREFIX)
@@ -179,6 +201,7 @@ def create_app() -> Quart:
     app.register_blueprint(event_prizes_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_templates_bp, url_prefix=API_PREFIX)
     app.register_blueprint(events_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(file_transfers_bp, url_prefix=API_PREFIX)
     app.register_blueprint(group_admin_bp, url_prefix=API_PREFIX)
     app.register_blueprint(item_values_bp, url_prefix=API_PREFIX)
     app.register_blueprint(items_bp, url_prefix=API_PREFIX)

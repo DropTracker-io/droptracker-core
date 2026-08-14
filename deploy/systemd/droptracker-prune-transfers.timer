@@ -1,0 +1,20 @@
+# Daily trigger for droptracker-prune-transfers.service at ~04:30 UTC.
+#
+# Half an hour after droptracker-prune-images.timer so the two cleanup passes
+# don't contend, and still well ahead of droptracker-db-backup.timer (08:30).
+#
+# Install:  sudo cp deploy/systemd/droptracker-prune-transfers.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now droptracker-prune-transfers.timer
+
+[Unit]
+Description=Daily DropTracker file-transfer retention pass (~04:30 UTC)
+
+[Timer]
+OnCalendar=*-*-* 04:30:00 UTC
+RandomizedDelaySec=900
+Persistent=true
+Unit=droptracker-prune-transfers.service
+
+[Install]
+WantedBy=timers.target

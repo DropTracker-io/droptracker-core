@@ -102,7 +102,8 @@ droptracker/
 │                           #   submissions, manual_submissions, subscriptions, paypal_ipn,
 │                           #   lootboard, realtime (SSE), npcs, items, item_values,
 │                           #   personal_bests, points, player_claims, embeds, redirects,
-│                           #   resolve, meta, suggestions, tickets, admin, health
+│                           #   resolve, meta, suggestions, tickets, file_transfers,
+│                           #   chat (generic threaded messaging), admin, health
 │                           # Events v2: events, event_admin, event_audit, event_board,
 │                           #   event_discord, event_layouts, event_participants,
 │                           #   event_prizes, event_task_validation, event_templates
@@ -154,6 +155,9 @@ droptracker/
 │   │                            #   opens a Discord connection — hard architectural rule)
 │   ├── redis_updates.py         # RedisLootTracker – incremental leaderboard updates
 │   ├── realtime.py              # Publishes rt:* pub/sub + feed:recent (web SSE)
+│   ├── chat.py                  # Generic threads/parties/messages/read-state domain
+│   │                            #   layer — the ONLY place "may X speak for clan Y?"
+│   │                            #   is answered (web96a)
 │   ├── points.py                # Premium point system (award/debit ledger)
 │   ├── badges.py                # Badge award engine
 │   ├── event_engine.py          # Events v2: producer / matcher / apply layers
@@ -163,6 +167,9 @@ droptracker/
 │   ├── event_board.py           # Live standings message, edited in place (2-min sweep)
 │   ├── event_board_image.py     # Board → PNG via page_screenshot of web /board-image/[id]
 │   ├── event_signup*.py         # Sign-up window, Discord prompt, pool
+│   ├── event_invites.py         # Clan-vs-clan challenge: negotiation thread +
+│   │                            #   system entries + DM fan-out to the invited
+│   │                            #   clan's admins (best-effort by contract)
 │   ├── event_team_discord*.py   # Per-team channels/categories
 │   ├── event_scheduled_events.py, event_types.py, event_wom_reconciler.py
 │   ├── loot_sweep.py            # `loot_sweep` event kind scoring (nested groups, decay)
@@ -270,6 +277,8 @@ A full walkthrough is in `docs/SUBMISSION_PIPELINE.md`. Short version:
 
 **The Web API never opens a Discord connection.** `web_api` enqueues into `discord_outbox`; the core bot drains it. Anything needing the gateway belongs in a bot, not a route.
 
+**Request bodies are capped app-wide at 28 MiB** (`MAX_CONTENT_LENGTH` in `web_api/create_app`, raised from Quart's 16 MiB default for the 25 MB file-transfer uploads). Anything larger is rejected by Quart before the route runs — the endpoint's own friendlier cap never gets a say — so a new upload endpoint above that size needs this raised too. Per-file limits live on the endpoints (`file_transfers` 25 MB, `uploads/proof` 10 MB); nginx allows 1024M on the site host, so this is the binding constraint.
+
 **Fast-accept intake is LIVE.** `WEBHOOK_QUEUE_MODE=true` in the production `.env`: `/webhook` validates + stashes + `RPUSH`es in ~50 ms and `workers/webhook_consumer.py` does the real work. (`.env.example` still ships `false` for fresh installs; `docs/REFACTOR_PLAN.md` describes the pre-queue behaviour.) Consequence: changing a processor requires restarting **`droptracker-webhook-consumer`**, not `droptracker-api`.
 
 **Events v2 pipeline.** Processors call `services/event_engine.queue_submission()` (LPUSH `events:submissions`, gated on `events:active`); `workers/event_consumer.py` matches against active event tasks (pure `match_task()`), applies progress/bingo/team points, and routes Discord notifications via `services/event_notifications.py`. Each event's `submission_policy` gates credit by intake path (envelope `used_api` flag): `all` (default), `confirm_non_api` (non-plugin submissions land as pending completions), or `api_only`. Lifecycle transitions live in `services/event_lifecycle.py`; the admin surface is `web_api/routes/events.py` + `event_admin.py` + `event_discord.py`. Event **kinds** beyond the default task/bingo model: `loot_sweep` (`services/loot_sweep.py`, `docs/LOOT_SWEEP.md`) and the board game (`services/boardgame_*.py`, `services/boardgen/`).
@@ -294,6 +303,7 @@ Core models: `Drop`, `Player`, `User`, `Group`, `Guild`, `GroupConfiguration`, `
 
 Model families (~90 tables):
 - **Events v2** (`db/models/events.py`): `Event`, `EventTask`, `EventTeam`, `EventTeamMember`, `EventBingoCell`, `EventBingoCompletion`, `EventCompletion`, `EventProgress`, `EventTaskLibraryItem`, `EventChannel`
+- **Chat** (`db/models/chat.py`, web96a): `ChatThread`, `ChatParticipant`, `ChatMessage`, `ChatRead`. Generic threaded messaging anchored to an arbitrary `(subject_type, subject_id)`; participants are **parties** (a clan, spoken for by any of its authorized admins) rather than users, and which humans a group party resolves to is derived live, never stored
 - **Points** (`group_points.py`): `PlayerPoints`, `GroupPointConfig`, `GroupPointMods`, `GroupPointTimedEvent`, `GroupPointSeason`, `GroupPointBlacklist`
 - **Web/admin** (`web.py`): `GroupAdmin`, `GroupEventManager`, `Announcement`, `DiscordOutbox`, `AuditLog`, `DocsPage`; plus `UserConfiguration`
 - **Support**: `Ticket`, `TicketMessage` (`tickets.py`); suggestions mirror tables
@@ -312,7 +322,7 @@ See `db/models/` for ORM definitions and `docs/ARCHITECTURE.md` for the schema r
 - `leaderboard:{YYYYMM}:group:{gid}` — Per-group monthly
 - `leaderboard:{YYYYMMDD}` / `leaderboard:{ISO-week}` / `leaderboard:all` — Daily / weekly / all-time
 - `player:{player_id}:{YYYYMM}:total_loot` — String: total GP this month
-- `rt:{scope}` where scope ∈ `global` | `feed` | `group:{id}` | `player:{id}` | `npc:{id}` | `event:{id}` — Pub/sub for web SSE (`GET /api/v1/stream`)
+- `rt:{scope}` where scope ∈ `global` | `feed` | `group:{id}` | `player:{id}` | `npc:{id}` | `event:{id}` | `chat:{id}` | `user:{id}` — Pub/sub for web SSE (`GET /api/v1/stream`). `chat:` carries message bodies and is membership-gated at subscribe time; `user:` carries badge hints only and compares identities (unlike `player:`, which merely requires *a* session)
 - `feed:recent` — Capped list backing the live drop ticker (`GET /api/v1/feed/recent`)
 - `events:submissions` / `events:active` — Events v2 queue + active-event gate
 - `plugin:notify:{player_id}` — Per-player in-game notification inbox

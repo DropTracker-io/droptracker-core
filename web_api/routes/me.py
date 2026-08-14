@@ -61,6 +61,12 @@ _BOOL_SETTINGS = [
 # first one unsolicited (the delivery ledger records that it happened), and this
 # is how they ask for the ones after it. Absent row = off, so no backfill.
 _CONFIG_SETTINGS = ["dm_account_changes", "dm_monthly_recap"]
+# Settings stored the same way but defaulting to ON, so an absent row means
+# "yes". `dm_clan_invites` gates the DM a clan leader gets when someone
+# challenges their clan (web96a) — an administrative duty notification, not a
+# perk, so it must not require opting in. Absent = on, and turning it off
+# writes an explicit "false" row.
+_CONFIG_SETTINGS_DEFAULT_ON = ["dm_clan_invites"]
 # Supporter submission-DM opt-ins (user_configurations), read by
 # data/submissions/* at queue time. Saving them is allowed for everyone;
 # they only take effect with the `dm_submissions` supporter entitlement.
@@ -129,6 +135,20 @@ def _set_config_bool(s, user_id: int, key: str, value: bool) -> None:
         s.add(UserConfiguration(user_id=user_id, config_key=key, config_value="true" if value else "false"))
 
 
+def _config_bool_default_on(s, user_id: int, key: str) -> bool:
+    """Like :func:`_config_bool` but an ABSENT row means True — the opt-out
+    shape. Only an explicit "false"/"0" turns the setting off, so shipping a
+    new default-on notification needs no backfill."""
+    row = (
+        s.query(UserConfiguration)
+        .filter(UserConfiguration.user_id == user_id, UserConfiguration.config_key == key)
+        .first()
+    )
+    if row is None:
+        return True
+    return str(row.config_value).lower() not in ("false", "0")
+
+
 def _config_value(s, user_id: int, key: str):
     row = (
         s.query(UserConfiguration)
@@ -156,6 +176,8 @@ def _settings_dict(s, user: User) -> dict:
     out = {k: bool(getattr(user, k, False)) for k in _BOOL_SETTINGS}
     for k in _CONFIG_SETTINGS + _DM_CONFIG_SETTINGS:
         out[k] = _config_bool(s, user.user_id, k)
+    for k in _CONFIG_SETTINGS_DEFAULT_ON:
+        out[k] = _config_bool_default_on(s, user.user_id, k)
     raw_min = _config_value(s, user.user_id, _DM_MIN_VALUE_KEY)
     try:
         out[_DM_MIN_VALUE_KEY] = int(raw_min) if raw_min else 0
@@ -361,7 +383,12 @@ async def patch_me():
     # Validate keys/types up-front (reject unknown keys silently ignored? -> 422).
     updates = {}
     for key, value in body.items():
-        if key in _BOOL_SETTINGS or key in _CONFIG_SETTINGS or key in _DM_CONFIG_SETTINGS:
+        if (
+            key in _BOOL_SETTINGS
+            or key in _CONFIG_SETTINGS
+            or key in _CONFIG_SETTINGS_DEFAULT_ON
+            or key in _DM_CONFIG_SETTINGS
+        ):
             if not isinstance(value, bool):
                 abort_problem(422, "Invalid value", f"'{key}' must be a boolean.")
             updates[key] = value
@@ -393,7 +420,12 @@ async def patch_me():
                     _set_config_value(s, user.user_id, key, str(value))
                 elif key == _RECAP_TIMEZONE_KEY:
                     _set_config_value(s, user.user_id, key, value)
-                elif key in _CONFIG_SETTINGS or key in _DM_CONFIG_SETTINGS or key == _DM_DELIVERY_ISSUE_KEY:
+                elif (
+                    key in _CONFIG_SETTINGS
+                    or key in _CONFIG_SETTINGS_DEFAULT_ON
+                    or key in _DM_CONFIG_SETTINGS
+                    or key == _DM_DELIVERY_ISSUE_KEY
+                ):
                     _set_config_bool(s, user.user_id, key, value)
                 else:
                     setattr(user, key, value)

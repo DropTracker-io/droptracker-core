@@ -1,0 +1,36 @@
+# Daily retention pass over direct-URL file transfers (web95a).
+# Triggered by droptracker-prune-transfers.timer — do not enable the service itself.
+#
+# The /file-transfer page accepts arbitrary 25 MB uploads from any signed-in
+# user with no per-user cap, so this sweep is the only thing bounding what the
+# B2 bucket accumulates. A transfer dies 30 days after its NEWEST version
+# (staff replies push the window out), which `file_transfers.expires_at`
+# already encodes — the script just acts on stamps that have passed.
+#
+# Runs as `debian`, the same account as droptracker-webapi, which is what wrote
+# the rows and holds the B2 credentials in .env.
+#
+# Manual dry run:  cd /store/droptracker/disc && venv/bin/python -m scripts.prune_file_transfers
+# Manual real run: sudo systemctl start droptracker-prune-transfers.service
+# Watch it:        journalctl -u droptracker-prune-transfers.service -f
+# Every deletion is recorded to logs/prune_file_transfers_<ts>.tsv first.
+
+[Unit]
+Description=DropTracker file-transfer retention (delete transfers past their 30d window)
+Wants=network-online.target
+After=network-online.target mariadb.service mysql.service
+
+[Service]
+Type=oneshot
+User=debian
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.prune_file_transfers --apply
+# Steady state is a handful of rows; the ceiling only matters if the timer has
+# been off long enough for a backlog to build.
+TimeoutStartSec=1h
+# Pure cleanup — never urgent, stay out of prod's way.
+Nice=15
+IOSchedulingClass=idle
+
+# Optional slack past expires_at (script flag):
+#ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.prune_file_transfers --apply --grace-days 3

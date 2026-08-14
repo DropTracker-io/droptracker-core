@@ -225,6 +225,33 @@ async def upload_bytes(
     return object_key
 
 
+async def download_bytes(object_key: str) -> bytes:
+    """Read an object back into memory.
+
+    The counterpart to `upload_bytes`, for private objects that must never get
+    a public URL: the file-transfer routes stream these bytes out through an
+    authed endpoint instead of handing the browser a CDN link. Callers are
+    responsible for keeping the objects small enough to hold in memory (the
+    transfer routes cap uploads at 25 MB).
+
+    Args:
+        object_key: The full object key in B2.
+
+    Returns:
+        The object's raw bytes.
+
+    Raises:
+        Exception if the object is missing or unreadable.
+    """
+    client = _get_s3_client()
+
+    def _read() -> bytes:
+        obj = client.get_object(Bucket=B2_BUCKET_NAME, Key=object_key)
+        return obj["Body"].read()
+
+    return await asyncio.to_thread(_read)
+
+
 async def delete_object(object_key: str) -> bool:
     """
     Delete an object from B2.
