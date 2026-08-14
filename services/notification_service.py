@@ -463,9 +463,10 @@ class NotificationService:
         type and it rendered; None means "carry on and send the embed". Every
         failure path returns None — no row, not active, unparseable JSON, a
         stored layout that no longer validates, a render that produced nothing,
-        a component the adapter could not build — because a broken layout should
-        cost the customisation, never the notification. Discord refuses a
-        message carrying both, so this is either/or per notification.
+        a component the adapter could not build, a payload Discord refuses —
+        because a broken layout should cost the customisation, never the
+        notification. Discord will not accept both an embed and components in
+        one message, so this is either/or per notification.
 
         The group-2 field stripping and the "X received a drop:" content line
         the embed path adds have no equivalent here on purpose: with components
@@ -491,9 +492,40 @@ class NotificationService:
             print(f"Component layout render failed for group {group_id}/{notification_type}: {exc}")
             return None
 
-        # Past this point a failure is a send failure, not a layout failure, so
-        # it propagates to the caller's handler like any other send would.
-        return await self._send(channel, components=components)
+        try:
+            return await self._send(channel, components=components)
+        except Exception as exc:
+            if not self._is_rejected_payload(exc):
+                raise
+            # Discord refused the payload, so nothing was posted and this is
+            # still a broken layout rather than a send failure — an image URL it
+            # would not accept, say. Falling back costs the customisation; not
+            # falling back would cost the notification. Every other error
+            # (Forbidden, rate limits, 5xx) propagates to the caller's handler
+            # as it does for an embed, because those may have posted, or are
+            # worth retrying, or need the "grant the bot permissions" DM.
+            print(
+                f"Discord rejected the component layout for group {group_id}/"
+                f"{notification_type}, falling back to the embed: {exc}"
+            )
+            return None
+
+    @staticmethod
+    def _is_rejected_payload(exc) -> bool:
+        """True for a Discord 400: the message was refused, nothing was posted.
+
+        Checked by status as well as by class because the import is not
+        guaranteed — the unit tests stub the ``interactions`` package, and an
+        ImportError here would turn a fallback into a lost notification.
+        """
+        try:
+            from interactions.client.errors import BadRequest
+
+            if isinstance(exc, BadRequest):
+                return True
+        except Exception:
+            pass
+        return getattr(exc, "status", None) == 400
 
     def _record_drop_notification(self, db_session, data, message, player_id, group_id):
         """Remember that this drop was announced to this group.

@@ -169,3 +169,40 @@ def test_every_branch_finishes_the_send():
     calls = src.count("await self._try_send_component_layout(")
     finishes = src.count("await self._finish_component_send(")
     assert calls == finishes == len(cl.NOTIFICATION_TYPES)
+
+
+class Rejected(Exception):
+    """Stands in for interactions' BadRequest — conftest stubs the
+    ``interactions`` package, so the real class cannot be imported here."""
+
+    status = 400
+
+
+class Denied(Exception):
+    """Stands in for Forbidden (403)."""
+
+    status = 403
+
+
+@pytest.mark.asyncio
+async def test_a_payload_discord_refuses_falls_back_to_the_embed(monkeypatch):
+    """A 400 means nothing was posted, so this is still a broken layout — the
+    member should get the embed rather than nothing at all."""
+    monkeypatch.setattr(cl, "load_active_layout", lambda *a, **k: LAYOUT)
+    monkeypatch.setattr(cl, "to_interactions_components", lambda payload: ["<container>"])
+    channel = SimpleNamespace(send=AsyncMock(side_effect=Rejected("bad media url")))
+    sent = await _service()._try_send_component_layout(
+        FakeSession(), _notification(), channel, 2, "pb", VALUES)
+    assert sent is None
+
+
+@pytest.mark.asyncio
+async def test_forbidden_still_propagates(monkeypatch):
+    """Missing channel permissions must reach the handler that DMs the group's
+    admins, not be swallowed into a fallback that fails the same way."""
+    monkeypatch.setattr(cl, "load_active_layout", lambda *a, **k: LAYOUT)
+    monkeypatch.setattr(cl, "to_interactions_components", lambda payload: ["<container>"])
+    channel = SimpleNamespace(send=AsyncMock(side_effect=Denied("no perms")))
+    with pytest.raises(Denied):
+        await _service()._try_send_component_layout(
+            FakeSession(), _notification(), channel, 2, "pb", VALUES)
