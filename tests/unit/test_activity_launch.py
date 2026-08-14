@@ -5,6 +5,7 @@ un-stubbing and can't contaminate other tests. The Discord shell
 import asyncio
 import importlib.util
 import os
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 
@@ -182,6 +183,65 @@ def test_launch_fallback_message_bare_launch():
     app_btn, web_btn = payload["components"][0]["components"]
     assert app_btn["url"] == core.activity_link_url()
     assert web_btn["url"] == core.WEBSITE_URL
+
+
+# --- channel -> event fallback ordering -------------------------------------- #
+NOW = datetime(2026, 8, 14, 12, 0)
+
+
+def _ev(event_id, status, starts_at=None, ends_at=None):
+    return {"id": event_id, "status": status, "starts_at": starts_at, "ends_at": ends_at}
+
+
+def test_channel_event_prefers_the_soonest_upcoming_draft():
+    """The reported bug: a group queued next month's event onto the channel its
+    current one announces from, and the newest-id fallback hijacked every
+    launch button on the running event's messages."""
+    summers_end = _ev(46, "draft", datetime(2026, 8, 17), datetime(2026, 9, 1, 3, 59))
+    september = _ev(51, "draft", datetime(2026, 9, 11, 14, 0), datetime(2026, 9, 19, 2, 0))
+    assert core.pick_channel_event([summers_end, september], NOW) == 46
+    assert core.pick_channel_event([september, summers_end], NOW) == 46
+
+
+def test_channel_event_prefers_active_over_everything():
+    running = _ev(2, "active", datetime(2026, 8, 1), datetime(2026, 8, 30))
+    imminent = _ev(9, "draft", datetime(2026, 8, 14, 13, 0), datetime(2026, 8, 20))
+    assert core.pick_channel_event([running, imminent], NOW) == 2
+    # ...even with dates that don't place "now" inside its own window.
+    assert core.pick_channel_event([_ev(2, "active"), imminent], NOW) == 2
+
+
+def test_channel_event_keeps_a_just_ended_event_over_a_distant_draft():
+    """An ended event's "Final standings" button must still land right."""
+    ended = _ev(3, "past", datetime(2026, 8, 1), datetime(2026, 8, 13))
+    far_off = _ev(8, "draft", datetime(2026, 11, 1), datetime(2026, 11, 20))
+    assert core.pick_channel_event([ended, far_off], NOW) == 3
+    # But once the next one is nearer than the last one's ending, it takes over.
+    assert core.pick_channel_event([ended, _ev(8, "draft", datetime(2026, 8, 15))], NOW) == 8
+
+
+def test_channel_event_lets_a_long_finished_event_go():
+    """Past PAST_RELEVANCE_WINDOW an event stops shadowing the one being set
+    up now — group 14's admin channel, shared by a July stress test and the
+    September event whose Discord it was configured for."""
+    stale = _ev(28, "past", datetime(2026, 7, 25), datetime(2026, 8, 4))
+    upcoming = _ev(51, "draft", datetime(2026, 9, 11, 14, 0), datetime(2026, 9, 19, 2, 0))
+    assert core.pick_channel_event([stale, upcoming], NOW) == 51
+    # An undated draft has nothing to go on, so the stale event still wins.
+    assert core.pick_channel_event([stale, _ev(51, "draft")], NOW) == 28
+
+
+def test_channel_event_sorts_undated_drafts_last_and_dedupes():
+    dated = _ev(4, "draft", datetime(2026, 9, 1))
+    assert core.pick_channel_event([_ev(7, "draft"), dated], NOW) == 4
+    # An event pointing several channel kinds at one channel repeats in the join.
+    assert core.pick_channel_event([dated, dict(dated)], NOW) == 4
+    # Nothing to pick from.
+    assert core.pick_channel_event([], NOW) is None
+    assert core.pick_channel_event(None, NOW) is None
+    assert core.pick_channel_event([{"id": None, "status": "draft"}], NOW) is None
+    # All undated: still answers, newest id wins.
+    assert core.pick_channel_event([_ev(7, "draft"), _ev(9, "draft")], NOW) == 9
 
 
 # --- ref parsing ------------------------------------------------------------ #

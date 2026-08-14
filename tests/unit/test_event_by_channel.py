@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -56,11 +57,44 @@ class TestEventByChannel:
 
     async def test_event_channel_resolves(self, client, monkeypatch):
         # Not a launcher channel; EventChannel row maps it to event 5.
-        s = _S([], [(5,)])
+        # Row shape: (id, status, starts_at, ends_at, ended_at).
+        s = _S([], [(5, "active", None, None, None)])
         _wire(monkeypatch, s)
         r = await client.get("/api/v1/events/by-channel/123456789")
         assert r.status_code == 200
         assert (await r.get_json()) == {"event_id": 5}
+
+    async def test_shared_channel_picks_the_nearer_event_not_the_newest(
+        self, client, monkeypatch
+    ):
+        """Two drafts share one channel — the launch button must land on the
+        one starting next, not on whichever was created last (the reported
+        bug: a September event hijacked the running event's pot announcement).
+        """
+        now = datetime.now()
+        s = _S([], [
+            (46, "draft", now + timedelta(days=3), now + timedelta(days=18), None),
+            (51, "draft", now + timedelta(days=28), now + timedelta(days=36), None),
+        ])
+        _wire(monkeypatch, s)
+        r = await client.get("/api/v1/events/by-channel/123456789")
+        assert r.status_code == 200
+        assert (await r.get_json()) == {"event_id": 46}
+
+    async def test_premature_end_is_measured_from_ended_at(self, client, monkeypatch):
+        """A manually ended event finished when ``ended_at`` says, not when it
+        was scheduled to — so it must not outrank an imminent draft."""
+        now = datetime.now()
+        s = _S([], [
+            # Scheduled to run another 10 days; actually stopped 8 days ago.
+            (60, "past", now - timedelta(days=20), now + timedelta(days=10),
+             now - timedelta(days=8)),
+            (61, "draft", now + timedelta(days=2), now + timedelta(days=9), None),
+        ])
+        _wire(monkeypatch, s)
+        r = await client.get("/api/v1/events/by-channel/123456789")
+        assert r.status_code == 200
+        assert (await r.get_json()) == {"event_id": 61}
 
     async def test_unmapped_channel_is_null(self, client, monkeypatch):
         s = _S([], [])

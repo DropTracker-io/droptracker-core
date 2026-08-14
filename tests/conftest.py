@@ -180,6 +180,17 @@ if "services.event_effort" not in sys.modules:
     sys.modules["services.event_effort"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/activity_launch_core.py — the Discord Activity launcher's pure half
+# (deliberately free of any `interactions` import; db access is lazy). web_api's
+# /events/by-channel deep-link fallback calls pick_channel_event, so the route
+# tests need the real ranking rather than a MagicMock.
+_ALC_PATH = _Path(__file__).resolve().parent.parent / "services" / "activity_launch_core.py"
+if "services.activity_launch_core" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.activity_launch_core", _ALC_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.activity_launch_core"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/event_buyins.py — the buy-in <-> roster invariant (web71a). Same
 # shape (stdlib-only module imports, lazy db) and MUST be registered before
 # services.event_signup, which imports it at module level.

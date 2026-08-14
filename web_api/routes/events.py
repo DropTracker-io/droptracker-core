@@ -1010,11 +1010,12 @@ async def event_launch_intent():
 async def event_by_channel(channel_id: str):
     """Resolve a Discord channel to the event whose board/notifications live
     there — the Activity's anonymous deep-link fallback: a launch button opens
-    the app in its channel, and ``sdk.channelId`` tells us which. Prefers the
-    active event; falls back to the most recent event pointed at the channel
-    (so an ended event's "Final standings" button still lands right).
-    ``{"event_id": null}`` when no event maps to the channel — or when the
-    channel hosts a group's standing "Open DropTracker" card
+    the app in its channel, and ``sdk.channelId`` tells us which. Picks the
+    event nearest to now in time (running > starting soonest > most recently
+    ended), so an ended event's "Final standings" button still lands right and
+    a draft queued for next month never hijacks the event a channel is
+    currently running. ``{"event_id": null}`` when no event maps to the
+    channel — or when the channel hosts a group's standing "Open DropTracker" card
     (``activity_launch_channel``): launches from there mean "open the app",
     not "open this channel's event", so the fallback must not fire."""
     channel_id = (channel_id or "").strip()
@@ -1023,6 +1024,7 @@ async def event_by_channel(channel_id: str):
 
     def _load():
         from db.models import EventChannel, GroupConfiguration
+        from services.activity_launch_core import pick_channel_event
 
         with db_session() as s:
             is_launcher_channel = (
@@ -1035,16 +1037,19 @@ async def event_by_channel(channel_id: str):
             )
             if is_launcher_channel:
                 return None
-            base = (
-                s.query(EventChannel.event_id)
-                .join(Event, Event.id == EventChannel.event_id)
+            rows = (
+                s.query(Event.id, Event.status, Event.starts_at,
+                        Event.ends_at, Event.ended_at)
+                .join(EventChannel, EventChannel.event_id == Event.id)
                 .filter(EventChannel.channel_id == channel_id)
+                .all()
             )
-            row = (
-                base.filter(Event.status == "active").order_by(Event.id.desc()).first()
-                or base.order_by(Event.id.desc()).first()
+            return pick_channel_event(
+                [{"id": r[0], "status": r[1], "starts_at": r[2],
+                  # A premature manual end moves the real finish line.
+                  "ends_at": r[4] or r[3]} for r in rows],
+                now=datetime.now(),
             )
-            return int(row[0]) if row else None
 
     event_id = await asyncio.to_thread(_load)
     return with_cache_headers(jsonify({"event_id": event_id}), max_age=30)

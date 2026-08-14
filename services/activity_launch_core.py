@@ -73,7 +73,11 @@ LAUNCH_EVENT_INFIX = ":e:"
 # after OAuth (web_api GET /events/launch-intent) and opens straight to that
 # event. Short TTL — it's a one-shot intent for the launch that just happened.
 LAUNCH_INTENT_PREFIX = "dt:activity:launch:"
-LAUNCH_INTENT_TTL = 120
+# Generous enough to cover a cold first launch — downloading the app shell and
+# clearing the OAuth consent screen can run well past a minute, and an intent
+# that expires mid-boot drops the launch onto the far vaguer channel fallback
+# (pick_channel_event). One-shot and user-scoped, so a longer window is cheap.
+LAUNCH_INTENT_TTL = 600
 
 # Group-config key a leader sets (in the registry); and the bot-managed row that
 # tracks the posted card as "channel_id:message_id" (NOT in the config registry).
@@ -172,6 +176,68 @@ def launch_intent_from_interaction(data: dict) -> "tuple[str, str] | None":
         return None
     event_id, view = target
     return user_id, (f"{event_id}:{view}" if view else event_id)
+
+
+# How long after an event ends its channel still counts as "about" it. Inside
+# this window a fresh "Final standings" post is plausibly the last thing anyone
+# read there, so the event stays in the running against a draft queued behind
+# it. Past it, the event is finished business and sorts behind anything dated.
+PAST_RELEVANCE_WINDOW = 72 * 3600
+
+
+def pick_channel_event(events, now):
+    """Which event a Discord channel is "about" right now — the anonymous
+    deep-link fallback used when a launch carries no explicit target (see
+    web_api ``GET /events/by-channel/<id>``).
+
+    ``events`` is an iterable of ``{"id", "status", "starts_at", "ends_at"}``
+    (datetimes or None; ``ends_at`` pre-coalesced with ``ended_at`` by the
+    caller). Returns the chosen event id, or None when there's nothing to pick.
+
+    Groups run events back to back out of one channel, so "which event" is a
+    question about *time*, not about which row was inserted last. Ranked by how
+    far ``now`` sits from each event's own window — 0 while it's running,
+    otherwise the gap to the nearest edge, whether that edge is behind or
+    ahead. Events that have nothing left to say for themselves — ended longer
+    ago than :data:`PAST_RELEVANCE_WINDOW`, or undated drafts — sort behind
+    everything else regardless of gap.
+
+    So an event starting in three days beats one queued for next month, a
+    just-ended event still beats a draft that's weeks out, and an event that
+    wrapped up a fortnight ago stops shadowing the one being set up now. An
+    ``active`` event is pinned to distance 0 — a running event is definitively
+    what its channel is about, whatever its stored dates say. Ties break on the
+    newest id.
+    """
+    ranked = []
+    seen = set()
+    for ev in events or []:
+        try:
+            event_id = int((ev or {}).get("id"))
+        except (TypeError, ValueError):
+            continue
+        # One event can point several channel kinds (announcements, completions,
+        # ...) at the same channel, so the caller's join yields duplicate rows.
+        if event_id in seen:
+            continue
+        seen.add(event_id)
+        status = (ev.get("status") or "").strip()
+        starts_at, ends_at = ev.get("starts_at"), ev.get("ends_at")
+        if status == "active":
+            tier, distance = 0, 0.0
+        elif starts_at is not None and now < starts_at:
+            tier, distance = 0, (starts_at - now).total_seconds()
+        elif ends_at is not None and now > ends_at:
+            distance = (now - ends_at).total_seconds()
+            tier = 0 if distance <= PAST_RELEVANCE_WINDOW else 1
+        elif starts_at is not None or ends_at is not None:
+            tier, distance = 0, 0.0  # now falls inside the event's own window
+        else:
+            tier, distance = 1, float("inf")  # undated draft — nothing to go on
+        ranked.append((tier, distance, 0 if status == "active" else 1, -event_id))
+    if not ranked:
+        return None
+    return -min(ranked)[3]
 
 
 def interaction_channel_type(data: dict):
