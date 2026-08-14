@@ -267,3 +267,22 @@ async def test_delete_missing_row_is_not_an_error(client, monkeypatch):
     _wire(monkeypatch, _S([]))
     resp = await client.delete("/api/v1/groups/2/notification-layouts/pb")
     assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_a_layout_that_no_longer_validates_reads_as_inactive(client, monkeypatch):
+    """Saved layouts are validated, so this means Discord's limits moved under
+    a stored template. The send path drops to the embed; the editor must not
+    keep claiming the type is live."""
+    row = FakeRow(
+        layout=json.dumps({"blocks": [{"type": "text", "content": "x" * 100_000}]}),
+        active=True,
+    )
+    batches = [[row] for _ in NOTIFICATION_TYPES]
+    _wire(monkeypatch, _S(*batches))
+    resp = await client.get("/api/v1/groups/2/notification-layouts")
+    body = await resp.get_json()
+    first = body["layouts"][0]
+    # Still returned, so the admin can see and fix it — just not called live.
+    assert first["custom"] is not None
+    assert first["active"] is False

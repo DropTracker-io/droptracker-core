@@ -182,12 +182,19 @@ async def list_group_notification_layouts(group_id: int):
             out = []
             for notification_type in cl.NOTIFICATION_TYPES:
                 row = _load_row(s, group_id, notification_type)
+                custom = _serialize_row(row) if row is not None else None
+                # "Live" must mean what load_active_layout means, or the editor
+                # says a type is sending components while it quietly sends its
+                # embed. A row that no longer parses, or no longer passes the
+                # current limits, is ignored by the send path — so it reads as
+                # not live here too.
+                live = bool(row is not None and row.active and custom)
+                if live and not cl.validate_layout(custom)[0]:
+                    live = False
                 out.append({
                     "notification_type": notification_type,
-                    "custom": _serialize_row(row) if row is not None else None,
-                    # A row whose JSON no longer parses reads as inactive here
-                    # for the same reason the send path ignores it.
-                    "active": bool(row is not None and row.active and _serialize_row(row)),
+                    "custom": custom,
+                    "active": live,
                     "default": _serialize_layout(cl.default_layout(notification_type)) or {
                         "accent_color": None, "blocks": []},
                     "updated_at": row.updated_at.isoformat() if row is not None and row.updated_at else None,
