@@ -454,6 +454,86 @@ class NotificationService:
             )
         return result
 
+    async def _try_send_component_layout(
+        self, db_session, notification, channel, group_id, notification_type, replacements
+    ):
+        """Send this notification as Components V2, if the group asked for it.
+
+        Returns the sent message when the group has an active layout for this
+        type and it rendered; None means "carry on and send the embed". Every
+        failure path returns None — no row, not active, unparseable JSON, a
+        stored layout that no longer validates, a render that produced nothing,
+        a component the adapter could not build — because a broken layout should
+        cost the customisation, never the notification. Discord refuses a
+        message carrying both, so this is either/or per notification.
+
+        The group-2 field stripping and the "X received a drop:" content line
+        the embed path adds have no equivalent here on purpose: with components
+        the author owns every line of the message.
+        """
+        try:
+            from services.component_layout import (
+                load_active_layout,
+                render_layout,
+                to_interactions_components,
+            )
+
+            layout = load_active_layout(db_session, group_id, notification_type)
+            if layout is None:
+                return None
+            rendered = render_layout(layout, replacements)
+            if rendered is None:
+                return None
+            components = to_interactions_components(rendered)
+            if not components:
+                return None
+        except Exception as exc:
+            print(f"Component layout render failed for group {group_id}/{notification_type}: {exc}")
+            return None
+
+        # Past this point a failure is a send failure, not a layout failure, so
+        # it propagates to the caller's handler like any other send would.
+        return await self._send(channel, components=components)
+
+    def _record_drop_notification(self, db_session, data, message, player_id, group_id):
+        """Remember that this drop was announced to this group.
+
+        ``_is_not_sent_with_session`` reads these rows, so a send path that
+        skips this one announces the same drop again the next time the row is
+        retried. Added to the session, not committed — the caller commits.
+        """
+        from db.models import Drop, NotifiedSubmission
+
+        if not message:
+            return
+        drop = db_session.query(Drop).filter(Drop.drop_id == data.get('drop_id')).first()
+        if not drop:
+            return
+        db_session.add(
+            NotifiedSubmission(
+                channel_id=str(message.channel.id),
+                player_id=player_id,
+                message_id=str(message.id),
+                group_id=group_id,
+                status="sent",
+                drop=drop,
+            )
+        )
+
+    async def _finish_component_send(self, db_session, notification, data):
+        """Close out a components send exactly as the embed paths close out theirs.
+
+        Marking the row and committing is not optional bookkeeping: the queue
+        loop sets 'processing' before dispatch and commits, so a sender that
+        returns without committing leaves the row 'processing' with a NULL
+        processed_at — which cleanup_stuck_notifications() then resets to
+        'pending' and the notification is sent all over again.
+        """
+        await self._cleanup_processed_local_video_after_send(db_session, data)
+        notification.status = 'sent'
+        notification.processed_at = datetime.now()
+        db_session.commit()
+
     @classmethod
     def _remote_image_allowed(cls, image_url: str) -> bool:
         """Only fetch images from hosts we actually expect.
@@ -1262,6 +1342,12 @@ class NotificationService:
             }
             replacements.update(self._plugin_version_placeholder_map(data))
 
+            if await self._try_send_component_layout(
+                db_session, notification, channel, group_id, "level_up", replacements
+            ):
+                await self._finish_component_send(db_session, notification, data)
+                return
+
             embed = replace_placeholders(embed_template, replacements)
             if group_id == 2:
                 embed = await self.remove_group_field(embed)
@@ -1446,25 +1532,33 @@ class NotificationService:
             video_url = self._maybe_get_video_url(db_session, data)
 
             formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
-            if embed_template:
-                replacements = {
-                    "{player_name}": player_link(player_name, player_id),
-                    "{player_name_plain}": player_name,
-                    "{quest_name}": str(quest_name),
-                    "{quests_completed}": str(data.get("quests_completed") or ""),
-                    "{total_quests}": str(data.get("total_quests") or ""),
-                    "{completion_percentage}": str(data.get("completion_percentage") or ""),
-                    "{quest_points}": str(data.get("quest_points") or ""),
-                    "{total_quest_points}": str(data.get("total_quest_points") or ""),
-                    "{qp_percentage}": str(data.get("qp_percentage") or ""),
-                    "{timestamp}": str(data.get("timestamp") or ""),
-                    "{video_url}": video_url or "",
-                    "{video_link}": f"[Video]({video_url})" if video_url else "",
-                    # Prefer video for display; keep screenshot in data["image_url"] for attachments
-                    "{image_url}": video_url or image_url or "",
-                }
-                replacements.update(self._plugin_version_placeholder_map(data))
+            # Built whether or not there is an embed template: a components
+            # layout resolves the same placeholders and is checked first.
+            replacements = {
+                "{player_name}": player_link(player_name, player_id),
+                "{player_name_plain}": player_name,
+                "{quest_name}": str(quest_name),
+                "{quests_completed}": str(data.get("quests_completed") or ""),
+                "{total_quests}": str(data.get("total_quests") or ""),
+                "{completion_percentage}": str(data.get("completion_percentage") or ""),
+                "{quest_points}": str(data.get("quest_points") or ""),
+                "{total_quest_points}": str(data.get("total_quest_points") or ""),
+                "{qp_percentage}": str(data.get("qp_percentage") or ""),
+                "{timestamp}": str(data.get("timestamp") or ""),
+                "{video_url}": video_url or "",
+                "{video_link}": f"[Video]({video_url})" if video_url else "",
+                # Prefer video for display; keep screenshot in data["image_url"] for attachments
+                "{image_url}": video_url or image_url or "",
+            }
+            replacements.update(self._plugin_version_placeholder_map(data))
 
+            if await self._try_send_component_layout(
+                db_session, notification, channel, group_id, "quest", replacements
+            ):
+                await self._finish_component_send(db_session, notification, data)
+                return
+
+            if embed_template:
                 embed = replace_placeholders(embed_template, replacements)
                 if group_id == 2:
                     embed = await self.remove_group_field(embed)
@@ -1563,22 +1657,30 @@ class NotificationService:
             video_url = self._maybe_get_video_url(db_session, data)
 
             formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
-            if embed_template:
-                replacements = {
-                    "{player_name}": player_link(player_name, player_id),
-                    "{player_name_plain}": player_name,
-                    "{source}": str(source),
-                    "{killer}": str(source),
-                    "{location}": str(location),
-                    "{region_id}": str(data.get("region_id") or ""),
-                    "{timestamp}": str(data.get("timestamp") or ""),
-                    "{video_url}": video_url or "",
-                    "{video_link}": f"[Video]({video_url})" if video_url else "",
-                    # Prefer video for display; keep screenshot in data["image_url"] for attachments
-                    "{image_url}": video_url or image_url or "",
-                }
-                replacements.update(self._plugin_version_placeholder_map(data))
+            # Built whether or not there is an embed template: a components
+            # layout resolves the same placeholders and is checked first.
+            replacements = {
+                "{player_name}": player_link(player_name, player_id),
+                "{player_name_plain}": player_name,
+                "{source}": str(source),
+                "{killer}": str(source),
+                "{location}": str(location),
+                "{region_id}": str(data.get("region_id") or ""),
+                "{timestamp}": str(data.get("timestamp") or ""),
+                "{video_url}": video_url or "",
+                "{video_link}": f"[Video]({video_url})" if video_url else "",
+                # Prefer video for display; keep screenshot in data["image_url"] for attachments
+                "{image_url}": video_url or image_url or "",
+            }
+            replacements.update(self._plugin_version_placeholder_map(data))
 
+            if await self._try_send_component_layout(
+                db_session, notification, channel, group_id, "death", replacements
+            ):
+                await self._finish_component_send(db_session, notification, data)
+                return
+
+            if embed_template:
                 embed = replace_placeholders(embed_template, replacements)
                 if group_id == 2:
                     embed = await self.remove_group_field(embed)
@@ -1677,20 +1779,28 @@ class NotificationService:
             video_url = self._maybe_get_video_url(db_session, data)
 
             formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
-            if embed_template:
-                replacements = {
-                    "{player_name}": player_link(player_name, player_id),
-                    "{player_name_plain}": player_name,
-                    "{diary_name}": str(diary_name),
-                    "{diary_tier}": str(diary_tier),
-                    "{timestamp}": str(data.get("timestamp") or ""),
-                    "{video_url}": video_url or "",
-                    "{video_link}": f"[Video]({video_url})" if video_url else "",
-                    # Prefer video for display; keep screenshot in data["image_url"] for attachments
-                    "{image_url}": video_url or image_url or "",
-                }
-                replacements.update(self._plugin_version_placeholder_map(data))
+            # Built whether or not there is an embed template: a components
+            # layout resolves the same placeholders and is checked first.
+            replacements = {
+                "{player_name}": player_link(player_name, player_id),
+                "{player_name_plain}": player_name,
+                "{diary_name}": str(diary_name),
+                "{diary_tier}": str(diary_tier),
+                "{timestamp}": str(data.get("timestamp") or ""),
+                "{video_url}": video_url or "",
+                "{video_link}": f"[Video]({video_url})" if video_url else "",
+                # Prefer video for display; keep screenshot in data["image_url"] for attachments
+                "{image_url}": video_url or image_url or "",
+            }
+            replacements.update(self._plugin_version_placeholder_map(data))
 
+            if await self._try_send_component_layout(
+                db_session, notification, channel, group_id, "diary", replacements
+            ):
+                await self._finish_component_send(db_session, notification, data)
+                return
+
+            if embed_template:
                 embed = replace_placeholders(embed_template, replacements)
                 if group_id == 2:
                     embed = await self.remove_group_field(embed)
@@ -2947,7 +3057,27 @@ class NotificationService:
             values.update(self._group_points_placeholder_map(data))
             values.update(self._plugin_version_placeholder_map(data))
             #print("Sending to replace_placeholders")
-            
+
+            component_message = await self._try_send_component_layout(
+                db_session, notification, channel, group_id, "drop", values
+            )
+            if component_message is not None:
+                # The temp download the embed path would have attached is not
+                # used here — a components layout links the hosted URL — but it
+                # still has to be cleaned up.
+                if image_temp_path:
+                    try:
+                        os.remove(image_temp_path)
+                    except Exception:
+                        pass
+                # The NotifiedSubmission row is what stops this drop being
+                # announced a second time, so this path must write it too.
+                self._record_drop_notification(
+                    db_session, data, component_message, player_id, group_id
+                )
+                await self._finish_component_send(db_session, notification, data)
+                return
+
             embed = replace_placeholders(embed_template, values)
             embed = self._finalize_group_points_embed(embed)
             if group_id == 2:
@@ -2985,22 +3115,9 @@ class NotificationService:
             await self._cleanup_processed_local_video_after_send(db_session, data)
             notification.status = 'sent'
             notification.processed_at = datetime.now()
-            
-            # Create NotifiedSubmission entry
-            from db.models import Drop
-            drop = db_session.query(Drop).filter(Drop.drop_id == data.get('drop_id')).first()
-            
-            if drop and message:
-                notified_sub = NotifiedSubmission(
-                    channel_id=str(message.channel.id),
-                    player_id=player_id,
-                    message_id=str(message.id),
-                    group_id=group_id,
-                    status="sent",
-                    drop=drop
-                )
-                db_session.add(notified_sub)
-            
+
+            self._record_drop_notification(db_session, data, message, player_id, group_id)
+
             db_session.commit()
 
         except Exception as e:
@@ -3447,38 +3564,17 @@ class NotificationService:
             replacements["{gear_image_url}"] = self._gear_image_url(player_id)
 
             # Components V2, when this group has an active layout for personal
-            # bests. Everyone else keeps the embed exactly as before — Discord
-            # will not accept both in one message, so this is either/or, and any
-            # failure here falls through to the embed rather than dropping the
-            # notification.
-            component_payload = None
-            try:
-                from services.component_layout import (
-                    load_active_layout,
-                    render_layout,
-                    to_interactions_components,
-                )
+            # bests; everyone else keeps the embed exactly as before.
+            if await self._try_send_component_layout(
+                db_session, notification, channel, group_id, "pb", replacements
+            ):
+                await self._finish_component_send(db_session, notification, data)
+                return
 
-                layout = load_active_layout(db_session, group_id, "pb")
-                if layout is not None:
-                    rendered = render_layout(layout, replacements)
-                    if rendered is not None:
-                        component_payload = to_interactions_components(rendered)
-            except Exception as exc:
-                print(f"Component layout render failed for group {group_id}: {exc}")
-                component_payload = None
-            
             embed = replace_placeholders(embed_template, replacements)
             embed = self._finalize_group_points_embed(embed)
-            
-            # Send message
-            if component_payload is not None:
-                # A V2 message carries no content and no embeds; everything the
-                # message says lives inside the components.
-                sent = await self._send(channel, components=component_payload)
-                notification.status = 'sent'
-                return sent
 
+            # Send message
             content = f"{formatted_name} has achieved a new personal best:"
             video_attachment, video_local_path = (None, None)
             if video_url:
@@ -3586,11 +3682,17 @@ class NotificationService:
             channel, channel_error = await self._fetch_sendable_channel(channel_id_config.config_value)
             formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
             if channel:
+                if await self._try_send_component_layout(
+                    db_session, notification, channel, group_id, "pet", value_dict
+                ):
+                    await self._finish_component_send(db_session, notification, data)
+                    return
+
                 embed = replace_placeholders(embed_template, value_dict)
                 embed = self._finalize_group_points_embed(embed)
                 if group_id == 2:
                     embed = await self.remove_group_field(embed)
-                
+
                 content = f"{formatted_name} has acquired a new pet!"
                 video_attachment, video_local_path = (None, None)
                 if video_url:
@@ -3745,10 +3847,16 @@ class NotificationService:
             value_dict["{video_link}"] = f"[Video]({video_url})" if video_url else ""
             # Prefer video for display; keep screenshot in data["image_url"] for attachments
             value_dict["{image_url}"] = video_url or (data.get("image_url") or "")
-            
+
+            if await self._try_send_component_layout(
+                db_session, notification, channel, group_id, "ca", value_dict
+            ):
+                await self._finish_component_send(db_session, notification, data)
+                return
+
             embed = replace_placeholders(embed_template, value_dict)
             embed = self._finalize_group_points_embed(embed)
-            
+
             # Send message
             formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
             content = f"{formatted_name} has completed a combat achievement!"
@@ -3871,10 +3979,16 @@ class NotificationService:
             replacements["{video_link}"] = f"[Video]({video_url})" if video_url else ""
             # Prefer video for display; keep screenshot in data["image_url"] for attachments
             replacements["{image_url}"] = video_url or (data.get("image_url") or "")
-            
+
+            if await self._try_send_component_layout(
+                db_session, notification, channel, group_id, "clog", replacements
+            ):
+                await self._finish_component_send(db_session, notification, data)
+                return
+
             embed = replace_placeholders(embed_template, replacements)
             embed = self._finalize_group_points_embed(embed)
-            
+
             # Send message
             formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
             content = f"{formatted_name} has added an item to their collection log!"

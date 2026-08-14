@@ -346,11 +346,308 @@ def _render_block(block: Dict[str, Any], replacements: Dict[str, Any]) -> Option
     return None
 
 
+# ── Notification types ───────────────────────────────────────────────────────
+# The types a group may author a layout for. Deliberately the embed template
+# types minus "lb": the lootboard message is an image the bot edits in place,
+# not a notification, and has no send path to branch.
+NOTIFICATION_TYPES = (
+    "drop",
+    "clog",
+    "pb",
+    "ca",
+    "pet",
+    "level_up",
+    "quest",
+    "death",
+    "diary",
+)
+
+
+# ── Editor metadata ──────────────────────────────────────────────────────────
+# What the builder needs to know about the DSL, served by
+# web_api/routes/notification_layouts.py so the editor and the renderer cannot
+# drift. Same shape as event_message_layouts.TOKEN_DOCS/TYPE_META, because a
+# group admin should be looking at one system rather than two dialects.
+#
+# ``sample`` drives the editor's live preview. ``optional`` marks a token that
+# is frequently absent in production — no screenshot, no character model, no
+# points awarded — which is what makes a line vanish; the editor blanks those
+# in its "missing values" preview so an author can see the sparse message
+# before their members do.
+_COMMON_TOKENS = ("player_name", "player_name_plain", "plugin_version")
+
+_MEDIA_TOKENS = ("image_url", "video_url", "video_link")
+
+_POINTS_TOKENS = (
+    "group_points_awarded",
+    "group_points_receiver_total",
+    "group_points_member_count",
+    "group_points_members_awarded",
+)
+
+TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
+    # Shared
+    "player_name": {
+        "help": "The player, as a link to their profile",
+        "sample": "[RuneLite Ron](https://www.droptracker.io/players/1)",
+    },
+    "player_name_plain": {"help": "The player's name with no link", "sample": "RuneLite Ron"},
+    "plugin_version": {
+        "help": "Plugin version that sent this (empty for manual submissions)",
+        "sample": "5.5.0",
+        "optional": True,
+    },
+    "image_url": {
+        "help": "Screenshot (or video, when one was recorded). Empty when the player sent neither",
+        "sample": "https://www.droptracker.io/img/proofs/sample.png",
+        "optional": True,
+    },
+    "video_url": {
+        "help": "Recorded video, when there is one",
+        "sample": "https://www.droptracker.io/vid/sample.mp4",
+        "optional": True,
+    },
+    "video_link": {
+        "help": "Markdown link to the video",
+        "sample": "[Video](https://www.droptracker.io/vid/sample.mp4)",
+        "optional": True,
+    },
+    "gear_image_url": {
+        "help": "The player's rendered character, when they have uploaded one",
+        "sample": "https://www.droptracker.io/img/gear/sample.png",
+        "optional": True,
+    },
+    # Group points (only present when points were actually awarded)
+    "group_points_awarded": {
+        "help": "Points this event awarded",
+        "sample": "12",
+        "optional": True,
+    },
+    "group_points_receiver_total": {
+        "help": "The receiver's running point total",
+        "sample": "340",
+        "optional": True,
+    },
+    "group_points_member_count": {
+        "help": "How many members shared the award",
+        "sample": "4",
+        "optional": True,
+    },
+    "group_points_members_awarded": {
+        "help": "The members who shared the award",
+        "sample": "RuneLite Ron, Zezima",
+        "optional": True,
+    },
+    # Drop
+    "item_name": {"help": "Item name (linked to the wiki)", "sample": "Twisted bow"},
+    "item_id": {
+        "help": "OSRS item id — an icon is https://www.droptracker.io/img/itemdb/{item_id}.png",
+        "sample": "20997",
+    },
+    "item_value": {"help": "Value of the drop, stacks spelled out", "sample": "`1.2B`"},
+    "quantity": {"help": "How many were received", "sample": "`1`"},
+    "total_value": {"help": "Stack value (value x quantity)", "sample": "`1204000000`"},
+    "npc_name": {"help": "The source — NPC, raid or chest", "sample": "Chambers of Xeric"},
+    "npc_id": {
+        "help": "NPC id — an icon is https://www.droptracker.io/img/npcdb/{npc_id}.png",
+        "sample": "7530",
+    },
+    "kill_count": {"help": "Kill count at the drop", "sample": "1,204"},
+    "month_name": {"help": "The current month", "sample": "August"},
+    "player_total_month": {"help": "The player's loot this month", "sample": "`48.2M`"},
+    "group_total_month": {"help": "The group's loot this month", "sample": "`1.2B`"},
+    "group_total": {"help": "The group's all-time tracked loot", "sample": "`14.7B`"},
+    "global_rank": {"help": "The player's rank across every group", "sample": "`142`/`8,204`"},
+    "group_rank": {"help": "The player's rank inside the group", "sample": "`3`/`86`"},
+    "group_to_group_rank": {"help": "The group's rank against other groups", "sample": "`17`/`420`"},
+    "user_count": {"help": "Tracked members in the group", "sample": "`86`"},
+    # Collection log
+    "collection_name": {"help": "The collection the item belongs to", "sample": "Chambers of Xeric"},
+    "kc_received": {"help": "Kill count when the slot was filled", "sample": "412"},
+    "player_loot_month": {"help": "The player's loot this month", "sample": "48.2M"},
+    "total_tracked": {"help": "Tracked members in the group", "sample": "86"},
+    # Personal best
+    "personal_best": {"help": "The new best time", "sample": "14:23.40"},
+    "team_size": {"help": "Team size for the kill", "sample": "4"},
+    "total_ranked_global": {"help": "Players ranked globally at this boss", "sample": "4120"},
+    "total_ranked_group": {"help": "Group members ranked at this boss", "sample": "22"},
+    # Combat achievements
+    "task_name": {"help": "The combat achievement completed", "sample": "Perfect Zulrah"},
+    "task_tier": {"help": "The task's tier", "sample": "Elite"},
+    "points_awarded": {"help": "Combat achievement points from this task", "sample": "4"},
+    "total_points": {"help": "The player's total combat achievement points", "sample": "1286"},
+    "current_tier": {"help": "The player's current tier", "sample": "Master"},
+    "next_tier": {"help": "The next tier up", "sample": "Grandmaster"},
+    "next_tier_points": {"help": "Points needed for the next tier", "sample": "2005"},
+    "points_left": {"help": "Points still to go", "sample": "719"},
+    "progress": {"help": "Progress toward the next tier", "sample": "64%"},
+    # Pets
+    "pet_name": {"help": "The pet's name", "sample": "Olmlet"},
+    "source": {"help": "Where it came from", "sample": "Chambers of Xeric"},
+    "killcount": {"help": "Kill count at the pet", "sample": "1432"},
+    "milestone": {"help": "Milestone text (same as the kill count)", "sample": "1432"},
+    "duplicate": {"help": "Whether this pet was already owned", "sample": "No"},
+    "previously_owned": {"help": "Whether the player has owned it before", "sample": "No"},
+    # Level ups
+    "skill_name": {"help": "The skill that levelled", "sample": "Slayer"},
+    "skills_names": {"help": "Every skill that levelled at once", "sample": "Slayer, Attack"},
+    "skills_text": {"help": "Formatted level-up summary", "sample": "Slayer 99 (+1)"},
+    "new_level": {"help": "The new level", "sample": "99"},
+    "levels_gained": {"help": "Levels gained", "sample": "1"},
+    "xp_total": {"help": "XP in that skill", "sample": "13,034,431"},
+    "total_level": {"help": "The player's total level", "sample": "2154"},
+    "total_xp": {"help": "The player's total XP", "sample": "312,441,092"},
+    "combat_level": {"help": "The player's combat level", "sample": "126"},
+    # Quests
+    "quest_name": {"help": "The quest completed", "sample": "Desert Treasure II"},
+    "quests_completed": {"help": "Quests completed", "sample": "158"},
+    "total_quests": {"help": "Quests in the game", "sample": "165"},
+    "completion_percentage": {"help": "Quest completion", "sample": "96%"},
+    "quest_points": {"help": "Quest points from this quest", "sample": "5"},
+    "total_quest_points": {"help": "The player's total quest points", "sample": "293"},
+    "qp_percentage": {"help": "Quest point completion", "sample": "94%"},
+    "timestamp": {"help": "When it happened", "sample": "today", "optional": True},
+    # Deaths
+    "killer": {"help": "What killed the player", "sample": "Vorkath"},
+    "location": {"help": "Where they died", "sample": "Ungael"},
+    "region_id": {"help": "OSRS region id", "sample": "9023", "optional": True},
+    # Diaries
+    "diary_name": {"help": "The diary area", "sample": "Kourend & Kebos"},
+    "diary_tier": {"help": "The tier completed", "sample": "Elite"},
+}
+
+# {type: {"label", "group", "description", "tokens"}} — ``tokens`` extends
+# _COMMON_TOKENS and is the editor's display order.
+TYPE_META: Dict[str, Dict[str, Any]] = {
+    "drop": {
+        "label": "Drop",
+        "group": "Loot",
+        "description": "Posted when a member receives a drop worth announcing.",
+        "tokens": ("item_name", "item_id", "item_value", "quantity", "total_value",
+                   "npc_name", "npc_id", "kill_count", "month_name", "player_total_month",
+                   "group_total_month", "group_total", "global_rank", "group_rank",
+                   "group_to_group_rank", "user_count") + _POINTS_TOKENS + _MEDIA_TOKENS,
+    },
+    "clog": {
+        "label": "Collection log",
+        "group": "Loot",
+        "description": "Posted when a member fills a collection log slot.",
+        "tokens": ("item_name", "item_id", "collection_name", "npc_name", "kc_received",
+                   "player_loot_month", "total_tracked") + _POINTS_TOKENS + _MEDIA_TOKENS,
+    },
+    "pb": {
+        "label": "Personal best",
+        "group": "Achievements",
+        "description": "Posted when a member sets a new personal best time.",
+        "tokens": ("npc_name", "npc_id", "personal_best", "team_size", "global_rank",
+                   "total_ranked_global", "group_rank", "total_ranked_group",
+                   "gear_image_url") + _POINTS_TOKENS + _MEDIA_TOKENS,
+    },
+    "ca": {
+        "label": "Combat achievement",
+        "group": "Achievements",
+        "description": "Posted when a member completes a combat achievement task.",
+        "tokens": ("task_name", "task_tier", "points_awarded", "total_points", "current_tier",
+                   "next_tier", "next_tier_points", "points_left",
+                   "progress") + _POINTS_TOKENS + _MEDIA_TOKENS,
+    },
+    "pet": {
+        "label": "Pet",
+        "group": "Achievements",
+        "description": "Posted when a member receives a pet.",
+        "tokens": ("pet_name", "source", "npc_name", "killcount", "milestone", "duplicate",
+                   "previously_owned") + _POINTS_TOKENS + _MEDIA_TOKENS,
+    },
+    "level_up": {
+        "label": "Level up",
+        "group": "Progress",
+        "description": "Posted when a member reaches a new level.",
+        "tokens": ("skill_name", "skills_names", "skills_text", "new_level", "levels_gained",
+                   "xp_total", "total_level", "total_xp", "combat_level") + _MEDIA_TOKENS,
+    },
+    "quest": {
+        "label": "Quest",
+        "group": "Progress",
+        "description": "Posted when a member completes a quest.",
+        "tokens": ("quest_name", "quests_completed", "total_quests", "completion_percentage",
+                   "quest_points", "total_quest_points", "qp_percentage",
+                   "timestamp") + _MEDIA_TOKENS,
+    },
+    "death": {
+        "label": "Death",
+        "group": "Progress",
+        "description": "Posted when a member dies.",
+        "tokens": ("source", "killer", "location", "region_id", "timestamp") + _MEDIA_TOKENS,
+    },
+    "diary": {
+        "label": "Achievement diary",
+        "group": "Progress",
+        "description": "Posted when a member completes an achievement diary.",
+        "tokens": ("diary_name", "diary_tier", "timestamp") + _MEDIA_TOKENS,
+    },
+}
+
+
+def tokens_for(notification_type: str) -> List[Dict[str, Any]]:
+    """Documented tokens for one type, in the editor's display order."""
+    meta = TYPE_META.get(notification_type) or {}
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for token in tuple(_COMMON_TOKENS) + tuple(meta.get("tokens") or ()):
+        if token in seen:
+            continue
+        seen.add(token)
+        doc = TOKEN_DOCS.get(token) or {}
+        out.append({
+            "token": token,
+            "help": doc.get("help") or "",
+            "sample": doc.get("sample", ""),
+            "optional": bool(doc.get("optional")),
+        })
+    return out
+
+
 # ── Defaults ─────────────────────────────────────────────────────────────────
 # Starting points a group can edit, rather than a blank editor. The personal
 # best layout mirrors services/pb_components.py, so switching a group over
-# produces what the samples showed.
+# produces what the samples showed; the rest follow the same shape — a headline
+# line, the subject beside its icon, the stats worth reading, then the proof.
+#
+# Each is written so that a player with no screenshot, no character model and
+# no points awarded still produces a message: every line that can be absent
+# holds its token alone, so losing the value loses the line and nothing else.
+_ITEM_ICON = "https://www.droptracker.io/img/itemdb/{item_id}.png"
+
 DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
+    "drop": {
+        "accent_color": "#c8aa6e",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** received a drop"},
+            {"type": "separator", "divider": True},
+            {
+                "type": "section",
+                "content": "### {item_name}\n## {item_value}\nfrom **{npc_name}**",
+                "thumbnail": _ITEM_ICON,
+            },
+            {"type": "text", "content": "**Kill count** {kill_count}"},
+            {"type": "text", "content": "**Points** {group_points_awarded}"},
+            {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
+    "clog": {
+        "accent_color": "#c8aa6e",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** filled a collection log slot"},
+            {"type": "separator", "divider": True},
+            {
+                "type": "section",
+                "content": "### {item_name}\n{collection_name}",
+                "thumbnail": _ITEM_ICON,
+            },
+            {"type": "text", "content": "**Kill count** {kc_received}"},
+            {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
     "pb": {
         "accent_color": "#c8aa6e",
         "blocks": [
@@ -362,6 +659,64 @@ DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
                 "thumbnail": "{gear_image_url}",
             },
             {"type": "text", "content": "**Team size** {team_size}  •  **Global rank** {global_rank}"},
+            {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
+    "ca": {
+        "accent_color": "#c8aa6e",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** completed a combat achievement"},
+            {"type": "separator", "divider": True},
+            {"type": "text", "content": "### {task_name}\n{task_tier} • **{points_awarded}** points"},
+            {"type": "text", "content": "-# {progress} of the way to {next_tier}"},
+            {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
+    "pet": {
+        "accent_color": "#c8aa6e",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** has a new pet"},
+            {"type": "separator", "divider": True},
+            {"type": "text", "content": "### {pet_name}\nfrom **{source}** at **{killcount}** kc"},
+            {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
+    "level_up": {
+        "accent_color": "#c8aa6e",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** levelled up"},
+            {"type": "separator", "divider": True},
+            {"type": "text", "content": "### {skills_text}"},
+            {"type": "text", "content": "**Total level** {total_level}  •  **Combat** {combat_level}"},
+            {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
+    "quest": {
+        "accent_color": "#c8aa6e",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** completed a quest"},
+            {"type": "separator", "divider": True},
+            {"type": "text", "content": "### {quest_name}"},
+            {"type": "text", "content": "**{quests_completed}**/**{total_quests}** quests • **{total_quest_points}** quest points"},
+            {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
+    "death": {
+        "accent_color": "#8b2f2f",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** died"},
+            {"type": "separator", "divider": True},
+            {"type": "text", "content": "### Killed by {killer}"},
+            {"type": "text", "content": "-# {location}"},
+            {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
+    "diary": {
+        "accent_color": "#c8aa6e",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** completed an achievement diary"},
+            {"type": "separator", "divider": True},
+            {"type": "text", "content": "### {diary_name}\n{diary_tier}"},
             {"type": "media", "urls": ["{image_url}"]},
         ],
     },

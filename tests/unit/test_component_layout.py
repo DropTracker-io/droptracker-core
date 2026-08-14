@@ -38,6 +38,17 @@ class TestValidation:
         ok, errors = validate_layout(default_layout("pb"))
         assert ok, errors
 
+    def test_every_shipped_default_is_saveable(self):
+        """The defaults seed the editor, so one that failed its own validator
+        would greet the author with errors on a layout they never touched."""
+        from services.component_layout import NOTIFICATION_TYPES
+
+        for notification_type in NOTIFICATION_TYPES:
+            layout = default_layout(notification_type)
+            assert layout, f"{notification_type} has no default layout"
+            ok, errors = validate_layout(layout)
+            assert ok, f"{notification_type}: {errors}"
+
     def test_requires_at_least_one_block(self):
         ok, errors = validate_layout({"blocks": []})
         assert not ok and errors
@@ -179,3 +190,40 @@ class TestPilotGating:
 
         assert components_enabled_for_group(None) is False
         assert components_enabled_for_group("two") is False
+
+
+class TestDefaultsDegradeGracefully:
+    """The defaults are what a group sees first, and most notifications are
+    sparse: no screenshot, no character model, no points awarded. A default
+    that rendered nothing in that case would silently fall back to the embed
+    and look like the feature was never switched on."""
+
+    def _bare_values(self, notification_type):
+        """Only the tokens a notification of this type always has, with every
+        optional one blank."""
+        from services.component_layout import tokens_for
+
+        values = {}
+        for doc in tokens_for(notification_type):
+            values[f"{{{doc['token']}}}"] = "" if doc["optional"] else f"<{doc['token']}>"
+        return values
+
+    def test_every_default_still_says_something_for_a_bare_player(self):
+        from services.component_layout import NOTIFICATION_TYPES
+
+        for notification_type in NOTIFICATION_TYPES:
+            payload = render_layout(
+                default_layout(notification_type), self._bare_values(notification_type))
+            assert payload is not None, f"{notification_type} rendered nothing"
+            assert any(c["type"] != 14 for c in blocks_of(payload)), notification_type
+
+    def test_optional_tokens_take_their_line_with_them(self):
+        """The drop default puts the points line on its own line precisely so
+        that a group with points disabled loses the line, not the message."""
+        values = self._bare_values("drop")
+        payload = render_layout(default_layout("drop"), values)
+        text = "\n".join(
+            c.get("content", "") for c in blocks_of(payload) if c["type"] == 10)
+        assert "group_points_awarded" not in text
+        assert "<item_name>" in "\n".join(
+            str(c) for c in blocks_of(payload))
