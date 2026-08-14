@@ -17,16 +17,58 @@ import os
 
 from quart import Blueprint, Response, jsonify, request
 
-from web_api.common import hidden_player_ids
+from web_api.common import group_ignored_player_ids, hidden_player_ids
 from web_api.deps import optional_user_id
 
 realtime_bp = Blueprint("v1_realtime", __name__)
 
+_CHANNEL_PREFIX = "rt:"
+_GROUP_SCOPE_PREFIX = "group:"
 
-async def _is_hidden_event(frame: str) -> bool:
-    """True when an rt:* frame belongs to a hidden player (privacy filter for
-    the live feed/leaderboard deltas). Best-effort: unparseable or player-less
-    frames pass through."""
+
+def _frame_scope(channel) -> str:
+    """The scope a frame arrived on: ``rt:group:42`` -> ``group:42``.
+
+    Taken from the Redis channel rather than the envelope's own ``scope`` field
+    because the channel is what actually decides who receives the frame — it is
+    the authoritative input to a privacy filter.
+    """
+    if isinstance(channel, (bytes, bytearray)):
+        channel = channel.decode("utf-8", "ignore")
+    channel = channel or ""
+    if channel.startswith(_CHANNEL_PREFIX):
+        return channel[len(_CHANNEL_PREFIX):]
+    return channel
+
+
+def _scope_group_id(scope: str):
+    """The group id a ``group:{id}`` scope names, else None."""
+    if not scope or not scope.startswith(_GROUP_SCOPE_PREFIX):
+        return None
+    try:
+        return int(scope[len(_GROUP_SCOPE_PREFIX):])
+    except (TypeError, ValueError):
+        return None
+
+
+async def _is_hidden_event(frame: str, scope: str = "") -> bool:
+    """True when an rt:* frame names a player the scope's viewers must not see.
+
+    Two independent hiding layers, and they have different reach:
+
+    * **Global** (``players.hidden`` / ``users.hidden``, via
+      ``hidden_player_ids``) — the player opted out of every public surface, so
+      this applies on every scope.
+    * **Per-group** (an ``ignored_players`` row, written when a group's leaders
+      hide a member from the admin member listing) — applies ONLY to
+      ``group:{id}`` frames, and only for the group that did the hiding. The
+      hide is group-scoped: it must not follow the player onto the global/feed
+      scopes, their own ``player:`` feed, or another group's feed. The
+      lootboards and (2026-08-14) the Discord notifications already honour it;
+      this stream was the last surface still showing hidden members.
+
+    Best-effort: unparseable or player-less frames pass through.
+    """
     try:
         envelope = json.loads(frame)
         # Only these carry a player id in `data` ("id"/"player_id" mean other
@@ -42,7 +84,15 @@ async def _is_hidden_event(frame: str) -> bool:
         if not isinstance(pid, int):
             return False
         hidden = await asyncio.to_thread(hidden_player_ids)
-        return pid in hidden
+        if pid in hidden:
+            return True
+        group_id = _scope_group_id(scope)
+        if group_id is None:
+            return False
+        # Both lookups cache ~60s in-process, so this stays off the DB on the
+        # per-frame hot path.
+        ignored = await asyncio.to_thread(group_ignored_player_ids, group_id)
+        return pid in ignored
     except Exception:
         return False
 
@@ -257,7 +307,9 @@ async def stream():
                     data = message.get("data")
                     if isinstance(data, (bytes, bytearray)):
                         data = data.decode("utf-8", "ignore")
-                    if await _is_hidden_event(data):
+                    # The channel, not the envelope, decides which hiding rules
+                    # apply — a connection can hold several scopes at once.
+                    if await _is_hidden_event(data, _frame_scope(message.get("channel"))):
                         continue
                     yield f"data: {data}\n\n".encode("utf-8")
 

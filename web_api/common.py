@@ -317,6 +317,47 @@ def hidden_player_ids() -> set:
     return out
 
 
+def group_ignored_player_ids(group_id) -> set:
+    """Set of player ids one group's leaders hid from that group's surfaces.
+
+    The second, group-scoped hiding layer: leaders toggle it on the admin member
+    listing (PATCH /api/v1/groups/{id}/hidden-players), which writes an
+    ``ignored_players`` row. Unlike ``hidden_player_ids`` above this is NOT
+    global — the player stays fully visible everywhere else, including in other
+    groups' surfaces — so callers must only apply it to that same group's reads.
+
+    Cached per group ~60s and fails open, matching ``hidden_player_ids``: a
+    transient DB fault must not take down the reads it filters.
+    """
+    try:
+        gid = int(group_id)
+    except (TypeError, ValueError):
+        return set()
+    if gid <= 0:
+        return set()
+
+    key = f"privacy:ignored_pids:{gid}"
+    cached = cache_get(key, _HIDDEN_TTL)
+    if cached is not None:
+        return cached
+
+    from db import IgnoredPlayer
+
+    out: set = set()
+    try:
+        with db_session() as s:
+            rows = (
+                s.query(IgnoredPlayer.player_id)
+                .filter(IgnoredPlayer.group_id == gid)
+                .all()
+            )
+            out = {int(pid) for (pid,) in rows}
+    except Exception:
+        out = set()
+    cache_set(key, out)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Slugs / "nice URLs" (web_api/routes/resolve.py + `canonical_slug` on the
 # group/player/npc/item detail payloads).
