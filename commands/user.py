@@ -439,8 +439,12 @@ class UserCommands(Extension):
                           "That's it!")
             if result.get("group_id") and result["group_id"] != 2:
                 embed.add_field(name="Group", value=f"You've been added to **{result.get('group_name')}**.", inline=False)
-            embed.add_field(name=f"What's next?",value=f"If you'd like, you can [register an account on our website](https://www.droptracker.io/register) to stay informed " +
-                            "on updates & to make your voice heard relating to bugs & suggestions.",inline=False)
+            embed.add_field(name=f"What's next?",value=f"**Configure your account settings**\n" + 
+                            "You can visit [our website](https://www.droptracker.io/), and sign-in with your Discord account to access privacy and visibility settings for your characters.\n" + 
+			                "**Do you have <:Construction:1533062962418417704> 83 Construction?**\n" +
+                            "> You can visit your Adventure Log (Achievement Gallery room of your own POH) to load all of your existing personal bests into our database instantly.\n" + 
+			                "**Open your Collection Log**\n" + 
+			                f"> Upload all (un)locked Collection Log slots instantly--just open the interface with our plugin enabled, then visit [your profile](https://www.droptracker.io/players/{result.get('player_name')})!", inline=False)
             embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
             embed.set_footer(text="Powered by the DropTracker | https://www.droptracker.io/")
             await ctx.send(embed=embed)

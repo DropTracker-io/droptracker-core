@@ -29,6 +29,7 @@ from db import (
     PlayerPet,
     session,
     NpcList,
+    IgnoredPlayer,
     Player,
     ItemList,
     PersonalBestEntry,
@@ -1196,6 +1197,39 @@ def group_has_notification_channel(db_session, group_id, notification_type) -> b
     return any(str(values.get(key) or "").strip() not in ("", "0") for key in keys)
 
 
+def player_hidden_for_group(db_session, group_id, player_id) -> bool:
+    """Whether a group leader has hidden this player from that group's surfaces.
+
+    Leaders toggle this on the member listing (PATCH
+    /api/v1/groups/{id}/hidden-players), which writes an ``ignored_players``
+    row. The lootboard generators have always honoured it; the notification
+    pipeline never did, so a "hidden" member kept getting announced in the
+    group's Discord — the half of hiding that people actually notice.
+
+    Scoped to group notifications only: DM/system notifications arrive here
+    with no group_id and are never filtered, so hiding a player from a group
+    does not cost that player their own submission DMs.
+
+    Lookup errors return False (fail open, matching group_has_notification_channel
+    and web_api.common.hidden_player_ids): a transient DB fault must not
+    silently mute every group's notifications.
+    """
+    if not group_id or not player_id:
+        return False
+    try:
+        return (
+            db_session.query(IgnoredPlayer.id)
+            .filter(
+                IgnoredPlayer.group_id == group_id,
+                IgnoredPlayer.player_id == player_id,
+            )
+            .first()
+            is not None
+        )
+    except Exception:
+        return False
+
+
 async def create_notification(notification_type, player_id, data, group_id=None, existing_session=None):
     """Create a notification queue entry."""
 
@@ -1226,6 +1260,16 @@ async def create_notification(notification_type, player_id, data, group_id=None,
         app_logger.log(
             log_type="debug",
             data=f"Skipping {notification_type} notification for group {group_id}: no notification channel configured",
+            app_name="core",
+            description="create_notification",
+        )
+        return None
+    # The group's leaders hid this member (ignored_players) — they opted the
+    # player out of this group's public surfaces, Discord included.
+    if player_hidden_for_group(db_session, group_id, player_id):
+        app_logger.log(
+            log_type="debug",
+            data=f"Skipping {notification_type} notification for group {group_id}: player {player_id} is hidden for this group",
             app_name="core",
             description="create_notification",
         )
