@@ -43,7 +43,8 @@ class Player(Base):
         date_added (datetime): Timestamp when player was first added
         date_updated (datetime): Timestamp of last update
         hidden (bool): Whether player is hidden from public displays (default: False)
-    
+        account_type (str): OSRS game mode wire string (e.g. 'ironman'), or None if never reported
+
     Relationships:
         user: Associated User object (Discord user)
         drops: List of Drop objects for this player
@@ -76,6 +77,9 @@ class Player(Base):
     date_added = Column(DateTime, default=func.now())
     date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
     hidden = Column(Boolean, default=False)
+    # OSRS game mode (varbit 1777) reported with submissions; last-write-wins.
+    # NULL until the player's plugin first reports it (Task 23).
+    account_type = Column(String(32), nullable=True)
     
     # Relationships
     user = relationship("User", back_populates="players")

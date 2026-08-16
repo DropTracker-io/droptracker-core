@@ -2141,6 +2141,19 @@
           {
             "type": "object",
             "properties": {
+              "account_type": {
+                "type": "string",
+                "description": "OSRS game mode reported by the RuneLite plugin (varbit 1777). Absent when never reported. Clients should tolerate unknown future values.",
+                "enum": [
+                  "normal",
+                  "ironman",
+                  "ultimate_ironman",
+                  "hardcore_ironman",
+                  "group_ironman",
+                  "hardcore_group_ironman",
+                  "unranked_group_ironman"
+                ]
+              },
               "points": {
                 "type": "integer"
               },

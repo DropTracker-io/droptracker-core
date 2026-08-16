@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .common import (
     SubmissionResponse,
+    apply_account_type,
     ensure_player_by_name_then_auth,
     ensure_can_create,
     is_user_dm_enabled,
@@ -70,6 +71,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
     if not user_exists or not authed:
         debug_print("User failed auth check")
         return
+    apply_account_type(player, ca_data.get("account_type"), world_type)
 
     dedup_type = "seasonal_ca" if is_seasonal else "ca"
     if not await ensure_can_create(session, unique_id, dedup_type):

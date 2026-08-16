@@ -9,6 +9,7 @@ from services.points import is_feature_active_for_group
 
 from .common import (
     SubmissionResponse,
+    apply_account_type,
     ensure_player_by_name_then_auth,
     get_player_groups_with_global,
     is_user_dm_enabled,
@@ -451,6 +452,7 @@ async def experience_processor(experience_data, external_session=None):
             )
     
         player_id = player.player_id
+        apply_account_type(player, experience_data.get("account_type"))
         #print(f"[EXP] Player authenticated: {player_name} (ID: {player_id})")
     
         # Import PlayerExperience model

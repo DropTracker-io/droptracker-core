@@ -9,6 +9,7 @@ from .common import (
     received_at,
     SubmissionResponse,
     ensure_item_for_drop,
+    apply_account_type,
     ensure_player_and_auth,
     ensure_npc_id_for_player,
     resolve_attachment_from_drop_data,
@@ -499,6 +500,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         if not user_exists or not authed:
             debug_print(player_name + " failed auth check")
             return SubmissionResponse(success=False, message=f"Player {player_name} failed auth check")
+        apply_account_type(player, drop_data.get("account_type"), world_type)
         debug_print(
             f"Player validated - ID: {player.player_id}, Name: {player_name}, Authed: {authed}"
         )

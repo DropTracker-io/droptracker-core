@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .common import (
     SubmissionResponse,
+    apply_account_type,
     ensure_player_by_name_then_auth,
     ensure_item_by_name,
     ensure_npc_id_for_player,
@@ -85,6 +86,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     if not user_exists or not authed:
         debug_print("User failed auth check")
         return
+    apply_account_type(player, pet_data.get("account_type"), world_type)
 
     pet_item = await ensure_item_by_name(session, pet_name)
     if not pet_item:

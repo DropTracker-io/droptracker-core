@@ -94,6 +94,36 @@ def debug_print(message, **kwargs):
 
 SEASONAL_WORLD_TYPE = "seasonal"
 
+# OSRS game modes as reported by the RuneLite plugin (varbit 1777), Task 23.
+# Wire strings are stored verbatim on the player row; anything else is ignored.
+VALID_ACCOUNT_TYPES = frozenset({
+    "normal",
+    "ironman",
+    "ultimate_ironman",
+    "hardcore_ironman",
+    "group_ironman",
+    "hardcore_group_ironman",
+    "unranked_group_ironman",
+})
+
+
+def apply_account_type(player, raw_value, world_type: str = "main"):
+    """Persist the submitted ``account_type`` on the player row (last-write-wins).
+
+    Invalid, absent, or non-main-world values are silently ignored — this must
+    never affect submission processing. Seasonal (League) worlds are separate
+    game accounts whose mode says nothing about the main account, so they never
+    write here. The caller's session commit persists the change.
+    """
+    try:
+        if player is None or raw_value is None or world_type != "main":
+            return
+        value = str(raw_value).strip().lower()
+        if value in VALID_ACCOUNT_TYPES and player.account_type != value:
+            player.account_type = value
+    except Exception:
+        pass
+
 
 def envelope_from_plugin(submission_data: dict) -> bool:
     """Whether an event-engine envelope should read as plugin traffic
