@@ -20,6 +20,7 @@ from .common import (
     convert_to_ms,
     convert_from_ms,
     ensure_npc_id_for_player,
+    apply_account_type,
     ensure_player_by_name_then_auth,
     get_player_groups_with_global,
     create_notification,
@@ -127,6 +128,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     player_id = player.player_id
     if not user_exists or not authed:
         return
+    apply_account_type(player, pb_data.get("account_type"), world_type)
 
     # TEMP (2026-08) split-source observation: kill-time submissions carry the
     # authoritative ToB/ToA/CoX roster (unused elsewhere) plus the game's

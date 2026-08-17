@@ -7,6 +7,7 @@ from db.models import Group
 
 from .common import (
     SubmissionResponse,
+    apply_account_type,
     ensure_player_by_name_then_auth,
     get_player_groups_with_global,
     is_user_dm_enabled,
@@ -90,6 +91,7 @@ async def quest_processor(quest_data, external_session=None, world_type="main"):
         return SubmissionResponse(success=False, message="Player not found or could not be created.")
     if not user_exists or not authed:
         return SubmissionResponse(success=False, message="Player authentication failed.")
+    apply_account_type(player, quest_data.get("account_type"), world_type)
 
     player_id = player.player_id
     quest_model = SeasonalQuestCompletionEntry if is_seasonal else QuestCompletionEntry

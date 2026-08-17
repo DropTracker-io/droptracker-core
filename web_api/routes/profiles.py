@@ -468,6 +468,9 @@ async def player_profile(player_id: int):
                         payload["is_supporter"] = True
             except Exception:
                 pass
+            account_type = getattr(player, "account_type", None)
+            if account_type:
+                payload["account_type"] = account_type
             if rank is not None:
                 payload["global_rank"] = rank
             # Month-over-month movement + percentile context for the hero tiles.

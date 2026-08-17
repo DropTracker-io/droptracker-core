@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from .common import (
     SubmissionResponse,
     ensure_item_by_name,
+    apply_account_type,
     ensure_player_by_name_then_auth,
     ensure_npc_id_for_player,
     get_player_groups_with_global,
@@ -148,6 +149,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
     if not user_exists or not authed:
         print("user failed auth check")
         return
+    apply_account_type(player, clog_data.get("account_type"), world_type)
 
     from db import CollectionLogEntry
 

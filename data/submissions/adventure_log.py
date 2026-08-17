@@ -5,6 +5,7 @@ from datetime import datetime
 
 from .common import (
     select_session_and_flag,
+    apply_account_type,
     ensure_player_by_name_then_auth,
     convert_to_ms,
     get_true_boss_name,
@@ -74,6 +75,7 @@ async def adventure_log_processor(adventure_log_data, external_session=None):
     player_id = player.player_id
     if not user_exists or not authed:
         return
+    apply_account_type(player, adventure_log_data.get("account_type"))
 
     from db import PersonalBestEntry, ItemList, PlayerPet
 
