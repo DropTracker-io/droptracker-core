@@ -467,7 +467,7 @@ async def load_config():
 
 
 # Hardcoded fallbacks when no GroupConfiguration override exists (group_id=2).
-PLUGIN_LATEST_VERSION_FALLBACK = "5.4.0"
+PLUGIN_LATEST_VERSION_FALLBACK = "6.0"
 PLUGIN_MINIMUM_VERSION_FALLBACK = "5.0.0"
 
 
