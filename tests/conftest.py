@@ -243,6 +243,17 @@ if "services.event_signup" not in sys.modules:
     sys.modules["services.event_signup"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/event_prizes.py (web52a; moved out of web_api/ 2026-08-17 so bot
+# and worker processes can read the pot without importing the web_api
+# package). Stdlib-only at import time; the prize routes import it at module
+# top, so the real thing must be present before route tests collect.
+_PRIZES_PATH = _Path(__file__).resolve().parent.parent / "services" / "event_prizes.py"
+if "services.event_prizes" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.event_prizes", _PRIZES_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.event_prizes"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/chat.py (web96a) — the threaded-messaging domain layer. Same shape
 # again: stdlib-only module imports, every DB/Redis/web_api touch lazy inside a
 # function. The chat routes and the invite flow both delegate their access

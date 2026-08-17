@@ -60,7 +60,7 @@ from web_api.common import (
     with_cache_headers,
 )
 from web_api.deps import current_user_id, json_body, optional_user_id
-from web_api.event_prizes import (
+from services.event_prizes import (
     MAX_BUYIN_AMOUNT,
     effective_prize_config,
     pot_line,

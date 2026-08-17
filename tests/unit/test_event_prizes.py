@@ -1,7 +1,7 @@
 """Unit tests for the prize-pot feature (web52a):
 
 - the pure config parser/normalizer + the pot-summary rollup
-  (``web_api/event_prizes.py``), loaded by file path so the stdlib-only helpers
+  (``services/event_prizes.py``), loaded by file path so the stdlib-only helpers
   test in isolation (the ``test_event_leadership`` idiom); and
 - the pot routes + the confirm-on-disable PATCH guard, driven through the app
   with the scripted-session harness from ``test_event_auth_modes``.
@@ -27,7 +27,7 @@ from tests.unit.test_event_auth_modes import _S, _SessionCM, _event, _player, _t
 # parser/normalizer test never drags in the app package.
 _MODULE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "web_api", "event_prizes.py",
+    "services", "event_prizes.py",
 )
 _spec = importlib.util.spec_from_file_location("_event_prizes_under_test", _MODULE_PATH)
 ep = importlib.util.module_from_spec(_spec)

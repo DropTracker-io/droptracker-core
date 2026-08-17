@@ -1,5 +1,12 @@
 """Prize-pot configuration for events v2 (web52a).
 
+Lives in ``services/`` (moved from ``web_api/`` 2026-08-17) because the core
+bot and events worker read the pot for board/lifecycle announcement lines —
+and importing anything under the ``web_api`` package from those processes
+drags in every blueprint, which is both heavyweight and fragile across
+deploys (see assert_activation_capacity in services/event_lifecycle.py).
+Stdlib-only at import time by design; keep it that way.
+
 An event can enable a **prize pot** (``web_events.buyins_enabled`` +
 ``web_events.prize_config``): participants record GP **buy-ins** and
 **donations** (``web_event_buyins``) that sum into an advertised pot, and clan

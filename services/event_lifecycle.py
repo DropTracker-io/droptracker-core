@@ -375,10 +375,21 @@ def assert_activation_capacity(session, event, user=None) -> None:
         describe_violation,
         group_has_rate_limited_events,
     )
-    from web_api.deps import is_superadmin
-    from web_api.entitlements import resolve_group_entitlements
+    # db.entitlements, not web_api.entitlements: this runs inside the event
+    # consumer worker, where importing the web_api package (all 38 blueprints)
+    # is both heavyweight and fragile — a deploy between worker start and the
+    # first scheduled activation left a stale in-memory ``db`` package that
+    # made the lazy web_api import raise, failing every auto-start (2026-08-17).
+    from db.entitlements import (
+        all_entitlements_granted,
+        resolve_group_entitlements,
+    )
 
-    entitlements = resolve_group_entitlements(session, event.group_id, user=user)
+    superadmin = bool(user and getattr(user, "is_superadmin", False))
+    entitlements = (
+        all_entitlements_granted() if superadmin
+        else resolve_group_entitlements(session, event.group_id)
+    )
     if not entitlements.get("events") and not group_has_rate_limited_events(
         session, event.group_id
     ):
@@ -403,7 +414,7 @@ def assert_activation_capacity(session, event, user=None) -> None:
             "or upgrade the subscription, then activate this one.",
         )
 
-    if not is_superadmin(user):
+    if not superadmin:
         violation = check_activation_rate_limit(session, event)
         if violation is not None:
             raise LifecycleError(
@@ -503,7 +514,7 @@ def _pot_advertise_line(session, event, team_count, *, ended=False, winner=None)
     None when the pot is off / not advertised (so the token-drop rule drops the
     line). web52a."""
     try:
-        from web_api.event_prizes import pot_line, pot_summary
+        from services.event_prizes import pot_line, pot_summary
         from services.event_notifications import format_gp
 
         pot = pot_summary(session, event, team_count=team_count)

@@ -19,12 +19,28 @@ registry (services/event_message_layouts.py, message type ``event_board``).
 """
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime, timedelta
 from typing import Optional
 
 from db.app_logger import AppLogger
 
 app_logger = AppLogger()
+
+# One lock per event: the post-send hook and the 2-minute interval sweep both
+# run in the core bot's loop, and rendering awaits for long enough (board
+# image, Discord fetches) that unserialized they can BOTH see a NULL
+# message_id and post duplicate boards (event 46, 2026-08-17). The dict only
+# ever holds a lock per event seen since process start — no cleanup needed.
+_refresh_locks: dict[int, asyncio.Lock] = {}
+
+
+def _refresh_lock(event_id: int) -> asyncio.Lock:
+    lock = _refresh_locks.get(event_id)
+    if lock is None:
+        lock = _refresh_locks[event_id] = asyncio.Lock()
+    return lock
 
 # Notification types whose successful send should immediately refresh the
 # board (anything that changes scores or lifecycle state).
@@ -71,7 +87,11 @@ def _board_rows(session, event) -> list:
     )
 
     event_config = effective_message_config(getattr(event, "message_config", None))
+    # populate_existing: the caller may hold rows loaded earlier in this
+    # session (notification routing touches EventChannel) — re-read from the
+    # DB so a message_id committed by a just-finished refresh is visible here.
     query = (session.query(EventChannel)
+             .populate_existing()
              .filter(EventChannel.event_id == event.id,
                      EventChannel.kind == "leaderboard")
              .order_by(EventChannel.id.asc()))
@@ -208,7 +228,7 @@ def _board_context(session, event, config: dict) -> dict:
     # buyins_enabled AND prize_config.advertise. Read fresh here so a config or
     # buy-in change surfaces on the next 2-min sweep with no pub/sub. The line
     # drops via the token-drop rule when pot_line is unset.
-    from web_api.event_prizes import pot_line, pot_summary
+    from services.event_prizes import pot_line, pot_summary
     from services.event_notifications import format_gp
 
     pot = pot_summary(session, event, team_count=team_count)
@@ -234,7 +254,19 @@ async def refresh_event_board(bot, session, event, *, force: bool = False) -> bo
     """Render and post/edit one event's live standings board.
 
     Returns True when a Discord write happened. Never raises — board upkeep
-    must not take down the caller (notification send loop / bot task)."""
+    must not take down the caller (notification send loop / bot task).
+
+    Serialized per event: concurrent callers (post-send hook vs interval
+    sweep) queue behind the lock, and the later one re-reads the rows
+    (populate_existing in _board_rows) so it edits the just-posted message
+    instead of posting a duplicate."""
+    async with _refresh_lock(getattr(event, "id", 0) or 0):
+        return await _refresh_event_board_locked(bot, session, event,
+                                                 force=force)
+
+
+async def _refresh_event_board_locked(bot, session, event, *,
+                                      force: bool = False) -> bool:
     try:
         from services.event_message_layouts import (
             build_components,

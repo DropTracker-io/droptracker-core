@@ -226,7 +226,11 @@ async def upload_board_svg(svg: str, event_id: int, seed: int) -> str:
     """Publish the generated SVG to B2 and return its public CDN URL (served as
     the tile-overlay background). Mirrors the board-background upload path."""
     from utils.b2_storage import upload_bytes
-    from web_api.routes.submissions import B2_CDN_BASE_URL
+
+    # Same env read as web_api.routes.submissions.B2_CDN_BASE_URL — inlined so
+    # this worker-side path never imports the web_api package (fragile across
+    # deploys in a long-lived process; see services/event_lifecycle.py).
+    B2_CDN_BASE_URL = os.getenv("B2_CDN_BASE_URL", "https://videos.droptracker.io")
 
     key = f"dt_uploads/boards/{event_id}-gen-{seed}-{uuid.uuid4().hex[:8]}.svg"
     await upload_bytes(svg.encode("utf-8"), key, "image/svg+xml")

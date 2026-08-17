@@ -199,6 +199,13 @@ async def close_after_notification(bot, session, event, notification_type: str) 
     them. ``event_ended`` covers allow_late_signups events."""
     if notification_type not in ("event_started", "event_ended"):
         return
+    # Same gate the interval sweep applies: an allow_late_signups event keeps
+    # its window open past the start announcement (until it ends), so starting
+    # is only a closing moment when signups_closed() says so.
+    from services.event_signup import signups_closed
+
+    if signups_closed(event) is None:
+        return
     await close_signup_prompts(bot, session, event)
 
 

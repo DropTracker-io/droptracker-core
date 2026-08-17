@@ -605,7 +605,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
     # the on-demand GET /events/{id}/pot. Function-local import mirrors
     # ``_leadership`` (the unit-test conftest stubs services; this stays in
     # web_api). Short-circuits cheaply when the pot is disabled.
-    from web_api.event_prizes import pot_summary
+    from services.event_prizes import pot_summary
 
     pot = pot_summary(s, ev, team_count=len(teams_rows))
     for t in teams:
@@ -1747,7 +1747,7 @@ async def get_event_teams(event_id: int):
 
             pot = None
             try:
-                from web_api.event_prizes import pot_summary
+                from services.event_prizes import pot_summary
 
                 pot = pot_summary(s, ev, team_count=len(all_teams))
             except Exception:
@@ -3558,7 +3558,7 @@ async def update_event(event_id: int):
                 # Prize pot (web52a): master toggle + JSON knobs, merged like
                 # the leadership config above.
                 from db import EventBuyin
-                from web_api.event_prizes import (
+                from services.event_prizes import (
                     effective_prize_config,
                     normalize_prize_input,
                 )
