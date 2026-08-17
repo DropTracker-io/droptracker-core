@@ -42,6 +42,7 @@ from services.event_notifications import (
 )
 from utils.wiseoldman import fetch_group_members
 from services.redis_updates import get_player_list_loot_sum, loot_tracker
+from services import event_alerts
 from db.models.video_upload import VideoUpload
 from utils.video_storage import (
     VIDEO_LOCAL_DELETE_AFTER_NOTIFY,
@@ -1145,7 +1146,12 @@ class NotificationService:
                     authorized_users = await get_authorized_users(group_id)
                     for user in authorized_users:
                         try:
-                            discord_user = await self.bot.fetch_user(user_id=user)
+                            # get_authorized_users returns User ROWS, not ids —
+                            # passing the row made every fetch_user raise
+                            # TypeError, so this "grant the bot permissions"
+                            # DM had never once been delivered (bug #126).
+                            discord_user = await self.bot.fetch_user(
+                                user_id=user.discord_id)
                             await discord_user.send(
                                 f"Hey, <@{discord_user.id}>!\n"
                                 f"We just tried to post a `{notification_type}` notification for your group, "
@@ -1156,9 +1162,27 @@ class NotificationService:
                         except Exception as e:
                             print("Couldn't DM server admin about failed notification (bot permissions in server)...")
             print(f"Forbidden access error attempting to send a notification to {group_id}")
+            # Operational event alerts additionally get their CONTENT DM'd to
+            # the group's leadership: the permission nudge above says the bot
+            # can't post, but not that an event failed to start (bug #126).
+            dmed = 0
+            if notification_type in event_alerts.OPERATIONAL_ALERT_TYPES:
+                try:
+                    from db.models import Event
+
+                    event = db_session.query(Event).filter(
+                        Event.id == data.get('event_id')).first()
+                    if event is not None:
+                        dmed = event_alerts.enqueue_alert_dms(
+                            db_session, event, notification_type, data,
+                            "forbidden")
+                except Exception:
+                    pass
             # Mark as failed and commit
             notification.status = 'failed'
-            notification.error_message = "Forbidden access error"
+            notification.error_message = (
+                f"Forbidden access error (alert DM'd to {dmed} group leader(s))"
+                if dmed else "Forbidden access error")
             db_session.commit()
         except Exception as e:
             app_logger.log(log_type="error", data=f"Error processing notification {notification.id}: {e}", app_name="notification_service", description="process_notification")
@@ -1975,8 +1999,19 @@ class NotificationService:
                 # Nothing configured for this kind (or at all). Recorded as
                 # 'skipped', NOT 'sent' — the old status literally lied to
                 # anyone debugging "why did my clan see nothing" (audit).
+                #
+                # An operational alert (event failed to start/end) must still
+                # reach a human, so it falls back to DMing the group's
+                # leadership rather than dying here (bug #126).
+                dmed = event_alerts.enqueue_alert_dms(
+                    db_session, event, notification_type,
+                    dict(data, event_id=event.id,
+                         event_name=data.get('event_name') or event.name),
+                    "no_channel")
                 notification.status = 'skipped'
-                notification.error_message = skip_reason
+                notification.error_message = (
+                    f"{skip_reason} — alert DM'd to {dmed} group leader(s)"
+                    if dmed else skip_reason)
                 notification.processed_at = datetime.now()
                 db_session.commit()
                 return
@@ -2204,8 +2239,16 @@ class NotificationService:
                     dest_errors.append(f"channel {dest['channel_id']}: {send_error}")
 
             if sent_count == 0:
+                # Every destination refused (multi-destination case; a single
+                # forbidden destination re-raises to the handler above). Same
+                # fallback: an operational alert still reaches the leaders.
+                dmed = event_alerts.enqueue_alert_dms(
+                    db_session, event, notification_type, data, "undeliverable")
                 notification.status = 'failed'
-                notification.error_message = "; ".join(dest_errors)[:500] or "no sendable channel"
+                base = "; ".join(dest_errors)[:500] or "no sendable channel"
+                notification.error_message = (
+                    f"{base} — alert DM'd to {dmed} group leader(s)"[:500]
+                    if dmed else base)
                 db_session.commit()
                 return
 
