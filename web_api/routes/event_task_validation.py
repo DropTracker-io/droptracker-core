@@ -134,6 +134,13 @@ MAX_PB_NEED = 500
 # designer's auto-created marker — see event_admin._BINGO_AUTO_KEY).
 _PASSTHROUGH_KEYS = ("bingo_auto",)
 
+# Per-task progress-notification override (``config.progress_notify``) —
+# replaces the event/team ``task_progress`` verbosity for this one task, on
+# BOTH the Discord messages and the in-game plugin notifications. Absent =
+# inherit. Mirrors services.event_notifications.TASK_PROGRESS_MODES (same
+# conftest import caveat as the other mirrored tuples above).
+PROGRESS_NOTIFY_MODES = ("off", "milestones", "all")
+
 
 def _canonical_item(s, name: str) -> str | None:
     row = (
@@ -833,6 +840,15 @@ def validate_task_payload(s, body: dict) -> dict:
     tv = body.get("target_value")
     config = _parse_config(body.get("config"))
     passthrough = {k: config.pop(k) for k in _PASSTHROUGH_KEYS if config and k in config}
+    progress_notify = config.pop("progress_notify", None) if config else None
+    if progress_notify not in (None, ""):
+        if progress_notify not in PROGRESS_NOTIFY_MODES:
+            abort_problem(
+                422, "Invalid config",
+                f"progress_notify must be one of {list(PROGRESS_NOTIFY_MODES)}.",
+            )
+        # Preserved across the per-type config rebuilds below, like bingo_auto.
+        passthrough["progress_notify"] = progress_notify
     if config == {}:
         config = None
 

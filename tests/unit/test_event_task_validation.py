@@ -1133,3 +1133,45 @@ def test_bounded_goal_keeps_its_own_ceiling():
     with pytest.raises(ProblemException) as exc:
         _validate({"type": "skill_target", "target": "Attack", "target_value": 120})
     assert exc.value.status == 422
+
+
+# ── progress_notify (per-task notification override) ─────────────────────────
+# A notification-only key: validated against the mode enum, preserved verbatim
+# across every per-type config rebuild (like bingo_auto), never semantic.
+
+def test_progress_notify_survives_list_rebuild():
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "any_of", "items": ["Boater", "Red boater"],
+                   "progress_notify": "milestones"},
+    })
+    cfg = _cfg(out)
+    assert cfg["progress_notify"] == "milestones"
+    assert cfg["kind"] == "any_of"
+
+
+def test_progress_notify_on_configless_type():
+    # xp_target normally normalizes config to None — the override alone
+    # must still be stored.
+    out = _validate({"type": "xp_target", "target": "Mining",
+                     "target_value": 1_000_000,
+                     "config": {"progress_notify": "all"}})
+    assert _cfg(out) == {"progress_notify": "all"}
+
+
+def test_progress_notify_rejects_unknown_mode():
+    with pytest.raises(ProblemException) as exc:
+        _validate({
+            "type": "item_collection",
+            "config": {"kind": "any_of", "items": ["Boater"],
+                       "progress_notify": "sometimes"},
+        })
+    assert exc.value.status == 422
+
+
+def test_progress_notify_empty_string_is_inherit():
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "any_of", "items": ["Boater"], "progress_notify": ""},
+    })
+    assert "progress_notify" not in _cfg(out)

@@ -1927,10 +1927,23 @@ class NotificationService:
             # Since web53a the queue may hold rows the event-level config has
             # muted (enqueued for a per-team channel), and 'milestones'-mode
             # filtering moved here from the enqueue side — each destination
-            # applies its own verbosity.
+            # applies its own verbosity. A per-task config.progress_notify
+            # override rides in the payload and replaces every destination's
+            # progress mode (the per-type toggle still mutes).
             milestone = bool(data.get('milestone_pct'))
+            task_override = (data.get('progress_notify')
+                             if notification_type == 'event_task_progress' else None)
+            if task_override not in ('off', 'milestones', 'all'):
+                task_override = None
 
             def _wants(message_config) -> bool:
+                if task_override:
+                    toggles = (message_config or {}).get('toggles') or {}
+                    if not toggles.get('event_task_progress', True):
+                        return False
+                    if task_override == 'off':
+                        return False
+                    return task_override == 'all' or milestone
                 if not should_send_event_message(message_config, notification_type):
                     return False
                 if (notification_type == 'event_task_progress'
@@ -1977,7 +1990,8 @@ class NotificationService:
 
                 team_dests = load_team_destinations(
                     db_session, event, notification_type,
-                    data.get('team_id'), milestone=milestone)
+                    data.get('team_id'), milestone=milestone,
+                    progress_override=task_override)
             except Exception:
                 team_dests = []
             seen_ids = {d["channel_id"] for d in destinations}

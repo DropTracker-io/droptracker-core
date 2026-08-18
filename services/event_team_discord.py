@@ -634,7 +634,8 @@ def team_progress_interest(session, event_id: int, team_id) -> str:
 
 
 def load_team_destinations(session, event, notification_type: str,
-                           team_id=None, milestone: bool = True) -> list:
+                           team_id=None, milestone: bool = True,
+                           progress_override: str = None) -> list:
     """Send destinations for the team channels of one event:
     ``[{"channel_id", "role_id", "team_id"}]``, toggle-filtered per team.
 
@@ -642,7 +643,9 @@ def load_team_destinations(session, event, notification_type: str,
     in clan-vs-clan); ``event_lead_change`` resolves to every team channel
     whose toggle is on. ``milestone`` carries whether an
     ``event_task_progress`` row crossed a milestone — teams in 'milestones'
-    mode skip non-milestone increments."""
+    mode skip non-milestone increments. ``progress_override`` is the per-task
+    ``config.progress_notify`` mode, which replaces the team's own progress
+    verbosity when set (the per-type send toggle still applies)."""
     is_lead = notification_type == "event_lead_change"
     if notification_type not in TEAM_SCOPED_TYPES and not is_lead:
         return []
@@ -675,8 +678,8 @@ def load_team_destinations(session, event, notification_type: str,
         if not toggles.get(notification_type, True):
             continue
         if notification_type == "event_task_progress":
-            mode = team_task_progress_mode(config, row.team_id,
-                                           inherited=inherited)
+            mode = progress_override or team_task_progress_mode(
+                config, row.team_id, inherited=inherited)
             if mode == "off" or (mode == "milestones" and not milestone):
                 continue
         pings = team_message_pings(config, row.team_id)

@@ -762,6 +762,15 @@ def _plugin_progress_step_crossed(previous: int, current: int, threshold: int) -
     return (current * steps) // threshold > (previous * steps) // threshold
 
 
+def task_progress_notify_mode(task: dict) -> Optional[str]:
+    """Per-task progress-notification override (``config.progress_notify``:
+    'off' | 'milestones' | 'all'), or None to inherit the event/team modes.
+    Set per tile so a bulk-quantity tile ("15k granite dust") can announce at
+    25/50/75% while a set tile ("full inquisitor") announces every piece."""
+    mode = parse_task_config(task.get("config")).get("progress_notify")
+    return mode if mode in ("off", "milestones", "all") else None
+
+
 def _list_kind(task: dict) -> Optional[str]:
     """Item-list config kind (any_of/all_of/point_collection/assembly/groups/any_path), if any."""
     config = task.get("config") or {}
@@ -2530,9 +2539,14 @@ def _enqueue_notification(session, notification_type: str, event: dict,
         should_send_event_message,
     )
 
-    if not should_send_event_message(
-        effective_message_config(event.get("message_config")), notification_type
-    ):
+    message_config = effective_message_config(event.get("message_config"))
+    wanted = should_send_event_message(message_config, notification_type)
+    if (not wanted and notification_type == "event_task_progress"
+            and data.get("progress_notify") in ("milestones", "all")):
+        # A per-task progress_notify override outranks the event-level MODE
+        # (which defaults to 'off'); only the toggle itself still mutes.
+        wanted = bool(message_config["toggles"].get("event_task_progress", True))
+    if not wanted:
         # Muted at the event level — but a per-team Discord channel (web53a)
         # may still want it. Coarse interest check here (any live row for the
         # team); the sender does the precise per-destination toggle filtering.
@@ -2926,6 +2940,14 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
     XP drop or loot stack is an increment — those only fan out when a
     {PLUGIN_PROGRESS_STEP_PCT}% step of the target was crossed, so a 10M-XP
     task pings its teams ~10 times total instead of per kill.
+
+    A per-task ``config.progress_notify`` override ('off'/'milestones'/'all')
+    replaces the event AND team modes for BOTH the plugin fan-out and the
+    Discord enqueue — it's how one tile announces at 25/50/75% while another
+    announces every item. The event-level ``event_task_progress`` toggle
+    stays the Discord master mute; the plugin's client toggle stays its own.
+    The override rides in the payload (``progress_notify``) so the sender's
+    per-destination verbosity re-checks honor it too.
     """
     from services.event_notifications import (
         effective_message_config,
@@ -2951,9 +2973,19 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
     crossed_pcts = progress_milestones_crossed(previous, current, target_threshold)
     if crossed_pcts:
         base_payload["milestone_pct"] = max(crossed_pcts)
-    send_plugin = True
-    if task.get("type") in PLUGIN_PROGRESS_STEP_TASK_TYPES:
+    task_mode = task_progress_notify_mode(task)
+    if task_mode:
+        base_payload["progress_notify"] = task_mode
+    if task_mode == "off":
+        send_plugin = False
+    elif task_mode == "milestones":
+        send_plugin = bool(crossed_pcts)
+    elif task.get("type") in PLUGIN_PROGRESS_STEP_TASK_TYPES:
+        # 'all' (and inherit) keep the meter-task step — per-XP-drop envelopes
+        # would spam every teammate's chat regardless of what the tile wants.
         send_plugin = _plugin_progress_step_crossed(previous, current, target_threshold)
+    else:
+        send_plugin = True
     if send_plugin:
         try:
             from services.plugin_notifications import (
@@ -2975,23 +3007,30 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
             print(f"plugin progress fan-out failed: {plugin_notify_err}")
 
     config = effective_message_config(event.get("message_config"))
-    mode = config.get("task_progress", "off")
-    if not config["toggles"].get("event_task_progress", True):
-        mode = "off"
-    # Per-team Discord channels (web53a) carry their own progress verbosity
-    # (default 'all') — enqueue at the most verbose mode ANY audience wants;
-    # the sender filters per destination (a 'milestones' main channel skips
-    # rows without milestone_pct).
-    team_mode = "off"
-    if team_id is not None:
-        try:
-            from services.event_team_discord import team_progress_interest
+    if task_mode:
+        # Tile-level decision is authoritative for Discord too; only the
+        # event-level toggle (the master mute) still silences it.
+        if not config["toggles"].get("event_task_progress", True):
+            return
+        effective = task_mode
+    else:
+        mode = config.get("task_progress", "off")
+        if not config["toggles"].get("event_task_progress", True):
+            mode = "off"
+        # Per-team Discord channels (web53a) carry their own progress verbosity
+        # (default 'all') — enqueue at the most verbose mode ANY audience wants;
+        # the sender filters per destination (a 'milestones' main channel skips
+        # rows without milestone_pct).
+        team_mode = "off"
+        if team_id is not None:
+            try:
+                from services.event_team_discord import team_progress_interest
 
-            team_mode = team_progress_interest(session, event["id"], team_id)
-        except Exception:
-            team_mode = "off"
-    _ORDER = {"off": 0, "milestones": 1, "all": 2}
-    effective = mode if _ORDER[mode] >= _ORDER[team_mode] else team_mode
+                team_mode = team_progress_interest(session, event["id"], team_id)
+            except Exception:
+                team_mode = "off"
+        _ORDER = {"off": 0, "milestones": 1, "all": 2}
+        effective = mode if _ORDER[mode] >= _ORDER[team_mode] else team_mode
     if effective == "off":
         return
     if effective == "milestones" and not crossed_pcts:

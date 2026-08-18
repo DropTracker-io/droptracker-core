@@ -909,10 +909,22 @@ async def update_task(event_id: int, task_id: int):
             # revoking); "keep" leaves recorded state alone and applies
             # forward-only. Forward-only kinds (manual types, board-game) have
             # no recomputable ledger, so no choice is demanded there.
-            scoring_keys = ("target", "target_value", "config", "points")
+            def _scoring_config(raw):
+                # Notification-only config keys don't drive scoring — a
+                # progress_notify change alone must not demand a retro choice.
+                try:
+                    cfg = json.loads(raw) if raw else None
+                except (TypeError, ValueError):
+                    return raw
+                if not isinstance(cfg, dict):
+                    return raw
+                cfg.pop("progress_notify", None)
+                return json.dumps(cfg, sort_keys=True) if cfg else None
+
             scoring_affecting = any(
-                _before_task[k] != _after_task[k] for k in scoring_keys
-            )
+                _before_task[k] != _after_task[k]
+                for k in ("target", "target_value", "points")
+            ) or _scoring_config(_before_task["config"]) != _scoring_config(_after_task["config"])
             forward_only = (
                 task.type in ("custom", "ehp_target", "ehb_target")
                 or (getattr(ev, "kind", None) or "standard") == "board_game"
