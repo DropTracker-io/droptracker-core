@@ -17,7 +17,8 @@ Structures returned (``structure`` field):
 - ``checklist`` — ``groups: [{mode, need, obtained, satisfied, unit?, items[]}]``
   where each item is ``{name, icon?, required, obtained, satisfied, points?}``.
   Covers flat ``any_of``/``all_of``/``assembly``/``point_collection``,
-  multi-group ``groups`` configs, and config-less single-target collections.
+  multi-group ``groups`` configs, config-less single-target collections, and
+  ``pet_collection`` (one row per eligible pet).
 - ``paths`` — ``paths: [{label, closest, pct, need, got, groups[]}]`` for
   ``any_path`` (dryness-protection either/or tasks).
 - ``meter`` — ``meter: {progress, target, unit, binary, label, target_value}``
@@ -371,6 +372,32 @@ def build_task_breakdown(task: dict, tile: dict | None, rows, progress_row,
             group["unit"] = "pts"
         out["structure"] = "checklist"
         out["groups"] = [group]
+
+    elif ttype == "pet_collection":
+        # Every eligible pet as a checklist row, ticked from the ledger's
+        # matched_target. Before this, a "collect any 3 of these 39 pets" task
+        # was a bare 1/3 meter — the list of qualifying pets appeared nowhere.
+        from web_api.task_tiles import pet_collection_names
+
+        names = pet_collection_names(task, config)
+        specific = bool((task.get("target") or "").strip())
+        items = [{
+            "name": n,
+            "icon": icons.get(_norm(n)),
+            "required": target_val if specific else 1,
+            "obtained": int(qty_by.get(_norm(n), 0)),
+            "satisfied": int(qty_by.get(_norm(n), 0)) >= (target_val if specific else 1),
+        } for n in names]
+        got = (min(items[0]["obtained"], target_val) if specific and items
+               else min(sum(1 for it in items if it["satisfied"]), target_val))
+        out["structure"] = "checklist"
+        out["groups"] = [{
+            "mode": "count" if specific else "any_of",
+            "need": target_val,
+            "obtained": got,
+            "satisfied": completed or got >= target_val,
+            "items": items,
+        }]
 
     elif is_item_task:
         # Config-less single-target collection ("collect N× item"): running count.

@@ -93,7 +93,8 @@ from web_api.event_players import (
     task_contributions,
     top_items,
 )
-from web_api.task_tiles import build_tile, spec_names, tile_spec
+from web_api.task_tiles import (MAX_TILE_ICONS, build_tile, spec_names,
+                                tile_spec)
 from web_api.deps import (
     assert_event_editor,
     assert_group_admin,
@@ -469,19 +470,9 @@ def _deny_restricted(ev: Event, viewer_id) -> None:
     )
 
 
-def _attach_task_tiles(s, tasks: list[dict]) -> None:
-    """Attach a ``tile`` block (badge + value + resolved icon refs) to each
-    serialized task dict. Names across all tasks resolve in two bulk queries
-    (items, npcs); unknown names keep ``id: None``. See web_api/task_tiles.py."""
+def _resolve_icon_ids(s, item_names: set, npc_names: set) -> tuple[dict, dict]:
+    """Bulk-resolve normalized item/NPC names to game ids (two queries)."""
     from db import ItemList, NpcList
-
-    specs = [tile_spec(t) for t in tasks]
-    item_names: set[str] = set()
-    npc_names: set[str] = set()
-    for spec in specs:
-        items, npcs = spec_names(spec)
-        item_names |= items
-        npc_names |= npcs
 
     item_ids: dict[str, int] = {}
     if item_names:
@@ -504,9 +495,29 @@ def _attach_task_tiles(s, tasks: list[dict]) -> None:
             .all()
         ):
             npc_ids[" ".join(name.strip().lower().split())] = npc_id
+    return item_ids, npc_ids
+
+
+def _attach_task_tiles(s, tasks: list[dict], cap: int | None = MAX_TILE_ICONS) -> None:
+    """Attach a ``tile`` block (badge + value + resolved icon refs) to each
+    serialized task dict. Names across all tasks resolve in two bulk queries
+    (items, npcs); unknown names keep ``id: None``. See web_api/task_tiles.py.
+
+    ``cap`` bounds the drawn icons per tile (board-art budget). Single-task
+    detail reads pass ``None`` so every requirement is named — a 39-pet task
+    must not lose 27 of its pets to the collage limit."""
+    specs = [tile_spec(t) for t in tasks]
+    item_names: set[str] = set()
+    npc_names: set[str] = set()
+    for spec in specs:
+        items, npcs = spec_names(spec)
+        item_names |= items
+        npc_names |= npcs
+
+    item_ids, npc_ids = _resolve_icon_ids(s, item_names, npc_names)
 
     for task, spec in zip(tasks, specs):
-        task["tile"] = build_tile(spec, item_ids, npc_ids)
+        task["tile"] = build_tile(spec, item_ids, npc_ids, cap=cap)
 
 
 def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
@@ -2293,7 +2304,9 @@ async def get_task_breakdown(event_id: int, task_id: int):
                 "target": task.target or None, "target_value": task.target_value,
                 "points": int(task.points or 0), "config": task.config or None,
             }
-            _attach_task_tiles(s, [task_dict])
+            # Uncapped: this is the detail read, so every requirement must be
+            # named. The 12-icon collage budget is for board art only.
+            _attach_task_tiles(s, [task_dict], cap=None)
 
             rows = (
                 s.query(EventCompletion)
@@ -2347,6 +2360,57 @@ async def get_task_breakdown(event_id: int, task_id: int):
     if viewer_id is not None:
         return private_no_store(jsonify(payload))
     return with_cache_headers(jsonify(payload), max_age=15)
+
+
+@events_bp.get("/events/<int:event_id>/tasks/<int:task_id>/requirements")
+async def get_task_requirements(event_id: int, task_id: int):
+    """What actually satisfies this task — every qualifying item/pet/NPC named
+    and icon-resolved, with no per-team progress.
+
+    The companion to ``/breakdown``: that one answers "how far has my team
+    got", this one answers the question a participant asks first — *which
+    pets/items count?* Team-independent, so it also serves events with no
+    teams yet and the organiser's own proof-read of a task they just built.
+    See web_api/task_requirements.py.
+    """
+    from web_api.task_requirements import (build_requirements, requirement_spec,
+                                           spec_requirement_names)
+
+    viewer_id = optional_user_id()
+
+    def _load():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                _deny_restricted(ev, viewer_id)
+                return None
+            task = (
+                s.query(EventTask)
+                .filter(EventTask.id == task_id, EventTask.event_id == event_id)
+                .first()
+            )
+            if task is None:
+                return None
+            spec = requirement_spec({
+                "id": task.id, "type": task.type, "label": task.label,
+                "target": task.target or None, "target_value": task.target_value,
+                "config": task.config or None,
+            })
+            item_names, npc_names = spec_requirement_names(spec)
+            item_ids, npc_ids = _resolve_icon_ids(s, item_names, npc_names)
+            payload = build_requirements(spec, item_ids, npc_ids)
+            payload["task_id"] = task.id
+            payload["label"] = task.label
+            return payload
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        abort_problem(404, "Not found", f"No task {task_id} in event {event_id}.")
+    # Requirements are a property of the task, not of the viewer or a team —
+    # safe to cache for anyone who can see the event at all.
+    return with_cache_headers(jsonify(payload), max_age=60)
 
 
 @events_bp.get("/events/<int:event_id>/loot-sweep")
@@ -4222,6 +4286,214 @@ async def add_task(event_id: int):
     # visibility echoes what was stored: a "public" save whose requirements
     # duplicate an existing public preset is demoted to "private".
     return jsonify({"id": task_id, "visibility": effective_visibility})
+
+
+_MAX_BULK_LIBRARY_TASKS = 100
+
+
+def parse_library_bulk_body(body: dict) -> tuple[list[int], list[tuple], str | None]:
+    """Validate a bulk library-copy request → ``(item_ids, picks, type_filter)``.
+
+    Pure (aborts on bad input, touches nothing else) so the selection rules —
+    de-duplication, the combined cap, the tier vocabulary — are unit-testable
+    without a session. ``picks`` are ``(difficulty|None, count)`` pairs."""
+    raw_ids = body.get("library_item_ids") or []
+    if not isinstance(raw_ids, list) or len(raw_ids) > _MAX_BULK_LIBRARY_TASKS:
+        abort_problem(422, "Invalid selection",
+                      f"'library_item_ids' must be a list of at most "
+                      f"{_MAX_BULK_LIBRARY_TASKS} ids.")
+    item_ids: list[int] = []
+    for raw in raw_ids:
+        if not isinstance(raw, int) or isinstance(raw, bool) or raw <= 0:
+            abort_problem(422, "Invalid selection",
+                          "'library_item_ids' must contain positive integers.")
+        if raw not in item_ids:
+            item_ids.append(raw)
+
+    raw_picks = body.get("picks") or []
+    if not isinstance(raw_picks, list) or len(raw_picks) > 16:
+        abort_problem(422, "Invalid picks", "'picks' must be a list (max 16).")
+    picks: list[tuple] = []
+    total_requested = len(item_ids)
+    for raw in raw_picks:
+        if not isinstance(raw, dict):
+            abort_problem(422, "Invalid picks", "Each pick must be an object.")
+        difficulty = raw.get("difficulty")
+        if difficulty is not None and difficulty not in EVENT_TASK_DIFFICULTIES:
+            abort_problem(
+                422, "Invalid difficulty",
+                f"difficulty must be one of {list(EVENT_TASK_DIFFICULTIES)} or null.")
+        count = raw.get("count")
+        if (not isinstance(count, int) or isinstance(count, bool)
+                or not (0 <= count <= _MAX_BULK_LIBRARY_TASKS)):
+            abort_problem(422, "Invalid picks",
+                          f"'count' must be an integer 0–{_MAX_BULK_LIBRARY_TASKS}.")
+        if count:
+            picks.append((difficulty, count))
+            total_requested += count
+    if not item_ids and not picks:
+        abort_problem(422, "Nothing selected",
+                      "Provide 'library_item_ids' and/or 'picks'.")
+    if total_requested > _MAX_BULK_LIBRARY_TASKS:
+        abort_problem(422, "Too many tasks",
+                      f"At most {_MAX_BULK_LIBRARY_TASKS} tasks can be added at once.")
+
+    type_filter = body.get("type")
+    if type_filter is not None and type_filter not in EVENT_TASK_TYPES:
+        abort_problem(422, "Invalid type",
+                      f"type must be one of {list(EVENT_TASK_TYPES)}.")
+    return item_ids, picks, type_filter
+
+
+@events_bp.post("/events/<int:event_id>/tasks/from-library")
+async def add_tasks_from_library(event_id: int):
+    """Copy many library presets into the event in one request.
+
+    Stocking a board-game event means filling four difficulty pools; doing it
+    through the single-task POST is one request, one round-trip and one click
+    *per task*, which is why boards were being built with a handful of tasks
+    instead of a real pool. Two selection modes, either or both:
+
+    - ``library_item_ids``: explicit picks (the multi-select).
+    - ``picks``: ``[{"difficulty": "air", "count": 10}, …]`` — take N random
+      presets of that tier from everything the caller may see. This is the
+      "give me 10 easy tasks" button.
+
+    Copies are this event's own PRIVATE tasks (identical semantics to the
+    one-at-a-time picker), and presets already copied into this event are
+    skipped so pressing the button twice tops the pool up instead of
+    duplicating it. Returns the created tasks plus what was skipped.
+    """
+    user_id = current_user_id()
+    body = await json_body()
+    item_ids, picks, type_filter = parse_library_bulk_body(body)
+
+    def _apply():
+        import random
+
+        from web_api.routes.event_admin import _admin_group_ids
+        from web_api.routes.event_task_validation import validate_task_payload
+
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                abort_problem(404, "Event not found", f"No event {event_id}.")
+            _assert_event_admin(s, user_id, ev)
+            _assert_event_not_past(ev)
+
+            # Same visibility scoping as the picker's read side: public rows
+            # plus the private saves of groups this user administers.
+            user = load_user(s, user_id)
+            visible = s.query(EventTaskLibraryItem).filter(
+                EventTaskLibraryItem.active.is_(True))
+            if not is_superadmin(user):
+                from sqlalchemy import or_ as sa_or
+
+                admin_gids = _admin_group_ids(s, user_id, manageable_guild_ids(user_id))
+                clauses = [EventTaskLibraryItem.visibility == "public"]
+                if admin_gids:
+                    clauses.append(EventTaskLibraryItem.group_id.in_(sorted(admin_gids)))
+                visible = visible.filter(sa_or(*clauses))
+            if type_filter:
+                visible = visible.filter(EventTaskLibraryItem.type == type_filter)
+
+            chosen: list = []
+            seen_ids: set[int] = set()
+            if item_ids:
+                for row in visible.filter(EventTaskLibraryItem.id.in_(item_ids)).all():
+                    if row.id not in seen_ids:
+                        seen_ids.add(row.id)
+                        chosen.append(row)
+
+            for difficulty, count in picks:
+                tier = visible.filter(
+                    EventTaskLibraryItem.difficulty == difficulty
+                    if difficulty is not None
+                    else EventTaskLibraryItem.difficulty.is_(None)
+                ).all()
+                pool = [r for r in tier if r.id not in seen_ids]
+                random.shuffle(pool)
+                for row in pool[:count]:
+                    seen_ids.add(row.id)
+                    chosen.append(row)
+
+            # Presets already in this event: skip rather than duplicate, so the
+            # button tops the pool up on a second press.
+            existing = {
+                label.strip().lower()
+                for (label,) in s.query(EventTask.label)
+                .filter(EventTask.event_id == event_id).all()
+                if label
+            }
+
+            created: list[dict] = []
+            skipped: list[str] = []
+            for row in chosen:
+                label = (row.name or "").strip()[:255]
+                if not label or label.lower() in existing:
+                    skipped.append(label or f"#{row.id}")
+                    continue
+                payload = {
+                    "type": row.type,
+                    "target": row.target,
+                    "target_value": row.target_value,
+                    "config": row.config,
+                }
+                try:
+                    normalized = validate_task_payload(s, payload)
+                except Exception:
+                    # A preset that no longer validates (a renamed NPC, a
+                    # retired item) must not sink the whole batch.
+                    skipped.append(label)
+                    continue
+                task = EventTask(
+                    event_id=event_id,
+                    type=row.type,
+                    label=label,
+                    points=int(row.default_points or 0),
+                    requires_confirmation=False,
+                    # Library copies are the event's own private tasks — never
+                    # write back to the shared preset other clans pick from.
+                    visibility="private",
+                    difficulty=row.difficulty,
+                    **normalized,
+                )
+                s.add(task)
+                s.flush()
+                existing.add(label.lower())
+                created.append({
+                    "id": task.id,
+                    "type": task.type,
+                    "label": task.label,
+                    "target": task.target or None,
+                    "target_value": task.target_value,
+                    "points": int(task.points or 0),
+                    "requires_confirmation": False,
+                    "visibility": "private",
+                    "difficulty": task.difficulty,
+                    "config": task.config or None,
+                })
+            if created:
+                s.add(AuditLog(
+                    actor_user_id=user_id,
+                    group_id=ev.group_id,
+                    event_id=event_id,
+                    action="event.task.bulk_create",
+                    target=f"web_events.{event_id}",
+                    after=json.dumps({
+                        "created": len(created),
+                        "skipped": len(skipped),
+                        "task_ids": [t["id"] for t in created],
+                    }),
+                ))
+            s.commit()
+            _attach_task_tiles(s, created)
+            return {"created": created, "skipped": skipped}
+
+    result = await asyncio.to_thread(_apply)
+    if result["created"]:
+        _bump(event_id)
+    return jsonify(result)
 
 
 @events_bp.get("/events/meta/types")

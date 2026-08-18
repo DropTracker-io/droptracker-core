@@ -99,6 +99,30 @@ def pets_in_category(cat: str) -> frozenset[str]:
     return PET_CATEGORIES.get(cat, frozenset())
 
 
+def eligible_pet_names(categories=None) -> tuple[str, ...]:
+    """Display spellings of every pet a ``pet_matches`` gate admits, sorted.
+
+    The display-side mirror of :func:`pet_matches`: same category semantics
+    (None/empty -> the default "any pet" set, misc excluded), but it *names*
+    the pets instead of testing one. Task surfaces use it to answer "which
+    pets actually count?" — a question a bare category key can't."""
+    if not categories:
+        norms = ALL_PETS
+    else:
+        norms = frozenset().union(
+            *(PET_CATEGORIES.get(c, frozenset()) for c in categories)
+        ) if categories else frozenset()
+    return tuple(sorted(PET_DISPLAY_BY_NORM[n] for n in norms
+                        if n in PET_DISPLAY_BY_NORM))
+
+
+def pet_category_of(pet_name: str) -> tuple[str, ...]:
+    """Category keys a pet belongs to (a pet may sit in several — the raids
+    pets are boss pets too). Empty when the name isn't catalogued."""
+    n = _norm(pet_name)
+    return tuple(k for k, names in PET_CATEGORIES.items() if n in names)
+
+
 def is_known_pet(pet_name: str) -> bool:
     """True if ``pet_name`` is any catalogued pet (misc included) — the check
     behind a specific-pet task target."""

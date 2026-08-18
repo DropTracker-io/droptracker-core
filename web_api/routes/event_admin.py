@@ -1426,6 +1426,16 @@ async def list_task_library():
             422, "Invalid type",
             f"type must be one of {list(EVENT_TASK_TYPES)}.",
         )
+    # Board-game tier filter (web44a difficulty). Board events roll their
+    # tiles from per-tier task pools, so "show me the hard ones" is how a
+    # board is stocked — filtering client-side over a 50-row page could not
+    # answer it.
+    difficulty_filter = (request.args.get("difficulty") or "").strip()
+    if difficulty_filter and difficulty_filter not in _LIBRARY_DIFFICULTIES:
+        abort_problem(
+            422, "Invalid difficulty",
+            f"difficulty must be one of {list(_LIBRARY_DIFFICULTIES)}.",
+        )
     try:
         page = max(int(request.args.get("page") or 1), 1)
     except (TypeError, ValueError):
@@ -1461,13 +1471,32 @@ async def list_task_library():
                              | EventTaskLibraryItem.description.like(like))
             if type_filter:
                 q = q.filter(EventTaskLibraryItem.type == type_filter)
+            if difficulty_filter:
+                q = q.filter(EventTaskLibraryItem.difficulty == difficulty_filter)
             rows = (q.order_by(EventTaskLibraryItem.name.asc())
                     .offset((page - 1) * _LIBRARY_PAGE_SIZE)
                     .limit(_LIBRARY_PAGE_SIZE)
                     .all())
-            return [_library_row(r) for r in rows]
+            # Per-tier availability, so the bulk-preload UI can show "12 easy /
+            # 30 medium / …" without paging the whole library client-side. Same
+            # visibility + search filters, minus the difficulty one.
+            counts = dict(
+                q.with_entities(EventTaskLibraryItem.difficulty,
+                                func.count(EventTaskLibraryItem.id))
+                .group_by(EventTaskLibraryItem.difficulty).all()
+            ) if not difficulty_filter else {}
+            return {
+                "items": [_library_row(r) for r in rows],
+                "difficulty_counts": {d: int(counts.get(d, 0))
+                                      for d in _LIBRARY_DIFFICULTIES},
+                "untiered": int(counts.get(None, 0)),
+            }
 
     payload = await asyncio.to_thread(_load)
+    # Back-compat: callers that predate the envelope get the bare array they
+    # have always parsed; the envelope is opt-in via ?envelope=1.
+    if (request.args.get("envelope") or "").strip() not in ("1", "true"):
+        return private_no_store(jsonify(payload["items"]))
     return private_no_store(jsonify(payload))
 
 

@@ -55,6 +55,17 @@ BREAK_MODES = ("pass", "land", "both")
 _MAX_STALL_TURNS = 10
 
 
+# What a player must pick when USING an effect. Drives both the buy-page
+# explanation ("aim this at a rival team") and the use-time input the board
+# view renders, so the two can never describe different things.
+TARGETING = {
+    "self": "Affects your own team.",
+    "team": "Aimed at a rival team.",
+    "tile": "Placed on a board tile.",
+    "value": "You choose a number when using it.",
+}
+
+
 @dataclass(frozen=True)
 class EffectSpec:
     """One shop effect's code-level metadata.
@@ -66,6 +77,13 @@ class EffectSpec:
                             services/boardgame_shop.py; unimplemented effects
                             surface greyed-out ("usable_now": false).
     - ``default_behavior``— the layer-1 behavior knobs (see module doc).
+    - ``targeting``       — a :data:`TARGETING` key: what the user picks on use.
+    - ``describe``        — behavior dict → one plain sentence stating what the
+                            item does *with this event's numbers*. The catalog
+                            ``description`` is static prose written once by a
+                            superadmin; this is generated from the resolved
+                            behavior, so an event that re-tunes ``freeze
+                            turns`` to 3 stops advertising 2.
     """
 
     key: str
@@ -73,37 +91,157 @@ class EffectSpec:
     is_tile_bound: bool = False
     implemented: bool = True
     default_behavior: dict = field(default_factory=dict)
+    targeting: str = "self"
+    describe: object = None
+
+
+def _int(behavior: dict, key: str, fallback: int) -> int:
+    try:
+        return int(behavior.get(key, fallback))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _describe_reroll_task(b: dict) -> str:
+    shift = _int(b, "difficulty_shift", 0)
+    if shift < 0:
+        return ("Swaps your current task for a fresh one, drawn from "
+                f"{abs(shift)} tier{'s' if abs(shift) > 1 else ''} easier.")
+    if shift > 0:
+        return ("Swaps your current task for a fresh one, drawn from "
+                f"{shift} tier{'s' if shift > 1 else ''} harder.")
+    return "Swaps your current task for a different one of the same tier."
+
+
+def _describe_roadblock(b: dict) -> str:
+    stall = _int(b, "stall_turns", 0)
+    break_on = b.get("break_on", "pass")
+    parts = ["Drops a trap on a board tile. Any team whose move crosses it — "
+             "including your own — stops there"]
+    parts.append(f" and loses {stall} turn{'s' if stall != 1 else ''}."
+                 if stall else ".")
+    if break_on == "land":
+        parts.append(" It survives being passed and is only spent when a team "
+                     "lands exactly on it.")
+    elif break_on == "both":
+        parts.append(" It is spent by the first team to pass over or land on it.")
+    else:
+        parts.append(" It is spent by the first team it stops.")
+    if not b.get("visible_to_all", True):
+        parts.append(" Rival teams cannot see it on the board.")
+    return "".join(parts)
+
+
+def _describe_ward(b: dict) -> str:
+    blocks = [str(x) for x in (b.get("blocks") or []) if x]
+    if not blocks or "offensive" in blocks:
+        return "Negates the next offensive item a rival uses on your team."
+    pretty = ", ".join(k.replace("_", " ") for k in blocks)
+    return f"Negates the next {pretty} used on your team."
 
 
 EFFECT_REGISTRY: dict[str, EffectSpec] = {spec.key: spec for spec in (
     # -- P2: self-targeted -------------------------------------------------
-    EffectSpec("skip_task", "utility"),
-    EffectSpec("reroll_task", "utility", default_behavior={"difficulty_shift": 0}),
-    EffectSpec("boost_coins", "economy", default_behavior={"multiplier": 2}),
+    EffectSpec("skip_task", "utility",
+               describe=lambda b: ("Instantly completes your current task. "
+                                   "No coins are awarded for it.")),
+    EffectSpec("reroll_task", "utility", default_behavior={"difficulty_shift": 0},
+               describe=_describe_reroll_task),
+    EffectSpec("boost_coins", "economy", default_behavior={"multiplier": 2},
+               describe=lambda b: (
+                   f"Multiplies the coins from your next completed task by "
+                   f"{_int(b, 'multiplier', 2)}×.")),
     # -- P3: movement + interference ---------------------------------------
-    EffectSpec("advance", "movement", default_behavior={"dice_sides": 6}),
+    EffectSpec("advance", "movement", default_behavior={"dice_sides": 6},
+               describe=lambda b: (
+                   f"Teleports you 1–{_int(b, 'dice_sides', 6)} tiles forward "
+                   "without completing a task. Does not use your turn, and you "
+                   "take on whatever the tile you land on gives you.")),
     EffectSpec("roadblock", "defensive", is_tile_bound=True,
+               targeting="tile",
                default_behavior={"break_on": "pass", "stall_turns": 1,
                                  "visible_to_all": True,
-                                 "expire_on_placer_move": True}),
-    EffectSpec("freeze_opponent", "offensive", default_behavior={"turns": 2}),
-    EffectSpec("shield", "defensive"),
+                                 "expire_on_placer_move": True},
+               describe=_describe_roadblock),
+    EffectSpec("freeze_opponent", "offensive", targeting="team",
+               default_behavior={"turns": 2},
+               describe=lambda b: (
+                   f"Freezes a rival team: their next {_int(b, 'turns', 2)} "
+                   f"roll{'s' if _int(b, 'turns', 2) != 1 else ''} move them "
+                   "nowhere. An armed shield or ward absorbs it.")),
+    EffectSpec("shield", "defensive",
+               describe=lambda b: ("Absorbs the next offensive item any rival "
+                                   "uses on your team. One at a time.")),
     # -- web50a: shop expansion --------------------------------------------
     # Movement modifiers (armed self-effects drained in perform_roll).
-    EffectSpec("extra_dice", "movement", default_behavior={"extra_dice": 1}),
-    EffectSpec("choose_roll", "movement"),
-    EffectSpec("reroll_move", "movement"),
+    EffectSpec("extra_dice", "movement", default_behavior={"extra_dice": 1},
+               describe=lambda b: (
+                   f"Adds {_int(b, 'extra_dice', 1)} extra "
+                   f"di{'ce' if _int(b, 'extra_dice', 1) != 1 else 'e'} to your "
+                   "next roll.")),
+    EffectSpec("choose_roll", "movement", targeting="value",
+               describe=lambda b: ("You choose exactly how many tiles your next "
+                                   "roll moves you, within the board's dice range.")),
+    EffectSpec("reroll_move", "movement",
+               describe=lambda b: ("Undoes your last move and rolls again from "
+                                   "where you started.")),
     # Defensive / utility.
-    EffectSpec("ward", "defensive", default_behavior={"blocks": ["offensive"]}),
-    EffectSpec("cleanse", "defensive"),
-    EffectSpec("choose_task", "utility", default_behavior={"candidates": 3}),
+    EffectSpec("ward", "defensive", default_behavior={"blocks": ["offensive"]},
+               describe=_describe_ward),
+    EffectSpec("cleanse", "defensive",
+               describe=lambda b: ("Clears the negative effects on your team — a "
+                                   "freeze, or a roadblock stall. Your own buffs "
+                                   "are left alone.")),
+    EffectSpec("choose_task", "utility", default_behavior={"candidates": 3},
+               describe=lambda b: (
+                   f"Draws {_int(b, 'candidates', 3)} candidate tasks for your "
+                   "current tile and lets you pick one. Only works on a tile that "
+                   "rolls from a difficulty pool.")),
     # Offensive (target-team; call _absorb_defense first).
-    EffectSpec("steal_item", "offensive"),
-    EffectSpec("reroll_opponent_task", "offensive"),
-    EffectSpec("knockback", "offensive", default_behavior={"tiles": 3}),
+    EffectSpec("steal_item", "offensive", targeting="team",
+               describe=lambda b: ("Steals one random unused item from a rival "
+                                   "team's bag. A shield or ward on them stops it.")),
+    EffectSpec("reroll_opponent_task", "offensive", targeting="team",
+               describe=lambda b: ("Forces a rival team to redraw their current "
+                                   "task, losing any progress on it. A shield or "
+                                   "ward on them stops it.")),
+    EffectSpec("knockback", "offensive", targeting="team",
+               default_behavior={"tiles": 3},
+               describe=lambda b: (
+                   f"Knocks a rival team back {_int(b, 'tiles', 3)} tiles. A "
+                   "shield or ward on them stops it.")),
     # Economy (armed self-effect drained by the movement core).
-    EffectSpec("coin_toll", "economy", default_behavior={"coins_per_team": 25}),
+    EffectSpec("coin_toll", "economy", default_behavior={"coins_per_team": 25},
+               describe=lambda b: (
+                   f"On your next roll, every rival team you pass over pays you "
+                   f"{_int(b, 'coins_per_team', 25)} coins.")),
 )}
+
+
+def describe_effect(effect_key: str, behavior: dict | None = None) -> str:
+    """One plain sentence saying what an effect does, using the numbers that
+    will ACTUALLY apply (pass the resolved behavior from
+    :func:`resolve_effect_behavior`).
+
+    Every player-facing shop surface reads this, so an item's rules are
+    explained in exactly one place. The catalog's static ``description`` is a
+    superadmin's flavour text and can silently drift from a re-tuned event;
+    this cannot."""
+    spec = EFFECT_REGISTRY.get(effect_key)
+    if spec is None:
+        return ""
+    resolved = sanitize_behavior(effect_key, dict(behavior or spec.default_behavior))
+    try:
+        return spec.describe(resolved) if callable(spec.describe) else ""
+    except Exception:
+        # A description must never be the reason a shop 500s.
+        return ""
+
+
+def effect_targeting(effect_key: str) -> str:
+    """The :data:`TARGETING` key for an effect ("self"/"team"/"tile"/"value")."""
+    spec = EFFECT_REGISTRY.get(effect_key)
+    return spec.targeting if spec is not None else "self"
 
 
 def live_effects() -> frozenset:

@@ -177,3 +177,67 @@ def test_icon_asset_path_none_when_unresolved():
     assert icon_asset_path({"type": "npc", "id": None, "name": "Mystery"}) is None
     assert icon_asset_path({"type": "skill", "id": None, "name": ""}) is None
     assert icon_asset_path({"type": "other", "id": 1}) is None
+
+
+# ── pet_collection tiles ─────────────────────────────────────────────────────
+# Pet tasks used to fall through to the text-only CUSTOM tile, so "collect any
+# 3 of these 39 pets" showed neither the pets nor a hint that a list existed.
+
+def test_pet_collection_specific_target():
+    tile = _tile(_task(type="pet_collection", target="baby mole", target_value=2),
+                 item_ids={"baby mole": 12646})
+    assert tile["badge"] == "PET"
+    assert tile["icons"] == [
+        {"type": "item", "id": 12646, "name": "Baby mole", "quantity": 2}]
+
+
+def test_pet_collection_snaps_target_to_canonical_spelling():
+    spec = tile_spec(_task(type="pet_collection", target="LIL' ZIK", target_value=1))
+    assert spec["items"] == [{"name": "Lil' zik"}]
+
+
+def test_pet_collection_explicit_list_names_every_pet():
+    cfg = json.dumps({"pets": ["Baby mole", "Vorki", "Scurry"]})
+    spec = tile_spec(_task(type="pet_collection", config=cfg, target_value=3))
+    assert spec["badge"] == "ANY 3 PETS"
+    # Sorted, canonical, de-duplicated.
+    assert [i["name"] for i in spec["items"]] == ["Baby mole", "Scurry", "Vorki"]
+
+
+def test_pet_collection_category_expands_taxonomy():
+    cfg = json.dumps({"categories": ["skilling"]})
+    spec = tile_spec(_task(type="pet_collection", config=cfg, target_value=1))
+    assert spec["badge"] == "ANY PET"
+    names = [i["name"] for i in spec["items"]]
+    assert "Beaver" in names and "Heron" in names
+    assert "Baby mole" not in names          # boss pet, not a skilling pet
+
+
+def test_pet_collection_bare_any_pet_excludes_misc():
+    spec = tile_spec(_task(type="pet_collection", target_value=3))
+    names = {i["name"] for i in spec["items"]}
+    assert "Beaver" in names and "Baby mole" in names
+    assert "Chompy chick" not in names       # misc is opt-in only
+
+
+def test_pet_collection_pets_resolve_as_item_icons():
+    cfg = json.dumps({"pets": ["Baby mole", "Vorki"]})
+    items, npcs = spec_names(tile_spec(_task(type="pet_collection", config=cfg)))
+    assert items == {"baby mole", "vorki"}
+    assert npcs == set()
+
+
+# ── icon cap is board art, not a data limit ──────────────────────────────────
+
+def test_uncapped_build_tile_keeps_every_icon():
+    cfg = json.dumps({"categories": ["boss"]})
+    spec = tile_spec(_task(type="pet_collection", config=cfg, target_value=3))
+    assert len(spec["items"]) > MAX_TILE_ICONS   # the case that broke
+
+    capped = build_tile(spec, {}, {})
+    assert len(capped["icons"]) == MAX_TILE_ICONS
+    assert capped["icon_overflow"] == len(spec["items"]) - MAX_TILE_ICONS
+
+    full = build_tile(spec, {}, {}, cap=None)
+    assert len(full["icons"]) == len(spec["items"])
+    assert full["icon_overflow"] == 0

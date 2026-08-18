@@ -1414,6 +1414,13 @@ def _shop_config_payload(s, event_id: int) -> dict:
     (defaulted where no rotation row exists). Shape matches the web
     `BoardShopConfigSchema`; used by both the GET and the PUT response."""
     from db.models import BoardgameShopItem, EventShopRotation
+    from services.boardgame_effects import (
+        describe_effect,
+        effect_targeting,
+        load_event_behavior_overrides,
+        resolve_effect_behavior,
+        tile_bound_effects,
+    )
     from services.boardgame_engine import board_settings
 
     config = (s.query(EventBoardConfig)
@@ -1424,17 +1431,32 @@ def _shop_config_payload(s, event_id: int) -> dict:
         for r in s.query(EventShopRotation)
         .filter(EventShopRotation.event_id == event_id).all()
     }
+    # RAW overrides (not the defaults-merged settings) so the summary reports
+    # the numbers this event will actually apply.
+    behavior_overrides = load_event_behavior_overrides(s, event_id)
+    tile_bound = frozenset(tile_bound_effects())
     items = []
     for item in (s.query(BoardgameShopItem)
                  .filter(BoardgameShopItem.active.is_(True))
                  .order_by(BoardgameShopItem.sort, BoardgameShopItem.id).all()):
         rot = rotation.get(item.id)
+        behavior = resolve_effect_behavior(item.effect, item=item,
+                                           overrides=behavior_overrides)
         items.append({
             "shop_item_id": item.id,
             "key": item.key,
             "name": item.name,
+            # The organiser is choosing which power-ups exist in their game;
+            # doing that from a name and a price alone is guesswork. Both the
+            # curator's prose AND the generated, event-accurate summary.
+            "description": item.description or None,
+            "effect_summary": describe_effect(item.effect, behavior),
+            "targeting": effect_targeting(item.effect),
+            "tile_bound": item.effect in tile_bound,
+            "behavior": behavior,
             "effect": item.effect,
             "item_type": item.item_type,
+            "type_cooldown_turns": int(item.type_cooldown_turns or 0),
             "icon_item_id": item.icon_item_id,
             "default_cost_coins": int(item.cost_coins or 0),
             "enabled": bool(rot.enabled) if rot is not None else True,

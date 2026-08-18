@@ -38,7 +38,15 @@ import random
 from datetime import datetime, timedelta
 from typing import Optional
 
-from services.boardgame_effects import EFFECT_REGISTRY, live_effects
+from services.boardgame_effects import (
+    EFFECT_REGISTRY,
+    describe_effect,
+    effect_targeting,
+    live_effects,
+    load_event_behavior_overrides,
+    resolve_effect_behavior,
+    tile_bound_effects,
+)
 from services.boardgame_engine import (
     assign_tile_task,
     award_coins,
@@ -75,6 +83,7 @@ class ShopError(Exception):
 # Effects with a live handler — sourced from the behavior registry so the
 # catalog flags, inventory flags, and the dispatch can never drift apart.
 _LIVE_EFFECTS = live_effects()
+_TILE_BOUND = frozenset(tile_bound_effects())
 
 
 def _cfg(raw) -> dict:
@@ -331,6 +340,9 @@ def available_items(session, event_id: int, settings: Optional[dict] = None,
         return []
     maybe_refresh_shop(session, event_id, settings)
     enabled_ids, disabled_effects = _item_kill_switches(settings)
+    # RAW overrides, not the defaults-merged settings — see
+    # boardgame_effects.resolve_effect_behavior's layering note.
+    behavior_overrides = load_event_behavior_overrides(session, event_id)
 
     rotation = {
         r.shop_item_id: r
@@ -365,11 +377,21 @@ def available_items(session, event_id: int, settings: Optional[dict] = None,
         per_team_cap = rot.per_team_cap if rot is not None else None
         bought_by_team = (bought_counts.get(item.id, 0)
                           if team_id is not None else None)
+        behavior = resolve_effect_behavior(item.effect, item=item,
+                                           overrides=behavior_overrides)
         out.append({
             "id": item.id,
             "key": item.key,
             "name": item.name,
             "description": item.description or None,
+            # What it does WITH THIS EVENT'S NUMBERS. `description` above is
+            # the superadmin's static flavour text and silently goes stale
+            # when a leader re-tunes an effect; this is generated from the
+            # resolved behavior, so the shop can never mis-advertise.
+            "effect_summary": describe_effect(item.effect, behavior),
+            "targeting": effect_targeting(item.effect),
+            "tile_bound": item.effect in _TILE_BOUND,
+            "behavior": behavior,
             "icon_item_id": item.icon_item_id,
             "item_type": item.item_type,
             "effect": item.effect,
@@ -419,9 +441,12 @@ def team_shop_state(session, event_id: int, team_id: int) -> dict:
         .order_by(EventTeamInventory.created_at)
         .all()
     )
+    behavior_overrides = load_event_behavior_overrides(session, event_id)
     inventory = []
     for inv, item in inv_rows:
         cd = int(item.type_cooldown_turns or 0)
+        behavior = resolve_effect_behavior(item.effect, item=item,
+                                           overrides=behavior_overrides)
         last = cooldowns.get(item.item_type)
         ready_turn = (last + cd) if last is not None else None
         inventory.append({
@@ -432,6 +457,11 @@ def team_shop_state(session, event_id: int, team_id: int) -> dict:
             "icon_item_id": item.icon_item_id,
             "item_type": item.item_type,
             "effect": item.effect,
+            "description": item.description or None,
+            # Same generated, event-accurate explanation the buy list shows —
+            # a bag item's rules must not be a mystery at the moment of use.
+            "effect_summary": describe_effect(item.effect, behavior),
+            "targeting": effect_targeting(item.effect),
             "status": inv.status,
             "acquired_turn": int(inv.acquired_turn or 0),
             "used_turn": inv.used_turn,

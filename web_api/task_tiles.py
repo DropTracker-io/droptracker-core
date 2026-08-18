@@ -175,6 +175,56 @@ def _item_collection_spec(task: dict, config: dict) -> dict:
             "npcs": metric_npcs, "skills": []}
 
 
+def pet_collection_names(task: dict, config: dict) -> list[str]:
+    """Every pet that satisfies a ``pet_collection`` task, in display spelling.
+
+    Mirrors the three matcher branches in ``event_engine.match_task`` exactly —
+    a specific ``target``, an explicit ``config.pets`` allow-list, or a
+    category gate resolved against the live taxonomy (``config.categories``,
+    absent = "any pet"). Naming the pets is the whole point: "obtain 3 pets"
+    over a 39-name list is unreadable until the list is on screen.
+    """
+    from utils.osrs_pets import canonical_pet_name, eligible_pet_names
+
+    target = (task.get("target") or "").strip()
+    if target:
+        return [canonical_pet_name(target) or target]
+    listed = config.get("pets")
+    if isinstance(listed, list) and listed:
+        out, seen = [], set()
+        for name in listed:
+            display = canonical_pet_name(str(name)) or str(name).strip()
+            key = _norm(display)
+            if display and key not in seen:
+                seen.add(key)
+                out.append(display)
+        return sorted(out)
+    categories = config.get("categories")
+    return list(eligible_pet_names(
+        categories if isinstance(categories, list) and categories else None))
+
+
+def _pet_collection_spec(task: dict, config: dict) -> dict:
+    """Pet tasks used to fall through to the text-only CUSTOM tile, so a
+    "collect any 3 of these 39 pets" task showed neither the pets nor a hint
+    that a list existed. Pets are ordinary item rows in the item DB, so they
+    resolve to icons like any other collection."""
+    names = pet_collection_names(task, config)
+    tv = task.get("target_value")
+    try:
+        need = int(tv) if tv is not None else 1
+    except (TypeError, ValueError):
+        need = 1
+    if (task.get("target") or "").strip():
+        # Specific pet: "Collect 2× Baby mole".
+        badge = "PET"
+        items = [{"name": names[0], **({"quantity": need} if need > 1 else {})}] if names else []
+    else:
+        badge = f"ANY {need} PETS" if need > 1 else "ANY PET"
+        items = [{"name": n} for n in names]
+    return {"badge": badge, "value": None, "items": items, "npcs": [], "skills": []}
+
+
 def tile_spec(task: dict) -> dict:
     """Pure: derive a task's unresolved tile spec.
 
@@ -190,6 +240,9 @@ def tile_spec(task: dict) -> dict:
 
     if task_type == "item_collection":
         return _item_collection_spec(task, config)
+
+    if task_type == "pet_collection":
+        return _pet_collection_spec(task, config)
 
     if task_type == "kc_target":
         return {**empty, "badge": "KC TARGET",
@@ -279,11 +332,17 @@ def icon_asset_path(icon: dict) -> str | None:
     return None
 
 
-def build_tile(spec: dict, item_ids: dict[str, int], npc_ids: dict[str, int]) -> dict:
+def build_tile(spec: dict, item_ids: dict[str, int], npc_ids: dict[str, int],
+               cap: int | None = MAX_TILE_ICONS) -> dict:
     """Serialize a spec into the public ``tile`` block.
 
     ``item_ids`` / ``npc_ids`` map *normalized* names → game ids; unresolved
     names keep ``id: None`` so the frontend can fall back to text.
+
+    ``cap`` bounds the drawn icon list (the rest becomes ``icon_overflow``) —
+    a board-art budget, not a data limit. Pass ``None`` on the single-task
+    detail reads, where the caller wants every requirement named; the
+    truncation is why a 39-pet task could only ever show 12 of its pets.
     """
     icons: list[dict] = []
     for entry in spec["items"]:
@@ -303,6 +362,6 @@ def build_tile(spec: dict, item_ids: dict[str, int], npc_ids: dict[str, int]) ->
     return {
         "badge": spec["badge"],
         "value": spec["value"],
-        "icons": icons[:MAX_TILE_ICONS],
-        "icon_overflow": max(total - MAX_TILE_ICONS, 0),
+        "icons": icons if cap is None else icons[:cap],
+        "icon_overflow": 0 if cap is None else max(total - cap, 0),
     }

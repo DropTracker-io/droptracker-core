@@ -176,3 +176,58 @@ class TestFlatAnyOf:
         group = out["groups"][0]
         assert group["obtained"] == 3
         assert group["satisfied"]
+
+
+class TestPetCollection:
+    """A pet task used to be a bare N/3 meter with no list of eligible pets —
+    the participant could not tell which of the 39 listed pets counted."""
+
+    PETS = ["Baby mole", "Vorki", "Scurry", "Beaver"]
+
+    @staticmethod
+    def _pet_task(config, target_value=3, target=None):
+        return {"id": 99, "type": "pet_collection", "label": "Three pets",
+                "target": target, "target_value": target_value, "config": config}
+
+    def test_lists_every_eligible_pet_as_a_checklist_row(self):
+        out = _breakdown(self._pet_task({"pets": self.PETS}), [])
+        assert out["structure"] == "checklist"
+        assert [i["name"] for i in out["groups"][0]["items"]] == sorted(self.PETS)
+        assert all(not i["satisfied"] for i in out["groups"][0]["items"])
+
+    def test_obtained_pets_tick_their_own_row(self):
+        rows = [_row(1, target="Vorki", rid=1), _row(1, target="Beaver", rid=2)]
+        out = _breakdown(self._pet_task({"pets": self.PETS}), rows, progress=2)
+        got = {i["name"]: i["satisfied"] for i in out["groups"][0]["items"]}
+        assert got == {"Baby mole": False, "Beaver": True,
+                       "Scurry": False, "Vorki": True}
+        group = out["groups"][0]
+        assert group["obtained"] == 2 and group["need"] == 3
+        assert not group["satisfied"]
+
+    def test_distinct_pets_not_quantities_drive_the_group(self):
+        """Each pet counts once — the matcher rejects duplicates, so two rows
+        for the same pet must not read as 2/3."""
+        rows = [_row(1, target="Vorki", rid=1), _row(1, target="Vorki", rid=2)]
+        out = _breakdown(self._pet_task({"pets": self.PETS}), rows, progress=1)
+        assert out["groups"][0]["obtained"] == 1
+
+    def test_specific_pet_target_is_a_counted_goal(self):
+        out = _breakdown(self._pet_task(None, target_value=2, target="Baby mole"),
+                         [_row(1, target="Baby mole")], progress=1)
+        item = out["groups"][0]["items"][0]
+        assert item["name"] == "Baby mole"
+        assert item["required"] == 2 and item["obtained"] == 1
+        assert not item["satisfied"]
+
+    def test_category_task_expands_the_taxonomy(self):
+        out = _breakdown(self._pet_task({"categories": ["skilling"]}), [])
+        names = [i["name"] for i in out["groups"][0]["items"]]
+        assert "Beaver" in names and "Baby mole" not in names
+
+    def test_pending_rows_overlay_the_matching_pet(self):
+        out = _breakdown(self._pet_task({"pets": self.PETS}), [],
+                         pending_rows=[_row(1, target="Scurry")])
+        rows = {i["name"]: i for i in out["groups"][0]["items"]}
+        assert rows["Scurry"].get("pending_satisfied") is True
+        assert "pending_satisfied" not in rows["Vorki"]
