@@ -52,7 +52,15 @@ else:
     from monitor.sdnotifier import SystemdWatchdog
 import time
 
-target_guilds = ["1172737525069135962","900855778095800380","597397938989432842","702992720909828168","1120606216972947468"]
+# Guilds whose messages are parsed as submissions. Defaults to the production
+# set; TARGET_GUILDS (a JSON array of guild-id strings) overrides it so a dev
+# instance can watch its own server without editing the ids in-tree. Prod
+# doesn't set the variable, so the override is inert there.
+_DEFAULT_TARGET_GUILDS = ["1172737525069135962","900855778095800380","597397938989432842","702992720909828168","1120606216972947468"]
+try:
+    target_guilds = json.loads(os.getenv("TARGET_GUILDS") or "") or _DEFAULT_TARGET_GUILDS
+except Exception:
+    target_guilds = _DEFAULT_TARGET_GUILDS
 
 if os.getenv("STATUS") == "dev":
     bot_token = os.getenv("DEV_WEBHOOK_TOKEN")
