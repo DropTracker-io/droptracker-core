@@ -18,6 +18,38 @@ _TS_REGISTRY = "/store/droptracker/web/packages/api-types/src/group-config.ts"
 
 
 class TestRegistry:
+    def test_every_field_has_label_and_category(self):
+        # The Discord-native config panel renders straight from this registry,
+        # so every field needs human-readable metadata (mirrored from the TS
+        # registry — see test_metadata_parity_with_ts_registry below).
+        category_keys = {c["key"] for c in reg.CONFIG_CATEGORIES}
+        for field in reg.GROUP_CONFIG_FIELDS:
+            key = field["key"]
+            assert isinstance(field.get("label"), str) and field["label"].strip(), (
+                f"{key} has no label"
+            )
+            assert field.get("category") in category_keys, (
+                f"{key} category {field.get('category')!r} not in CONFIG_CATEGORIES"
+            )
+            # Every field currently ships help text; keep it that way.
+            assert isinstance(field.get("help"), str) and field["help"].strip(), (
+                f"{key} has no help text"
+            )
+
+    def test_config_categories_are_well_formed(self):
+        keys = [c["key"] for c in reg.CONFIG_CATEGORIES]
+        assert keys, "CONFIG_CATEGORIES must not be empty"
+        assert len(keys) == len(set(keys)), "duplicate category keys"
+        for cat in reg.CONFIG_CATEGORIES:
+            assert cat["label"].strip(), f"category {cat['key']} has no label"
+
+    def test_seasonal_mirror_inherits_base_metadata(self):
+        # Mirrors resolve to the base field, so labels/help come along free.
+        base = reg.get_config_field("notify_pbs")
+        mirror = reg.get_config_field("seasonal_notify_pbs")
+        assert mirror is base
+        assert mirror["label"] == "Notify personal bests"
+
     def test_seasonal_boards_is_base_not_mirror(self):
         # The intentional edge case: exact match wins over prefix-stripping.
         field = reg.get_config_field("seasonal_boards")
@@ -112,3 +144,47 @@ class TestRegistry:
         expected = set(base_keys) | {f"seasonal_{k}" for k in mirror_keys}
         got = set(reg.all_config_keys())
         assert got == expected, f"missing={expected - got} extra={got - expected}"
+
+    @pytest.mark.skipif(
+        not os.path.exists(_TS_REGISTRY), reason="web repo not present for parity check"
+    )
+    def test_metadata_parity_with_ts_registry(self):
+        # label / category / help are copied VERBATIM from the TS registry —
+        # the web editor and the Discord config panel must show identical
+        # wording. Same chunking approach as the key-parity test above.
+        with open(_TS_REGISTRY, "r", encoding="utf-8") as f:
+            src = f.read()
+
+        array_match = re.search(
+            r"GROUP_CONFIG_FIELDS[^=]*=\s*\[(.*?)\n\];", src, re.DOTALL
+        )
+        assert array_match, "could not locate GROUP_CONFIG_FIELDS array"
+
+        def grab(chunk, name):
+            m = re.search(name + r':\s*"((?:[^"\\]|\\.)*)"', chunk)
+            return m.group(1).replace('\\"', '"') if m else None
+
+        ts_meta = {}
+        for chunk in re.split(r'(?=key:\s*")', array_match.group(1)):
+            m = re.search(r'key:\s*"([a-zA-Z0-9_]+)"', chunk)
+            if not m:
+                continue
+            ts_meta[m.group(1)] = {
+                "label": grab(chunk, "label"),
+                "category": grab(chunk, "category"),
+                "help": grab(chunk, "help"),
+            }
+
+        for field in reg.GROUP_CONFIG_FIELDS:
+            key = field["key"]
+            assert key in ts_meta, f"{key} missing from TS registry"
+            for attr in ("label", "category", "help"):
+                assert field.get(attr) == ts_meta[key][attr], (
+                    f"{key}.{attr} diverged from TS registry: "
+                    f"py={field.get(attr)!r} ts={ts_meta[key][attr]!r}"
+                )
+
+        # CONFIG_CATEGORIES order + labels mirror the TS constant (TS names
+        # the key field `id`).
+        ts_cats = re.findall(r'\{\s*id:\s*"(\w+)",\s*label:\s*"([^"]*)"\s*\}', src)
+        assert [(c["key"], c["label"]) for c in reg.CONFIG_CATEGORIES] == ts_cats

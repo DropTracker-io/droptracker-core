@@ -6,18 +6,38 @@ for the 55+ ``group_configurations`` keys. The typed ``GET/PATCH
 /api/v1/groups/{id}/config`` endpoints validate against this; the legacy
 ``load_config`` used by the RuneLite plugin is untouched.
 
+Each field also carries the human-readable metadata (``label``, ``category``,
+``help``) copied VERBATIM from the TS registry so Discord-native surfaces can
+render the same wording as the web editor. ``CONFIG_CATEGORIES`` mirrors the
+TS constant of the same name. Keep both registries in sync when editing.
+
 A parity test (``tests/unit/test_group_config_registry.py``) asserts this key
 set matches the TS ``allConfigKeys()``.
 
 Edge case (matches the TS ``getConfigField``): ``seasonal_boards`` is a real base
 key that starts with ``seasonal_`` and is NOT a mirror — resolve exact keys
-before stripping the prefix.
+before stripping the prefix. Seasonal mirrors resolve to their base field, so
+they inherit the base key's label/category/help.
 """
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
 SEASONAL_PREFIX = "seasonal_"
+
+# Ordered category list (mirrors the TS CONFIG_CATEGORIES; TS calls the key
+# field `id`).
+CONFIG_CATEGORIES: List[Dict[str, str]] = [
+    {"key": "channels", "label": "Channels"},
+    {"key": "drops", "label": "Drop notifications"},
+    {"key": "levels", "label": "Level notifications"},
+    {"key": "pbs", "label": "Personal best"},
+    {"key": "cas", "label": "Combat achievements"},
+    {"key": "board", "label": "Lootboard"},
+    {"key": "recaps", "label": "Monthly recaps"},
+    {"key": "clan_log", "label": "Clan Log"},
+    {"key": "integration", "label": "Integration & info"},
+]
 
 # type ∈ channel | boolean | int | string | text | csv | bosslist | select
 # (bosslist stores a comma-separated boss-name list like csv; the frontend
@@ -28,81 +48,367 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # services/notification_service.py). The registry previously used
     # *_channel_id names that nothing consumed; migration web20a copied any
     # values groups saved under those dead keys into the canonical ones.
-    {"key": "channel_id_to_post_loot", "type": "channel", "default": None},
-    {"key": "lootboard_channel_id", "type": "channel", "default": None},
-    {"key": "lootboard_message_id", "type": "string", "default": None},
-    {"key": "channel_id_to_post_levels", "type": "channel", "default": None},
-    {"key": "channel_id_to_post_pb", "type": "channel", "default": None},
-    {"key": "channel_id_to_post_ca", "type": "channel", "default": None},
-    {"key": "channel_id_to_post_pets", "type": "channel", "default": None},
-    {"key": "channel_id_to_post_quests", "type": "channel", "default": None},
-    {"key": "channel_id_to_post_clog", "type": "channel", "default": None},
-    {"key": "channel_id_to_post_deaths", "type": "channel", "default": None},
-    {"key": "channel_id_to_post_diaries", "type": "channel", "default": None},
-    {"key": "announcements_channel_id", "type": "channel", "default": None},
+    {
+        "key": "channel_id_to_post_loot",
+        "label": "Drops channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel where drop notifications are posted.",
+        "default": None,
+    },
+    {
+        "key": "lootboard_channel_id",
+        "label": "Lootboard channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel where the lootboard image is posted/updated.",
+        "default": None,
+    },
+    {
+        "key": "lootboard_message_id",
+        "label": "Lootboard message id",
+        "category": "channels",
+        "type": "string",
+        "help": "Message the bot edits when reposting the board. Managed automatically.",
+        "default": None,
+    },
+    {
+        "key": "channel_id_to_post_levels",
+        "label": "Levels channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel for level-up notifications. Falls back to the drops channel when unset.",
+        "default": None,
+    },
+    {
+        "key": "channel_id_to_post_pb",
+        "label": "Personal best channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel for personal-best notifications. Falls back to the drops channel when unset.",
+        "default": None,
+    },
+    {
+        "key": "channel_id_to_post_ca",
+        "label": "Combat achievements channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel for combat-achievement notifications. Falls back to the drops channel when unset.",
+        "default": None,
+    },
+    {
+        "key": "channel_id_to_post_pets",
+        "label": "Pets channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel for pet notifications. Falls back to the drops channel when unset.",
+        "default": None,
+    },
+    {
+        "key": "channel_id_to_post_quests",
+        "label": "Quests channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel for quest-completion notifications. Falls back to the drops channel when unset.",
+        "default": None,
+    },
+    {
+        "key": "channel_id_to_post_clog",
+        "label": "Collection log channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel for collection-log notifications. Falls back to the drops channel when unset.",
+        "default": None,
+    },
+    {
+        "key": "channel_id_to_post_deaths",
+        "label": "Deaths channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel for player-death notifications. Falls back to the drops channel when unset.",
+        "default": None,
+    },
+    {
+        "key": "channel_id_to_post_diaries",
+        "label": "Diaries channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel for achievement-diary notifications. Falls back to the drops channel when unset.",
+        "default": None,
+    },
+    {
+        "key": "announcements_channel_id",
+        "label": "Announcements channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel where published announcements are syndicated (FRONTEND_PLAN.md §10).",
+        "default": None,
+    },
     # Channel for the standing "Open DropTracker" card (the Discord Activity
     # launcher). The bot posts/moves/removes it as this changes; the message id
     # it manages lives in the un-registered `activity_launch_message_id` row.
-    {"key": "activity_launch_channel", "type": "channel", "default": None},
+    {
+        "key": "activity_launch_channel",
+        "label": "Activity launcher channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Post an “Open DropTracker” card in this channel with a button that opens the in-Discord app. The bot keeps one card here and moves or removes it when you change this.",
+        "default": None,
+    },
 
     # --- Drop notifications ---
     # Defaults here must match the runtime fallbacks the processors use when a
     # key is absent (data/submissions/drop.py), otherwise the editor shows one
     # behavior and the bot does another.
-    {"key": "minimum_value_to_notify", "type": "int", "default": 2500000, "min": 0},
-    {"key": "only_include_items_over_minimum", "type": "boolean", "default": False, "seasonal": True},
-    {"key": "only_send_messages_with_images", "type": "boolean", "default": False, "seasonal": True},
-    {"key": "send_stacks_of_items", "type": "boolean", "default": False, "seasonal": True},
-    {"key": "notify_clogs", "type": "boolean", "default": True, "seasonal": True},
-    {"key": "notify_cas", "type": "boolean", "default": True, "seasonal": True},
-    {"key": "notify_pets", "type": "boolean", "default": True, "seasonal": True},
-    {"key": "notify_quests", "type": "boolean", "default": False, "seasonal": True},
-    {"key": "notify_special_quests", "type": "boolean", "default": True, "seasonal": True},
-    {"key": "notify_deaths", "type": "boolean", "default": False, "seasonal": True},
-    {"key": "notify_diaries", "type": "boolean", "default": False, "seasonal": True},
+    {
+        "key": "minimum_value_to_notify",
+        "label": "Minimum value to notify",
+        "category": "drops",
+        "type": "int",
+        "help": "Suppress drop notifications below this GP value.",
+        "default": 2500000,
+        "min": 0,
+    },
+    {
+        "key": "only_include_items_over_minimum",
+        "label": "Only items over minimum",
+        "category": "drops",
+        "type": "boolean",
+        "help": "On stacked/multi-item drops, only include items above the minimum value.",
+        "default": False,
+        "seasonal": True,
+    },
+    {
+        "key": "only_send_messages_with_images",
+        "label": "Only send with images",
+        "category": "drops",
+        "type": "boolean",
+        "help": "Require a screenshot before posting a drop.",
+        "default": False,
+        "seasonal": True,
+    },
+    {
+        "key": "send_stacks_of_items",
+        "label": "Announce item stacks",
+        "category": "drops",
+        "type": "boolean",
+        "help": "Announce drops of stackable items (e.g. rune/coin stacks) when their total value passes the minimum.",
+        "default": False,
+        "seasonal": True,
+    },
+    {
+        "key": "notify_clogs",
+        "label": "Notify collection logs",
+        "category": "drops",
+        "type": "boolean",
+        "help": "Post a notification on new collection-log slots.",
+        "default": True,
+        "seasonal": True,
+    },
+    {
+        "key": "notify_cas",
+        "label": "Notify combat achievements",
+        "category": "drops",
+        "type": "boolean",
+        "help": "Post a notification on combat-achievement completions.",
+        "default": True,
+        "seasonal": True,
+    },
+    {
+        "key": "notify_pets",
+        "label": "Notify pets",
+        "category": "drops",
+        "type": "boolean",
+        "help": "Post a notification on pet drops.",
+        "default": True,
+        "seasonal": True,
+    },
+    {
+        "key": "notify_quests",
+        "label": "Notify quests",
+        "category": "drops",
+        "type": "boolean",
+        "help": "Post a notification on quest completions.",
+        "default": False,
+        "seasonal": True,
+    },
+    {
+        "key": "notify_special_quests",
+        "label": "Notify special quests",
+        "category": "drops",
+        "type": "boolean",
+        "help": "Notify on milestone/special quests even when general quest notifications are off.",
+        "default": True,
+        "seasonal": True,
+    },
+    {
+        "key": "notify_deaths",
+        "label": "Notify deaths",
+        "category": "drops",
+        "type": "boolean",
+        "help": "Post a notification when a member dies.",
+        "default": False,
+        "seasonal": True,
+    },
+    {
+        "key": "notify_diaries",
+        "label": "Notify achievement diaries",
+        "category": "drops",
+        "type": "boolean",
+        "help": "Post a notification on achievement-diary completions.",
+        "default": False,
+        "seasonal": True,
+    },
 
     # --- Level notifications ---
     # notify_levels is the master toggle for the whole level/XP family
     # (level-ups, total-level milestones, post-99 XP milestones).
-    {"key": "notify_levels", "type": "boolean", "default": False, "seasonal": True},
-    {"key": "level_minimum_for_notifications", "type": "int", "default": 1, "min": 1, "max": 99},
-    {"key": "level_increment", "type": "int", "default": 1, "min": 1, "max": 99},
+    {
+        "key": "notify_levels",
+        "label": "Notify levels",
+        "category": "levels",
+        "type": "boolean",
+        "help": "Master toggle for level-up, total-level milestone, and post-99 XP milestone notifications.",
+        "default": False,
+        "seasonal": True,
+    },
+    {
+        "key": "level_minimum_for_notifications",
+        "label": "Minimum level",
+        "category": "levels",
+        "type": "int",
+        "help": "Only notify for skill levels at or above this value. Set to 99 (with the toggles below off) to only announce 99s.",
+        "default": 1,
+        "min": 1,
+        "max": 99,
+    },
+    {
+        "key": "level_increment",
+        "label": "Level increment",
+        "category": "levels",
+        "type": "int",
+        "help": "Notify every N skill levels (1 = every level). Level 99 always notifies. In a multi-level jump, every crossed level is checked.",
+        "default": 1,
+        "min": 1,
+        "max": 99,
+    },
     # Virtual (100-126) skill level-ups. Off by default so level 99 is the
     # final per-skill level-up notification unless a group opts in.
-    {"key": "notify_virtual_levels", "type": "boolean", "default": False},
+    {
+        "key": "notify_virtual_levels",
+        "label": "Virtual levels (100+)",
+        "category": "levels",
+        "type": "boolean",
+        "help": "Also notify for virtual level-ups above 99 (levels 100–126). Off = level 99 is the final level-up notification for a skill.",
+        "default": False,
+    },
     # Combat level increases. The plugin reports these as level-ups; they are
     # their own opt-in family and ignore the min/increment skill filters.
-    {"key": "notify_combat_levels", "type": "boolean", "default": False},
+    {
+        "key": "notify_combat_levels",
+        "label": "Combat level-ups",
+        "category": "levels",
+        "type": "boolean",
+        "help": "Notify when a member's combat level increases. Combat levels ignore the minimum/increment filters above.",
+        "default": False,
+    },
     # TOTAL-level milestones (e.g. 1500,2000,2277) that always notify.
-    {"key": "level_milestones", "type": "csv", "default": ""},
+    {
+        "key": "level_milestones",
+        "label": "Total level milestones",
+        "category": "levels",
+        "type": "csv",
+        "help": "Comma-separated TOTAL levels that always notify (e.g. 1500,2000,2277).",
+        "default": "",
+    },
     # Post-99 XP notification interval; 0 disables. Plugin reports at 1M
     # granularity, so values should be multiples of 1,000,000.
-    {"key": "post99_xp_interval", "type": "int", "default": 25000000, "min": 0},
+    {
+        "key": "post99_xp_interval",
+        "label": "Post-99 XP interval",
+        "category": "levels",
+        "type": "int",
+        "help": "After a skill reaches 99, notify every N XP (e.g. 25000000 = every 25M). Multiples of 1M; 0 disables.",
+        "default": 25000000,
+        "min": 0,
+    },
 
     # --- Personal best ---
     # notify_pbs (PB Discord notifications) is available to every group. The
     # Hall of Fame keys below are premium (see HALL_OF_FAME_CONFIG_KEYS);
     # create_pb_embeds is the master on/off switch the HOF bot keys off of.
-    {"key": "notify_pbs", "type": "boolean", "default": True, "seasonal": True},
-    {"key": "create_pb_embeds", "type": "boolean", "default": False},
-    {"key": "personal_best_embed_boss_list", "type": "bosslist", "default": ""},
-    {"key": "number_of_pbs_to_display", "type": "int", "default": 5, "min": 1, "max": 10},
-    {"key": "channel_id_to_send_pb_embeds", "type": "channel", "default": None},
-    {"key": "hof_individual_boss_messages", "type": "boolean", "default": False},
+    {
+        "key": "notify_pbs",
+        "label": "Notify personal bests",
+        "category": "pbs",
+        "type": "boolean",
+        "help": "Post personal-best notifications in Discord. Available to all groups.",
+        "default": True,
+        "seasonal": True,
+    },
+    {
+        "key": "create_pb_embeds",
+        "label": "Enable Hall of Fame",
+        "category": "pbs",
+        "type": "boolean",
+        "help": "Post and keep updated the Hall of Fame personal-best leaderboards in Discord. Turn this on, then choose the bosses and channel below.",
+        "default": False,
+    },
+    {
+        "key": "personal_best_embed_boss_list",
+        "label": "Hall of Fame bosses",
+        "category": "pbs",
+        "type": "bosslist",
+        "help": "Bosses featured in the Hall of Fame. Empty = no bosses shown.",
+        "default": "",
+    },
+    {
+        "key": "number_of_pbs_to_display",
+        "label": "PBs to display",
+        "category": "pbs",
+        "type": "int",
+        "help": "Top PB entries shown per team-size bracket in Hall of Fame messages.",
+        "default": 5,
+        "min": 1,
+        "max": 10,
+    },
+    {
+        "key": "channel_id_to_send_pb_embeds",
+        "label": "Hall of Fame channel",
+        "category": "pbs",
+        "type": "channel",
+        "help": "Channel where the Hall of Fame leaderboards are posted.",
+        "default": None,
+    },
+    {
+        "key": "hof_individual_boss_messages",
+        "label": "Individual Hall of Fame messages",
+        "category": "pbs",
+        "type": "boolean",
+        "help": "Post one Hall of Fame message per boss. When off, only the directory message is posted and members use its drop-down to view each boss's leaderboard.",
+        "default": False,
+    },
 
     # --- Combat achievements ---
     {
         "key": "min_ca_tier_to_notify",
+        "label": "Minimum CA tier",
+        "category": "cas",
         "type": "select",
+        "help": "Lowest combat-achievement tier that triggers a notification.",
         "default": "EASY",
         "options": ["EASY", "MEDIUM", "HARD", "ELITE", "MASTER", "GRANDMASTER"],
         "seasonal": True,
     },
 
     # --- Achievement diaries ---
+    # (TS categorises this under "drops".)
     {
         "key": "min_diary_tier_to_notify",
+        "label": "Minimum diary tier",
+        "category": "drops",
         "type": "select",
+        "help": "Lowest achievement-diary tier that triggers a notification.",
         "default": "EASY",
         "options": ["EASY", "MEDIUM", "HARD", "ELITE"],
         "seasonal": True,
@@ -112,14 +418,56 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # boardstyle: a lootboards-table row id chosen via the preview picker
     # (GET /lootboard-styles). Existence is validated in the PATCH route —
     # the catalog lives in the DB, not this static registry.
-    {"key": "loot_board_type", "type": "boardstyle", "default": "1"},
-    {"key": "use_dynamic_colors", "type": "boolean", "default": True},
-    {"key": "use_gp_colors", "type": "boolean", "default": True},
-    {"key": "repost_lootboard", "type": "boolean", "default": False},
-    {"key": "seasonal_boards", "type": "boolean", "default": False},
+    {
+        "key": "loot_board_type",
+        "label": "Lootboard style",
+        "category": "board",
+        "type": "boardstyle",
+        "help": "Visual style of the generated lootboard. Browse the catalog with live previews.",
+        "default": "1",
+    },
+    {
+        "key": "use_dynamic_colors",
+        "label": "Dynamic colors",
+        "category": "board",
+        "type": "boolean",
+        "help": "Color item tiles by relative value.",
+        "default": True,
+    },
+    {
+        "key": "use_gp_colors",
+        "label": "GP colors",
+        "category": "board",
+        "type": "boolean",
+        "help": "Use GP-value color thresholds on the board.",
+        "default": True,
+    },
+    {
+        "key": "repost_lootboard",
+        "label": "Repost lootboard",
+        "category": "board",
+        "type": "boolean",
+        "help": "Repost (vs. edit) the board on each update.",
+        "default": False,
+    },
+    {
+        "key": "seasonal_boards",
+        "label": "Seasonal boards",
+        "category": "board",
+        "type": "boolean",
+        "help": "When enabled, automatically use themed boards for holidays/seasons when made available globally.",
+        "default": False,
+    },
 
     # --- Split tracking (GP only; point splitting lives in the points routes) ---
-    {"key": "split_gp_tracking", "type": "boolean", "default": False},
+    {
+        "key": "split_gp_tracking",
+        "label": "Split GP tracking",
+        "category": "drops",
+        "type": "boolean",
+        "help": "Track raid loot splits: members receive their share of a split drop's GP value instead of the receiver keeping the full amount. Point splitting is configured separately on the Points tab.",
+        "default": False,
+    },
 
     # --- Manual submissions (suggestion #45) ---
     # How website manual submissions count for THIS group (never affects
@@ -131,64 +479,202 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     #   block           — no manual submission ever counts for this group
     {
         "key": "manual_submission_policy",
+        "label": "Manual submissions",
+        "category": "drops",
         "type": "select",
+        "help": "How drops submitted manually on the website count for this group. They always count globally and for the player's other groups — this only controls this group's boards and notifications.",
         "default": "allow",
         "options": ["allow", "confirm", "authorized_only", "block"],
     },
     # Optional: channel for the "manual submission awaiting review" ping under
     # the 'confirm' policy. Unset => no Discord ping (web review queue only).
-    {"key": "channel_id_to_post_manual_review", "type": "channel", "default": None},
+    {
+        "key": "channel_id_to_post_manual_review",
+        "label": "Manual review channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Optional. Where to ping when a manual submission is held for approval (the \"Hold for admin approval\" policy). Leave unset to review only on the website.",
+        "default": None,
+    },
 
     # --- Member activity log + voice-channel stat displays ---
     # channel_id_to_send_logs: member join/leave embeds (db/ops.py notify_group).
     # vc_to_display_*: voice channels renamed every 10 min with live stats
     # (services/channel_names.py). The channel picker's manual-id entry is how
     # voice channels are selected (the guild channel cache is text-only).
-    {"key": "channel_id_to_send_logs", "type": "channel", "default": None},
-    {"key": "vc_to_display_monthly_loot", "type": "channel", "default": None},
-    {"key": "vc_to_display_monthly_loot_text", "type": "string", "default": "{month}: {gp_amount} gp"},
-    {"key": "vc_to_display_droptracker_users", "type": "channel", "default": None},
-    {"key": "vc_to_display_droptracker_users_text", "type": "string", "default": "{member_count} members"},
+    {
+        "key": "channel_id_to_send_logs",
+        "label": "Member log channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel where member join/leave log messages are posted. Leave unset to disable.",
+        "default": None,
+    },
+    {
+        "key": "vc_to_display_monthly_loot",
+        "label": "Monthly loot voice channel",
+        "category": "integration",
+        "type": "channel",
+        "help": "Voice channel renamed every 10 minutes to show the group's monthly loot total. Voice channels aren't listed in the picker — use manual ID entry.",
+        "default": None,
+    },
+    {
+        "key": "vc_to_display_monthly_loot_text",
+        "label": "Monthly loot channel text",
+        "category": "integration",
+        "type": "string",
+        "help": "Template for the loot voice channel name. Placeholders: {month}, {gp_amount}.",
+        "default": "{month}: {gp_amount} gp",
+    },
+    {
+        "key": "vc_to_display_droptracker_users",
+        "label": "Member count voice channel",
+        "category": "integration",
+        "type": "channel",
+        "help": "Voice channel renamed every 10 minutes to show the group's tracked member count. Voice channels aren't listed in the picker — use manual ID entry.",
+        "default": None,
+    },
+    {
+        "key": "vc_to_display_droptracker_users_text",
+        "label": "Member count channel text",
+        "category": "integration",
+        "type": "string",
+        "help": "Template for the member-count voice channel name. Placeholder: {member_count}.",
+        "default": "{member_count} members",
+    },
 
     # --- Misc / integration ---
     # Not a setting of its own: this is an editable view of groups.group_name,
     # the column every surface displays. PATCH routes it through
     # db/group_rename.py; max_length matches that VARCHAR(30) column.
-    {"key": "group_name", "type": "string", "default": "", "max_length": 30},
-    {"key": "group_description", "type": "text", "default": ""},
-    {"key": "clan_chat_name", "type": "string", "default": ""},
+    {
+        "key": "group_name",
+        "label": "Group name",
+        "category": "integration",
+        "type": "string",
+        "help": "Display name of the group. Renaming updates it everywhere — group page, leaderboards, search and Discord messages.",
+        "default": "",
+        "max_length": 30,
+    },
+    {
+        "key": "group_description",
+        "label": "Description",
+        "category": "integration",
+        "type": "text",
+        "help": "Short description shown on the public group page.",
+        "default": "",
+    },
+    {
+        "key": "clan_chat_name",
+        "label": "Clan chat name",
+        "category": "integration",
+        "type": "string",
+        "help": "Your in-game clan chat channel name, exactly as it appears in game. Required for clan broadcast tracking: relayed broadcasts only bind to this group when the relayer's clan matches this name.",
+        "default": "",
+    },
     # --- Clan broadcast tracking (chat-relayed drops for non-plugin members) ---
     # Gate + storage floor for data/submissions/clan_broadcast.py. Broadcasts
     # only bind to a group when clan_broadcast_tracking is on AND the group's
     # clan_chat_name matches the relaying member's in-game clan. Chat rows are
     # authed=False / source='clan_chat' and never feed events, points or splits.
-    {"key": "clan_broadcast_tracking", "type": "boolean", "default": False},
-    {"key": "clan_broadcast_min_value", "type": "int", "default": 0, "min": 0},
+    {
+        "key": "clan_broadcast_tracking",
+        "label": "Clan broadcast tracking",
+        "category": "integration",
+        "type": "boolean",
+        "help": "Track drops, pets and collection log slots for members who don't run the plugin, parsed from in-game clan broadcast messages relayed by clanmates who do. Requires the clan chat name to be set. Chat-tracked entries are unverified, carry no screenshots, and never count toward events, points or splits.",
+        "default": False,
+    },
+    {
+        "key": "clan_broadcast_min_value",
+        "label": "Clan broadcast minimum value",
+        "category": "integration",
+        "type": "int",
+        "help": "Extra GP floor for chat-relayed drops: broadcasts below this are not recorded for this group at all. 0 records everything the clan's in-game broadcast threshold lets through.",
+        "default": 0,
+        "min": 0,
+    },
     # Relayed broadcasts can never carry a screenshot, so only_send_messages_
     # with_images would otherwise record chat rows and notify nothing. Default
     # True: opting into tracking opts into its imageless notifications.
-    {"key": "clan_broadcast_notify_without_images", "type": "boolean", "default": True},
+    {
+        "key": "clan_broadcast_notify_without_images",
+        "label": "Notify clan broadcasts without screenshots",
+        "category": "integration",
+        "type": "boolean",
+        "help": "Relayed clan broadcasts never carry a screenshot, so leave this on if you use \"Only send messages with images\" — otherwise chat-tracked drops, personal bests, pets and collection log slots are recorded but never announced. Turn it off to keep those announcements out of your channels entirely.",
+        "default": True,
+    },
     # --- Clan chat bridge (two-way game ↔ Discord chat sync) ---
     # services/clan_chat_bridge.py + data/submissions/clan_chat.py. Requires
     # clan_chat_name; one toggle drives both directions (game lines mirrored
     # into the channel, channel messages shown in game for plugin users).
-    {"key": "clan_chat_bridge_enabled", "type": "boolean", "default": False},
-    {"key": "channel_id_clan_chat_bridge", "type": "channel", "default": None},
-    {"key": "discord_url", "type": "string", "default": ""},
-    {"key": "auto_provision_members", "type": "boolean", "default": False},
-    {"key": "export_api_key", "type": "string", "default": None},
+    {
+        "key": "clan_chat_bridge_enabled",
+        "label": "Clan chat bridge",
+        "category": "integration",
+        "type": "boolean",
+        "help": "Two-way sync between your in-game clan chat and the bridge channel: game chat is mirrored into the channel, and channel messages appear in game for members running the plugin with the bridge enabled. Requires the clan chat name and a bridge channel.",
+        "default": False,
+    },
+    {
+        "key": "channel_id_clan_chat_bridge",
+        "label": "Clan chat bridge channel",
+        "category": "integration",
+        "type": "channel",
+        "help": "The Discord channel your in-game clan chat is mirrored to, and whose messages are relayed into the game. Anyone who can type in this channel can speak to the clan — restrict it accordingly.",
+        "default": None,
+    },
+    {
+        "key": "discord_url",
+        "label": "Discord invite URL",
+        "category": "integration",
+        "type": "string",
+        "help": "Public Discord invite shown on the group page.",
+        "default": "",
+    },
+    {
+        "key": "auto_provision_members",
+        "label": "Auto-add WiseOldMan members",
+        "category": "integration",
+        "type": "boolean",
+        "help": "Creates DropTracker profiles ahead of time for everyone in this group's linked WiseOldMan group, so members join this group automatically the moment they install the plugin — instead of waiting up to an hour for the next member sync.",
+        "default": False,
+    },
+    {
+        "key": "export_api_key",
+        "label": "Export API key",
+        "category": "integration",
+        "type": "string",
+        "help": "Per-group key used for on-demand WOM sync. Treat as a secret.",
+        "default": None,
+    },
 
     # --- Events: WOM reconciliation ---
     # Hybrid event XP/KC tracking from WiseOldMan bulk gains
     # (services/event_wom_reconciler.py). On by default for any group with a
     # linked WOM group id; this key force-disables it.
-    {"key": "event_wom_reconciliation", "type": "boolean", "default": True},
+    {
+        "key": "event_wom_reconciliation",
+        "label": "Event WiseOldMan tracking",
+        "category": "integration",
+        "type": "boolean",
+        "help": "During events, top up XP and boss KC task progress from WiseOldMan hiscores so members without the plugin still count. Never double-counts progress the plugin already tracked.",
+        "default": True,
+    },
     # Optional WOM group verification code: lets event freshness passes queue
     # a group-wide WOM "update-all" (one API call) instead of per-player
     # updates. Admin-only, redacted in audit logs like export_api_key.
     # "password" coerces exactly like "string" (both coerce_* functions fall
     # through); the type only changes how the web editor renders the input.
-    {"key": "wom_verification_code", "type": "password", "default": None},
+    {
+        "key": "wom_verification_code",
+        "label": "WiseOldMan verification code",
+        "category": "integration",
+        "type": "password",
+        "help": "Your WiseOldMan group's verification code. Optional — lets DropTracker queue a group-wide WOM update when events start and end, keeping hiscores-based event progress fresh. Treat as a secret.",
+        "default": None,
+    },
 
     # --- Monthly recaps ---
     # The clan's "Wrapped" card, posted on the 1st for the month just ended
@@ -198,10 +684,24 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # admin turns this on to keep getting them. That first post is authorised by
     # a seeding pass rather than by code, so the flag always reflects the truth —
     # a clan can switch it off in advance and never receive one at all.
-    {"key": "recaps_enabled", "type": "boolean", "default": False},
+    {
+        "key": "recaps_enabled",
+        "label": "Post monthly recaps",
+        "category": "recaps",
+        "type": "boolean",
+        "help": "Post your clan's recap card on the 1st of each month, covering the month just ended. Every clan receives one card to begin with; turn this on to keep receiving them, or off to stop.",
+        "default": False,
+    },
     # Where it goes. Empty falls back to lootboard_channel_id, which is where a
     # clan's monthly totals already live, so most groups need not set this.
-    {"key": "channel_id_to_post_recaps", "type": "channel", "default": None},
+    {
+        "key": "channel_id_to_post_recaps",
+        "label": "Recap channel",
+        "category": "recaps",
+        "type": "channel",
+        "help": "Where the monthly recap card is posted. Leave empty to use your lootboard channel.",
+        "default": None,
+    },
     # Local hour (0-23) on the 1st. Combined with recap_timezone below, which is
     # seeded from the browser of the first admin who opens this page, so the
     # default is "noon, their time" rather than a number someone has to reason
@@ -210,9 +710,25 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     #
     # A card cannot be built before that close, so a clan far enough ahead of UTC
     # gets the earliest moment after it — which is still their afternoon.
-    {"key": "recap_post_hour", "type": "int", "default": 12, "min": 0, "max": 23},
+    {
+        "key": "recap_post_hour",
+        "label": "Post at (hour)",
+        "category": "recaps",
+        "type": "int",
+        "help": "Hour of the 1st, in the timezone below, to post the card. Defaults to 12 (midday) — the month closes at 00:00 UTC, which is the middle of the night for most people. A card can't exist before that close, so clans far enough ahead of UTC receive theirs at the first moment after it.",
+        "default": 12,
+        "min": 0,
+        "max": 23,
+    },
     # IANA name (e.g. "America/New_York"). Empty means UTC.
-    {"key": "recap_timezone", "type": "string", "default": None},
+    {
+        "key": "recap_timezone",
+        "label": "Timezone",
+        "category": "recaps",
+        "type": "string",
+        "help": "IANA timezone name, e.g. Europe/London. Set automatically from your browser the first time an admin opens this page; empty means UTC.",
+        "default": None,
+    },
 
     # --- Clan Log ---
     # The standing "how far through every boss's uniques are we" message, edited
@@ -221,13 +737,34 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # bot owns and keeps editing in someone's channel, which no clan should get
     # without asking. The board itself is always available on the website and
     # through /clan-log, for every group and every tier.
-    {"key": "clan_log_enabled", "type": "boolean", "default": False},
+    {
+        "key": "clan_log_enabled",
+        "label": "Post a live Clan Log board",
+        "category": "clan_log",
+        "type": "boolean",
+        "help": "Keep a standing message in your Discord showing how far through every boss's uniques your clan is, edited automatically as members pull things. Your board is always on the website and available through /clan-log — this is only the Discord message.",
+        "default": False,
+    },
     # Where the standing message lives. Unlike the recap this does NOT fall back
     # to the lootboard channel — an ever-editing message would fight the
     # lootboard for the same slot.
-    {"key": "clan_log_channel_id", "type": "channel", "default": None},
+    {
+        "key": "clan_log_channel_id",
+        "label": "Clan Log channel",
+        "category": "clan_log",
+        "type": "channel",
+        "help": "Where the standing Clan Log message lives. Pick a channel of its own: the bot edits this message continuously, so it will bury conversation in a busy channel.",
+        "default": None,
+    },
     # The message the bot edits. Written by the bot, not by an admin.
-    {"key": "clan_log_message_id", "type": "string", "default": None},
+    {
+        "key": "clan_log_message_id",
+        "label": "Clan Log message id",
+        "category": "clan_log",
+        "type": "string",
+        "help": "Message the bot edits when updating the board. Managed automatically.",
+        "default": None,
+    },
 ]
 
 _BY_KEY = {f["key"]: f for f in GROUP_CONFIG_FIELDS}
