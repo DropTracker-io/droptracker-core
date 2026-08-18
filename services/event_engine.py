@@ -746,9 +746,10 @@ def effective_threshold(session, task: dict, team_id) -> int:
     return max(int(n or 0), 1)
 
 
-# Continuous-metric task types whose plugin progress fan-out is stepped: every
-# XP drop / loot stack is an increment, so per-increment envelopes would spam
-# every teammate's game chat. Discrete tasks (items, KC) stay per-increment.
+# Continuous-metric task types whose plugin progress fan-out stays stepped
+# even under a per-task progress_notify of 'all': every XP drop / loot stack
+# is an increment, so per-increment envelopes would spam every teammate's
+# game chat. (The default for every type is 25/50/75% milestones only.)
 PLUGIN_PROGRESS_STEP_TASK_TYPES = ("xp_target", "loot_value")
 PLUGIN_PROGRESS_STEP_PCT = 10
 
@@ -2933,21 +2934,22 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
     drove this increment, carried through so the sender can attach it to the
     Discord message the same way a completion's proof does.
 
-    The in-game plugin inbox is fanned out here on every increment, before
-    the Discord verbosity gates — the plugin has its own client-side progress
-    toggle, and the HUD advances off these envelopes between state refreshes.
-    Exception: continuous-metric tasks (xp_target/loot_value), where every
-    XP drop or loot stack is an increment — those only fan out when a
-    {PLUGIN_PROGRESS_STEP_PCT}% step of the target was crossed, so a 10M-XP
-    task pings its teams ~10 times total instead of per kill.
+    The in-game plugin inbox is fanned out here, before the Discord verbosity
+    gates — the plugin has its own client-side progress toggle, and the HUD
+    stays current off the /event_state refresh. By DEFAULT only 25/50/75%
+    milestone crossings fan out (per-increment envelopes spammed teammates);
+    a per-task ``config.progress_notify`` of 'all' opts one tile back into
+    every increment — except continuous-metric tasks (xp_target/loot_value),
+    which even then step at {PLUGIN_PROGRESS_STEP_PCT}% of the target so a
+    10M-XP task pings its teams ~10 times total instead of per kill.
 
-    A per-task ``config.progress_notify`` override ('off'/'milestones'/'all')
-    replaces the event AND team modes for BOTH the plugin fan-out and the
-    Discord enqueue — it's how one tile announces at 25/50/75% while another
-    announces every item. The event-level ``event_task_progress`` toggle
-    stays the Discord master mute; the plugin's client toggle stays its own.
-    The override rides in the payload (``progress_notify``) so the sender's
-    per-destination verbosity re-checks honor it too.
+    The override ('off'/'milestones'/'all') replaces the event AND team modes
+    for BOTH the plugin fan-out and the Discord enqueue — it's how one tile
+    announces at 25/50/75% while another announces every item. The
+    event-level ``event_task_progress`` toggle stays the Discord master mute;
+    the plugin's client toggle stays its own. The override rides in the
+    payload (``progress_notify``) so the sender's per-destination verbosity
+    re-checks honor it too.
     """
     from services.event_notifications import (
         effective_message_config,
@@ -2978,14 +2980,18 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
         base_payload["progress_notify"] = task_mode
     if task_mode == "off":
         send_plugin = False
-    elif task_mode == "milestones":
-        send_plugin = bool(crossed_pcts)
-    elif task.get("type") in PLUGIN_PROGRESS_STEP_TASK_TYPES:
-        # 'all' (and inherit) keep the meter-task step — per-XP-drop envelopes
-        # would spam every teammate's chat regardless of what the tile wants.
-        send_plugin = _plugin_progress_step_crossed(previous, current, target_threshold)
+    elif task_mode == "all":
+        # Explicit per-tile opt-in to every increment — except meter tasks,
+        # where every XP drop / loot stack is an increment and per-increment
+        # envelopes would spam every teammate's chat.
+        send_plugin = (
+            _plugin_progress_step_crossed(previous, current, target_threshold)
+            if task.get("type") in PLUGIN_PROGRESS_STEP_TASK_TYPES else True)
     else:
-        send_plugin = True
+        # 'milestones' and INHERIT: 25/50/75% crossings only. Default changed
+        # from every-increment 2026-08-18 (owner: don't spam by default) — the
+        # HUD stays current off the /event_state refresh either way.
+        send_plugin = bool(crossed_pcts)
     if send_plugin:
         try:
             from services.plugin_notifications import (

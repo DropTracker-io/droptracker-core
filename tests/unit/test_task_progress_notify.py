@@ -95,19 +95,31 @@ def test_mode_reads_dict_and_json_configs():
         {"config": {"progress_notify": "sometimes"}}) is None
 
 
-# ── inherit (no override) — pre-existing behaviour is unchanged ──────────────
+# ── inherit (no override): plugin defaults to milestones — don't spam ───────
 
-def test_inherit_plugin_every_increment_discord_muted(gates):
+def test_inherit_plugin_defaults_to_milestones(gates):
     plugin, discord, _ = gates
+    # 10 → 20 of 15000 crosses nothing: no in-game envelope by default.
     _run(gates, _task(), _event(mode="off"), previous=10, current=20)
-    assert len(plugin.calls) == 1
+    assert not plugin.calls
     assert not discord.calls
 
 
-def test_inherit_all_mode_enqueues_discord(gates):
+def test_inherit_plugin_fires_on_crossing(gates):
     plugin, discord, _ = gates
-    _run(gates, _task(), _event(mode="all"), previous=10, current=20)
+    # 3700 → 3800 crosses 25% of 15000 — the default in-game cadence.
+    _run(gates, _task(), _event(mode="off"), previous=3700, current=3800)
     assert len(plugin.calls) == 1
+    assert plugin.calls[0][0][3]["milestone_pct"] == 25
+    assert not discord.calls  # event mode off
+
+
+def test_inherit_all_mode_enqueues_discord_every_increment(gates):
+    plugin, discord, _ = gates
+    # An explicit event-level 'all' still posts every increment to Discord;
+    # the plugin inbox stays at the milestone default.
+    _run(gates, _task(), _event(mode="all"), previous=10, current=20)
+    assert not plugin.calls
     assert len(discord.calls) == 1
 
 
