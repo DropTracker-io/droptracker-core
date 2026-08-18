@@ -296,9 +296,13 @@ class TestApp:
         assert r.status_code == 200
         body = await r.get_json()
         assert body["client_id"] == "424242"
-        assert body["permissions"] is None
+        # Default bitfield = services.guild_permissions.INVITE_PERMISSIONS
+        # (parity pinned in test_group_onboarding_panel) — the invite used to
+        # request no permissions at all here and Administrator elsewhere.
+        assert body["permissions"] == "268553232"
         assert body["invite_url"].startswith("https://discord.com/oauth2/authorize?")
         assert "client_id=424242" in body["invite_url"]
+        assert "permissions=268553232" in body["invite_url"]
 
 
 class TestProfileStatHelpers:

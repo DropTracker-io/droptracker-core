@@ -5,8 +5,14 @@ from interactions import ComponentContext, Extension, ActionRow, Button, ButtonS
 from interactions.api.events import Startup, Component, ComponentCompletion, ComponentError, ModalCompletion, ModalError, MessageCreate
 from interactions.models import ContainerComponent, ThumbnailComponent, SeparatorComponent, UserSelectMenu, SlidingWindowSystem, SectionComponent, SeparatorComponent, TextDisplayComponent, ThumbnailComponent, MediaGalleryComponent, MediaGalleryItem, OverwriteType
 from utils.site_urls import PREMIUM_URL, WEBSITE_URL
+from services.guild_permissions import INVITE_PERMISSIONS
 
-
+# One invite URL for every surface. Previously this file asked for
+# permissions=8 (Administrator) while the website's /meta/bot-invite asked
+# for none — now both derive from the same minimal bitfield.
+BOT_INVITE_URL = ("https://discord.com/oauth2/authorize"
+                  f"?client_id=1172933457010245762&permissions={INVITE_PERMISSIONS}"
+                  "&scope=bot%20applications.commands")
 
 
 logo_media = UnfurledMediaItem(
@@ -182,7 +188,7 @@ invite_components = [
             accessory=Button(
                 label="Invite the DropTracker.io Bot",
                 style=ButtonStyle.LINK,
-                url="https://discord.com/oauth2/authorize?client_id=1172933457010245762&permissions=8&scope=bot"
+                url=BOT_INVITE_URL
             )
         ),
         SeparatorComponent(divider=True),
@@ -382,7 +388,7 @@ async def build_clan_setup(bot=None):
                 Button(
                     label="Invite our Discord bot",
                     style=ButtonStyle.LINK,
-                    url="https://discord.com/oauth2/authorize?client_id=1172933457010245762&permissions=8&scope=bot"
+                    url=BOT_INVITE_URL
                 )
             ),
             SeparatorComponent(divider=True),

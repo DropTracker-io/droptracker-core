@@ -24,7 +24,11 @@ _DEFAULT_CLIENT_ID = "1172933457010245762"
 @meta_bp.get("/meta/bot-invite")
 async def bot_invite():
     client_id = (os.getenv("DISCORD_BOT_CLIENT_ID") or "").strip() or _DEFAULT_CLIENT_ID
-    permissions = (os.getenv("DISCORD_BOT_INVITE_PERMISSIONS") or "").strip() or None
+    # Default = services.guild_permissions.INVITE_PERMISSIONS (kept as a
+    # literal here because web_api must not import the interactions lib; a
+    # unit test pins the two equal). Was previously ABSENT — the invite asked
+    # for no permissions while components.py asked for Administrator.
+    permissions = (os.getenv("DISCORD_BOT_INVITE_PERMISSIONS") or "").strip() or "268553232"
 
     params = {"client_id": client_id, "scope": "bot applications.commands"}
     if permissions:

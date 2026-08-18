@@ -125,8 +125,11 @@ class ClanCommands(Extension):
                               f"Please visit the website to configure your group settings manually: https://www.droptracker.io/login",
                               ephemeral=True)
 
-            await ctx.send(f"To continue setting up, please [sign in on the website](https://www.droptracker.io/login) using your Discord account.",
-                            ephemeral=True)
+            await ctx.send("To continue setting up — channels, notification "
+                           "toggles, thresholds — run `/group-setup` right here, "
+                           "or [sign in on the website](https://www.droptracker.io/login) "
+                           "for the full dashboard.",
+                           ephemeral=True)
         else:
             await ctx.send(f"You do not have the necessary permissions to use this command inside of this Discord server.\\n" +
                            "Please ask the server owner to execute this command.",

@@ -19,7 +19,6 @@ from monitor.sdnotifier import SystemdWatchdog
 
 from sqlalchemy import text
 from services.notification_service import NotificationService
-from services.bot_state import BotState
 from services.channel_names import ChannelNames
 from services.channel_cache import shape_channel_cache
 from utils.embeds import create_boss_pb_embed, update_boss_pb_embed
@@ -131,7 +130,10 @@ def create_hypercorn_config():
 
 ## Discord Bot initialization ##
 
-bot = interactions.Client(intents=Intents.DIRECT_MESSAGES | Intents.GUILD_INTEGRATIONS,
+# GUILDS added 2026-08-18 for the group-onboarding welcome (GuildJoin never
+# fired without it). It only adds guild lifecycle events + a guild cache we
+# still deliberately don't rely on (fetch_guild_cached et al stay REST-based).
+bot = interactions.Client(intents=Intents.DIRECT_MESSAGES | Intents.GUILD_INTEGRATIONS | Intents.GUILDS,
                           send_command_traceback=False,
                           owner_ids=[528746710042804247, 232236164776460288])
 bot.send_not_ready_messages = True
@@ -274,7 +276,6 @@ async def on_startup(event: Startup):
                               activity=interactions.Activity(name=f" /help", type=interactions.ActivityType.WATCHING))
     #bot.load_extension("services.update_dmer")
     bot.load_extension("commands")
-    bot.load_extension("services.bot_state")
     bot.load_extension("services.message_handler")
     bot.load_extension("services.event_signup_discord")
     bot.load_extension("services.channel_names")
@@ -290,6 +291,10 @@ async def on_startup(event: Startup):
     # /settings — the Discord-native player settings panel (DM notifications,
     # in-game event notifications, pings & visibility).
     bot.load_extension("services.player_settings_panel")
+    # /group-setup — Discord-native group onboarding + config panel, and the
+    # welcome card on GuildJoin. Replaces services.bot_state (whose listener
+    # was dead code: no GUILDS intent, missing-self bug).
+    bot.load_extension("services.group_onboarding_panel")
     print("Loaded services.")
     print("Set bot to ready")
     await asyncio.sleep(1)
