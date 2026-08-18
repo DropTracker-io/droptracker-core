@@ -131,8 +131,8 @@ async def _process_entry(entry_bytes: bytes) -> None:
         _normalize_world_type,
         _try_attach_video_url_to_drop,
     )
-    from data import submissions
     from data.submissions.common import SubmissionResponse
+    from data.submissions.dispatch import SUPPORTED_TYPES, dispatch_submission
     from data.submissions.raid_dedupe import (
         duplicate_reject_message,
         flag_multipath_loot_duplicates,
@@ -258,40 +258,18 @@ async def _process_entry(entry_bytes: bytes) -> None:
                 # the queue path silently drops all video linkage.
                 await _link_video_to_submission(processed_data, db_session)
 
-                match norm_type:
-                    case "drop":
-                        response = await submissions.drop_processor(processed_data, external_session=db_session)
-                        await _try_attach_video_url_to_drop(processed_data, db_session)
-                    case "collection_log":
-                        response = await submissions.clog_processor(processed_data, external_session=db_session)
-                    case "personal_best":
-                        response = await submissions.pb_processor(processed_data, external_session=db_session)
-                    case "combat_achievement":
-                        response = await submissions.ca_processor(processed_data, external_session=db_session)
-                    case "experience":
-                        response = await submissions.experience_processor(processed_data, external_session=db_session)
-                    case "quest":
-                        response = await submissions.quest_processor(processed_data, external_session=db_session)
-                    case "death":
-                        response = await submissions.death_processor(processed_data, external_session=db_session)
-                    case "diary":
-                        response = await submissions.diary_processor(processed_data, external_session=db_session)
-                    case "pet":
-                        response = await submissions.pet_processor(processed_data, external_session=db_session)
-                    case "adventure_log":
-                        response = await submissions.adventure_log_processor(processed_data, external_session=db_session)
-                    case "clan_broadcast":
-                        response = await submissions.clan_broadcast_processor(processed_data, external_session=db_session)
-                    case "clan_chat":
-                        response = await submissions.clan_chat_processor(processed_data, external_session=db_session)
-                    case _:
-                        log.warning("Unknown submission type %r; skipping", norm_type)
-                        _mark_submission_outcome(
-                            processed_data,
-                            norm_type,
-                            SubmissionResponse(False, f"Unsupported submission type: {norm_type}"),
-                        )
-                        continue
+                if norm_type not in SUPPORTED_TYPES:
+                    log.warning("Unknown submission type %r; skipping", norm_type)
+                    _mark_submission_outcome(
+                        processed_data,
+                        norm_type,
+                        SubmissionResponse(False, f"Unsupported submission type: {norm_type}"),
+                    )
+                    continue
+
+                response = await dispatch_submission(norm_type, processed_data, db_session)
+                if norm_type == "drop":
+                    await _try_attach_video_url_to_drop(processed_data, db_session)
 
                 db_session.commit()
                 _mark_submission_outcome(processed_data, norm_type, response)

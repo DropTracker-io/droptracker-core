@@ -10,7 +10,17 @@ from interactions.api.events import MemberUpdate, MessageCreate, MessageReaction
 from interactions import Embed, Intents, Message, ChannelType, OptionType, SlashContext, listen, slash_command, Permissions, slash_option
 from interactions.models import Member
 from db.models import Group, ItemList, PersonalBestEntry, PlayerPet, Session, Player, User, UserConfiguration
-from data.submissions import adventure_log_processor, clog_processor, ca_processor, pb_processor, drop_processor, pet_processor, experience_processor
+# Processors are deliberately NOT imported here: this reader routes everything
+# through data.submissions.dispatch so it cannot support fewer types than the
+# API intake does. tests/unit/test_submission_dispatch_parity.py enforces it.
+from data.submissions.dispatch import (
+    SEASONAL_WORLD_TYPE,
+    SUPPORTED_TYPES,
+    dispatch_submission,
+    normalize_submission_type,
+    normalize_world_type,
+    resolve_submission_type,
+)
 from api.services.metrics import MetricsTracker
 from services.points import award_points_to_player
 from services import nitro_attribution
@@ -79,59 +89,12 @@ _NITRO_DEBOUNCE_SECONDS = 30
 _NITRO_POLL_SECONDS = 60
 
 
-def _normalize_world_type(raw_world_type):
-    if raw_world_type is None:
-        return MAIN_WORLD_TYPE
-    normalized = str(raw_world_type).strip().lower()
-    return normalized or MAIN_WORLD_TYPE
-
-
-def _normalize_submission_type(raw_submission_type):
-    normalized = str(raw_submission_type or "").strip().lower()
-    match normalized:
-        case "other" | "npc":
-            return "drop"
-        case "kill_time" | "npc_kill":
-            return "personal_best"
-        case "experience_update" | "experience_milestone" | "level_up" | "xp_milestone":
-            # "xp_milestone" is the legacy type string older plugin builds send
-            return "experience"
-        case "quest_completion":
-            return "quest"
-        case _:
-            return normalized
-
-
-async def _dispatch_seasonal_submission(submission_type, embed_data, session):
-    """Route seasonal submissions to their respective processors with world_type='seasonal'."""
-    match submission_type:
-        case "drop":
-            from data.submissions import drop_processor
-            return await drop_processor(embed_data, external_session=session, world_type="seasonal")
-        case "collection_log":
-            from data.submissions import clog_processor
-            return await clog_processor(embed_data, external_session=session, world_type="seasonal")
-        case "personal_best":
-            from data.submissions import pb_processor
-            return await pb_processor(embed_data, external_session=session, world_type="seasonal")
-        case "combat_achievement":
-            from data.submissions import ca_processor
-            return await ca_processor(embed_data, external_session=session, world_type="seasonal")
-        case "pet":
-            from data.submissions import pet_processor
-            return await pet_processor(embed_data, external_session=session, world_type="seasonal")
-        case "quest":
-            from data.submissions import quest_processor
-            return await quest_processor(embed_data, external_session=session, world_type="seasonal")
-        case "death":
-            from data.submissions import death_processor
-            return await death_processor(embed_data, external_session=session, world_type="seasonal")
-        case "diary":
-            from data.submissions import diary_processor
-            return await diary_processor(embed_data, external_session=session, world_type="seasonal")
-        case _:
-            # experience and adventure_log not yet tracked for seasonal worlds
-            return None
+# Type routing is shared with the API intake path (data/submissions/dispatch.py)
+# so this reader can never again support fewer submission types than the API
+# does — main-world deaths, diaries and quests were silently discarded here for
+# exactly that reason. Do not reintroduce a local copy of either table.
+_normalize_world_type = normalize_world_type
+_normalize_submission_type = normalize_submission_type
 
 RETRYABLE_DB_ERROR_STRINGS = (
     "server has gone away",
@@ -479,17 +442,35 @@ def retry_on_database_error(max_retries=3, delay=1):
 
 @retry_on_database_error(max_retries=3, delay=1)
 async def process_submission_with_session(submission_type, embed_data):
-    """Process a submission with a fresh database session"""
+    """Process a submission with a fresh database session.
+
+    Routing, raid dedupe, video linking and outcome marking are all borrowed
+    from the API intake path rather than reimplemented, so this transport
+    stays 1:1 with it. Imported lazily: api.routes.webhook pulls in Quart.
+    """
+    from api.routes.webhook import (
+        _link_video_to_submission,
+        _mark_submission_outcome,
+        _try_attach_video_url_to_drop,
+    )
+    from data.submissions.common import SubmissionResponse
+    from data.submissions.raid_dedupe import duplicate_reject_message
+
     world_type = _normalize_world_type(embed_data.get("world_type"))
     embed_data["world_type"] = world_type
     normalized_submission_type = _normalize_submission_type(submission_type)
     session = Session()
     try:
         success = False
-        if world_type == "seasonal":
+        if world_type == SEASONAL_WORLD_TYPE:
             from services.seasonal_state import is_seasonal_active
             if is_seasonal_active():
-                result = await _dispatch_seasonal_submission(normalized_submission_type, embed_data, session)
+                result = await dispatch_submission(
+                    normalized_submission_type,
+                    embed_data,
+                    session,
+                    world_type=SEASONAL_WORLD_TYPE,
+                )
             else:
                 # Global kill switch (admin panel): skip seasonal processing.
                 result = None
@@ -497,36 +478,32 @@ async def process_submission_with_session(submission_type, embed_data):
         elif world_type != MAIN_WORLD_TYPE:
             result = None
             success = True
-        elif normalized_submission_type == "collection_log":
-            print("Received collection log submission from non-api user")
-            result = await clog_processor(embed_data, external_session=session)
-            success = True
-        elif normalized_submission_type == "combat_achievement":
-            result = await ca_processor(embed_data, external_session=session)
-            success = True
-        elif normalized_submission_type == "personal_best":
-            result = await pb_processor(embed_data, external_session=session)
-            success = True
-        elif normalized_submission_type == "drop":
-            result = await drop_processor(embed_data, external_session=session)
-            success = True
-        elif normalized_submission_type == "pet":
-            result = await pet_processor(embed_data, external_session=session)
-            success = True
-        elif normalized_submission_type == "adventure_log":
-            result = await adventure_log_processor(embed_data, external_session=session)
-            success = True
-        elif normalized_submission_type == "experience":
-            # Level-ups and experience_update snapshots from non-API users;
-            # snapshots keep event xp_target baselines/deltas advancing
-            # (events gate non-API credit via their submission_policy).
-            result = await experience_processor(embed_data, external_session=session)
-            success = True
+        elif normalized_submission_type not in SUPPORTED_TYPES:
+            # Mirror the API path: record the rejection rather than dropping the
+            # submission on the floor, so a type this reader cannot route is
+            # visible in /check instead of vanishing.
+            print(f"Unsupported submission type on webhook path: {normalized_submission_type!r}")
+            result = SubmissionResponse(
+                False, f"Unsupported submission type: {normalized_submission_type}"
+            )
         else:
-            result = None
-        
+            # A re-looted raid chest double-counts GP and KC if processed twice.
+            # The API path rejects these before dispatch; so must this one.
+            dup_message = duplicate_reject_message(embed_data)
+            if normalized_submission_type == "drop" and dup_message:
+                result = SubmissionResponse(False, dup_message)
+            else:
+                await _link_video_to_submission(embed_data, session)
+                result = await dispatch_submission(
+                    normalized_submission_type, embed_data, session
+                )
+                if normalized_submission_type == "drop":
+                    await _try_attach_video_url_to_drop(embed_data, session)
+                success = True
+
         # Commit the session if everything succeeded
         session.commit()
+        _mark_submission_outcome(embed_data, normalized_submission_type, result)
         try:
             metrics.record_request(normalized_submission_type, success, app="webhook_bot")
             #print(f"Recorded request: {submission_type} {success}")
@@ -567,6 +544,33 @@ async def process_submission_with_session(submission_type, embed_data):
         except Exception:
             pass
 
+def _flag_bundle_duplicates(embed_dicts) -> None:
+    """Fingerprint one payload's embeds for content-level duplicates.
+
+    Mirrors the two passes the API intake runs over ``processed_items`` before
+    dispatch. Both are bundle-level: they group embeds by (acc_hash, source,
+    world) and flag repeats of a bundle already seen, so they have nothing to
+    compare against unless the whole message is handed to them at once.
+    Without this, a re-looted raid chest or a multi-part boss kill arriving on
+    the webhook transport double-counts GP, KC and event task progress.
+    """
+    try:
+        from data.submissions.raid_dedupe import (
+            flag_multipath_loot_duplicates,
+            flag_raid_reloot_duplicates,
+        )
+
+        reflagged = flag_raid_reloot_duplicates(embed_dicts)
+        if reflagged:
+            print(f"Flagged {reflagged} raid re-loot duplicate embed(s) in webhook payload")
+        multipath_flagged = flag_multipath_loot_duplicates(embed_dicts)
+        if multipath_flagged:
+            print(f"Flagged {multipath_flagged} multi-path boss duplicate embed(s) in webhook payload")
+    except Exception as e:
+        # Fail open: a dedupe outage must not stop submissions being recorded.
+        print(f"Bundle duplicate flagging failed: {e}")
+
+
 @interactions.listen(MessageCreate)
 async def on_message_create(event: MessageCreate):
     def embed_to_dict(embed: Embed):
@@ -592,58 +596,50 @@ async def on_message_create(event: MessageCreate):
     channel_id = message.channel.id
                     
     if str(message.guild.id) in (str(guild) for guild in target_guilds) or message.guild.id == os.getenv("DISCORD_GUILD_ID"):
+        # One Discord message is one plugin payload, so its embeds are collected
+        # and fingerprinted as a bundle before any of them is dispatched — the
+        # raid re-loot and multi-part-boss passes are bundle-level by contract
+        # and cannot flag anything if embeds are dispatched one at a time.
+        pending = []
         for embed in message.embeds:
             embed_data = embed_to_dict(embed)
+            if not embed_data:
+                continue
             if message.attachments:
                 for attachment in message.attachments:
                     if attachment.url:
                         embed_data['attachment_url'] = attachment.url
                         embed_data['attachment_type'] = attachment.content_type
-                        
+
             field_names = [field.name for field in embed.fields]
-            if embed_data:
-                field_values = [field.value.lower().strip() for field in embed.fields]
-                if "source_type" in field_names and "loot chest" in field_values:
-                    ## Skip pvp
-                    continue
-                    
-                # Transport flag for the DB rows only (API vs webhook intake).
-                # The events engine no longer derives plugin-vs-manual from
-                # this: processors stamp the event envelope's used_api from
-                # intake_source, so webhook-path plugin traffic still counts
-                # as plugin under confirm_non_api / api_only policies.
-                embed_data['used_api'] = False
-                
-                try:
-                    if "collection_log" in field_values:
-                        await process_submission_with_session("collection_log", embed_data)
-                        continue
-                    elif "combat_achievement" in field_values:
-                        await process_submission_with_session("combat_achievement", embed_data)
-                        continue
-                    elif "npc_kill" in field_values or "kill_time" in field_values:
-                        await process_submission_with_session("personal_best", embed_data)
-                        continue
-                    elif embed.title and "received some drops" in embed.title or "drop" in field_values:
-                        await process_submission_with_session("drop", embed_data)
-                        continue
-                    elif ("experience_update" in field_values or "experience_milestone" in field_values
-                          or "level_up" in field_values or "xp_milestone" in field_values):
-                        await process_submission_with_session(embed_data.get("type", "experience_update"), embed_data)
-                        continue
-                    elif "quest_completion" in field_values:
-                        # await quest_processor(embed_data)
-                        continue
-                    elif "pet" in field_values and "pet_name" in field_names:
-                        await process_submission_with_session("pet", embed_data)
-                        continue
-                    elif "adventure_log" in field_values:
-                        await process_submission_with_session("adventure_log", embed_data)
-                        continue
-                        
-                except Exception as e:
-                    print(f"Failed to process submission after retries: {e}")
-                    # Continue processing other embeds even if one fails
+            field_values = [field.value.lower().strip() for field in embed.fields]
+            if "source_type" in field_names and "loot chest" in field_values:
+                ## Skip pvp
+                continue
+
+            # Transport flag for the DB rows only (API vs webhook intake).
+            # The events engine no longer derives plugin-vs-manual from
+            # this: processors stamp the event envelope's used_api from
+            # intake_source, so webhook-path plugin traffic still counts
+            # as plugin under confirm_non_api / api_only policies.
+            embed_data['used_api'] = False
+            embed_data['world_type'] = _normalize_world_type(embed_data.get("world_type"))
+
+            submission_type = resolve_submission_type(
+                embed_data.get("type"), embed.title, field_names, field_values
+            )
+            if submission_type:
+                pending.append((submission_type, embed_data))
+
+        if pending:
+            _flag_bundle_duplicates([data for _, data in pending])
+
+        for submission_type, embed_data in pending:
+            try:
+                await process_submission_with_session(submission_type, embed_data)
+            except Exception as e:
+                print(f"Failed to process submission after retries: {e}")
+                # Continue processing other embeds even if one fails
     else:
         print(f"Message is not in the target guilds: {message.guild.id}")
 

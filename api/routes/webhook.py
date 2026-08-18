@@ -10,6 +10,13 @@ from quart_rate_limiter import rate_limit
 
 from api.core import logger, get_db_session, metrics, reset_db_connections
 from data import submissions
+from data.submissions.dispatch import (
+    SEASONAL_WORLD_TYPE,
+    SUPPORTED_TYPES,
+    dispatch_submission,
+    normalize_submission_type,
+    normalize_world_type,
+)
 from db import Player, Drop
 from db.models.video_upload import VideoUpload
 from services.seasonal_state import is_seasonal_active
@@ -38,13 +45,6 @@ def _drop_request_debug(message: str):
         print(f"[DropRequestDebug] {message}")
 
 
-def _normalize_world_type(raw_world_type):
-    if raw_world_type is None:
-        return MAIN_WORLD_TYPE
-    normalized = str(raw_world_type).strip().lower()
-    return normalized or MAIN_WORLD_TYPE
-
-
 def _mark_submission_outcome(processed_data, submission_type, response):
     """Write the per-submission status marker from the processor's verdict.
 
@@ -61,48 +61,18 @@ def _mark_submission_outcome(processed_data, submission_type, response):
         mark_submission_processed(guid, submission_type)
 
 
-def _normalize_submission_type(raw_submission_type):
-    normalized = str(raw_submission_type or "").strip().lower()
-    match normalized:
-        case "other" | "npc":
-            return "drop"
-        case "kill_time" | "npc_kill":
-            return "personal_best"
-        case "experience_update" | "experience_milestone" | "level_up" | "xp_milestone":
-            # "xp_milestone" is the legacy type string older plugin builds send
-            return "experience"
-        case "quest_completion":
-            return "quest"
-        case "player_death":
-            return "death"
-        case "achievement_diary" | "diary_completion":
-            return "diary"
-        case _:
-            return normalized
+# Type routing lives in data/submissions/dispatch.py so this path, the queue
+# consumer and the legacy Discord-webhook reader cannot drift apart again.
+# These names stay as thin aliases because both other callers import them here.
+_normalize_submission_type = normalize_submission_type
+_normalize_world_type = normalize_world_type
 
 
 async def _dispatch_seasonal_submission(submission_type, processed_data, db_session):
-    """Route seasonal submissions to their respective processors with world_type='seasonal'."""
-    match submission_type:
-        case "drop" | "other" | "npc":
-            return await submissions.drop_processor(processed_data, external_session=db_session, world_type="seasonal")
-        case "collection_log":
-            return await submissions.clog_processor(processed_data, external_session=db_session, world_type="seasonal")
-        case "personal_best" | "kill_time" | "npc_kill":
-            return await submissions.pb_processor(processed_data, external_session=db_session, world_type="seasonal")
-        case "combat_achievement":
-            return await submissions.ca_processor(processed_data, external_session=db_session, world_type="seasonal")
-        case "pet":
-            return await submissions.pet_processor(processed_data, external_session=db_session, world_type="seasonal")
-        case "quest" | "quest_completion":
-            return await submissions.quest_processor(processed_data, external_session=db_session, world_type="seasonal")
-        case "death" | "player_death":
-            return await submissions.death_processor(processed_data, external_session=db_session, world_type="seasonal")
-        case "diary" | "achievement_diary" | "diary_completion":
-            return await submissions.diary_processor(processed_data, external_session=db_session, world_type="seasonal")
-        case _:
-            # experience and adventure_log not yet tracked for seasonal worlds
-            return None
+    """Route seasonal submissions to their processors with world_type='seasonal'."""
+    return await dispatch_submission(
+        submission_type, processed_data, db_session, world_type=SEASONAL_WORLD_TYPE
+    )
 
 
 async def _link_video_to_submission(processed_data, db_session):
@@ -459,88 +429,44 @@ async def _process_webhook_request(req_start):
                         try:
                             # Link video upload if video_key is present in the embed data
                             await _link_video_to_submission(processed_data, db_session)
-                            match (submission_type):
-                                case "drop" | "other"| "npc":
-                                    submission_type = "drop"
-                                    g.submission_type = submission_type
-                                    _drop_request_debug(
-                                        "dispatch_to_drop_processor "
-                                        f"guid={processed_data.get('guid')} "
-                                        f"player_name={processed_data.get('player_name') or processed_data.get('player')} "
-                                        f"players_included_type={type(processed_data.get('players_included')).__name__} "
-                                        f"players_included={processed_data.get('players_included')} "
-                                        f"nearby_players_type={type(processed_data.get('nearby_players')).__name__} "
-                                        f"nearby_players={processed_data.get('nearby_players')}"
-                                    )
-                                    response = await submissions.drop_processor(processed_data, external_session=db_session)
-                                    log_phase("drop_processed")
-                                    # After creating the drop, try to link the video to the Drop row
-                                    await _try_attach_video_url_to_drop(processed_data, db_session)
-                                case "collection_log":
-                                    submission_type = "collection_log"
-                                    g.submission_type = submission_type
-                                    response = await submissions.clog_processor(processed_data, external_session=db_session)
-                                    log_phase("clog_processed")
-                                case "personal_best" | "kill_time" | "npc_kill":
-                                    submission_type = "personal_best"
-                                    g.submission_type = submission_type
-                                    response = await submissions.pb_processor(processed_data, external_session=db_session)
-                                    log_phase("pb_processed")
-                                case "combat_achievement":
-                                    submission_type = "combat_achievement"
-                                    g.submission_type = submission_type
-                                    response = await submissions.ca_processor(processed_data, external_session=db_session)
-                                    log_phase("ca_processed")
-                                case "experience_update" | "experience_milestone" | "level_up" | "xp_milestone":
-                                    g.submission_type = "experience"
-                                    response = await submissions.experience_processor(processed_data, external_session=db_session)
-                                    log_phase("experience_processed")
-                                case "quest" | "quest_completion":
-                                    submission_type = "quest"
-                                    g.submission_type = submission_type
-                                    response = await submissions.quest_processor(processed_data, external_session=db_session)
-                                    log_phase("quest_processed")
-                                case "death" | "player_death":
-                                    submission_type = "death"
-                                    g.submission_type = submission_type
-                                    response = await submissions.death_processor(processed_data, external_session=db_session)
-                                    log_phase("death_processed")
-                                case "clan_broadcast":
-                                    g.submission_type = "clan_broadcast"
-                                    response = await submissions.clan_broadcast_processor(processed_data, external_session=db_session)
-                                    log_phase("clan_broadcast_processed")
-                                case "clan_chat":
-                                    g.submission_type = "clan_chat"
-                                    response = await submissions.clan_chat_processor(processed_data, external_session=db_session)
-                                    log_phase("clan_chat_processed")
-                                case "diary" | "achievement_diary" | "diary_completion":
-                                    submission_type = "diary"
-                                    g.submission_type = submission_type
-                                    response = await submissions.diary_processor(processed_data, external_session=db_session)
-                                    log_phase("diary_processed")
-                                case "pet":
-                                    g.submission_type = "pet"
-                                    response = await submissions.pet_processor(processed_data, external_session=db_session)
-                                    log_phase("pet_processed")
-                                case "adventure_log":
-                                    g.submission_type = "adventure_log"
-                                    print(f"Got adventure log data: {processed_data}")
-                                    response = await submissions.adventure_log_processor(processed_data, external_session=db_session)
-                                    log_phase("adventure_log_processed")
-                                case _:
-                                    g.submission_type = submission_type or "webhook"
-                                    # Unknown type: acknowledge with 200 so no plugin
-                                    # build retry-loops, but record the truth instead
-                                    # of a fake success.
-                                    logger.log_sync(
-                                        "warning",
-                                        f"Unsupported submission type received: {submission_type!r}",
-                                    )
-                                    response = SubmissionResponse(
-                                        False, f"Unsupported submission type: {submission_type}"
-                                    )
-                                    _mark_submission_outcome(processed_data, submission_type, response)
-                                    continue
+                            raw_submission_type = submission_type
+                            submission_type = normalize_submission_type(submission_type)
+                            if submission_type not in SUPPORTED_TYPES:
+                                g.submission_type = submission_type or "webhook"
+                                # Unknown type: acknowledge with 200 so no plugin
+                                # build retry-loops, but record the truth instead
+                                # of a fake success.
+                                logger.log_sync(
+                                    "warning",
+                                    f"Unsupported submission type received: {raw_submission_type!r}",
+                                )
+                                response = SubmissionResponse(
+                                    False, f"Unsupported submission type: {raw_submission_type}"
+                                )
+                                _mark_submission_outcome(processed_data, submission_type, response)
+                                continue
+
+                            g.submission_type = submission_type
+                            if submission_type == "drop":
+                                _drop_request_debug(
+                                    "dispatch_to_drop_processor "
+                                    f"guid={processed_data.get('guid')} "
+                                    f"player_name={processed_data.get('player_name') or processed_data.get('player')} "
+                                    f"players_included_type={type(processed_data.get('players_included')).__name__} "
+                                    f"players_included={processed_data.get('players_included')} "
+                                    f"nearby_players_type={type(processed_data.get('nearby_players')).__name__} "
+                                    f"nearby_players={processed_data.get('nearby_players')}"
+                                )
+                            elif submission_type == "adventure_log":
+                                print(f"Got adventure log data: {processed_data}")
+
+                            response = await dispatch_submission(
+                                submission_type, processed_data, db_session
+                            )
+                            log_phase(f"{submission_type}_processed")
+                            if submission_type == "drop":
+                                # After creating the drop, link the video to the Drop row
+                                await _try_attach_video_url_to_drop(processed_data, db_session)
                             db_session.commit()
                             log_phase("committed")
                             _mark_submission_outcome(processed_data, submission_type, response)
