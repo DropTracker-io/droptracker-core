@@ -287,6 +287,9 @@ async def on_startup(event: Startup):
     # Buttons on the monthly recap DM. Persistent (custom_id match), so a card
     # sent months ago still works.
     bot.load_extension("services.recap_buttons")
+    # /settings — the Discord-native player settings panel (DM notifications,
+    # in-game event notifications, pings & visibility).
+    bot.load_extension("services.player_settings_panel")
     print("Loaded services.")
     print("Set bot to ready")
     await asyncio.sleep(1)
