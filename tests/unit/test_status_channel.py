@@ -164,3 +164,71 @@ def test_worst_status_ranking():
     assert sc._worst_status({"api": {"status": "operational"},
                             "webhook": {"status": "offline"}}) == "offline"
     assert sc._worst_status({"api": {}, "webhook": {}}) == "offline"
+
+
+# ---------------------------------------------------------------------------
+# _upsert_card repost discipline (regression: 2026-08-20 duplicate cards)
+# ---------------------------------------------------------------------------
+
+class FakeMessage:
+    def __init__(self):
+        self.id = 111
+        self.edits = []
+
+    async def edit(self, components=None):
+        self.edits.append(components)
+
+
+class FakeChannel:
+    def __init__(self, fetch_result="raise"):
+        self.fetch_result = fetch_result
+        self.sent = []
+
+    async def fetch_message(self, message_id=None):
+        if self.fetch_result == "raise":
+            raise RuntimeError("transport closed")
+        return self.fetch_result
+
+    async def send(self, components=None):
+        self.sent.append(components)
+        return FakeMessage()
+
+
+@pytest.fixture
+def stored_id(monkeypatch):
+    monkeypatch.setattr(sc, "_get_stored_message_id", lambda slot: 999)
+    monkeypatch.setattr(sc, "_store_message_id", lambda slot, mid: None)
+
+
+@pytest.mark.asyncio
+async def test_upsert_transient_fetch_error_does_not_repost(stored_id):
+    """A raised fetch error (connection drop, 403, 5xx) must propagate — NOT
+    be read as "message deleted" and repost a duplicate card."""
+    channel = FakeChannel(fetch_result="raise")
+    with pytest.raises(RuntimeError):
+        await sc._upsert_card(channel, "services", ["c"])
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_upsert_deleted_message_reposts(stored_id):
+    """fetch_message returning None (genuine 404) is the one repost case."""
+    channel = FakeChannel(fetch_result=None)
+    await sc._upsert_card(channel, "services", ["c"])
+    assert len(channel.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_upsert_existing_message_edits_in_place(stored_id):
+    msg = FakeMessage()
+    channel = FakeChannel(fetch_result=msg)
+    await sc._upsert_card(channel, "services", ["c"])
+    assert msg.edits == [["c"]]
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_skips_while_previous_sweep_in_flight():
+    """Piled-up sweeps (stalled Discord REST) must skip, not stack."""
+    async with sc._sweep_lock:
+        assert await sc.run_status_sweep(bot=object()) is False

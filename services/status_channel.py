@@ -58,6 +58,10 @@ _ISSUES_CHAR_BUDGET = 3400
 _last_rendered_rev: Optional[int] = None
 _sweeps_since_issues = 0
 
+# Overlap guard: when Discord REST stalls, 1-min sweeps pile up; without this,
+# every stalled sweep resumed at once and each posted its own card copy.
+_sweep_lock = asyncio.Lock()
+
 
 def _fmt(n) -> str:
     try:
@@ -267,14 +271,18 @@ def _store_message_id(slot: str, message_id) -> None:
 
 
 async def _upsert_card(channel, slot: str, components) -> None:
-    """Edit the stored message for this slot, or post a fresh one."""
+    """Edit the stored message for this slot, or post a fresh one.
+
+    fetch_message returns None only on a genuine 404 (message deleted) — that
+    is the ONLY case that may repost. Transient REST failures raise and must
+    propagate to the sweep's outer catch: swallowing them here read as
+    "deleted" and reposted a duplicate card per in-flight sweep when the
+    Discord connection dropped (3 dupes on 2026-08-20).
+    """
     message = None
     stored = _get_stored_message_id(slot)
     if stored:
-        try:
-            message = await channel.fetch_message(message_id=stored)
-        except Exception:
-            message = None  # deleted / inaccessible — repost below
+        message = await channel.fetch_message(message_id=stored)
     if message is not None:
         await message.edit(components=components)
     else:
@@ -284,10 +292,17 @@ async def _upsert_card(channel, slot: str, components) -> None:
 
 async def run_status_sweep(bot) -> bool:
     """One upkeep pass. Never raises; returns True when a Discord write happened."""
-    global _last_rendered_rev, _sweeps_since_issues
-
     if not STATUS_CHANNEL_ID:
         return False
+    if _sweep_lock.locked():
+        return False  # previous sweep still in flight — skip, never stack
+    async with _sweep_lock:
+        return await _run_status_sweep_locked(bot)
+
+
+async def _run_status_sweep_locked(bot) -> bool:
+    global _last_rendered_rev, _sweeps_since_issues
+
     try:
         if not getattr(bot, "is_ready", False):
             return False
