@@ -450,29 +450,32 @@ async def event_board_updates():
         print(f"Event board sweep error: {e}")
 
 
-@Task.create(IntervalTrigger(minutes=20))
-async def clan_log_refresh():
-    """Clan Log: advance each enabled clan's ledger, then repost what changed.
+def _clan_log_advance_ledgers() -> None:
+    """Synchronous half of clan_log_refresh — MUST NOT run on the event loop.
 
-    Two halves on purpose. The ledger tail is cheap and unconditional (a
-    ``drop_id > cursor`` range over ~300 catalogued items, measured at a tenth
-    of a second for an idle clan), so every enabled clan's board stays current
-    on the website whether or not it posts to Discord. Only clans with
-    ``clan_log_enabled`` get the standing message, and only when their board
-    actually moved — see services/clan_log_discord.
+    Every statement below is blocking SQLAlchemy against ``drops`` (~189M rows).
+    A full round is not fast and never was: on 2026-08-20 one tick wrote 62
+    boards over 62.0s of wall clock, and a single group taking the rebuild path
+    (catalog-version or roster-hash drift) has been measured past 120s on its
+    own. Discord's gateway heartbeat has a 41.25s deadline, so running this
+    inline zombied the connection on essentially every full round — the bot's
+    own watchdog logged "Health check timed out" throughout, then the
+    heartbeater died seconds after the loop was handed back. That was ~0.8
+    gateway reconnects/hour with nothing else wrong with the box.
+
+    Owns its session start-to-finish so it is confined to the worker thread
+    (a SQLAlchemy Session must not be shared across threads concurrently).
     """
-    session = None
+    import time
+
+    from sqlalchemy import text
+
+    from db.models.base import Session
+    from services.clan_log import load_catalog, refresh_group
+    from utils.redis import redis_client
+
+    session = Session()
     try:
-        import time
-
-        from sqlalchemy import text
-
-        from db.models.base import Session
-        from services.clan_log import load_catalog, refresh_group
-        from services.clan_log_discord import refresh_standing_messages
-        from utils.redis import redis_client
-
-        session = Session()
         # Every group that HAS a board, not just the ones posting to Discord:
         # the website board should not go stale because a clan chose not to
         # dedicate a channel to it.
@@ -484,9 +487,10 @@ async def clan_log_refresh():
             return
 
         # Round-robin under a wall-clock budget. Each tail is a tenth of a
-        # second for an idle clan, but the count grows with adoption, and this
-        # task shares an event loop with everything else the bot does — so it
-        # takes a bounded bite per cycle and resumes where it stopped.
+        # second for an idle clan, but the count grows with adoption, so this
+        # takes a bounded bite per cycle and resumes where it stopped. The
+        # budget bounds how long the WORKER runs; it no longer bounds anything
+        # the event loop cares about.
         resume_after = 0
         try:
             resume_after = int(redis_client.get("clan_log:refresh_cursor") or 0)
@@ -517,11 +521,51 @@ async def clan_log_refresh():
             )
         except Exception:
             pass
+    finally:
+        session.close()
 
+
+# A full round can outrun the 20-minute interval when groups hit the rebuild
+# path; without this a second tick would start while the first still held a
+# worker thread, doubling the DB load for no extra progress.
+_clan_log_running = False
+
+
+@Task.create(IntervalTrigger(minutes=20))
+async def clan_log_refresh():
+    """Clan Log: advance each enabled clan's ledger, then repost what changed.
+
+    Two halves on purpose. The ledger tail is cheap and unconditional (a
+    ``drop_id > cursor`` range over ~300 catalogued items, measured at a tenth
+    of a second for an idle clan), so every enabled clan's board stays current
+    on the website whether or not it posts to Discord. Only clans with
+    ``clan_log_enabled`` get the standing message, and only when their board
+    actually moved — see services/clan_log_discord.
+
+    The ledger half is blocking and slow, so it runs in a worker thread — see
+    _clan_log_advance_ledgers for why that is not optional.
+    """
+    global _clan_log_running
+
+    if _clan_log_running:
+        print("Clan Log refresh still running from a previous tick; skipping.")
+        return
+
+    session = None
+    _clan_log_running = True
+    try:
+        from db.models.base import Session
+        from services.clan_log_discord import refresh_standing_messages
+
+        await asyncio.to_thread(_clan_log_advance_ledgers)
+
+        # Discord half: genuinely async, and cheap enough to stay on the loop.
+        session = Session()
         await refresh_standing_messages(bot, session)
     except Exception as e:
         print(f"Clan Log refresh error: {e}")
     finally:
+        _clan_log_running = False
         if session is not None:
             session.close()
 

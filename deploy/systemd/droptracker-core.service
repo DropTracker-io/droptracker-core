@@ -44,6 +44,21 @@ ReadWritePaths=/store/droptracker
 LimitNOFILE=65536
 LimitNPROC=4096
 
+# CPU scheduling priority.
+#
+# The Discord gateway heartbeat is tiny but latency-critical: if this process
+# cannot be scheduled for ~41s, Discord declares the connection zombied and
+# forces a full reconnect. The bot only uses ~9% of one core, so it loses that
+# race purely on scheduling, never on throughput.
+#
+# On 2026-08-20 a runaway `grep -rn <id> /` in an interactive session took 6 of
+# 8 cores for 4+ hours; gateway reconnects went from ~0.8/hr to ~3.2/hr and one
+# stall ran 3.5 minutes. CPUWeight raises this service's share of system.slice
+# under contention (it is a weight, not a cap — an idle box is unaffected);
+# user.slice is symmetrically deprioritised in its own drop-in.
+CPUWeight=400
+Nice=-5
+
 [Install]
 # Defines which system state should enable this service
 WantedBy=multi-user.target

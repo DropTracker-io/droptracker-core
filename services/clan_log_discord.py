@@ -20,6 +20,7 @@ spin forever, the same reason ``services/event_board`` does it.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 from typing import Optional
 
@@ -86,66 +87,100 @@ async def build_card_payload(session, group_id: int, period: str = "all"):
     return build_message_text(payload), file, state_hash
 
 
+def _scan_standing_candidates() -> Optional[tuple]:
+    """Which clans' standing boards actually moved. MUST run off the event loop.
+
+    Returns ``(checked, skipped, config, candidates)`` where candidates is
+    ``[(group_id, channel_id, current_hash), ...]``.
+
+    The module docstring's claim that a quiet clan "costs one in-memory
+    comparison" is only true of the *comparison* — reaching it needs a full
+    ``load_board`` DB read per clan, and the skip path never awaits, so with
+    ~63 enabled clans this ran to completion without once yielding. On
+    2026-08-20 that blocked the loop past Discord's 41.25s heartbeat deadline
+    and killed the gateway seconds after clan_log_refresh's ledger half had
+    just been moved to a thread for exactly the same reason.
+
+    Owns its session so it stays confined to the worker thread.
+    """
+    from db.models import GroupConfiguration
+    from db.models.base import Session
+    from services.clan_log import load_board
+    from services.clan_log_image import board_state_hash
+    from utils import group_config
+    from utils.redis import redis_client
+
+    session = Session()
+    try:
+        rows = (
+            session.query(GroupConfiguration)
+            .filter(
+                GroupConfiguration.config_key == "clan_log_enabled",
+                GroupConfiguration.config_value.in_(["1", "true", "True", "yes", "on"]),
+            )
+            .all()
+        )
+        group_ids = [int(r.group_id) for r in rows]
+        if not group_ids:
+            return None
+
+        config = group_config.get_bulk(
+            session, group_ids, ["clan_log_channel_id", "clan_log_message_id"]
+        )
+
+        checked = 0
+        skipped = 0
+        candidates = []
+        for group_id in group_ids:
+            checked += 1
+            channel_id = (config.get((group_id, "clan_log_channel_id")) or "").strip()
+            if not channel_id or channel_id in {"0", "None"}:
+                continue
+
+            posted_key = _POSTED_HASH_KEY.format(group_id=group_id)
+            try:
+                payload = load_board(session, group_id, "all")
+                if not payload:
+                    continue
+                current_hash = board_state_hash(payload)
+                if redis_client.get(posted_key) == current_hash:
+                    skipped += 1
+                    continue
+            except Exception:
+                current_hash = None
+            candidates.append((group_id, channel_id, current_hash))
+        return checked, skipped, config, candidates
+    finally:
+        session.close()
+
+
 async def refresh_standing_messages(bot, session, *, limit: int = MAX_RENDERS_PER_CYCLE
                                     ) -> dict:
     """Post/edit the standing board message for every clan that enabled it.
 
     Skips a clan whose board has not changed since its last post, which is the
-    common case — that check is a Redis read, not a render.
+    common case. Change detection is blocking and proportional to the number of
+    enabled clans, so it happens in a worker thread
+    (:func:`_scan_standing_candidates`); only the Discord writes — bounded at
+    ``limit`` per cycle — run on the event loop.
     """
-    from db.models import Group, GroupConfiguration
-    from utils import group_config
     from utils.redis import redis_client
 
     stats = {"checked": 0, "posted": 0, "edited": 0, "skipped": 0, "failed": 0}
 
-    rows = (
-        session.query(GroupConfiguration)
-        .filter(
-            GroupConfiguration.config_key == "clan_log_enabled",
-            GroupConfiguration.config_value.in_(["1", "true", "True", "yes", "on"]),
-        )
-        .all()
-    )
-    group_ids = [int(r.group_id) for r in rows]
-    if not group_ids:
+    scan = await asyncio.to_thread(_scan_standing_candidates)
+    if not scan:
         return stats
+    stats["checked"], stats["skipped"], config, candidates = scan
 
-    config = group_config.get_bulk(
-        session, group_ids, ["clan_log_channel_id", "clan_log_message_id"]
-    )
-
-    rendered = 0
-    for group_id in group_ids:
-        stats["checked"] += 1
-        channel_id = (config.get((group_id, "clan_log_channel_id")) or "").strip()
-        if not channel_id or channel_id in {"0", "None"}:
-            continue
-
+    # Budget spent past this point; the rest keep their stale message until the
+    # next cycle.
+    for group_id, channel_id, current_hash in candidates[:limit]:
         posted_key = _POSTED_HASH_KEY.format(group_id=group_id)
-        try:
-            from services.clan_log import load_board
-            from services.clan_log_image import board_state_hash
-
-            payload = load_board(session, group_id, "all")
-            if not payload:
-                continue
-            current_hash = board_state_hash(payload)
-            if redis_client.get(posted_key) == current_hash:
-                stats["skipped"] += 1
-                continue
-        except Exception:
-            current_hash = None
-
-        if rendered >= limit:
-            # Budget spent; the rest keep their stale message until next cycle.
-            break
-
         try:
             text, file, state_hash = await build_card_payload(session, group_id, "all")
             if text is None:
                 continue
-            rendered += 1
 
             channel = await bot.fetch_channel(channel_id=channel_id)
             if not channel:

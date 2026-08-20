@@ -30,6 +30,21 @@ sudo systemctl restart <unit>
 
 Notes:
 
+- **CPU priority (`user.slice.d/50-cpuweight.conf`).** Not a unit — a drop-in for
+  the *user* slice, installed separately:
+
+  ```bash
+  sudo mkdir -p /etc/systemd/system/user.slice.d
+  sudo cp deploy/systemd/user.slice.d/50-cpuweight.conf /etc/systemd/system/user.slice.d/
+  sudo systemctl daemon-reload   # applies immediately, no restart needed
+  ```
+
+  Anything you launch from a shell or an agent session runs in `user.slice`;
+  the services above run in `system.slice`. They default to equal CPU weight,
+  so one runaway interactive command can starve production. This drops
+  `user.slice` to weight 50 (vs 100) and `droptracker-core` is raised to 400,
+  because a missed Discord gateway heartbeat (41s) forces a full reconnect.
+  Both are weights, not quotas — an idle box is unaffected.
 - All services run as `User=user` with `WorkingDirectory=/store/droptracker/disc`
   and read config from `.env` (python-dotenv).
 - The bots use `Type=notify` with a 30s systemd watchdog (see
