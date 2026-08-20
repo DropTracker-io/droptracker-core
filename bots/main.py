@@ -87,6 +87,11 @@ redis_client = RedisClient()
 ## Category IDs that contain DropTracker webhooks that receive messages from the RuneLite client
 load_dotenv()
 
+# Hall of Fame ownership role for services.hall_of_fame (read at import time).
+# The legacy droptracker-hof process sets "legacy"; everything else is the core
+# bot, which is where the Hall of Fame is being consolidated.
+os.environ.setdefault("HOF_ROLE", "core")
+
 from utils.sentry import init_sentry
 init_sentry("droptracker-core")
 
@@ -301,6 +306,11 @@ async def on_startup(event: Startup):
     # welcome card on GuildJoin. Replaces services.bot_state (whose listener
     # was dead code: no GUILDS intent, missing-self bug).
     bot.load_extension("services.group_onboarding_panel")
+    # Hall of Fame. The same extension also runs in the legacy droptracker-hof
+    # process; the two arbitrate per group (services/hall_of_fame.py), and a
+    # group moves here permanently once it removes the old HOF bot from its
+    # guild. HOF_ROLE is set in main() before the client is built.
+    bot.load_extension("services.hall_of_fame")
     print("Loaded services.")
     print("Set bot to ready")
     await asyncio.sleep(1)

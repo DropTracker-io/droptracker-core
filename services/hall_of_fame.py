@@ -27,7 +27,7 @@ Design rules that fix the historical bugs (see GitHub issue #31):
   before any sends, and only touches messages older than 2 minutes.
 - Content hashes are keyed by *message id* in Redis, so a hash can never be
   compared against the wrong message after a re-mapping.
-- ``session.expire_all()`` runs before every group pass so freshly-inserted
+- ``self._db.expire_all()`` runs before every group pass so freshly-inserted
   PB rows are always visible (the stale-PB bug).
 - All Discord writes go through one rate-limited, retrying helper (per-channel
   pacing ~1 write/1.2s plus a global cap), honouring 429 retry_after and
@@ -76,6 +76,7 @@ from db.models import (
     NpcList,
     PersonalBestEntry,
     Player,
+    Session,
     get_current_partition,
     session,
 )
@@ -94,6 +95,8 @@ from utils.hof import (
     npc_name_candidates,
     chunk_select_options,
     fit_directory_lines,
+    forwardable_refresh_payloads,
+    hof_owner_is_self,
     parse_boss_list,
     parse_select_custom_id,
     select_menu_custom_id,
@@ -150,6 +153,42 @@ _MAX_TEXT_CHARS = 3950
 _HASH_KEY_TEMPLATE = "hof:msghash:v2:{group_id}:{message_id}"
 _HASH_TTL_SECONDS = 14 * 24 * 3600
 
+# ── Bot consolidation: legacy HOF app → core bot (2026-08-20) ─────────────── #
+# The Hall of Fame historically ran as its own Discord application, so groups
+# had to invite a second bot. This extension now runs in BOTH processes and
+# arbitrates per group, migrating one group at a time:
+#
+#   * A group opts in by REMOVING the legacy HOF bot from its guild.
+#   * The core bot notices the absence, deletes the boards the legacy app left
+#     behind (it cannot edit another app's messages), and takes the group over
+#     permanently — recorded by _MANAGED_BY_CORE_KEY.
+#   * The legacy bot skips every group carrying that flag.
+#
+# The flag is a ONE-WAY ratchet: re-inviting the legacy bot must never hand a
+# group back, or both processes would manage the same channel and reintroduce
+# the duplicate-message races of issue #31.
+_ROLE = (os.getenv("HOF_ROLE") or "core").strip().lower()
+_IS_LEGACY = _ROLE == "legacy"
+_LEGACY_HOF_APP_ID = int(os.getenv("HALL_OF_FAME_BOT_APP_ID", "1229885751098085439"))
+# Deliberately NOT registered in web_api/config_registry: unknown keys are
+# rejected there with 422, so no group admin can flip ownership from the site.
+_MANAGED_BY_CORE_KEY = "hof_managed_by_core"
+
+# Retirement monitor: the legacy bot publishes how many groups it still serves
+# so we can tell when it is safe to switch the process off for good.
+_LEGACY_STATUS_KEY = "hof:legacy:status"
+_LEGACY_STATUS_TTL_SECONDS = 3 * 3600
+_LEGACY_IDLE_ALERT_KEY = "hof:legacy:idle_alerted"
+# Cycles at zero before we announce it (~30min at the default cadence), so a
+# transient DB/entitlement blip can't declare the migration finished early.
+_LEGACY_IDLE_CYCLES_TO_ALERT = 3
+
+# Both processes drain the shared refresh queue, so either may pop a signal for
+# a group the other owns. The non-owner forwards it once to the owner's queue
+# (marked so it can never ping-pong) and drops it if it comes back.
+_REFRESH_PEER_QUEUE_TEMPLATE = "hof:refresh:queue:{role}"
+_REFRESH_PEER_QUEUE_CAP = 500
+
 
 class ChannelNotPostable(Exception):
     """The HOF bot cannot use a group's configured channel.
@@ -189,6 +228,8 @@ class CycleStats:
     skipped: int = 0
     pruned: int = 0
     failures: int = 0
+    # Groups this process owns (pre-cooldown) — drives the retirement monitor.
+    managed: int = 0
 
     def summary(self) -> str:
         return (
@@ -208,6 +249,16 @@ class ChannelScan:
 class HallOfFame(Extension):
     def __init__(self, bot: interactions.Client):
         self.bot = bot
+        # The legacy HOF process keeps using the shared scoped session it has
+        # always used. Inside the CORE bot it must not: _begin_fresh_read()
+        # rolls back unconditionally to escape the stale REPEATABLE READ
+        # snapshot, which on the shared session would silently discard pending
+        # work belonging to notifications, event boards or the outbox drain.
+        # A private session buys that isolation for one extra pooled connection.
+        self._db = session if _IS_LEGACY else Session()
+        self._role = _ROLE
+        # Legacy-side counter for the retirement monitor.
+        self._legacy_idle_cycles = 0
         # Per-channel pacing: Discord's PATCH message bucket is 5 per rolling
         # window per channel, and production logs show sustained 1.2s pacing
         # still tripping it during mass-edit waves, so pace conservatively.
@@ -233,8 +284,8 @@ class HallOfFame(Extension):
         self._loop_task = asyncio.create_task(self._update_loop())
         self._refresh_task = asyncio.create_task(self._refresh_loop())
         log.warning(
-            "HOF: reconciliation service started (sweep every %ds, refresh queue live)",
-            _CYCLE_SLEEP_SECONDS,
+            "HOF: reconciliation service started as '%s' (sweep every %ds, refresh queue live)",
+            self._role, _CYCLE_SLEEP_SECONDS,
         )
 
     def drop(self):
@@ -252,15 +303,23 @@ class HallOfFame(Extension):
 
     async def _update_loop(self):
         cycle = 0
+        # Nothing here may touch a channel before the gateway is up; inside the
+        # core bot this extension is loaded well before the connection exists.
+        for _ in range(150):
+            if getattr(self.bot, "is_ready", False):
+                break
+            await asyncio.sleep(2)
         while True:
             cycle += 1
             started = time.monotonic()
             try:
                 stats = await self._run_cycle(cycle)
                 log.warning(
-                    "HOF cycle %d done in %.0fs | %s",
-                    cycle, time.monotonic() - started, stats.summary(),
+                    "HOF cycle %d done in %.0fs | role=%s, %d owned | %s",
+                    cycle, time.monotonic() - started, self._role, stats.managed,
+                    stats.summary(),
                 )
+                await self._report_migration_progress(stats)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -286,20 +345,36 @@ class HallOfFame(Extension):
             self._begin_fresh_read()
             group_ids = [
                 row.group_id
-                for row in session.query(GroupConfiguration.group_id).filter(
+                for row in self._db.query(GroupConfiguration.group_id).filter(
                     GroupConfiguration.config_key == "create_pb_embeds",
                     GroupConfiguration.config_value == "1",
                 ).all()
             ]
             dev_mode = self._is_in_development()
             eligible: List[int] = []
+            # Groups still owned by the legacy app, with the guild we'd have to
+            # probe to find out whether it has been removed yet.
+            unclaimed: List[Tuple[int, str]] = []
             for group_id in group_ids:
                 if dev_mode and group_id != _GLOBAL_GROUP_ID:
                     continue
                 if not self._group_is_entitled(group_id):
                     stats.skipped += 1
                     continue
-                if self._cooldown_active(group_id):
+                mine = self._owns_group(group_id)
+                # Count ownership BEFORE the cooldown filter: a group in 403
+                # backoff is still one the legacy bot has to hand over, and the
+                # retirement monitor must not report it as already migrated.
+                if mine:
+                    stats.managed += 1
+                if not mine and not _IS_LEGACY:
+                    guild_row = self._db.query(Group.guild_id).filter(
+                        Group.group_id == group_id,
+                    ).first()
+                    if guild_row and guild_row[0]:
+                        unclaimed.append((group_id, str(guild_row[0])))
+                    continue
+                if not mine or self._cooldown_active(group_id):
                     continue
                 eligible.append(group_id)
         if dev_mode:
@@ -311,6 +386,22 @@ class HallOfFame(Extension):
                 "config row to resume normal operation.",
                 _GLOBAL_GROUP_ID, _GLOBAL_GROUP_ID,
             )
+        # Migration pass: adopt any group whose guild no longer has the legacy
+        # HOF bot. The probes are REST-only, so they run outside the work lock.
+        for group_id, guild_id in unclaimed:
+            absent = await self._legacy_bot_absent(guild_id)
+            if absent is not True:
+                continue
+            try:
+                async with self._work_lock:
+                    self._begin_fresh_read()
+                    if await self._claim_group(group_id, stats):
+                        eligible.append(group_id)
+                        stats.managed += 1
+            except Exception:
+                self._safe_rollback()
+                stats.failures += 1
+                log.exception("HOF: takeover failed for group %d", group_id)
         for group_id in eligible:
             try:
                 async with self._work_lock:
@@ -343,6 +434,169 @@ class HallOfFame(Extension):
         return stats
 
     # ------------------------------------------------------------------ #
+    # Ownership: legacy HOF app vs core bot
+    # ------------------------------------------------------------------ #
+
+    def _managed_by_core(self, group_id: int) -> bool:
+        """Has this group been migrated to the core bot? Reads the ratchet flag.
+
+        On any read error we answer False, which means "legacy still owns it" —
+        the conservative direction: the core bot declines to act, and the legacy
+        bot (which is physically present in that guild) keeps working."""
+        try:
+            row = self._db.query(GroupConfiguration).filter(
+                GroupConfiguration.group_id == group_id,
+                GroupConfiguration.config_key == _MANAGED_BY_CORE_KEY,
+            ).first()
+            return bool(row and str(row.config_value).strip() == "1")
+        except Exception:
+            self._safe_rollback()
+            log.exception("HOF: could not read ownership flag for group %d", group_id)
+            return False
+
+    def _owns_group(self, group_id: int) -> bool:
+        """True when THIS process is responsible for the group."""
+        return hof_owner_is_self(self._managed_by_core(group_id), _IS_LEGACY)
+
+    def _mark_managed_by_core(self, group_id: int) -> None:
+        """Set the one-way ratchet. Called under ``_work_lock``."""
+        row = self._db.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == group_id,
+            GroupConfiguration.config_key == _MANAGED_BY_CORE_KEY,
+        ).first()
+        if row is None:
+            self._db.add(GroupConfiguration(
+                group_id=group_id,
+                config_key=_MANAGED_BY_CORE_KEY,
+                config_value="1",
+                long_value=None,
+            ))
+        else:
+            row.config_value = "1"
+        self._db.commit()
+
+    async def _legacy_bot_absent(self, guild_id) -> Optional[bool]:
+        """Is the legacy HOF application gone from this guild?
+
+        Returns True only on a *definitive* answer, because True is what
+        triggers an irreversible takeover. A 404 on the member lookup means
+        either "not a member" or "unknown guild" — and the second case would be
+        a false positive that steals a group the legacy bot is still serving —
+        so a 404 is confirmed by checking our OWN membership of the same guild.
+        Anything we cannot positively establish returns None ("assume theirs").
+        """
+        if not guild_id:
+            return None
+        try:
+            await self.bot.http.get_member(int(guild_id), _LEGACY_HOF_APP_ID)
+            return False  # still there — nothing to do
+        except NotFound:
+            pass
+        except Exception as e:
+            log.debug("HOF: legacy presence probe failed for guild %s: %s", guild_id, e)
+            return None
+        # Distinguish "legacy bot left" from "we can't see this guild at all".
+        try:
+            await self.bot.http.get_member(int(guild_id), int(self.bot.user.id))
+            return True
+        except Exception as e:
+            log.debug("HOF: guild %s is not reachable by the core bot: %s", guild_id, e)
+            return None
+
+    async def _claim_group(self, group_id: int, stats: CycleStats) -> bool:
+        """Take a group over from the legacy HOF app. Called under ``_work_lock``.
+
+        Ordering matters. The channel is resolved FIRST: if the core bot cannot
+        post there, claiming would only move the group from one broken state to
+        another, so we leave it unclaimed and retry on a later cycle. Once the
+        channel is known good we set the ratchet before touching Discord, so a
+        crash mid-migration leaves the group unambiguously ours and the next
+        sweep finishes the job.
+        """
+        group = self._db.query(Group).filter(Group.group_id == group_id).first()
+        if not group or not group.guild_id:
+            return False
+        cfg = self._load_group_config(group_id)
+        if not cfg.channel_id:
+            return False
+        try:
+            channel = await self.bot.fetch_channel(int(cfg.channel_id))
+        except Exception as e:
+            log.warning("HOF: cannot claim group %d — channel %s unreachable: %s",
+                        group_id, cfg.channel_id, e)
+            return False
+        if channel is None or not hasattr(channel, "send") or not hasattr(channel, "history"):
+            log.warning(
+                "HOF: cannot claim group %d yet — the core bot cannot post in channel %s "
+                "(missing View/Send). The legacy bot has already left this guild, so the "
+                "Hall of Fame stays down until permissions are fixed.",
+                group_id, cfg.channel_id,
+            )
+            return False
+
+        self._mark_managed_by_core(group_id)
+
+        # The tracked rows point at messages authored by the legacy app, which
+        # this bot can never edit. Drop them (and their content hashes) so the
+        # reconciler posts a fresh, owned set.
+        rows = self._db.query(GroupPersonalBestMessage).filter(
+            GroupPersonalBestMessage.group_id == group_id,
+        ).all()
+        for row in rows:
+            try:
+                redis_client.client.delete(self._hash_key(group_id, row.message_id))
+            except Exception:
+                pass
+            self._db.delete(row)
+            stats.pruned += 1
+        self._db.commit()
+
+        purged = await self._purge_legacy_messages(group_id, channel, stats)
+        log.warning(
+            "HOF: claimed group %d (guild %s) from the legacy bot — dropped %d tracked "
+            "row(s), deleted %d leftover message(s); rebuilding the board now",
+            group_id, group.guild_id, len(rows), purged,
+        )
+        return True
+
+    async def _purge_legacy_messages(self, group_id: int, channel, stats: CycleStats) -> int:
+        """Delete the boards the legacy HOF app left in the channel.
+
+        Strictly scoped to messages authored by that one application id —
+        never our own, never another bot's, never a human's. Deleting another
+        app's messages needs Manage Messages; without it we log what the admin
+        must clean up by hand and still complete the takeover, because the
+        alternative (refusing to serve the group) is worse.
+        """
+        deleted = 0
+        try:
+            stale: List["interactions.Message"] = []
+            async for message in channel.history(limit=_CHANNEL_SCAN_LIMIT):
+                if str(message.author.id) == str(_LEGACY_HOF_APP_ID):
+                    stale.append(message)
+        except Exception as e:
+            log.warning("HOF: group %d — could not scan for legacy messages: %s", group_id, e)
+            return 0
+        for message in stale:
+            try:
+                await self._discord_write(str(channel.id), message.delete)
+                deleted += 1
+                stats.deleted += 1
+            except NotFound:
+                pass
+            except Forbidden:
+                log.warning(
+                    "HOF: group %d — no Manage Messages permission, so %d old Hall of Fame "
+                    "message(s) from the retired bot must be deleted manually in channel %s",
+                    group_id, len(stale) - deleted, channel.id,
+                )
+                break
+            except Exception as e:
+                log.warning("HOF: group %d — failed to delete legacy message %s: %s",
+                            group_id, message.id, e)
+        return deleted
+
+    # ------------------------------------------------------------------ #
     # Entitlement gate + 403 backoff
     # ------------------------------------------------------------------ #
 
@@ -362,7 +616,7 @@ class HallOfFame(Extension):
         if cached and now - cached[0] < _ENTITLEMENT_TTL_SECONDS:
             return cached[1]
         try:
-            granted = bool(resolve_group_entitlements(session, group_id).get("hall_of_fame"))
+            granted = bool(resolve_group_entitlements(self._db, group_id).get("hall_of_fame"))
         except Exception:
             self._safe_rollback()
             # Fall back to the last known answer if we have one; otherwise fail
@@ -403,7 +657,7 @@ class HallOfFame(Extension):
 
     def _configured_channel_id(self, group_id: int) -> Optional[str]:
         try:
-            row = session.query(GroupConfiguration).filter(
+            row = self._db.query(GroupConfiguration).filter(
                 GroupConfiguration.group_id == group_id,
                 GroupConfiguration.config_key == "channel_id_to_send_pb_embeds",
             ).first()
@@ -434,6 +688,76 @@ class HallOfFame(Extension):
         return True
 
     # ------------------------------------------------------------------ #
+    # Retirement monitor
+    # ------------------------------------------------------------------ #
+
+    async def _report_migration_progress(self, stats: CycleStats) -> None:
+        """Track how much work the legacy bot still has, and say when it's done.
+
+        The legacy process publishes its owned-group count every cycle; the core
+        process reads it and announces — once — when that count has been zero
+        long enough to trust. At that point no Hall of Fame message anywhere is
+        being maintained by the old application and ``droptracker-hof`` can be
+        switched off. A stale/absent key means the legacy bot isn't running, so
+        the core bot stays quiet rather than declaring victory on its behalf.
+        """
+        try:
+            if _IS_LEGACY:
+                payload = json.dumps({
+                    "groups": stats.managed,
+                    "ts": int(time.time()),
+                })
+                await asyncio.to_thread(
+                    redis_client.client.set, _LEGACY_STATUS_KEY, payload,
+                    _LEGACY_STATUS_TTL_SECONDS,
+                )
+                if stats.managed:
+                    # Work came back (a group re-enabled HOF before migrating):
+                    # re-arm the announcement.
+                    await asyncio.to_thread(redis_client.client.delete, _LEGACY_IDLE_ALERT_KEY)
+                return
+
+            raw = await asyncio.to_thread(redis_client.client.get, _LEGACY_STATUS_KEY)
+            if not raw:
+                return  # legacy bot not reporting — nothing to conclude
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            remaining = int(json.loads(raw).get("groups", 0))
+            if remaining:
+                self._legacy_idle_cycles = 0
+                return
+            self._legacy_idle_cycles += 1
+            if self._legacy_idle_cycles < _LEGACY_IDLE_CYCLES_TO_ALERT:
+                return
+            already = await asyncio.to_thread(redis_client.client.get, _LEGACY_IDLE_ALERT_KEY)
+            if already:
+                return
+            await asyncio.to_thread(
+                redis_client.client.set, _LEGACY_IDLE_ALERT_KEY, str(int(time.time())),
+            )
+            await self._announce_legacy_retirement(stats.managed)
+        except Exception as e:
+            log.debug("HOF: migration progress report failed: %s", e)
+
+    async def _announce_legacy_retirement(self, core_groups: int) -> None:
+        channel_id = (os.getenv("DISCORD_AUTOMATION_CHANNEL_ID") or "").strip()
+        message = (
+            "**Hall of Fame migration complete.**\n"
+            f"The legacy Hall of Fame bot is no longer maintaining any group's messages "
+            f"({core_groups} group(s) are now served by the core bot). "
+            "`droptracker-hof` can be stopped and disabled, and its Discord application retired."
+        )
+        log.warning("HOF: %s", message.replace("**", "").replace("\n", " "))
+        if not channel_id:
+            return
+        try:
+            channel = await self.bot.fetch_channel(int(channel_id))
+            if channel is not None and hasattr(channel, "send"):
+                await channel.send(message)
+        except Exception as e:
+            log.warning("HOF: could not post the retirement notice: %s", e)
+
+    # ------------------------------------------------------------------ #
     # Near-real-time refresh consumer
     # ------------------------------------------------------------------ #
 
@@ -462,6 +786,11 @@ class HallOfFame(Extension):
                 # same lock as the sweep — the two never use the session at once.
                 async with self._work_lock:
                     targets = self._resolve_refresh_targets(raw_items)
+                if not targets:
+                    # Either a PB for a group we don't own, or for no HOF group
+                    # at all. Offer it to the peer once; it drops what it can't
+                    # use either.
+                    self._forward_refresh_items(raw_items)
                 for group_id, display_name in targets:
                     try:
                         async with self._work_lock:
@@ -491,8 +820,11 @@ class HallOfFame(Extension):
         """Block for one refresh signal, then coalesce any others that arrive
         within the debounce window. Returns the raw queue payloads (no DB work
         here — resolution happens under the work lock in the caller)."""
+        # During the migration both processes watch the shared queue plus their
+        # own hand-off queue (see _forward_refresh_items).
+        keys = [_REFRESH_QUEUE_KEY, self._own_refresh_queue()]
         first = await asyncio.to_thread(
-            redis_client.client.blpop, _REFRESH_QUEUE_KEY, _REFRESH_BLPOP_TIMEOUT,
+            redis_client.client.blpop, keys, _REFRESH_BLPOP_TIMEOUT,
         )
         if not first:
             return []
@@ -501,13 +833,44 @@ class HallOfFame(Extension):
         # so we edit each message once rather than N times.
         await asyncio.sleep(_REFRESH_DEBOUNCE_SECONDS)
         while True:
-            more = await asyncio.to_thread(redis_client.client.lpop, _REFRESH_QUEUE_KEY)
+            more = None
+            for key in keys:
+                more = await asyncio.to_thread(redis_client.client.lpop, key)
+                if more:
+                    break
             if not more:
                 break
             raw_items.append(more)
             if len(raw_items) >= 500:  # safety valve against unbounded drains
                 break
         return raw_items
+
+    def _own_refresh_queue(self) -> str:
+        return _REFRESH_PEER_QUEUE_TEMPLATE.format(role=self._role)
+
+    def _peer_refresh_queue(self) -> str:
+        return _REFRESH_PEER_QUEUE_TEMPLATE.format(
+            role="core" if _IS_LEGACY else "legacy",
+        )
+
+    def _forward_refresh_items(self, raw_items: List) -> None:
+        """Hand a batch that resolved to nothing here over to the other process.
+
+        Either process can pop a signal for a group the other owns. Forwarding
+        is one hop only — items are tagged, and a tagged item that still has no
+        target here is simply dropped, because the 10-minute sweep is the
+        backstop for anything this near-real-time path misses.
+        """
+        payloads = forwardable_refresh_payloads(raw_items)
+        if not payloads:
+            return
+        try:
+            queue = self._peer_refresh_queue()
+            redis_client.client.rpush(queue, *payloads)
+            # Cap it so a stopped peer can't grow the list without bound.
+            redis_client.client.ltrim(queue, -_REFRESH_PEER_QUEUE_CAP, -1)
+        except Exception as e:
+            log.debug("HOF: could not forward refresh signals to the peer bot: %s", e)
 
     def _resolve_refresh_targets(self, raw_items: List) -> Set[Tuple[int, str]]:
         """Map raw {player_id, npc_id} signals to the set of boss messages that
@@ -533,18 +896,20 @@ class HallOfFame(Extension):
             for _, npc_id in parsed:
                 if npc_id in display_by_npc:
                     continue
-                npc = session.query(NpcList).filter(NpcList.npc_id == npc_id).first()
+                npc = self._db.query(NpcList).filter(NpcList.npc_id == npc_id).first()
                 display_by_npc[npc_id] = canonical_display_name(npc.npc_name) if npc else None
             for player_id, npc_id in parsed:
                 display_name = display_by_npc.get(npc_id)
                 if not display_name:
                     continue
-                player = session.query(Player).filter(Player.player_id == player_id).first()
+                player = self._db.query(Player).filter(Player.player_id == player_id).first()
                 if not player:
                     continue
                 for group in (player.groups or []):
                     gid = group.group_id
                     if dev_mode and gid != _GLOBAL_GROUP_ID:
+                        continue
+                    if not self._owns_group(gid):
                         continue
                     if not self._group_is_entitled(gid):
                         continue
@@ -571,7 +936,7 @@ class HallOfFame(Extension):
         """Re-render one boss message in place (by message id, not positionally)
         and edit it only if its content actually changed."""
         self._begin_fresh_read()
-        group = session.query(Group).filter(Group.group_id == group_id).first()
+        group = self._db.query(Group).filter(Group.group_id == group_id).first()
         if not group or not group.guild_id:
             return
         cfg = self._load_group_config(group_id)
@@ -581,7 +946,7 @@ class HallOfFame(Extension):
         match = next(((e, npcs) for e, npcs in resolved if e.display_name == display_name), None)
         if match is None:
             return
-        row = session.query(GroupPersonalBestMessage).filter(
+        row = self._db.query(GroupPersonalBestMessage).filter(
             GroupPersonalBestMessage.group_id == group_id,
             GroupPersonalBestMessage.boss_name == display_name,
             GroupPersonalBestMessage.channel_id == str(cfg.channel_id),
@@ -612,13 +977,13 @@ class HallOfFame(Extension):
             str(channel.id), lambda: message.edit(components=components), expect_result=True,
         )
         row.date_updated = datetime.datetime.now()
-        session.commit()
+        self._db.commit()
         self._store_hash(group_id, row.message_id, new_hash)
         log.info("HOF: refreshed group %d boss '%s' from PB signal", group_id, display_name)
 
     def _directory_jump_url(self, group: Group) -> Optional[str]:
         """Jump URL of the group's top directory message, if it exists."""
-        row = session.query(GroupPersonalBestMessage).filter(
+        row = self._db.query(GroupPersonalBestMessage).filter(
             GroupPersonalBestMessage.group_id == group.group_id,
             GroupPersonalBestMessage.boss_name == DIRECTORY_KEY,
         ).order_by(GroupPersonalBestMessage.message_id.asc()).first()
@@ -628,7 +993,7 @@ class HallOfFame(Extension):
         """Discard any uncommitted session state so an aborted group pass can
         never leak pending deletes/updates into the next group's commit."""
         try:
-            session.rollback()
+            self._db.rollback()
         except Exception:
             pass
 
@@ -642,13 +1007,13 @@ class HallOfFame(Extension):
         stale transaction; the next query autobegins one with a current
         snapshot. Must be called while holding ``_work_lock``."""
         try:
-            session.rollback()
+            self._db.rollback()
         except Exception:
             pass
-        session.expire_all()
+        self._db.expire_all()
 
     def _is_in_development(self) -> bool:
-        cfg = session.query(GroupConfiguration).filter(
+        cfg = self._db.query(GroupConfiguration).filter(
             GroupConfiguration.group_id == 2,
             GroupConfiguration.config_key == "is_in_development",
         ).first()
@@ -660,7 +1025,7 @@ class HallOfFame(Extension):
 
     def _load_group_config(self, group_id: int) -> GroupHOFConfig:
         cfg = GroupHOFConfig()
-        rows = session.query(GroupConfiguration).filter(
+        rows = self._db.query(GroupConfiguration).filter(
             GroupConfiguration.group_id == group_id,
             GroupConfiguration.config_key.in_([
                 "channel_id_to_send_pb_embeds",
@@ -704,7 +1069,7 @@ class HallOfFame(Extension):
             for name in entry.variant_names:
                 npc = None
                 for candidate in npc_name_candidates(name):
-                    npc = session.query(NpcList).filter(NpcList.npc_name == candidate).first()
+                    npc = self._db.query(NpcList).filter(NpcList.npc_name == candidate).first()
                     if npc:
                         break
                 if npc:
@@ -729,7 +1094,7 @@ class HallOfFame(Extension):
 
     async def _reconcile_group(self, group_id: int, stats: CycleStats):
         self._begin_fresh_read()
-        group = session.query(Group).filter(Group.group_id == group_id).first()
+        group = self._db.query(Group).filter(Group.group_id == group_id).first()
         if not group or not group.guild_id:
             return
         cfg = self._load_group_config(group_id)
@@ -842,12 +1207,12 @@ class HallOfFame(Extension):
     async def _load_verified_slots(
         self, group: Group, channel, scan: Optional[ChannelScan], stats: CycleStats,
     ) -> List[GroupPersonalBestMessage]:
-        rows = session.query(GroupPersonalBestMessage).filter(
+        rows = self._db.query(GroupPersonalBestMessage).filter(
             GroupPersonalBestMessage.group_id == group.group_id,
         ).all()
         valid = [r for r in rows if r.message_id and str(r.message_id).isdigit()]
         for bad in (r for r in rows if r not in valid):
-            session.delete(bad)
+            self._db.delete(bad)
             stats.pruned += 1
         valid.sort(key=lambda r: int(r.message_id))
 
@@ -857,7 +1222,7 @@ class HallOfFame(Extension):
         deduped: List[GroupPersonalBestMessage] = []
         for row in valid:
             if str(row.message_id) in seen_ids:
-                session.delete(row)
+                self._db.delete(row)
                 stats.pruned += 1
                 continue
             seen_ids.add(str(row.message_id))
@@ -868,15 +1233,15 @@ class HallOfFame(Extension):
         for row in valid:
             if str(row.channel_id) != str(channel.id):
                 # Channel was re-configured: the old message is unreachable now.
-                session.delete(row)
+                self._db.delete(row)
                 stats.pruned += 1
                 continue
             if await self._message_exists(channel, row, scan):
                 slots.append(row)
             else:
-                session.delete(row)
+                self._db.delete(row)
                 stats.pruned += 1
-        session.commit()
+        self._db.commit()
         return slots
 
     async def _message_exists(
@@ -938,7 +1303,7 @@ class HallOfFame(Extension):
             row = slots[index]
             if row.boss_name != key:
                 row.boss_name = key
-                session.commit()
+                self._db.commit()
             if self._get_stored_hash(group.group_id, row.message_id) == new_hash:
                 stats.skipped += 1
                 return
@@ -960,7 +1325,7 @@ class HallOfFame(Extension):
                         expect_result=True,
                     )
                     row.date_updated = datetime.datetime.now()
-                    session.commit()
+                    self._db.commit()
                     self._store_hash(group.group_id, row.message_id, new_hash)
                     stats.edited += 1
                     return
@@ -968,8 +1333,8 @@ class HallOfFame(Extension):
                     message = None
             # The message disappeared mid-pass: replace it.  The new message is
             # appended at the bottom (position self-heals next cycle).
-            session.delete(row)
-            session.commit()
+            self._db.delete(row)
+            self._db.commit()
             stats.pruned += 1
             slots[index] = await self._send_new_message(group, channel, key, components, stats)
         else:
@@ -990,8 +1355,8 @@ class HallOfFame(Extension):
             channel_id=str(channel.id),
             boss_name=key,
         )
-        session.add(row)
-        session.commit()
+        self._db.add(row)
+        self._db.commit()
         self._store_hash(group.group_id, str(message.id), self._components_hash(components))
         stats.sent += 1
         return row
@@ -1014,8 +1379,8 @@ class HallOfFame(Extension):
                 stats.deleted += 1
             except NotFound:
                 pass
-        session.delete(row)
-        session.commit()
+        self._db.delete(row)
+        self._db.commit()
 
     async def _get_channel_message(
         self, channel, message_id, scan: Optional[ChannelScan],
@@ -1247,7 +1612,7 @@ class HallOfFame(Extension):
                     fastest_team_size = team_size
         fastest_kill_part = ""
         if fastest is not None:
-            player = session.query(Player).filter(Player.player_id == fastest.player_id).first()
+            player = self._db.query(Player).filter(Player.player_id == fastest.player_id).first()
             fastest_kill_part = (
                 f"-# • Fastest kill: `{convert_from_ms(fastest.personal_best)}` "
                 f"({self._get_team_size_string(fastest_team_size)})\n"
@@ -1267,7 +1632,7 @@ class HallOfFame(Extension):
                     month_key = f"leaderboard:npc:{npc.npc_id}:{partition}"
                     all_key = f"leaderboard:npc:{npc.npc_id}"
                 for player_id, score in redis_client.client.zrevrange(month_key, 0, 4, withscores=True):
-                    player = session.query(Player).filter(Player.player_id == int(player_id)).first()
+                    player = self._db.query(Player).filter(Player.player_id == int(player_id)).first()
                     month_looters.append((player, score))
                 if month_looters:
                     top_player, top_score = month_looters[0]
@@ -1326,7 +1691,7 @@ class HallOfFame(Extension):
         now = time.monotonic()
         if cached and now - cached[0] < _ENTITLEMENT_TTL_SECONDS:
             return cached[1]
-        group = session.query(Group).filter(Group.group_id == group_id).first()
+        group = self._db.query(Group).filter(Group.group_id == group_id).first()
         player_ids = list({p.player_id for p in group.get_players()}) if group else []
         self._player_ids_cache[group_id] = (now, player_ids)
         return player_ids
@@ -1334,13 +1699,13 @@ class HallOfFame(Extension):
     def _get_pbs(self, group_id: int, npc_name: str) -> Dict[object, List[PersonalBestEntry]]:
         """Personal bests for a group + npc name, bucketed by team size and
         sorted fastest-first within each bucket."""
-        npc_ids = [row[0] for row in session.query(NpcList.npc_id).filter(NpcList.npc_name == npc_name).all()]
+        npc_ids = [row[0] for row in self._db.query(NpcList.npc_id).filter(NpcList.npc_name == npc_name).all()]
         if not npc_ids:
             return {}
         player_ids = self._group_player_ids(group_id)
         if not player_ids:
             return {}
-        pbs = session.query(PersonalBestEntry).filter(
+        pbs = self._db.query(PersonalBestEntry).filter(
             PersonalBestEntry.player_id.in_(player_ids),
             PersonalBestEntry.npc_id.in_(npc_ids),
         ).all()
@@ -1384,7 +1749,7 @@ class HallOfFame(Extension):
         if player is None:
             return "Unknown"
         try:
-            return get_formatted_name(player.player_name, group_id, session, player_id=player.player_id)
+            return get_formatted_name(player.player_name, group_id, self._db, player_id=player.player_id)
         except Exception:
             return player.player_name or "Unknown"
 
@@ -1449,7 +1814,7 @@ class HallOfFame(Extension):
             return None
         for variant_name in variants:
             for candidate in npc_name_candidates(variant_name):
-                candidate_npc = session.query(NpcList).filter(NpcList.npc_name == candidate).first()
+                candidate_npc = self._db.query(NpcList).filter(NpcList.npc_name == candidate).first()
                 if not candidate_npc or candidate_npc.npc_id == exclude_npc_id:
                     continue
                 if os.path.exists(f"{NPC_IMG_DIR}/{candidate_npc.npc_id}.png"):
@@ -1555,11 +1920,15 @@ class HallOfFame(Extension):
         try:
             async with self._work_lock:
                 self._begin_fresh_read()
-                groups = session.query(Group).filter(Group.guild_id == guild_id).all()
+                groups = self._db.query(Group).filter(Group.guild_id == guild_id).all()
                 targets = [
                     g.group_id for g in groups
-                    if g.group_id in self._forbidden_until
-                    or g.group_id in self._forbidden_strikes
+                    if (g.group_id in self._forbidden_until
+                        or g.group_id in self._forbidden_strikes)
+                    # Never reconcile a group the other process owns: in the
+                    # core bot this event also fires for guilds whose Hall of
+                    # Fame is still the legacy bot's job.
+                    and self._owns_group(g.group_id)
                 ]
         except Exception:
             self._safe_rollback()
@@ -1613,8 +1982,8 @@ class HallOfFame(Extension):
         selection = str(values[0])
         try:
             await ctx.defer(ephemeral=True)
-            session.expire_all()
-            group = session.query(Group).filter(Group.group_id == group_id).first()
+            self._db.expire_all()
+            group = self._db.query(Group).filter(Group.group_id == group_id).first()
             if not group:
                 await ctx.send("This group no longer exists.", ephemeral=True)
                 return

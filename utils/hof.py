@@ -263,3 +263,47 @@ def parse_select_custom_id(custom_id: str) -> int | None:
         return int(parts[1])
     except ValueError:
         return None
+
+
+# ── Bot-consolidation migration helpers ─────────────────────────────────────
+# The Hall of Fame runs in two processes while the legacy HOF application is
+# retired (see services/hall_of_fame.py). These two decisions are what keep
+# that safe, so they live here where they can be tested without Discord.
+
+
+def hof_owner_is_self(managed_by_core: bool, is_legacy: bool) -> bool:
+    """Does THIS process own a group's Hall of Fame?
+
+    Ownership is a strict partition: a group is served by the core bot once its
+    ``hof_managed_by_core`` ratchet is set, and by the legacy application until
+    then. Exactly one of the two processes may answer True for any group — two
+    writers on one channel is what produced the duplicate-message races the
+    reconciler was rewritten to fix.
+    """
+    return bool(managed_by_core) != bool(is_legacy)
+
+
+def forwardable_refresh_payloads(raw_items: List) -> List[str]:
+    """Filter a drained refresh batch down to what may be handed to the peer.
+
+    Either process can pop a PB signal belonging to the other, so it offers the
+    batch to its peer. Forwarding is capped at ONE hop: anything already tagged
+    is dropped rather than sent back, otherwise a signal that neither process
+    can place would bounce between the two queues forever. The periodic sweep
+    is the backstop for whatever gets dropped here.
+    """
+    import json
+
+    out: List[str] = []
+    for item in raw_items:
+        try:
+            if isinstance(item, bytes):
+                item = item.decode("utf-8")
+            payload = json.loads(item)
+            if not isinstance(payload, dict) or payload.get("fwd"):
+                continue
+            payload["fwd"] = 1
+            out.append(json.dumps(payload))
+        except Exception:
+            continue
+    return out

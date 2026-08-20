@@ -152,9 +152,10 @@ SERVICE_REGISTRY: list[dict] = [
     {"unit": "droptracker-heartbeat", "name": "Heartbeat bot", "category": "Discord bots",
      "description": "Uptime heartbeat", "port": None,
      "kind": "service", "confirm_stop": False},
-    {"unit": "droptracker-hof", "name": "Hall of Fame bot", "category": "Discord bots",
-     "description": "Generates and posts Hall of Fame images", "port": None,
-     "kind": "service", "confirm_stop": False},
+    {"unit": "droptracker-hof", "name": "Hall of Fame bot (legacy)", "category": "Discord bots",
+     "description": "Being retired — serves only groups that still have the old HOF bot in "
+                    "their guild; the core bot takes each one over as it is removed",
+     "port": None, "kind": "service", "confirm_stop": False},
     # --- Processing & workers --------------------------------------------
     {"unit": "droptracker-webhook-consumer", "name": "Intake queue consumer", "category": "Processing & workers",
      "description": "Drains webhook:queue (fast-accept intake processing)", "port": None,

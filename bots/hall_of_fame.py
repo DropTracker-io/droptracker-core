@@ -11,7 +11,15 @@ from interactions import Embed, Intents, Message, ChannelType, OptionType, slash
 from db.entitlements import resolve_group_entitlements
 from db.models import Group, ItemList, PersonalBestEntry, PlayerPet, Session, Player, User, GroupConfiguration
 from utils.format import convert_to_ms, get_true_boss_name
-from services import hall_of_fame
+
+# This is the LEGACY Hall of Fame application, which is being retired: the same
+# extension now also runs inside the core bot, and each group migrates across
+# when it removes this bot from its guild (see services/hall_of_fame.py).
+# services.hall_of_fame reads HOF_ROLE at import time, so it must be set first —
+# defaulting it wrong here would make this process think it owns every group.
+os.environ["HOF_ROLE"] = "legacy"
+
+from services import hall_of_fame  # noqa: E402
 from monitor.sdnotifier import SystemdWatchdog
 import time
 
