@@ -257,6 +257,13 @@ def bridge_channel_map(session) -> dict:
         _channel_map_cache["expires"] = now + _CHANNEL_MAP_TTL_SECONDS
     except Exception as e:
         print(f"[ClanChatBridge] channel map refresh failed: {e}")
+        # A failed transaction left on the shared scoped session would make
+        # every future refresh fail too — clear it so the next 60s expiry
+        # can actually recover instead of serving the stale map forever.
+        try:
+            session.rollback()
+        except Exception:
+            pass
         return _channel_map_cache["map"]
     return result
 

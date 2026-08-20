@@ -133,7 +133,13 @@ def create_hypercorn_config():
 # GUILDS added 2026-08-18 for the group-onboarding welcome (GuildJoin never
 # fired without it). It only adds guild lifecycle events + a guild cache we
 # still deliberately don't rely on (fetch_guild_cached et al stay REST-based).
-bot = interactions.Client(intents=Intents.DIRECT_MESSAGES | Intents.GUILD_INTEGRATIONS | Intents.GUILDS,
+# GUILD_MESSAGES + MESSAGE_CONTENT added 2026-08-20 (Discord approved the
+# privileged content intent) so on_clan_bridge_message actually receives guild
+# messages — without GUILD_MESSAGES the gateway never dispatches MESSAGE_CREATE,
+# and without MESSAGE_CONTENT every non-mention body arrives empty. The portal
+# toggle must stay enabled on the application or identify fails at startup.
+bot = interactions.Client(intents=Intents.DIRECT_MESSAGES | Intents.GUILD_INTEGRATIONS | Intents.GUILDS
+                          | Intents.GUILD_MESSAGES | Intents.MESSAGE_CONTENT,
                           send_command_traceback=False,
                           owner_ids=[528746710042804247, 232236164776460288])
 bot.send_not_ready_messages = True
@@ -342,7 +348,11 @@ async def on_clan_bridge_message(event: MessageCreate):
             return
         from services.clan_chat_bridge import bridge_channel_map, fan_out_discord_message
 
-        route = bridge_channel_map(session).get(str(message.channel.id))
+        # The 60s-expiry cache miss runs a GroupConfiguration query; with
+        # GUILD_MESSAGES on, this listener sees every guild message, so the
+        # query must not run on the gateway loop.
+        channel_map = await asyncio.to_thread(bridge_channel_map, session)
+        route = channel_map.get(str(message.channel.id))
         if route is None:
             return
         _group_id, clan_slug = route

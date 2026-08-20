@@ -822,9 +822,10 @@ class SubmissionCommands(Extension):
     async def submit_proof(self, ctx: SlashContext, screenshot: Attachment):
         """Attach proof after the fact, so a held submission doesn't have to be
         made again. A modal can't take a file and neither can a button, so a
-        command option is the only in-channel way to hand us an upload — the
-        core bot has no GUILD_MESSAGES intent (bots/main.py) and therefore never
-        sees a screenshot posted in a channel."""
+        command option is the deterministic in-channel way to hand us an upload —
+        the bot does receive guild messages now (GUILD_MESSAGES added 2026-08-20
+        for the clan chat bridge), but a bare channel upload carries no link to
+        a specific held submission, so the explicit command stays."""
         await ctx.defer(ephemeral=True)
         self._refresh_session()
 
@@ -841,11 +842,12 @@ class SubmissionCommands(Extension):
         """Attach a screenshot DM'd to the bot to whatever the sender was just
         prompted about.
 
-        DMs are the only message surface available: the core bot identifies with
-        ``Intents.DIRECT_MESSAGES | Intents.GUILD_INTEGRATIONS`` (bots/main.py),
-        so uploads posted in a guild channel never reach the gateway at all —
-        `/submit proof` covers that case. Gated on the awaiting-proof registry,
-        so an unrelated DM costs one Redis GET and nothing else.
+        DMs are the deliberate surface for this: guild messages do reach the
+        gateway now (GUILD_MESSAGES + MESSAGE_CONTENT since 2026-08-20, for the
+        clan chat bridge), but a guild upload can't be tied to a specific held
+        submission, so `/submit proof` covers the in-channel case. Gated on the
+        awaiting-proof registry, so an unrelated DM costs one Redis GET and
+        nothing else.
         """
         message = getattr(event, "message", None)
         if message is None or getattr(message, "_guild_id", None) is not None:
