@@ -388,8 +388,16 @@ class HallOfFame(Extension):
             )
         # Migration pass: adopt any group whose guild no longer has the legacy
         # HOF bot. The probes are REST-only, so they run outside the work lock.
+        verdicts: Dict[int, str] = {}
         for group_id, guild_id in unclaimed:
+            # Paced: this runs against a different guild each time, so it is not
+            # one bucket, but it is also not worth spending burst allowance on a
+            # migration check that has ten minutes to complete.
+            await asyncio.sleep(0.5)
             absent = await self._legacy_bot_absent(guild_id)
+            verdicts[group_id] = {True: "legacy-gone", False: "legacy-present"}.get(
+                absent, "inconclusive",
+            )
             if absent is not True:
                 continue
             try:
@@ -402,6 +410,12 @@ class HallOfFame(Extension):
                 self._safe_rollback()
                 stats.failures += 1
                 log.exception("HOF: takeover failed for group %d", group_id)
+        if verdicts:
+            # Migration visibility: which groups are still on the legacy bot and
+            # why. Drops to nothing once every group has moved across.
+            pending = sum(1 for v in verdicts.values() if v != "legacy-gone")
+            log.warning("HOF migration: %d group(s) still on the legacy bot | %s",
+                        pending, ", ".join(f"{g}:{v}" for g, v in sorted(verdicts.items())))
         for group_id in eligible:
             try:
                 async with self._work_lock:
@@ -493,14 +507,20 @@ class HallOfFame(Extension):
         except NotFound:
             pass
         except Exception as e:
-            log.debug("HOF: legacy presence probe failed for guild %s: %s", guild_id, e)
+            # Indeterminate, so the group stays with the legacy bot this cycle.
+            # Logged loudly because a probe that keeps failing silently stalls
+            # the migration with no visible reason.
+            log.warning("HOF: legacy presence probe for guild %s was inconclusive (%s: %s)",
+                        guild_id, type(e).__name__, e)
             return None
         # Distinguish "legacy bot left" from "we can't see this guild at all".
         try:
             await self.bot.http.get_member(int(guild_id), int(self.bot.user.id))
             return True
         except Exception as e:
-            log.debug("HOF: guild %s is not reachable by the core bot: %s", guild_id, e)
+            log.warning("HOF: guild %s did not confirm our own membership (%s: %s) — "
+                        "not claiming, since a 404 there could mean the guild is "
+                        "simply invisible to us", guild_id, type(e).__name__, e)
             return None
 
     async def _claim_group(self, group_id: int, stats: CycleStats) -> bool:
@@ -518,6 +538,14 @@ class HallOfFame(Extension):
             return False
         cfg = self._load_group_config(group_id)
         if not cfg.channel_id:
+            # Enabled but never finished being set up. Nothing exists to take
+            # over, so leave it unclaimed — and say why, or this looks like the
+            # migration silently stalling on that group every cycle.
+            log.warning(
+                "HOF: group %d has no Hall of Fame channel configured, so there is "
+                "nothing to migrate (create_pb_embeds is on but "
+                "channel_id_to_send_pb_embeds is empty)", group_id,
+            )
             return False
         try:
             channel = await self.bot.fetch_channel(int(cfg.channel_id))
