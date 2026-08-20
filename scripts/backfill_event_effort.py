@@ -139,7 +139,9 @@ async def _bulk_rows(session, ev):
 def _backfill_event(session, redis_conn, ev, rows, *, apply: bool) -> int:
     from db.models import EventEffort
     from services.event_effort import effort_scope
-    from services.event_engine import _STATE_KEY_TTL, _task_to_dict, load_effort_npcs
+    from services.event_engine import (
+        _STATE_KEY_TTL, KC_SOURCE_WOM, _kc_source_base_key, _kc_source_gain_key,
+        _task_to_dict, load_effort_npcs)
     from db.models import EventTask
 
     tasks = [_task_to_dict(t) for t in
@@ -210,14 +212,22 @@ def _backfill_event(session, redis_conn, ev, rows, *, apply: bool) -> int:
                 existing.source = "both" if existing.source == "plugin" else "wom"
                 if frozen_at and existing.frozen_at is None:
                     existing.frozen_at = frozen_at
-            # Seed the watermark to the absolute value we just banked, so the
-            # next live fold measures from here instead of re-crediting the
-            # whole window (or, on the plugin path, an extra +1 first kill).
+            # Seed the WOM source's baseline to the absolute value we just
+            # banked, so the next live fold measures from here instead of
+            # re-crediting the whole window. Only the WOM baseline: the fold
+            # keeps a separate one per source precisely because a plugin KC
+            # and a WOM metric can count different things (see
+            # services/event_engine._fold_kc_watermark), and writing this
+            # value onto the plugin's baseline would mute or inflate it.
             if redis_conn is not None:
                 try:
+                    scope = effort_scope(npc_name)
                     redis_conn.set(
-                        f"events:{ev.id}:kcbase:{effort_scope(npc_name)}:{player_id}",
+                        _kc_source_base_key(ev.id, scope, player_id, KC_SOURCE_WOM),
                         end_kc, ex=_STATE_KEY_TTL)
+                    redis_conn.set(
+                        _kc_source_gain_key(ev.id, scope, player_id, KC_SOURCE_WOM),
+                        0, ex=_STATE_KEY_TTL)
                 except Exception:
                     pass
     return written

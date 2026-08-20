@@ -217,3 +217,55 @@ class TestLootSweepRelevance:
              "config": {"groups": [{"npcs": ["Barrows"], "items": ["Ahrim's hood"]}]}},
         ])
         assert out and out[0]["npcs"] == ["barrows"]
+
+
+class TestCollectionTaskItemNames:
+    """Which names a collection task hands to source-NPC inference. Bug report
+    #131: a SINGLE-item task keeps its item in the ``target`` column with no
+    config item list at all, so "obtain 7 Sarachnis cudgels" inferred nothing
+    and Sarachnis earned no effort all event."""
+
+    def _descriptors(self, tasks):
+        return engine._effort_task_descriptors(_FakeSession([]), tasks)
+
+    def test_target_only_task_infers_from_its_target_item(self):
+        out = self._descriptors([
+            {"id": 591, "type": "item_collection", "target": "Sarachnis cudgel",
+             "config": {"progress_notify": "all"}},
+        ])
+        assert out and out[0]["item_names"] == ["sarachnis cudgel"]
+
+    def test_target_and_config_items_are_unioned(self):
+        out = self._descriptors([
+            {"id": 1, "type": "item_collection", "target": "Dragon med helm",
+             "config": {"items": [{"item_name": "Dragon platelegs"}]}},
+        ])
+        assert out[0]["item_names"] == ["dragon med helm", "dragon platelegs"]
+
+    def test_pet_list_config_infers_from_the_pets(self):
+        out = self._descriptors([
+            {"id": 576, "type": "pet_collection", "target": None,
+             "config": {"pets": ["Ikkle hydra", "Baron"]}},
+        ])
+        assert out[0]["item_names"] == ["baron", "ikkle hydra"]
+
+    def test_loot_value_target_is_an_npc_not_an_item(self):
+        # The matcher reads a loot_value ``target`` as the NPC the task is
+        # scoped to, so it must land in npcs — inferring drop sources FROM it
+        # would be nonsense.
+        out = self._descriptors([
+            {"id": 2, "type": "loot_value", "target": "Vorkath", "config": None},
+        ])
+        assert out[0]["npcs"] == ["vorkath"] and out[0]["item_names"] == []
+
+    def test_source_restriction_still_wins_over_inference(self):
+        out = self._descriptors([
+            {"id": 3, "type": "item_collection", "target": "Dragon pickaxe",
+             "config": {"source_npcs": ["Callisto"]}},
+        ])
+        assert out[0]["npcs"] == ["callisto"] and out[0]["item_names"] == []
+
+    def test_task_with_nothing_to_go_on_is_skipped(self):
+        assert self._descriptors([
+            {"id": 4, "type": "item_collection", "target": None, "config": {}},
+        ]) == []

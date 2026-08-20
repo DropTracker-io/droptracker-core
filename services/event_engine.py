@@ -1970,6 +1970,52 @@ def _kc_fallback_key(event_id: int, task_id, player_id: int) -> str:
     return f"events:{event_id}:kcfallback:{task_id}:{player_id}"
 
 
+#: The two sources of ABSOLUTE kill counts folded into one scope. They are
+#: tracked separately because they do not always count the same event — see
+#: :func:`_fold_kc_watermark`.
+KC_SOURCE_PLUGIN = "plugin"   # RuneLite loot-tracker kill_count, on a drop
+KC_SOURCE_WOM = "wom"         # WOM boss metric, via the event reconciler
+_KC_SOURCES = (KC_SOURCE_PLUGIN, KC_SOURCE_WOM)
+
+#: A single fold crediting more than this many kills is far more likely to be
+#: a counter mismatch, a KC reset or an account re-link than a real grind.
+#: LOGGED, never clamped: a month-long event's first WOM sync for a member who
+#: joined at the window start legitimately lands in the hundreds, and silently
+#: eating that would be a worse bug than the one being watched for.
+_KC_DELTA_ALERT = 250
+
+
+def _kc_source_base_key(event_id: int, task_id, player_id: int, source: str) -> str:
+    """One source's FIXED baseline — the absolute KC it first reported for this
+    scope. Deliberately a different prefix from the legacy ``kcbase`` key so
+    the two schemes can coexist through a mid-event deploy."""
+    return f"events:{event_id}:kcsrc:{task_id}:{player_id}:{source}"
+
+
+def _kc_source_gain_key(event_id: int, task_id, player_id: int, source: str) -> str:
+    """One source's monotone estimate of the scope's in-event kills."""
+    return f"events:{event_id}:kcgain:{task_id}:{player_id}:{source}"
+
+
+def _kc_credited_key(event_id: int, task_id, player_id: int) -> str:
+    """Kills this scope has already handed out, across all sources."""
+    return f"events:{event_id}:kccred:{task_id}:{player_id}"
+
+
+def _redis_int(redis_conn, key, default: int = 0) -> int:
+    """``GET key`` as an int, tolerating bytes / missing / junk values."""
+    try:
+        raw = redis_conn.get(key)
+    except Exception:
+        return default
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 def _legacy_kcdedupe_max(redis_conn, event_id: int, task_id, player_id: int) -> int:
     """Max kill_count already credited via the pre-watermark ``kcdedupe`` set
     (deploy transition: don't re-credit kills counted under the old scheme)."""
@@ -1988,24 +2034,103 @@ def _legacy_kcdedupe_max(redis_conn, event_id: int, task_id, player_id: int) -> 
     return best
 
 
+def _legacy_kc_max(redis_conn, event_id: int, task_id, player_id: int) -> int:
+    """Highest absolute KC an EARLIER scheme already credited for this scope.
+
+    Two of them now: the single shared watermark this function's predecessor
+    kept at ``kcbase`` (see :func:`_fold_kc_watermark`), and the older
+    ``kcdedupe`` member set before that. Used only as a floor on a source's
+    first baseline after a mid-event deploy, so kills counted under the old
+    scheme are not handed out a second time.
+    """
+    return max(
+        _legacy_kcdedupe_max(redis_conn, event_id, task_id, player_id),
+        _redis_int(redis_conn, f"events:{event_id}:kcbase:{task_id}:{player_id}"),
+    )
+
+
+def _kc_estimate(redis_conn, event_id: int, task_id, player_id: int,
+                 exclude: Optional[str] = None) -> int:
+    """The scope's best in-event kill estimate: the largest any single source
+    supports. A MAX, never a sum — two sources counting the same kills must
+    not both credit."""
+    return max((_redis_int(redis_conn, _kc_source_gain_key(
+        event_id, task_id, player_id, src))
+        for src in _KC_SOURCES if src != exclude), default=0)
+
+
+def _kc_new_baseline(redis_conn, event_id: int, task_id, player_id: int,
+                     source: str, kc_abs: int, seed, first_credit_offset: int) -> int:
+    """The baseline to bank the first time ``source`` reports for this scope.
+
+    A *virtual* baseline: the source's estimate is always ``kc_abs - base``, so
+    ``base`` encodes both where the source started counting and what it
+    inherited. It may legitimately be negative (an inherited estimate larger
+    than the counter itself) and must not be clamped to 0.
+    """
+    try:
+        seed = int(seed)
+    except (TypeError, ValueError):
+        seed = None
+    if seed is not None and 0 < seed <= kc_abs:
+        # A WOM window-start seed already spans the whole window, so it needs
+        # no inheritance — it IS the complete measure.
+        base = seed
+    else:
+        prior = _kc_estimate(redis_conn, event_id, task_id, player_id, exclude=source)
+        if prior > 0:
+            # A source that starts reporting mid-event missed everything before
+            # its first report. It inherits the scope's current estimate so it
+            # can keep the scope LIVE from here (plugin drops land in seconds;
+            # the WOM reconciler is activity-tiered and can lag hours) without
+            # re-crediting anything. Nothing else is credited right now: the
+            # inherited estimate is exactly what has already been paid out.
+            return kc_abs - prior
+        base = max(kc_abs - int(first_credit_offset), 0)
+    # Mid-event deploy from an earlier scheme: its credits are not repeated.
+    # Only meaningful for the scope's FIRST source (a later one inherits the
+    # estimate above instead), and capped at ``kc_abs`` so a floor left by the
+    # other source's larger scale cannot mute this one forever.
+    return min(max(base, _legacy_kc_max(redis_conn, event_id, task_id, player_id)),
+               kc_abs)
+
+
 def _fold_kc_watermark(redis_conn, event_id: int, task_id, player_id: int,
                        kc_abs, *, seed=None, first_credit_offset: int = 0,
+                       source: str = KC_SOURCE_PLUGIN,
                        staged: Optional[StagedWrites] = None) -> int:
-    """Return kills gained since the stored absolute-KC watermark, advance it.
+    """Return the kills an absolute-KC report newly earns for this scope.
 
-    One watermark per (event, task-scope, player) — ``task_id`` is the bare
-    task id, or a per-NPC scope for multi-NPC kc tasks (_kc_state_scope) —
-    advanced by BOTH sources of absolute KC — plugin drops' ``kill_count`` and
-    WOM hiscores — so whichever is ahead wins and the other folds to 0 (the
-    double-count guard).
+    ``task_id`` is the bare task id, a per-NPC scope for multi-NPC kc tasks
+    (:func:`_kc_state_scope`), or an ``eff:`` effort scope.
 
-    First observation: baseline = ``seed`` (WOM's window-start KC) when given,
-    else ``kc_abs - first_credit_offset`` (offset 1 keeps a first plugin drop
-    crediting +1, as before). Credits already granted through the
-    no-kill_count cooldown fallback (``kcfallback`` counter) are subtracted
-    from any positive delta so they never double-count.
+    **Absolutes are never subtracted across sources.** Two sources report an
+    absolute KC for the same scope — a plugin drop's loot-tracker
+    ``kill_count`` and WOM's boss metric — and they do not always count the
+    same event. Fortis Colosseum is the proof: WOM's ``sol_heredit`` counts
+    COMPLETED runs while the plugin's chest KC counts every attempt, so one
+    player's two counters read 172 and 920 for the same account on the same
+    day. The single shared watermark this replaces folded whichever source
+    arrived second against the other's absolute value and credited the
+    LIFETIME DIFFERENCE as in-event kills — 748 of them inside 100 minutes
+    (bug report #131).
 
-    With ``staged`` the watermark advance + fallback consume are deferred to
+    So each source keeps its OWN baseline (``kcsrc``, set by
+    :func:`_kc_new_baseline`) and its own monotone estimate of the scope's
+    in-event kills (``kcgain``, always ``kc_abs - base``). The scope credits
+    ``max(estimate)`` less what it has already paid out (``kccred``). Where
+    the two counters agree — every ordinary boss — max-of-estimates behaves
+    exactly like the old "whichever is ahead wins, the other folds to 0"
+    double-count guard. Where they disagree, neither can inflate the other,
+    and the scope still tracks whichever source has seen more (so a player who
+    stops running the plugin keeps earning from WOM, and one who starts
+    mid-event keeps the scope updating live between WOM syncs).
+
+    Credits already granted through the no-kill_count cooldown fallback
+    (``kcfallback``) are subtracted from any positive delta so they never
+    double-count.
+
+    With ``staged`` the state advance + fallback consume are deferred to
     post-commit (P0-6).
     """
 
@@ -2021,35 +2146,49 @@ def _fold_kc_watermark(redis_conn, event_id: int, task_id, player_id: int,
         return 0
     if kc_abs <= 0:
         return 0
-    key = f"events:{event_id}:kcbase:{task_id}:{player_id}"
+    src = str(source or KC_SOURCE_PLUGIN)
+    base_key = _kc_source_base_key(event_id, task_id, player_id, src)
+    gain_key = _kc_source_gain_key(event_id, task_id, player_id, src)
+    cred_key = _kc_credited_key(event_id, task_id, player_id)
     try:
-        prev = redis_conn.get(key)
-        if prev is None:
-            try:
-                seed = int(seed)
-            except (TypeError, ValueError):
-                seed = None
-            base = seed if seed is not None and 0 < seed <= kc_abs \
-                else max(kc_abs - int(first_credit_offset), 0)
-            base = max(base, _legacy_kcdedupe_max(
-                redis_conn, event_id, task_id, player_id))
+        raw_base = redis_conn.get(base_key)
+        if raw_base is None:
+            base = _kc_new_baseline(redis_conn, event_id, task_id, player_id,
+                                    src, kc_abs, seed, first_credit_offset)
+            _write("set", base_key, base, ex=_STATE_KEY_TTL)
         else:
-            base = int(prev)
-        delta = max(0, kc_abs - base)
-        _write("set", key, max(kc_abs, base), ex=_STATE_KEY_TTL)
-        if delta > 0:
-            fb_key = _kc_fallback_key(event_id, task_id, player_id)
-            try:
-                pending = int(redis_conn.get(fb_key) or 0)
-            except (TypeError, ValueError):
-                pending = 0
-            if pending > 0:
-                consumed = min(pending, delta)
-                delta -= consumed
-                if pending - consumed > 0:
-                    _write("set", fb_key, pending - consumed, ex=_STATE_KEY_TTL)
-                else:
-                    _write("delete", fb_key)
+            base = int(raw_base)
+
+        # This source's estimate: monotone, so a stale or regressed report can
+        # never walk it back.
+        estimate = max(0, kc_abs - base, _redis_int(redis_conn, gain_key))
+        _write("set", gain_key, estimate, ex=_STATE_KEY_TTL)
+
+        earned = max(estimate, _kc_estimate(
+            redis_conn, event_id, task_id, player_id, exclude=src))
+        credited = _redis_int(redis_conn, cred_key)
+        delta = earned - credited
+        if delta <= 0:
+            return 0
+        # Everything up to ``earned`` is accounted for once this returns —
+        # part by this delta, part by the fallback credits consumed below.
+        _write("set", cred_key, earned, ex=_STATE_KEY_TTL)
+        if delta > _KC_DELTA_ALERT:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "large KC fold: event=%s scope=%s player=%s source=%s "
+                "kc=%s base=%s delta=%s — verify the counter's semantics",
+                event_id, task_id, player_id, src, kc_abs, base, delta)
+        fb_key = _kc_fallback_key(event_id, task_id, player_id)
+        pending = _redis_int(redis_conn, fb_key)
+        if pending > 0:
+            consumed = min(pending, delta)
+            delta -= consumed
+            if pending - consumed > 0:
+                _write("set", fb_key, pending - consumed, ex=_STATE_KEY_TTL)
+            else:
+                _write("delete", fb_key)
         return delta
     except Exception:
         return 0
@@ -2094,7 +2233,7 @@ def _done_tasks_key(event_id: int, team_id) -> str:
 # config only, so without this a logic change would keep serving stale cached
 # maps until someone happened to edit a task — which is exactly how pb_target
 # support first landed invisibly.
-_EFFORT_MAP_VERSION = "3"
+_EFFORT_MAP_VERSION = "4"
 
 
 def _effort_tasks_digest(tasks) -> str:
@@ -2108,7 +2247,7 @@ def _effort_tasks_digest(tasks) -> str:
             str(task.get("id")), str(task.get("type")), _norm(task.get("target")),
             json.dumps({k: config.get(k) for k in
                         ("npcs", "source_npcs", "item_npcs", "items", "any_of",
-                         "groups", "paths")}, sort_keys=True, default=str),
+                         "groups", "paths", "pets")}, sort_keys=True, default=str),
         )))
     return hashlib.sha1("\n".join(parts).encode()).hexdigest()[:16]
 
@@ -2161,6 +2300,30 @@ def _loot_sweep_effort_names(config: dict) -> tuple:
     return sorted(npcs), sorted(item_names)
 
 
+def _effort_item_names(task: dict) -> set:
+    """Item/pet names an unrestricted collection task should infer NPCs from.
+
+    Wider than :func:`_config_item_entries`, which only sees the config's item
+    lists, and that gap was invisible: a SINGLE-item task stores its item in
+    the ``target`` COLUMN with no config list at all (the matcher reads it at
+    :func:`item_match_quantity`), so "obtain 7 Sarachnis cudgels" inferred no
+    sources and Sarachnis earned no effort while multi-item tiles on the same
+    board worked fine (bug report #131). ``config.pets`` — how the task form
+    stores a customized pet-category list — had the same hole.
+    """
+    config = task.get("config") or {}
+    names = set(_config_item_entries(config))
+    for pet in (config.get("pets") or ()):
+        name = _norm(pet if isinstance(pet, str)
+                     else (pet or {}).get("pet_name") or (pet or {}).get("name"))
+        if name:
+            names.add(name)
+    target = _norm(task.get("target"))
+    if target:
+        names.add(target)
+    return names
+
+
 def _effort_task_descriptors(session, tasks) -> list:
     """Per-task ``{task_id, npcs, npc_ids, item_names}`` for
     :func:`services.event_effort.build_effort_map`.
@@ -2189,10 +2352,15 @@ def _effort_task_descriptors(session, tasks) -> list:
             # any_path KC paths name their own NPCs — they are explicit too.
             for path in _metric_paths(task):
                 configured |= set(path.get("npcs") or ())
+            if ttype == "loot_value":
+                # ``target`` scopes a loot_value task to ONE NPC (see the
+                # matcher) — an NPC name, not an item, so it is explicit and
+                # never fed to item inference.
+                configured |= {n for n in (_norm(task.get("target")),) if n}
             if configured:
                 npcs = sorted(configured)
             else:
-                item_names = sorted(_config_item_entries(task.get("config") or {}))
+                item_names = sorted(_effort_item_names(task))
         elif ttype == "loot_sweep":
             # A loot-sweep set names its own sources per group ("Barrows" for
             # the brothers' pieces), so those are explicit; groups that name
@@ -2359,7 +2527,7 @@ def _apply_effort(session, redis_conn, state: "MatcherState", event: dict,
     if kind == "drop":
         npc_norm = _norm(data.get("npc_name"))
         kc_abs, seed = data.get("kill_count"), None
-        source, offset = "plugin", 1
+        source, offset = KC_SOURCE_PLUGIN, 1
     elif kind == "pb":
         # A kill-time submission is an attempt at the boss, and PB envelopes
         # carry no absolute KC — so this takes the same no-kill_count path the
@@ -2399,7 +2567,7 @@ def _apply_effort(session, redis_conn, state: "MatcherState", event: dict,
         metric = str(data.get("boss_metric") or "").strip().lower()
         npc_norm = next(
             (name for name, e in npcs.items() if e.get("metric") == metric), "")
-        kc_abs, source, offset = data.get("kc"), "wom", 0
+        kc_abs, source, offset = data.get("kc"), KC_SOURCE_WOM, 0
         # Same D10 rule the crediting path uses: only seed from the window-start
         # value for players who were in before the window opened.
         seed = data.get("kc_start") if data.get("target_event_id") == event["id"] else None
@@ -2414,7 +2582,7 @@ def _apply_effort(session, redis_conn, state: "MatcherState", event: dict,
     try:
         delta = _fold_kc_watermark(
             redis_conn, event["id"], _effort_scope(npc_norm), player_id, kc_abs,
-            seed=seed, first_credit_offset=offset, staged=staged)
+            seed=seed, first_credit_offset=offset, source=source, staged=staged)
         if delta > 0:
             record_effort(session, event["id"], team_id, player_id, npc_norm,
                           entry, delta, source=source, at=submitted_at)
@@ -4291,7 +4459,8 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
                     if kill_count is not None and kill_count > 0:
                         quantity = _fold_kc_watermark(
                             redis_conn, event_id, kc_scope, player_id,
-                            kill_count, first_credit_offset=1, staged=staged)
+                            kill_count, first_credit_offset=1,
+                            source=KC_SOURCE_PLUGIN, staged=staged)
                         if quantity <= 0:
                             continue
                     else:
@@ -4317,7 +4486,7 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
                     quantity = _fold_kc_watermark(
                         redis_conn, event_id, kc_scope, player_id, data.get("kc"),
                         seed=data.get("kc_start") if wom_seed_ok else None,
-                        staged=staged)
+                        source=KC_SOURCE_WOM, staged=staged)
                     if quantity <= 0:
                         continue
                 elif match["mode"] == "xp":

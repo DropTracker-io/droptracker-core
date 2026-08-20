@@ -60,6 +60,22 @@ def _fold(r, kc, **kw):
     return engine._fold_kc_watermark(r, EID, TID, PID, kc, **kw)
 
 
+def _plugin(r, kc, **kw):
+    """A drop's loot-tracker kill_count (the first one credits the kill)."""
+    return _fold(r, kc, first_credit_offset=1,
+                 source=engine.KC_SOURCE_PLUGIN, **kw)
+
+
+def _wom(r, kc, **kw):
+    """A WOM reconciler envelope's boss-metric KC."""
+    return _fold(r, kc, source=engine.KC_SOURCE_WOM, **kw)
+
+
+def _redis_credited(r):
+    """Total the scope has handed out across both sources."""
+    return engine._redis_int(r, engine._kc_credited_key(EID, TID, PID))
+
+
 class TestKcWatermarkPlugin:
     def test_first_drop_credits_one(self):
         r = _FakeRedis()
@@ -104,17 +120,62 @@ class TestKcWatermarkWom:
         r = _FakeRedis()
         assert _fold(r, 250, seed=260) == 0
 
-    def test_plugin_ahead_wom_folds_to_zero(self):
+    def test_wom_window_seed_tops_up_what_the_plugin_baseline_missed(self):
+        # The plugin's baseline is lazy — it starts at the first drop it sees,
+        # so kills earlier in the window are invisible to it. WOM's window-start
+        # seed DOES span them, and its estimate is the one that counts.
         r = _FakeRedis()
-        _fold(r, 258, first_credit_offset=1)  # plugin drop
-        assert _fold(r, 255, seed=240) == 0   # stale WOM snapshot
-        assert _fold(r, 260) == 2             # newer WOM tops up past 258
+        assert _plugin(r, 258) == 1            # one kill observed live
+        assert _wom(r, 255, seed=240) == 14    # 15 in-window kills, 1 paid
+        assert _wom(r, 260) == 5
 
-    def test_wom_ahead_plugin_folds_to_zero(self):
+    def test_wom_ahead_then_plugin_starts_reporting(self):
         r = _FakeRedis()
-        assert _fold(r, 250, seed=240) == 10  # WOM credited the window
-        assert _fold(r, 249, first_credit_offset=1) == 0  # older plugin drop
-        assert _fold(r, 251, first_credit_offset=1) == 1
+        assert _wom(r, 250, seed=240) == 10    # WOM credited the window
+        # The plugin's first report inherits that estimate rather than
+        # re-crediting from its own counter: nothing new to pay out.
+        assert _plugin(r, 249) == 0
+        assert _plugin(r, 251) == 2            # and then tracks live from there
+
+    def test_neither_source_re_credits_the_others_kills(self):
+        r = _FakeRedis()
+        assert _plugin(r, 100) == 1
+        assert _plugin(r, 110) == 10
+        assert _wom(r, 4_000, seed=3_989) == 0  # same 11 kills, other counter
+
+
+class TestMismatchedCounterSemantics:
+    """Bug report #131. WOM's ``sol_heredit`` counts COMPLETED Colosseum runs;
+    the plugin's Fortis Colosseum chest KC counts every attempt. One player's
+    counters read 172 and 920 on the same day, and the old shared watermark
+    credited the 748-kill difference as in-event effort."""
+
+    def test_lifetime_difference_is_never_credited(self):
+        r = _FakeRedis()
+        assert _wom(r, 172, seed=170) == 2     # 2 completed runs this window
+        # The first chest arrives with a counter on a completely different
+        # scale. It must credit its own progress, not the 748-kill gap.
+        assert _plugin(r, 920) == 0
+        assert _plugin(r, 921) == 1
+        assert _plugin(r, 925) == 4
+
+    def test_mismatch_in_the_other_arrival_order(self):
+        r = _FakeRedis()
+        assert _plugin(r, 920) == 1
+        assert _wom(r, 172, seed=170) <= 2     # never 172 - 920's scale
+        _plugin(r, 930)
+        # 11 chests opened (920..930), and that is the whole bill.
+        assert _redis_credited(r) == 11
+
+    def test_high_scale_source_still_leads_after_the_low_one(self):
+        # 11 chests opened in the window is 11 units of effort even though WOM
+        # only ever confirms the 8 that were completed.
+        r = _FakeRedis()
+        _wom(r, 172, seed=172)
+        for kc in range(921, 932):
+            _plugin(r, kc)
+        assert _redis_credited(r) == 11
+        assert _wom(r, 180) == 0               # 8 completions < 11 attempts
 
 
 class TestKcFallbackCounter:
