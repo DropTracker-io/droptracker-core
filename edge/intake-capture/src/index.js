@@ -39,8 +39,16 @@ const TERMINAL_STATUS = new Set([400, 401, 403]);
 export default {
   async fetch(request, env, ctx) {
     // The route should only ever send us POSTs, but a stray method must not be
-    // buffered or captured.
-    if (request.method !== "POST") return fetch(request);
+    // buffered or captured. It still has to reach the origin by ORIGIN_HOST:
+    // `fetch(request)` would re-request api.droptracker.io/webhook and land
+    // straight back in this Worker.
+    if (request.method !== "POST") {
+      try {
+        return await forward(request, null, env);
+      } catch {
+        return json({ error: "Origin unreachable" }, 502);
+      }
+    }
 
     // Read the body once. Streaming is not an option: if the origin fails
     // mid-stream the bytes are gone and there is nothing left to spool.
@@ -48,14 +56,17 @@ export default {
     try {
       body = await request.arrayBuffer();
     } catch {
-      // Body never consumed, so the original request is still forwardable.
-      return fetch(request);
+      // We never got the submission, so we cannot forward it and must not
+      // claim we have it. 503 is retryable; the plugin keeps its copy.
+      return json({ error: "Could not read request body" }, 503);
     }
 
     try {
       return await handle(request, body, env, ctx);
     } catch (err) {
       // Last-ditch: forward once with no capture rather than fail the client.
+      // Note this goes to ORIGIN_HOST too -- there is no safe way to replay the
+      // original request object without re-entering our own route.
       try {
         return await forward(request, body, env);
       } catch {
@@ -140,7 +151,7 @@ function forward(request, body, env) {
   }
 
   return fetch(target, {
-    method: "POST",
+    method: request.method,
     headers,
     body,
     signal: AbortSignal.timeout(Number(env.ORIGIN_TIMEOUT_MS ?? 15000)),
