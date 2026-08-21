@@ -146,9 +146,22 @@ def _fetch_groups(conn, table: Table, since: str):
     return {guid: rows for guid, rows in groups.items() if len(rows) > 1}
 
 
-def _pick_keeper(table: Table, rows: list[dict]) -> dict:
+def _pick_keeper(table: Table, rows: list[dict], prefer_window=None) -> dict:
     if table.keep == "best_pb":
         return min(rows, key=lambda r: (r["personal_best"], r[table.pk]))
+    if prefer_window and table.name == "drops":
+        # Lowest-id normally means "the original write", but after a backfill it
+        # can mean the opposite. Replaying an outage window re-creates rows with
+        # their ORIGINAL date_added; an earlier, buggier replay pass may already
+        # have written the same submission stamped at the time the backfill ran.
+        # Those wrong-stamped copies hold the LOWER ids, so plain lowest-id keeps
+        # them and deletes the correctly dated ones. Prefer a row that actually
+        # falls inside the window, then lowest id.
+        start, end = prefer_window
+        return min(rows, key=lambda r: (
+            not (r.get("date_added") is not None and start <= r["date_added"] <= end),
+            r[table.pk],
+        ))
     return min(rows, key=lambda r: r[table.pk])
 
 
@@ -185,9 +198,23 @@ def main() -> int:
     ap.add_argument("--since", default="2026-08-01",
                     help="date_added floor for the drops scan (default: 2026-08-01). "
                          "The small tables are always scanned in full.")
+    ap.add_argument("--prefer-window", nargs=2, metavar=("START", "END"),
+                    help="for drops, keep the duplicate whose date_added falls in this "
+                         "UTC window instead of the lowest id — use after backfilling an "
+                         "outage window, so the row carrying the ORIGINAL timestamp wins "
+                         "over a copy re-dated by an earlier replay pass. "
+                         "Format: 'YYYY-MM-DD HH:MM'")
     ap.add_argument("--skip-force-update", action="store_true",
                     help="skip the Redis rebuild for players whose drops changed")
     args = ap.parse_args()
+
+    prefer_window = None
+    if args.prefer_window:
+        prefer_window = tuple(
+            datetime.strptime(v, "%Y-%m-%d %H:%M") for v in args.prefer_window
+        )
+        print(f"keep-preference: drops dated {prefer_window[0]} .. {prefer_window[1]} "
+              f"win over lower-id duplicates")
 
     mode = "APPLY" if args.apply else "DRY RUN"
     print(f"=== dedupe_submission_rows [{mode}] drops window: date_added >= {args.since} ===\n")
@@ -203,7 +230,7 @@ def main() -> int:
             groups = _fetch_groups(conn, table, args.since)
             doomed_rows, keep_count = [], 0
             for guid, rows in sorted(groups.items()):
-                keeper = _pick_keeper(table, rows)
+                keeper = _pick_keeper(table, rows, prefer_window)
                 losers = [r for r in rows if r[table.pk] != keeper[table.pk]]
                 keep_count += 1
                 doomed_rows.extend(losers)
