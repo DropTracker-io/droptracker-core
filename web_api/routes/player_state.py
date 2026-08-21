@@ -11,6 +11,7 @@ error — most players will not have synced when this first ships.
 from __future__ import annotations
 
 import json
+import time
 
 from quart import Blueprint, jsonify
 
@@ -44,40 +45,67 @@ DIARY_AREA_NAMES = {
 
 QUEST_STATE_NAMES = {0: "not_started", 1: "in_progress", 2: "finished"}
 
-# The task registry is reference data that changes only when the manifest is
-# rebuilt, so it is read once per process rather than per request.
-_CA_REGISTRY_CACHE = None
-_CLOG_STRUCTURE_CACHE = None
+# Reference data out of the manifest — the combat achievement registry and the
+# collection log's tab/page structure. Both change only when their generator
+# script runs, so they are cached rather than re-read on every page view.
+#
+# Two rules make the cache safe, and both were learned the hard way:
+#
+#  - An empty section is NEVER cached. These rows are written by scripts that
+#    run long after a worker boots, and the previous cache stored the empty
+#    list permanently because `[] is not None`. A profile whose 140 collection
+#    log items were sitting in the database rendered "No collection log
+#    recorded" until the process happened to restart.
+#  - Even a populated section expires, so re-running a sync propagates on its
+#    own instead of needing `systemctl restart droptracker-webapi`.
+_MANIFEST_SECTION_TTL_SECONDS = 300
+_MANIFEST_SECTION_CACHE: dict = {}
+
+
+def _manifest_section(s, key, extract):
+    """The decoded manifest section for ``key``, or ``[]`` if it is not usable.
+
+    ``extract`` shapes the decoded JSON into what callers want and returns
+    something falsy when the payload is not the shape it expects; unparseable
+    JSON and a missing row are treated the same way, because to a caller they
+    mean the same thing — the generator has not run yet.
+    """
+    now = time.monotonic()
+    cached = _MANIFEST_SECTION_CACHE.get(key)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    from db.models import PluginManifestSection
+
+    row = (
+        s.query(PluginManifestSection)
+        .filter(PluginManifestSection.key == key)
+        .first()
+    )
+    value = []
+    if row is not None:
+        try:
+            decoded = extract(json.loads(row.payload))
+        except (TypeError, ValueError):
+            decoded = None
+        if decoded:
+            value = decoded
+
+    if value:
+        _MANIFEST_SECTION_CACHE[key] = (now + _MANIFEST_SECTION_TTL_SECONDS, value)
+    return value
 
 
 def _combat_achievement_registry(s):
     """The cache-derived task registry: every task with its varp and bit.
 
     Read from the manifest so the site and any client share one definition.
-    Cached per process — it changes only when the extractor is re-run.
     """
-    global _CA_REGISTRY_CACHE
-    if _CA_REGISTRY_CACHE is not None:
-        return _CA_REGISTRY_CACHE
-
-    from db.models import PluginManifestSection
-
-    row = (
-        s.query(PluginManifestSection)
-        .filter(PluginManifestSection.key == "combat_achievement_tasks")
-        .first()
+    return _manifest_section(
+        s,
+        "combat_achievement_tasks",
+        lambda loaded: loaded.get("tasks") if isinstance(loaded, dict) else None,
     )
-    tasks = []
-    if row is not None:
-        try:
-            loaded = json.loads(row.payload)
-            if isinstance(loaded, dict):
-                tasks = loaded.get("tasks") or []
-        except (TypeError, ValueError):
-            tasks = []
-
-    _CA_REGISTRY_CACHE = tasks
-    return tasks
 
 
 def _combat_achievements_for(s, player_id: int):
@@ -164,31 +192,14 @@ def _combat_achievements_for(s, player_id: int):
 def _collection_log_structure(s):
     """Tabs -> pages -> item ids, from the manifest the wiki sync populates.
 
-    Cached per process: it is reference data that only changes when the sync
-    runs, and it is read on every collection log page view.
+    Empty until ``scripts/sync_collection_log.py`` has run; the endpoint reports
+    that as ``has_structure: false`` rather than inventing a hierarchy.
     """
-    global _CLOG_STRUCTURE_CACHE
-    if _CLOG_STRUCTURE_CACHE is not None:
-        return _CLOG_STRUCTURE_CACHE
-
-    from db.models import PluginManifestSection
-
-    row = (
-        s.query(PluginManifestSection)
-        .filter(PluginManifestSection.key == "collection_log")
-        .first()
+    return _manifest_section(
+        s,
+        "collection_log",
+        lambda loaded: loaded if isinstance(loaded, list) else None,
     )
-    structure = []
-    if row is not None:
-        try:
-            loaded = json.loads(row.payload)
-            if isinstance(loaded, list):
-                structure = loaded
-        except (TypeError, ValueError):
-            structure = []
-
-    _CLOG_STRUCTURE_CACHE = structure
-    return structure
 
 
 def _player_or_none(s, player_id: int):
