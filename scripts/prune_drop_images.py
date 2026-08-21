@@ -1,4 +1,26 @@
-"""Retention for user-uploaded DROP screenshots (storage reclamation).
+"""Retention for user-uploaded submission screenshots (storage reclamation).
+
+Covers ALL nine submission types under ``static/assets/img/user-upload/``, by
+two different mechanisms, because the types differ in one decisive way:
+
+  * ``drop`` has a *value*, so it is driven from ``drops.image_url`` and keeps
+    anything worth >= ``--min-value`` regardless of age (see below).
+  * the other eight (``level_up``, ``clog``, ``ca``, ``pb``, ``quest``,
+    ``pet``, ``death``, ``experience_milestone``) have no value to weigh and
+    are swept off the *filesystem* by mtime.
+
+Why the second mechanism had to exist (2026-08-19): this script originally
+scanned only ``drops``, so it only ever saw ``drop/``. The other eight types
+had no retention at all and grew to 96 GiB — ``level_up`` alone reached 223k
+files / 42.5 GiB, referenced by no table whatsoever (``player_exp`` has no
+image column; those files exist purely to be embedded in one Discord
+notification). The disk hit 99% while this script ran green every night,
+reporting a healthy 1.9 GiB reclaimed. A DB-driven scan structurally cannot
+see a file nothing in the DB points at — hence the filesystem sweep.
+
+Note both mechanisms honour the same recap protection, and deleting any image
+blanks it in Discord messages older than the retention window: the URL lives
+in the message, and there is no backup of this tree anywhere.
 
 Every drop submission may carry a screenshot, and we kept all of them forever:
 as of 2026-07-21 that is 837k files / 152 GiB under
@@ -89,6 +111,24 @@ URL_PREFIXES = (
 
 DEFAULT_MIN_VALUE = 1_000_000
 DEFAULT_RETENTION_DAYS = 30
+DEFAULT_NONDROP_RETENTION_DAYS = 30
+
+# Every submission type that lands in the user-upload tree, and the table whose
+# ``image_url`` points at it (None = nothing in the DB references these files).
+#
+# `drop` is deliberately absent: it is the one type with a *value* to weigh, so
+# it keeps the DB-driven scan below. The rest are swept off the filesystem —
+# see `prune_non_drop_images` for why that direction is the only one that works.
+NON_DROP_TYPES = {
+    "level_up": None,
+    "pet": None,
+    "experience_milestone": None,
+    "clog": ("collection", "log_id"),
+    "ca": ("combat_achievement", "id"),
+    "pb": ("personal_best", "id"),
+    "quest": ("quest_completions", "id"),
+    "death": ("player_deaths", "id"),
+}
 # Rows per window query / ids per UPDATE. Keeps each statement well inside
 # MariaDB's read_timeout and bounds memory on a 175M-row table.
 SELECT_CHUNK = 20_000
@@ -194,6 +234,126 @@ def windows_to_scan(cutoff: datetime) -> list[tuple[datetime, datetime]]:
     return windows
 
 
+def iter_type_files(submission_type: str):
+    """Yield ``(path, stat)`` for every file under ``*/{submission_type}/``.
+
+    ``scandir`` rather than ``glob``/``walk`` because this crosses ~1.1M files
+    and ``scandir`` carries the stat result with the entry, so the age test
+    below costs no extra syscall.
+    """
+    try:
+        wom_dirs = os.scandir(LOCAL_ROOT)
+    except OSError:
+        return
+    with wom_dirs:
+        for wom in wom_dirs:
+            if not wom.is_dir(follow_symlinks=False):
+                continue
+            type_dir = os.path.join(wom.path, submission_type)
+            if not os.path.isdir(type_dir):
+                continue
+            for root, _dirs, files in os.walk(type_dir):
+                for name in files:
+                    path = os.path.join(root, name)
+                    try:
+                        yield path, os.stat(path)
+                    except OSError:
+                        continue
+
+
+def prune_non_drop_images(cutoff, protected, snap, apply, retention_days):
+    """Delete non-drop submission screenshots past the retention window.
+
+    **Driven from the filesystem, not the DB — and that is the whole point.**
+    `level_up`, `pet` and `experience_milestone` are referenced by *no* table:
+    they are written, embedded once in a Discord notification, and never read
+    again. A DB-driven scan cannot see them, which is exactly how `level_up`
+    reached 223k files / 42.5 GiB while the nightly drop prune ran green every
+    morning. Walking the tree covers all eight types uniformly; the references
+    that *do* exist are healed afterwards by `heal_missing_references`.
+
+    Age comes from mtime because these types have no value to weigh — the
+    retention window is the entire policy.
+    """
+    totals = {}
+    for submission_type in sorted(NON_DROP_TYPES):
+        removed = freed = skipped = 0
+        for path, st in iter_type_files(submission_type):
+            if datetime.fromtimestamp(st.st_mtime) >= cutoff:
+                continue
+            if path in protected:
+                # A recap card renders this one forever.
+                skipped += 1
+                continue
+            # Recorded BEFORE the unlink, same as the drop path, so the log is
+            # a complete account of what went even if the run dies mid-sweep.
+            snap.write(f"0\t{path}\t{st.st_size}\tdeleted_{submission_type}\n")
+            if apply:
+                try:
+                    os.remove(path)
+                except OSError as exc:
+                    print(f"  ! could not remove {path}: {exc}")
+                    continue
+            removed += 1
+            freed += st.st_size
+        snap.flush()
+        if removed or skipped:
+            note = f" ({skipped:,} recap-protected)" if skipped else ""
+            print(f"  {submission_type:<22}: {removed:,} images "
+                  f"({_fmt_bytes(freed)}){note}")
+        totals[submission_type] = (removed, freed)
+    return totals
+
+
+def heal_missing_references(cutoff, apply):
+    """Null ``image_url`` on rows whose file is gone, so the site renders "no
+    screenshot" instead of a broken image.
+
+    Runs after the sweep and is self-healing: it only ever nulls a reference
+    whose file is *already* absent, so it is safe to re-run and never removes a
+    reference that still resolves. These tables are 30k-290k rows (against
+    drops' 188M), so a plain keyset walk on the primary key is fine here —
+    none of the index gymnastics the drops scan needs.
+    """
+    cleared_total = 0
+    for submission_type, ref in sorted(NON_DROP_TYPES.items()):
+        if ref is None:
+            continue
+        table, pk = ref
+        cleared = 0
+        last_pk = -1
+        while True:
+            rows = session.execute(text(
+                f"SELECT {pk}, image_url FROM {table} "
+                f"WHERE {pk} > :last_pk AND date_added < :cutoff "
+                "  AND image_url IS NOT NULL AND image_url <> '' "
+                f"ORDER BY {pk} LIMIT :lim"
+            ), {"last_pk": last_pk, "cutoff": cutoff,
+                "lim": SELECT_CHUNK}).all()
+            if not rows:
+                break
+            stale = []
+            for row_pk, image_url in rows:
+                last_pk = row_pk
+                path = local_path_for(image_url)
+                if path is None or os.path.exists(path):
+                    continue
+                stale.append(row_pk)
+            if stale and apply:
+                stmt = (text(f"UPDATE {table} SET image_url = NULL "
+                             f"WHERE {pk} IN :ids")
+                        .bindparams(bindparam("ids", expanding=True)))
+                for i in range(0, len(stale), UPDATE_CHUNK):
+                    session.execute(stmt, {"ids": stale[i:i + UPDATE_CHUNK]})
+                session.commit()
+            cleared += len(stale)
+        if cleared:
+            print(f"  {table:<22}: {cleared:,} dangling image_url "
+                  f"{'cleared' if apply else 'would be cleared'}")
+        cleared_total += cleared
+    return cleared_total
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Prune low-value drop screenshots past the retention window.")
@@ -205,6 +365,14 @@ def main() -> int:
                         help=f"keep everything newer than this (default {DEFAULT_RETENTION_DAYS})")
     parser.add_argument("--limit", type=int, default=0,
                         help="stop after this many candidate rows (0 = no limit)")
+    parser.add_argument("--nondrop-retention-days", type=int,
+                        default=DEFAULT_NONDROP_RETENTION_DAYS,
+                        help="retention window for non-drop submission types "
+                             f"(default {DEFAULT_NONDROP_RETENTION_DAYS}); "
+                             "these have no value to weigh, so age is the "
+                             "whole policy")
+    parser.add_argument("--skip-non-drop", action="store_true",
+                        help="only prune drop screenshots (legacy behaviour)")
     args = parser.parse_args()
 
     cutoff = datetime.now() - timedelta(days=args.retention_days)
@@ -318,6 +486,20 @@ def main() -> int:
                 break
         flush_ids()
 
+        if not args.skip_non_drop:
+            nd_cutoff = datetime.now() - timedelta(
+                days=args.nondrop_retention_days)
+            print(f"\nnon-drop submission types (older than "
+                  f"{nd_cutoff:%Y-%m-%d %H:%M}, "
+                  f"{args.nondrop_retention_days}d):")
+            nd_totals = prune_non_drop_images(
+                nd_cutoff, protected, snap, args.apply,
+                args.nondrop_retention_days)
+            nd_removed = sum(n for n, _ in nd_totals.values())
+            nd_freed = sum(f for _, f in nd_totals.values())
+            print(f"\nhealing dangling references:")
+            nd_cleared = heal_missing_references(nd_cutoff, args.apply)
+
     verb = "freed" if args.apply else "would free"
     print(f"\ncandidates scanned : {scanned:,}")
     print(f"images {'removed' if args.apply else 'to remove'} : {pruned:,}")
@@ -328,7 +510,16 @@ def main() -> int:
     if protected_hits:
         print(f"recap-protected    : {protected_hits:,} (kept for recap cards)")
     if unresolved:
+        # Overwhelmingly rows with image_url = '' — a drop that simply carried
+        # no screenshot. Nothing to reclaim; they are not a backlog.
         print(f"unrecognised urls  : {unresolved:,} (left untouched)")
+    if not args.skip_non_drop:
+        print(f"\nnon-drop images {'removed' if args.apply else 'to remove'} "
+              f": {nd_removed:,}")
+        print(f"non-drop space {verb}  : {_fmt_bytes(nd_freed)}")
+        if nd_cleared:
+            print(f"references healed     : {nd_cleared:,}")
+        print(f"\nTOTAL space {verb}     : {_fmt_bytes(freed + nd_freed)}")
     if not args.apply:
         print("\nDry run — nothing was changed. Re-run with --apply to act.")
     return 0
