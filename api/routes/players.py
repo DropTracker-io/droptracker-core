@@ -467,7 +467,17 @@ async def load_config():
 
 
 # Hardcoded fallbacks when no GroupConfiguration override exists (group_id=2).
-PLUGIN_LATEST_VERSION_FALLBACK = "6.0"
+# This MUST track what the Plugin Hub actually serves, not what is on master:
+# the plugin warns "a new version is available -> update via the Plugin Hub"
+# whenever its own version is older, so advertising an unreleased version tells
+# every user to fetch a build that does not exist. Bump only once the hub's
+# pinned commit carries the new version. Verify before bumping -- the hub
+# manifest names the commit, and that commit's build.gradle names the version:
+#   curl -s https://raw.githubusercontent.com/runelite/plugin-hub/master/plugins/droptracker
+#   git -C plugin show <commit>:build.gradle | grep '^version'
+# (Bumped to 5.5.0 while the hub still served 5.4.2, which told every user on
+# the only published build to go fetch a release that did not exist.)
+PLUGIN_LATEST_VERSION_FALLBACK = "5.4.2"
 PLUGIN_MINIMUM_VERSION_FALLBACK = "5.0.0"
 
 
