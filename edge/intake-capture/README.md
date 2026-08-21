@@ -171,20 +171,40 @@ production routes.
 
 ### 4. Deploy the Worker
 
-**Staging first.** `--env staging` has no route and is reachable only on
-`workers.dev`, so production traffic is untouched:
+**Always pass `--env` explicitly.** There are two targets and they differ only
+by that flag:
+
+| Command | Worker | Routes |
+|---|---|---|
+| `wrangler deploy --env=""` | `droptracker-intake-capture-staging` | none, workers.dev only |
+| `wrangler deploy --env production` | `droptracker-intake-capture` | **live on api.droptracker.io** |
+
+Routes are declared only under `[env.production]`. That is deliberate: Wrangler
+*inherits* a top-level `routes` block into every named environment (vars and
+bindings are not inherited, routes are), so a top-level route block means every
+environment you deploy grabs production traffic. On 2026-08-21 exactly that put
+an unvalidated worker in front of live intake. Two names and one route block
+removes the question.
+
+Staging first — this touches nothing:
 
 ```bash
-npx wrangler deploy --env staging
+npx wrangler deploy --env=""
 ```
 
 Run the checks below against the `workers.dev` URL it prints. Only when they
-pass, deploy the unnamed environment — that one carries the
-`api.droptracker.io/webhook` and `/submit` routes and goes live the moment it
-lands:
+pass:
 
 ```bash
-npx wrangler deploy
+npx wrangler deploy --env production
+```
+
+To hand the routes back to the plain proxy at any point, delete the production
+worker. Traffic falls straight through to the origin, which is how it ran
+before any of this existed:
+
+```bash
+npx wrangler delete droptracker-intake-capture
 ```
 
 ### 5. Drain credentials and timer
@@ -243,8 +263,9 @@ any file in the local disk spool. The R2 spool is surfaced by the drain timer's
 own journal rather than a separate probe, since health_watch has no R2
 credentials.
 
-Rollback is deleting the Worker route in the Cloudflare dashboard. Traffic
-returns to the plain proxy path immediately; no deploy, no restart.
+Rollback is `npx wrangler delete droptracker-intake-capture`, or removing the
+route in the dashboard. Traffic returns to the plain proxy path immediately; no
+deploy, no restart, and the origin never knew the difference.
 
 ## What this does not cover
 

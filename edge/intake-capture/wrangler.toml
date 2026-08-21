@@ -1,20 +1,57 @@
-name = "droptracker-intake-capture"
+# Routes live in ONE place: [env.production] at the bottom of this file.
+#
+# The top level deliberately declares no route, so the default `wrangler deploy`
+# target is a workers.dev-only worker under a different name. That is not a
+# style preference -- named environments in Wrangler *inherit* `routes` from the
+# top level (unlike vars and bindings, which they do not), so a top-level
+# `routes` block silently attaches production traffic to whatever environment
+# you deploy. On 2026-08-21 a `deploy --env staging` did exactly that and put an
+# unvalidated worker in front of api.droptracker.io.
+#
+# Two names, one route block, no inheritance to reason about:
+#   wrangler deploy                    -> droptracker-intake-capture-staging, no routes
+#   wrangler deploy --env production   -> droptracker-intake-capture, live routes
+
+name = "droptracker-intake-capture-staging"
 main = "src/index.js"
 compatibility_date = "2026-08-21"
+workers_dev = true
+
+[vars]
+ORIGIN_HOST = "api-origin.droptracker.io"
+ORIGIN_TIMEOUT_MS = "15000"
+# No sampling in staging: every capture here should be one you caused.
+FORCE_SPOOL_SAMPLE = "0"
+
+[[r2_buckets]]
+binding = "SPOOL"
+bucket_name = "droptracker-intake-spool"
+
+[[analytics_engine_datasets]]
+binding = "LEDGER"
+dataset = "droptracker_intake_staging"
+
+
+# ---------------------------------------------------------------------------
+# Production. The only place routes appear.
+# ---------------------------------------------------------------------------
+[env.production]
+name = "droptracker-intake-capture"
+workers_dev = false
 
 # Scoped to the two submission routes only. The GET read traffic
 # (/notifications, /panel_data, /event_state) is far higher volume and must stay
 # on the plain proxy path -- routing it through a Worker multiplies cost for no
 # durability benefit.
-[[routes]]
+[[env.production.routes]]
 pattern = "api.droptracker.io/webhook"
 zone_name = "droptracker.io"
 
-[[routes]]
+[[env.production.routes]]
 pattern = "api.droptracker.io/submit"
 zone_name = "droptracker.io"
 
-[vars]
+[env.production.vars]
 # Must NOT be api.droptracker.io, or the Worker's own fetch re-enters its route.
 ORIGIN_HOST = "api-origin.droptracker.io"
 # The plugin's OkHttp default read timeout is 10s and nginx's is 90s; 15s here
@@ -25,31 +62,10 @@ ORIGIN_TIMEOUT_MS = "15000"
 # drain paths exercised. GUID dedup makes the replay a no-op. ~370 objects/day.
 FORCE_SPOOL_SAMPLE = "0.001"
 
-[[r2_buckets]]
+[[env.production.r2_buckets]]
 binding = "SPOOL"
 bucket_name = "droptracker-intake-spool"
 
-[[analytics_engine_datasets]]
+[[env.production.analytics_engine_datasets]]
 binding = "LEDGER"
 dataset = "droptracker_intake"
-
-# Staging: same code and bindings, NO route, reachable only on workers.dev.
-# Deploy here first and run the checks in README.md against the workers.dev URL
-# -- production traffic is untouched until the unnamed environment above is
-# deployed. Named environments do not inherit bindings, hence the repetition.
-[env.staging]
-workers_dev = true
-
-[env.staging.vars]
-ORIGIN_HOST = "api-origin.droptracker.io"
-ORIGIN_TIMEOUT_MS = "15000"
-# No sampling in staging: every capture there should be one you caused.
-FORCE_SPOOL_SAMPLE = "0"
-
-[[env.staging.r2_buckets]]
-binding = "SPOOL"
-bucket_name = "droptracker-intake-spool"
-
-[[env.staging.analytics_engine_datasets]]
-binding = "LEDGER"
-dataset = "droptracker_intake_staging"
