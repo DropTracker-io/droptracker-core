@@ -596,30 +596,74 @@ async def event_signup_prompt_retire():
         print(f"Event sign-up prompt sweep error: {e}")
 
 
+_LOOTBOARD_KEYS = ("lootboard_channel_id", "lootboard_message_id", "repost_lootboard")
+
+
+def _lootboard_targets() -> dict:
+    """Which groups have a lootboard to post, as plain values. Runs off the loop.
+
+    Deliberately does NOT use utils.group_config.get_bulk: that layer is cached,
+    and the poster below rewrites ``lootboard_message_id`` through the raw ORM
+    without invalidating it, so a cached read could hand back a superseded
+    message id and make the poster repost instead of edit.
+
+    This was 1 + 3×(every group) sequential round trips — ~813 queries, measured
+    at 2.4s of blocked event loop every 8 minutes. It is now two queries, and it
+    only selects the two Group columns the caller actually reads.
+    """
+    session = Session()
+    try:
+        wom_by_group = dict(session.query(Group.group_id, Group.wom_id).all())
+
+        config: dict = {}
+        rows = (
+            session.query(
+                GroupConfiguration.group_id,
+                GroupConfiguration.config_key,
+                GroupConfiguration.config_value,
+            )
+            .filter(GroupConfiguration.config_key.in_(_LOOTBOARD_KEYS))
+            .order_by(GroupConfiguration.id)
+            .all()
+        )
+        for group_id, key, value in rows:
+            keys = config.setdefault(group_id, {})
+            # Lowest id wins, matching the per-key .first() this replaced.
+            # (group_id, config_key) is NOT unique -- group 97 really does
+            # carry repost_lootboard as both '1' and '0'. Without the explicit
+            # order plus first-wins, the last row would win instead and
+            # silently flip that board from repost mode to edit mode.
+            if key not in keys:
+                keys[key] = value
+
+        targets = {}
+        for group_id, keys in config.items():
+            channel = keys.get("lootboard_channel_id")
+            if not channel or "lootboard_message_id" not in keys:
+                continue
+            targets[group_id] = {
+                "wom_id": wom_by_group.get(group_id),
+                "channel": channel,
+                "message": keys.get("lootboard_message_id"),
+                # .get, not attribute access: a group configured without
+                # repost_lootboard used to raise here and take the whole
+                # prelude — and therefore every group's board — down with it.
+                "repost": keys.get("repost_lootboard"),
+            }
+        return targets
+    finally:
+        session.close()
+
+
 @Task.create(IntervalTrigger(minutes=8))
 async def lootboard_updates():
     try:
         print("Updating loot leaderboards...")
         session = None
         try:
+            groups_to_update = await asyncio.to_thread(_lootboard_targets)
             session = Session()
-            all_groups = session.query(Group).all()
-            groups_to_update = {}
-            for group in all_groups:
-                group_id = group.group_id
-                configured_channel = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
-                                                                            GroupConfiguration.config_key == 'lootboard_channel_id').first()
-                configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
-                                                                            GroupConfiguration.config_key == 'lootboard_message_id').first()
-                should_repost = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
-                                                                            GroupConfiguration.config_key == 'repost_lootboard').first()
-                if configured_channel and configured_message:
-                    if configured_channel.config_value:
-                        groups_to_update[group_id] = {"wom_id": group.wom_id,
-                                                    "channel": configured_channel.config_value,
-                                                    "message": configured_message.config_value,
-                                                    "repost": should_repost.config_value}
-            
+
             for group_id, group in groups_to_update.items():
                 try:
                     channel: interactions.Channel = await bot.fetch_channel(channel_id=group['channel'])
