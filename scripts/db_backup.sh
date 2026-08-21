@@ -27,6 +27,8 @@
 #   MIN_FREE_GB=25              minimum free space on the backup fs before starting
 #   SKIP_B2=1                   local-only run (no upload / remote prune)
 #   SKIP_REDIS=1                skip the Redis snapshot copy
+#   KEEP_LOCAL_AFTER_UPLOAD=1   keep the local set after a successful B2 upload
+#                               (default: delete it — see the upload step below)
 #
 set -euo pipefail
 
@@ -41,6 +43,7 @@ REMOTE_RETENTION_DAYS="${REMOTE_RETENTION_DAYS:-30}"
 MIN_FREE_GB="${MIN_FREE_GB:-25}"
 SKIP_B2="${SKIP_B2:-0}"
 SKIP_REDIS="${SKIP_REDIS:-0}"
+KEEP_LOCAL_AFTER_UPLOAD="${KEEP_LOCAL_AFTER_UPLOAD:-0}"
 
 # Fail-loudly floor sizes for the gzipped dumps: a "successful" dump smaller
 # than this means something went badly wrong (empty schema, auth issue, etc).
@@ -224,6 +227,21 @@ else
     "$PYTHON" "$B2_SYNC" upload-dir "$OUT_DIR" "dt_backups/mysql/$DATE_UTC"
     log "pruning B2 objects older than ${REMOTE_RETENTION_DAYS} days"
     "$PYTHON" "$B2_SYNC" prune --days "$REMOTE_RETENTION_DAYS"
+    # The local set is staging for the upload, not a retained copy. This box runs
+    # chronically near-full, and parking ~5 GB here until the next nightly run is
+    # exactly what starves Redis of the room it needs to write its RDB — a full
+    # disk wedges Redis into MISCONF, which rejects every write and silently
+    # freezes the whole submission queue (2026-08-18, 87 minutes of lost drops).
+    # B2 holds REMOTE_RETENTION_DAYS of sets; set KEEP_LOCAL_AFTER_UPLOAD=1 to
+    # keep today's for a fast local restore. Only reached when the upload and
+    # remote prune both succeeded — set -e aborts the script otherwise, leaving
+    # the local set in place as the only copy.
+    if [[ "$KEEP_LOCAL_AFTER_UPLOAD" == "1" ]]; then
+        log "KEEP_LOCAL_AFTER_UPLOAD=1: retaining local set $OUT_DIR"
+    else
+        log "removing local set $OUT_DIR (now offsite; KEEP_LOCAL_AFTER_UPLOAD=1 to retain)"
+        rm -rf "$OUT_DIR"
+    fi
 fi
 
 log "=== backup complete in $(( $(date -u +%s) - START_TS ))s ==="
