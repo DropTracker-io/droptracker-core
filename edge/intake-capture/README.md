@@ -118,16 +118,29 @@ starting from the **Edit Cloudflare Workers** template and adding
 | Zone (`droptracker.io`) | Workers Routes → Edit |
 | Zone (`droptracker.io`) | Zone → Read |
 
-Then, in the shell you deploy from:
+**Set the account id too.** Without it wrangler tries to discover the account
+via `GET /client/v4/memberships`, which is a *User*-scoped endpoint an
+account-scoped token cannot call — it fails with a misleading
+`Authentication failed (status: 400) [code: 9106]`. The account id is not a
+secret, and it is the same value as `R2_ACCOUNT_ID` in step 5 (dashboard →
+any zone → Overview → Account ID, or the R2 page).
+
+In the shell you deploy from — `read -rs` keeps the token out of shell
+history:
 
 ```bash
-export CLOUDFLARE_API_TOKEN='...'
-npx wrangler whoami
+read -rs CLOUDFLARE_API_TOKEN && export CLOUDFLARE_API_TOKEN
+export CLOUDFLARE_ACCOUNT_ID='<account id>'
+npx wrangler r2 bucket list
 ```
 
-`whoami` should print the account. Do not put this token in `.env` — it is a
-deploy-time credential, unrelated to the R2 keys in step 5, and far broader
-than them.
+Use `r2 bucket list` to validate, **not `wrangler whoami`** — whoami also goes
+through `/memberships` and will fail for the same reason even when the token is
+perfectly good. An empty list (or your existing buckets) means auth works.
+
+Do not put the API token in `.env` — it is a deploy-time credential, unrelated
+to the R2 keys in step 5 and far broader than them. If you ever need `whoami`
+to work, add **User → Memberships → Read** to the token.
 
 ### 3. R2 bucket and Analytics Engine
 
