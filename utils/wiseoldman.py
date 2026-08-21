@@ -105,8 +105,16 @@ GROUP_CACHE_TTL = int(os.getenv("WOM_GROUP_CACHE_TTL", "900"))
 
 # Player/group lookup caches also live in Redis (see _SharedRateLimiter docstring above)
 # so a cache hit in one API worker is a cache hit for all of them.
-_REDIS_PLAYER_PREFIX = "wom:player:"
-_REDIS_PLAYER_FAIL_PREFIX = "wom:player:fail:"
+# Version the identity cache keys. _get_cached_player is consulted BEFORE any
+# WOM call, so a guard added to the fetch path (see _is_degenerate_wom_player)
+# is silently defeated for the full cache TTL by entries written by the previous
+# build — which is exactly what happened on deploy: the placeholder record for
+# "unknown" kept being served from `wom:player:unknown` and kept breaking auth
+# after the fix was live. Bump this suffix whenever a change alters what counts
+# as an acceptable identity, so the new rules are applied from the first lookup
+# rather than after the last stale entry expires.
+_REDIS_PLAYER_PREFIX = "wom:player:v2:"
+_REDIS_PLAYER_FAIL_PREFIX = "wom:player:v2:fail:"
 _REDIS_GROUP_PREFIX = "wom:group:"
 
 # Stores the WOM-reported total member_count per group (populated during API calls).
@@ -222,6 +230,44 @@ def _ehb_from_raw_player(player):
         return None
 
 
+def _is_degenerate_wom_player(player) -> bool:
+    """True when a WOM record carries no usable identity and must never be adopted.
+
+    WOM hands out placeholder rows for names it has registered but never
+    successfully scraped: 0 exp, combat 3, ``type`` "unknown", and — the
+    reliable tell — no ``last_changed_at`` at all, because nothing has ever
+    changed. Id 796802 is one of these and its ``displayName`` is the literal
+    string "unknown".
+
+    Treating such a record as authoritative is not a cosmetic problem, it
+    destroys an account's identity. On 2026-07-27 one was adopted by a real,
+    plugin-authed row: the row was renamed to "unknown" and repinned to 796802,
+    which (a) stopped the clan roster ever matching it by id, so a wom_temp stub
+    was minted and absorbed its clans and its bingo signup, and (b) made the
+    submitted RSN resolve to that stub, so ``check_auth`` saw a temp hash whose
+    real twin already held the submitted account hash and refused every
+    submission. ~3 weeks of drops, clogs, CAs and PBs were discarded in silence.
+
+    A real tracked account always has exp > 0 (starting stats alone are ~1154),
+    so the exp-and-never-changed conjunction cannot misfire on a live account.
+    A genuinely new account that WOM has registered but not yet scraped also
+    lands here, and that is correct: it is not yet usable as an identity anchor,
+    and the caller falls back to local account-hash resolution rather than
+    binding a name to an empty record.
+    """
+    # Fail OPEN: only a positively confirmed placeholder is rejected. An
+    # unreadable or unexpected shape (WOM library rename, partial payload) must
+    # never be mistaken for one — that would strand real accounts, which is the
+    # very failure this guard exists to prevent.
+    try:
+        exp = getattr(player, "exp", None)
+        if exp is None or int(exp) > 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return getattr(player, "last_changed_at", None) is None
+
+
 def _identity_shim(player) -> dict:
     """The lightweight identity dict cached + returned by check_user_by_*.
     Extending it is backward-compatible: consumers .get() what they know."""
@@ -258,6 +304,18 @@ async def check_user_by_username(username: str, *, force_refresh: bool = False) 
         if result.is_ok:
             player = result.unwrap()
             if player is None:
+                payload = (None, None, None, -1)
+                await _store_player_cache(username, payload, success=False)
+                return payload
+            if _is_degenerate_wom_player(player):
+                # Never let an empty placeholder record overwrite a real row's
+                # name or wom_id — see _is_degenerate_wom_player.
+                logger.warning(
+                    "WOM returned a placeholder record for %r (id=%s, displayName=%r, exp=%s); "
+                    "treating as a failed lookup so it cannot become authoritative identity",
+                    username, getattr(player, "id", None),
+                    getattr(player, "display_name", None), getattr(player, "exp", None),
+                )
                 payload = (None, None, None, -1)
                 await _store_player_cache(username, payload, success=False)
                 return payload
@@ -302,6 +360,17 @@ async def check_user_by_username(username: str, *, force_refresh: bool = False) 
             await _store_player_cache(username, payload, success=False)
             return payload
 
+        if _is_degenerate_wom_player(player):
+            # A forced re-scrape that still comes back empty is the strongest
+            # possible signal that this name has no usable WOM identity yet.
+            logger.warning(
+                "WOM update_player still returned a placeholder record for %r (id=%s); "
+                "treating as a failed lookup",
+                username, getattr(player, "id", None),
+            )
+            payload = (None, None, None, -1)
+            await _store_player_cache(username, payload, success=False)
+            return payload
         log_slots = _extract_log_slots(player)
         identity = _identity_shim(player)
         payload = (identity, str(player.username), str(player.id), log_slots)
