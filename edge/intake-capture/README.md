@@ -251,6 +251,31 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://<worker>.workers.dev/w
 - Unbind `SPOOL` → **503**, not 200. Test this one explicitly; it is the invariant.
 - Malformed body → the origin's 400 passes through, no capture.
 
+**Force a real capture.** The unit tests mock R2; this is the only way to know
+the binding works against the real bucket. Staging has no routes, so redeploy it
+pointed at a black hole, POST, then put it back:
+
+```bash
+npx wrangler deploy --env="" --var ORIGIN_HOST:blackhole.invalid
+```
+
+```bash
+curl -s -X POST https://<worker>.workers.dev/webhook \
+  -F 'payload_json={"embeds":[{"title":"capture probe","fields":[{"name":"type","value":"drop"},{"name":"guid","value":"capture-probe-1"}]}]}'
+```
+
+That must return **`{"message":"Queued"}` 200** — the origin was unreachable, so
+the 200 is the Worker vouching for its own R2 write. Confirm the object landed
+and carries the guid, then restore staging:
+
+```bash
+npx wrangler r2 object list droptracker-intake-spool --prefix webhook/
+```
+
+```bash
+npx wrangler deploy --env=""
+```
+
 Drain, twice — the second pass must write nothing, which is GUID dedup holding:
 
 ```bash

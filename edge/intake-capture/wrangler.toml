@@ -19,7 +19,7 @@ workers_dev = true
 
 [vars]
 ORIGIN_HOST = "api-origin.droptracker.io"
-ORIGIN_TIMEOUT_MS = "15000"
+ORIGIN_TIMEOUT_MS = "8000"
 # No sampling in staging: every capture here should be one you caused.
 FORCE_SPOOL_SAMPLE = "0"
 
@@ -54,10 +54,14 @@ zone_name = "droptracker.io"
 [env.production.vars]
 # Must NOT be api.droptracker.io, or the Worker's own fetch re-enters its route.
 ORIGIN_HOST = "api-origin.droptracker.io"
-# The plugin's OkHttp default read timeout is 10s and nginx's is 90s; 15s here
-# keeps a hung origin from pinning the Worker without cutting off slow-but-live
-# requests.
-ORIGIN_TIMEOUT_MS = "15000"
+# MUST stay under the plugin's 10s OkHttp read timeout. If the origin hangs
+# rather than refusing, a Worker that waits longer than the client captures the
+# submission and then answers 200 to nobody -- the plugin has already given up
+# and will retry, producing one duplicate capture per attempt. Answering at 8s
+# means the plugin hears the 200 and stops. A healthy acceptor replies in ~50ms
+# and anything over 750ms is already logged as slow, so this cuts off nothing
+# real.
+ORIGIN_TIMEOUT_MS = "8000"
 # Fraction of *successful* requests also written to R2, to keep the spool and
 # drain paths exercised. GUID dedup makes the replay a no-op. ~370 objects/day.
 FORCE_SPOOL_SAMPLE = "0.001"
