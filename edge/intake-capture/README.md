@@ -92,15 +92,7 @@ A probe like that has no player, so it dead-letters and leaves its entry in
 `webhook:dead` plus any attachment in `WEBHOOK_TEMP_DIR`. Clean both up
 afterwards rather than leaving them to look like real lost submissions.
 
-### 2. R2 bucket and Analytics Engine
-
-```bash
-npx wrangler r2 bucket create droptracker-intake-spool
-```
-
-Analytics Engine needs no creation step; the dataset appears on first write.
-
-### 3. Deploy the Worker
+### 2. wrangler and credentials
 
 `node` here is nvm-managed, so source it first.
 
@@ -108,8 +100,44 @@ Analytics Engine needs no creation step; the dataset appears on first write.
 export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && nvm use 20
 cd /store/droptracker/disc/edge/intake-capture
 npm install
-npx wrangler login
 ```
+
+**Authenticate with an API token, not `wrangler login`.** The OAuth flow
+redirects to `http://localhost:8976/oauth/callback` — localhost of whatever
+machine the *browser* is on. On a headless box that is never the machine
+running wrangler, so copying the URL to a desktop cannot complete the flow.
+
+Create a token at dash.cloudflare.com → My Profile → API Tokens → Create Token,
+starting from the **Edit Cloudflare Workers** template and adding
+**Account → Workers R2 Storage → Edit**. It needs, at minimum:
+
+| Scope | Permission |
+|---|---|
+| Account | Workers Scripts → Edit |
+| Account | Workers R2 Storage → Edit |
+| Zone (`droptracker.io`) | Workers Routes → Edit |
+| Zone (`droptracker.io`) | Zone → Read |
+
+Then, in the shell you deploy from:
+
+```bash
+export CLOUDFLARE_API_TOKEN='...'
+npx wrangler whoami
+```
+
+`whoami` should print the account. Do not put this token in `.env` — it is a
+deploy-time credential, unrelated to the R2 keys in step 5, and far broader
+than them.
+
+### 3. R2 bucket and Analytics Engine
+
+```bash
+npx wrangler r2 bucket create droptracker-intake-spool
+```
+
+Analytics Engine needs no creation step; the dataset appears on first write.
+
+### 4. Deploy the Worker
 
 **Staging first.** `--env staging` has no route and is reachable only on
 `workers.dev`, so production traffic is untouched:
@@ -127,11 +155,22 @@ lands:
 npx wrangler deploy
 ```
 
-### 4. Drain credentials and timer
+### 5. Drain credentials and timer
 
-Create an R2 API token scoped to **this bucket only** — it holds unprocessed
-player submissions — and fill in `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
-`R2_SECRET_ACCESS_KEY` in `.env`. Then:
+These are **not** the deploy token from step 3. The drain script talks to R2
+over the S3-compatible API, which needs its own access key pair: dash →
+R2 → Manage R2 API Tokens → Create, scoped to **this bucket only** and
+**Object Read & Write** (it holds unprocessed player submissions, so do not
+reuse a wider token). That page also shows the account id.
+
+Fill `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` in `.env`,
+confirm the drain can see the bucket, then install the timer:
+
+```bash
+./venv/bin/python -m scripts.drain_r2_spool
+```
+
+It should print `nothing to drain` rather than a credentials error. Then:
 
 ```bash
 sudo cp deploy/systemd/droptracker-r2-drain.{service,timer} /etc/systemd/system/
