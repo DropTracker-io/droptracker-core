@@ -37,25 +37,43 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-# (ghost_player_id, real_player_id, real_user_id_or_None, adopt_wom_id_or_None, label)
+# (ghost_player_id, real_player_id, real_user_id_or_None, adopt_wom_id_or_None,
+#  adopt_name_or_None, label)
 #
 # adopt_wom_id: the WOM id the REAL row should end up carrying. Set it when the
 # real row's stored wom_id is dead on WOM's side while the ghost carries the id
 # the clan rosters actually report — leaving the stale id in place is what makes
 # the account re-ghost (see merge_pair step 8). None leaves players.wom_id alone.
+#
+# adopt_name: the RSN the REAL row should end up carrying. Set it when a dead
+# wom_id has already corrupted players.player_name (see merge_pair step 9). A
+# name that no longer matches the RSN the plugin submits is not cosmetic: it
+# blocks the hash+name fast path in ensure_player_and_auth, forces every
+# submission down the WOM-resolution path, and stops the name-keyed
+# _heal_stub_onto_real_twin from ever recognising the pair. None leaves the
+# name alone (it self-heals from WOM on the next accepted submission).
 PAIRS = [
     # --- already merged 2026-07-23; kept for provenance, re-running them is a no-op ---
-    (5755309, 3, 3, None, "Brondt (ghost wom 169385 -> real 3, Discord brondt_)"),
-    (5754005, 5754170, None, None, "solo novelli (ghost wom 2606248 -> real 5754170)"),
-    (5755171, 5753485, None, None, "lm_Brad -> lm Brad (space/underscore, ghost wom 3170694 -> real 5753485)"),
+    (5755309, 3, 3, None, None, "Brondt (ghost wom 169385 -> real 3, Discord brondt_)"),
+    (5754005, 5754170, None, None, None, "solo novelli (ghost wom 2606248 -> real 5754170)"),
+    (5755171, 5753485, None, None, None, "lm_Brad -> lm Brad (space/underscore, ghost wom 3170694 -> real 5753485)"),
     # --- 2026-07-24: the two remaining split pairs, both stale-wom_id re-ghosts ---
     # Brondt re-ghosted 2026-07-23 13:23 despite the create-time fix. Real row 3 was
     # pinned to wom 796802, which WOM resolves to an empty "unknown" record (0 exp,
     # combat level 3, no snapshot since 2022) — so the roster sync never matched him
     # by id. The ghost carries the live account (747M exp, updated daily).
-    (5755906, 3, 3, 169385, "Brondt (ghost wom 169385 -> real 3; real held dead wom 796802)"),
+    (5755906, 3, 3, 169385, None, "Brondt (ghost wom 169385 -> real 3; real held dead wom 796802)"),
     # Same shape: real row 5755813 holds wom 3259035, which WOM 404s outright.
-    (5755787, 5755813, None, 3145894, "Tril22 (ghost wom 3145894 -> real 5755813; real held nonexistent wom 3259035)"),
+    (5755787, 5755813, None, 3145894, None, "Tril22 (ghost wom 3145894 -> real 5755813; real held nonexistent wom 3259035)"),
+    # --- 2026-08-19: Wimi. Same dead-wom_id shape as Brondt, but one step worse:
+    # the dead id (796802 — WOM's empty "unknown" record) had already renamed the
+    # real row to "unknown", so the submitted RSN no longer matched any real row.
+    # That put every submission on the reject path in check_auth (WOM resolves
+    # "Wimi" -> the ghost -> ghost holds a temp hash -> the real row already holds
+    # the submitted hash -> authed=False), silently discarding ~3 weeks of drops,
+    # clogs, CAs and PBs from 2026-07-27 on. Real row 7151 owns all the history
+    # (120,357 drops); the ghost owns the clan memberships and the event-46 signup.
+    (5756095, 7151, 1098, 534037, "Wimi", "Wimi (ghost wom 534037 -> real 7151; real held dead wom 796802 and was renamed to 'unknown')"),
 ]
 
 # Tables handled with bespoke unique-key dedup; excluded from the generic reassign.
@@ -111,7 +129,7 @@ def count_refs(cur, columns, pid):
     return total
 
 
-def merge_pair(cur, ghost, real, real_uid, adopt_wom_id, columns, log):
+def merge_pair(cur, ghost, real, real_uid, adopt_wom_id, adopt_name, columns, log):
     # Guard: ghost must be a wom_temp stub; real must exist and not be a stub.
     cur.execute("SELECT player_id, player_name, account_hash FROM players WHERE player_id=%s", (ghost,))
     g = cur.fetchone()
@@ -217,6 +235,22 @@ def merge_pair(cur, ghost, real, real_uid, adopt_wom_id, columns, log):
                     f"ABORT: wom_id {adopt_wom_id} still held by player {clash['player_id']}")
             cur.execute("UPDATE players SET wom_id=%s WHERE player_id=%s", (adopt_wom_id, real))
             log.append(f"  wom_id: real {real} moved {old_wom} -> {adopt_wom_id}")
+
+    # 9) Repair a name a dead wom_id already corrupted.
+    #    ensure_player_and_auth's fast path requires stored name == submitted RSN;
+    #    while they differ, every submission is forced down the WOM-resolution path
+    #    that minted this ghost in the first place, and the name-keyed
+    #    _heal_stub_onto_real_twin can never match the pair. Runs after the ghost
+    #    is deleted so the ghost's identical name cannot collide.
+    if adopt_name is not None:
+        cur.execute("SELECT player_name FROM players WHERE player_id=%s", (real,))
+        row = cur.fetchone()
+        old_name = row["player_name"] if row else None
+        if old_name == adopt_name:
+            log.append(f"  name: real already {adopt_name!r}, no change")
+        else:
+            cur.execute("UPDATE players SET player_name=%s WHERE player_id=%s", (adopt_name, real))
+            log.append(f"  name: real {real} renamed {old_name!r} -> {adopt_name!r}")
     return "merged"
 
 
@@ -236,12 +270,13 @@ def main():
         with conn.cursor() as cur:
             columns = all_reference_columns(cur)
             print(f"{len(columns)} player_id reference columns. Mode: {'APPLY' if args.apply else 'DRY-RUN'}\n")
-            for ghost, real, real_uid, adopt_wom_id, label in pairs:
+            for ghost, real, real_uid, adopt_wom_id, adopt_name, label in pairs:
                 log = [f"PAIR: {label}", f"  ghost={ghost} real={real}"]
                 # snapshot for audit/reversibility before mutating
                 snap = count_refs(cur, columns, ghost)
                 try:
-                    result = merge_pair(cur, ghost, real, real_uid, adopt_wom_id, columns, log)
+                    result = merge_pair(cur, ghost, real, real_uid, adopt_wom_id,
+                                        adopt_name, columns, log)
                     if args.apply:
                         conn.commit(); log.append("  COMMITTED")
                     else:
