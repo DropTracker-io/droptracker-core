@@ -144,11 +144,30 @@ to work, add **User → Memberships → Read** to the token.
 
 ### 3. R2 bucket and Analytics Engine
 
+**Enable R2 first.** It is off until you opt in: dashboard → R2 → Enable /
+Purchase R2. Cloudflare asks for a payment method even though the usage here
+fits the free tier. Until you do, every R2 call returns
+`Please enable R2 through the Cloudflare Dashboard [code: 10042]` — which is a
+billing gate, not a token problem.
+
+R2's free tier genuinely covers this: 10 GB storage, 1M Class A ops/month. In
+steady state the Worker writes only the 0.1% sample (~370 objects/day, ~11k
+Class A/month) and the drain deletes each within five minutes, so stored bytes
+sit near zero. An 87-minute outage of the size we have actually seen would
+write ~22k objects totalling ~450 MB.
+
 ```bash
 npx wrangler r2 bucket create droptracker-intake-spool
 ```
 
 Analytics Engine needs no creation step; the dataset appears on first write.
+
+**Workers Paid is the other gate — but not yet.** The free plan allows 100k
+requests/day and `POST /webhook` alone is ~372k/day, so the production deploy
+in step 4 needs the $5/mo Workers Paid plan (10M requests included, ~1.2M
+overage at $0.30/M ≈ $0.36). Staging costs nothing meaningful, so do the whole
+validation pass on the free plan and upgrade only just before attaching the
+production routes.
 
 ### 4. Deploy the Worker
 
