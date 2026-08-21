@@ -143,7 +143,8 @@ class MessageHandler(Extension):
                             "tracking system, built for Old School RuneScape players & groups.\n" +
                             "-# Our small team of developers work hard to provide a fun extension to the game:\n\n" + 
                             "-# <@528746710042804247> - Primary Development\n" +
-                            "-# <@232236164776460288> - RuneLite plugin / community help\n\n" +
+                            "-# <@232236164776460288> - RuneLite plugin / community help\n" +
+                            "-# <@230848731614806017> - Developer\n\n" +
                             "-# We are always looking for more help!\n" + 
                             "-# If you are interested in joining the team, please reach out.",
                         ),
