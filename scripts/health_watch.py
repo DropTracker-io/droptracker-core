@@ -89,6 +89,45 @@ WEB_PORTS = [("website", "Website front-end", ["http://127.0.0.1:31380/",
 
 HTTP_TIMEOUT = 8
 
+# Free space on the filesystem everything shares. This is not housekeeping: at
+# zero, Redis can no longer write its RDB snapshot and — with
+# stop-writes-on-bgsave-error — starts rejecting *every write command*. That
+# freezes the submission queue in both directions while systemd and the HTTP
+# probes above still report a perfectly healthy fleet. 2026-08-18: 87 minutes,
+# ~35k submissions, noticed only because a user asked about a missing drop.
+# Deliberately an early warning, well above zero.
+DISK_PATH = "/"
+DISK_MIN_FREE_GB = 8
+
+# Redis writability. A read probe cannot see the failure above — MISCONF
+# rejects writes only, so GET/PING keep answering normally throughout.
+REDIS_PROBE_KEY = "health:watch:write-probe"
+
+# Intake liveness, per transport. services/status_metrics keeps
+# `status:metrics:{source}:players` as a ZSET scored with the unix time of each
+# player's last processed submission, written after every successful dispatch.
+# If the newest entry goes stale, submissions have stopped being processed —
+# whatever the units and ports claim. Baseline traffic is ~750/min, so a
+# quarter hour of silence is never normal.
+INTAKE_SOURCES = [("api", "API intake"), ("webhook", "Webhook-path intake")]
+INTAKE_STALL_SECONDS = 900
+
+# Submission backlogs that mean data is sitting somewhere unprocessed.
+#
+# `webhook:dead` holds entries whose processing raised a non-retryable error —
+# BRPOPLPUSH'd entries are the only copy, so this list *is* the data. Retryable
+# faults never reach it (_requeue_with_backoff handles those), so every entry is
+# a real submission nobody has replayed. A trickle is not worth a page; a rate
+# is. Drain with `python -m scripts.drain_r2_spool --source dead --apply`.
+DEAD_LETTER_KEY = "webhook:dead"
+DEAD_LETTER_MAX = 25
+
+# utils/webhook_spool is the acceptor's on-disk fallback for when Redis refuses
+# the enqueue. It should be empty at all times: anything in it means Redis was
+# rejecting writes and the consumer has not drained it back yet. Unlike the
+# dead list, one file here is already worth knowing about.
+SPOOL_MAX_PENDING = 0
+
 
 def _load_state() -> dict:
     try:
@@ -131,6 +170,83 @@ def http_ok(url: str) -> bool:
         return False
 
 
+def disk_free_gb(path: str) -> float:
+    import shutil
+
+    return shutil.disk_usage(path).free / (1024 ** 3)
+
+
+def _redis_client():
+    """Redis handle, or None if the library/connection is unavailable.
+
+    Shares DB_PASS as the password (see utils/redis.py). Kept local so a Redis
+    problem is something this script reports rather than something that stops
+    it running.
+    """
+    try:
+        import redis
+
+        return redis.Redis(
+            host="127.0.0.1", port=6379, db=0, password=os.getenv("DB_PASS"),
+            socket_connect_timeout=5, socket_timeout=5,
+        )
+    except Exception:
+        return None
+
+
+def redis_writable() -> tuple:
+    """(ok, detail). Probes with a WRITE, because only writes reveal MISCONF."""
+    client = _redis_client()
+    if client is None:
+        return False, "redis client unavailable"
+    try:
+        client.set(REDIS_PROBE_KEY, int(time.time()), ex=300)
+        return True, ""
+    except Exception as e:
+        # The MISCONF text is long; keep enough to identify it in a DM.
+        return False, str(e)[:220]
+
+
+def intake_idle_seconds(source: str):
+    """Seconds since this transport last processed anything, or None.
+
+    None means "cannot tell" — no client, or the ZSET is empty. Empty is
+    genuinely ambiguous (the set is trimmed on read), so it is treated as
+    unknown and skipped rather than paged on; the disk and Redis probes are the
+    primary detectors and this is the backstop that catches everything else.
+    """
+    client = _redis_client()
+    if client is None:
+        return None
+    try:
+        newest = client.zrevrange(f"status:metrics:{source}:players", 0, 0, withscores=True)
+        if not newest:
+            return None
+        return max(0.0, time.time() - float(newest[0][1]))
+    except Exception:
+        return None
+
+
+def dead_letter_depth():
+    """Entries in webhook:dead, or None if it cannot be read."""
+    client = _redis_client()
+    if client is None:
+        return None
+    try:
+        return int(client.llen(DEAD_LETTER_KEY))
+    except Exception:
+        return None
+
+
+def spool_pending():
+    """Files in the acceptor's disk spool, or None if it cannot be read."""
+    try:
+        from utils import webhook_spool
+        return int(webhook_spool.pending_count())
+    except Exception:
+        return None
+
+
 def run_checks() -> list:
     """Every check as (key, label, ok, detail), in one pass."""
     results = []
@@ -146,6 +262,43 @@ def run_checks() -> list:
         ok = any(http_ok(u) for u in urls)
         results.append((f"http:{key}", f"{label} (blue/green)", ok,
                         "neither blue nor green answered" if not ok else ""))
+
+    try:
+        free_gb = disk_free_gb(DISK_PATH)
+        results.append((f"disk:{DISK_PATH}", f"Disk space on {DISK_PATH}",
+                        free_gb >= DISK_MIN_FREE_GB,
+                        f"{free_gb:.1f} GiB free, below the {DISK_MIN_FREE_GB} GiB floor "
+                        f"— Redis stops accepting writes when this reaches zero"))
+    except Exception as e:
+        results.append((f"disk:{DISK_PATH}", f"Disk space on {DISK_PATH}", False,
+                        f"could not stat {DISK_PATH}: {e}"))
+
+    ok, detail = redis_writable()
+    results.append(("redis:writable", "Redis accepting writes", ok,
+                    detail or "write probe rejected"))
+
+    for source, label in INTAKE_SOURCES:
+        idle = intake_idle_seconds(source)
+        if idle is None:
+            continue
+        results.append((f"intake:{source}", label, idle <= INTAKE_STALL_SECONDS,
+                        f"nothing processed for {idle / 60:.0f} min"))
+
+    dead = dead_letter_depth()
+    if dead is not None:
+        results.append(("queue:dead", "Dead-lettered submissions",
+                        dead <= DEAD_LETTER_MAX,
+                        f"{dead} entries in {DEAD_LETTER_KEY} — these are the only "
+                        f"copy. Replay: python -m scripts.drain_r2_spool "
+                        f"--source dead --apply"))
+
+    pending = spool_pending()
+    if pending is not None:
+        results.append(("queue:spool", "Acceptor disk spool",
+                        pending <= SPOOL_MAX_PENDING,
+                        f"{pending} entry(s) spooled to disk — Redis refused the "
+                        f"enqueue and the consumer has not drained them back"))
+
     return results
 
 

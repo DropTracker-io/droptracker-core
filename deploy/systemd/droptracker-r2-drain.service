@@ -1,0 +1,34 @@
+# Replays submissions the edge Worker captured while the intake was unavailable.
+# Triggered by droptracker-r2-drain.timer — do not enable the service itself.
+#
+# edge/intake-capture writes the raw multipart body to R2 whenever the origin
+# cannot take a submission, and only then tells the plugin we have it. This is
+# the other half of that promise: without it, a captured submission is stored
+# but never processed, which is a slower kind of losing it.
+#
+# Normally a no-op. The Worker also spools a small random sample of successful
+# requests (FORCE_SPOOL_SAMPLE), so a healthy run replays a handful of already-
+# recorded submissions and GUID dedup absorbs them — that is what keeps this
+# path from rotting between incidents.
+#
+# Manual dry run:  cd /store/droptracker/disc && venv/bin/python -m scripts.drain_r2_spool
+# Manual real run: sudo systemctl start droptracker-r2-drain.service
+# Dead letters:    venv/bin/python -m scripts.drain_r2_spool --source dead --apply
+
+[Unit]
+Description=DropTracker edge-capture spool drain (R2 -> intake)
+Wants=network-online.target
+After=network-online.target droptracker-api.service
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.drain_r2_spool --apply
+# A backlog from a long outage drains over several passes by design; one pass
+# is bounded by --limit (500) and --rate (20/s), so ~25s of work at most.
+TimeoutStartSec=30m
+# The script refuses to run against an unhealthy intake and exits 1. During an
+# ongoing outage that is the expected outcome, not something to alert on.
+SuccessExitStatus=0 1
+Nice=10

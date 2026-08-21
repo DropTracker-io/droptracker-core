@@ -246,6 +246,17 @@ async def _queue_webhook_request():
         image_tmp_path = image_filename = image_content_type = None
         if image_file:
             image_tmp_path, image_filename, image_content_type = await _save_upload_to_temp(image_file)
+            if image_tmp_path is None:
+                # The stash failed (almost always a full disk) but the payload
+                # itself is fine. Keeping the submission and dropping the
+                # screenshot is the right trade — losing the drop to save its
+                # picture would be worse — but it must not be silent, because
+                # the result looks identical to a client that never sent one.
+                logger.log_sync(
+                    "warning",
+                    "[QueueAcceptor] Accepted a submission WITHOUT its screenshot: "
+                    f"the temp stash failed for {image_filename!r}",
+                )
 
         entry = {
             "payload": webhook_payload,
@@ -276,6 +287,15 @@ async def _queue_webhook_request():
                 f"[QueueAcceptor] Redis rejected the enqueue AND the spool write failed "
                 f"({redis_error}) — asking the client to retry",
             )
+            # The client will resend, screenshot included, so this copy is
+            # already garbage. Leaving it behind is how 926 orphans from
+            # 2026-08-18 are still sitting in WEBHOOK_TEMP_DIR: nothing else
+            # ever unlinks a temp file whose entry never reached the queue.
+            if image_tmp_path:
+                try:
+                    os.unlink(image_tmp_path)
+                except OSError:
+                    pass
             return jsonify({"error": "Queue temporarily unavailable"}), 503
         return jsonify({"message": "Queued"}), 200
 

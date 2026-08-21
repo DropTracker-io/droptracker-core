@@ -1,0 +1,24 @@
+# Drains the edge-capture spool every 5 minutes.
+#
+# Frequent on purpose: the window between "the intake came back" and "the
+# captured submissions are actually processed" is time in which a player's drop
+# exists nowhere they can see it. Five minutes keeps that short without
+# hammering R2 when the spool is empty (an empty pass is one LIST call).
+#
+# Install:  sudo cp deploy/systemd/droptracker-r2-drain.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now droptracker-r2-drain.timer
+
+[Unit]
+Description=Drain the DropTracker edge-capture spool every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+# Catch up after a reboot: a spool that filled during downtime is exactly what
+# this exists for.
+Persistent=true
+Unit=droptracker-r2-drain.service
+
+[Install]
+WantedBy=timers.target

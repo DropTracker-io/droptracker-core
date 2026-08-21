@@ -1,0 +1,34 @@
+name = "droptracker-intake-capture"
+main = "src/index.js"
+compatibility_date = "2026-08-21"
+
+# Scoped to the two submission routes only. The GET read traffic
+# (/notifications, /panel_data, /event_state) is far higher volume and must stay
+# on the plain proxy path -- routing it through a Worker multiplies cost for no
+# durability benefit.
+[[routes]]
+pattern = "api.droptracker.io/webhook"
+zone_name = "droptracker.io"
+
+[[routes]]
+pattern = "api.droptracker.io/submit"
+zone_name = "droptracker.io"
+
+[vars]
+# Must NOT be api.droptracker.io, or the Worker's own fetch re-enters its route.
+ORIGIN_HOST = "api-origin.droptracker.io"
+# The plugin's OkHttp default read timeout is 10s and nginx's is 90s; 15s here
+# keeps a hung origin from pinning the Worker without cutting off slow-but-live
+# requests.
+ORIGIN_TIMEOUT_MS = "15000"
+# Fraction of *successful* requests also written to R2, to keep the spool and
+# drain paths exercised. GUID dedup makes the replay a no-op. ~370 objects/day.
+FORCE_SPOOL_SAMPLE = "0.001"
+
+[[r2_buckets]]
+binding = "SPOOL"
+bucket_name = "droptracker-intake-spool"
+
+[[analytics_engine_datasets]]
+binding = "LEDGER"
+dataset = "droptracker_intake"
