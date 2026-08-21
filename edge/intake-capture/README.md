@@ -231,6 +231,14 @@ sudo systemctl daemon-reload && sudo systemctl enable --now droptracker-r2-drain
 
 ## Verifying
 
+**A browser will not tell you much.** The Worker only captures POSTs; anything
+else it proxies straight to the origin. So on the `workers.dev` URL expect
+`GET /` → 404 and `GET /webhook` → 405, both coming from the intake API. The
+useful browser check is `GET /ping`, which should return 200 — that proves the
+Worker reached `ORIGIN_HOST`. (Before the route-re-entry fix, a GET returned
+Cloudflare's "There is nothing here yet" placeholder, because the Worker was
+re-fetching its own URL.)
+
 Against the `workers.dev` URL, before any route is attached:
 
 ```bash
