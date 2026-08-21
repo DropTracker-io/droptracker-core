@@ -38,6 +38,9 @@ __pycache__/
 *.pyc
 *.pyo
 *.mako
+# ...except alembic's revision template: without it `alembic revision` cannot
+# author a migration at all, so a fresh clone (and every dev box) is broken.
+!alembic/script.py.mako
 *.pxi
 *.pyi
 *.pyx

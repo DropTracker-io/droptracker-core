@@ -393,6 +393,9 @@ def _player_personal_bests(s, player_id: int):
         except Exception:
             date_ts = 0
         out.append({
+            # Needed to fetch the loadout this time was set with; the npc/team
+            # pair is not unique enough to look a row up by.
+            "pb_id": int(pb.id),
             "npc_id": int(pb.npc_id),
             "boss": names.get(pb.npc_id, f"NPC {pb.npc_id}"),
             "time_ms": int(pb.personal_best),
@@ -504,6 +507,25 @@ async def player_profile(player_id: int):
                 pbs = _player_personal_bests(s, player_id)
                 if pbs:
                     payload["personal_bests"] = pbs
+            except Exception:
+                pass
+            # Character model, when the player has uploaded one. Best-effort:
+            # the profile must render for the overwhelming majority who have
+            # not, so any failure here just omits the viewer.
+            try:
+                from db.models import PlayerState
+                from services.player_model import model_exists
+
+                state = (
+                    s.query(PlayerState)
+                    .filter(PlayerState.player_id == player_id)
+                    .first()
+                )
+                if state is not None and state.model_fingerprint:
+                    payload["model_fingerprint"] = state.model_fingerprint
+                    payload["model_has_pet"] = model_exists(
+                        player_id, state.model_fingerprint, pet=True
+                    )
             except Exception:
                 pass
             points = _player_points(s, player_id)

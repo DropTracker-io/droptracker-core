@@ -402,6 +402,7 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | Plugin in-game notifications / HUD | `services/plugin_notifications.py`, `api/routes/notifications.py` |
 | Add/modify a Discord slash command | `commands/user.py`, `commands/admin.py`, `commands/group_admin.py` |
 | Change notification embed format | `utils/embeds.py` + `db/models/embed.py` (GroupEmbed) |
+| Notifications sent as Components V2 instead of an embed | `services/component_layout.py` (DSL, defaults, token docs, pilot allowlist) + `web_api/routes/notification_layouts.py`; the send-path branch is `NotificationService._try_send_component_layout` |
 | Change event message wording/layout | `services/event_message_layouts.py` (DB-seeded — reseed on default change) |
 | Change leaderboard ranking logic | `services/redis_updates.py` |
 | Change lootboard image layout | `lootboard/generator.py` or `lootboard/flexible_generator.py` |

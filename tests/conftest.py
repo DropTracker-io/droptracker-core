@@ -201,6 +201,64 @@ if "services.event_buyins" not in sys.modules:
     sys.modules["services.event_buyins"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/plugin_manifest.py — assembly + versioning of the manifest served to
+# plugin clients. Stdlib-only by design (sections are duck-typed, the ORM model
+# is never imported), so load the real module and assert on it directly.
+_PLUGIN_MANIFEST_PATH = _Path(__file__).resolve().parent.parent / "services" / "plugin_manifest.py"
+if "services.plugin_manifest" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.plugin_manifest", _PLUGIN_MANIFEST_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.plugin_manifest"] = _mod
+    _spec.loader.exec_module(_mod)
+
+# services/component_layout.py — validation + rendering of group-authored V2
+# layouts. Stdlib-only at import time (the placeholder helper is imported
+# lazily), so the real module loads under the stubbed packages.
+_COMPONENT_LAYOUT_PATH = _Path(__file__).resolve().parent.parent / "services" / "component_layout.py"
+if "services.component_layout" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.component_layout", _COMPONENT_LAYOUT_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.component_layout"] = _mod
+    _spec.loader.exec_module(_mod)
+
+# services/pb_components.py — the Components V2 personal best layout. Pure
+# dict-building with no gateway or DB, so load the real module.
+_PB_COMPONENTS_PATH = _Path(__file__).resolve().parent.parent / "services" / "pb_components.py"
+if "services.pb_components" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.pb_components", _PB_COMPONENTS_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.pb_components"] = _mod
+    _spec.loader.exec_module(_mod)
+
+# services/player_model.py — validation/storage of uploaded character models.
+# Stdlib-only; the tests assert on its rejection of malformed GLB containers and
+# path-traversal fingerprints.
+_PLAYER_MODEL_PATH = _Path(__file__).resolve().parent.parent / "services" / "player_model.py"
+if "services.player_model" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.player_model", _PLAYER_MODEL_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.player_model"] = _mod
+    _spec.loader.exec_module(_mod)
+
+# services/loadout.py — decoding of the PB gear/inventory wire format.
+# Stdlib-only; the tests assert on its handling of malformed client input.
+_LOADOUT_PATH = _Path(__file__).resolve().parent.parent / "services" / "loadout.py"
+if "services.loadout" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.loadout", _LOADOUT_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.loadout"] = _mod
+    _spec.loader.exec_module(_mod)
+
+# services/state_sync.py — snapshot parsing/decoding/diffing. Stdlib-only and
+# free of DB access by design, so load the real module: the sync tests assert on
+# its hostile-input handling and diff rules directly.
+_STATE_SYNC_PATH = _Path(__file__).resolve().parent.parent / "services" / "state_sync.py"
+if "services.state_sync" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.state_sync", _STATE_SYNC_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.state_sync"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/status_metrics.py — the #status channel counters. Stdlib-only module
 # imports (Redis access is lazy and injectable), so load the real module: the
 # status tests assert on window sums / heartbeats with a fake Redis.

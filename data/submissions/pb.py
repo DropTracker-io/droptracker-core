@@ -52,6 +52,55 @@ def _time_to_ms(value) -> int:
     return max(int(ms), 0) if ms else 0
 
 
+def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_changed):
+    """Persist the gear/inventory captured at the kill, if any was sent.
+
+    Wrapped in its own try/except and a SAVEPOINT: this is an additive nicety,
+    so a malformed loadout must not roll back or fail the personal best it is
+    attached to.
+    """
+    try:
+        from services.loadout import parse_loadout, serialize_loadout
+
+        equipment = serialize_loadout(parse_loadout(equipment_raw))
+        inventory = serialize_loadout(parse_loadout(inventory_raw))
+
+        from db.models import PersonalBestLoadout
+
+        if equipment is None and inventory is None:
+            # Nothing sent. If the stored best time just changed, whatever
+            # loadout we hold describes a time that no longer exists - keeping
+            # it would attribute the wrong gear to the new best. Drop it.
+            if pb_row_changed and pb_entry.id:
+                with session.begin_nested():
+                    (
+                        session.query(PersonalBestLoadout)
+                        .filter(PersonalBestLoadout.pb_id == pb_entry.id)
+                        .delete()
+                    )
+            return
+
+        session.flush()  # ensure pb_entry.id exists
+        with session.begin_nested():
+            row = (
+                session.query(PersonalBestLoadout)
+                .filter(PersonalBestLoadout.pb_id == pb_entry.id)
+                .first()
+            )
+            if row is None:
+                session.add(
+                    PersonalBestLoadout(
+                        pb_id=pb_entry.id, equipment=equipment, inventory=inventory
+                    )
+                )
+            else:
+                # A later, better time replaces the loadout that achieved it.
+                row.equipment = equipment
+                row.inventory = inventory
+    except Exception as e:
+        debug_print(f"Could not store PB loadout: {e}")
+
+
 async def pb_processor(pb_data, external_session=None, world_type="main"):
     debug_print(f"=== PB PROCESSOR START (world_type={world_type}) ===")
     debug_print(f"Raw PB data: {pb_data}")
@@ -88,6 +137,10 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     video_key = pb_data.get("video_key")
     video_url = pb_data.get("video_url")
     plugin_version = pb_data.get("p_v", None)
+    # Gear/inventory the plugin captured at the moment of the kill (P2.0).
+    # Absent for older clients and for players who opted out.
+    equipment_raw = pb_data.get("equipment", None)
+    inventory_raw = pb_data.get("inventory", None)
 
     notice = ""
 
@@ -276,6 +329,11 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                 f"PB entry with Unique ID {unique_id} already exists — replay, ignoring"
             )
             return
+
+    # Attach the loadout once the PB row has an id. Best-effort by design: a
+    # decorative extra must never cost the player their personal best.
+    if pb_entry is not None and not is_seasonal:
+        _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_changed)
 
     if use_external_session:
         session.flush()
