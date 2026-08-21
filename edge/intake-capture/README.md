@@ -68,11 +68,29 @@ sudo sed -i 's/^    server_name api\.droptracker\.io;$/    server_name api.dropt
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-Verify before going further — this must return the same JSON as the live host:
+Verify before going further. An empty POST returns **400** — that is the app
+rejecting a body with no `payload_json`, and it is the correct answer. What
+matters is that it is the *app's* JSON 400 and not nginx's HTML one, and that it
+matches the live host byte for byte:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1/webhook -H 'Host: api-origin.droptracker.io'
+curl -s -X POST http://127.0.0.1/webhook -H 'Host: api-origin.droptracker.io'
+curl -s -X POST http://127.0.0.1/webhook -H 'Host: api.droptracker.io'
 ```
+
+Both must print `{"error":"Expected multipart/form-data"}`. For a positive
+check, a well-formed body should come back `{"message":"Queued"}` — note this
+really does enqueue, so use a guid you can recognise and expect it to be
+rejected downstream:
+
+```bash
+curl -s -X POST http://127.0.0.1/webhook -H 'Host: api-origin.droptracker.io' \
+  -F 'payload_json={"embeds":[{"title":"edge probe","fields":[{"name":"type","value":"drop"},{"name":"guid","value":"edge-probe"}]}]}'
+```
+
+A probe like that has no player, so it dead-letters and leaves its entry in
+`webhook:dead` plus any attachment in `WEBHOOK_TEMP_DIR`. Clean both up
+afterwards rather than leaving them to look like real lost submissions.
 
 ### 2. R2 bucket and Analytics Engine
 
