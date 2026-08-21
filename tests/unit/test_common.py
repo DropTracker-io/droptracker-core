@@ -643,3 +643,97 @@ class TestApplyIdentityEhb:
         _, changed = self.fn(MagicMock(), p, 5, ehb=None)
         assert changed is False
         assert p.ehb == 100.0
+
+
+# ── _heal_stub_onto_hash_owner ────────────────────────────────────────────────
+#
+# Regression cover for the 2026-07-27 silent submission outage: a wom_temp stub
+# holding the live WOM id in front of the real, plugin-authed row that already
+# owns the submitted account hash. Left unhealed, check_auth cannot replace the
+# stub's temp hash (the real row holds it), returns authed=False, and every
+# processor rejects the submission with "failed auth check" — no error, no queue,
+# just discarded drops.
+
+class TestHealStubOntoHashOwner:
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from data.submissions.common import _heal_stub_onto_hash_owner
+        self.fn = _heal_stub_onto_hash_owner
+
+    @staticmethod
+    def _row(player_id, account_hash, wom_id=None, name="Someone"):
+        return MagicMock(player_id=player_id, account_hash=account_hash,
+                         wom_id=wom_id, player_name=name)
+
+    def test_stub_in_front_of_hash_owner_is_healed(self):
+        stub = self._row(5756095, "wom_temp_534037", wom_id=534037, name="Wimi")
+        real = self._row(7151, "8843007474529783095", wom_id=796802, name="unknown")
+        session = MagicMock()
+
+        resolved = self.fn(session, stub, real, 534037)
+
+        assert resolved is real, "submissions must attribute to the row owning the hash"
+        assert real.wom_id == 534037, "real row must adopt the live WOM id"
+        assert stub.wom_id is None, "stub must release the UNIQUE wom_id first"
+        session.commit.assert_called_once()
+
+    def test_stub_releases_id_before_real_row_claims_it(self):
+        # players.wom_id is UNIQUE: without the intervening flush the two writes
+        # collide and the heal fails on every submission.
+        stub = self._row(2, "wom_temp_99", wom_id=99)
+        real = self._row(1, "realhash", wom_id=None)
+        session = MagicMock()
+        order = []
+        session.flush.side_effect = lambda: order.append(("flush", stub.wom_id))
+        session.commit.side_effect = lambda: order.append(("commit", real.wom_id))
+
+        self.fn(session, stub, real, 99)
+
+        assert order == [("flush", None), ("commit", 99)]
+
+    def test_non_stub_wom_row_is_left_alone(self):
+        # Two distinct real accounts — not a split identity; never touch them.
+        wom_row = self._row(1, "hash-a", wom_id=99)
+        hash_row = self._row(2, "hash-b", wom_id=100)
+        session = MagicMock()
+
+        assert self.fn(session, wom_row, hash_row, 99) is wom_row
+        assert wom_row.wom_id == 99
+        session.commit.assert_not_called()
+
+    def test_no_hash_owner_leaves_stub_resolved(self):
+        # The ordinary first-authentication case: check_auth replaces the temp
+        # hash in place, which is the intended healing path.
+        stub = self._row(2, "wom_temp_99", wom_id=99)
+        session = MagicMock()
+
+        assert self.fn(session, stub, None, 99) is stub
+        session.commit.assert_not_called()
+
+    def test_two_stubs_are_not_merged(self):
+        stub = self._row(2, "wom_temp_99", wom_id=99)
+        other_stub = self._row(3, "wom_temp_100", wom_id=100)
+        session = MagicMock()
+
+        assert self.fn(session, stub, other_stub, 99) is stub
+        session.commit.assert_not_called()
+
+    def test_same_row_on_both_sides_is_a_noop(self):
+        row = self._row(2, "wom_temp_99", wom_id=99)
+        session = MagicMock()
+
+        assert self.fn(session, row, row, 99) is row
+        session.commit.assert_not_called()
+
+    def test_commit_failure_falls_back_to_stub(self):
+        # Fail-safe: a heal that cannot commit must not change resolution.
+        stub = self._row(2, "wom_temp_99", wom_id=99)
+        real = self._row(1, "realhash", wom_id=None)
+        session = MagicMock()
+        session.commit.side_effect = RuntimeError("deadlock")
+
+        assert self.fn(session, stub, real, 99) is stub
+        session.rollback.assert_called_once()
+
+    def test_none_wom_row_is_passed_through(self):
+        assert self.fn(MagicMock(), None, self._row(1, "h"), 99) is None

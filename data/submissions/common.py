@@ -8,6 +8,8 @@ backward compatibility with the original `data.submissions` module.
 """
 
 import asyncio
+import contextlib
+import contextvars
 import hashlib
 import json
 import os
@@ -629,6 +631,71 @@ def _announce_new_player(session, player) -> None:
         debug_print(f"Ticker new-player publish failed: {e}")
 
 
+def _heal_stub_onto_hash_owner(session, player_by_wom, player_by_hash, expected_wom_id):
+    """Resolve a WOM id parked on an import stub back to the account that owns the hash.
+
+    Returns the row submissions should be attributed to.
+
+    A ``wom_temp_`` row is a placeholder minted from a clan roster for someone who
+    has never used the plugin. When one holds the WOM id for an RSN whose *real*,
+    plugin-authed row already exists under the submitted account hash, the stub is
+    not the player — it is a duplicate sitting in front of them.
+
+    Without this, that arrangement is a permanent, silent outage for the account.
+    ``ensure_player_and_auth`` resolves the RSN through WOM, lands on the stub, and
+    ``check_auth`` then sees a temp hash whose replacement is blocked because
+    another row already holds the submitted hash — so it returns
+    ``(user_exists=True, authed=False)`` and every processor rejects the
+    submission with "failed auth check". Nothing errors and nothing is queued;
+    the drops are simply gone. That is what silently discarded ~3 weeks of one
+    account's submissions from 2026-07-27 (player_id 7151 / stub 5756095).
+
+    The account hash is minted by the game client and is unique per account, so it
+    is strictly stronger identity evidence than the name match
+    ``utils.wiseoldman._heal_stub_onto_real_twin`` relies on — and it still works
+    when the real row's *name* has been corrupted, which is exactly the case that
+    kept the name-keyed heal from ever firing.
+
+    Deliberately narrow, mirroring the sibling heal: this moves the WOM id and
+    nothing else. The stub's own rows (memberships, event signups) still need the
+    46-table reassignment in ``scripts/merge_ghost_players.py``; the stub is left
+    inert with a NULL ``wom_id`` and logged at WARNING so the pair is easy to find.
+    On any failure it falls back to the stub, preserving previous behaviour.
+    """
+    if player_by_wom is None:
+        return player_by_wom
+    if not _is_temp_account_hash(player_by_wom.account_hash):
+        return player_by_wom
+    if player_by_hash is None or player_by_hash.player_id == player_by_wom.player_id:
+        return player_by_wom
+    if _is_temp_account_hash(player_by_hash.account_hash):
+        return player_by_wom
+
+    try:
+        # players.wom_id is UNIQUE — the stub has to release it first.
+        player_by_wom.wom_id = None
+        session.flush()
+        player_by_hash.wom_id = expected_wom_id
+        session.commit()
+    except Exception as heal_err:
+        logger.log_sync(
+            "warning",
+            f"Failed to move wom_id {expected_wom_id} from stub "
+            f"{player_by_wom.player_id} to hash owner {player_by_hash.player_id}: {heal_err}",
+        )
+        session.rollback()
+        return player_by_wom
+
+    logger.log_sync(
+        "warning",
+        f"Healed split identity by account hash: moved wom_id {expected_wom_id} from "
+        f"WOM-import stub player_id={player_by_wom.player_id} to real player_id="
+        f"{player_by_hash.player_id} ({player_by_hash.player_name!r}). The stub still "
+        f"holds its own rows — merge it with scripts/merge_ghost_players.py.",
+    )
+    return player_by_hash
+
+
 async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
     """Ensure player exists, cache id, then auth. Returns (player, authed, user_exists)."""
 
@@ -692,7 +759,8 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
         # Prefer canonical WOM row over hash/name-resolved rows.
         player_by_wom = session.query(Player).filter(Player.wom_id == expected_wom_id).first()
         if player_by_wom:
-            player = player_by_wom
+            player = _heal_stub_onto_hash_owner(session, player_by_wom, player_by_hash,
+                                                expected_wom_id)
         elif player is None:
             player = player_by_name_fast
             resolved_by_name = player is not None
@@ -857,9 +925,16 @@ async def ensure_can_create(session, unique_id, submission_type) -> bool:
                     CollectionLogEntry.unique_id == unique_id,
                 ).first()
             case "drop":
+                # No used_api filter. The GUID identifies the submission, not
+                # the transport that carried it, and webhook-path drops are
+                # written used_api=False — so filtering on True made this
+                # lookup blind to every one of them, and replaying any of them
+                # wrote a second row instead of being a no-op. Replaying the
+                # 2026-08-18 outage window duplicated 35,619 drops before this
+                # was spotted. The clan_broadcast case below already carried
+                # this reasoning; drops needed it too.
                 return session.query(Drop).filter(
                     Drop.unique_id == unique_id,
-                    Drop.used_api == True,
                 ).first()
             case "clan_broadcast":
                 # Chat-relayed drops use a DETERMINISTIC content guid
@@ -896,9 +971,11 @@ async def ensure_can_create(session, unique_id, submission_type) -> bool:
                     DiaryCompletionEntry.unique_id == unique_id,
                 ).first()
             case "seasonal_drop":
+                # Same fix as the "drop" case above: the transport flag must
+                # not narrow a GUID lookup, or webhook-path seasonal drops
+                # cannot see their own original on replay.
                 return session.query(SeasonalDrop).filter(
                     SeasonalDrop.unique_id == unique_id,
-                    SeasonalDrop.used_api == True,
                 ).first()
             case "seasonal_pb":
                 return session.query(SeasonalPersonalBestEntry).filter(
@@ -1260,8 +1337,37 @@ def player_hidden_for_group(db_session, group_id, player_id) -> bool:
         return False
 
 
+# Notification types muted for the current task/context. Used by backfills:
+# replaying an outage window has to re-record the submissions, but firing the
+# matching Discord announcements hours late is confusing rather than useful.
+# A ContextVar (not a module global) so it cannot leak across the concurrent
+# tasks the consumers run submissions in.
+_suppressed_notification_types: contextvars.ContextVar = contextvars.ContextVar(
+    "suppressed_notification_types", default=frozenset()
+)
+
+
+@contextlib.contextmanager
+def suppress_notifications(*notification_types):
+    """Mute these notification types for the duration of the block.
+
+    Types are the same strings passed to :func:`create_notification` — e.g.
+    ``suppress_notifications("pb", "dm_pb")`` mutes both the group-channel
+    personal-best post and its DM. Only the announcement is suppressed; the
+    submission itself is still recorded, scored and counted toward events.
+    """
+    token = _suppressed_notification_types.set(frozenset(notification_types))
+    try:
+        yield
+    finally:
+        _suppressed_notification_types.reset(token)
+
+
 async def create_notification(notification_type, player_id, data, group_id=None, existing_session=None):
     """Create a notification queue entry."""
+
+    if notification_type in _suppressed_notification_types.get():
+        return None
 
     global stored_notifications
     try:

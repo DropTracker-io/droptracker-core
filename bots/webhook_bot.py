@@ -579,13 +579,86 @@ def _flag_bundle_duplicates(embed_dicts) -> None:
         print(f"Bundle duplicate flagging failed: {e}")
 
 
+def _embed_to_dict(embed: Embed):
+    if embed.fields:
+        return {f.name: f.value for f in embed.fields}
+    return {}
+
+
+def build_message_bundle(message) -> list:
+    """One Discord message -> its ``[(submission_type, embed_data)]`` bundle.
+
+    Split out of :func:`on_message_create` so the live listener and
+    ``scripts/replay_webhook_window.py`` reconstruct payloads through the exact
+    same code. A replay that reimplemented this would drift from intake the way
+    the per-transport dispatch copies did (see data/submissions/dispatch.py).
+    """
+    pending = []
+    for embed in message.embeds:
+        embed_data = _embed_to_dict(embed)
+        if not embed_data:
+            continue
+        if message.attachments:
+            for attachment in message.attachments:
+                if attachment.url:
+                    embed_data['attachment_url'] = attachment.url
+                    embed_data['attachment_type'] = attachment.content_type
+
+        field_names = [field.name for field in embed.fields]
+        field_values = [field.value.lower().strip() for field in embed.fields]
+        if "source_type" in field_names and "loot chest" in field_values:
+            ## Skip pvp
+            continue
+
+        # Transport flag for the DB rows only (API vs webhook intake).
+        # The events engine no longer derives plugin-vs-manual from
+        # this: processors stamp the event envelope's used_api from
+        # intake_source, so webhook-path plugin traffic still counts
+        # as plugin under confirm_non_api / api_only policies.
+        embed_data['used_api'] = False
+        embed_data['world_type'] = _normalize_world_type(embed_data.get("world_type"))
+
+        submission_type = resolve_submission_type(
+            embed_data.get("type"), embed.title, field_names, field_values
+        )
+        if submission_type:
+            pending.append((submission_type, embed_data))
+    return pending
+
+
+async def process_message_bundle(message, bundle=None) -> int:
+    """Dispatch one message's embeds as a bundle; returns the number dispatched.
+
+    One Discord message is one plugin payload, so its embeds are collected and
+    fingerprinted as a bundle before any of them is dispatched — the raid
+    re-loot and multi-part-boss passes are bundle-level by contract and cannot
+    flag anything if embeds are dispatched one at a time.
+
+    ``bundle`` lets a caller hand in the payloads it already built and adjusted,
+    instead of having them silently rebuilt from the message here. The replay
+    tool relies on it: it stamps each payload with the message's original
+    timestamp, and a rebuild would discard those edits and re-date every
+    recovered row to whenever the backfill ran.
+    """
+    pending = build_message_bundle(message) if bundle is None else bundle
+    if not pending:
+        return 0
+
+    _flag_bundle_duplicates([data for _, data in pending])
+
+    dispatched = 0
+    for submission_type, embed_data in pending:
+        try:
+            await process_submission_with_session(submission_type, embed_data)
+            dispatched += 1
+        except Exception as e:
+            print(f"Failed to process submission after retries: {e}")
+            # Continue processing other embeds even if one fails
+    return dispatched
+
+
 @interactions.listen(MessageCreate)
 async def on_message_create(event: MessageCreate):
-    def embed_to_dict(embed: Embed):
-        if embed.fields:
-            return {f.name: f.value for f in embed.fields}
-        return {}
-    
     bot: interactions.Client = event.bot
     if not bot.is_ready:
         return
@@ -601,53 +674,9 @@ async def on_message_create(event: MessageCreate):
         return
     if message.channel.type == ChannelType.DM or message.channel.type == ChannelType.GROUP_DM:
         return
-    channel_id = message.channel.id
-                    
+
     if str(message.guild.id) in (str(guild) for guild in target_guilds) or message.guild.id == os.getenv("DISCORD_GUILD_ID"):
-        # One Discord message is one plugin payload, so its embeds are collected
-        # and fingerprinted as a bundle before any of them is dispatched — the
-        # raid re-loot and multi-part-boss passes are bundle-level by contract
-        # and cannot flag anything if embeds are dispatched one at a time.
-        pending = []
-        for embed in message.embeds:
-            embed_data = embed_to_dict(embed)
-            if not embed_data:
-                continue
-            if message.attachments:
-                for attachment in message.attachments:
-                    if attachment.url:
-                        embed_data['attachment_url'] = attachment.url
-                        embed_data['attachment_type'] = attachment.content_type
-
-            field_names = [field.name for field in embed.fields]
-            field_values = [field.value.lower().strip() for field in embed.fields]
-            if "source_type" in field_names and "loot chest" in field_values:
-                ## Skip pvp
-                continue
-
-            # Transport flag for the DB rows only (API vs webhook intake).
-            # The events engine no longer derives plugin-vs-manual from
-            # this: processors stamp the event envelope's used_api from
-            # intake_source, so webhook-path plugin traffic still counts
-            # as plugin under confirm_non_api / api_only policies.
-            embed_data['used_api'] = False
-            embed_data['world_type'] = _normalize_world_type(embed_data.get("world_type"))
-
-            submission_type = resolve_submission_type(
-                embed_data.get("type"), embed.title, field_names, field_values
-            )
-            if submission_type:
-                pending.append((submission_type, embed_data))
-
-        if pending:
-            _flag_bundle_duplicates([data for _, data in pending])
-
-        for submission_type, embed_data in pending:
-            try:
-                await process_submission_with_session(submission_type, embed_data)
-            except Exception as e:
-                print(f"Failed to process submission after retries: {e}")
-                # Continue processing other embeds even if one fails
+        await process_message_bundle(message)
     else:
         print(f"Message is not in the target guilds: {message.guild.id}")
 
