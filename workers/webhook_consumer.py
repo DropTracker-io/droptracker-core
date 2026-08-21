@@ -369,6 +369,22 @@ async def _maintenance(r, stop: asyncio.Event) -> None:
             if processing > _in_flight:
                 log.warning("%d entry(s) stranded in %s — reclaimed on next restart",
                             processing - _in_flight, PROCESSING_KEY)
+            # Anything the acceptor had to spool because Redis would not take
+            # it (utils/webhook_spool). Redis is demonstrably writable again by
+            # now — this very loop just read from it — so push the backlog back
+            # onto the queue. Bounded per pass so a large backlog drains over
+            # several minutes instead of starving live traffic.
+            try:
+                from utils import webhook_spool
+
+                spooled = await asyncio.to_thread(webhook_spool.pending_count)
+                if spooled:
+                    drained, bad = await asyncio.to_thread(webhook_spool.drain, r, QUEUE_KEY)
+                    log.warning("spool: %d pending, %d requeued, %d unreadable",
+                                spooled, drained, bad)
+            except Exception:
+                log.error("spool drain failed:\n%s", traceback.format_exc())
+
             # Plugin-user clan broadcasts whose grace window expired: record
             # the chat fallback unless the subject's own submission arrived
             # (data/submissions/clan_broadcast.py reconciliation). Runs before

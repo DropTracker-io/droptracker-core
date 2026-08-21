@@ -219,6 +219,7 @@ async def _save_upload_to_temp(image_file) -> tuple:
 async def _queue_webhook_request():
     """Fast-path acceptor: validate, save image to temp, push to Redis queue, return 200."""
     import json
+    from utils import webhook_spool
     from utils.redis import RedisClient
 
     try:
@@ -254,8 +255,28 @@ async def _queue_webhook_request():
             "enqueued_at": datetime.utcnow().isoformat(),
         }
 
+        # A 200 from here means "we have durably taken responsibility for this
+        # submission", and the plugin stops retrying on the strength of it. So
+        # the enqueue failing must never reach the client as success: spool it
+        # to disk instead, and if even that fails, answer 503 so the client
+        # keeps its copy and retries. (2026-08-18: this path silently swallowed
+        # the Redis error and answered 200 ~40,800 times.)
         rc = RedisClient()
-        rc.rpush("webhook:queue", json.dumps(entry))
+        try:
+            rc.rpush("webhook:queue", json.dumps(entry))
+        except Exception as redis_error:
+            if webhook_spool.write(entry):
+                logger.log_sync(
+                    "warning",
+                    f"[QueueAcceptor] Redis rejected the enqueue; spooled to disk: {redis_error}",
+                )
+                return jsonify({"message": "Queued"}), 200
+            logger.log_sync(
+                "error",
+                f"[QueueAcceptor] Redis rejected the enqueue AND the spool write failed "
+                f"({redis_error}) — asking the client to retry",
+            )
+            return jsonify({"error": "Queue temporarily unavailable"}), 503
         return jsonify({"message": "Queued"}), 200
 
     except Exception as e:

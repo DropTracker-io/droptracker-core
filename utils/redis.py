@@ -31,10 +31,16 @@ class RedisClient:
             print(f"Error setting key '{key}': {e}")
 
     def rpush(self, key: str, value: str) -> None:
-        try:
-            self.client.rpush(key, value)
-        except redis.RedisError as e:
-            print(f"Error rpushing key '{key}': {e}")
+        """Append to a list. **Raises** on failure — do not swallow this.
+
+        This used to catch RedisError and merely print it. Its one caller is the
+        `/webhook` acceptor, which read the silent return as success and
+        answered HTTP 200; when Redis went read-only under MISCONF on
+        2026-08-18 that turned into ~40,800 submissions acknowledged and thrown
+        away in 87 minutes, with no retry because the client had been told it
+        landed. A queue write that fails has to be visible to its caller.
+        """
+        self.client.rpush(key, value)
         
     def lpop(self, key: str) -> Optional[str]:
         try:
