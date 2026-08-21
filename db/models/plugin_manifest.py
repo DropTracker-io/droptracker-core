@@ -21,7 +21,8 @@ bump.
 """
 from __future__ import annotations
 
-from sqlalchemy import Column, DateTime, String, Text, func
+from sqlalchemy import Column, DateTime, String, func
+from sqlalchemy.dialects.mysql import LONGTEXT
 
 from .base import Base
 
@@ -37,7 +38,12 @@ class PluginManifestSection(Base):
     # JSON, shape depends on the section. Text rather than a JSON column: we
     # never query into it, and the whole point is that the server hands it to
     # the plugin verbatim.
-    payload = Column(Text, nullable=False)
+    #
+    # LONGTEXT, not TEXT: the combat_achievement_tasks section is ~144KB today
+    # (every CA task with its name, tier, monster and varp/bit), which TEXT's
+    # 64KB ceiling silently refuses with "Data too long for column". It only
+    # grows as Jagex adds tasks.
+    payload = Column(LONGTEXT, nullable=False)
     # Why this section exists / where its contents come from, for whoever finds
     # this table in three months.
     description = Column(String(255), nullable=True)
