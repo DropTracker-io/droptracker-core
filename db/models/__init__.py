@@ -4,6 +4,16 @@ from .user import User
 from .npc import NpcList
 from .item import ItemList
 from .item_value_override import ItemValueOverride
+from .plugin_manifest import PluginManifestSection
+from .pb_loadout import PersonalBestLoadout
+from .component_layout import GroupComponentLayout
+from .player_state import (
+    PlayerState,
+    PlayerCollectionLogItem,
+    PlayerCombatAchievementVarps,
+    PlayerQuestState,
+    PlayerDiaryTier,
+)
 from .player import Player, IgnoredPlayer
 from .group import Group
 from .user_configuration import UserConfiguration
@@ -208,6 +218,14 @@ __all__ = [
     "NpcList",
     "ItemList",
     "ItemValueOverride",
+    "PluginManifestSection",
+    "PersonalBestLoadout",
+    "GroupComponentLayout",
+    "PlayerState",
+    "PlayerCollectionLogItem",
+    "PlayerCombatAchievementVarps",
+    "PlayerQuestState",
+    "PlayerDiaryTier",
     "Player",
     "IgnoredPlayer",
     "Group",

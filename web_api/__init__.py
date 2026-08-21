@@ -49,12 +49,14 @@ from web_api.routes.lootboard import lootboard_bp
 from web_api.routes.manual_submissions import manual_submissions_bp
 from web_api.routes.me import me_bp
 from web_api.routes.meta import meta_bp
+from web_api.routes.notification_layouts import notification_layouts_bp
 from web_api.routes.npcs import npcs_bp
 from web_api.routes.paypal_ipn import paypal_ipn_bp
 from web_api.routes.personal_bests import personal_bests_bp
 from web_api.routes.player_claims import player_claims_bp
 from web_api.routes.points import points_bp
 from web_api.routes.profiles import profiles_bp
+from web_api.routes.player_state import player_state_bp
 from web_api.routes.realtime import realtime_bp
 from web_api.routes.clan_log import clan_log_bp
 from web_api.routes.recaps import recaps_bp
@@ -209,6 +211,7 @@ def create_app() -> Quart:
     app.register_blueprint(manual_submissions_bp, url_prefix=API_PREFIX)
     app.register_blueprint(me_bp, url_prefix=API_PREFIX)
     app.register_blueprint(meta_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(notification_layouts_bp, url_prefix=API_PREFIX)
     app.register_blueprint(npcs_bp, url_prefix=API_PREFIX)
     app.register_blueprint(paypal_ipn_bp, url_prefix=API_PREFIX)
     app.register_blueprint(leaderboards_bp, url_prefix=API_PREFIX)
@@ -217,6 +220,7 @@ def create_app() -> Quart:
     app.register_blueprint(points_bp, url_prefix=API_PREFIX)
     app.register_blueprint(profiles_bp, url_prefix=API_PREFIX)
     app.register_blueprint(clan_log_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(player_state_bp, url_prefix=API_PREFIX)
     app.register_blueprint(recaps_bp, url_prefix=API_PREFIX)
     app.register_blueprint(redirects_bp, url_prefix=API_PREFIX)
     app.register_blueprint(status_bp, url_prefix=API_PREFIX)

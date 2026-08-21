@@ -1,0 +1,9 @@
+{
+  "name": "droptracker-cache-extract",
+  "private": true,
+  "type": "module",
+  "description": "One-off extractors that read the OSRS game cache over HTTP. Not part of the running services - they regenerate JSON reference data that is committed alongside them.",
+  "dependencies": {
+    "@abextm/cache2": "^0.1.9"
+  }
+}
