@@ -102,16 +102,30 @@ Analytics Engine needs no creation step; the dataset appears on first write.
 
 ### 3. Deploy the Worker
 
+`node` here is nvm-managed, so source it first.
+
 ```bash
+export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && nvm use 20
 cd /store/droptracker/disc/edge/intake-capture
 npm install
-npx wrangler deploy
+npx wrangler login
 ```
 
-`wrangler.toml` already binds `SPOOL` (R2) and `LEDGER` (Analytics Engine) and
-declares the two routes. Deploying with the routes in place puts it live
-immediately — to stage first, comment out the `[[routes]]` blocks and test
-against the `workers.dev` URL.
+**Staging first.** `--env staging` has no route and is reachable only on
+`workers.dev`, so production traffic is untouched:
+
+```bash
+npx wrangler deploy --env staging
+```
+
+Run the checks below against the `workers.dev` URL it prints. Only when they
+pass, deploy the unnamed environment — that one carries the
+`api.droptracker.io/webhook` and `/submit` routes and goes live the moment it
+lands:
+
+```bash
+npx wrangler deploy
+```
 
 ### 4. Drain credentials and timer
 

@@ -32,3 +32,24 @@ bucket_name = "droptracker-intake-spool"
 [[analytics_engine_datasets]]
 binding = "LEDGER"
 dataset = "droptracker_intake"
+
+# Staging: same code and bindings, NO route, reachable only on workers.dev.
+# Deploy here first and run the checks in README.md against the workers.dev URL
+# -- production traffic is untouched until the unnamed environment above is
+# deployed. Named environments do not inherit bindings, hence the repetition.
+[env.staging]
+workers_dev = true
+
+[env.staging.vars]
+ORIGIN_HOST = "api-origin.droptracker.io"
+ORIGIN_TIMEOUT_MS = "15000"
+# No sampling in staging: every capture there should be one you caused.
+FORCE_SPOOL_SAMPLE = "0"
+
+[[env.staging.r2_buckets]]
+binding = "SPOOL"
+bucket_name = "droptracker-intake-spool"
+
+[[env.staging.analytics_engine_datasets]]
+binding = "LEDGER"
+dataset = "droptracker_intake_staging"
