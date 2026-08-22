@@ -388,14 +388,21 @@ def drain_mirror_lines(limit: int = MIRROR_DRAIN_BATCH) -> list:
     return entries
 
 
-def batch_lines_by_channel(entries: list) -> dict:
+def batch_lines_by_channel(entries: list, rank_emojis: dict = None) -> dict:
     """``{channel_id: [rendered_line, ...]}`` — pure formatting step.
 
     Lines arrive pre-sanitized relative to the GAME (client markup already
     meaningless) but not Discord: sender and message are markdown-escaped
     here, at the last moment before send. Broadcasts have no sender and render
     with :data:`BROADCAST_PREFIX` instead, keeping system lines visually apart
-    from player speech the way the game's chat colours do."""
+    from player speech the way the game's chat colours do.
+
+    A staged rank renders as a leading app emoji (``:rank: **Name**: msg``) —
+    the emoji token is built after escaping, never through it, or the escaper
+    would break the ``<:name:id>`` syntax. Pass ``rank_emojis`` to keep this
+    pure; the default loads the seeded map."""
+    from utils.rank_emojis import emoji_for_rank
+
     batches: dict = {}
     for entry in entries:
         channel_id = str(entry.get("channel_id") or "")
@@ -408,7 +415,9 @@ def batch_lines_by_channel(entries: list) -> dict:
         sender = sanitize_game_line(entry.get("sender"))
         if not sender:
             continue
-        batches.setdefault(channel_id, []).append(f"**{sender}**: {message}")
+        icon = emoji_for_rank(entry.get("rank"), rank_emojis)
+        line = f"**{sender}**: {message}"
+        batches.setdefault(channel_id, []).append(f"{icon} {line}" if icon else line)
     return batches
 
 

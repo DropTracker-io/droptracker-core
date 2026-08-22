@@ -80,8 +80,16 @@ async def clan_chat_processor(chat_data, external_session=None, world_type="main
     if not _bundle_is_new(f"chatbridge:seen:{slug}:{digest}", CHAT_SEEN_TTL_SECONDS):
         return SubmissionResponse(True, "Line already relayed by another clanmate")
 
+    # Rank drives the mirror line's rank emoji. The plugin's relay doesn't send
+    # one today, so it falls back to the clan's WOM roles (cached by the hourly
+    # membership sync) — resolved per group, since a player can hold different
+    # ranks in two clans. Purely cosmetic: None just renders a plain line.
+    from utils.clan_ranks import rank_for_group_member
+
+    plugin_rank = chat_data.get("rank")
     staged = 0
     for group_id, channel_id in bound.items():
-        if push_mirror_line(group_id, channel_id, sender, message, rank=chat_data.get("rank")):
+        rank = plugin_rank or rank_for_group_member(session, group_id, sender)
+        if push_mirror_line(group_id, channel_id, sender, message, rank=rank):
             staged += 1
     return SubmissionResponse(True, f"Clan chat line staged for {staged} group(s)")

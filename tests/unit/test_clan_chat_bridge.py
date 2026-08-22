@@ -135,6 +135,62 @@ def test_entries_without_a_kind_read_as_chat():
     assert bridge.batch_lines_by_channel(entries) == {"111": ["**Alice**: hi"]}
 
 
+# ── rank emoji ──────────────────────────────────────────────────────────────
+
+_RANKS = {"deputy_owner": "<:rank_deputy_owner:123>", "recruit": "<:rank_recruit:456>"}
+
+
+def test_rank_renders_as_a_leading_emoji():
+    entries = [
+        {"channel_id": "111", "sender": "Alice", "message": "hi", "rank": "deputy_owner"},
+        {"channel_id": "111", "sender": "Bob", "message": "yo", "rank": "Recruit"},
+    ]
+    assert bridge.batch_lines_by_channel(entries, _RANKS)["111"] == [
+        "<:rank_deputy_owner:123> **Alice**: hi",
+        "<:rank_recruit:456> **Bob**: yo",
+    ]
+
+
+def test_emoji_token_is_not_markdown_escaped():
+    """escape_markdown() escapes underscores — routing the token through it
+    would produce ``<:rank\\_deputy\\_owner:123>`` and render as literal text."""
+    line = bridge.batch_lines_by_channel(
+        [{"channel_id": "111", "sender": "Alice", "message": "hi", "rank": "deputy_owner"}],
+        _RANKS,
+    )["111"][0]
+    assert "\\_" not in line
+    assert line.startswith("<:rank_deputy_owner:123> ")
+
+
+def test_unranked_and_unknown_ranks_render_plain_lines():
+    entries = [
+        {"channel_id": "111", "sender": "Alice", "message": "hi", "rank": None},
+        {"channel_id": "111", "sender": "Bob", "message": "yo", "rank": "Not Ranked"},
+        {"channel_id": "111", "sender": "Carol", "message": "sup", "rank": "member"},
+    ]
+    assert bridge.batch_lines_by_channel(entries, _RANKS)["111"] == [
+        "**Alice**: hi", "**Bob**: yo", "**Carol**: sup",
+    ]
+
+
+def test_broadcasts_never_take_a_rank_emoji():
+    """A staged rank on a system line is meaningless — broadcasts have no
+    speaker, so the line keeps its own prefix."""
+    entries = [{"channel_id": "111", "kind": "broadcast", "message": "Alice got a pet",
+                "rank": "deputy_owner"}]
+    assert bridge.batch_lines_by_channel(entries, _RANKS)["111"] == [
+        "📢 *Alice got a pet*"
+    ]
+
+
+def test_rank_emoji_still_fits_the_message_cap():
+    """Each token adds ~40 chars to a line; the drain loop splits on the cap,
+    so a single ranked line must stay far below it."""
+    longest = max(_RANKS.values(), key=len)
+    line = f"{longest} **{'x' * 32}**: {'y' * 200}"
+    assert len(line) < bridge.MIRROR_MESSAGE_MAX_CHARS
+
+
 # ── broadcast mirroring (bound groups + per-group first-sight claim) ─────────
 
 class _FakeRedis:
