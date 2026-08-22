@@ -476,11 +476,26 @@ def _clan_log_advance_ledgers() -> None:
 
     session = Session()
     try:
-        # Every group that HAS a board, not just the ones posting to Discord:
-        # the website board should not go stale because a clan chose not to
-        # dedicate a channel to it.
+        # Every group with a roster, not just the ones posting to Discord: the
+        # website board should not go stale because a clan chose not to dedicate
+        # a channel to it.
+        #
+        # Sourced from `groups`, NOT from `clan_log_firsts`. Taking candidates
+        # from the ledger this sweep populates was a closed loop: a group could
+        # only be swept if it had already been swept, so the only way in was a
+        # manual `scripts.clan_log.backfill_group` run. Every clan created after
+        # the 2026-08-13 backfill was therefore stuck with no ledger, no board
+        # and a 404 on /groups/<id>/log, however much its members had tracked.
+        #
+        # Groups 1 and 2 are infrastructure (config template / every tracked
+        # player), the same pair recap's `_NON_CLAN_GROUP_IDS` excludes.
         rows = session.execute(
-            text("SELECT DISTINCT group_id FROM clan_log_firsts ORDER BY group_id")
+            text(
+                "SELECT g.group_id FROM groups g "
+                "JOIN user_group_association a ON a.group_id = g.group_id "
+                "WHERE g.group_id NOT IN (1, 2) "
+                "GROUP BY g.group_id ORDER BY g.group_id"
+            )
         ).fetchall()
         group_ids = [int(r[0]) for r in rows]
         if not group_ids:

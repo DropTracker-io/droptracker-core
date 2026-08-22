@@ -13,6 +13,9 @@ month nobody has opened) is built on demand and stored, the same
 first-view-generates pattern ``recaps`` uses for player cards. That is cheap
 here because it reads the ledger, not the drop history.
 
+A group with no ledger at all gets an empty all-time board rather than a 404,
+so long as it has members. Nothing is stored for that case — see ``_board``.
+
 Public by construction: the board is a shareable artifact and hidden members
 are already excluded when it is built.
 """
@@ -35,10 +38,13 @@ def _board(group_id: int, period: str):
     """Stored board, generated from the ledger on first view if absent."""
     # Lazy import: tests stub `services` as a MagicMock at module scope.
     from services.clan_log import (
+        PERIOD_ALL,
         build_payload,
         is_valid_period,
+        ledger_periods,
         load_board,
         save_board,
+        visible_group_player_ids,
     )
 
     if not is_valid_period(period):
@@ -49,16 +55,28 @@ def _board(group_id: int, period: str):
         if payload is not None:
             return payload
 
-        # Only build a period the group actually has history for; anything else
-        # is a 404 rather than an empty board with a real-looking 0%.
-        from services.clan_log import ledger_periods
+        # A period the ledger can answer for is built and stored on first view.
+        if period in set(ledger_periods(s, group_id)):
+            payload = build_payload(s, group_id, period)
+            save_board(s, group_id, period, payload)
+            s.commit()
+            return payload
 
-        if period not in set(ledger_periods(s, group_id)):
+        # No ledger rows at all — the group has never been swept, or has been
+        # swept and genuinely has nothing yet. Either way a clan that exists and
+        # has members gets its (empty) all-time board rather than a 404: an
+        # honest 0/N is what a freshly configured clan should see, and the 404
+        # was what every group created after the feature shipped got, because
+        # the sweep used to take its candidates from the ledger it populates.
+        #
+        # Deliberately NOT stored. The sweep owns the stored board, and this one
+        # stops being true the moment that group's first sweep lands, so caching
+        # it here would pin a real-looking 0% in place. Narrower periods stay a
+        # 404: `is_valid_period` accepts any well-formed YYYY-MM, and building
+        # those on demand would mint snapshots for arbitrary crafted URLs.
+        if period != PERIOD_ALL or not visible_group_player_ids(s, group_id):
             return None
-        payload = build_payload(s, group_id, period)
-        save_board(s, group_id, period, payload)
-        s.commit()
-        return payload
+        return build_payload(s, group_id, period)
 
 
 def _periods(group_id: int) -> list[str]:

@@ -52,6 +52,33 @@ def _candidate_groups(session, min_members: int) -> list[tuple[int, str, int]]:
     return [(int(r[0]), r[1], int(r[2])) for r in rows]
 
 
+def _refresh_with_retry(session, group_id: int, catalog: dict, attempts: int = 3):
+    """``refresh_group``, retried through a dropped connection.
+
+    A full rebuild is a long read against ``drops``; MySQL timing the query out
+    is transient and per-attempt, not a property of the group. The 2026-08-13
+    backfill lost a couple of dozen established clans to exactly that — one
+    ``Lost connection to MySQL server during query`` each, printed as FAILED and
+    never retried, so they sat on a 404 for nine days while the sweep (which
+    took its candidates from the ledger this script writes) skipped them too.
+
+    Rolling back puts a fresh connection under the session, and the ledger
+    upserts on ``(group, item, month)``, so a half-applied attempt costs nothing.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return refresh_group(session, group_id, catalog=catalog, full=True)
+        except RosterTooLarge:
+            raise
+        except Exception as exc:
+            session.rollback()
+            if attempt == attempts:
+                raise
+            print(f"  group {group_id}: attempt {attempt} failed "
+                  f"({exc.__class__.__name__}), retrying")
+            time.sleep(2 * attempt)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Backfill a group's Clan Log")
     parser.add_argument("--group", type=int, action="append", default=[],
@@ -84,7 +111,7 @@ def main() -> int:
         for group_id, name, members in targets:
             started = time.time()
             try:
-                stats = refresh_group(session, group_id, catalog=catalog, full=True)
+                stats = _refresh_with_retry(session, group_id, catalog)
             except RosterTooLarge as exc:
                 print(f"  group {group_id}: SKIPPED — {exc}")
                 session.rollback()
