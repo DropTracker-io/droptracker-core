@@ -438,7 +438,7 @@ def _group_configs_for(player_name, acc_hash, db_session):
                             "send_pbs": get_config_value(current_group_configs, "notify_pbs"),
                             "send_clogs": get_config_value(current_group_configs, "notify_clogs"),
                             "send_cas": get_config_value(current_group_configs, "notify_cas"),
-                            "send_pets": get_config_value(current_group_configs, "send_pets"),
+                            "send_pets": get_config_value(current_group_configs, "notify_pets"),
                             "send_deaths": get_config_value(current_group_configs, "notify_deaths"),
                             "send_diaries": get_config_value(current_group_configs, "notify_diaries"),
                             "send_xp": get_config_value(current_group_configs, "notify_levels"),
@@ -475,9 +475,14 @@ async def load_config():
 # manifest names the commit, and that commit's build.gradle names the version:
 #   curl -s https://raw.githubusercontent.com/runelite/plugin-hub/master/plugins/droptracker
 #   git -C plugin show <commit>:build.gradle | grep '^version'
-# (Bumped to 5.5.0 while the hub still served 5.4.2, which told every user on
-# the only published build to go fetch a release that did not exist.)
-PLUGIN_LATEST_VERSION_FALLBACK = "5.4.2"
+# Pinned is not the same as published: the hub pinned 6.0 on 2026-08-21 but kept
+# serving 5.4.2 for three days, so the pin alone is not the signal -- wait until
+# the build is actually downloadable.
+# (Bumped to 5.5.0 once while the hub still served 5.4.2, which told every user
+# on the only published build to go fetch a release that did not exist.)
+# 2026-08-24: hub pin 87d66f3 -> version 6.0, and 6.0 clients are in the wild
+# (61 accounts wrote player_state, which only v6's StateSyncService can write).
+PLUGIN_LATEST_VERSION_FALLBACK = "6.0"
 PLUGIN_MINIMUM_VERSION_FALLBACK = "5.0.0"
 
 
