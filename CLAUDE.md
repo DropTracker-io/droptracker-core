@@ -199,6 +199,9 @@ droptracker/
 │   ├── npc_names.py        # npc_match_key/NPC_ALIASES/ENCOUNTER_NAME_ALIASES
 │   │                       #   ← the ONLY correct way to compare two NPC names
 │   ├── embeds.py           # Discord embed builders
+│   ├── site_urls.py        # droptracker.io links — always built from the id
+│   ├── app_emojis.py       # the bot's custom emoji, owned by the application
+│   ├── rank_emojis.py      # OSRS clan rank icons, ditto (clan chat bridge)
 │   ├── format.py           # format_number(), replace_placeholders(), etc.
 │   ├── encrypter.py        # Fernet webhook URL encryption
 │   ├── b2_storage.py       # Backblaze B2 presigned URLs
@@ -264,6 +267,10 @@ A full walkthrough is in `docs/SUBMISSION_PIPELINE.md`. Short version:
 ## Key Architectural Rules
 
 **WOM is the identity source of truth.** A `Player` row is only created once WOM confirms the account exists; never trust a submitted `player_name` alone. **But the intake hot path does not call WOM per submission** — resolution is cached/deferred and `droptracker-player-updates` handles refresh on its own cadence.
+
+**Never write a `<:name:id>` emoji into a message.** A guild emoji costs the *sending bot* `USE_EXTERNAL_EMOJIS` in the destination channel, and where that permission is missing the message does not degrade — the reader sees the raw `<:supporter:123>`. Add a key to `utils/app_emojis.SPECS` and call `emoji()` / `partial_emoji()`; `scripts/seed_app_emojis.py` uploads them as **application** emojis (no permission, 2000 per app) and writes `static/app_emojis.json`. The core bot and the Hall of Fame bot are **separate Discord applications** and `services/hall_of_fame.py` runs in both, so the map is keyed by profile and each process declares its own with `use_profile()` at startup. Every key carries a Unicode fallback, so an unseeded app renders sensibly rather than blankly. (`utils/rank_emojis.py` is the same idea for the ~270 clan rank icons, with its own map.)
+
+**Site links are built from the id, never from a name** — `utils/site_urls.py`. OSRS names carry spaces, and Discord's `[label](url)` parser ends the URL at the first space, so a name-derived URL renders as broken text for exactly the players whose names have a space. The reader only ever sees the label.
 
 **Compare NPC names only via `utils/npc_names.py`.** `npc_match_key()` folds spelling, articles and aliases ("The Gauntlet" / "Crystalline Hunllef" / "gauntlet" → `gauntlet`). Chest/collective encounters attribute ALL loot to one canonical NPC row (Barrows brothers → `Barrows`, the Moons → `Lunar Chest`), so a raw display name is frequently not a real drop source.
 

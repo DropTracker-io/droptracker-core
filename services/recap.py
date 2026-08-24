@@ -581,8 +581,10 @@ def _true_kills(session, player_ids: list[int], period: str, npc_ids: list[int])
 #
 #   player_pets        2026-01-16
 #   quest_completions  2026-02-13
-#   player_deaths      2026-07-07   (plugin release not yet live)
-#   diary_completions  never        (plugin release not yet live)
+#   player_deaths      2026-07-07   (flowing: ~66k rows by 2026-08)
+#   diary_completions  never        (handler shipped 2026-07-07 and is in the
+#                                    published v6.0 build, yet nothing has ever
+#                                    landed -- treat a 0 here as unverified)
 #
 # They are all computed regardless, so the first month of real data lights them
 # up with no migration and no schema bump. **The renderer must omit any card
