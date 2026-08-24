@@ -191,6 +191,16 @@ if "services.activity_launch_core" not in sys.modules:
     sys.modules["services.activity_launch_core"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/ca_tiers.py — Combat Achievement tier thresholds + progress maths.
+# stdlib-only imports (osrs_api is imported lazily inside the fetch), so load
+# the real module: the CA notification tests assert on its tier decisions.
+_CA_TIERS_PATH = _Path(__file__).resolve().parent.parent / "services" / "ca_tiers.py"
+if "services.ca_tiers" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.ca_tiers", _CA_TIERS_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.ca_tiers"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/event_buyins.py — the buy-in <-> roster invariant (web71a). Same
 # shape (stdlib-only module imports, lazy db) and MUST be registered before
 # services.event_signup, which imports it at module level.
@@ -247,6 +257,17 @@ if "services.loadout" not in sys.modules:
     _spec = _importlib_util.spec_from_file_location("services.loadout", _LOADOUT_PATH)
     _mod = _importlib_util.module_from_spec(_spec)
     sys.modules["services.loadout"] = _mod
+    _spec.loader.exec_module(_mod)
+
+# services/group_loot_totals.py — the one reader of the lootboard's published
+# group total. Stdlib-only at import time (utils.redis is imported lazily inside
+# the function, and the connection is injectable), so load the real module: the
+# voice-channel counter tests assert on its missing-board handling.
+_GROUP_LOOT_TOTALS_PATH = _Path(__file__).resolve().parent.parent / "services" / "group_loot_totals.py"
+if "services.group_loot_totals" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.group_loot_totals", _GROUP_LOOT_TOTALS_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.group_loot_totals"] = _mod
     _spec.loader.exec_module(_mod)
 
 # services/state_sync.py — snapshot parsing/decoding/diffing. Stdlib-only and
@@ -340,6 +361,20 @@ if "services.event_invites" not in sys.modules:
     sys.modules["services.event_invites"] = _mod
     _spec.loader.exec_module(_mod)
     setattr(sys.modules["services"], "event_invites", _mod)
+
+# services/clan_chat_bridge.py — the two-way chat bridge. Stdlib-only at import
+# time by contract (redis/db/discord are lazy-imported inside the functions), and
+# the clan_chat intake reaches into it for the loop guard `is_bridge_echo` — a
+# MagicMock would answer every echo check truthy and hide the guard entirely.
+_BRIDGE_PATH = _Path(__file__).resolve().parent.parent / "services" / "clan_chat_bridge.py"
+if "services.clan_chat_bridge" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location(
+        "services.clan_chat_bridge", _BRIDGE_PATH
+    )
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.clan_chat_bridge"] = _mod
+    _spec.loader.exec_module(_mod)
+    setattr(sys.modules["services"], "clan_chat_bridge", _mod)
 
 # ── SQLAlchemy column expression stub ─────────────────────────────────────────
 # Real SQLAlchemy column attributes implement comparison operators to return
