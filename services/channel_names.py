@@ -6,10 +6,8 @@ from interactions import Extension, Task, IntervalTrigger, ChannelType
 from db.models import Group, GroupConfiguration, session, Player
 from datetime import datetime, timedelta
 from sqlalchemy import text
-from utils.format import format_number
-from utils.redis import redis_client
-from db.ops import associate_player_ids
-from utils.wiseoldman import fetch_group_members
+from utils.format import format_number, get_current_partition
+from services.group_loot_totals import board_month_total
 import time
 import asyncio
 
@@ -32,7 +30,7 @@ class ChannelNames(Extension):
                 #print("Got all loot channel id configs", loot_channel_id_configs)
                 for channel_setting in loot_channel_id_configs:
                     #print("Channel setting is:", channel_setting)
-                    if channel_setting.config_value != "":
+                    if channel_setting.config_value:
                         #print("Channel setting value is not empty")
                         try:
                             channel = await bot.fetch_channel(channel_id=channel_setting.config_value)
@@ -45,38 +43,19 @@ class ChannelNames(Extension):
                                     template_str = template.config_value if template else ""
                                     if template_str == "" or not template_str:
                                         template_str = "{month}: {gp_amount} gp"
-                                    if channel_setting.group_id != 2:
-                                        group_wom_id = session.query(Group.wom_id).filter(Group.group_id == channel_setting.group_id).first()
-                                        if group_wom_id:
-                                            group_wom_id = group_wom_id[0]
-                                        if group_wom_id:
-                                            #print("Finding group members?")
-                                            try:
-                                                wom_member_list = await fetch_group_members(wom_group_id=int(group_wom_id))
-                                            except Exception as e:
-                                                #print("Couldn't get the member list", e)
-                                                # A single group's transient WOM/Discord error must
-                                                # not stop the whole updater. Skip this group and keep
-                                                # iterating over the remaining channels.
-                                                continue
-                                        player_ids = await associate_player_ids(wom_member_list)
-                                        clan_player_ids = wom_member_list if wom_member_list else []
-                                    else:
-                                        clan_player_ids = session.query(Player.player_id).all()
-                                        player_ids = [player_id[0] for player_id in clan_player_ids]
-                                    player_id = player_ids[0]
-                                    group_total = 0
-                                    from datetime import datetime
-                                    partition = datetime.now().year * 100 + datetime.now().month
-                                    for player_id in player_ids:
-                                        player_total_month = f"player:{player_id}:{partition}:total_loot"
-                                        player_month_total = redis_client.get(player_total_month)
-                                        if player_month_total is None:
-                                            player_month_total = 0
-                                        group_total += int(player_month_total)
+                                    # Show the number the lootboard drew, don't re-derive it.
+                                    # This used to sum every WOM member's global monthly total,
+                                    # which ignored the board's ignored_players, drop-moderation
+                                    # exclusions and split-GP credits — group 14's channel read
+                                    # 984.6M gp higher than its own board (suggestion #138).
+                                    partition = get_current_partition()
+                                    group_total = board_month_total(channel_setting.group_id, partition)
+                                    if group_total is None:
+                                        # No board rendered for this partition yet (new group, or
+                                        # the first minutes of a new month). Leave the channel name
+                                        # alone rather than posting a total the board disagrees with.
+                                        continue
                                     month_str = datetime.now().strftime("%B")
-                                    #group_rank, ranked_in_group, group_total_month = calculate_clan_overall_rank(player_id, player_ids)
-                                    #group_total_month = format_number(group_total_month)
                                     fin_text = template_str.replace("{month}", month_str).replace("{gp_amount}", format_number(group_total))
                                     await channel.edit(name=f"{fin_text}")
                             else:
@@ -111,9 +90,9 @@ class ChannelNames(Extension):
                 print("channel_names update loop iteration failed. e:", e)
             finally:
                 # Release the scoped session before sleeping so this thread does not
-                # hold an idle read transaction for the full interval — the reads
-                # above (and inside fetch_group_members) otherwise leave the shared
-                # scoped session's connection checked out (2026-07-15 idle-transaction
+                # hold an idle read transaction for the full interval — the config
+                # and member-count reads above otherwise leave the shared scoped
+                # session's connection checked out (2026-07-15 idle-transaction
                 # leak family). Nothing is held across iterations, so remove() is safe.
                 # In finally so cleanup + sleep run even when the iteration raised,
                 # preventing a tight busy-spin on a persistent error.
