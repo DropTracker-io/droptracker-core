@@ -26,6 +26,8 @@ from db import (
     PersonalBestEntry,
     NpcList,
 )
+from db.models import PlayerState
+from utils.account_types import account_type_from_varbit
 from web_api.common import (
     cache_get,
     cache_set,
@@ -406,6 +408,23 @@ def _player_personal_bests(s, player_id: int):
     return out
 
 
+def _account_type_for(s, player_id: int):
+    """Wire-string game mode from the player's latest state sync, if any.
+
+    Never raises: a missing state row, an unreadable table or a game mode
+    newer than this build all mean "no badge", not a failed profile load.
+    """
+    try:
+        row = (
+            s.query(PlayerState.account_type)
+            .filter(PlayerState.player_id == player_id)
+            .first()
+        )
+        return account_type_from_varbit(row[0]) if row else None
+    except Exception:
+        return None
+
+
 @profiles_bp.get("/players/<int:player_id>")
 async def player_profile(player_id: int):
     def _load():
@@ -471,7 +490,15 @@ async def player_profile(player_id: int):
                         payload["is_supporter"] = True
             except Exception:
                 pass
-            account_type = getattr(player, "account_type", None)
+            # Game mode. The plugin reports this two ways and only the
+            # state-sync snapshot is actually populated today, so prefer it:
+            # it carries the raw varbit and is rewritten on every login, which
+            # is what makes a de-ironed account downgrade on its own. The
+            # string on the player row is the Task 23 submission path, kept as
+            # a fallback for players who submit but have never synced.
+            account_type = _account_type_for(s, player_id) or getattr(
+                player, "account_type", None
+            )
             if account_type:
                 payload["account_type"] = account_type
             if rank is not None:

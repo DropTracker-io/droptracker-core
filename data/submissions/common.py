@@ -55,6 +55,7 @@ from sqlalchemy.engine import Row
 from services import redis_updates
 from services.points import award_points_to_player
 
+from utils.account_types import VALID_ACCOUNT_TYPES
 from utils.ge_value import get_true_item_value
 import osrs_api
 from utils.wiseoldman import (
@@ -95,18 +96,6 @@ def debug_print(message, **kwargs):
 
 
 SEASONAL_WORLD_TYPE = "seasonal"
-
-# OSRS game modes as reported by the RuneLite plugin (varbit 1777), Task 23.
-# Wire strings are stored verbatim on the player row; anything else is ignored.
-VALID_ACCOUNT_TYPES = frozenset({
-    "normal",
-    "ironman",
-    "ultimate_ironman",
-    "hardcore_ironman",
-    "group_ironman",
-    "hardcore_group_ironman",
-    "unranked_group_ironman",
-})
 
 
 def apply_account_type(player, raw_value, world_type: str = "main"):

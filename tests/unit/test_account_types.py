@@ -1,6 +1,7 @@
 """Task 23 — OSRS account types (game modes) on players.
 
 Covers the intake-side validation helper (data/submissions/common.py), the
+varbit decoder shared with the state-sync path (utils/account_types.py), the
 Web API v1 profile exposure (GET /players/{id}), and the OpenAPI contract.
 """
 
@@ -88,6 +89,85 @@ class TestApplyAccountType:
         apply_account_type(self._player(), {"weird": "payload"})
 
 
+# ── Varbit decoder (state-sync path) ──────────────────────────────────────────
+
+class TestAccountTypeFromVarbit:
+    # The table from the Task 23 spec: varbit 1777 value -> wire string.
+    SPEC_TABLE = {
+        0: "normal",
+        1: "ironman",
+        2: "ultimate_ironman",
+        3: "hardcore_ironman",
+        4: "group_ironman",
+        5: "hardcore_group_ironman",
+        6: "unranked_group_ironman",
+    }
+
+    def test_decodes_every_mode_in_the_spec_table(self):
+        from utils.account_types import account_type_from_varbit
+
+        for varbit, expected in self.SPEC_TABLE.items():
+            assert account_type_from_varbit(varbit) == expected
+
+    def test_enum_matches_the_intake_helper(self):
+        from data.submissions.common import VALID_ACCOUNT_TYPES
+        from utils.account_types import VALID_ACCOUNT_TYPES as SHARED
+
+        # One source of truth: the two paths cannot drift apart.
+        assert set(VALID_ACCOUNT_TYPES) == set(SHARED) == SPEC_ACCOUNT_TYPES
+
+    def test_future_mode_degrades_to_none(self):
+        from utils.account_types import account_type_from_varbit
+
+        assert account_type_from_varbit(7) is None
+        assert account_type_from_varbit(99) is None
+        assert account_type_from_varbit(-1) is None
+
+    def test_non_integer_values_are_none(self):
+        from utils.account_types import account_type_from_varbit
+
+        for value in (None, "1", "ironman", 1.5, {}, []):
+            assert account_type_from_varbit(value) is None
+
+    def test_bool_is_not_treated_as_an_index(self):
+        from utils.account_types import account_type_from_varbit
+
+        # bool subclasses int; True must not decode as "ironman".
+        assert account_type_from_varbit(True) is None
+        assert account_type_from_varbit(False) is None
+
+
+# ── Profile lookup of the synced mode ─────────────────────────────────────────
+
+class TestAccountTypeLookup:
+    def _session_returning(self, row):
+        s = MagicMock()
+        s.query.return_value.filter.return_value.first.return_value = row
+        return s
+
+    def test_reads_the_synced_varbit(self):
+        from web_api.routes.profiles import _account_type_for
+
+        assert _account_type_for(self._session_returning((3,)), 42) == "hardcore_ironman"
+
+    def test_never_synced_is_none(self):
+        from web_api.routes.profiles import _account_type_for
+
+        assert _account_type_for(self._session_returning(None), 42) is None
+
+    def test_null_column_is_none(self):
+        from web_api.routes.profiles import _account_type_for
+
+        assert _account_type_for(self._session_returning((None,)), 42) is None
+
+    def test_query_failure_is_none(self):
+        from web_api.routes.profiles import _account_type_for
+
+        s = MagicMock()
+        s.query.side_effect = RuntimeError("table is gone")
+        assert _account_type_for(s, 42) is None
+
+
 # ── Web API v1: GET /players/{id} exposure ────────────────────────────────────
 
 class TestPlayerProfileAccountType:
@@ -169,6 +249,30 @@ class TestPlayerProfileAccountType:
         assert r.status_code == 200
         body = await r.get_json()
         assert "account_type" not in body
+
+    async def test_synced_mode_is_used_when_the_row_is_empty(self, client, monkeypatch):
+        import web_api.routes.profiles as profiles
+
+        # The live case: nothing ever wrote the string, but the player syncs.
+        player = self._fake_player("Iron NerdGuy", None)
+        self._patch_profiles(monkeypatch, player)
+        monkeypatch.setattr(profiles, "_account_type_for", lambda *a, **k: "ironman")
+
+        r = await client.get("/api/v1/players/42")
+        body = await r.get_json()
+        assert body["account_type"] == "ironman"
+
+    async def test_synced_mode_wins_over_a_stale_stored_string(self, client, monkeypatch):
+        import web_api.routes.profiles as profiles
+
+        # De-ironed: the state sync refreshes on login, the row may not.
+        player = self._fake_player("Nik", "ironman")
+        self._patch_profiles(monkeypatch, player)
+        monkeypatch.setattr(profiles, "_account_type_for", lambda *a, **k: "normal")
+
+        r = await client.get("/api/v1/players/42")
+        body = await r.get_json()
+        assert body["account_type"] == "normal"
 
 
 # ── OpenAPI contract ──────────────────────────────────────────────────────────
