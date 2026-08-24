@@ -22,6 +22,7 @@ from db.models import (
 )
 from db.ops import DatabaseOperations, associate_player_ids, get_formatted_name
 from db.entitlements import has_custom_embeds
+from utils.app_emojis import emoji as app_emoji
 from utils.redis import redis_client
 from utils.messages import confirm_new_npc, confirm_new_item, name_change_message, new_player_message
 from utils.format import format_number, replace_placeholders, convert_from_ms
@@ -65,8 +66,6 @@ STATIC_IMG_DIR = "/store/droptracker/disc/static/assets/img"
 # services/contribution_notifications.py). Channel defaults to the same
 # global supporters channel the legacy group_upgrade notifications used.
 CONTRIBUTION_CHANNEL_ID = int(os.getenv("DISCORD_CONTRIBUTION_CHANNEL_ID", "1490419196012793866"))
-SUPPORTER_EMOJI = "<:supporter:1263827303712948304>"
-DROPTRACKER_EMOJI = "<a:droptracker:1346787143778963497>"
 BRAND_THUMBNAIL = "https://www.droptracker.io/img/droptracker-small.gif"
 CONTRIBUTION_COLOR = "#00f0f0"
 
@@ -2524,7 +2523,7 @@ class NotificationService:
                     match status:
                         case 'added':
                             group_embed = interactions.Embed(
-                                title=f"<:supporter:1263827303712948304> Your group has been upgraded!",
+                                title=f"{app_emoji('supporter')} Your group has been upgraded!",
                                 description=f"<@{user.discord_id}> has upgraded {group.group_name} to unlock premium features, such as customizable embeds!",
                                 color="#00f0f0"
                             )
@@ -2535,7 +2534,7 @@ class NotificationService:
                             )
                             group_embed.set_footer(global_footer)
                             global_embed = interactions.Embed(
-                                title=f"<:supporter:1263827303712948304> `{user.username}` just upgraded {group.group_name}!",
+                                title=f"{app_emoji('supporter')} `{user.username}` just upgraded {group.group_name}!",
                                 description=f"{player_name if player_name else f'<@{user.discord_id}>'} just used their [account upgrade benefits]({PREMIUM_URL}) to unlock premium features for {group_link(group.group_name, group.group_id)}",
                                 color="#00f0f0"
                             )
@@ -2552,7 +2551,7 @@ class NotificationService:
                                 await guild_member.add_role(role=premium_role)
                         case 'expired':
                             group_embed = interactions.Embed(
-                                title=f"<:supporter:1263827303712948304> Your group has been downgraded!",
+                                title=f"{app_emoji('supporter')} Your group has been downgraded!",
                                 description=f"Your group upgrade has now expired.",
                                 color="#f00000"
                             )
@@ -2644,7 +2643,7 @@ class NotificationService:
                     match status:
                         case 'added':
                             embed = interactions.Embed(
-                                title="<a:droptracker:1346787143778963497> Thank you for your support!",
+                                title=f"{app_emoji('droptracker')} Thank you for your support!",
                                 description=f"Your account upgrade has been successfully processed.",
                                 color="#00f0f0"
                             )
@@ -2734,7 +2733,7 @@ class NotificationService:
             else:
                 headline = f"**{supporter_text}** just became a DropTracker supporter with a **{per}** contribution. Thank you for keeping the project alive!"
             global_embed = interactions.Embed(
-                title=f"{SUPPORTER_EMOJI} New supporter contribution!",
+                title=f"{app_emoji('supporter')} New supporter contribution!",
                 description=headline,
                 color=CONTRIBUTION_COLOR,
             )
@@ -2760,7 +2759,7 @@ class NotificationService:
                     dm_description = f"Your **{per}** supporter subscription is now active."
                     manage_url = "https://www.droptracker.io/premium"
                 dm_embed = interactions.Embed(
-                    title=f"{DROPTRACKER_EMOJI} Thank you for your support!",
+                    title=f"{app_emoji('droptracker')} Thank you for your support!",
                     description=dm_description,
                     color=CONTRIBUTION_COLOR,
                 )
@@ -2782,7 +2781,7 @@ class NotificationService:
             # 3) The group's own Discord (group contributions only)
             if group and group.guild_id:
                 group_embed = interactions.Embed(
-                    title=f"{SUPPORTER_EMOJI} {group.group_name} received a contribution!",
+                    title=f"{app_emoji('supporter')} {group.group_name} received a contribution!",
                     description=f"{mention or supporter_text} contributed **{per}** toward the group's premium subscription — keeping premium perks unlocked for everyone.",
                     color=CONTRIBUTION_COLOR,
                 )
@@ -3895,40 +3894,28 @@ class NotificationService:
             else:
                 embed_template = await self.db_ops.get_group_embed('ca', 1)
             
-            async with osrs_api.create_client() as client:
-                actual_tier = await client.semantic.get_current_ca_tier(points_total)
-            #actual_tier = await get_current_ca_tier(points_total)
-            tier_order = ['Grandmaster', 'Master', 'Elite', 'Hard', 'Medium', 'Easy']
-            if actual_tier is None:
-                next_tier = "Easy"
-            else:
-                next_tier = tier_order[tier_order.index(actual_tier) - 1]
-            async with osrs_api.create_client() as client:
-                progress, next_tier_points = await client.semantic.get_ca_tier_progress(points_total)
-            #progress, next_tier_points = await get_ca_tier_progress(points_total)
+            # Tier + progress off one cached threshold table. Fetching it per
+            # notification (twice, uncached) meant a flaky wiki call rendered
+            # "Progress to Easy: 0% (-2,412 pts)" for a near-Grandmaster player.
+            from services.ca_tiers import ca_progress, get_tier_thresholds
+
+            ca_state = ca_progress(points_total, await get_tier_thresholds())
             formatted_task_name = task_name.replace(" ", "_").replace("?", "%3F")
             wiki_url = f"https://oldschool.runescape.wiki/w/{formatted_task_name}"
             formatted_task_name = f"[{task_name}]({wiki_url})"
-            try:
-                if not next_tier_points or next_tier_points == 0:
-                    next_tier_points = 38
-                points_left = int(next_tier_points) - int(points_total)
-            except Exception as e:
-                points_left = "Unknown"
-            if embed_template:
-                value_dict = {
-                    "{player_name}": player_link(player_name, player_id),
-                    "{player_name_plain}": player_name,
-                    "{task_name}": formatted_task_name,
-                    "{current_tier}": actual_tier,
-                    "{progress}": progress,
-                    "{points_awarded}": points_awarded,
-                    "{total_points}": points_total,
-                    "{next_tier}": next_tier,
-                    "{task_tier}": task_tier,
-                    "{next_tier_points}": next_tier_points,
-                    "{points_left}": points_left
-                }
+            value_dict = {
+                "{player_name}": player_link(player_name, player_id),
+                "{player_name_plain}": player_name,
+                "{task_name}": formatted_task_name,
+                "{current_tier}": ca_state["current_tier"],
+                "{progress}": ca_state["progress"],
+                "{points_awarded}": points_awarded,
+                "{total_points}": ca_state["total_points"],
+                "{next_tier}": ca_state["next_tier"],
+                "{task_tier}": task_tier,
+                "{next_tier_points}": ca_state["next_tier_points"],
+                "{points_left}": ca_state["points_left"],
+            }
             value_dict.update(self._group_points_placeholder_map(data))
             value_dict.update(self._plugin_version_placeholder_map(data))
             video_url = self._maybe_get_video_url(db_session, data)
