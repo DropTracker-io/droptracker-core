@@ -21,6 +21,34 @@ from typing import Any, Dict
 CACHE_KEY = "plugin:manifest"
 CACHE_TTL_SECONDS = 300
 
+# Sections that go over the wire to plugin clients.
+#
+# An allowlist, not "every row in the table", because the table holds two very
+# different kinds of thing with two very different size budgets. The reference
+# data the *server* reads — the combat achievement task registry and the
+# collection log structure — is 156KB between them, and it is read straight from
+# the database by the web API (see web_api/routes/player_state.py and
+# api/routes/state_sync.py), never over HTTP. Serving it to clients as well made
+# the manifest 160KB, of which the plugin used 239 bytes.
+#
+# Default-deny is deliberate, and it is not a hedge against size alone. A
+# section the plugin has no field for cannot be used by it however we send it:
+# consuming a new section needs new client code and therefore a Plugin Hub
+# release either way. So shipping one unasked buys nothing and costs every
+# client the bytes — and once cost them far more than bytes, when
+# ``combat_achievement_tasks`` changed from an array to an object and every
+# client lost the *entire* manifest, Gson having abandoned the document at the
+# first field whose type did not match. The varps, the quest ids and the sync
+# kill switch all went with it, and the only symptom was one debug line.
+#
+# Adding a key here is the deliberate act of putting it on the wire. Everything
+# else stays server-side, editable at runtime, and free.
+CLIENT_SECTIONS = (
+    "combat_achievement_varps",
+    "quest_ids",
+    "sync",
+)
+
 # Seed contents for a database that has never had the manifest built. These are
 # defaults, not the source of truth: once a row exists the database wins, so a
 # fix can be applied by updating a row rather than shipping code.
@@ -39,10 +67,10 @@ DEFAULT_SECTIONS: Dict[str, Dict[str, Any]] = {
         ),
     },
     "combat_achievement_tasks": {
-        # Populated by scripts/build_manifest.py from RuneLite's generated
-        # VarbitID constants (see scripts/ca_registry.json). Empty here rather
-        # than inlined because it is 398 entries of generated data, not a
-        # hand-maintained default.
+        # Server-only: not in CLIENT_SECTIONS, so it never reaches a plugin.
+        # Populated by scripts/build_manifest.py from scripts/ca_tasks.json.
+        # Empty here rather than inlined because it is 646 entries of generated
+        # data, not a hand-maintained default.
         "payload": {},
         "description": (
             "Combat achievement tasks from the game cache: name, tier, monster, "
@@ -110,7 +138,24 @@ def assemble_sections(rows) -> Dict[str, Any]:
     return sections
 
 
-def manifest_payload(rows) -> Dict[str, Any]:
-    """The full manifest document served to plugin clients."""
+def client_sections(rows) -> Dict[str, Any]:
+    """The assembled sections, narrowed to what clients are served.
+
+    Split from ``manifest_payload`` so the filtering rule can be asserted on
+    directly, and so a caller that wants the whole picture (an admin surface,
+    say) can still have it from ``assemble_sections``.
+    """
     sections = assemble_sections(rows)
+    return {key: sections[key] for key in CLIENT_SECTIONS if key in sections}
+
+
+def manifest_payload(rows) -> Dict[str, Any]:
+    """The manifest document served to plugin clients.
+
+    The version hashes only the sections actually served. That is what makes it
+    a usable cache validator: re-running the collection log sync changes a
+    server-only section, and hashing that too would churn every client's ETag
+    over data no client can see.
+    """
+    sections = client_sections(rows)
     return {"version": manifest_version(sections), **sections}

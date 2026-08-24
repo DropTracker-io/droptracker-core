@@ -10,11 +10,16 @@ Why an endpoint rather than the GitHub Pages content channel we already publish
 fixable in minutes, and Pages adds a build + CDN cache we do not control. If the
 payload later grows large (the collection log structure is the candidate), the
 bulky sections can move to Pages without the plugin caring — it only knows a URL.
+
+What clients receive is narrowed to ``services.plugin_manifest.CLIENT_SECTIONS``.
+The table is shared with server-side reference data an order of magnitude larger
+than anything a plugin reads, and that data has no business on the wire.
 """
 import asyncio
 import json
 
 from quart import Blueprint, Response, jsonify, request
+from werkzeug.http import parse_etags
 
 from api.core import get_db_session, redis_client
 # Import the model from the package, not its submodule: the unit-test conftest
@@ -80,17 +85,33 @@ async def get_manifest():
     return _respond(payload)
 
 
+def _etag_matches(if_none_match: str, version: str) -> bool:
+    """Whether the client already holds this version.
+
+    RFC 7232 requires the *weak* comparison function for If-None-Match, and that
+    is not pedantry here: nginx rewrites a strong ETag to its weak form when it
+    gzips a response, so what the client receives is `W/"abc"` while what we
+    build below is `"abc"`. The string equality this replaced therefore never
+    matched for any client that accepts gzip — which is all of them — and every
+    revalidation re-sent the whole body.
+
+    Delegated to werkzeug (already a dependency, via Quart) rather than stripping
+    a `W/` prefix by hand, so multiple candidate tags and `*` behave properly.
+    """
+    return parse_etags(if_none_match).contains_weak(version)
+
+
 def _respond(payload: dict):
     """Serve the manifest, honouring If-None-Match.
 
-    The ETag is the manifest version, itself a hash of the section payloads, so
+    The ETag is the manifest version, itself a hash of the served sections, so
     an unchanged manifest answers 304 and the client keeps what it has.
     """
-    etag = f'"{payload.get("version", "unknown")}"'
-    if request.headers.get("If-None-Match") == etag:
+    version = str(payload.get("version", "unknown"))
+    if _etag_matches(request.headers.get("If-None-Match"), version):
         response = Response("", status=304)
     else:
         response = jsonify(payload)
-    response.headers["ETag"] = etag
+    response.headers["ETag"] = f'"{version}"'
     response.headers["Cache-Control"] = f"public, max-age={_CACHE_TTL_SECONDS}"
     return response

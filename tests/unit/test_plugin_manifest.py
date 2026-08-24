@@ -4,8 +4,10 @@ import json
 import pytest
 
 from services.plugin_manifest import (
+    CLIENT_SECTIONS,
     DEFAULT_SECTIONS,
     assemble_sections,
+    client_sections,
     manifest_payload,
     manifest_version,
 )
@@ -32,9 +34,13 @@ def test_rows_override_defaults():
     assert sections["sync"] == DEFAULT_SECTIONS["sync"]["payload"]
 
 
-def test_unknown_section_is_served():
-    """A section added to the table should reach clients without a code change —
-    that is the entire point of the table."""
+def test_unknown_section_is_assembled():
+    """A section added to the table is picked up without a code change.
+
+    Assembly, note, not delivery: what reaches a *client* is narrowed by
+    CLIENT_SECTIONS (see below). Editing the payload of a section clients
+    already receive still needs no deploy, which is the property that matters.
+    """
     sections = assemble_sections([FakeRow("future_thing", {"a": 1})])
     assert sections["future_thing"] == {"a": 1}
 
@@ -61,8 +67,62 @@ def test_version_changes_when_payload_changes():
 
 def test_payload_includes_version_and_sections():
     payload = manifest_payload([])
-    assert payload["version"] == manifest_version(assemble_sections([]))
+    assert payload["version"] == manifest_version(client_sections([]))
     assert "combat_achievement_varps" in payload
+
+
+# --------------------------------------------------------------------------- #
+# What actually goes over the wire
+# --------------------------------------------------------------------------- #
+def test_server_only_sections_never_reach_clients():
+    """The regression that motivated the allowlist.
+
+    ``combat_achievement_tasks`` is 144KB of task registry and ``collection_log``
+    another 15KB; the plugin reads neither, and both are read server-side
+    straight from the database. Together they were 99.8% of a 160KB response.
+    """
+    payload = manifest_payload([
+        FakeRow("combat_achievement_tasks", {"tasks": [{"name": "Noxious Foe"}]}),
+        FakeRow("collection_log", [{"name": "Bosses", "pages": []}]),
+    ])
+    assert "combat_achievement_tasks" not in payload
+    assert "collection_log" not in payload
+    # ...and the sections clients do read are unaffected by their presence.
+    assert payload["combat_achievement_varps"] == DEFAULT_SECTIONS[
+        "combat_achievement_varps"]["payload"]
+
+
+def test_a_new_section_is_not_served_until_it_is_opted_in():
+    """Default-deny. A section the client has no field for cannot be used by it
+    however we send it, so the wire is opt-in rather than opt-out."""
+    payload = manifest_payload([FakeRow("future_thing", {"a": 1})])
+    assert "future_thing" not in payload
+    assert assemble_sections([FakeRow("future_thing", {"a": 1})])["future_thing"] == {"a": 1}
+
+
+def test_version_ignores_sections_clients_cannot_see():
+    """Guards the ETag against churn.
+
+    The collection log sync rewrites its section on its own cadence. If that
+    moved the version, every client would re-download the manifest for data none
+    of them receive — which is the cache validator doing the opposite of its job.
+    """
+    before = manifest_payload([])["version"]
+    after = manifest_payload([FakeRow("collection_log", [{"name": "Bosses"}])])["version"]
+    assert before == after
+
+
+def test_version_still_changes_when_a_served_section_changes():
+    before = manifest_payload([])["version"]
+    after = manifest_payload([FakeRow("sync", {"enabled": False})])["version"]
+    assert before != after
+
+
+def test_every_client_section_has_a_default():
+    """A served key with no default would be absent whenever its row is missing,
+    which reads to the plugin as "feature off" rather than "not built yet"."""
+    for key in CLIENT_SECTIONS:
+        assert key in DEFAULT_SECTIONS, f"{key} is served but has no default"
 
 
 def test_combat_achievement_varps_are_not_a_contiguous_range():
