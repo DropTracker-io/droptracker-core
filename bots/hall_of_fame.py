@@ -19,6 +19,15 @@ from utils.format import convert_to_ms, get_true_boss_name
 # defaulting it wrong here would make this process think it owns every group.
 os.environ["HOF_ROLE"] = "legacy"
 
+# This process is a *different Discord application* from the core bot, and an
+# application emoji only renders for the app that owns it. services.hall_of_fame
+# runs in both processes, so without this the sync-note glyph would come out as
+# a raw <:construction:...> here. Unlike HOF_ROLE above this is read per call,
+# not at import — it sits alongside it because both declare what this process is.
+from utils.app_emojis import use_profile  # noqa: E402
+
+use_profile("hof")
+
 from services import hall_of_fame  # noqa: E402
 from monitor.sdnotifier import SystemdWatchdog
 import time

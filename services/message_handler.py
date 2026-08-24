@@ -5,13 +5,14 @@ from interactions import ChannelType, ContextMenuContext, Extension, listen, Mes
 from interactions.api.events import MessageCreate, Component
 from db.models import Group, GroupPatreon, PlayerPet, session, Player, ItemList, PersonalBestEntry
 from db.xf.recent_submissions import create_xenforo_entry
-from services.components import InfoActionRow
+from services.components import info_action_row
 from utils.embeds import update_boss_pb_embed
 # Removed circular import - these will be imported lazily inside functions if needed
 from utils.msg_logger import HighThroughputLogger
 from data.submissions import clog_processor, ca_processor, pb_processor, drop_processor
 from utils.format import convert_to_ms, convert_from_ms, get_true_boss_name
 from utils.redis import redis_client
+from utils.app_emojis import emoji as app_emoji, partial_emoji as app_partial_emoji
 from utils.site_urls import PREMIUM_URL
 from db.app_logger import AppLogger
 from interactions import AutocompleteContext, BaseContext, GuildText, Permissions, SlashCommand, UnfurledMediaItem, PartialEmoji, ActionRow, Button, ButtonStyle, SlashCommandOption, check, is_owner, Extension, slash_command, slash_option, SlashContext, Embed, OptionType, GuildChannel, SlashCommandChoice
@@ -111,7 +112,7 @@ class MessageHandler(Extension):
                 TextDisplayComponent(
                             content="### Finding your RuneLite client logs for debugging purposes:\n" +
                             "-# There are two primary ways to locate your `client.log` file:\n" +
-                            "-# By right-clicking the <:screenshot:1380839233123651695> screenshot icon in the top-right corner of the RuneLite client\n" +
+                            f"-# By right-clicking the {app_emoji('screenshot')} screenshot icon in the top-right corner of the RuneLite client\n" +
                             "-# or, navigate to:\n" +
                             "-# Windows: `%userprofile%.runelite\logs`\n" +
                             "-# Linux/MacOS: $HOME/.runelite/logs\n\n"
@@ -207,12 +208,12 @@ class MessageHandler(Extension):
                     accessory=Button(
                         label="Upgrade",
                         style=ButtonStyle.LINK,
-                        emoji=PartialEmoji(name="supporter", id=1263827303712948304),
+                        emoji=app_partial_emoji("supporter"),
                         url=PREMIUM_URL
                     )
                 ),
                 SeparatorComponent(divider=True),
-                InfoActionRow,
+                info_action_row(),
                 SeparatorComponent(divider=True)
             ),
             

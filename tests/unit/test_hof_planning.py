@@ -5,20 +5,20 @@ raid-variant grouping, directory sizing, and the boss-select custom_id codec.
 """
 
 from utils.hof import (
-    CONSTRUCTION_EMOJI,
     DIRECTORY_BOTTOM_KEY,
     DIRECTORY_KEY,
     MAX_MESSAGE_TEXT_CHARS,
     SEPULCHRE_CANONICAL,
-    SYNC_NOTE_TEXT,
     build_boss_plan,
     build_message_plan,
     canonical_display_name,
     chunk_select_options,
     fit_directory_lines,
     parse_boss_list,
+    construction_emoji,
     parse_select_custom_id,
     select_menu_custom_id,
+    sync_note_text,
 )
 
 
@@ -150,11 +150,12 @@ class TestSyncNoteText:
     """The wording/formatting here is owner-specified — pin it exactly."""
 
     def test_exact_wording(self):
-        assert SYNC_NOTE_TEXT == (
+        construction = construction_emoji()
+        assert sync_note_text() == (
             "-# **Note**: You can sync all of your existing Personal Bests here by "
             "doing the following:\n"
-            "-# 1. Build an `Adventure Log`  (min. 83 <:Construction:1533062962418417704> )  "
-            "inside of an `Achievement Gallery`  (80 <:Construction:1533062962418417704> )  "
+            f"-# 1. Build an `Adventure Log`  (min. 83 {construction} )  "
+            f"inside of an `Achievement Gallery`  (80 {construction} )  "
             "in your Player-Owned House.\n"
             "-# 2. Open the Adventure Log, and click on the `Counters` tab. This will "
             "immediately send your stored times to the DropTracker."
@@ -163,18 +164,44 @@ class TestSyncNoteText:
     def test_every_line_is_subtext(self):
         # A line that loses its '-# ' prefix renders full-size and breaks the
         # footer look of the message.
-        assert all(line.startswith("-# ") for line in SYNC_NOTE_TEXT.split("\n"))
+        assert all(line.startswith("-# ") for line in sync_note_text().split("\n"))
 
     def test_emoji_uses_full_custom_form(self):
-        # A bare ':Construction:' shortcode renders as literal text in a bot
+        # A bare ':construction:' shortcode renders as literal text in a bot
         # message — only the <:name:id> form resolves to the emoji.
-        assert ":Construction:" not in SYNC_NOTE_TEXT.replace(CONSTRUCTION_EMOJI, "")
-        assert SYNC_NOTE_TEXT.count(CONSTRUCTION_EMOJI) == 2
+        note = sync_note_text()
+        assert ":construction:" not in note.replace(construction_emoji(), "")
+        assert note.count(construction_emoji()) == 2
+
+    def test_emoji_follows_the_running_application(self):
+        # services/hall_of_fame.py is loaded by both the core bot and the Hall
+        # of Fame bot — two separate Discord applications. An app emoji only
+        # renders for its owner, so the note must resolve per profile rather
+        # than bake one id in at import time.
+        from utils import app_emojis
+
+        before = app_emojis.current_profile()
+        try:
+            app_emojis.use_profile("core")
+            core_note = sync_note_text()
+            app_emojis.use_profile("hof")
+            hof_note = sync_note_text()
+        finally:
+            app_emojis.use_profile(before)
+
+        seeded = app_emojis.load_map()
+        if seeded.get("core", {}).get("construction") and seeded.get("hof", {}).get("construction"):
+            assert core_note != hof_note, "both apps resolved to the same emoji id"
+        # Seeded or not, both renderings must carry a real glyph twice — an
+        # unresolved key would leave the sentence reading "(min. 83 )".
+        for note in (core_note, hof_note):
+            assert "(min. 83 )" not in note
+            assert "<::>" not in note
 
     def test_leaves_room_inside_the_message_cap(self):
         # _render_directory has no shrink-and-retry loop, so the note must fit
         # in the head-room the directory list gives back for it.
-        assert len(SYNC_NOTE_TEXT) < MAX_MESSAGE_TEXT_CHARS - 3300
+        assert len(sync_note_text()) < MAX_MESSAGE_TEXT_CHARS - 3300
 
 
 class TestFitDirectoryLines:

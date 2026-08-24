@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List
 
+from utils.app_emojis import emoji as app_emoji
+
 # Logical message keys stored in group_personal_best_message.boss_name for the
 # directory messages.  These values are already present in production rows, so
 # they must not change.
@@ -65,25 +67,40 @@ SELECT_OPTIONS_PER_MENU = 25
 
 SELECT_CUSTOM_ID_PREFIX = "hof_boss_select"
 
-# Custom guild emoji (DropTracker primary guild). It has to be the full
-# <:name:id> form: a bare ':Construction:' shortcode is only expanded by the
-# Discord *composer*, so a bot posting it renders the literal text instead.
-# Emoji in message content are resolved from the CDN by id, so this renders in
-# every group's guild regardless of the HOF bot's membership there.
-CONSTRUCTION_EMOJI = "<:Construction:1533062962418417704>"
+def construction_emoji() -> str:
+    """The Construction-level glyph, as the running application owns it.
 
-# Footer appended to the LAST message of every Hall of Fame channel (the bottom
-# directory in individual-boss mode, otherwise the single directory message).
-# Players assume the Hall of Fame only tracks PBs set after they installed the
-# plugin, so tell them how to backfill the ones they already have. Lives here,
-# not in the service, so the exact wording is covered by the unit tests.
-SYNC_NOTE_TEXT = (
-    "-# **Note**: You can sync all of your existing Personal Bests here by doing the following:\n"
-    f"-# 1. Build an `Adventure Log`  (min. 83 {CONSTRUCTION_EMOJI} )  inside of an "
-    f"`Achievement Gallery`  (80 {CONSTRUCTION_EMOJI} )  in your Player-Owned House.\n"
-    "-# 2. Open the Adventure Log, and click on the `Counters` tab. This will immediately "
-    "send your stored times to the DropTracker."
-)
+    It has to be the full ``<:name:id>`` form: a bare ``:construction:``
+    shortcode is only expanded by the Discord *composer*, so a bot posting it
+    renders the literal text instead. It used to be a guild emoji, which cost
+    the sender ``USE_EXTERNAL_EMOJIS`` in every clan channel outside the
+    DropTracker server; it is an application emoji now (utils/app_emojis.py),
+    which needs no permission at all.
+
+    Resolved per call because ``services/hall_of_fame.py`` is loaded by both
+    the core bot and the Hall of Fame bot — two separate Discord applications,
+    each owning its own copy of this emoji under a different id.
+    """
+    return app_emoji("construction")
+
+
+def sync_note_text() -> str:
+    """Footer appended to the LAST message of every Hall of Fame channel.
+
+    (The bottom directory in individual-boss mode, otherwise the single
+    directory message.) Players assume the Hall of Fame only tracks PBs set
+    after they installed the plugin, so tell them how to backfill the ones they
+    already have. Lives here, not in the service, so the exact wording is
+    covered by the unit tests.
+    """
+    construction = construction_emoji()
+    return (
+        "-# **Note**: You can sync all of your existing Personal Bests here by doing the following:\n"
+        f"-# 1. Build an `Adventure Log`  (min. 83 {construction} )  inside of an "
+        f"`Achievement Gallery`  (80 {construction} )  in your Player-Owned House.\n"
+        "-# 2. Open the Adventure Log, and click on the `Counters` tab. This will immediately "
+        "send your stored times to the DropTracker."
+    )
 
 
 def canonical_display_name(boss_name: str) -> str:

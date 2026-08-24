@@ -39,6 +39,7 @@ from datetime import datetime, timedelta
 # from utils.ranking.npc_ranker import check_npc_rank_change_from_drop
 # from utils.ranking.rank_checker import check_rank_change_from_drop
 from utils.embeds import get_global_drop_embed
+from utils.app_emojis import emoji as app_emoji
 from utils.download import download_player_image
 from utils.format import normalize_player_display_equivalence
 from utils.site_urls import player_link
@@ -816,7 +817,7 @@ async def notify_group(bot: interactions.Client, type: str, group: Group, member
                 uid = f"<@{member.user.discord_id}>"
             else:
                 uid = f"ID: `{member.player_id}`"
-            embed = Embed(title=f"<:leave:1213802516882530375> Member Removed",
+            embed = Embed(title=f"{app_emoji('leave')} Member Removed",
                           description=f"{member.player_name} ({uid}) has been removed from your group during to a WiseOldMan refresh.",
                           color=0x00ff00)
             query = """SELECT COUNT(*) FROM user_group_association WHERE group_id = :group_id"""
@@ -833,7 +834,7 @@ async def notify_group(bot: interactions.Client, type: str, group: Group, member
                 uid = f"<@{member.user.discord_id}>"
             else:
                 uid = f"ID: `{member.player_id}`"   
-            embed = Embed(title=f"<:join:1213802515834204200> Member Added",
+            embed = Embed(title=f"{app_emoji('join')} Member Added",
                           description=f"{member.player_name} ({uid}) has been added to your group during a WiseOldMan refresh.",
                           color=0x00ff00)
             query = """SELECT COUNT(*) FROM user_group_association WHERE group_id = :group_id"""

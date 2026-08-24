@@ -22,6 +22,7 @@ from services.notification_service import NotificationService
 from services.channel_names import ChannelNames
 from services.channel_cache import shape_channel_cache
 from utils.embeds import create_boss_pb_embed, update_boss_pb_embed
+from utils.app_emojis import emoji as app_emoji, use_profile
 from utils.logger import LoggerClient
 from db.app_logger import AppLogger
 
@@ -190,8 +191,14 @@ bot._build_sync_payload = _build_sync_payload_keep_entry_point
 
 if os.getenv("STATUS") == "dev" or os.getenv("STATE") == "dev":
     bot_token = os.getenv('DEV_TOKEN')
+    # Application emojis belong to the app that owns them, and DEV_TOKEN is a
+    # different app from BOT_TOKEN — so the dev bot resolves its own profile
+    # (seed it with `scripts/seed_app_emojis.py --profile core-dev`, or leave
+    # it unseeded and every emoji renders as its unicode fallback).
+    use_profile("core-dev")
 else:
     bot_token = os.getenv('BOT_TOKEN')
+    use_profile("core")
 
 ## Quart server initialization ##
 app = Quart(__name__)
@@ -705,7 +712,7 @@ async def lootboard_updates():
                         
                         # Always create a new message when repost is enabled
                         try:
-                            message = await channel.send(f"<a:loading:1180923500836421715> Please wait while we initialize this Loot Leaderboard....")
+                            message = await channel.send(f"{app_emoji('loading')} Please wait while we initialize this Loot Leaderboard....")
                             configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
                                                                                         GroupConfiguration.config_key == 'lootboard_message_id').first()
                             configured_message.config_value = str(message.id)
@@ -744,7 +751,7 @@ async def lootboard_updates():
                         if not message:
                             print(f"Couldn't get the message to update the loot leaderboard with...")
                             try:
-                                message = await channel.send(f"<a:loading:1180923500836421715> Please wait while we initialize this Loot Leaderboard....")
+                                message = await channel.send(f"{app_emoji('loading')} Please wait while we initialize this Loot Leaderboard....")
                                 configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
                                                                                             GroupConfiguration.config_key == 'lootboard_message_id').first()
                                 configured_message.config_value = str(message.id)

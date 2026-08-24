@@ -87,7 +87,6 @@ from utils.hof import (
     DIRECTORY_KEY,
     RAID_GROUPS,
     SEPULCHRE_CANONICAL,
-    SYNC_NOTE_TEXT,
     BossPlanEntry,
     build_boss_plan,
     build_message_plan,
@@ -100,6 +99,7 @@ from utils.hof import (
     parse_boss_list,
     parse_select_custom_id,
     select_menu_custom_id,
+    sync_note_text,
 )
 from utils.redis import redis_client
 from utils.site_urls import WEBSITE_URL, npc_url
@@ -1471,7 +1471,8 @@ class HallOfFame(Extension):
         # _render_directory has no shrink-and-retry loop, so the boss list must
         # give back exactly the room the sync note takes or a long directory
         # would silently blow Discord's 4000-char message cap.
-        limit = 3300 - (len(SYNC_NOTE_TEXT) + 1 if include_sync_note else 0)
+        note = sync_note_text()
+        limit = 3300 - (len(note) + 1 if include_sync_note else 0)
         lines = fit_directory_lines(linked_lines, plain_lines, limit=limit)
         if not lines:
             lines = ["-# No Hall of Fame bosses are configured yet."]
@@ -1498,7 +1499,7 @@ class HallOfFame(Extension):
         if include_sync_note:
             note_components = [
                 SeparatorComponent(divider=True),
-                TextDisplayComponent(content=SYNC_NOTE_TEXT),
+                TextDisplayComponent(content=note),
             ]
 
         return [ContainerComponent(

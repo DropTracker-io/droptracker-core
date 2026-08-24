@@ -4,6 +4,7 @@ import interactions
 from interactions import ComponentContext, Extension, ActionRow, Button, ButtonStyle, FileComponent, PartialEmoji, Permissions, SlashContext, UnfurledMediaItem, listen, slash_command
 from interactions.api.events import Startup, Component, ComponentCompletion, ComponentError, ModalCompletion, ModalError, MessageCreate
 from interactions.models import ContainerComponent, ThumbnailComponent, SeparatorComponent, UserSelectMenu, SlidingWindowSystem, SectionComponent, SeparatorComponent, TextDisplayComponent, ThumbnailComponent, MediaGalleryComponent, MediaGalleryItem, OverwriteType
+from utils.app_emojis import partial_emoji as app_partial_emoji
 from utils.site_urls import PREMIUM_URL, WEBSITE_URL
 from services.guild_permissions import INVITE_PERMISSIONS
 
@@ -21,20 +22,28 @@ logo_media = UnfurledMediaItem(
 
 
 
-InfoActionRow = ActionRow(
-    Button(
-        label="View Player Setup/Info",
-        style=ButtonStyle.GRAY,
-        emoji=PartialEmoji(name="newmember", id=1263916335184744620),
-        custom_id="player_setup_info"
-    ),
-    Button(
-        label="View Clan Setup Guide",
-        style=ButtonStyle.GRAY,
-        emoji=PartialEmoji(name="developer", id=1263916346954088558),
-        custom_id="clan_setup_info"
-    ),
-)
+def info_action_row() -> ActionRow:
+    """The "how do I set this up" button pair.
+
+    A function rather than a module constant because the button emoji are
+    application emojis, and which application this process is is only settled
+    once the bot has called ``utils.app_emojis.use_profile`` — which happens
+    after imports.
+    """
+    return ActionRow(
+        Button(
+            label="View Player Setup/Info",
+            style=ButtonStyle.GRAY,
+            emoji=app_partial_emoji("newmember"),
+            custom_id="player_setup_info"
+        ),
+        Button(
+            label="View Clan Setup Guide",
+            style=ButtonStyle.GRAY,
+            emoji=app_partial_emoji("developer"),
+            custom_id="clan_setup_info"
+        ),
+    )
 
 
 
@@ -170,7 +179,7 @@ async def build_help_components(bot=None):
                 )
             ),
             SeparatorComponent(divider=True),
-            InfoActionRow,
+            info_action_row(),
             SeparatorComponent(divider=True),
         )
     ]
@@ -379,7 +388,7 @@ async def build_clan_setup(bot=None):
                 accessory=Button(
                     label="Upgrade",
                     style=ButtonStyle.LINK,
-                    emoji=PartialEmoji(name="supporter", id=1263827303712948304),
+                    emoji=app_partial_emoji("supporter"),
                     url=PREMIUM_URL
                 )
             ),

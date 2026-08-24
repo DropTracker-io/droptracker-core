@@ -27,6 +27,7 @@ from db.models import (
 )
 from services.components import build_player_setup
 from utils.format import get_command_id
+from utils.app_emojis import emoji as app_emoji
 from .utils import try_create_user, is_admin
 
 
@@ -114,7 +115,7 @@ class ClanCommands(Extension):
             embed = Embed(title="New group created",
                         description=f"Your group has been created (ID: `{result.get('group_id')}`)!")
             embed.add_field(name=f"WOM group `{result.get('wom_id')}` is now assigned to your Discord server `{result.get('guild_id')}`",
-                            value=f"<a:loading:1180923500836421715> Please wait while we initialize some other things for you...",
+                            value=f"{app_emoji('loading')} Please wait while we initialize some other things for you...",
                             inline=False)
             embed.set_footer(f"https://discord.gg/droptracker")
 

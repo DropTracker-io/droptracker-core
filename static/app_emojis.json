@@ -1,0 +1,22 @@
+{
+  "core": {
+    "construction": "<:construction:1540992759819927643>",
+    "developer": "<:developer:1540992760922771507>",
+    "droptracker": "<a:droptracker:1350554808481878057>",
+    "leave": "<:leave:1540992762751615026>",
+    "loading": "<a:loading:1540992764102180905>",
+    "newmember": "<:newmember:1540992765662339192>",
+    "screenshot": "<:screenshot:1540992766803181568>",
+    "supporter": "<:supporter:1540992768141434930>"
+  },
+  "hof": {
+    "construction": "<:construction:1540992772046069830>",
+    "developer": "<:developer:1540992773036052500>",
+    "droptracker": "<a:droptracker:1540992778358624276>",
+    "leave": "<:leave:1540992780036341811>",
+    "loading": "<a:loading:1540992781353357363>",
+    "newmember": "<:newmember:1540992782905122838>",
+    "screenshot": "<:screenshot:1540992784134176860>",
+    "supporter": "<:supporter:1540992785489072128>"
+  }
+}
