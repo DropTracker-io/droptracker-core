@@ -21,6 +21,8 @@ they inherit the base key's label/category/help.
 """
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Dict, List, Optional
 
 SEASONAL_PREFIX = "seasonal_"
@@ -30,6 +32,7 @@ SEASONAL_PREFIX = "seasonal_"
 CONFIG_CATEGORIES: List[Dict[str, str]] = [
     {"key": "channels", "label": "Channels"},
     {"key": "drops", "label": "Drop notifications"},
+    {"key": "deaths", "label": "Deaths"},
     {"key": "levels", "label": "Level notifications"},
     {"key": "pbs", "label": "Personal best"},
     {"key": "cas", "label": "Combat achievements"},
@@ -118,14 +121,6 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "category": "channels",
         "type": "channel",
         "help": "Channel for collection-log notifications. Falls back to the drops channel when unset.",
-        "default": None,
-    },
-    {
-        "key": "channel_id_to_post_deaths",
-        "label": "Deaths channel",
-        "category": "channels",
-        "type": "channel",
-        "help": "Channel for player-death notifications. Falls back to the drops channel when unset.",
         "default": None,
     },
     {
@@ -242,15 +237,6 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "seasonal": True,
     },
     {
-        "key": "notify_deaths",
-        "label": "Notify deaths",
-        "category": "drops",
-        "type": "boolean",
-        "help": "Post a notification when a member dies.",
-        "default": False,
-        "seasonal": True,
-    },
-    {
         "key": "notify_diaries",
         "label": "Notify achievement diaries",
         "category": "drops",
@@ -258,6 +244,45 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "Post a notification on achievement-diary completions.",
         "default": False,
         "seasonal": True,
+    },
+
+    # --- Deaths ---
+    # Death notifications get their own section: toggle, channel and the
+    # custom message variants (randomized clan-broadcast-style death lines).
+    # death_message_variants is a JSON string array stored via LONG_VALUE_KEYS
+    # (web_api/routes/config.py) so lists past 255 chars spill into long_value.
+    {
+        "key": "notify_deaths",
+        "label": "Notify deaths",
+        "category": "deaths",
+        "type": "boolean",
+        "help": "Post a notification when a member dies.",
+        "default": False,
+        "seasonal": True,
+    },
+    {
+        "key": "channel_id_to_post_deaths",
+        "label": "Deaths channel",
+        "category": "deaths",
+        "type": "channel",
+        "help": "Channel for player-death notifications. Falls back to the drops channel when unset.",
+        "default": None,
+    },
+    {
+        "key": "death_message_variants",
+        "label": "Death messages",
+        "category": "deaths",
+        "type": "messagelist",
+        "help": "Custom death messages, one picked at random per death — like the in-game clan broadcasts. Placeholders like {player_name} and {source} are filled in. Leave empty for the default message. Groups using a Components layout for deaths keep their layout; these messages don't apply there.",
+        "default": "",
+    },
+    {
+        "key": "death_message_as_embed_description",
+        "label": "Show message inside the embed",
+        "category": "deaths",
+        "type": "boolean",
+        "help": "On: the picked message replaces the embed description (including a custom embed's). Off: it's sent as the plain message text above the embed.",
+        "default": False,
     },
 
     # --- Level notifications ---
@@ -831,6 +856,51 @@ class ConfigValidationError(ValueError):
         self.detail = detail
 
 
+# Limits for `messagelist` fields — the TS registry
+# (packages/api-types/src/group-config.ts) enforces the same.
+MESSAGE_LIST_MAX_ENTRIES = 30
+MESSAGE_LIST_MAX_ENTRY_LENGTH = 200
+MESSAGE_LIST_MAX_RAW_LENGTH = 8000
+# Message content pings for real (embed text doesn't), so mention syntax is
+# rejected outright rather than trusting the placement checkbox's state.
+MESSAGE_LIST_MENTION_RE = re.compile(r"@everyone|@here|<@[&!]?\d+>")
+
+
+def coerce_message_list(key: str, value: Any) -> str:
+    """Validate + normalize a messagelist value to its stored form: a JSON
+    array of message strings, or "" when unset. Raises ConfigValidationError."""
+    if value is None or value == "" or value == []:
+        return ""
+    if isinstance(value, str):
+        if len(value) > MESSAGE_LIST_MAX_RAW_LENGTH:
+            raise ConfigValidationError(key, f"'{key}' is too large.")
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            raise ConfigValidationError(key, f"'{key}' must be a JSON array of strings.")
+    if not isinstance(value, list) or any(not isinstance(e, str) for e in value):
+        raise ConfigValidationError(key, f"'{key}' must be a JSON array of strings.")
+    if not value:
+        return ""
+    if len(value) > MESSAGE_LIST_MAX_ENTRIES:
+        raise ConfigValidationError(
+            key, f"'{key}' allows at most {MESSAGE_LIST_MAX_ENTRIES} messages."
+        )
+    for entry in value:
+        if not entry.strip():
+            raise ConfigValidationError(key, f"'{key}' messages can't be blank.")
+        if len(entry) > MESSAGE_LIST_MAX_ENTRY_LENGTH:
+            raise ConfigValidationError(
+                key,
+                f"'{key}' messages must be at most {MESSAGE_LIST_MAX_ENTRY_LENGTH} characters.",
+            )
+        if MESSAGE_LIST_MENTION_RE.search(entry):
+            raise ConfigValidationError(
+                key, f"'{key}' messages can't contain @everyone, @here or Discord mentions."
+            )
+    return json.dumps(value, ensure_ascii=False)
+
+
 def coerce_to_storage(key: str, value: Any) -> str:
     """Validate a client value against the registry and return its text form
     for ``group_configurations.config_value``. Raises ConfigValidationError."""
@@ -865,6 +935,9 @@ def coerce_to_storage(key: str, value: Any) -> str:
                 key, f"'{key}' must be one of {field.get('options')}."
             )
         return sval
+
+    if ftype == "messagelist":
+        return coerce_message_list(key, value)
 
     # channel / string / text / csv / bosslist
     if value is None:

@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import random
+import re
 import shutil
 from datetime import datetime, timedelta
 import interactions
@@ -25,7 +27,7 @@ from db.entitlements import has_custom_embeds
 from utils.app_emojis import emoji as app_emoji
 from utils.redis import redis_client
 from utils.messages import confirm_new_npc, confirm_new_item, name_change_message, new_player_message
-from utils.format import format_number, replace_placeholders, convert_from_ms
+from utils.format import format_number, replace_placeholders, replace_placeholders_in_text, convert_from_ms
 from utils.site_urls import PREMIUM_URL, WEBSITE_URL, group_link, player_link
 from db.app_logger import AppLogger
 import osrs_api
@@ -76,6 +78,42 @@ SUBMISSION_DM_TYPES = frozenset({
     'dm_drop', 'dm_pb', 'dm_ca', 'dm_clog', 'dm_pet',
     'dm_quest', 'dm_death', 'dm_diary', 'dm_level_up', 'dm_name_change',
 })
+
+# Group-configured death message variants: config key `death_message_variants`
+# holds a JSON string array (write-side validation and limits live in
+# web_api/config_registry.py; keep DEATH_MESSAGE_MAX_ENTRY_LENGTH in sync).
+# Helpers are module-level and pure so they unit-test without the service.
+DEATH_MESSAGE_MAX_ENTRY_LENGTH = 200
+# Message content pings for real (embed text doesn't). Saves are validated,
+# but strip again at send time so legacy/hand-edited rows can never ping.
+_DEATH_MENTION_RE = re.compile(r"@everyone|@here|<@[&!]?\d+>")
+
+
+def parse_death_variants(raw: str | None) -> list[str]:
+    """Parse the stored `death_message_variants` value, tolerating bad data:
+    anything that isn't a JSON array of usable strings is simply dropped."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [
+        e for e in parsed
+        if isinstance(e, str) and e.strip() and len(e) <= DEATH_MESSAGE_MAX_ENTRY_LENGTH
+    ]
+
+
+def pick_death_variant(variants: list[str], rng=None) -> str | None:
+    if not variants:
+        return None
+    return (rng or random).choice(variants)
+
+
+def strip_death_message_pings(text: str) -> str:
+    return _DEATH_MENTION_RE.sub("", text)
 
 
 # Removed global tracking dictionaries - now using database-based tracking via NotifiedSubmission table
@@ -240,6 +278,28 @@ class NotificationService:
 
     def _plugin_version_placeholder_map(self, data: dict) -> dict:
         return {"{plugin_version}": str(data.get("plugin_version") or "")}
+
+    def _death_message_config(self, db_session, group_id: int) -> tuple[list[str], bool]:
+        """Group's death message variants + whether they replace the embed
+        description (False = they become the message content line)."""
+        rows = db_session.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == group_id,
+            GroupConfiguration.config_key.in_(
+                ("death_message_variants", "death_message_as_embed_description")
+            ),
+        ).all()
+        raw_variants = None
+        as_embed_description = False
+        for row in rows:
+            if row.config_key == "death_message_variants":
+                # Mirror web_api/routes/config.py _effective_stored_value:
+                # the key is in LONG_VALUE_KEYS, so a saved list past 255
+                # chars lives in long_value with config_value blanked.
+                value = row.config_value or ""
+                raw_variants = (row.long_value or value) if len(value) < 10 else value
+            elif row.config_key == "death_message_as_embed_description":
+                as_embed_description = str(row.config_value or "").lower() in ("true", "1")
+        return parse_death_variants(raw_variants), as_embed_description
 
     def _build_default_quest_embed(self, data: dict, player_name: str, player_id: int, video_url: str = "") -> interactions.Embed:
         """
@@ -1748,6 +1808,26 @@ class NotificationService:
                 )
 
             content = f"{formatted_name} has died!"
+
+            variants, as_embed_description = self._death_message_config(db_session, group_id)
+            variant = pick_death_variant(variants)
+            if variant:
+                if as_embed_description:
+                    # The picked message wins over the template's description:
+                    # it is the more specific setting (documented in the
+                    # config field help). The content line stays the default.
+                    embed.description = replace_placeholders_in_text(variant, replacements)
+                else:
+                    # Message content renders no markdown links, so swap the
+                    # link-form tokens for their plain values.
+                    content_replacements = {
+                        **replacements,
+                        "{player_name}": formatted_name,
+                        "{video_link}": video_url or "",
+                    }
+                    content = strip_death_message_pings(
+                        replace_placeholders_in_text(variant, content_replacements)
+                    )
 
             # Prefer attaching MP4 if available; otherwise attach screenshot if present.
             video_attachment, video_local_path = (None, None)

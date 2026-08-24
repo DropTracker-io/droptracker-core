@@ -5,6 +5,7 @@ registry's ``allConfigKeys()`` (packages/api-types/src/group-config.ts). If the
 web repo isn't checked out beside this one, the parity check is skipped.
 """
 
+import json
 import os
 import re
 
@@ -103,6 +104,30 @@ class TestRegistry:
     def test_coerce_to_storage_leaves_unbounded_strings_alone(self):
         # Only fields that declare max_length get the trim treatment.
         assert reg.coerce_to_storage("group_description", " padded ") == " padded "
+
+    def test_coerce_to_storage_messagelist(self):
+        # Accepts a JSON string or a real list; stores normalized JSON.
+        raw = '["{player_name} has died to {source}!"]'
+        assert reg.coerce_to_storage("death_message_variants", raw) == raw
+        assert reg.coerce_to_storage(
+            "death_message_variants", ["a msg"]) == '["a msg"]'
+        # Unset shapes all normalize to "".
+        for empty in (None, "", "[]", []):
+            assert reg.coerce_to_storage("death_message_variants", empty) == ""
+
+    def test_coerce_to_storage_messagelist_rejects_bad(self):
+        for bad in (
+            "not json",            # unparseable
+            '{"a": 1}',            # not a list
+            '[1, 2]',              # non-string entries
+            '["  "]',              # blank entry
+            '["' + "x" * 201 + '"]',   # entry over the per-message cap
+            json.dumps([str(i) for i in range(31)]),  # too many entries
+            '["hi @everyone"]',    # content pings for real
+            '["hey <@&123>"]',
+        ):
+            with pytest.raises(reg.ConfigValidationError):
+                reg.coerce_to_storage("death_message_variants", bad)
 
     def test_coerce_to_storage_rejects_bad(self):
         with pytest.raises(reg.ConfigValidationError):

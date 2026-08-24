@@ -61,7 +61,7 @@ config_bp = Blueprint("v1_config", __name__)
 # The HoF service reads these via long_value when config_value is empty/short
 # (services/hall_of_fame.py _parse_group_boss_list), so the typed endpoints
 # must round-trip long_value or long lists silently truncate on save.
-LONG_VALUE_KEYS = {"personal_best_embed_boss_list"}
+LONG_VALUE_KEYS = {"personal_best_embed_boss_list", "death_message_variants"}
 
 
 @config_bp.get("/seasonal-status")
