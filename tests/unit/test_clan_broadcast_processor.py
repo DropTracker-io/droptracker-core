@@ -15,6 +15,7 @@ from data.submissions.clan_broadcast import (
     _clan_slug,
     _deterministic_guid,
     _notification_gate,
+    _notify_enabled_groups,
 )
 
 
@@ -441,6 +442,41 @@ def test_resolve_npc_without_a_source_never_queries():
     assert cb._resolve_npc(None, "") == (None, None)
 
 
+# ── per-kind notify toggles: tracking is not a re-opt-in to announcements ───
+
+def _enabled(monkeypatch, config, key, gids=(10, 11, 12)):
+    from utils import group_config as gc
+
+    monkeypatch.setattr(gc, "get_bulk", lambda _s, _g, _k: config)
+    return _notify_enabled_groups(object(), gids, key)
+
+
+def test_notify_toggle_off_excludes_the_group(monkeypatch):
+    """Group 144's live bug: notify_clogs=0 still got chat-relayed clog embeds."""
+    config = {(10, "notify_clogs"): "1", (11, "notify_clogs"): "0"}
+    assert _enabled(monkeypatch, config, "notify_clogs", gids=(10, 11)) == {10}
+
+
+def test_notify_toggle_unset_reads_as_off(monkeypatch):
+    """Matches is_truthy(gc.get(...)) in clog_processor/pet_processor: a group
+    with no row gets no plugin clog either, so no chat clog."""
+    assert _enabled(monkeypatch, {}, "notify_clogs", gids=(10,)) == set()
+
+
+def test_notify_toggle_accepts_both_truthy_spellings(monkeypatch):
+    config = {
+        (10, "notify_pets"): "true",
+        (11, "notify_pets"): "1",
+        (12, "notify_pets"): "false",
+    }
+    assert _enabled(monkeypatch, config, "notify_pets") == {10, 11}
+
+
+def test_notify_toggle_dedupes_repeated_group_ids(monkeypatch):
+    config = {(10, "notify_pbs"): "1"}
+    assert _enabled(monkeypatch, config, "notify_pbs", gids=(10, 10, 10)) == {10}
+
+
 # ── images-only gate vs a source that can never have an image ───────────────
 
 def _images_gate(monkeypatch, images_only, override=None):
@@ -602,6 +638,17 @@ def test_channel_presence_churn_is_never_mirrored(monkeypatch):
     assert _mirror(parsed=cb.parse_broadcast("Logger Off has left.")) == 0
     # Membership churn is rare and meaningful — it still syncs.
     assert _mirror(parsed=cb.parse_broadcast("Quitter has left the clan.")) == 2
+
+
+def test_client_channel_notices_are_never_mirrored(monkeypatch):
+    """The login hint is addressed to the relayer, not the clan: one line per
+    member per login, and nothing a Discord reader can act on."""
+    monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
+    _fake_bridge_module(monkeypatch, staged=2)
+    notice = "To talk in your clan's channel, start each line of chat with // or /c."
+    assert cb.parse_broadcast(notice).kind in cb.MIRROR_SUPPRESSED_KINDS
+    assert _mirror(parsed=cb.parse_broadcast(notice)) == 0
+    assert _mirror(parsed=cb.parse_broadcast("Attempting to join clan channel...")) == 0
 
 
 def test_unparsed_lines_still_mirror_so_a_rewording_cannot_mute_the_bridge(monkeypatch):

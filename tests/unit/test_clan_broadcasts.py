@@ -242,6 +242,14 @@ def test_collection_log_with_trailing_period():
         ("Goldens Acc has joined.", "presence", "Goldens Acc"),
         ("HerbRager has left.", "presence", "HerbRager"),
         ("Channel Tail has joined the clan channel.", "presence", "Channel Tail"),
+        (
+            "To talk in your clan's channel, start each line of chat with // or /c.",
+            "channel_notice",
+            None,
+        ),
+        ("Attempting to join clan channel...", "channel_notice", None),
+        ("You are now a member of the clan channel.", "channel_notice", None),
+        ("You have left the clan channel.", "channel_notice", None),
         ("Main Dangler has been defeated by Koishi Fumo in The Wilderness.", "pk", "Main Dangler"),
         (
             "Generous One has deposited 5,000,000 coins into the coffer.",
@@ -350,8 +358,14 @@ def test_solo_pb_has_no_bracket_in_line():
 
 # --- unknown ---------------------------------------------------------------
 
+def test_channel_notice_does_not_shadow_a_player_named_line():
+    """The notice branches all require the word "channel", so a real broadcast
+    about a player whose name opens like one still parses normally."""
+    assert parse_broadcast("You Are Nice received a drop: Dragon pickaxe.").kind == "item_drop"
+    assert parse_broadcast("Quitter has left the clan.").kind == "left_clan"
+
+
 def test_unknown_shapes_return_none():
-    assert parse_broadcast("To talk in your clan's channel, start each line of chat with // or /c.") is None
     assert parse_broadcast("gz!!") is None
     assert parse_broadcast("") is None
     assert parse_broadcast(None) is None

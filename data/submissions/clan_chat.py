@@ -9,6 +9,10 @@ shape as clan_broadcast), collapses the copies N relaying clanmates produce,
 and stages the line for the core bot's batched channel send
 (``services/clan_chat_bridge``). No DB rows: mirrored chatter is ephemeral.
 
+Lines the bridge itself put in the game's chat box are dropped here rather
+than relayed onward — see ``is_bridge_echo`` and the loop-safety note in
+``services/clan_chat_bridge``.
+
 Deliberately NOT reusing the broadcast processor: broadcasts are system lines
 that become tracked records; this is player speech that becomes display. The
 only shared pieces are the binding rule and the dedupe idiom.
@@ -44,12 +48,23 @@ async def clan_chat_processor(chat_data, external_session=None, world_type="main
         return SubmissionResponse(True, "Clan chat is not bridged for this world type")
 
     message = clean_broadcast_text(chat_data.get("message"))[:MESSAGE_MAX_CHARS]
-    sender = clean_broadcast_text(chat_data.get("sender"))[:SENDER_MAX_CHARS]
+    # Tested before the cap: a long Discord display name can push the marker
+    # past SENDER_MAX_CHARS, and the echo has to be recognizable either way.
+    full_sender = clean_broadcast_text(chat_data.get("sender"))
+    sender = full_sender[:SENDER_MAX_CHARS]
     clan_name = chat_data.get("clan_name")
     relayer_name = chat_data.get("player_name", chat_data.get("player"))
     account_hash = chat_data.get("acc_hash")
     if not message or not sender or not clan_name or not relayer_name or not account_hash:
         return SubmissionResponse(False, "Missing clan chat fields")
+
+    from services.clan_chat_bridge import is_bridge_echo
+
+    # A Discord line the bridge rendered into the game chat box, relayed back
+    # by a plugin build predating the client-side guard. Dropped ahead of auth:
+    # it is a guaranteed no-op, and auth costs a DB round trip to reach it.
+    if is_bridge_echo(full_sender):
+        return SubmissionResponse(True, "Ignored the bridge's own Discord line")
 
     relayer, authed, user_exists = await ensure_player_and_auth(
         session, str(relayer_name).strip(), str(account_hash), chat_data.get("auth_key")

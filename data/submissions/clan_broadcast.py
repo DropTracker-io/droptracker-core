@@ -36,6 +36,15 @@ Group binding: a broadcast belongs to the groups OF THE RELAYER whose
 requires an authed plugin account that is a member of the group, and the blast
 radius is capped to groups that explicitly opted in.
 
+Notification gates: binding decides whether a broadcast is RECORDED, never
+whether it is ANNOUNCED. Every ``_process_chat_*`` notify loop must re-apply
+its kind's existing per-group gates — ``minimum_value_to_notify`` /
+``send_stacks_of_items`` for drops, ``notify_pbs`` / ``notify_clogs`` /
+``notify_pets`` (via :func:`_notify_enabled_groups`) for the rest — plus
+:func:`_images_gate_blocks`. Opting into tracking is not opting back into an
+announcement the group switched off; clogs and pets shipped without their
+toggle and posted into channels that had them off (group 144, 2026-08-24).
+
 This intake ALSO owns the broadcast half of the two-way chat bridge. ``CLAN_MESSAGE``
 lines reach the server only as ``clan_broadcast`` payloads, but in game they sit
 in the same chat box as player speech, so ``_mirror_to_bridge`` stages the raw
@@ -43,8 +52,9 @@ line for the group's bridge channel (``services/clan_chat_bridge``) right after
 relayer auth — ahead of the tracked-kind filter, the tracking group binding and
 any record or notification, none of which the mirror depends on. Bridge and
 tracking are independent opt-ins; a group may run either alone. The parse runs
-first only so ``MIRROR_SUPPRESSED_KINDS`` can drop channel-presence churn;
-anything else, including a line that fails to parse at all, still mirrors.
+first only so ``MIRROR_SUPPRESSED_KINDS`` can drop channel-presence churn and
+the client's own channel notices; anything else, including a line that fails to
+parse at all, still mirrors.
 
 Dedupe is three-layered, because N clanmates may relay the same line and
 queue redelivery must be a no-op:
@@ -110,9 +120,13 @@ NOTIFY_WITHOUT_IMAGES_KEY = "clan_broadcast_notify_without_images"
 #: presence churn ("X has joined." / "X has left.") is the overwhelming majority
 #: of a busy clan's broadcast volume — 95 of 101 lines on a sample day — and
 #: carries nothing a Discord reader wants; in game it is a one-line status blip,
-#: in a mirror channel it is a wall. Membership changes (invite, left_clan,
-#: expelled) are rare and meaningful, so they still sync.
-MIRROR_SUPPRESSED_KINDS = frozenset({"presence"})
+#: in a mirror channel it is a wall. ``channel_notice`` is the same argument for
+#: the client's own channel chatter — the "To talk in your clan's channel, start
+#: each line of chat with // or /c." login hint is addressed to the relayer, not
+#: to the clan, and would otherwise post once per member per login. Membership
+#: changes (invite, left_clan, expelled) are rare and meaningful, so they still
+#: sync.
+MIRROR_SUPPRESSED_KINDS = frozenset({"presence", "channel_notice"})
 
 #: Fallback npc_list row for chat drops whose line names no resolvable source
 #: (untradeables, wordings without a "from X" clause, novel/garbled names).
@@ -600,6 +614,23 @@ async def _images_gate_blocks(session, group_id) -> bool:
     return True
 
 
+def _notify_enabled_groups(session, group_ids, key):
+    """Subset of ``group_ids`` whose per-kind notify toggle is on.
+
+    Broadcast tracking is an opt-in for *tracking*, not a blanket re-opt-in to
+    every announcement: a group that turned ``notify_clogs`` off did not ask
+    for clog embeds back because a clanmate now relays chat. Every kind must
+    honour the same toggle its plugin processor reads, and unset reads as off
+    to match ``is_truthy(gc.get(...))`` there. Chat tracking is main-world
+    only (see clan_broadcast_processor), so never a ``seasonal_`` prefix.
+    """
+    from utils import group_config as gc
+
+    gids = sorted(set(group_ids))
+    bulk = gc.get_bulk(session, gids, [key])
+    return {gid for gid in gids if gc.is_truthy(bulk.get((gid, key)))}
+
+
 def _notification_gate(group_id, group_config_values, unit_value, total_value):
     """Mirror drop_processor's per-group announce criteria."""
     from utils import group_config as gc
@@ -1036,12 +1067,10 @@ async def _process_chat_pb(
         debug_print(f"[ClanBroadcast] Ticker PB publish failed: {e}")
 
     # Group notifications: same notify_pbs + screenshot gates as pb_processor.
-    from utils import group_config as gc
-
-    bulk = gc.get_bulk(session, sorted(set(subject_group_ids)), ["notify_pbs"])
+    enabled = _notify_enabled_groups(session, subject_group_ids, "notify_pbs")
     notified = 0
     for gid in sorted(set(subject_group_ids)):
-        if not gc.is_truthy(bulk.get((gid, "notify_pbs"))):
+        if gid not in enabled:
             continue
         if await _images_gate_blocks(session, gid):
             continue
@@ -1130,8 +1159,11 @@ async def _process_chat_pet(
     from utils.osrs_pets import skilling_pet_source
 
     source = skilling_pet_source(parsed.item_name)
+    enabled = _notify_enabled_groups(session, subject_group_ids, "notify_pets")
     notified = 0
     for gid in sorted(set(subject_group_ids)):
+        if gid not in enabled:
+            continue
         if await _images_gate_blocks(session, gid):
             continue
         notification_data = {
@@ -1186,8 +1218,11 @@ async def _process_chat_clog(
 
     item = await ensure_item_by_name(session, parsed.item_name)
     _stat("clogs_notified")
+    enabled = _notify_enabled_groups(session, subject_group_ids, "notify_clogs")
     notified = 0
     for gid in sorted(set(subject_group_ids)):
+        if gid not in enabled:
+            continue
         if await _images_gate_blocks(session, gid):
             continue
         notification_data = {

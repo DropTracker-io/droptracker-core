@@ -23,9 +23,16 @@ heartbeat stamped by ``GET /notifications`` when the plugin polls with a
 ``clan`` parameter. Old plugin builds drop unknown envelope types silently,
 so this ships without a client-version gate.
 
-Loop safety is structural: the in-game rendering of a Discord line is
-client-side only (never a real chat message), so relayers can't re-mirror it;
-mirrored game lines are posted by the bot, and the listener ignores bots.
+Loop safety takes two guards, because only ONE of the directions closes
+itself: mirrored game lines are posted by the bot and the MessageCreate
+listener ignores bots, so Discord→game can't be re-fed. The other way round
+is not free — the plugin renders a Discord line client-side, but it renders
+it through ``client.addChatMessage``, which posts a real ``ChatMessage``
+event, so the line lands back in the relayer's own CLAN_CHAT subscriber and
+without a guard is relayed straight back to the channel it was typed in. The
+rendered sender carries :data:`ECHO_SENDER_MARKER`; the plugin drops those
+before relaying and this intake drops them again (:func:`is_bridge_echo`),
+which is what covers the installs still running a pre-fix build.
 
 Module-level imports are stdlib-only (same contract as
 plugin_notifications.py): anything Redis/DB/Discord-shaped is lazy-imported
@@ -83,6 +90,13 @@ CLAN_NAME_KEY = "clan_chat_name"
 #: Envelope type for Discord→game lines (plugin renders as a clan-chat-styled
 #: local message; unaware builds drop it).
 ENVELOPE_TYPE = "clan_chat_message"
+
+#: Stamped onto the Discord author's name by the plugin's renderer
+#: (``ChatMessageUtil.DISCORD_SENDER_MARKER``), and the only thing separating
+#: our own echoed line from a clanmate's. An OSRS display name is letters,
+#: digits, spaces, hyphens and underscores — never parentheses — so this
+#: marker cannot collide with a real sender.
+ECHO_SENDER_MARKER = "(Discord)"
 
 _channel_map_cache = {"expires": 0.0, "map": {}}
 _CHANNEL_MAP_TTL_SECONDS = 60
@@ -455,6 +469,16 @@ async def _send_mirror_message(bot, channel_id, content) -> int:
 
 
 # ── Discord → game ──────────────────────────────────────────────────────────
+
+def is_bridge_echo(sender) -> bool:
+    """Whether a relayed game line is our own Discord→game render coming back.
+
+    See the module docstring: the plugin's local render fires a real chat
+    event, so an install without the client-side guard relays the line to us.
+    Substring rather than suffix — the marker trails the name today, but the
+    sender is length-capped on both hops and the test has to survive a cut."""
+    return ECHO_SENDER_MARKER in str(sender or "")
+
 
 def fan_out_discord_message(clan_slug: str, sender: str, content: str) -> int:
     """Push one Discord line to every present clan member's plugin inbox.

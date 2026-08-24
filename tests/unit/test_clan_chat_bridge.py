@@ -292,3 +292,27 @@ def test_rate_limit_fails_open_when_redis_is_down(monkeypatch):
     monkeypatch.setattr(bridge, "_redis", boom)
     assert bridge.relayer_within_rate_limit(42) is True
     assert bridge._claim_first_sight("k", 60) is True
+
+
+# ── loop safety: our own Discord render coming back ─────────────────────────
+
+def test_bridge_echo_is_recognized_by_its_marker():
+    """The plugin renders a Discord line through client.addChatMessage, which
+    posts a real ChatMessage — so a build without the client-side guard relays
+    the line straight back to us, wearing the rendered sender."""
+    assert bridge.is_bridge_echo("Bob (Discord)") is True
+    assert bridge.is_bridge_echo("Bob (Discord)".upper()) is False  # marker is literal
+
+
+def test_bridge_echo_survives_a_truncated_sender():
+    """A 32-char Discord display name pushes the marker past the intake's
+    sender cap, so the test is a substring, not a suffix."""
+    long_name = "x" * 32 + " (Discord) trailing"
+    assert bridge.is_bridge_echo(long_name) is True
+
+
+def test_bridge_echo_never_fires_on_a_real_clanmate():
+    # OSRS display names are letters, digits, spaces, hyphens and underscores —
+    # a parenthesis cannot appear in one.
+    for name in ("Iron Botanist", "Discord", "Disc0rd", "Beast_Owned", "", None):
+        assert bridge.is_bridge_echo(name) is False

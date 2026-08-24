@@ -297,6 +297,22 @@ _COFFER_RE = re.compile(
     r"^(?P<player>.+?) has (?P<direction>deposited|withdrawn) "
     r"(?P<value>[\d,]+) coins (?:into|from) the (?:clan )?coffer\.?$"
 )
+#: Client-local channel notices: the game talking TO the relayer, not a
+#: broadcast ABOUT a clanmate. The login hint ("To talk in your clan's channel,
+#: start each line of chat with // or /c.") is the one every member sees every
+#: session — in game a one-off reminder, in a mirror channel a line per login
+#: per member. Every broadcast worth mirroring opens with a player name and a
+#: verb, so anchoring on second-person/instructional openers cannot shadow one;
+#: the "channel" requirement keeps the "You have left"/"You are now" branches
+#: off a membership change. Prefix-anchored: the tails are the wording most
+#: likely to drift.
+_CHANNEL_NOTICE_RE = re.compile(
+    r"^(?:To talk in your clan'?s? channel\b"
+    r"|Attempting to join .*\bchannel\b"
+    r"|You are now (?:a member of|in|talking in) .*\bchannel\b"
+    r"|You (?:have left|are not in) .*\bchannel\b)",
+    re.IGNORECASE,
+)
 
 
 def _classified(kind: str, player_group: str = "player"):
@@ -366,12 +382,22 @@ def _presence(m) -> ParsedBroadcast:
     )
 
 
+def _channel_notice(_m) -> ParsedBroadcast:
+    """Classify-only, and suppressed from the bridge mirror
+    (``clan_broadcast.MIRROR_SUPPRESSED_KINDS``). Carries no player: the line
+    is addressed to whoever relayed it, not about anybody."""
+    return ParsedBroadcast(kind="channel_notice")
+
+
 # Order matters only where prefixes overlap: the more specific "clue item" /
 # "collection log" / "special loot" phrasings never collide with the generic
 # "received a drop", so this is documentation more than necessity. PK-loss is
 # last of the "has been" family so invite/expelled win first, and presence sits
-# after _LEFT_RE so "has left the clan." stays a membership departure.
+# after _LEFT_RE so "has left the clan." stays a membership departure. Channel
+# notices lead: they are fixed prose with no name to capture, so nothing below
+# can claim one, and no name-led pattern should get the chance to try.
 _MATCHERS = (
+    (_CHANNEL_NOTICE_RE, _channel_notice),
     (_ITEM_DROP_RE, _item_drop),
     (_RAID_DROP_RE, _raid_drop),
     (_CLUE_ITEM_RE, _clue_item),
