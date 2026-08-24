@@ -556,6 +556,11 @@ class SemanticAPI:
     async def get_ca_tier_progress(self, current_points: int) -> tuple[float, int]:
         """
         Calculate combat achievement tier progress.
+
+        Note: a failed/partial wiki lookup returns (0.0, 0) here, which reads as
+        "no progress" rather than "unknown". Anything user-facing should go
+        through ``services.ca_tiers`` instead — it caches the thresholds,
+        rejects partial answers and falls back to pinned values.
         
         Args:
             current_points: Current CA points
@@ -627,6 +632,9 @@ class SemanticAPI:
     async def get_current_ca_tier(self, current_points: int) -> Optional[str]:
         """
         Get the current combat achievement tier for given points.
+
+        Returns None both for "below Easy" and for "the wiki lookup failed" —
+        see the note on get_ca_tier_progress; prefer ``services.ca_tiers``.
         
         Args:
             current_points: Current CA points
