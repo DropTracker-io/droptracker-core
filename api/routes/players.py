@@ -438,7 +438,7 @@ def _group_configs_for(player_name, acc_hash, db_session):
                             "send_pbs": get_config_value(current_group_configs, "notify_pbs"),
                             "send_clogs": get_config_value(current_group_configs, "notify_clogs"),
                             "send_cas": get_config_value(current_group_configs, "notify_cas"),
-                            "send_pets": get_config_value(current_group_configs, "send_pets"),
+                            "send_pets": get_config_value(current_group_configs, "notify_pets"),
                             "send_deaths": get_config_value(current_group_configs, "notify_deaths"),
                             "send_diaries": get_config_value(current_group_configs, "notify_diaries"),
                             "send_xp": get_config_value(current_group_configs, "notify_levels"),
