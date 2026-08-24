@@ -117,10 +117,13 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     pb_ms = _time_to_ms(pb_data.get("personal_best_ms", pb_data.get("best_time", 0)))
     if pb_ms == 0 and current_ms == 0:
         return
-    # Canonical team encoding ("Solo", "2", …, "11-15") — see suggestion #50.
-    from utils.npc_names import sanitize_team_size
+    # Canonical team encoding ("Solo", "2", …, "11-15") — see suggestion #50 —
+    # capped at the number of players the boss can actually be fought with, so a
+    # contaminated client roster can't invent a 7-man Theatre of Blood board
+    # (suggestion #140).
+    from utils.npc_names import clamp_team_size
 
-    team_size = sanitize_team_size(pb_data.get("team_size", 1))
+    team_size = clamp_team_size(boss_name, pb_data.get("team_size", 1))
     # The embed path delivers "true"/"false" strings; the form path booleans.
     is_personal_best = pb_data.get("is_new_pb", pb_data.get("is_pb", False))
     is_personal_best = str(is_personal_best).strip().lower() in ("true", "1", "yes")

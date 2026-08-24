@@ -234,6 +234,64 @@ def sanitize_team_size(raw) -> str:
     return s
 
 
+#: Party sizes the game itself enforces, keyed by base-raid match key. A team
+#: size above the cap is not a big raid — it is proof the client's roster is
+#: contaminated, because these raids publish a fixed number of member slots
+#: (ToB five health orbs, ToA eight) and cannot hold more players than that.
+#: Chambers of Xeric is deliberately absent: its party has no small fixed
+#: ceiling, so "24" there is a real bracket.
+RAID_TEAM_SIZE_CAPS = {
+    "theatre-of-blood": 5,
+    "tombs-of-amascut": 8,
+}
+
+#: Leading integer of a canonical team-size token — "6" and the low end of the
+#: "6+" / "11-15" brackets. A bracket is over the cap when its *lowest* member
+#: already is.
+_TEAM_SIZE_LEAD = re.compile(r"^(\d+)")
+
+
+def team_size_cap(npc_name: str | None) -> int | None:
+    """Largest team ``npc_name`` can actually be fought in, or None if unbounded.
+
+    Mode variants inherit the base raid's cap: "Theatre of Blood: Hard Mode"
+    and "Theatre of Blood: Entry Mode" are both five-player raids.
+    """
+    key = npc_match_key(npc_name)
+    if not key:
+        return None
+    cap = RAID_TEAM_SIZE_CAPS.get(key)
+    if cap is not None:
+        return cap
+    base = npc_base_slug(key)
+    return RAID_TEAM_SIZE_CAPS.get(base) if base else None
+
+
+def clamp_team_size(npc_name: str | None, raw) -> str:
+    """``sanitize_team_size`` plus the boss's real party ceiling.
+
+    Plugin 6.0 (commit 9c259fc, 2026-08-04) started bracketing raid PBs by the
+    accumulated ``NearbyPlayerTracker`` roster, which is not bounded to one
+    raid: names from consecutive runs pile up, so Theatre of Blood times were
+    submitted as 6-, 7-, 8- and 9-player raids and the Hall of Fame grew boards
+    for team sizes the game cannot produce (suggestion #140).
+
+    Clamping to the ceiling rather than dropping the entry keeps a real kill
+    time on a real board. The contaminated count is a union that is always at
+    least the true size, so the cap is the closest defensible value; when the
+    true team was smaller the time simply ranks low on the capped board rather
+    than inventing a phantom one.
+    """
+    size = sanitize_team_size(raw)
+    cap = team_size_cap(npc_name)
+    if cap is None or size == "Solo":
+        return size
+    lead = _TEAM_SIZE_LEAD.match(size)
+    if lead and int(lead.group(1)) > cap:
+        return str(cap)
+    return size
+
+
 def npc_slug_sql_expr(column: str) -> str:
     """SQL computing ``npc_slug(column)`` (MariaDB/MySQL 8 REGEXP_REPLACE).
 

@@ -206,6 +206,58 @@ def test_sanitize_team_size():
         assert t(v) == v
 
 
+def test_team_size_cap_is_the_games_own_party_ceiling():
+    from utils.npc_names import team_size_cap
+
+    # Five health orbs / eight health orbs — the raid cannot hold more.
+    assert team_size_cap("Theatre of Blood") == 5
+    assert team_size_cap("Tombs of Amascut") == 8
+    # Mode variants inherit the base raid's ceiling.
+    assert team_size_cap("Theatre of Blood: Hard Mode") == 5
+    assert team_size_cap("Theatre of Blood: Entry Mode") == 5
+    assert team_size_cap("Tombs of Amascut: Expert Mode") == 8
+    assert team_size_cap("Tombs of Amascut: Entry Mode") == 8
+    # Spelling-insensitive, like every other lookup in this module.
+    assert team_size_cap("theatre of blood hard mode") == 5
+    # Chambers of Xeric masses legitimately; nothing else is capped.
+    assert team_size_cap("Chambers of Xeric") is None
+    assert team_size_cap("Chambers of Xeric Challenge Mode") is None
+    assert team_size_cap("Vorkath") is None
+    assert team_size_cap(None) is None
+    assert team_size_cap("") is None
+
+
+def test_clamp_team_size_rejects_impossible_raid_teams():
+    """Suggestion #140: a contaminated client roster submitted Theatre of Blood
+    times as 6-, 7-, 8- and 9-player raids, and the Hall of Fame rendered a
+    board per bucket."""
+    from utils.npc_names import clamp_team_size as c
+
+    assert c("Theatre of Blood", "9") == "5"
+    assert c("Theatre of Blood", "6") == "5"
+    assert c("Theatre of Blood: Hard Mode", 8) == "5"
+    assert c("Tombs of Amascut: Expert Mode", "15") == "8"
+    # A bracket is over the cap when its lowest member already is.
+    assert c("Theatre of Blood", "6+") == "5"
+    assert c("Theatre of Blood", "11-15") == "5"
+
+    # Real sizes pass through untouched, cap included.
+    for size in ("Solo", "2", "3", "4", "5"):
+        assert c("Theatre of Blood", size) == size
+    assert c("Tombs of Amascut", "8") == "8"
+
+    # Uncapped bosses keep every bracket they legitimately produce.
+    assert c("Chambers of Xeric", "24+") == "24+"
+    assert c("Chambers of Xeric", "11-15") == "11-15"
+    assert c("The Nightmare", "6") == "6"
+
+    # Still does sanitize_team_size' job on the way through.
+    assert c("Theatre of Blood", "(3 players)") == "3"
+    assert c("Theatre of Blood", "0") == "Solo"
+    assert c("Theatre of Blood", None) == "Solo"
+    assert c(None, "9") == "9"
+
+
 def test_sql_expr_matches_python_rule():
     expr = npc_slug_sql_expr("npc_name")
     assert "REGEXP_REPLACE" in expr and "LOWER(npc_name)" in expr

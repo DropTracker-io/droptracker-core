@@ -218,3 +218,29 @@ class TestRaidMetricContract:
         assert row.personal_best == 832800
         assert row.new_pb is False
         assert notify.await_count == 0
+
+
+class TestTeamSizeCeiling:
+    """Suggestion #140: the Hall of Fame grew "7 players" and "8 players"
+    Theatre of Blood boards, and a member "randomly" gained a 6-man ToB PB.
+
+    Plugin 6.0 (commit 9c259fc, 2026-08-04) started bracketing raid PBs by the
+    accumulated ``NearbyPlayerTracker`` roster, which piles up names across
+    runs — so intake has to refuse a team the raid cannot hold, whatever the
+    client says. The plugin fix only reaches players who update; this one
+    protects every board immediately.
+    """
+
+    def _stored_team_size(self, submitted):
+        payload = _payload(current_ms=888000, pb_ms=0, is_pb=True)
+        payload["team_size"] = submitted
+        _run(payload, row=None)
+        return db.PersonalBestEntry.call_args.kwargs["team_size"]
+
+    def test_impossible_tob_team_is_clamped_to_five(self):
+        for submitted in ("6", "7", "8", "9", 9):
+            assert self._stored_team_size(submitted) == "5", submitted
+
+    def test_real_tob_team_sizes_are_untouched(self):
+        for submitted in ("Solo", "2", "3", "4", "5"):
+            assert self._stored_team_size(submitted) == submitted
