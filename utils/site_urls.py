@@ -19,7 +19,23 @@ Deliberately pure: stdlib only, no DB and no network, so it is importable from
 the bots, the notification service and the tests alike.
 """
 
+from urllib.parse import quote
+
 WEBSITE_URL = "https://www.droptracker.io"
+
+
+def _seg(value) -> str:
+    """One URL path segment, percent-encoded.
+
+    Ids need no encoding, so this is a no-op on the intended input. It exists
+    for the input that is *not* intended: a display name passed where an id
+    belongs. OSRS names carry spaces (``Beast Owned``), and a raw space ends
+    the URL as far as Discord's ``[label](url)`` parser is concerned — the link
+    renders as broken text instead of a link. Encoding turns that mistake into
+    a URL the site still resolves (``/players/Beast%20Owned`` -> the resolver
+    re-slugifies it) rather than a dead one.
+    """
+    return quote(str(value), safe="")
 
 #: Where a "give us money" prompt should point. XF had per-group upgrade pages
 #: under /groups/{ref}/upgrades and a personal one under /account/premium; both
@@ -30,37 +46,37 @@ PREMIUM_URL = f"{WEBSITE_URL}/premium"
 
 def player_url(player_id) -> str:
     """Public profile page for a player."""
-    return f"{WEBSITE_URL}/players/{player_id}"
+    return f"{WEBSITE_URL}/players/{_seg(player_id)}"
 
 
 def group_url(group_id) -> str:
     """Public profile page for a group."""
-    return f"{WEBSITE_URL}/groups/{group_id}"
+    return f"{WEBSITE_URL}/groups/{_seg(group_id)}"
 
 
 def npc_url(npc_id) -> str:
     """Public NPC page (drop table, loot totals, personal-best boards)."""
-    return f"{WEBSITE_URL}/npcs/{npc_id}"
+    return f"{WEBSITE_URL}/npcs/{_seg(npc_id)}"
 
 
 def item_url(item_id) -> str:
     """Public item page (recent receivers, top collectors, drop sources)."""
-    return f"{WEBSITE_URL}/items/{item_id}"
+    return f"{WEBSITE_URL}/items/{_seg(item_id)}"
 
 
 def event_url(event_id) -> str:
     """Public event page."""
-    return f"{WEBSITE_URL}/events/{event_id}"
+    return f"{WEBSITE_URL}/events/{_seg(event_id)}"
 
 
 def group_subscription_url(group_id) -> str:
     """A group's subscription tab — where an admin actually manages the plan."""
-    return f"{WEBSITE_URL}/groups/{group_id}/subscription"
+    return f"{WEBSITE_URL}/groups/{_seg(group_id)}/subscription"
 
 
 def group_submissions_url(group_id) -> str:
     """A group's manual-submission review queue."""
-    return f"{WEBSITE_URL}/groups/{group_id}/submissions"
+    return f"{WEBSITE_URL}/groups/{_seg(group_id)}/submissions"
 
 
 def player_link(player_name, player_id) -> str:

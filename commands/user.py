@@ -21,6 +21,8 @@ from db.player_claims import claim_player, unclaim_player
 from services.components import build_help_components
 from services.points import award_points_to_player
 from utils.format import format_time_since_update, get_command_id, get_player_by_claim_rsn
+from utils.site_urls import player_url
+from utils.app_emojis import emoji as app_emoji
 from utils.wiseoldman import check_user_by_username
 from .utils import try_create_user, is_admin, is_user_authorized
 from sqlalchemy import func
@@ -441,10 +443,10 @@ class UserCommands(Extension):
                 embed.add_field(name="Group", value=f"You've been added to **{result.get('group_name')}**.", inline=False)
             embed.add_field(name=f"What's next?",value=f"**Configure your account settings**\n" + 
                             "You can visit [our website](https://www.droptracker.io/), and sign-in with your Discord account to access privacy and visibility settings for your characters.\n" + 
-			                "**Do you have <:Construction:1533062962418417704> 83 Construction?**\n" +
+			                f"**Do you have {app_emoji('construction')} 83 Construction?**\n" +
                             "> You can visit your Adventure Log (Achievement Gallery room of your own POH) to load all of your existing personal bests into our database instantly.\n" + 
 			                "**Open your Collection Log**\n" + 
-			                f"> Upload all (un)locked Collection Log slots instantly--just open the interface with our plugin enabled, then visit [your profile](https://www.droptracker.io/players/{result.get('player_name')})!", inline=False)
+			                f"> Upload all (un)locked Collection Log slots instantly--just open the interface with our plugin enabled, then visit [your profile]({player_url(result.get('player_id'))})!", inline=False)
             embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
             embed.set_footer(text="Powered by the DropTracker | https://www.droptracker.io/")
             await ctx.send(embed=embed)

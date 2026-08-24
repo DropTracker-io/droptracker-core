@@ -78,3 +78,37 @@ def test_premium_url_is_the_live_upgrade_page():
     # XF served upgrades from /groups/{ref}/upgrades and /account/premium; both
     # 404 now, and the hand-written /groups/upgrades never existed at all.
     assert PREMIUM_URL == f"{WEBSITE_URL}/premium"
+
+
+def test_a_name_passed_where_an_id_belongs_still_yields_a_usable_url():
+    # The /claim-rsn success embed used to interpolate the *name* into the
+    # profile URL. Discord's `[label](url)` parser ends the URL at the first
+    # space, so "Beast Owned" rendered as broken text rather than a link.
+    # Ids are still what callers should pass — this only makes the mistake
+    # survivable, since the site's resolver re-slugifies whatever it gets.
+    url = player_url("Beast Owned")
+    assert " " not in url
+    assert url == f"{WEBSITE_URL}/players/Beast%20Owned"
+    assert group_url("Mr. Fluffy's Clan") == f"{WEBSITE_URL}/groups/Mr.%20Fluffy%27s%20Clan"
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        player_link("Beast Owned", "Beast Owned"),
+        group_link("Some Clan", "Some Clan"),
+        npc_link("Chambers of Xeric", "Chambers of Xeric"),
+    ],
+)
+def test_markdown_links_never_carry_a_space_inside_the_url(link):
+    # Whatever went in, the parenthesised half has to be one unbroken token.
+    url = link[link.index("](") + 2 : -1]
+    assert " " not in url, f"{link} breaks Discord's link parser"
+
+
+def test_ids_are_untouched_by_the_encoding_guard():
+    # The guard must be a no-op on the intended input, ints and int-ish strings
+    # alike — otherwise every link in the bot changes shape.
+    assert player_url(5) == f"{WEBSITE_URL}/players/5"
+    assert player_url("5") == f"{WEBSITE_URL}/players/5"
+    assert group_subscription_url(176) == f"{WEBSITE_URL}/groups/176/subscription"
