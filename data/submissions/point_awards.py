@@ -674,9 +674,13 @@ async def _check_and_award_points(
     # Optional group-only eligibility gate:
     # When enabled, points are awarded only for solo content or for group content
     # where at least one additional listed participant is in this same group.
+    # "Group content" means a split-eligible source: when force_no_split is set
+    # (group no_split rule or the global split-source policy), the source is not
+    # shared content, so bystanders from the nearby-player scan must not make a
+    # solo drop look like an unaccompanied group kill.
     require_group_only = await check_points_require_group_only_mode(group_id, external_session)
     point_log(f"require_group_only={require_group_only}")
-    if require_group_only and included_player_names and not in_group_participants:
+    if require_group_only and included_player_names and not force_no_split and not in_group_participants:
         point_log(
             f"require_group_only blocked all points for reason={reason}"
         )
