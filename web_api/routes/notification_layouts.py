@@ -3,7 +3,7 @@ routes/embeds.py, over ``group_component_layouts``.
 
   GET    /api/v1/notification-layouts/meta                  (any signed-in user)
   GET    /api/v1/groups/{id}/notification-layouts           (session + group admin)
-  PUT    /api/v1/groups/{id}/notification-layouts/{type}    (group admin + pilot)
+  PUT    /api/v1/groups/{id}/notification-layouts/{type}    (group admin + premium)
   DELETE /api/v1/groups/{id}/notification-layouts/{type}    (session + group admin)
 
 Deliberately shaped like routes/event_layouts.py — same ``/meta`` endpoint
@@ -18,10 +18,10 @@ its type is switched over. DELETE removes the row entirely and the type is back
 on the embed path.
 
 Writes are gated on ``component_layout.components_enabled_for_group`` — the
-same allowlist the send path checks — rather than on an entitlement, so the
-editor can never save something the bot will not honour. GET reports that gate
-as ``enabled`` instead of refusing, so the frontend can tell "not in the pilot"
-apart from "the backend is down".
+same check the send path makes, so the editor can never save something the bot
+will not honour. GET reports that gate as ``enabled`` instead of refusing, so
+the frontend can tell "needs an upgrade" apart from "the backend is down", and
+so an unentitled admin can still see what the layouts would look like.
 
 ``services.component_layout`` is lazy-imported inside handlers: the unit-test
 conftest stubs the ``services`` package (event_discord.py pattern).
@@ -73,14 +73,14 @@ def _validate_notification_type(cl, notification_type: str) -> None:
         )
 
 
-def _assert_pilot(cl, group_id: int) -> None:
+def _assert_entitled(cl, group_id: int) -> None:
     if not cl.components_enabled_for_group(group_id):
         abort_problem(
             403,
-            "Not available yet",
-            "Component layouts are being trialled on a small number of groups. "
+            "Upgrade required",
+            "Choosing how your notifications are built is part of a paid plan. "
             "Your notifications keep using their embed templates.",
-            extra={"code": "components_pilot_only"},
+            extra={"code": "components_requires_upgrade"},
         )
 
 
@@ -217,9 +217,9 @@ async def put_group_notification_layout(group_id: int, notification_type: str):
         with db_session() as s:
             user = load_user(s, user_id)
             assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
-            # After the admin check: whether a group is in the pilot is not
+            # After the admin check: what a group's plan includes is not
             # something a non-admin needs to learn by probing.
-            _assert_pilot(cl, group_id)
+            _assert_entitled(cl, group_id)
 
             row = _load_row(s, group_id, notification_type)
             before = _serialize_row(row) if row is not None else None

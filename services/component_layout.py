@@ -95,6 +95,33 @@ def _substitute_line(text: str, replacements: Dict[str, Any]) -> str:
         return text
 
 
+def _line_values_are_all_blank(line: str, replacements: Dict[str, Any]) -> bool:
+    """True when every placeholder on this line resolves to nothing.
+
+    A line exists to carry a value, so "**Location** {location}" with no
+    location should disappear rather than render a heading with nothing under
+    it. This is what `replace_placeholders` does for an embed field whose value
+    resolves empty, and the reason a label always belongs on the same line as
+    the value it introduces.
+
+    Lines carrying a token this notification never defines are left alone —
+    the unresolved-token rule below already drops those.
+    """
+    tokens = _PLACEHOLDER_RE.findall(line)
+    if not tokens:
+        return False
+    saw_known = False
+    for token in tokens:
+        if token in replacements:
+            saw_known = True
+            try:
+                if str(replacements[token]).strip():
+                    return False
+            except Exception:
+                return False
+    return saw_known
+
+
 def _substitute(text: str, replacements: Dict[str, Any]) -> str:
     """Substitute per line, dropping any line left holding an unresolved token.
 
@@ -108,6 +135,8 @@ def _substitute(text: str, replacements: Dict[str, Any]) -> str:
         return ""
     kept = []
     for line in text.split("\n"):
+        if _line_values_are_all_blank(line, replacements):
+            continue
         resolved = _substitute_line(line, replacements)
         if line.strip() and not resolved.strip():
             continue
@@ -498,6 +527,11 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
     "total_level": {"help": "The player's total level", "sample": "2154"},
     "total_xp": {"help": "The player's total XP", "sample": "312,441,092"},
     "combat_level": {"help": "The player's combat level", "sample": "126"},
+    "milestone_xp": {
+        "help": "XP milestone reached, on the milestone notifications that share this layout (empty on an ordinary level-up)",
+        "sample": "25,000,000",
+        "optional": True,
+    },
     # Quests
     "quest_name": {"help": "The quest completed", "sample": "Desert Treasure II"},
     "quests_completed": {"help": "Quests completed", "sample": "158"},
@@ -561,9 +595,13 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
     "level_up": {
         "label": "Level up",
         "group": "Progress",
-        "description": "Posted when a member reaches a new level.",
+        "description": (
+            "Posted when a member reaches a new level. XP and total-level "
+            "milestones use this layout too."
+        ),
         "tokens": ("skill_name", "skills_names", "skills_text", "new_level", "levels_gained",
-                   "xp_total", "total_level", "total_xp", "combat_level") + _MEDIA_TOKENS,
+                   "xp_total", "total_level", "total_xp", "combat_level",
+                   "milestone_xp") + _MEDIA_TOKENS,
     },
     "quest": {
         "label": "Quest",
@@ -608,115 +646,213 @@ def tokens_for(notification_type: str) -> List[Dict[str, Any]]:
 
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
-# Starting points a group can edit, rather than a blank editor. The personal
-# best layout mirrors services/pb_components.py, so switching a group over
-# produces what the samples showed; the rest follow the same shape — a headline
-# line, the subject beside its icon, the stats worth reading, then the proof.
+# Starting points a group can edit, rather than a blank editor.
+#
+# These deliberately mirror the shipped embed templates (the group-1 rows in
+# ``group_embeds``, and the ``_build_default_*_embed`` builders for the three
+# types that have no row): same headline, same wording, same figures in the
+# same order, with the embed's title as a heading and each field as a
+# "**Name** value" line. Switching a type over should look like the message the
+# group already gets, not like a different product — anyone who wants the
+# component-only extras (a thumbnail beside the text, stacked screenshots, link
+# buttons) can add them from there.
 #
 # Each is written so that a player with no screenshot, no character model and
 # no points awarded still produces a message: every line that can be absent
 # holds its token alone, so losing the value loses the line and nothing else.
+# A label with no token on its line would survive its own data disappearing,
+# so labels for optional values always sit beside them.
 _ITEM_ICON = "https://www.droptracker.io/img/itemdb/{item_id}.png"
 
+# The three point fields every loot/achievement embed carries. Each value is
+# omitted from the replacement map rather than blanked when it does not apply
+# (see notification_service._group_points_placeholder_map), so an unearned
+# point line drops and the rest of the block stays.
+_POINTS_LINES = (
+    "**Points Earned** `{group_points_awarded}`\n"
+    "**Total Points** `{group_points_receiver_total}`\n"
+    "**Members Awarded** {group_points_members_awarded}"
+)
+
 DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
+    # Mirrors group-1 embed "drop": title {item_name}, description
+    # "G/E Value: `{item_value}`", then the Player Stats / Group Stats fields.
     "drop": {
         "accent_color": "#c8aa6e",
         "blocks": [
-            {"type": "text", "content": "**{player_name}** received a drop"},
+            {"type": "text", "content": "**{player_name}** received a drop:"},
             {"type": "separator", "divider": True},
             {
                 "type": "section",
-                "content": "### {item_name}\n## {item_value}\nfrom **{npc_name}**",
+                "content": "## {item_name}\nG/E Value: `{item_value}`\nfrom **{npc_name}**",
                 "thumbnail": _ITEM_ICON,
             },
             {"type": "text", "content": "**Kill count** {kill_count}"},
-            {"type": "text", "content": "**Points** {group_points_awarded}"},
+            {
+                "type": "text",
+                "content": (
+                    "**Player Stats**\n"
+                    "{month_name} total: {player_total_month}\n"
+                    "Group Rank: {group_rank}\n"
+                    "Global Rank: {global_rank}"
+                ),
+            },
+            {
+                "type": "text",
+                "content": (
+                    "**Group Stats**\n"
+                    "Players tracked: {user_count}\n"
+                    "{month_name} total: {group_total_month}\n"
+                    "Rank: {group_to_group_rank}"
+                ),
+            },
+            {"type": "text", "content": _POINTS_LINES},
             {"type": "media", "urls": ["{image_url}"]},
         ],
     },
+    # Mirrors group-1 embed "clog".
     "clog": {
         "accent_color": "#c8aa6e",
         "blocks": [
-            {"type": "text", "content": "**{player_name}** filled a collection log slot"},
+            {
+                "type": "text",
+                "content": "**{player_name}** has added an item to their collection log!",
+            },
             {"type": "separator", "divider": True},
             {
                 "type": "section",
-                "content": "### {item_name}\n{collection_name}",
+                "content": (
+                    "## {item_name}\n"
+                    "They currently have `{kc_received}` kc at `{npc_name}`"
+                ),
                 "thumbnail": _ITEM_ICON,
             },
-            {"type": "text", "content": "**Kill count** {kc_received}"},
+            {"type": "text", "content": "**Player Stats**\nLoot this month: `{player_loot_month}`"},
+            {"type": "text", "content": "**Group Stats**\nTracked Members: `{total_tracked}`"},
+            {"type": "text", "content": _POINTS_LINES},
             {"type": "media", "urls": ["{image_url}"]},
         ],
     },
+    # Mirrors group-1 embed "pb", with the one addition components make
+    # possible: the player's rendered character beside the time. Absent for
+    # anyone who has not uploaded a model, which drops the thumbnail and
+    # leaves the rest of the section intact.
     "pb": {
         "accent_color": "#c8aa6e",
         "blocks": [
-            {"type": "text", "content": "**{player_name}** has achieved a new personal best"},
+            {
+                "type": "text",
+                "content": "**{player_name}** has achieved a new personal best:",
+            },
             {"type": "separator", "divider": True},
             {
                 "type": "section",
-                "content": "### {npc_name}\n# {personal_best}",
+                "content": "## {npc_name}\nTime achieved: **{personal_best}**",
                 "thumbnail": "{gear_image_url}",
             },
-            {"type": "text", "content": "**Team size** {team_size}  •  **Global rank** {global_rank}"},
+            {
+                "type": "text",
+                "content": (
+                    "**Team size** {team_size}\n"
+                    "**Group Rank** {group_rank}/{total_ranked_group}\n"
+                    "**Global Rank** {global_rank}/{total_ranked_global}"
+                ),
+            },
+            {"type": "text", "content": _POINTS_LINES},
             {"type": "media", "urls": ["{image_url}"]},
         ],
     },
+    # Mirrors group-1 embed "ca". {task_name} arrives as a markdown wiki link.
     "ca": {
         "accent_color": "#c8aa6e",
         "blocks": [
-            {"type": "text", "content": "**{player_name}** completed a combat achievement"},
+            {
+                "type": "text",
+                "content": "**{player_name}** has completed a combat achievement!",
+            },
             {"type": "separator", "divider": True},
-            {"type": "text", "content": "### {task_name}\n{task_tier} • **{points_awarded}** points"},
-            {"type": "text", "content": "-# {progress}% of the way to {next_tier}"},
+            {
+                "type": "text",
+                "content": "{task_name} ({task_tier} - `{points_awarded}` points)",
+            },
+            {
+                "type": "text",
+                "content": (
+                    "**Current tier** {current_tier} ({total_points} pts)\n"
+                    "**Progress to {next_tier}** `{progress}%` ({points_left} pts)"
+                ),
+            },
+            {"type": "text", "content": _POINTS_LINES},
             {"type": "media", "urls": ["{image_url}"]},
         ],
     },
+    # Mirrors group-1 embed "pet".
     "pet": {
         "accent_color": "#c8aa6e",
         "blocks": [
-            {"type": "text", "content": "**{player_name}** has a new pet"},
+            {"type": "text", "content": "**{player_name}** has acquired a new pet!"},
             {"type": "separator", "divider": True},
-            {"type": "text", "content": "### {pet_name}\nfrom **{source}** at **{killcount}** kc"},
+            {"type": "text", "content": "## {pet_name}\nReceived at `{killcount}`"},
+            {"type": "text", "content": _POINTS_LINES},
             {"type": "media", "urls": ["{image_url}"]},
         ],
     },
+    # Mirrors group-1 embed "level_up", including its green. The level-up
+    # sender builds no points map, so no points block here.
     "level_up": {
-        "accent_color": "#c8aa6e",
+        "accent_color": "#2ECC71",
         "blocks": [
-            {"type": "text", "content": "**{player_name}** levelled up"},
+            {"type": "text", "content": "**{player_name}** levelled-up:"},
             {"type": "separator", "divider": True},
-            {"type": "text", "content": "### {skills_text}"},
-            {"type": "text", "content": "**Total level** {total_level}  •  **Combat** {combat_level}"},
+            {"type": "text", "content": "## Levels achieved: {skills_text}"},
+            {
+                "type": "text",
+                "content": (
+                    "**Total level** `{total_level}`\n"
+                    "**Combat level** `{combat_level}`\n"
+                    "**Total XP** `{total_xp}`"
+                ),
+            },
             {"type": "media", "urls": ["{image_url}"]},
         ],
     },
+    # No group-1 row for quest/death/diary — these mirror the hardcoded
+    # _build_default_*_embed builders in notification_service.py instead,
+    # colours included.
     "quest": {
-        "accent_color": "#c8aa6e",
+        "accent_color": "#5A8DEE",
         "blocks": [
-            {"type": "text", "content": "**{player_name}** completed a quest"},
+            {"type": "text", "content": "**{player_name}** completed a quest!"},
             {"type": "separator", "divider": True},
-            {"type": "text", "content": "### {quest_name}"},
-            {"type": "text", "content": "**{quests_completed}**/**{total_quests}** quests • **{total_quest_points}** quest points"},
+            {"type": "text", "content": "## {quest_name}"},
+            {
+                "type": "text",
+                "content": (
+                    "**Quest Progress** `{quests_completed}`/`{total_quests}` ({completion_percentage})\n"
+                    "**Quest Points** `{quest_points}`/`{total_quest_points}` ({qp_percentage})"
+                ),
+            },
             {"type": "media", "urls": ["{image_url}"]},
         ],
     },
     "death": {
-        "accent_color": "#8b2f2f",
+        "accent_color": "#B23B3B",
         "blocks": [
-            {"type": "text", "content": "**{player_name}** died"},
+            {"type": "text", "content": "**{player_name}** has died!"},
             {"type": "separator", "divider": True},
-            {"type": "text", "content": "### Killed by {killer}"},
-            {"type": "text", "content": "-# {location}"},
+            {"type": "text", "content": "**Killed By** {source}\n**Location** {location}"},
             {"type": "media", "urls": ["{image_url}"]},
         ],
     },
     "diary": {
-        "accent_color": "#c8aa6e",
+        "accent_color": "#5A8DEE",
         "blocks": [
-            {"type": "text", "content": "**{player_name}** completed an achievement diary"},
+            {
+                "type": "text",
+                "content": "**{player_name}** completed an achievement diary!",
+            },
             {"type": "separator", "divider": True},
-            {"type": "text", "content": "### {diary_name}\n{diary_tier}"},
+            {"type": "text", "content": "## {diary_tier} {diary_name}"},
             {"type": "media", "urls": ["{image_url}"]},
         ],
     },
@@ -738,32 +874,52 @@ def _deep_copy(value):
 
 
 # ── Resolution ───────────────────────────────────────────────────────────────
-# Which groups may send notifications as components. Deliberately a hard-coded
-# allowlist rather than an entitlement while this is being trialled: it changes
-# what every member of a group receives, so it should not be switchable by
-# anyone but us until the builder has been proven in the global group.
-COMPONENTS_PILOT_GROUP_IDS = {2}
+# Component layouts are a paid customisation, gated by the same entitlement as
+# the embed builder: a group choosing between an embed and components for a
+# notification type is choosing between two ways to spend the same feature.
+# (This replaced a hard-coded pilot allowlist once the builder was proven in
+# the global group.)
+COMPONENTS_ENTITLEMENT = "custom_embeds"
+
+
+def _group_has_components_entitlement(group_id: int) -> bool:
+    """Whether this group's subscription includes the layout builder.
+
+    Split out so it can be substituted in tests, where ``db`` is a stub
+    package: the ``is True`` comparison means a MagicMock standing in for the
+    real lookup reads as *not* entitled, so a stubbed environment falls back
+    to the embed path rather than silently claiming every group is premium.
+    """
+    from db.entitlements import has_custom_embeds
+
+    return has_custom_embeds(group_id) is True
 
 
 def components_enabled_for_group(group_id: int) -> bool:
     """True when a group is allowed to use component layouts at all.
 
     Separate from whether a layout exists or is active, so the editor can be
-    hidden and the send path short-circuited by the same check.
+    gated and the send path short-circuited by the same check.
     """
     try:
-        return int(group_id) in COMPONENTS_PILOT_GROUP_IDS
+        gid = int(group_id)
     except (TypeError, ValueError):
+        return False
+    try:
+        return _group_has_components_entitlement(gid)
+    except Exception as exc:
+        # An entitlement lookup that fails must not cost the notification.
+        print(f"Could not resolve components entitlement for group {gid}: {exc}")
         return False
 
 
 def load_active_layout(session, group_id: int, notification_type: str) -> Optional[Dict[str, Any]]:
     """The layout a group's notification should use, or None to send an embed.
 
-    Returns None for every group outside the pilot, for a type with no row, for
-    a row that is authored but not marked active, and for a row whose JSON no
-    longer parses — every one of those falls back to the embed path, so a broken
-    layout costs the customisation rather than the notification.
+    Returns None for every group without the entitlement, for a type with no
+    row, for a row that is authored but not marked active, and for a row whose
+    JSON no longer parses — every one of those falls back to the embed path, so
+    a broken layout costs the customisation rather than the notification.
     """
     if not components_enabled_for_group(group_id):
         return None

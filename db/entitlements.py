@@ -43,9 +43,9 @@ ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
     },
     {
         "key": "custom_embeds",
-        "label": "Custom Discord embeds",
+        "label": "Custom notification designs",
         "category": "features",
-        "help": "Customize the Discord embeds the bot posts for drops, collection logs, personal bests, combat achievements, pets and the lootboard.",
+        "help": "Design the Discord messages the bot posts for drops, collection logs, personal bests, combat achievements, pets and the lootboard — as a classic embed or as Discord components, chosen per notification type.",
         "default": False,
     },
     {

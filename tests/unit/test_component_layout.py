@@ -175,15 +175,44 @@ def test_parse_accent_accepts_hex_with_or_without_hash():
     assert parse_accent("nope") is None
 
 
-class TestPilotGating:
-    def test_only_the_global_group_may_use_components(self):
-        """This changes what every member of a group receives, so it stays an
-        explicit allowlist until it has been proven in the global group."""
-        from services.component_layout import components_enabled_for_group
+class TestEntitlementGating:
+    """Components are a paid customisation, gated by the same entitlement as
+    the embed builder. The lookup is patched here because conftest stubs
+    ``db.models``, which would make the real entitlement query answer True for
+    every group."""
 
-        assert components_enabled_for_group(2) is True
-        assert components_enabled_for_group(1) is False
-        assert components_enabled_for_group(9999) is False
+    def test_follows_the_group_entitlement(self, monkeypatch):
+        import importlib
+
+        # Dotted import, not ``import services.component_layout as cl``:
+        # conftest stubs the ``services`` package, so the attribute form
+        # yields a MagicMock.
+        cl = importlib.import_module("services.component_layout")
+
+        entitled = {2, 55}
+        monkeypatch.setattr(
+            cl, "_group_has_components_entitlement", lambda gid: gid in entitled)
+
+        assert cl.components_enabled_for_group(2) is True
+        assert cl.components_enabled_for_group(55) is True
+        assert cl.components_enabled_for_group(1) is False
+        assert cl.components_enabled_for_group(9999) is False
+
+    def test_a_failing_entitlement_lookup_keeps_the_embed(self, monkeypatch):
+        """The send path calls this per notification; an entitlement error must
+        cost the customisation, never the message."""
+        import importlib
+
+        # Dotted import, not ``import services.component_layout as cl``:
+        # conftest stubs the ``services`` package, so the attribute form
+        # yields a MagicMock.
+        cl = importlib.import_module("services.component_layout")
+
+        def _boom(_gid):
+            raise RuntimeError("entitlement backend down")
+
+        monkeypatch.setattr(cl, "_group_has_components_entitlement", _boom)
+        assert cl.components_enabled_for_group(2) is False
 
     def test_non_numeric_group_is_not_enabled(self):
         from services.component_layout import components_enabled_for_group
@@ -227,3 +256,94 @@ class TestDefaultsDegradeGracefully:
         assert "group_points_awarded" not in text
         assert "<item_name>" in "\n".join(
             str(c) for c in blocks_of(payload))
+
+
+class TestALineWithNoValueDisappears:
+    """A label belongs to the value beside it. Rendering "**Location**" over
+    nothing is what an embed avoids by dropping a field whose value resolves
+    empty, and a layout has to do the same or switching a type over looks
+    broken for every player missing an optional value."""
+
+    def test_a_blank_value_takes_its_label(self):
+        payload = render_layout(
+            {"blocks": [{"type": "text", "content": "**Killed By** {source}\n**Location** {location}"}]},
+            {"{source}": "Abyssal demon", "{location}": ""},
+        )
+        text = blocks_of(payload)[0]["content"]
+        assert text == "**Killed By** Abyssal demon"
+
+    def test_a_line_survives_while_any_value_remains(self):
+        payload = render_layout(
+            {"blocks": [{"type": "text", "content": "**Rank** {group_rank}/{total_ranked_group}"}]},
+            {"{group_rank}": "1", "{total_ranked_group}": ""},
+        )
+        assert blocks_of(payload)[0]["content"] == "**Rank** 1/"
+
+    def test_a_line_with_no_tokens_is_never_dropped(self):
+        payload = render_layout(
+            {"blocks": [{"type": "text", "content": "Nice one!\n{missing_thing}"}]},
+            {"{source}": "x"},
+        )
+        assert blocks_of(payload)[0]["content"] == "Nice one!"
+
+    def test_the_death_default_drops_an_unknown_location(self):
+        payload = render_layout(
+            default_layout("death"),
+            {"{player_name}": "Ron", "{source}": "Vet'ion", "{location}": "", "{image_url}": ""},
+        )
+        text = "\n".join(c.get("content", "") for c in blocks_of(payload) if c["type"] == 10)
+        assert "**Killed By** Vet'ion" in text
+        assert "Location" not in text
+
+
+class TestDefaultsMirrorTheEmbeds:
+    """A group switching a type over should recognise the message. The
+    defaults reproduce the shipped embed templates, so the headline wording,
+    the figures and their order all carry across."""
+
+    def test_headlines_match_the_embed_content_lines(self):
+        # The embed path sends these as the message content above the embed;
+        # a components message has no content line, so the default has to
+        # carry the same wording itself.
+        expected = {
+            "drop": "received a drop:",
+            "pb": "has achieved a new personal best:",
+            "clog": "has added an item to their collection log!",
+            "ca": "has completed a combat achievement!",
+            "pet": "has acquired a new pet!",
+            "level_up": "levelled-up:",
+            "quest": "completed a quest!",
+            "death": "has died!",
+            "diary": "completed an achievement diary!",
+        }
+        for notification_type, headline in expected.items():
+            first = default_layout(notification_type)["blocks"][0]
+            assert first["type"] == "text"
+            assert headline in first["content"], notification_type
+            assert "{player_name}" in first["content"], notification_type
+
+    def test_personal_best_shows_the_character_render(self):
+        """The one thing components can do that the personal-best embed
+        cannot, and the reason a group would switch this type over."""
+        section = [
+            b for b in default_layout("pb")["blocks"] if b["type"] == "section"
+        ]
+        assert len(section) == 1
+        assert section[0]["thumbnail"] == "{gear_image_url}"
+        assert "{personal_best}" in section[0]["content"]
+
+    def test_accents_follow_the_embed_colours(self):
+        assert default_layout("level_up")["accent_color"] == "#2ECC71"
+        assert default_layout("death")["accent_color"] == "#B23B3B"
+        assert default_layout("quest")["accent_color"] == "#5A8DEE"
+        assert default_layout("diary")["accent_color"] == "#5A8DEE"
+
+    def test_points_lines_only_where_the_sender_supplies_them(self):
+        """level_up/quest/death/diary build no points map, so a points line
+        there would be dead weight that always drops."""
+        from services.component_layout import NOTIFICATION_TYPES, TYPE_META
+
+        for notification_type in NOTIFICATION_TYPES:
+            blob = str(default_layout(notification_type))
+            documented = "group_points_awarded" in TYPE_META[notification_type]["tokens"]
+            assert ("group_points_awarded" in blob) is documented, notification_type

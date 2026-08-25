@@ -2,7 +2,7 @@
 
 The interesting contract here is not CRUD, it is that the editor can only ever
 save something the send path will honour: the same validator runs on save, the
-same pilot allowlist gates writes, and a group outside the pilot is told so
+same entitlement gates writes, and an unentitled group is told so
 rather than being handed an editor whose output would be ignored.
 
 Same scripted-session harness as the other route tests.
@@ -52,7 +52,16 @@ class FakeRow:
         self.__dict__.update(base)
 
 
-def _wire(monkeypatch, session, *, admin=True, user_id=7):
+def _wire(monkeypatch, session, *, admin=True, user_id=7, entitled_groups=(2,)):
+    # The entitlement lookup is patched on the real component_layout module
+    # because conftest stubs ``db.models``: the genuine query would answer True
+    # for every group and the gate would look broken here.
+    import importlib
+
+    cl = importlib.import_module("services.component_layout")
+    monkeypatch.setattr(
+        cl, "_group_has_components_entitlement", lambda gid: gid in set(entitled_groups))
+
     monkeypatch.setattr(nl, "current_user_id", lambda: user_id)
     monkeypatch.setattr(nl, "db_session", lambda: _SessionCM(session))
     monkeypatch.setattr(nl, "manageable_guild_ids", lambda uid: [])
@@ -120,14 +129,14 @@ async def test_list_requires_group_admin(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_list_reports_pilot_gate_rather_than_refusing(client, monkeypatch):
+async def test_list_reports_entitlement_gate_rather_than_refusing(client, monkeypatch):
     batches = [[] for _ in NOTIFICATION_TYPES]
     _wire(monkeypatch, _S(*batches))
     resp = await client.get("/api/v1/groups/9999/notification-layouts")
     assert resp.status_code == 200
     body = await resp.get_json()
     assert body["enabled"] is False
-    # Still serves the defaults, so a non-pilot admin sees what they would get.
+    # Still serves the defaults, so an unentitled admin sees what they'd get.
     assert len(body["layouts"]) == len(NOTIFICATION_TYPES)
     assert all(l["custom"] is None and l["active"] is False for l in body["layouts"])
     assert all(l["default"]["blocks"] for l in body["layouts"])
@@ -172,14 +181,14 @@ async def test_put_rejects_unknown_type(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_put_refused_outside_the_pilot(client, monkeypatch):
+async def test_put_refused_without_the_entitlement(client, monkeypatch):
     """Saving must be impossible where the send path would ignore the row."""
     _wire(monkeypatch, _S())
     resp = await client.put(
         "/api/v1/groups/9999/notification-layouts/pb", json={"blocks": GOOD_BLOCKS})
     assert resp.status_code == 403
     body = await resp.get_json()
-    assert body["code"] == "components_pilot_only"
+    assert body["code"] == "components_requires_upgrade"
 
 
 @pytest.mark.asyncio
@@ -254,8 +263,8 @@ async def test_delete_reverts_to_the_embed(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_delete_allowed_outside_the_pilot(client, monkeypatch):
-    """A group dropped from the pilot must still be able to clear its rows."""
+async def test_delete_allowed_without_the_entitlement(client, monkeypatch):
+    """A group whose subscription lapsed must still be able to clear its rows."""
     s = _S([FakeRow(group_id=9999)])
     _wire(monkeypatch, s)
     resp = await client.delete("/api/v1/groups/9999/notification-layouts/pb")

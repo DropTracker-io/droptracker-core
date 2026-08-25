@@ -168,7 +168,12 @@ def test_every_branch_finishes_the_send():
     src = open(_MODULE_PATH, encoding="utf-8").read()
     calls = src.count("await self._try_send_component_layout(")
     finishes = src.count("await self._finish_component_send(")
-    assert calls == finishes == len(cl.NOTIFICATION_TYPES)
+    assert calls == finishes
+    # At least one call site per customisable type, and more where a sender
+    # reuses another type's layout: the XP and total-level milestone senders
+    # share "level_up" so a group that switches level-ups over does not get a
+    # component for the level and an embed for the milestone.
+    assert calls >= len(cl.NOTIFICATION_TYPES)
 
 
 class Rejected(Exception):
