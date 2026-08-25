@@ -197,7 +197,7 @@ async def list_staff_chats():
         )
 
     def _load():
-        from services.chat import thread_payload, unread_counts
+        from services.chat import resolve_membership, thread_payload, unread_counts
         from web_api.routes.chat import _party_names
 
         with db_session() as s:
@@ -229,6 +229,14 @@ async def list_staff_chats():
                         t,
                         participants=by_thread.get(int(t.id), []),
                         unread=unread.get(int(t.id), 0),
+                        # Resolve the seat per row. Without this every thread
+                        # reported my_parties=[] and can_post=false — including
+                        # to a superadmin who can in fact post the moment they
+                        # open it — so anything gating a composer on the list
+                        # payload would be lying. Staff-only surface, ≤100
+                        # rows a page, and the per-user lookups inside are
+                        # cached, so the cost is worth the honesty.
+                        membership=resolve_membership(s, t, user_id),
                         party_names=names,
                     )
                     for t in rows

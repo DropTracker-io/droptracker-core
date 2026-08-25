@@ -266,8 +266,18 @@ def _post_dm_bounced(session, chat_message_id: int) -> None:
         )
         if thread is None or thread.kind != "staff_dm":
             return
+        # Attributed to whoever wrote the message that bounced. An authorless
+        # entry would badge them for the consequence of their own send —
+        # unread_counts excludes your own rows but counts authorless ones —
+        # while the recipient, who is the person that needs to learn their
+        # DMs are shut, still gets the badge either way.
         post_system(
-            session, thread=thread, code="dm_bounced", commit=False, publish=False
+            session,
+            thread=thread,
+            code="dm_bounced",
+            actor_user_id=origin.author_user_id,
+            commit=False,
+            publish=False,
         )
     except Exception as e:  # noqa: BLE001
         print(f"[discord_outbox] dm_bounced note failed for message {chat_message_id}: {e}")

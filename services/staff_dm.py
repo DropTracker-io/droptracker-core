@@ -69,6 +69,12 @@ def get_or_create_staff_thread(s, *, target_user_id: int,
         owner_party=("user", int(staff_user_id)),
         commit=False,
     )
+    # Note the asymmetry: `staff_dm_opened` is posted only when an existing
+    # thread is REOPENED. A brand-new thread is created open and its first
+    # message is itself the opening — a system line announcing the
+    # conversation directly above the conversation's first line is noise.
+    # Reopening is different: it lands weeks later under old history, where
+    # "staff started this up again" is the context a reader lacks.
     reopened = False
     if thread.status != "open":
         set_thread_status(s, thread, "open", commit=False)
