@@ -330,6 +330,21 @@ def _wiki_url(name) -> str:
     return f"https://oldschool.runescape.wiki/w/{str(name or '').replace(' ', '_')}"
 
 
+_TITLE_WHITESPACE = re.compile(r"\s+")
+
+
+def tidy_title(text):
+    """Collapse the whitespace an empty placeholder leaves behind.
+
+    ``{item_emoji} {item_name}`` resolves to ``" Abyssal whip"`` for an item
+    with no glyph — and Discord renders that leading space. A title is one line
+    by construction, so collapsing runs and trimming can only remove whitespace
+    no template meant to keep. Applied after substitution, never before: the
+    template itself is what the editor round-trips.
+    """
+    return _TITLE_WHITESPACE.sub(" ", str(text or "")).strip()
+
+
 def replace_placeholders(embed: interactions.Embed, value_dict: dict, global_server: bool = False):
 
     # Replace placeholders in the embed title
@@ -343,8 +358,8 @@ def replace_placeholders(embed: interactions.Embed, value_dict: dict, global_ser
         title_has_npc = "{npc_name}" in embed.title
         title_has_item = "{item_name}" in embed.title
 
-        embed.title = strip_title_markdown(
-            replace_placeholders_in_text(embed.title, value_dict)
+        embed.title = tidy_title(
+            strip_title_markdown(replace_placeholders_in_text(embed.title, value_dict))
         )
 
         resolved_url = ""

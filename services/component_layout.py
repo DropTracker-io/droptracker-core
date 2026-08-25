@@ -469,6 +469,20 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
     },
     # Drop
     "item_name": {"help": "Item name (linked to the wiki)", "sample": "Twisted bow"},
+    "item_emoji": {
+        # Optional in the real sense: ~1000 of 29k items have a glyph, so this
+        # resolves to nothing most of the time. Marked so the unresolved-token
+        # rule does not read a blank as "this line is about missing data".
+        #
+        # Sample is deliberately blank. The value is a `<:name:id>` reference
+        # that only Discord turns into a picture — pasting a real one here would
+        # put a raw id in the editor preview (and trip the literal-emoji guard
+        # in tests/unit/test_app_emojis.py, which cannot tell a sample from a
+        # send). Blank previews as the no-glyph case, which is the common one.
+        "help": "The item's own icon, for the ~1000 items with an emoji (drops only)",
+        "sample": "",
+        "optional": True,
+    },
     "item_id": {
         "help": "OSRS item id — an icon is https://www.droptracker.io/img/itemdb/{item_id}.png",
         "sample": "20997",
@@ -557,7 +571,7 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Drop",
         "group": "Loot",
         "description": "Posted when a member receives a drop worth announcing.",
-        "tokens": ("item_name", "item_id", "item_value", "quantity", "total_value",
+        "tokens": ("item_name", "item_emoji", "item_id", "item_value", "quantity", "total_value",
                    "npc_name", "npc_id", "kill_count", "month_name", "player_total_month",
                    "group_total_month", "group_total", "global_rank", "group_rank",
                    "group_to_group_rank", "user_count") + _POINTS_TOKENS + _MEDIA_TOKENS,

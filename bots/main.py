@@ -23,6 +23,7 @@ from services.channel_names import ChannelNames
 from services.channel_cache import shape_channel_cache
 from utils.embeds import create_boss_pb_embed, update_boss_pb_embed
 from utils.app_emojis import emoji as app_emoji, use_profile
+from utils.game_emojis import use_profile as use_game_emoji_profile
 from utils.logger import LoggerClient
 from db.app_logger import AppLogger
 
@@ -196,9 +197,11 @@ if os.getenv("STATUS") == "dev" or os.getenv("STATE") == "dev":
     # (seed it with `scripts/seed_app_emojis.py --profile core-dev`, or leave
     # it unseeded and every emoji renders as its unicode fallback).
     use_profile("core-dev")
+    use_game_emoji_profile("core-dev")
 else:
     bot_token = os.getenv('BOT_TOKEN')
     use_profile("core")
+    use_game_emoji_profile("core")
 
 ## Quart server initialization ##
 app = Quart(__name__)

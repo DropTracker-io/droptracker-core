@@ -14,6 +14,7 @@ from utils.format import (
     replace_placeholders,
     replace_placeholders_in_text,
     strip_title_markdown,
+    tidy_title,
 )
 
 
@@ -339,6 +340,39 @@ class TestReplacePlaceholdersTitle:
         out = replace_placeholders(embed, {"{item_name}": "Abyssal whip"})
         assert out.url == "https://oldschool.runescape.wiki/w/Abyssal_whip"
 
+    def test_item_emoji_leads_the_title_and_keeps_the_wiki_link(self):
+        # The shipped default template. `title_has_item` is evaluated on the
+        # template, before substitution, so a token in front of {item_name}
+        # must not cost the auto-link.
+        embed = _embed("{item_emoji} {item_name}")
+        out = replace_placeholders(
+            embed,
+            {"{item_emoji}": "<:item_abyssal_whip:123>", "{item_name}": "Abyssal whip"},
+        )
+        assert out.title == "<:item_abyssal_whip:123> Abyssal whip"
+        assert out.url == "https://oldschool.runescape.wiki/w/Abyssal_whip"
+
+    def test_item_with_no_emoji_leaves_no_leading_space(self):
+        # ~28k of 29k items have no glyph, so this is the common path.
+        embed = _embed("{item_emoji} {item_name}")
+        out = replace_placeholders(
+            embed, {"{item_emoji}": "", "{item_name}": "Bronze dagger"}
+        )
+        assert out.title == "Bronze dagger"
+        assert out.url == "https://oldschool.runescape.wiki/w/Bronze_dagger"
+
+    def test_emoji_name_survives_the_markdown_flattener(self):
+        # `__underscored__` is a flattening pattern and every emoji name is
+        # underscore-separated; a name that produced `__` would be mangled into
+        # a reference Discord renders as raw text.
+        embed = _embed("{item_emoji} {item_name}")
+        out = replace_placeholders(
+            embed,
+            {"{item_emoji}": "<:item_tumeken_s_shadow_uncharged:9>",
+             "{item_name}": "Tumeken's shadow (uncharged)"},
+        )
+        assert out.title.startswith("<:item_tumeken_s_shadow_uncharged:9> ")
+
     def test_custom_url_wins_over_wiki_autolink(self):
         embed = _embed("{npc_name}", url="https://www.droptracker.io/npcs/{npc_id}")
         out = replace_placeholders(embed, {"{npc_name}": "Zulrah", "{npc_id}": "2042"})
@@ -405,3 +439,26 @@ class TestReplacePlaceholdersTeamSizeField:
         value_dict = {"{team_size}": "4"}
         replace_placeholders(embed, value_dict)
         assert value_dict == {"{team_size}": "4"}
+
+
+# ── tidy_title ────────────────────────────────────────────────────────────────
+
+class TestTidyTitle:
+    """An empty placeholder must not leave its space behind in the title."""
+
+    def test_leading_space_from_an_empty_token_is_trimmed(self):
+        assert tidy_title(" Bronze dagger") == "Bronze dagger"
+
+    def test_trailing_space_is_trimmed(self):
+        assert tidy_title("Bronze dagger ") == "Bronze dagger"
+
+    def test_internal_run_collapses_to_one_space(self):
+        assert tidy_title("A  B") == "A B"
+
+    def test_an_ordinary_title_is_untouched(self):
+        for title in ("Abyssal whip", ":tada: Theatre of Blood :tada:",
+                      "<:item_twisted_bow:1> Twisted bow"):
+            assert tidy_title(title) == title
+
+    def test_none_becomes_empty_rather_than_raising(self):
+        assert tidy_title(None) == ""

@@ -25,6 +25,7 @@ from db.models import (
 from db.ops import DatabaseOperations, associate_player_ids, get_formatted_name
 from db.entitlements import has_custom_embeds
 from utils.app_emojis import emoji as app_emoji
+from utils.game_emojis import emoji_for_item, emoji_for_item_id
 from utils.redis import redis_client
 from utils.messages import confirm_new_npc, confirm_new_item, name_change_message, new_player_message
 from utils.format import format_number, replace_placeholders, replace_placeholders_in_text, convert_from_ms
@@ -3248,8 +3249,21 @@ class NotificationService:
             else:
                 item_value_text = "`" + format_number(total_value) + "`"
 
+            # Discord renders a custom emoji inside an embed title, so the
+            # item's own icon can lead the line. Resolved by name first — the
+            # manifest folds noted and placeholder ids onto one name, while
+            # `item_id` above is whichever row `.first()` happened to return —
+            # and by id only as a fallback for a spelling the set does not
+            # carry. Empty for the ~28k items outside the set, which is the
+            # normal path: replace_placeholders tidies away the space it
+            # leaves behind, so the title collapses to the bare name.
+            item_emoji = (emoji_for_item(item_name)
+                          or emoji_for_item_id(item_id)
+                          or "")
+
             values = {
                 "{item_name}": item_name,
+                "{item_emoji}": item_emoji,
                 "{month_name}": datetime.now().strftime("%B"),
                 "{player_total_month}": "`" + player_month_total + "`",
                 "{global_rank}": global_rank_str,

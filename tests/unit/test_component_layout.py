@@ -4,6 +4,7 @@ The layouts are user input that becomes a Discord API payload, so the cases
 that matter are the ones where a bad template would either be rejected by
 Discord (losing the notification entirely) or silently render nonsense.
 """
+from pathlib import Path
 from services.component_layout import (
     IS_COMPONENTS_V2,
     MAX_BLOCKS,
@@ -219,6 +220,31 @@ class TestEntitlementGating:
 
         assert components_enabled_for_group(None) is False
         assert components_enabled_for_group("two") is False
+
+
+class TestAdvertisedTokensAreActuallySubstituted:
+    """A token in the catalogue is a promise to the group admin who pastes it.
+
+    The catalogue and the substitution live in different modules, so nothing
+    but this stops them drifting — and the failure is silent until a live
+    message goes out with `{item_emoji}` printed in it.
+    """
+
+    def test_every_drop_token_appears_in_the_sender(self):
+        from services.component_layout import NOTIFICATION_TYPES, tokens_for
+
+        source = (Path(__file__).resolve().parents[2]
+                  / "services" / "notification_service.py").read_text(encoding="utf-8")
+        missing = {}
+        for notification_type in NOTIFICATION_TYPES:
+            absent = [d["token"] for d in tokens_for(notification_type)
+                      if "{%s}" % d["token"] not in source]
+            if absent:
+                missing[notification_type] = absent
+        assert not missing, (
+            "These tokens are offered in the editor but never substituted by "
+            f"services/notification_service.py: {missing}"
+        )
 
 
 class TestDefaultsDegradeGracefully:
