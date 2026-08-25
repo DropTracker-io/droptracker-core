@@ -1605,6 +1605,16 @@ class NotificationService:
             }
             replacements.update(self._plugin_version_placeholder_map(data))
 
+            # XP and total-level milestones share the level-up template, so
+            # they share its layout too: a group that switched level-ups over
+            # to components would otherwise get components for a level and an
+            # embed for the milestone, with no setting explaining the split.
+            if await self._try_send_component_layout(
+                db_session, notification, channel, group_id, "level_up", replacements
+            ):
+                await self._finish_component_send(db_session, notification, data)
+                return
+
             embed = replace_placeholders(embed_template, replacements)
             if group_id == 2:
                 embed = await self.remove_group_field(embed)
