@@ -272,7 +272,7 @@ def _sources(item_ids: list[int]) -> dict:
     from web_api.routes.npc_source_aliases import alias_group_for_member
 
     ids = sorted({int(i) for i in item_ids})
-    key = "item:sources:" + ",".join(str(i) for i in ids)
+    key = "item:sources:v2:" + ",".join(str(i) for i in ids)
     cached = cache_get(key, _SOURCES_TTL)
     if cached is not None:
         return cached
@@ -293,6 +293,15 @@ def _sources(item_ids: list[int]) -> dict:
     # Collapse alias-group members ("Reward cart (Wintertodt)" + "Supply crate
     # (Wintertodt)") into one display entry. `members` carries the real names so
     # the source-restriction picker stores what drops actually record.
+    # `member_ids` is the same list for id-keyed callers (the points
+    # include/exclude lists store an npc id, not a name): the ids of the rows
+    # that merged, NOT the alias's representative id, which only exists to pick
+    # an icon and may name an npc no drop is ever recorded under.
+    member_ids: dict[str, list[int]] = {}
+    for entry in npcs:
+        group = alias_group_for_member(entry["name"])
+        if group is not None:
+            member_ids.setdefault(group["name"], []).append(int(entry["npc_id"]))
     collapsed, seen_alias = [], set()
     for entry in npcs:
         group = alias_group_for_member(entry["name"])
@@ -310,6 +319,7 @@ def _sources(item_ids: list[int]) -> dict:
                 "name": group["name"],
                 "icon_url": f"{IMG_BASE}/npcdb/{group['npc_id']}.png",
                 "members": list(group["members"]),
+                "member_ids": member_ids.get(group["name"], []),
             }
         )
     out = {"total": int(wiki_total) + max(extra, 0), "npcs": collapsed}

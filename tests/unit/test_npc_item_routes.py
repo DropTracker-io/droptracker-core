@@ -265,6 +265,17 @@ class TestSources:
             "Reward cart (Wintertodt)", "Supply crate (Wintertodt)"
         ]
 
+    def test_alias_carries_member_ids_for_id_keyed_callers(self):
+        """The points include/exclude lists store an npc id, not a name, so an
+        alias has to expose the ids of the rows it merged. The representative
+        id (13974, chosen for the icon) is not enough on its own — selecting
+        "Wintertodt" there must blacklist the supply crate too."""
+        wiki = [(13974, "Reward cart (Wintertodt)", "1", 0.01, 1, 1),
+                (20693, "Supply crate (Wintertodt)", "1", 0.01, 1, 1)]
+        with self._db(wiki_rows=wiki):
+            out = items._sources([20718])
+        assert out["npcs"][0]["member_ids"] == [13974, 20693]
+
     def test_result_is_cached_per_id_set(self):
         wiki = [(963, "Kalphite Queen", "1", 0.0078, 1, 1)]
         with self._db(wiki_rows=wiki) as s:

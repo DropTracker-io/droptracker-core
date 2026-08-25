@@ -8,8 +8,9 @@ Admin (session + group admin; mutations also need the `custom_points` entitlemen
   PATCH  /api/v1/groups/{id}/points/mods/{modId}
   DELETE /api/v1/groups/{id}/points/mods/{modId}
   GET    /api/v1/groups/{id}/points/lists
-  POST   /api/v1/groups/{id}/points/lists         { list_type, item_id?, npc_id? }
+  POST   /api/v1/groups/{id}/points/lists         { list_type, item_id?, npc_id?, npc_ids? }
   DELETE /api/v1/groups/{id}/points/lists/{entryId}
+  GET    /api/v1/groups/{id}/points/item-sources?item_id=
   GET    /api/v1/groups/{id}/points/boosts
   POST   /api/v1/groups/{id}/points/boosts        { start_at, end_at, event_type, target_type, target_id?, operation, operation_value, description? }
   PATCH  /api/v1/groups/{id}/points/boosts/{boostId}
@@ -560,6 +561,71 @@ async def delete_point_mod(group_id: int, mod_id: int):
 # --------------------------------------------------------------------------- #
 LIST_TYPES = ("blacklist", "whitelist", "no_split")
 
+#: Most rows one "add entry" call may create. An entry restricted to specific
+#: drop sources becomes one row per source (see :func:`_parse_list_target`), and
+#: a widely-sourced item can name hundreds of NPCs — past this the caller wants
+#: "any source" (a single NULL-npc row), not a wall of rows.
+MAX_LIST_ENTRY_SOURCES = 50
+
+
+def _parse_list_target(body: dict, s) -> tuple[int | None, list[int]]:
+    """Validate a list entry's target -> ``(item_id, npc_ids)``.
+
+    Accepts ``npc_ids`` (a list) as well as the single ``npc_id``, because an
+    item is normally blacklisted "from any of these sources": the matcher
+    (``point_awards._point_list_entry_matches``) ANDs a row's item and npc, so
+    that has to be one row per source rather than one row holding several ids.
+    The caller expands accordingly.
+
+    An EMPTY ``npc_ids`` means any source and stores a single NULL-npc row —
+    which is also why the source picker only ever sends ids when the admin has
+    deselected some: "all sources selected" must stay unrestricted so a source
+    we have not observed yet (or an item recorded under a reward container
+    rather than the boss) still matches.
+    """
+    item_id = body.get("item_id")
+    try:
+        item_id = int(item_id) if item_id not in (None, "", 0, "0") else None
+    except Exception:
+        abort_problem(400, "Invalid item", "item_id must be an integer.")
+
+    raw_npcs = body.get("npc_ids")
+    if raw_npcs in (None, ""):
+        raw_npcs = [body.get("npc_id")]
+    if not isinstance(raw_npcs, (list, tuple)):
+        abort_problem(400, "Invalid NPC", "npc_ids must be a list of integers.")
+    npc_ids: list[int] = []
+    for raw in raw_npcs:
+        if raw in (None, "", 0, "0"):
+            continue
+        try:
+            value = int(raw)
+        except Exception:
+            abort_problem(400, "Invalid NPC", "npc_ids must be integers.")
+        if value not in npc_ids:
+            npc_ids.append(value)
+
+    if item_id is None and not npc_ids:
+        abort_problem(400, "Target required", "Provide an item, an NPC, or both.")
+    if len(npc_ids) > MAX_LIST_ENTRY_SOURCES:
+        abort_problem(
+            400,
+            "Too many sources",
+            f"Pick at most {MAX_LIST_ENTRY_SOURCES} drop sources, "
+            "or leave them all selected to match any source.",
+        )
+    if item_id is not None and not s.query(ItemList.item_id).filter(ItemList.item_id == item_id).first():
+        abort_problem(400, "Invalid item", f"No item with id {item_id}.")
+    if npc_ids:
+        known = {
+            int(n)
+            for (n,) in s.query(NpcList.npc_id).filter(NpcList.npc_id.in_(npc_ids)).all()
+        }
+        missing = [n for n in npc_ids if n not in known]
+        if missing:
+            abort_problem(400, "Invalid NPC", f"No NPC with id {missing[0]}.")
+    return item_id, npc_ids
+
 
 def _lists_payload(s, group_id: int) -> list[dict]:
     rows = (
@@ -609,18 +675,82 @@ async def create_point_list_entry(group_id: int):
             list_type = str(body.get("list_type") or "").strip().lower()
             if list_type not in LIST_TYPES:
                 abort_problem(400, "Invalid value", f"list_type must be one of {', '.join(LIST_TYPES)}.")
-            item_id, npc_id = _parse_target_ids(body, s)
-            row = GroupPointBlacklist(
-                group_id=group_id,
-                list_type=list_type,
-                item_id=item_id,
-                npc_id=npc_id,
-            )
-            s.add(row)
+            item_id, npc_ids = _parse_list_target(body, s)
+            # One row per chosen source; no sources = one unrestricted row.
+            targets = [(item_id, n) for n in npc_ids] or [(item_id, None)]
+            existing = {
+                (int(r.item_id) if r.item_id else None, int(r.npc_id) if r.npc_id else None)
+                for r in s.query(GroupPointBlacklist)
+                .filter(
+                    GroupPointBlacklist.group_id == group_id,
+                    GroupPointBlacklist.list_type == list_type,
+                )
+                .all()
+            }
+            rows = [
+                GroupPointBlacklist(
+                    group_id=group_id,
+                    list_type=list_type,
+                    item_id=t_item,
+                    npc_id=t_npc,
+                )
+                for (t_item, t_npc) in targets
+                if (t_item, t_npc) not in existing
+            ]
+            if not rows:
+                abort_problem(
+                    409, "Already listed", "That target is already on this list."
+                )
+            for row in rows:
+                s.add(row)
             s.commit()
-            return {"id": row.id, "entries": _lists_payload(s, group_id)}
+            return {
+                "id": rows[0].id,
+                "ids": [r.id for r in rows],
+                "entries": _lists_payload(s, group_id),
+            }
 
     return private_no_store(jsonify(await asyncio.to_thread(_apply)))
+
+
+@points_bp.get("/groups/<int:group_id>/points/item-sources")
+async def point_item_sources(group_id: int):
+    """The NPCs an item is known to drop from — backs the list editor's
+    "only from these sources" picker.
+
+    Same resolver the event task form uses (wiki drop table + observed drops,
+    alias groups collapsed), so both surfaces offer the same sources. Answers
+    for the item's whole name-variant set, not the id passed in: a drop is
+    recorded under whichever variant the client sent.
+    """
+    user_id = current_user_id()
+    try:
+        item_id = int(request.args.get("item_id") or 0)
+    except Exception:
+        abort_problem(400, "Invalid item", "item_id must be an integer.")
+    if not item_id:
+        abort_problem(400, "Item required", "Pass an item_id.")
+
+    def _load():
+        from db.item_sources import variant_item_ids
+
+        with db_session() as s:
+            _admin_ctx(s, user_id, group_id)
+            row = (
+                s.query(ItemList.item_name)
+                .filter(ItemList.item_id == item_id)
+                .first()
+            )
+            if row is None:
+                abort_problem(400, "Invalid item", f"No item with id {item_id}.")
+            item_name = row[0]
+            ids = variant_item_ids(s, item_name, item_id)
+        # _sources opens its own session — call it after this one has closed.
+        from web_api.routes.items import _sources
+
+        return {"item_id": item_id, "item_name": item_name, **_sources(ids)}
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
 
 
 @points_bp.delete("/groups/<int:group_id>/points/lists/<int:entry_id>")
