@@ -1229,6 +1229,26 @@ class NotificationService:
             app_logger.log(log_type="error", data=f"Error claiming notification {notification_id}: {e}", app_name="notification_service", description="process_pending_notifications")
             return 0
 
+    @staticmethod
+    def _blacklist_skip_reason(db_session, notification: NotificationQueue, data: dict) -> str | None:
+        """A ``skipped: …`` reason when the group muted this notification's subject.
+
+        Fails open on any error — a blacklist lookup problem must cost a group
+        nothing more than an unfiltered notification.
+        """
+        try:
+            from db.notification_blacklist import blacklist_reason
+
+            reason = blacklist_reason(
+                db_session,
+                notification.group_id,
+                notification.notification_type,
+                data,
+            )
+            return f"skipped: {reason}" if reason else None
+        except Exception:
+            return None
+
     async def process_notification_with_session(self, notification: NotificationQueue, db_session):
         """Process a single notification based on its type with a specific session"""
         try:
@@ -1236,6 +1256,26 @@ class NotificationService:
             
             data = json.loads(notification.data)
             notification_type = notification.notification_type
+
+            # The group's leaders blacklisted this item / source NPC. The
+            # enqueue gate (data/submissions/common.create_notification) is the
+            # primary one; this second check catches rows queued BEFORE the
+            # entry was added, which would otherwise still be announced minutes
+            # later. Both sides share db.notification_blacklist so they cannot
+            # disagree the way the channel-fallback rule once did.
+            skip_reason = self._blacklist_skip_reason(db_session, notification, data)
+            if skip_reason:
+                app_logger.log(
+                    log_type="info",
+                    data=f"Notification {notification.id} withheld from group "
+                         f"{notification.group_id}: {skip_reason}",
+                    app_name="notification_service",
+                    description="process_notification")
+                notification.status = 'skipped'
+                notification.error_message = skip_reason
+                notification.processed_at = datetime.now()
+                db_session.commit()
+                return
 
             # If this notification includes a video_key, delay sending until the
             # video processing pipeline has finished (so embeds can include the URL).

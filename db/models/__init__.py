@@ -34,6 +34,7 @@ from .player_death import PlayerDeath
 from .diary_completion import DiaryCompletionEntry
 from .group_configuration import GroupConfiguration
 from .group_notification import GroupNotification
+from .group_notification_blacklist import GroupNotificationBlacklist
 from .notified_submission import NotifiedSubmission
 from .notification_queue import NotificationQueue
 from .player_notification_prefs import PlayerNotificationPrefs
@@ -241,6 +242,7 @@ __all__ = [
     "DiaryCompletionEntry",
     "GroupConfiguration",
     "GroupNotification",
+    "GroupNotificationBlacklist",
     "NotifiedSubmission",
     "NotificationQueue",
     "PlayerNotificationPrefs",

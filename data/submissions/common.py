@@ -1326,6 +1326,34 @@ def player_hidden_for_group(db_session, group_id, player_id) -> bool:
         return False
 
 
+def notification_blacklisted(db_session, group_id, notification_type, data) -> str | None:
+    """Why this group's leaders blacklisted this notification, or ``None``.
+
+    Leaders curate a per-group list of items and NPCs on the group settings
+    page (``/api/v1/groups/{id}/notification-blacklist``). Anything on it is
+    still recorded, scored and counted — it simply never reaches their Discord.
+    That is the whole feature: clans want the 47th "Bones from Barrows" out of
+    the channel, not out of their totals.
+
+    Scoped to group notifications exactly like :func:`player_hidden_for_group`:
+    DM/system notifications arrive with no group_id and are never filtered, so
+    a group muting an item cannot cost a member their own submission DMs.
+
+    Matching lives in ``db.notification_blacklist`` so the enqueue gate here
+    and the send-side guard in ``services/notification_service.py`` cannot
+    drift — the same disagreement that lost 387 clog notifications when the
+    channel-fallback rule was asserted twice. Fails open on any lookup error.
+    """
+    if not group_id:
+        return None
+    try:
+        from db.notification_blacklist import blacklist_reason
+
+        return blacklist_reason(db_session, group_id, notification_type, data)
+    except Exception:
+        return None
+
+
 # Notification types muted for the current task/context. Used by backfills:
 # replaying an outage window has to re-record the submissions, but firing the
 # matching Discord announcements hours late is confusing rather than useful.
@@ -1395,6 +1423,17 @@ async def create_notification(notification_type, player_id, data, group_id=None,
         app_logger.log(
             log_type="debug",
             data=f"Skipping {notification_type} notification for group {group_id}: player {player_id} is hidden for this group",
+            app_name="core",
+            description="create_notification",
+        )
+        return None
+    # The group's leaders blacklisted this item or its source NPC — they want
+    # it recorded but never announced in their Discord.
+    blacklist_hit = notification_blacklisted(db_session, group_id, notification_type, data)
+    if blacklist_hit:
+        app_logger.log(
+            log_type="debug",
+            data=f"Skipping {notification_type} notification for group {group_id}: {blacklist_hit}",
             app_name="core",
             description="create_notification",
         )

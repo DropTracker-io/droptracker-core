@@ -159,6 +159,17 @@ if "db.event_rate_limits" not in sys.modules:
     sys.modules["db.event_rate_limits"] = _mod
     _spec.loader.exec_module(_mod)
 
+# db/notification_blacklist.py — the shared item/NPC blacklist matcher. Same
+# shape (stdlib + utils.npc_names at module level, ORM model lazy-imported
+# inside the query), and it is the single rule the enqueue gate, the send-side
+# guard and the web API all match by, so unit tests must exercise the real one.
+_BLACKLIST_PATH = _Path(__file__).resolve().parent.parent / "db" / "notification_blacklist.py"
+if "db.notification_blacklist" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("db.notification_blacklist", _BLACKLIST_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["db.notification_blacklist"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # db/group_rename.py — the shared "rename a group everywhere" service. Same
 # shape again (SQLAlchemy-only module imports, sessions passed in), and the
 # config + admin-data routes import it at module level, so it must resolve

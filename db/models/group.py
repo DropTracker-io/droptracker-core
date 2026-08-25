@@ -77,6 +77,10 @@ class Group(Base):
     notified_submissions = relationship("NotifiedSubmission", back_populates="group")
     group_point_timed_events = relationship("GroupPointTimedEvent", back_populates="group")
     group_point_blacklist = relationship("GroupPointBlacklist", back_populates="group")
+    # Items/NPCs this group never wants announced in its Discord channels.
+    notification_blacklist = relationship(
+        "GroupNotificationBlacklist", back_populates="group",
+        cascade="all, delete-orphan")
 
     def __init__(self, group_name, wom_id, guild_id, description: str= "An Old School RuneScape group."):
         """
