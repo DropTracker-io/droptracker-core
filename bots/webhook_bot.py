@@ -68,6 +68,12 @@ else:
     bot_token = os.getenv("WEBHOOK_TOKEN")
 
 bot = interactions.Client(token=bot_token, intents=Intents.ALL)
+
+# This bot loads the ticket extension, whose sweeps resolve channel ids
+# straight from the DB. On a dev box that DB is a copy of production, so
+# confine outbound resolution to DEV_ALLOWED_GUILDS. Inert unless set.
+from utils.dev_guild_guard import install as _install_dev_guild_guard
+_install_dev_guild_guard(bot)
 metrics = MetricsTracker()
 watchdog = None
 shutdown_event = asyncio.Event()

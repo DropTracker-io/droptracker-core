@@ -198,6 +198,12 @@ if os.getenv("STATUS") == "dev" or os.getenv("STATE") == "dev":
     # it unseeded and every emoji renders as its unicode fallback).
     use_profile("core-dev")
     use_game_emoji_profile("core-dev")
+    # The dev database is a copy of production, so its ~262 guild ids and
+    # ~1,600 channel ids point at guilds this app is not in. Confine outbound
+    # resolution to DEV_ALLOWED_GUILDS; no-op unless that is set.
+    from utils.dev_guild_guard import install as install_dev_guild_guard, describe as describe_dev_guild_guard
+    install_dev_guild_guard(bot)
+    print(describe_dev_guild_guard())
 else:
     bot_token = os.getenv('BOT_TOKEN')
     use_profile("core")
