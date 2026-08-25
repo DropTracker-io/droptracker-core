@@ -169,12 +169,22 @@ def test_staff_branch_respects_thread_status(monkeypatch):
     assert got is not None and got.can_post is False
 
 
-def test_staff_not_seated_on_event_invites(monkeypatch):
-    """A CvC negotiation stays invisible: the staff branch must never widen
-    the original kinds."""
+def test_staff_seated_on_clan_negotiations(monkeypatch):
+    """Staff mediate CvC disputes, so they can open and answer any clan-vs-clan
+    thread by id. This widens READ access, not the thread list — see
+    test_speakable_groups_still_excludes_staff below."""
     _patch_deps(monkeypatch, support_staff=True)
     s = _FakeSession([_participant("group", 42)])
-    assert chat.resolve_membership(s, _thread("event_invite"), user_id=99) is None
+    got = chat.resolve_membership(s, _thread("event_invite"), user_id=99)
+    assert got is not None and got.parties == (chat.Party("user", 99),)
+
+
+def test_staff_branch_refuses_unknown_kinds(monkeypatch):
+    """A kind nobody registered is not a support surface — fail closed rather
+    than granting staff a seat on whatever ships next."""
+    _patch_deps(monkeypatch, support_staff=True)
+    s = _FakeSession([_participant("group", 42)])
+    assert chat.resolve_membership(s, _thread("something_new"), user_id=99) is None
 
 
 def test_non_staff_still_fails_closed(monkeypatch):
@@ -261,6 +271,62 @@ def test_publish_inbox_unread_excludes_author_zero(monkeypatch):
     sent.clear()
     inbox_mod.publish_inbox_unread("ticket", 9, [0, 5])
     assert sorted(s[1] for s in sent) == ["user:0", "user:5"]
+
+
+def test_speakable_groups_still_excludes_staff(monkeypatch):
+    """The staff seat is per-thread, never a blanket list widening: a staff
+    member's own inbox must not fill with every clan on the site."""
+    import sys
+    from unittest.mock import MagicMock
+
+    fake = MagicMock()
+    fake.resolve_group_role = lambda s, uid, gid, mg=None, user=None: None
+    fake.is_superadmin = lambda user: True
+    fake.is_support_staff = lambda user: True
+    fake.load_user = lambda s, uid: SimpleNamespace(user_id=uid, groups=[])
+    fake.manageable_guild_ids = lambda uid: set()
+    fake.event_manager_group_ids = lambda s, uid: set()
+    monkeypatch.setitem(sys.modules, "web_api.deps", fake)
+    assert chat.speakable_group_ids(_EmptySession(), 99) == set()
+
+
+# --------------------------------------------------------------------------- #
+# Ticket relay content with attachments
+# --------------------------------------------------------------------------- #
+def test_relay_appends_attachment_urls():
+    from web_api.routes.tickets import _relay_content
+
+    out = _relay_content("alice", "look", [{"url": "https://cdn/x.png"}])
+    assert out.startswith("**alice** (via site): look")
+    assert out.endswith("https://cdn/x.png")
+
+
+def test_relay_with_attachments_still_matches_the_skip_marker():
+    """Appending URLs must not break the prefix the mirror keys off, or every
+    attachment reply would duplicate into the transcript."""
+    from web_api.routes.tickets import _relay_content
+
+    out = _relay_content("alice", "look", [{"url": "https://cdn/x.png"}])
+    assert _is_web_relay(_author(True), out) is True
+
+
+def test_relay_truncation_keeps_urls_and_fits_discord():
+    """A cut-off link is useless; a cut-off sentence still reads. So the prose
+    is what gives way, and the result still fits Discord's 2000 cap."""
+    from web_api.routes.tickets import _relay_content
+
+    urls = [{"url": "https://cdn/" + "y" * 60 + ".png"} for _ in range(4)]
+    out = _relay_content("alice", "z" * 5000, urls)
+    assert len(out) <= 2000
+    for u in urls:
+        assert u["url"] in out
+
+
+def test_relay_skips_attachments_without_urls():
+    from web_api.routes.tickets import _relay_content
+
+    out = _relay_content("alice", "hi", [{"url": None}, {}])
+    assert out == "**alice** (via site): hi"
 
 
 # --------------------------------------------------------------------------- #

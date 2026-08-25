@@ -559,8 +559,20 @@ class Tickets(Extension):
             )
             for r in web_rows:
                 try:
+                    # Same builder the reply route uses, so the relay marker
+                    # (and therefore the mirror's skip) stays identical and
+                    # any attachment URLs come along.
+                    from web_api.routes.tickets import (
+                        _attachment_entries,
+                        _relay_content,
+                    )
+
                     msg = await channel.send(
-                        f"**{(r.author_name or 'user')[:100]}** (via site): {r.content or ''}"[:2000]
+                        _relay_content(
+                            r.author_name or "user",
+                            r.content or "",
+                            _attachment_entries(r.attachments_json),
+                        )
                     )
                     r.discord_message_id = str(msg.id)
                     s.commit()

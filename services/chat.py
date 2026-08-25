@@ -343,14 +343,19 @@ def resolve_membership(s, thread, user_id: int) -> Optional[Membership]:
                 matched.append(Party("group", gid))
 
     if not matched:
-        # Support staff hold a seat on the support-surface kinds without a
-        # stored participant row (web102a): any developer/superadmin may read
-        # and answer a staff_dm or group_notice thread, exactly as any of a
-        # clan's admins may answer for the clan. Every other kind fails
-        # closed — a CvC negotiation stays invisible to non-participants,
-        # and staff thread LISTS stay scoped to real parties (see
-        # speakable_group_ids); the staff route queries by kind instead.
-        if getattr(thread, "kind", None) in ("staff_dm", "group_notice"):
+        # Support staff hold a seat on every thread kind without a stored
+        # participant row (web102a): any developer/superadmin may read and
+        # answer a staff_dm, a group_notice, or a clan-vs-clan negotiation,
+        # exactly as any of a clan's admins may answer for the clan. Staff
+        # mediate CvC disputes, so being locked out of the conversation they
+        # are asked to arbitrate was the wrong default.
+        #
+        # This widens who may open a thread BY ID; it deliberately does not
+        # widen the thread LIST. `speakable_group_ids` still refuses to fold
+        # every clan on the site into a staff member's own inbox — the staff
+        # browse routes query by kind instead, so a negotiation reaches staff
+        # eyes only when they go looking for it.
+        if getattr(thread, "kind", None) in THREAD_KINDS:
             from web_api.deps import is_support_staff
 
             if is_support_staff(user):

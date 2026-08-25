@@ -81,11 +81,26 @@ def _rate_limited(bucket: str, user_id: int, limit: int, window: int) -> bool:
         return False
 
 
-def _relay_content(author_name: str, body: str) -> str:
-    """The Discord copy of a site-authored reply. The exact shape is
-    load-bearing: ticket_transcripts._is_web_relay matches it to keep the
-    mirror from re-importing the relay."""
-    return f"**{author_name[:100]}** (via site): {body}"[:2000]
+def _relay_content(author_name: str, body: str,
+                   attachments: Optional[list] = None) -> str:
+    """The Discord copy of a site-authored reply.
+
+    The PREFIX shape is load-bearing: ticket_transcripts._is_web_relay matches
+    it to keep the mirror from re-importing the relay, so the leading
+    ``**name** (via site): `` must not change here without changing there.
+    Attachment URLs are appended on their own lines — Discord unfurls them, so
+    staff reading in the channel see the screenshot rather than a note that one
+    exists. Truncation keeps the URLs and trims the prose, because a cut-off
+    link is useless while a cut-off sentence still reads.
+    """
+    head = f"**{author_name[:100]}** (via site): "
+    urls = [a.get("url") for a in (attachments or []) if a.get("url")]
+    tail = ("\n" + "\n".join(urls)) if urls else ""
+    room = 2000 - len(head) - len(tail)
+    if room < 0:  # pathological: more URL than Discord allows
+        return (head + body)[:2000]
+    text = body if len(body) <= room else body[: max(0, room - 1)].rstrip() + "…"
+    return head + text + tail
 
 
 def _ts(dt: Optional[datetime]) -> Optional[int]:
@@ -128,6 +143,14 @@ def _ticket_summary(s, t: Ticket, *, message_counts: Optional[dict] = None) -> d
 
 
 def _attachment_entries(raw: Optional[str]) -> list[dict]:
+    """Render stored attachment refs for the client.
+
+    Two shapes coexist by origin and neither is converted into the other:
+    Discord-mirrored files were downloaded to disk and carry a ``path`` under
+    the /img/ route, while web-uploaded ones live on B2 and carry the upload
+    ``key`` whose URL we re-derive (never a client-supplied URL — see
+    services.chat.normalize_attachments).
+    """
     if not raw:
         return []
     try:
@@ -137,10 +160,19 @@ def _attachment_entries(raw: Optional[str]) -> list[dict]:
     out = []
     for e in entries if isinstance(entries, list) else []:
         path = e.get("path")
+        key = e.get("key")
+        if path:
+            url = f"/img/{path}"
+        elif key:
+            from services.chat import attachment_url
+
+            url = attachment_url(key)
+        else:
+            url = e.get("original_url")
         out.append(
             {
                 "filename": e.get("filename") or "file",
-                "url": f"/img/{path}" if path else e.get("original_url"),
+                "url": url,
                 "content_type": e.get("content_type"),
                 "size": e.get("size"),
             }
@@ -336,7 +368,18 @@ async def create_ticket_message(ticket_id: int):
     user_id = current_user_id()
     body = await json_body()
     content = str(body.get("content") or "").strip()
-    if not (1 <= len(content) <= _REPLY_MAX):
+    # Attachments ride the same upload path chat uses (POST /uploads/proof →
+    # key), and the same validator: we keep the key and re-derive the URL, so a
+    # client cannot post an arbitrary remote image into a ticket transcript.
+    from services.chat import ChatError, normalize_attachments
+
+    try:
+        attachments = normalize_attachments(body.get("attachments"))
+    except ChatError as e:
+        abort_problem(422, "Invalid attachments", str(e))
+    if not content and not attachments:
+        abort_problem(422, "Invalid content", "Write something or attach a file.")
+    if len(content) > _REPLY_MAX:
         abort_problem(
             422, "Invalid content", f"'content' must be 1-{_REPLY_MAX} characters."
         )
@@ -369,6 +412,7 @@ async def create_ticket_message(ticket_id: int):
                 kind="message",
                 origin="web",
                 content=content,
+                attachments_json=(json.dumps(attachments) if attachments else None),
                 date_sent=datetime.now(),
             )
             s.add(row)
@@ -386,7 +430,7 @@ async def create_ticket_message(ticket_id: int):
                 enqueue(
                     s,
                     channel_id=ticket.channel_id,
-                    content=_relay_content(author_name, content),
+                    content=_relay_content(author_name, content, attachments),
                     kind="message",
                     ref_type="ticket_message",
                     ref_id=row.id,

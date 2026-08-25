@@ -67,19 +67,63 @@ def _pointer_debounced(discord_id: str) -> bool:
         return True  # when unsure, stay silent
 
 
-def _attachment_refs(message) -> list[dict]:
-    """Record DM attachments as CDN references. Discord CDN links expire —
-    accepted for v1; mirroring bytes to B2 is the phase-2 upgrade."""
+#: Mirror ceiling per file. Discord's own free-tier attachment cap is 25 MB,
+#: so this refuses nothing a normal user can send; it exists to keep a
+#: hostile or accidental upload from being read into memory.
+MAX_MIRROR_BYTES = 25 * 1024 * 1024
+_MIRROR_PREFIX = "dt_uploads"
+
+
+async def _attachment_refs(message) -> list[dict]:
+    """Mirror DM attachments into B2 and return refs the thread can render.
+
+    Discord's CDN URLs are signed and expire, so storing them would leave a
+    conversation full of dead images a month later — the same reason ticket
+    transcripts download their attachments. Bytes go to the ``dt_uploads/``
+    prefix the web upload route already uses, so ``services.chat`` re-derives
+    the URL from the key exactly as it does for site uploads.
+
+    Failure degrades rather than drops: the CDN URL is recorded so the entry
+    still shows *something* until it expires, and the message still posts.
+    """
+    import uuid
+
     out = []
     for att in list(getattr(message, "attachments", None) or [])[:4]:
-        out.append(
-            {
-                "url": str(getattr(att, "url", "") or ""),
-                "key": None,
-                "content_type": getattr(att, "content_type", None),
-                "filename": getattr(att, "filename", None),
-            }
-        )
+        cdn_url = str(getattr(att, "url", "") or "")
+        filename = getattr(att, "filename", None) or "file"
+        content_type = getattr(att, "content_type", None) or "application/octet-stream"
+        size = getattr(att, "size", None)
+        entry = {"key": None, "url": cdn_url, "filename": filename,
+                 "content_type": content_type}
+        try:
+            if size is not None and int(size) > MAX_MIRROR_BYTES:
+                raise ValueError(f"{size} bytes over mirror cap")
+            import aiohttp
+
+            from utils.b2_storage import upload_bytes
+
+            async with aiohttp.ClientSession() as http:
+                async with http.get(cdn_url) as resp:
+                    resp.raise_for_status()
+                    data = await resp.read()
+            if len(data) > MAX_MIRROR_BYTES:
+                raise ValueError(f"{len(data)} bytes over mirror cap")
+            ext = ""
+            if "." in filename:
+                ext = "." + filename.rsplit(".", 1)[-1][:10]
+            key = f"{_MIRROR_PREFIX}/{uuid.uuid4().hex}{ext}"
+            await upload_bytes(data, key, content_type)
+            from services.chat import attachment_url
+
+            # Store key AND the derived URL, the same pair
+            # normalize_attachments writes for site uploads — the renderer
+            # reads attachments_json verbatim, so the URL has to be in it.
+            entry["key"] = key
+            entry["url"] = attachment_url(key)
+        except Exception as e:  # noqa: BLE001
+            print(f"[staff_dm_bridge] attachment mirror failed ({filename}): {e}")
+        out.append(entry)
     return out
 
 
@@ -153,15 +197,16 @@ class StaffDmBridge(Extension):
                 return  # guild traffic is other listeners' business
             discord_id = str(author.id)
             content = (message.content or "").strip()
-            attachments = _attachment_refs(message)
-            if not content and not attachments:
+            if not content and not getattr(message, "attachments", None):
                 return
+            # Budget first: a rate-limited message must not cost us an upload.
             if _rate_limited(int(author.id)):
                 try:
                     await message.add_reaction("⏳")
                 except Exception:
                     pass
                 return
+            attachments = await _attachment_refs(message)
             result = await asyncio.to_thread(
                 _ingest, discord_id, str(message.id), content[:2000], attachments
             )

@@ -2,6 +2,7 @@
 
   GET  /api/v1/me/inbox               -> chat threads + tickets + suggestions,
                                          each with unread, one sorted list
+  POST /api/v1/me/inbox/read-all      -> zero every unread the caller holds
   POST /api/v1/tickets/{id}/read      -> {message_id} advance read pointer
   POST /api/v1/suggestions/{id}/read  -> {message_id} advance read pointer
 
@@ -311,6 +312,92 @@ async def my_inbox():
             }
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@inbox_bp.post("/me/inbox/read-all")
+async def mark_inbox_read_all():
+    """Zero the whole badge in one action.
+
+    Pointers land on each surface's newest entry rather than on a global
+    watermark, so a conversation that gains a message a second later still
+    lights up — "mark all read" means "I've seen everything up to now", not
+    "stop telling me".
+    """
+    user_id = current_user_id()
+
+    def _apply():
+        from sqlalchemy import func
+
+        from services.chat import mark_read
+        from services.inbox import mark_surface_read
+
+        with db_session() as s:
+            marked = 0
+
+            chat_items = _chat_items(s, user_id)
+            thread_ids = [int(i["thread"]["id"]) for i in chat_items]
+            if thread_ids:
+                newest = dict(
+                    s.query(ChatMessage.thread_id, func.max(ChatMessage.id))
+                    .filter(ChatMessage.thread_id.in_(thread_ids))
+                    .group_by(ChatMessage.thread_id)
+                    .all()
+                )
+                for item in chat_items:
+                    tid = int(item["thread"]["id"])
+                    if int(item["thread"].get("unread") or 0) <= 0:
+                        continue
+                    mark_read(s, tid, user_id, int(newest.get(tid, 0) or 0),
+                              commit=False)
+                    marked += 1
+
+            ticket_items, _open_id = _ticket_items(s, user_id)
+            ticket_ids = [
+                int(i["ticket"]["ticket_id"]) for i in ticket_items
+                if int(i.get("unread") or 0) > 0
+            ]
+            if ticket_ids:
+                newest_t = dict(
+                    s.query(TicketMessage.ticket_id, func.max(TicketMessage.id))
+                    .filter(TicketMessage.ticket_id.in_(ticket_ids))
+                    .group_by(TicketMessage.ticket_id)
+                    .all()
+                )
+                for tid in ticket_ids:
+                    mark_surface_read(
+                        s, "ticket", tid, user_id,
+                        int(newest_t.get(tid, 0) or 0), commit=False,
+                    )
+                    marked += 1
+
+            suggestion_items = _suggestion_items(s, user_id)
+            sug_ids = [
+                int(i["suggestion"]["id"]) for i in suggestion_items
+                if int(i.get("unread") or 0) > 0
+            ]
+            if sug_ids:
+                from db.models import SuggestionMessage
+
+                newest_s = dict(
+                    s.query(
+                        SuggestionMessage.suggestion_id,
+                        func.max(SuggestionMessage.id),
+                    )
+                    .filter(SuggestionMessage.suggestion_id.in_(sug_ids))
+                    .group_by(SuggestionMessage.suggestion_id)
+                    .all()
+                )
+                for sid in sug_ids:
+                    mark_surface_read(
+                        s, "suggestion", sid, user_id,
+                        int(newest_s.get(sid, 0) or 0), commit=False,
+                    )
+                    marked += 1
+
+            s.commit()
+            return {"marked": marked, "total_unread": 0}
+
+    return private_no_store(jsonify(await asyncio.to_thread(_apply)))
 
 
 @inbox_bp.post("/tickets/<int:ticket_id>/read")

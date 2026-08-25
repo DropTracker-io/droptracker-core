@@ -2,15 +2,20 @@
 
   POST /api/v1/staff/chats           -> {user_id, body} open (or reopen) the
                                         target's staff_dm thread + DM them
-  GET  /api/v1/staff/chats           -> all staff_dm threads + unread, paged
+  GET  /api/v1/staff/chats?kind=     -> threads of one kind + unread, paged
+                                        (staff_dm | event_invite | group_notice)
   GET  /api/v1/staff/users/search    -> ?q= find a site user to message
 
 All gated on ``is_support_staff`` (v1: developers + superadmins). Ongoing
 conversation happens through the ordinary ``/chat/*`` routes — the
-``resolve_membership`` staff branch seats staff on any staff_dm thread — and
-every staff post is relayed as a Discord DM by the chat route via
+``resolve_membership`` staff branch seats staff on any thread — and every
+staff post on a staff_dm is relayed as a Discord DM by the chat route via
 ``services/staff_dm.queue_staff_dm_relay`` (collapsed to at most one ping a
 minute per thread).
+
+``kind=event_invite`` is how staff reach clan-vs-clan negotiations they are
+asked to mediate. Those threads never enter a staff member's own inbox (see
+``speakable_group_ids``); a clan's leaders see their own without coming here.
 """
 from __future__ import annotations
 
@@ -27,6 +32,11 @@ staff_chats_bp = Blueprint("v1_staff_chats", __name__)
 
 _SEARCH_LIMIT = 12
 _OPEN_LIMIT_PER_DAY = 30  # per staff member; a sanity cap, not a workflow
+
+#: Kinds staff may browse. Mirrors services.chat.THREAD_KINDS; kept as its own
+#: tuple so adding a kind is a deliberate decision about staff visibility
+#: rather than an automatic consequence.
+_BROWSABLE_KINDS = ("staff_dm", "event_invite", "group_notice")
 
 
 def _staff_open_limited(user_id: int) -> bool:
@@ -171,8 +181,20 @@ async def open_staff_chat():
 
 @staff_chats_bp.get("/staff/chats")
 async def list_staff_chats():
+    """Staff browse over threads of one kind.
+
+    Deliberately a separate surface from ``/chat/threads``: staff hold a seat
+    on every thread by ``resolve_membership``, but folding every clan's
+    negotiation into their own inbox would bury their actual conversations.
+    They come here when they go looking.
+    """
     user_id = current_user_id()
     page, limit = parse_page(request, default_limit=25, max_limit=100)
+    kind = (request.args.get("kind") or "staff_dm").strip().lower()
+    if kind not in _BROWSABLE_KINDS:
+        abort_problem(
+            400, "Bad request", f"kind must be one of {'|'.join(_BROWSABLE_KINDS)}."
+        )
 
     def _load():
         from services.chat import thread_payload, unread_counts
@@ -182,7 +204,7 @@ async def list_staff_chats():
             assert_support_staff(load_user(s, user_id))
             query = (
                 s.query(ChatThread)
-                .filter(ChatThread.kind == "staff_dm")
+                .filter(ChatThread.kind == kind, ChatThread.status != "archived")
                 .order_by(ChatThread.last_message_at.desc())
             )
             total = query.count()
