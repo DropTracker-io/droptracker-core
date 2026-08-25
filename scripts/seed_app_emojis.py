@@ -79,9 +79,15 @@ MAX_UPLOAD_BYTES = 256 * 1024
 #: Sizes tried, largest first, when the source art is too big.
 SHRINK_TO = (128, 96, 64, 48, 32)
 
-#: Discord's per-app ceiling, shared with the ~270 rank emojis already up
-#: there (see scripts/seed_rank_emojis.py).
+#: Discord's per-app ceiling, shared with the ~270 rank emojis and the ~1000
+#: item/NPC emojis already up there (see scripts/seed_rank_emojis.py and
+#: scripts/seed_game_emojis.py).
 APP_EMOJI_LIMIT = 2000
+
+#: Name prefixes belonging to the *other* seeders on this application. This
+#: registry's own keys are unprefixed, so "not ours" cannot be decided by a
+#: prefix — only by excluding everyone else's.
+OTHER_SET_PREFIXES = ("rank_", "item_", "npc_")
 
 
 def _get(url: str, timeout: int = 30) -> bytes:
@@ -182,12 +188,16 @@ async def seed_profile(profile: str, token: str, args) -> int:
 
         wanted = {key: spec.name for key, spec in SPECS.items()}
         missing = {k: n for k, n in wanted.items() if n not in existing}
-        # Only ever consider emojis this registry is responsible for: the core
-        # app also owns ~270 rank_* emojis that seed_rank_emojis.py manages.
+        # Only ever consider emojis this registry is responsible for. The core
+        # app also owns ~270 rank_* (scripts/seed_rank_emojis.py) and ~1000
+        # item_*/npc_* (scripts/seed_game_emojis.py), each seeded from its own
+        # source of truth. This set is the unprefixed remainder, so it has to
+        # name every other namespace explicitly — a prefix added there and not
+        # here means the next --prune here deletes that whole set.
         managed = set(wanted.values())
         stale = [
             name for name in existing
-            if not name.startswith("rank_") and name not in managed
+            if not name.startswith(OTHER_SET_PREFIXES) and name not in managed
         ]
 
         if args.verify:

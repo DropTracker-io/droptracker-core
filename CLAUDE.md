@@ -202,6 +202,7 @@ droptracker/
 │   ├── site_urls.py        # droptracker.io links — always built from the id
 │   ├── app_emojis.py       # the bot's custom emoji, owned by the application
 │   ├── rank_emojis.py      # OSRS clan rank icons, ditto (clan chat bridge)
+│   ├── game_emojis.py      # ~1000 item/NPC glyphs, ditto (notification surfaces)
 │   ├── format.py           # format_number(), replace_placeholders(), etc.
 │   ├── encrypter.py        # Fernet webhook URL encryption
 │   ├── b2_storage.py       # Backblaze B2 presigned URLs
@@ -268,7 +269,9 @@ A full walkthrough is in `docs/SUBMISSION_PIPELINE.md`. Short version:
 
 **WOM is the identity source of truth.** A `Player` row is only created once WOM confirms the account exists; never trust a submitted `player_name` alone. **But the intake hot path does not call WOM per submission** — resolution is cached/deferred and `droptracker-player-updates` handles refresh on its own cadence.
 
-**Never write a `<:name:id>` emoji into a message.** A guild emoji costs the *sending bot* `USE_EXTERNAL_EMOJIS` in the destination channel, and where that permission is missing the message does not degrade — the reader sees the raw `<:supporter:123>`. Add a key to `utils/app_emojis.SPECS` and call `emoji()` / `partial_emoji()`; `scripts/seed_app_emojis.py` uploads them as **application** emojis (no permission, 2000 per app) and writes `static/app_emojis.json`. The core bot and the Hall of Fame bot are **separate Discord applications** and `services/hall_of_fame.py` runs in both, so the map is keyed by profile and each process declares its own with `use_profile()` at startup. Every key carries a Unicode fallback, so an unseeded app renders sensibly rather than blankly. (`utils/rank_emojis.py` is the same idea for the ~270 clan rank icons, with its own map.)
+**Never write a `<:name:id>` emoji into a message.** A guild emoji costs the *sending bot* `USE_EXTERNAL_EMOJIS` in the destination channel, and where that permission is missing the message does not degrade — the reader sees the raw `<:supporter:123>`. Add a key to `utils/app_emojis.SPECS` and call `emoji()` / `partial_emoji()`; `scripts/seed_app_emojis.py` uploads them as **application** emojis (no permission, 2000 per app) and writes `static/app_emojis.json`. The core bot and the Hall of Fame bot are **separate Discord applications** and `services/hall_of_fame.py` runs in both, so the map is keyed by profile and each process declares its own with `use_profile()` at startup. Every key carries a Unicode fallback, so an unseeded app renders sensibly rather than blankly. (`utils/rank_emojis.py` is the same idea for the ~270 clan rank icons, and `utils/game_emojis.py` for ~1000 item/NPC glyphs — each with its own map.)
+
+**Three emoji sets share the core application's 2000 slots**, each with its own seeder and its own `--prune`: `rank_*` (270, `seed_rank_emojis.py`), `item_*`/`npc_*` (1000, `seed_game_emojis.py`) and the unprefixed UI keys (8, `seed_app_emojis.py`). Prune decides "not mine" from a name prefix, so **a new prefixed set must be added to `seed_app_emojis.OTHER_SET_PREFIXES`** or the next run of that seeder deletes it wholesale (`tests/unit/test_game_emojis.py::TestSeedersDoNotDeleteEachOther` fails the build if it is not). The item/NPC set is *deliberately incomplete* — 1000 of 29k items — so `emoji_for_item()`/`emoji_for_npc()` returning `None` is the normal path and callers render the bare name; there is no Unicode fallback, because nothing stands in for "Twisted bow". Which entities are in it is a decision, not a config: `scripts/rank_game_emojis.py` derives it from notification history and writes `data/game_emojis.json` (committed, reviewable); the seeder writes `static/game_emojis.json` (the upload receipt).
 
 **Site links are built from the id, never from a name** — `utils/site_urls.py`. OSRS names carry spaces, and Discord's `[label](url)` parser ends the URL at the first space, so a name-derived URL renders as broken text for exactly the players whose names have a space. The reader only ever sees the label.
 
@@ -409,6 +412,7 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | Plugin in-game notifications / HUD | `services/plugin_notifications.py`, `api/routes/notifications.py` |
 | Add/modify a Discord slash command | `commands/user.py`, `commands/admin.py`, `commands/group_admin.py` |
 | Change notification embed format | `utils/embeds.py` + `db/models/embed.py` (GroupEmbed) |
+| Put an item or NPC icon inside a message | `utils/game_emojis.py` (`emoji_for_item`/`emoji_for_npc`, name **or** id); regenerate the set with `scripts/rank_game_emojis.py --report` then `--write`, upload with `scripts/seed_game_emojis.py` |
 | Notifications sent as Components V2 instead of an embed | `services/component_layout.py` (DSL, defaults, token docs, pilot allowlist) + `web_api/routes/notification_layouts.py`; the send-path branch is `NotificationService._try_send_component_layout` |
 | Change event message wording/layout | `services/event_message_layouts.py` (DB-seeded — reseed on default change) |
 | Change leaderboard ranking logic | `services/redis_updates.py` |
