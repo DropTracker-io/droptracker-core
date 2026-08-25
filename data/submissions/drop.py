@@ -54,11 +54,17 @@ def _verify_high_value_drop_sync(item_name, npc_name, timeout: float = 20.0) -> 
     can't finish within ``timeout`` (fail-open — a slow wiki must not reject a
     legitimate high-value submission). Returns False only when the wiki
     definitively reports the pairing is invalid.
+
+    The redis cache passed to the client keeps repeat lookups for the same
+    item off api.php for up to a week — the wiki blocklisted our old
+    User-Agent in 2026-08 for query volume, which silently fail-opened this
+    entire check. check_drop revalidates any cache-derived rejection live, so
+    the cache cannot false-reject.
     """
     from .common import osrs_api
 
     async def _check() -> bool:
-        async with osrs_api.create_client() as client:
+        async with osrs_api.create_client(cache=redis_client.client) as client:
             return await client.semantic.check_drop(item_name, npc_name)
 
     try:

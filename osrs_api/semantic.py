@@ -37,6 +37,15 @@ class SemanticAPI:
     # "no rows" stays inconclusive.
     NEW_ITEM_GRACE_DAYS = 30
 
+    # Drop tables only change with the weekly game update (Tue/Wed), so a
+    # per-item source list is safe to reuse for days. Serving allows from
+    # cache is what keeps our api.php volume down — the wiki blocklisted our
+    # previous User-Agent for hammering it once per >1M drop. Staleness can
+    # only ever delay an ALLOW for a freshly-added source: any REJECT that was
+    # derived from cached data is re-checked against the live wiki before it
+    # is issued (see check_drop), so the TTL never causes a false rejection.
+    DROP_CACHE_TTL_SECONDS = 7 * 24 * 3600
+
     # Mapping of database names to semantic names for compatibility
     ALT_NAMES = {
         # Semantic name -> our database name
@@ -83,8 +92,43 @@ class SemanticAPI:
     def __init__(self, client):
         """Initialize with reference to main client."""
         self.client = client
+        # Optional redis-like cache (get/set(ex=)) supplied by the client;
+        # None disables drop-source caching entirely.
+        self.cache = getattr(client, "cache", None)
         self._ca_tiers_cache = None  # Cache for Combat Achievement tiers
-    
+
+    def _cache_get(self, key: str):
+        """JSON-decode a cached value; None on miss, no cache, or any error.
+
+        The cache is an availability optimization, never a correctness
+        dependency — a broken/unreachable cache must degrade to the uncached
+        wiki path, not take drop verification down with it.
+        """
+        if self.cache is None:
+            return None
+        try:
+            raw = self.cache.get(key)
+        except Exception as e:
+            print(f"Drop-check cache read failed for {key}: {e}")
+            return None
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+
+    def _cache_set(self, key: str, value) -> None:
+        if self.cache is None:
+            return
+        try:
+            self.cache.set(key, json.dumps(value), ex=self.DROP_CACHE_TTL_SECONDS)
+        except Exception as e:
+            print(f"Drop-check cache write failed for {key}: {e}")
+
+
     def _bucket_quote(self, value: str) -> str:
         """
         Safely quote a string for Bucket API queries using double quotes and escaping.
@@ -116,13 +160,17 @@ class SemanticAPI:
         
         async with session.get(self.WIKI_API_URL, params=params) as resp:
             if resp.status != 200:
+                # Log it: a silent non-200 is how a UA blocklisting in
+                # 2026-08 turned every high-value check into a fail-open for
+                # days with nothing in the journal but "unavailable".
+                print(f"Bucket API HTTP {resp.status} for query: {query[:160]}")
                 return {}
-            
+
             body = await resp.json()
             if 'error' in body:
                 print(f"Bucket API error: {body['error']}")
                 return {}
-            
+
             return body
     
     async def get_item_id(self, item_name: str) -> Optional[int]:
@@ -223,7 +271,7 @@ class SemanticAPI:
         except ValueError:
             return None
 
-    async def _nothing_drops_item(self, item_name: str) -> bool:
+    async def _nothing_drops_item(self, item_name: str) -> Optional[bool]:
         """Is this an item the game provably never drops?
 
         True only when the wiki HAS an ``infobox_item`` page under this name
@@ -231,9 +279,11 @@ class SemanticAPI:
         ``NEW_ITEM_GRACE_DAYS`` — so an empty dropsline result means "no
         monster drops this", not "nobody has documented it yet".
 
-        False on anything short of that (name the wiki doesn't know, missing
-        or unparseable release date, failed lookup), which keeps the caller on
-        its fail-open path.
+        False on any conclusive lookup short of that (name the wiki doesn't
+        know, missing or unparseable release date), which keeps the caller on
+        its fail-open path. None when the wiki couldn't answer at all
+        (transport/API error) — same fail-open effect for the caller, but the
+        caching layer must not remember it.
         """
         query = (
             "bucket('infobox_item')"
@@ -243,7 +293,7 @@ class SemanticAPI:
         )
         result = await self._bucket_query(query)
         if 'bucket' not in result:
-            return False
+            return None
 
         rows = result['bucket']
         if not rows:
@@ -263,153 +313,91 @@ class SemanticAPI:
         # indistinguishable from a name nothing drops.
         return (date.today() - max(released)).days > self.NEW_ITEM_GRACE_DAYS
 
+    async def _nothing_drops_item_cached(
+        self, item_name: str, use_cache: bool
+    ) -> tuple:
+        """Cached wrapper for _nothing_drops_item.
+
+        Returns ``(verdict, used_cache)``. The verdict caches for
+        DROP_CACHE_TTL_SECONDS; errors (None) pass through uncached. A cached
+        True verdict still gets revalidated live by check_drop before it can
+        reject anything, so staleness only ever extends an allow.
+        """
+        key = f"wiki:nodrops:v1:{item_name.strip().lower()}"
+        if use_cache:
+            cached = self._cache_get(key)
+            if isinstance(cached, dict) and "verdict" in cached:
+                return bool(cached["verdict"]), True
+        verdict = await self._nothing_drops_item(item_name)
+        if verdict is not None:
+            self._cache_set(key, {"verdict": verdict})
+        return verdict, False
+
+    async def _dropsline_sources(
+        self, lookup_name: str, use_cache: bool
+    ) -> tuple:
+        """The wiki's drop-source page names for one dropsline item name.
+
+        Returns ``(sources, used_cache)`` where sources is a list of raw
+        page_name strings (possibly empty), or None when the wiki couldn't
+        answer. Successful lookups — including empty ones — cache for
+        DROP_CACHE_TTL_SECONDS; errors are never cached.
+        """
+        key = f"wiki:dropsline:v1:{lookup_name.strip().lower()}"
+        if use_cache:
+            cached = self._cache_get(key)
+            if isinstance(cached, list):
+                return cached, True
+
+        # The explicit .limit() is load-bearing: see DROPSLINE_ROW_LIMIT.
+        query = (
+            "bucket('dropsline')"
+            ".select('page_name')"
+            f".where('item_name', {self._bucket_quote(lookup_name)})"
+            f".limit({self.DROPSLINE_ROW_LIMIT}).run()"
+        )
+        result = await self._bucket_query(query)
+
+        # `_bucket_query` returns a dict WITHOUT a 'bucket' key on transport
+        # or API error (a successful query always includes 'bucket', even
+        # when the list is empty), which lets us tell "the wiki couldn't
+        # answer" apart from "the item has no drop sources".
+        if 'bucket' not in result:
+            return None, False
+
+        sources = [str(e.get('page_name', '')) for e in result['bucket']]
+        self._cache_set(key, sources)
+        return sources, False
+
     async def check_drop(self, item_name: str, npc_name: str) -> bool:
         """
         Check if an item drops from a specific NPC.
-        
+
+        Wiki lookups are served from the (optional) cache for up to
+        DROP_CACHE_TTL_SECONDS. Allows may therefore be decided from cached
+        data, but a REJECT derived from any cached data is always re-run
+        against the live wiki first — so caching can delay an allow for a
+        newly-added drop source by at most the TTL, and can never cause a
+        false rejection that live data wouldn't.
+
         Args:
             item_name: The name of the item
             npc_name: The name of the NPC
-            
+
         Returns:
             True if the item drops from the NPC, False otherwise
         """
         try:
-            # Handle special cases
-            if item_name == "Enhanced crystal teleport seed" and npc_name == "Elf":
-                return True
-            if item_name.strip() == "Black tourmaline core" and npc_name.strip() == "Dusk":
-                return True
-            if npc_name.strip() == "Kingdom of Miscellania":
-                # Kingdom resource collection is an activity, not a monster;
-                # the dropsline bucket can never confirm it, so every stack
-                # (coal, herbs, logs, nests) worth >1M would be a guaranteed
-                # confident-negative false rejection.
-                return True
-            
-            # Build db-name -> {wiki page_name, …}. A single submitted NPC can
-            # correspond to several wiki drop-source pages: the "Royal Titans"
-            # encounter's loot is split across "Branda the Fire Queen" and
-            # "Eldric the Ice King"; Chambers of Xeric loot is under "Ancient
-            # chest"; etc. The previous dict collapsed many-to-one, so only the
-            # last alias for a given NPC ever matched.
-            reverse_alt_names = {}
-            for wiki_name, db_names in self.ALT_NAMES.items():
-                names = db_names if isinstance(db_names, list) else [db_names]
-                for db_name in names:
-                    reverse_alt_names.setdefault(db_name, set()).add(wiki_name)
-
-            # Acceptable wiki drop-source names for this NPC: the submitted name
-            # itself plus any aliased wiki page names.
-            acceptable = {npc_name} | reverse_alt_names.get(npc_name, set())
-            acceptable_norm = {a.lower().strip() for a in acceptable}
-            if acceptable_norm != {npc_name.lower().strip()}:
-                print(f"Accepting drop sources {sorted(acceptable)} for {npc_name}")
-
-            # Charged megarares (Tumeken's shadow, Scythe of vitur,
-            # Sanguinesti staff, …) only ever DROP in their "(uncharged)"
-            # form, and that is the only name the dropsline bucket indexes.
-            # A submission carrying the charged name therefore got zero rows
-            # and sailed through the not-indexed fail-open below — which is
-            # how a "Tumeken's shadow from Dossier" (a container-open
-            # inventory-diff artifact) was accepted on 2026-08-05. When the
-            # submitted name has no rows, retry with the droppable variant:
-            # its source list is authoritative for the charged form too,
-            # because the charged form provably drops nowhere.
-            lookup_names = [item_name]
-            base_name = str(item_name or "").strip()
-            if base_name and not base_name.lower().endswith("(uncharged)"):
-                lookup_names.append(f"{base_name} (uncharged)")
-
-            for lookup_name in lookup_names:
-                # Query the dropsline bucket to find NPCs that drop this item.
-                # The explicit .limit() is load-bearing: see DROPSLINE_ROW_LIMIT.
-                query = (
-                    "bucket('dropsline')"
-                    ".select('page_name')"
-                    f".where('item_name', {self._bucket_quote(lookup_name)})"
-                    f".limit({self.DROPSLINE_ROW_LIMIT}).run()"
+            allowed, used_cache = await self._check_drop_inner(
+                item_name, npc_name, use_cache=True
+            )
+            if not allowed and used_cache:
+                print(f"Cached data rejects {item_name} from {npc_name}; "
+                      f"revalidating against the live wiki")
+                allowed, _ = await self._check_drop_inner(
+                    item_name, npc_name, use_cache=False
                 )
-
-                result = await self._bucket_query(query)
-
-                # FAIL-OPEN on anything inconclusive. This check exists to block
-                # spoofed high-value submissions, and a spoof can only be proven
-                # POSITIVELY — the wiki lists real drop sources for the item and
-                # this NPC isn't among them. Every other outcome (wiki
-                # unavailable/rate-limited, malformed query, or the item simply
-                # not indexed in `dropsline`) is *inconclusive* and must NOT be
-                # treated as a spoof, or we silently reject legitimate drops.
-                # `_bucket_query` returns a dict WITHOUT a 'bucket' key on transport
-                # or API error (a successful query always includes 'bucket', even
-                # when the list is empty), which lets us tell "the wiki couldn't
-                # answer" apart from "the item has no drop sources".
-                if 'bucket' not in result:
-                    print(f"Dropsline lookup unavailable for {lookup_name!r}; allowing (fail-open)")
-                    return True
-
-                bucket_data = result['bucket']
-                if not bucket_data:
-                    # No rows under this name — try the next variant before
-                    # concluding the item isn't indexed at all.
-                    continue
-
-                # Check if any of the returned NPCs match our target NPC
-                for drop_entry in bucket_data:
-                    dropped_from = drop_entry.get('page_name', '')
-
-                    # Remove any subpage references (e.g., "NPC name#Normal")
-                    if "#" in dropped_from:
-                        dropped_from = dropped_from.split("#")[0]
-
-                    # Check if this drop source matches our NPC name (or an alias).
-                    if dropped_from.lower().strip() in acceptable_norm:
-                        print(f"Drop found & valid for {item_name} from {dropped_from}")
-                        return True
-
-                # A full page means the wiki had at least as many drop-source rows
-                # as we asked for, so it may have more that it never sent — "not in
-                # this list" then proves nothing. Inconclusive, so fail open.
-                if len(bucket_data) >= self.DROPSLINE_ROW_LIMIT:
-                    print(f"Dropsline results for {lookup_name!r} hit the "
-                          f"{self.DROPSLINE_ROW_LIMIT}-row query limit; allowing (fail-open)")
-                    return True
-
-                # Confident negative: the item HAS known drop sources and this NPC
-                # is not one of them. This is the only case we reject.
-                sources = sorted({e.get('page_name', '') for e in bucket_data})
-                print(f"No valid drop found for {item_name} from {npc_name} "
-                      f"(matched dropsline name {lookup_name!r}; wiki sources: {sources})")
-                return False
-
-            # No drop-source rows under any name we tried. Two very different
-            # situations land here, and only one of them is inconclusive:
-            #
-            #  * the wiki has no item page under this name at all (our
-            #    spelling, a variant we don't handle, a genuine wiki gap) —
-            #    proves nothing either way;
-            #  * the wiki DOES know the item and no monster's drop table lists
-            #    it, i.e. nothing in the game drops it. Player-assembled and
-            #    imbued gear lives here — Noxious halberd, Emberlight, Purging
-            #    staff, Brimstone ring, Archers ring (i) — and for those every
-            #    claimed NPC source is false by construction.
-            #
-            # The second case is the one this check exists to catch and used
-            # to wave through. RuneLite's container-open loot records (bird
-            # nests, Dossiers, Rogues' Chest — LootRecordType.EVENT) compute
-            # loot by inventory diff, so an in-game inventory glitch invents
-            # "loot" out of the player's own gear, which is exactly the
-            # never-dropped items above. That is how a phantom 42M "Noxious
-            # halberd from Rogues' Chest" was accepted on 2026-08-10, and a
-            # 782M "Tumeken's shadow from Dossier" before it.
-            if await self._nothing_drops_item(item_name):
-                print(f"Nothing in the game drops {item_name!r} (wiki-indexed item "
-                      f"with no dropsline rows); rejecting the claimed "
-                      f"{npc_name} source")
-                return False
-
-            print(f"No dropsline data for {item_name!r}; allowing (fail-open)")
-            return True
+            return allowed
 
         except Exception as e:
             # Any unexpected error (network, parsing, …) is inconclusive — the
@@ -418,6 +406,140 @@ class SemanticAPI:
             # (scripts, tests) don't misread an error as a confident "no".
             print(f"Error checking drop for {item_name} from {npc_name}: {e}; allowing (fail-open)")
             return True
+
+    async def _check_drop_inner(
+        self, item_name: str, npc_name: str, use_cache: bool
+    ) -> tuple:
+        """One verification pass. Returns ``(allowed, used_cache)``.
+
+        ``used_cache`` is True when any wiki data consulted came from the
+        cache — check_drop uses it to decide whether a rejection needs a live
+        revalidation pass. With ``use_cache=False`` every lookup hits the wiki
+        and refreshes the cache.
+        """
+        # Handle special cases
+        if item_name == "Enhanced crystal teleport seed" and npc_name == "Elf":
+            return True, False
+        if item_name.strip() == "Black tourmaline core" and npc_name.strip() == "Dusk":
+            return True, False
+        if npc_name.strip() == "Kingdom of Miscellania":
+            # Kingdom resource collection is an activity, not a monster;
+            # the dropsline bucket can never confirm it, so every stack
+            # (coal, herbs, logs, nests) worth >1M would be a guaranteed
+            # confident-negative false rejection.
+            return True, False
+
+        # Build db-name -> {wiki page_name, …}. A single submitted NPC can
+        # correspond to several wiki drop-source pages: the "Royal Titans"
+        # encounter's loot is split across "Branda the Fire Queen" and
+        # "Eldric the Ice King"; Chambers of Xeric loot is under "Ancient
+        # chest"; etc. The previous dict collapsed many-to-one, so only the
+        # last alias for a given NPC ever matched.
+        reverse_alt_names = {}
+        for wiki_name, db_names in self.ALT_NAMES.items():
+            names = db_names if isinstance(db_names, list) else [db_names]
+            for db_name in names:
+                reverse_alt_names.setdefault(db_name, set()).add(wiki_name)
+
+        # Acceptable wiki drop-source names for this NPC: the submitted name
+        # itself plus any aliased wiki page names.
+        acceptable = {npc_name} | reverse_alt_names.get(npc_name, set())
+        acceptable_norm = {a.lower().strip() for a in acceptable}
+        if acceptable_norm != {npc_name.lower().strip()}:
+            print(f"Accepting drop sources {sorted(acceptable)} for {npc_name}")
+
+        # Charged megarares (Tumeken's shadow, Scythe of vitur,
+        # Sanguinesti staff, …) only ever DROP in their "(uncharged)"
+        # form, and that is the only name the dropsline bucket indexes.
+        # A submission carrying the charged name therefore got zero rows
+        # and sailed through the not-indexed fail-open below — which is
+        # how a "Tumeken's shadow from Dossier" (a container-open
+        # inventory-diff artifact) was accepted on 2026-08-05. When the
+        # submitted name has no rows, retry with the droppable variant:
+        # its source list is authoritative for the charged form too,
+        # because the charged form provably drops nowhere.
+        lookup_names = [item_name]
+        base_name = str(item_name or "").strip()
+        if base_name and not base_name.lower().endswith("(uncharged)"):
+            lookup_names.append(f"{base_name} (uncharged)")
+
+        used_cache = False
+        for lookup_name in lookup_names:
+            sources, from_cache = await self._dropsline_sources(lookup_name, use_cache)
+            used_cache = used_cache or from_cache
+
+            # FAIL-OPEN on anything inconclusive. This check exists to block
+            # spoofed high-value submissions, and a spoof can only be proven
+            # POSITIVELY — the wiki lists real drop sources for the item and
+            # this NPC isn't among them. Every other outcome (wiki
+            # unavailable/rate-limited, malformed query, or the item simply
+            # not indexed in `dropsline`) is *inconclusive* and must NOT be
+            # treated as a spoof, or we silently reject legitimate drops.
+            if sources is None:
+                print(f"Dropsline lookup unavailable for {lookup_name!r}; allowing (fail-open)")
+                return True, used_cache
+
+            if not sources:
+                # No rows under this name — try the next variant before
+                # concluding the item isn't indexed at all.
+                continue
+
+            # Check if any of the returned NPCs match our target NPC
+            for dropped_from in sources:
+                # Remove any subpage references (e.g., "NPC name#Normal")
+                if "#" in dropped_from:
+                    dropped_from = dropped_from.split("#")[0]
+
+                # Check if this drop source matches our NPC name (or an alias).
+                if dropped_from.lower().strip() in acceptable_norm:
+                    print(f"Drop found & valid for {item_name} from {dropped_from}")
+                    return True, used_cache
+
+            # A full page means the wiki had at least as many drop-source rows
+            # as we asked for, so it may have more that it never sent — "not in
+            # this list" then proves nothing. Inconclusive, so fail open.
+            if len(sources) >= self.DROPSLINE_ROW_LIMIT:
+                print(f"Dropsline results for {lookup_name!r} hit the "
+                      f"{self.DROPSLINE_ROW_LIMIT}-row query limit; allowing (fail-open)")
+                return True, used_cache
+
+            # Confident negative: the item HAS known drop sources and this NPC
+            # is not one of them. This is the only case we reject.
+            print(f"No valid drop found for {item_name} from {npc_name} "
+                  f"(matched dropsline name {lookup_name!r}; wiki sources: "
+                  f"{sorted(set(sources))})")
+            return False, used_cache
+
+        # No drop-source rows under any name we tried. Two very different
+        # situations land here, and only one of them is inconclusive:
+        #
+        #  * the wiki has no item page under this name at all (our
+        #    spelling, a variant we don't handle, a genuine wiki gap) —
+        #    proves nothing either way;
+        #  * the wiki DOES know the item and no monster's drop table lists
+        #    it, i.e. nothing in the game drops it. Player-assembled and
+        #    imbued gear lives here — Noxious halberd, Emberlight, Purging
+        #    staff, Brimstone ring, Archers ring (i) — and for those every
+        #    claimed NPC source is false by construction.
+        #
+        # The second case is the one this check exists to catch and used
+        # to wave through. RuneLite's container-open loot records (bird
+        # nests, Dossiers, Rogues' Chest — LootRecordType.EVENT) compute
+        # loot by inventory diff, so an in-game inventory glitch invents
+        # "loot" out of the player's own gear, which is exactly the
+        # never-dropped items above. That is how a phantom 42M "Noxious
+        # halberd from Rogues' Chest" was accepted on 2026-08-10, and a
+        # 782M "Tumeken's shadow from Dossier" before it.
+        verdict, from_cache = await self._nothing_drops_item_cached(item_name, use_cache)
+        used_cache = used_cache or from_cache
+        if verdict:
+            print(f"Nothing in the game drops {item_name!r} (wiki-indexed item "
+                  f"with no dropsline rows); rejecting the claimed "
+                  f"{npc_name} source")
+            return False, used_cache
+
+        print(f"No dropsline data for {item_name!r}; allowing (fail-open)")
+        return True, used_cache
     
     async def find_related_drops(self, item_name: str, npc_name: str) -> Dict[str, Any]:
         """

@@ -12,22 +12,24 @@ This package provides a clean interface for common operations like:
 - Getting combat achievement tier information
 """
 
-from .client import OSRSAPIClient
+from .client import OSRSAPIClient, DEFAULT_USER_AGENT
 from .semantic import SemanticAPI
 from .pricing import PricingAPI
 
 __version__ = "1.0.0"
-__all__ = ["OSRSAPIClient", "SemanticAPI", "PricingAPI"]
+__all__ = ["OSRSAPIClient", "SemanticAPI", "PricingAPI", "DEFAULT_USER_AGENT"]
 
 # Convenience function to create a fully configured client
-def create_client(user_agent: str = "@joelhalen - www.droptracker.io") -> OSRSAPIClient:
+def create_client(user_agent: str = DEFAULT_USER_AGENT, cache=None) -> OSRSAPIClient:
     """
     Create a fully configured OSRS API client with all sub-APIs initialized.
-    
+
     Args:
         user_agent: User agent string for API requests
-        
+        cache: Optional redis-like cache for drop-source lookups (see
+            OSRSAPIClient)
+
     Returns:
         Configured OSRSAPIClient instance
     """
-    return OSRSAPIClient(user_agent)
+    return OSRSAPIClient(user_agent, cache=cache)
