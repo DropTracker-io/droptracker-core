@@ -80,6 +80,8 @@ from .file_transfer import (
     TRANSFER_RETENTION_DAYS,
     TRANSFER_UPLOADER_ROLES,
 )
+from .surface_read import SurfaceRead
+from .group_notice import GroupNotice
 from .chat import (
     ChatThread,
     ChatParticipant,
@@ -312,6 +314,8 @@ __all__ = [
     "ChatParticipant",
     "ChatMessage",
     "ChatRead",
+    "SurfaceRead",
+    "GroupNotice",
     "CHAT_THREAD_KINDS",
     "CHAT_THREAD_STATUSES",
     "CHAT_PARTY_TYPES",

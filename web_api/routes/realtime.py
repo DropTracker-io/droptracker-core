@@ -171,6 +171,31 @@ def _may_read_thread(user_id, thread_id: int) -> bool:
         return False
 
 
+def _may_read_ticket(user_id, ticket_id: int) -> bool:
+    """Whether ``user_id`` may subscribe to a ticket's activity frames
+    (web102a). Same participant-or-superadmin rule as the HTTP transcript
+    route. The frames are bodyless pokes, but subscription still implies
+    "this ticket exists and involves you", so fail closed."""
+    if user_id is None:
+        return False
+    try:
+        from db.models import Ticket
+        from web_api.common import db_session
+        from web_api.deps import load_user
+        from web_api.routes.tickets import _is_participant
+
+        with db_session() as s:
+            ticket = s.query(Ticket).filter(Ticket.ticket_id == ticket_id).first()
+            if ticket is None:
+                return False
+            user = load_user(s, user_id)
+            if getattr(user, "is_superadmin", False):
+                return True
+            return _is_participant(s, user_id, ticket)
+    except Exception:
+        return False
+
+
 async def _authorize_channels(raw: str) -> list[str]:
     """Validate + filter requested channels. Drops private ``player:`` scopes
     unless a valid session is present, and ``event:``/``chat:``/``user:`` scopes
@@ -191,7 +216,7 @@ async def _authorize_channels(raw: str) -> list[str]:
         # "event:{id}" is public like "group:*" for PUBLIC events (live event
         # pages, Task 17); private ones are gated below.
         if ch not in _PUBLIC_EXACT_SCOPES and not ch.startswith(
-            ("group:", "player:", "npc:", "event:", "chat:", "user:")
+            ("group:", "player:", "npc:", "event:", "chat:", "user:", "ticket:")
         ):
             continue
         if ch.startswith("player:") and not have_session:
@@ -206,6 +231,15 @@ async def _authorize_channels(raw: str) -> list[str]:
                 if int(ch.split(":", 1)[1]) != int(user_id):
                     continue
             except (IndexError, ValueError, TypeError):
+                continue
+        if ch.startswith("ticket:"):
+            if not have_session:
+                continue
+            try:
+                ticket_id = int(ch.split(":", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            if not await asyncio.to_thread(_may_read_ticket, user_id, ticket_id):
                 continue
         if ch.startswith("chat:"):
             if not have_session:

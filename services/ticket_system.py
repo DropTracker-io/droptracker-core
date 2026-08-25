@@ -16,24 +16,17 @@ from interactions.models import (
 )
 
 from commands import try_create_user
-from db.models import Drop, Group, Player, Ticket, User, Session, user_group_association
+from db.models import Drop, Group, Player, Ticket, TicketMessage, User, Session, user_group_association
 from services.ticket_transcripts import (
+    STAFF_ROLE_IDS,
+    SUPPORT_ROLE_ID,
+    TICKETS_ROLE_ID,
     backfill_open_tickets,
     close_and_archive,
     upsert_message,
 )
 from utils.format import format_number
 from utils.redis import redis_client
-
-SUPPORT_ROLE_ID = 1176291872143052831
-# Ticket-helper role: members may read + reply in every ticket (the TICKETS
-# category carries a matching overwrite, and each new ticket channel is granted
-# it explicitly below), but they do NOT get the close-ticket permission.
-TICKETS_ROLE_ID = 1210785661649686539
-# A message author holding any of these counts as "staff" for the opposing-party
-# ping — their replies notify the ticket opener. Superset of the role ids the
-# close-permission checks use: TICKETS_ROLE_ID replies as staff but cannot close.
-STAFF_ROLE_IDS = {1342871954885050379, 1176291872143052831, TICKETS_ROLE_ID}
 
 # Inactivity lifecycle: warn once a ticket has been idle this long, then
 # auto-archive it this much later unless a human reply resets the clock.
@@ -296,12 +289,66 @@ def build_ticket_snapshot_error():
         )
     ]
 
+TICKET_CATEGORY_ID = 1210785948892274698
+
+
+async def create_ticket_channel(bot, *, ticket_type: str, author_name: str,
+                                member_target=None):
+    """Create a ticket text channel under the tickets category with the
+    standard overwrites. Shared by the Discord button flow and the pending
+    (web-created) provisioning path so the two can never drift.
+
+    ``member_target`` is the opener (Member or raw id); ``None`` skips the
+    member overwrite — a web-created ticket whose opener left the guild still
+    gets a channel, and the site stays their surface.
+    Raises on channel-creation failure; the member overwrite failing raises
+    too (a channel its opener can't see is worse than no channel), while the
+    helper-role overwrite stays best-effort.
+    """
+    category = bot.get_channel(TICKET_CATEGORY_ID)
+    if not category:
+        raise RuntimeError("ticket category not found")
+    channel = await category.create_text_channel(
+        name=f"{author_name}-{ticket_type}-{int(time.time()) % 10000}"
+    )
+    if member_target is not None:
+        await channel.add_permission(
+            target=member_target,
+            type=OverwriteType.MEMBER,
+            allow=[
+                Permissions.VIEW_CHANNEL,
+                Permissions.SEND_MESSAGES,
+                Permissions.READ_MESSAGE_HISTORY,
+            ],
+        )
+    try:
+        # Ticket-helper role: granted explicitly so access never depends on
+        # the category-overwrite snapshot Discord takes at creation.
+        # Non-fatal: the snapshot already carries the category overwrite.
+        await channel.add_permission(
+            target=TICKETS_ROLE_ID,
+            type=OverwriteType.ROLE,
+            allow=[
+                Permissions.VIEW_CHANNEL,
+                Permissions.SEND_MESSAGES,
+                Permissions.READ_MESSAGE_HISTORY,
+                Permissions.SEND_MESSAGES_IN_THREADS,
+            ],
+        )
+    except Exception as e:
+        print(f"[tickets] helper-role grant failed on {channel.id}: {e}")
+    return channel
+
+
 class Tickets(Extension):
     def __init__(self, bot):
         # channel_id (str) -> ticket_id for open tickets; kept warm by the
         # 15s task so the MessageCreate hot path never queries the DB for
         # non-ticket channels.
         self.ticket_channel_cache: dict[str, int] = {}
+        # ticket_id -> consecutive provisioning failures for web-created
+        # (status='pending') tickets; at 3 a system row tells the opener.
+        self._pending_provision_fails: dict[int, int] = {}
         self._started = False
         # webhook_bot loads this extension INSIDE its own Startup handler, so
         # a @listen(Startup) here would register after the event already
@@ -351,9 +398,15 @@ class Tickets(Extension):
 
         The admin dashboard (web_api PATCH /admin/tickets/{id}) flips a
         ticket to status='close_requested'; this loop archives the channel,
-        marks it closed, and deletes the channel.
+        marks it closed, and deletes the channel. Web-created tickets
+        (status='pending', web102a) get their Discord channel provisioned
+        here too.
         """
         self._refresh_ticket_cache()
+        try:
+            await self._provision_pending_tickets()
+        except Exception as e:
+            print(f"[tickets] pending provisioning sweep failed: {e}")
         local_session = Session()
         try:
             pending = (
@@ -385,6 +438,138 @@ class Tickets(Extension):
                 closed_by_name=closer_name,
                 reason="closed from the web dashboard",
             )
+
+    async def _provision_pending_tickets(self):
+        """Give web-created tickets their Discord channel (web102a).
+
+        One at a time, oldest first, capped per sweep — channel creation is
+        rate-limited API territory. Failures leave the row pending for the
+        next sweep; after 3 consecutive failures a system row tells the
+        opener the site remains their surface.
+        """
+        s = Session()
+        try:
+            pending = (
+                s.query(Ticket)
+                .filter(Ticket.status == "pending")
+                .order_by(Ticket.ticket_id.asc())
+                .limit(3)
+                .all()
+            )
+            rows = []
+            for t in pending:
+                opener = s.query(User).filter(User.user_id == t.created_by).first()
+                rows.append(
+                    (
+                        t.ticket_id,
+                        t.type or "other",
+                        str(getattr(opener, "discord_id", "") or "") or None,
+                        getattr(opener, "username", None),
+                    )
+                )
+        except Exception as e:
+            print(f"[tickets] pending scan failed: {e}")
+            rows = []
+        finally:
+            s.close()
+        for ticket_id, ticket_type, discord_id, username in rows:
+            try:
+                await self._provision_one_pending(
+                    ticket_id, ticket_type, discord_id, username
+                )
+                self._pending_provision_fails.pop(ticket_id, None)
+            except Exception as e:
+                fails = self._pending_provision_fails.get(ticket_id, 0) + 1
+                self._pending_provision_fails[ticket_id] = fails
+                print(f"[tickets] provisioning ticket {ticket_id} failed (attempt {fails}): {e}")
+                if fails == 3:
+                    add_system_message(
+                        ticket_id,
+                        "Setting up the Discord channel for this ticket is taking "
+                        "longer than expected. Staff have been notified — replies "
+                        "on the website still reach the team.",
+                    )
+
+    async def _provision_one_pending(self, ticket_id: int, ticket_type: str,
+                                     discord_id, username):
+        """Channel + welcome + relay of the stored web-origin messages."""
+        author_name = username or f"user-{ticket_id}"
+        member = None
+        category = self.bot.get_channel(TICKET_CATEGORY_ID)
+        if discord_id and category is not None:
+            try:
+                member = await category.guild.fetch_member(discord_id)
+            except Exception:
+                member = None  # opener not in the guild; site stays their surface
+        channel = await create_ticket_channel(
+            self.bot,
+            ticket_type=ticket_type,
+            author_name=author_name,
+            member_target=member,
+        )
+        # Flip the row first: if anything below fails, the sweep must not
+        # create a second channel for the same ticket.
+        s = Session()
+        try:
+            live = s.query(Ticket).filter(Ticket.ticket_id == ticket_id).first()
+            if live is None or live.status != "pending":
+                # Closed (or otherwise resolved) while we were provisioning.
+                try:
+                    await channel.delete()
+                except Exception:
+                    pass
+                return
+            live.channel_id = str(channel.id)
+            live.status = "open"
+            s.commit()
+        finally:
+            s.close()
+        self.ticket_channel_cache[str(channel.id)] = ticket_id
+
+        try:
+            welcome = build_ticket_welcome(
+                ticket_type=ticket_type,
+                ticket_id=ticket_id,
+                author_mention=(f"<@{discord_id}>" if discord_id else author_name),
+                opened_ts=int(time.time()),
+            )
+            await channel.send(components=welcome)
+            loading_message = await channel.send(components=build_ticket_loading())
+            if discord_id:
+                asyncio.create_task(
+                    load_and_update_player_data(discord_id, channel, loading_message)
+                )
+        except Exception as e:
+            print(f"[tickets] intro cards failed for ticket {ticket_id}: {e}")
+
+        # Carry the site-authored opener message(s) into the channel. The
+        # relay marker keeps the mirror from re-importing them; the sent id
+        # is written straight back (no outbox round-trip needed here).
+        s = Session()
+        try:
+            web_rows = (
+                s.query(TicketMessage)
+                .filter(
+                    TicketMessage.ticket_id == ticket_id,
+                    TicketMessage.origin == "web",
+                    TicketMessage.discord_message_id.is_(None),
+                )
+                .order_by(TicketMessage.id.asc())
+                .all()
+            )
+            for r in web_rows:
+                try:
+                    msg = await channel.send(
+                        f"**{(r.author_name or 'user')[:100]}** (via site): {r.content or ''}"[:2000]
+                    )
+                    r.discord_message_id = str(msg.id)
+                    s.commit()
+                except Exception as e:
+                    s.rollback()
+                    print(f"[tickets] web-row relay failed (ticket {ticket_id}, row {r.id}): {e}")
+        finally:
+            s.close()
+        print(f"[tickets] provisioned channel {channel.id} for web ticket {ticket_id}")
 
     @Task.create(IntervalTrigger(minutes=5))
     async def process_ticket_inactivity(self):
@@ -740,57 +925,36 @@ class Tickets(Extension):
                 await try_create_user(discord_id=str(ctx.author.id), username=ctx.author.username)
                 dt_user = local_session.query(User).filter_by(discord_id=str(ctx.author.id)).first()
             
-            # Check for existing open tickets
-            existing_ticket = local_session.query(Ticket).filter_by(
-                created_by=dt_user.user_id, 
-                status="open"
+            # Check for existing open tickets ('pending' = web-created, channel
+            # still provisioning — that one counts too).
+            existing_ticket = local_session.query(Ticket).filter(
+                Ticket.created_by == dt_user.user_id,
+                Ticket.status.in_(("pending", "open", "close_requested")),
             ).first()
-            
+
             if existing_ticket:
+                where = (
+                    f"<#{existing_ticket.channel_id}>"
+                    if existing_ticket.channel_id
+                    else "<https://www.droptracker.io/tickets> (its Discord channel is still being set up)"
+                )
                 return await ctx.send(
-                    f"You already have an open ticket: <#{existing_ticket.channel_id}>\n"
+                    f"You already have an open ticket: {where}\n"
                     f"Please use your existing ticket or close it before creating a new one.",
                     ephemeral=True
                 )
-            
-            bot: interactions.Client = self.bot
-            ticket_category = bot.get_channel(1210785948892274698)
-            if not ticket_category:
-                return await ctx.send("Ticket category not found. Please contact an administrator.", ephemeral=True)
-            
-            # Use a more efficient way to get ticket count for naming
+
             try:
-                author_name = ctx.author.username
-                # Use timestamp instead of total count for uniqueness and speed
-                ticket_number = int(time.time()) % 10000
-                ticket_channel = await ticket_category.create_text_channel(
-                    name=f"{author_name}-{ticket_type}-{ticket_number}"
-                )
-                await ticket_channel.add_permission(
-                    target=ctx.author,
-                    type=OverwriteType.MEMBER,
-                    allow=[Permissions.VIEW_CHANNEL, Permissions.SEND_MESSAGES, Permissions.READ_MESSAGE_HISTORY]
+                ticket_channel = await create_ticket_channel(
+                    self.bot,
+                    ticket_type=ticket_type,
+                    author_name=ctx.author.username,
+                    member_target=ctx.author,
                 )
             except Exception as e:
                 print(f"Error creating ticket channel: {e}")
                 return await ctx.send("Failed to create ticket channel. Please try again later.", ephemeral=True)
-            try:
-                # Ticket-helper role: granted explicitly so access never depends
-                # on the category-overwrite snapshot Discord takes at creation.
-                # Non-fatal: the snapshot already carries the category overwrite.
-                await ticket_channel.add_permission(
-                    target=TICKETS_ROLE_ID,
-                    type=OverwriteType.ROLE,
-                    allow=[
-                        Permissions.VIEW_CHANNEL,
-                        Permissions.SEND_MESSAGES,
-                        Permissions.READ_MESSAGE_HISTORY,
-                        Permissions.SEND_MESSAGES_IN_THREADS,
-                    ],
-                )
-            except Exception as e:
-                print(f"[tickets] helper-role grant failed on {ticket_channel.id}: {e}")
-            
+
             # Create and save the ticket to database immediately
             ticket = Ticket(
                 type=ticket_type, 

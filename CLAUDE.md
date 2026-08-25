@@ -103,7 +103,8 @@ droptracker/
 │                           #   lootboard, realtime (SSE), npcs, items, item_values,
 │                           #   personal_bests, points, player_claims, embeds, redirects,
 │                           #   resolve, meta, suggestions, tickets, file_transfers,
-│                           #   chat (generic threaded messaging), admin, health
+│                           #   chat (generic threaded messaging), inbox (unified
+│                           #   widget inbox), staff_chats, group_notices, admin, health
 │                           # Events v2: events, event_admin, event_audit, event_board,
 │                           #   event_discord, event_layouts, event_participants,
 │                           #   event_prizes, event_task_validation, event_templates

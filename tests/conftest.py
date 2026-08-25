@@ -361,6 +361,22 @@ if "services.chat" not in sys.modules:
     _spec.loader.exec_module(_mod)
     setattr(sys.modules["services"], "chat", _mod)
 
+# services/inbox.py + staff_dm.py + group_notices.py + ticket_transcripts.py
+# (web102a) — the support-widget read state, staff-DM relay half, group-notice
+# state machine, and the transcript mirror's echo firewall. Same lazy-import
+# contract (DB/Redis inside functions); ticket_transcripts' module-level
+# db.models import resolves against the stub, which is fine — its pure parts
+# (_is_web_relay, marker regex) are what the tests drive.
+for _name in ("inbox", "staff_dm", "group_notices", "ticket_transcripts"):
+    _mod_key = f"services.{_name}"
+    if _mod_key not in sys.modules:
+        _path = _Path(__file__).resolve().parent.parent / "services" / f"{_name}.py"
+        _spec = _importlib_util.spec_from_file_location(_mod_key, _path)
+        _mod = _importlib_util.module_from_spec(_spec)
+        sys.modules[_mod_key] = _mod
+        _spec.loader.exec_module(_mod)
+        setattr(sys.modules["services"], _name, _mod)
+
 # services/event_invites.py (web96a) — clan-vs-clan challenge notifications.
 # Imports services.chat lazily, so it must be registered after it.
 _INVITES_PATH = _Path(__file__).resolve().parent.parent / "services" / "event_invites.py"

@@ -39,9 +39,11 @@ from sqlalchemy import (
 
 from .base import Base
 
-#: Thread kinds. Only ``event_invite`` is wired today; the column is a plain
-#: string so a new surface adds a value here and nothing else.
-CHAT_THREAD_KINDS = ("event_invite",)
+#: Thread kinds. The column is a plain string so a new surface adds a value
+#: here and nothing else. ``event_invite`` is the CvC negotiation; ``staff_dm``
+#: is a staff↔user conversation (one per user, bridged to Discord DMs);
+#: ``group_notice`` is a bot-raised config problem addressed to a clan.
+CHAT_THREAD_KINDS = ("event_invite", "staff_dm", "group_notice")
 
 #: ``open`` accepts new messages; ``locked`` is readable but closed to posts
 #: (e.g. an event that ended); ``archived`` is hidden from the default list.
@@ -151,6 +153,13 @@ class ChatMessage(Base):
     # copy changes don't need a backfill; system_data_json carries the nouns.
     system_code = Column(String(32), nullable=True)
     system_data_json = Column(Text, nullable=True)
+    # Where the entry was authored: 'web' (site/API) or 'discord_dm' (ingested
+    # by the staff-DM bridge). Mirrors ticket_messages/suggestion_messages.
+    source = Column(String(16), nullable=False, default="web")
+    # The Discord copy of this entry, when one exists. Unique so the DM bridge
+    # is idempotent on redelivery; for web-origin rows the outbox drain writes
+    # it back after relaying (traceability, never the dedupe mechanism).
+    discord_message_id = Column(String(32), nullable=True, unique=True)
     created_at = Column(DateTime, nullable=False, default=func.now())
     # Moderator tombstone. The row survives so the timeline keeps its shape and
     # an audit can still see that something was said and removed.

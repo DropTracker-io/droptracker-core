@@ -336,7 +336,25 @@ async def create_suggestion_message(suggestion_id: int):
                     actor_user_id=user_id,
                     commit=False,
                 )
+            # Posting implies reading (web102a).
+            from services.inbox import advance_own_reply
+
+            advance_own_reply(s, "suggestion", suggestion_id, user_id, msg.id)
             s.commit()
+            try:
+                from services.inbox import (
+                    publish_inbox_unread,
+                    suggestion_participant_user_ids,
+                )
+
+                publish_inbox_unread(
+                    "suggestion",
+                    suggestion_id,
+                    suggestion_participant_user_ids(s, sug),
+                    exclude_user_id=user_id,
+                )
+            except Exception:
+                pass
             return _message_row(s, msg)
 
     payload = await asyncio.to_thread(_create)

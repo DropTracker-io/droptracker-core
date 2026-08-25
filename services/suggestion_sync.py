@@ -167,21 +167,27 @@ class SuggestionSync(Extension):
             return False  # attachment/embed-only messages have no mirrorable text
         author = message.author
         created = _plain_datetime(getattr(message, "created_at", None))
-        s.add(
-            SuggestionMessage(
-                suggestion_id=sug.id,
-                author_user_id=_resolve_author_user_id(s, str(author.id)),
-                author_discord_id=str(author.id),
-                author_name=_display_name(author),
-                source="discord",
-                content=content,
-                discord_message_id=str(message.id),
-                created_at=created,
-            )
+        row = SuggestionMessage(
+            suggestion_id=sug.id,
+            author_user_id=_resolve_author_user_id(s, str(author.id)),
+            author_discord_id=str(author.id),
+            author_name=_display_name(author),
+            source="discord",
+            content=content,
+            discord_message_id=str(message.id),
+            created_at=created,
         )
+        s.add(row)
         sug.message_count = int(sug.message_count or 0) + 1
         if sug.last_activity_at is None or created > sug.last_activity_at:
             sug.last_activity_at = created
+        s.flush()
+        if row.author_user_id is not None:
+            # A Discord-side reply proves its author is caught up — advance
+            # their site inbox pointer so no badge appears (web102a).
+            from services.inbox import advance_own_reply
+
+            advance_own_reply(s, "suggestion", sug.id, row.author_user_id, row.id)
         return True
 
     # ── live listeners ───────────────────────────────────────────────────
@@ -205,9 +211,24 @@ class SuggestionSync(Extension):
                     # Reply in a web-origin thread whose id write-back hasn't
                     # landed yet (≤10s window); the startup backfill heals it.
                     return
+                inserted = False
                 if str(message.id) != str(thread.id):  # starter is the body
-                    self._upsert_reply(s, sug, message)
+                    inserted = self._upsert_reply(s, sug, message)
                 s.commit()
+                if inserted:
+                    # Bodyless badge poke for the site inbox (web102a).
+                    from services.inbox import (
+                        publish_inbox_unread,
+                        suggestion_participant_user_ids,
+                    )
+
+                    author_uid = _resolve_author_user_id(s, str(author.id))
+                    publish_inbox_unread(
+                        "suggestion",
+                        sug.id,
+                        suggestion_participant_user_ids(s, sug),
+                        exclude_user_id=author_uid,
+                    )
             except Exception as e:  # noqa: BLE001
                 s.rollback()
                 print(f"[suggestion_sync] mirror failed (thread {thread.id}): {e}")

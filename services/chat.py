@@ -29,7 +29,7 @@ from typing import Any, Iterable, Optional, Sequence
 # validating against them never depends on the DB package (which unit tests
 # replace with a MagicMock — a tuple membership test against one of those
 # silently passes and the validation quietly evaporates).
-THREAD_KINDS = ("event_invite",)
+THREAD_KINDS = ("event_invite", "staff_dm", "group_notice")
 THREAD_STATUSES = ("open", "locked", "archived")
 PARTY_TYPES = ("group", "user")
 MESSAGE_KINDS = ("message", "system")
@@ -47,6 +47,13 @@ SYSTEM_CODES = (
     "invite_withdrawn",
     "event_activated",
     "event_ended",
+    # staff_dm (web102a)
+    "staff_dm_opened",
+    "dm_bounced",
+    # group_notice (web102a)
+    "notice_raised",
+    "notice_recurred",
+    "notice_resolved",
 )
 
 #: Default page size for a thread's message history.
@@ -336,6 +343,22 @@ def resolve_membership(s, thread, user_id: int) -> Optional[Membership]:
                 matched.append(Party("group", gid))
 
     if not matched:
+        # Support staff hold a seat on the support-surface kinds without a
+        # stored participant row (web102a): any developer/superadmin may read
+        # and answer a staff_dm or group_notice thread, exactly as any of a
+        # clan's admins may answer for the clan. Every other kind fails
+        # closed — a CvC negotiation stays invisible to non-participants,
+        # and staff thread LISTS stay scoped to real parties (see
+        # speakable_group_ids); the staff route queries by kind instead.
+        if getattr(thread, "kind", None) in ("staff_dm", "group_notice"):
+            from web_api.deps import is_support_staff
+
+            if is_support_staff(user):
+                return Membership(
+                    parties=(Party("user", int(user_id)),),
+                    can_post=(thread.status == "open"),
+                    is_moderator=moderator,
+                )
         return None
     return Membership(
         parties=tuple(matched),
@@ -411,10 +434,18 @@ def post_message(
     party: Party,
     body: Optional[str],
     attachments: Any = None,
+    source: str = "web",
+    discord_message_id: Optional[str] = None,
     commit: bool = True,
     publish: bool = True,
 ):
-    """Append a human message. Raises :class:`ChatError` on invalid input."""
+    """Append a human message. Raises :class:`ChatError` on invalid input.
+
+    ``source``/``discord_message_id`` are the Discord-bridge columns
+    (web102a): the staff-DM bridge ingests with ``source='discord_dm'`` plus
+    the DM's message id, which the unique key turns into redelivery
+    idempotency.
+    """
     from db.models import ChatMessage
 
     if thread.status != "open":
@@ -432,6 +463,8 @@ def post_message(
         author_party_id=int(party.id),
         body=text or None,
         attachments_json=json.dumps(files) if files else None,
+        source=source,
+        discord_message_id=(str(discord_message_id) if discord_message_id else None),
     )
     s.add(row)
     thread.last_message_at = datetime.now()

@@ -245,6 +245,34 @@ def _message_kwargs(row) -> dict:
     return kwargs
 
 
+def _post_dm_bounced(session, chat_message_id: int) -> None:
+    """System entry on a staff_dm thread whose relay DM bounced. Best-effort;
+    committed by the drain's per-row finally."""
+    try:
+        from db.models import ChatMessage, ChatThread
+        from services.chat import post_system
+
+        origin = (
+            session.query(ChatMessage)
+            .filter(ChatMessage.id == int(chat_message_id))
+            .first()
+        )
+        if origin is None:
+            return
+        thread = (
+            session.query(ChatThread)
+            .filter(ChatThread.id == origin.thread_id)
+            .first()
+        )
+        if thread is None or thread.kind != "staff_dm":
+            return
+        post_system(
+            session, thread=thread, code="dm_bounced", commit=False, publish=False
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"[discord_outbox] dm_bounced note failed for message {chat_message_id}: {e}")
+
+
 class DMClosed(Exception):
     """The recipient does not accept DMs from us (or no longer exists).
 
@@ -338,6 +366,11 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
                         # Delivered as far as we're concerned — see DMClosed.
                         row.status = "sent"
                         row.error = f"dm not delivered: {str(e)[:400]}"
+                        # Staff-DM relays surface the bounce on the thread so
+                        # staff know Discord isn't reaching this user and the
+                        # site inbox is the only channel (web102a).
+                        if row.ref_type == "chat_message" and row.ref_id:
+                            _post_dm_bounced(session, row.ref_id)
                     else:
                         row.status = "sent"
                     row.processed_at = datetime.now()
@@ -377,6 +410,19 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
                         )
                         if sm:
                             sm.discord_message_id = row.discord_message_id
+                    # Web ticket replies (web102a): traceability only — the
+                    # mirror's relay-marker skip is what prevents echo, never
+                    # this write-back.
+                    elif row.ref_type == "ticket_message" and row.ref_id:
+                        from db.models import TicketMessage
+
+                        tm = (
+                            session.query(TicketMessage)
+                            .filter(TicketMessage.id == row.ref_id)
+                            .first()
+                        )
+                        if tm:
+                            tm.discord_message_id = row.discord_message_id
                 sent += 1
             except Exception as e:  # noqa: BLE001
                 row.status = "failed"

@@ -29,8 +29,13 @@ import aiohttp
 
 from db.models import Session, Ticket, TicketMessage, User
 
-# Staff/support roles (same ids the close-permission checks use).
-STAFF_ROLE_IDS = {1342871954885050379, 1176291872143052831}
+# Canonical ticket staff roles (web102a — single definition; ticket_system.py
+# imports these). SUPPORT closes tickets; TICKETS ("ticket helper") may read
+# and reply in every ticket but cannot close. A transcript row from any of the
+# three is flagged is_staff.
+SUPPORT_ROLE_ID = 1176291872143052831
+TICKETS_ROLE_ID = 1210785661649686539
+STAFF_ROLE_IDS = {1342871954885050379, SUPPORT_ROLE_ID, TICKETS_ROLE_ID}
 
 # Served by web/front.py's /img/<path> route (send_from_directory relative to
 # the repo root), i.e. https://www.droptracker.io/img/tickets/...
@@ -48,6 +53,23 @@ _MENTION_TOKEN = re.compile(r"<@[!&]?\d+>")
 
 def _is_pure_mention_content(content: str) -> bool:
     return bool(content) and not _MENTION_TOKEN.sub("", content).strip()
+
+
+# A web-origin reply relayed into the channel by the outbox drain
+# (web_api/routes/tickets.py posts "**name** (via site): body" as the core
+# bot). The TicketMessage row already exists (origin='web'), so the mirror
+# must skip the Discord copy. Matching on bot-author + this marker is
+# deterministic and race-free: it does not depend on the drain's
+# discord_message_id write-back having landed, and it holds during the
+# close-time full-history re-archive. Humans cannot forge it — a human author
+# fails the bot check and mirrors normally.
+_RELAY_MARKER = re.compile(r"^\*\*.{1,100}\*\* \(via site\): ", re.DOTALL)
+
+
+def _is_web_relay(author, content: str) -> bool:
+    return bool(getattr(author, "bot", False)) and bool(
+        _RELAY_MARKER.match(content or "")
+    )
 
 
 def _safe_filename(name: str) -> str:
@@ -138,6 +160,9 @@ async def upsert_message(ticket: Ticket, message, *, session=None) -> Optional[b
         # notifies the opposing party, then self-deletes. Keep it out of the
         # archive regardless of the delete-vs-mirror race.
         return False
+    if _is_web_relay(author, content):
+        # Discord copy of a site reply; the row was written at POST time.
+        return False
     own_session = session is None
     s = session or Session()
     try:
@@ -188,7 +213,16 @@ async def upsert_message(ticket: Ticket, message, *, session=None) -> Optional[b
                 # restarts the 5-day clock (date_updated above is that clock).
                 if live.inactivity_warned_at is not None:
                     live.inactivity_warned_at = None
+        s.flush()
+        if not is_bot and row.author_user_id is not None:
+            # Replying (even from Discord) proves the author was caught up —
+            # advance their inbox read pointer so the site shows no badge.
+            from services.inbox import advance_own_reply
+
+            advance_own_reply(s, "ticket", ticket.ticket_id, row.author_user_id, row.id)
         s.commit()
+        if not is_bot:
+            _publish_ticket_activity(s, ticket, row)
         return True
     except Exception as e:  # noqa: BLE001
         s.rollback()
@@ -197,6 +231,31 @@ async def upsert_message(ticket: Ticket, message, *, session=None) -> Optional[b
     finally:
         if own_session:
             s.close()
+
+
+def _publish_ticket_activity(s, ticket: Ticket, row: TicketMessage) -> None:
+    """Realtime pokes for a newly mirrored human entry: a bodyless frame on
+    ``rt:ticket:{id}`` (open transcript views refetch) and ``inbox_unread``
+    badge hints to the other participants. Best-effort — a Redis hiccup must
+    never fail the archive, and everything here is a fast sync publish so it
+    is safe on the bot's event loop."""
+    try:
+        from services.inbox import publish_inbox_unread, ticket_participant_user_ids
+        from services.realtime import publish_event
+
+        publish_event(
+            "ticket_message",
+            f"ticket:{int(ticket.ticket_id)}",
+            {"ticket_id": int(ticket.ticket_id), "id": int(row.id)},
+        )
+        publish_inbox_unread(
+            "ticket",
+            ticket.ticket_id,
+            ticket_participant_user_ids(s, ticket),
+            exclude_user_id=row.author_user_id,
+        )
+    except Exception:
+        pass
 
 
 def add_system_message(ticket_id: int, text: str, *, actor_name: str = "DropTracker") -> None:
@@ -218,6 +277,20 @@ def add_system_message(ticket_id: int, text: str, *, actor_name: str = "DropTrac
             )
         )
         s.commit()
+        # System rows count as unread news ("ticket closed by staff").
+        try:
+            from services.inbox import (
+                publish_inbox_unread,
+                ticket_participant_user_ids,
+            )
+
+            ticket = s.query(Ticket).filter(Ticket.ticket_id == ticket_id).first()
+            if ticket is not None:
+                publish_inbox_unread(
+                    "ticket", ticket_id, ticket_participant_user_ids(s, ticket)
+                )
+        except Exception:
+            pass
     except Exception as e:  # noqa: BLE001
         s.rollback()
         print(f"[tickets] system message failed (ticket {ticket_id}): {e}")
@@ -267,6 +340,10 @@ async def archive_channel_history(bot, ticket: Ticket) -> bool:
     when history could not be fetched — callers must not delete the channel
     in that case.
     """
+    if not ticket.channel_id:
+        # Web-created ticket closed before its channel was provisioned:
+        # the web-origin rows already ARE the archive.
+        return True
     try:
         channel = await bot.fetch_channel(int(ticket.channel_id))
     except Exception as e:  # noqa: BLE001
@@ -337,9 +414,10 @@ async def close_and_archive(
         s.close()
 
     try:
-        channel = await bot.fetch_channel(int(ticket.channel_id))
-        if channel is not None:
-            await channel.delete()
+        if ticket.channel_id:
+            channel = await bot.fetch_channel(int(ticket.channel_id))
+            if channel is not None:
+                await channel.delete()
     except Exception as e:  # noqa: BLE001
         # Channel may already be gone; the archive + DB state are what matter.
         print(f"[tickets] channel delete failed ({ticket_id}): {e}")

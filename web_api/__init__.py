@@ -67,6 +67,9 @@ from web_api.routes.resolve import resolve_bp
 from web_api.routes.search import search_bp
 from web_api.routes.submissions import submissions_bp
 from web_api.routes.subscriptions import subscriptions_bp
+from web_api.routes.group_notices import group_notices_bp
+from web_api.routes.inbox import inbox_bp
+from web_api.routes.staff_chats import staff_chats_bp
 from web_api.routes.suggestions import suggestions_bp
 from web_api.routes.tickets import tickets_bp
 
@@ -233,6 +236,9 @@ def create_app() -> Quart:
     app.register_blueprint(subscriptions_bp, url_prefix=API_PREFIX)
     app.register_blueprint(suggestions_bp, url_prefix=API_PREFIX)
     app.register_blueprint(tickets_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(inbox_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(staff_chats_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(group_notices_bp, url_prefix=API_PREFIX)
 
     return app
 

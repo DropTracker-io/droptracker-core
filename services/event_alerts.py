@@ -188,6 +188,34 @@ def enqueue_alert_dms(session, event, notification_type: str, data: dict,
         app_logger = AppLogger()
         group_id = getattr(event, "group_id", None)
         event_id = getattr(event, "id", None)
+        # Surface the delivery failure as a group notice too (web102a): the
+        # widget shows it to every group admin even when nobody is DM-able,
+        # and it auto-resolves once a notification lands again. Best-effort.
+        if group_id:
+            try:
+                from services.group_notices import raise_group_notice
+
+                raise_group_notice(
+                    session,
+                    group_id=int(group_id),
+                    code=f"event_alert_{reason_code}",
+                    title="Event notifications for your group are failing",
+                    body=(
+                        f"An event alert (`{notification_type}`) could not be "
+                        "posted to your configured event channel "
+                        f"({'missing permissions' if reason_code == 'forbidden' else 'no usable channel'}). "
+                        "Check the event's Discord settings and the bot's channel "
+                        "permissions; this notice closes itself once delivery "
+                        "recovers."
+                    ),
+                    data={
+                        "event_id": event_id,
+                        "notification_type": notification_type,
+                        "reason": reason_code,
+                    },
+                )
+            except Exception:
+                pass
         recipients = alert_recipient_discord_ids(session, group_id)
         if not recipients:
             # Nothing more this process can do — but say so loudly rather than

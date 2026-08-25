@@ -311,6 +311,10 @@ async def on_startup(event: Startup):
     bot.load_extension("services.user_context")
     bot.load_extension("services.group_poll")
     bot.load_extension("services.activity_launch")
+    # Staff-DM reply bridge (web102a): DMs to this bot flow into staff_dm
+    # chat threads. Must live on the SAME bot that sends the relay DMs
+    # (the outbox drain runs here), or replies land in the wrong app's inbox.
+    bot.load_extension("services.staff_dm_bridge")
     bot.load_extension("services.news_optin")
     # Buttons on the monthly recap DM. Persistent (custom_id match), so a card
     # sent months ago still works.

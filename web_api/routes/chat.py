@@ -347,6 +347,25 @@ async def post_message_route(thread_id: int):
 
             mark_read(s, thread.id, user_id, row.id)
             user = load_user(s, user_id)
+
+            # Staff replies on a staff_dm thread ping the user on Discord
+            # (collapsed to one DM/minute per thread — the link button
+            # carries the rest of the conversation). The subject user's own
+            # messages never relay: their Discord surface is the DM they
+            # reply to, not a DM from us.
+            if thread.kind == "staff_dm" and int(thread.subject_id) != int(user_id):
+                try:
+                    from services.staff_dm import queue_staff_dm_relay
+
+                    queue_staff_dm_relay(
+                        s,
+                        thread=thread,
+                        message=row,
+                        staff_name=getattr(user, "username", None) or "DropTracker staff",
+                        commit=True,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    print(f"[chat] staff_dm relay enqueue failed (thread {thread.id}): {e}")
             return message_payload(
                 row, author_name=getattr(user, "username", None)
             )

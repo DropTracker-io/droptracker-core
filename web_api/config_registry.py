@@ -353,7 +353,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "label": "Post-99 XP interval",
         "category": "levels",
         "type": "int",
-        "help": "After a skill reaches 99, notify every N XP (e.g. 25000000 = every 25M). Multiples of 1M; 0 disables.",
+        "help": "After a skill reaches 99, notify every N XP (e.g. 25m = every 25M). Multiples of 1M; 0 disables.",
         "default": 25000000,
         "min": 0,
     },

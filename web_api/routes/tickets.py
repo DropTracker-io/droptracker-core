@@ -1,15 +1,23 @@
-"""Support tickets on the web (web21a).
+"""Support tickets on the web (web21a; two-way since web102a).
 
   GET   /api/v1/me/tickets           -> tickets the user created or wrote in
+  POST  /api/v1/me/tickets           -> {type, body} open a ticket from the site
   GET   /api/v1/tickets/{id}         -> full transcript (participant/superadmin)
+  POST  /api/v1/tickets/{id}/messages-> {content} reply from the site
   GET   /api/v1/admin/tickets        -> all tickets, filterable + stats (superadmin)
   PATCH /api/v1/admin/tickets/{id}   -> {action: claim|unclaim|close} (superadmin)
 
-Tickets are created and answered in Discord (services/ticket_system.py); the
-web surface is a read-only archive plus staff triage. Closing from the web
-sets status='close_requested'; the webhook bot's 15s maintenance task archives
-the channel history, deletes the channel, and flips the row to 'closed'
-(services/ticket_transcripts.py) — the Web API never talks to Discord (§10.2).
+Tickets live in Discord channels (services/ticket_system.py) and every message
+is mirrored into ticket_messages. Web replies go the other way: the row is
+written here first (origin='web'), then relayed into the channel through
+discord_outbox as "**name** (via site): body" — the transcript mirror
+recognises that marker and skips the Discord copy
+(services/ticket_transcripts._is_web_relay). Web-created tickets start as
+status='pending' with no channel; the webhook bot's 15s maintenance task
+provisions the channel and flips them to 'open'. Closing from the web sets
+status='close_requested'; the same task archives the channel history, deletes
+the channel, and flips the row to 'closed' — the Web API never talks to
+Discord (§10.2).
 
 Transcript attachments are served from /img/tickets/... by the legacy image
 server; rows only store the relative path.
@@ -33,8 +41,51 @@ tickets_bp = Blueprint("v1_tickets", __name__)
 
 _TICKET_TYPES = ("players", "clans", "support", "other")
 # close_requested is presented as "closing" so the UI can show the transient
-# state without treating it as a distinct lifecycle stage.
-_PUBLIC_STATUS = {"open": "open", "close_requested": "closing", "closed": "closed"}
+# state without treating it as a distinct lifecycle stage; pending (web-created,
+# channel not yet provisioned) is presented as open — the user's contract is
+# "my message is filed", and the channel is an implementation detail.
+_PUBLIC_STATUS = {
+    "pending": "open",
+    "open": "open",
+    "close_requested": "closing",
+    "closed": "closed",
+}
+
+# Statuses that count as "this user already has a ticket going".
+_OPENISH = ("pending", "open", "close_requested")
+
+# Body budget leaves room for the "**name** (via site): " relay prefix inside
+# Discord's 2000-char message cap.
+_REPLY_MAX = 1800
+_CREATE_MIN, _CREATE_MAX = 10, 1800
+
+_REPLY_LIMIT, _REPLY_WINDOW = 10, 300  # per user
+_CREATE_LIMIT, _CREATE_WINDOW = 3, 86400  # per user
+
+
+def _rate_limited(bucket: str, user_id: int, limit: int, window: int) -> bool:
+    """Fixed-window Redis budget; fails open (an outage must not mute
+    support, of all things)."""
+    try:
+        from web_api.common import _rc
+
+        conn = _rc()
+        if conn is None:
+            return False
+        key = f"web:ratelimit:{bucket}:{user_id}"
+        count = conn.incr(key)
+        if count == 1:
+            conn.expire(key, window)
+        return count > limit
+    except Exception:
+        return False
+
+
+def _relay_content(author_name: str, body: str) -> str:
+    """The Discord copy of a site-authored reply. The exact shape is
+    load-bearing: ticket_transcripts._is_web_relay matches it to keep the
+    mirror from re-importing the relay."""
+    return f"**{author_name[:100]}** (via site): {body}"[:2000]
 
 
 def _ts(dt: Optional[datetime]) -> Optional[int]:
@@ -105,6 +156,7 @@ def _message_row(m: TicketMessage) -> dict:
         "is_staff": bool(m.is_staff),
         "is_bot": bool(m.is_bot),
         "kind": m.kind or "message",
+        "origin": getattr(m, "origin", None) or "discord",
         "content": m.content or "",
         "attachments": _attachment_entries(m.attachments_json),
         "date_sent": _ts(m.date_sent),
@@ -175,6 +227,79 @@ async def my_tickets():
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
 
 
+@tickets_bp.post("/me/tickets")
+async def create_ticket():
+    """Open a ticket from the site. The row (plus the first transcript entry)
+    is written synchronously as status='pending'; the webhook bot's 15s
+    maintenance task provisions the Discord channel and flips it to 'open'."""
+    user_id = current_user_id()
+    body = await json_body()
+    ticket_type = str(body.get("type") or "").strip().lower()
+    text = str(body.get("body") or "").strip()
+    if ticket_type not in _TICKET_TYPES:
+        abort_problem(400, "Bad request", "type must be one of players|clans|support|other.")
+    if not (_CREATE_MIN <= len(text) <= _CREATE_MAX):
+        abort_problem(
+            422, "Invalid body",
+            f"'body' must be {_CREATE_MIN}-{_CREATE_MAX} characters.",
+        )
+    if _rate_limited("ticket_create", user_id, _CREATE_LIMIT, _CREATE_WINDOW):
+        abort_problem(429, "Too many tickets", "Slow down and try again tomorrow.")
+
+    def _create():
+        with db_session() as s:
+            existing = (
+                s.query(Ticket)
+                .filter(Ticket.created_by == user_id, Ticket.status.in_(_OPENISH))
+                .first()
+            )
+            if existing is not None:
+                abort_problem(
+                    409,
+                    "Ticket already open",
+                    "You already have an open ticket.",
+                    extra={"open_ticket_id": existing.ticket_id},
+                )
+            user = load_user(s, user_id)
+            author_name = getattr(user, "username", None) or f"user {user_id}"
+            ticket = Ticket(
+                channel_id=None,
+                type=ticket_type,
+                created_by=user_id,
+                status="pending",
+                subject=text[:255],
+                last_reply_uid=str(getattr(user, "discord_id", "") or ""),
+            )
+            s.add(ticket)
+            s.flush()
+            first = TicketMessage(
+                ticket_id=ticket.ticket_id,
+                discord_message_id=None,
+                author_user_id=user_id,
+                author_discord_id=str(getattr(user, "discord_id", "") or "0"),
+                author_name=author_name[:100],
+                is_staff=False,
+                is_bot=False,
+                kind="message",
+                origin="web",
+                content=text,
+                date_sent=datetime.now(),
+            )
+            s.add(first)
+            s.flush()
+            from services.inbox import advance_own_reply
+
+            advance_own_reply(s, "ticket", ticket.ticket_id, user_id, first.id)
+            s.commit()
+            payload = _ticket_summary(s, ticket)
+            payload["messages"] = [_message_row(first)]
+            payload["mentions"] = {}
+            return payload
+
+    payload = await asyncio.to_thread(_create)
+    return private_no_store(jsonify(payload)), 201
+
+
 @tickets_bp.get("/tickets/<int:ticket_id>")
 async def ticket_detail(ticket_id: int):
     user_id = current_user_id()
@@ -203,6 +328,101 @@ async def ticket_detail(ticket_id: int):
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
 
 
+@tickets_bp.post("/tickets/<int:ticket_id>/messages")
+async def create_ticket_message(ticket_id: int):
+    """Reply from the site. The transcript row is written here (origin='web');
+    the Discord copy is relayed by the outbox drain with the site marker the
+    mirror knows to skip."""
+    user_id = current_user_id()
+    body = await json_body()
+    content = str(body.get("content") or "").strip()
+    if not (1 <= len(content) <= _REPLY_MAX):
+        abort_problem(
+            422, "Invalid content", f"'content' must be 1-{_REPLY_MAX} characters."
+        )
+    if _rate_limited("ticket_replies", user_id, _REPLY_LIMIT, _REPLY_WINDOW):
+        abort_problem(429, "Too many replies", "Slow down and try again in a few minutes.")
+
+    def _create():
+        from web_api.deps import is_developer
+
+        with db_session() as s:
+            ticket = s.query(Ticket).filter(Ticket.ticket_id == ticket_id).first()
+            if ticket is None:
+                abort_problem(404, "Not found", "No such ticket.")
+            user = load_user(s, user_id)
+            if not (getattr(user, "is_superadmin", False) or _is_participant(s, user_id, ticket)):
+                abort_problem(403, "Forbidden", "You were not part of this ticket.")
+            if ticket.status not in ("pending", "open"):
+                abort_problem(
+                    409, "Ticket not open", "This ticket is closing or closed."
+                )
+            author_name = getattr(user, "username", None) or f"user {user_id}"
+            row = TicketMessage(
+                ticket_id=ticket_id,
+                discord_message_id=None,
+                author_user_id=user_id,
+                author_discord_id=str(getattr(user, "discord_id", "") or "0"),
+                author_name=author_name[:100],
+                is_staff=bool(is_developer(user)),
+                is_bot=False,
+                kind="message",
+                origin="web",
+                content=content,
+                date_sent=datetime.now(),
+            )
+            s.add(row)
+            ticket.last_reply_uid = str(getattr(user, "discord_id", "") or user_id)
+            ticket.date_updated = datetime.now()
+            # A human reply restarts the inactivity clock, same as in Discord.
+            if ticket.inactivity_warned_at is not None:
+                ticket.inactivity_warned_at = None
+            s.flush()
+            # Relay into the channel once it exists; a still-pending ticket
+            # carries this row over when the channel is provisioned.
+            if ticket.channel_id:
+                from services.discord_outbox import enqueue
+
+                enqueue(
+                    s,
+                    channel_id=ticket.channel_id,
+                    content=_relay_content(author_name, content),
+                    kind="message",
+                    ref_type="ticket_message",
+                    ref_id=row.id,
+                    actor_user_id=user_id,
+                    commit=False,
+                )
+            from services.inbox import advance_own_reply
+
+            advance_own_reply(s, "ticket", ticket_id, user_id, row.id)
+            s.commit()
+            try:
+                from services.inbox import (
+                    publish_inbox_unread,
+                    ticket_participant_user_ids,
+                )
+                from services.realtime import publish_event
+
+                publish_event(
+                    "ticket_message",
+                    f"ticket:{ticket_id}",
+                    {"ticket_id": ticket_id, "id": int(row.id)},
+                )
+                publish_inbox_unread(
+                    "ticket",
+                    ticket_id,
+                    ticket_participant_user_ids(s, ticket),
+                    exclude_user_id=user_id,
+                )
+            except Exception:
+                pass
+            return _message_row(row)
+
+    payload = await asyncio.to_thread(_create)
+    return private_no_store(jsonify(payload)), 201
+
+
 @tickets_bp.get("/admin/tickets")
 async def admin_tickets():
     user_id = current_user_id()
@@ -218,12 +438,12 @@ async def admin_tickets():
             if status in ("open", "closed"):
                 # "open" includes the transient close_requested state.
                 if status == "open":
-                    query = query.filter(Ticket.status.in_(["open", "close_requested"]))
+                    query = query.filter(Ticket.status.in_(_OPENISH))
                 else:
                     query = query.filter(Ticket.status == "closed")
             elif status == "unclaimed":
                 query = query.filter(
-                    Ticket.status.in_(["open", "close_requested"]),
+                    Ticket.status.in_(_OPENISH),
                     Ticket.claimed_by.is_(None),
                 )
             if ticket_type in _TICKET_TYPES:
@@ -253,17 +473,17 @@ async def admin_tickets():
             ) if ids else {}
 
             by_status = dict(s.query(Ticket.status, func.count()).group_by(Ticket.status).all())
-            open_like = int(by_status.get("open", 0)) + int(by_status.get("close_requested", 0))
+            open_like = sum(int(by_status.get(st, 0)) for st in _OPENISH)
             unclaimed = (
                 s.query(func.count())
                 .select_from(Ticket)
-                .filter(Ticket.status.in_(["open", "close_requested"]), Ticket.claimed_by.is_(None))
+                .filter(Ticket.status.in_(_OPENISH), Ticket.claimed_by.is_(None))
                 .scalar()
                 or 0
             )
             by_type = dict(
                 s.query(Ticket.type, func.count())
-                .filter(Ticket.status.in_(["open", "close_requested"]))
+                .filter(Ticket.status.in_(_OPENISH))
                 .group_by(Ticket.type)
                 .all()
             )

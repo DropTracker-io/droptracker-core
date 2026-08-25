@@ -457,6 +457,23 @@ def assert_developer(user: Optional[User]) -> None:
         )
 
 
+def is_support_staff(user: Optional[User]) -> bool:
+    """Staff for the support surfaces (widget staff chats, group notices —
+    web102a). v1 this is developers + superadmins; a future moderator/helper
+    tier changes exactly this function and nothing else."""
+    return is_developer(user)
+
+
+def assert_support_staff(user: Optional[User]) -> None:
+    if not is_support_staff(user):
+        abort_problem(
+            403,
+            "Forbidden",
+            "Support staff access is required.",
+            extra={"code": "staff_required"},
+        )
+
+
 def assert_group_entitlement(
     s,
     user_id: int,

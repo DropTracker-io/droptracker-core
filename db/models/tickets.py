@@ -4,12 +4,15 @@ from db.models.base import Base
 class Ticket(Base):
     __tablename__ = 'tickets'
     ticket_id = Column(Integer, primary_key=True, autoincrement=True)
-    channel_id = Column(String(255), nullable=False)
+    # NULL while a web-created ticket sits in status='pending', before the
+    # webhook bot's maintenance task provisions the Discord channel (web102a).
+    channel_id = Column(String(255), nullable=True)
     type = Column(String(255), nullable=False)
     created_by = Column(Integer, ForeignKey('users.user_id'), nullable=False)
     claimed_by = Column(Integer, ForeignKey('users.user_id'), nullable=True)
-    # open -> (close_requested, set by the web admin dashboard; the webhook bot
-    # archives the channel then flips it) -> closed
+    # pending (web-created, no channel yet) -> open -> (close_requested, set by
+    # the web admin dashboard; the webhook bot archives the channel then flips
+    # it) -> closed
     status = Column(String(255), nullable=False)
     date_added = Column(DateTime, default=func.now())
     last_reply_uid = Column(String(255), nullable=True)
@@ -53,6 +56,9 @@ class TicketMessage(Base):
     is_staff = Column(Boolean, nullable=False, default=False)
     is_bot = Column(Boolean, nullable=False, default=False)
     kind = Column(String(16), nullable=False, default='message')  # message|system
+    # 'discord' (mirrored) or 'web' (typed on the site, relayed to the channel
+    # by the outbox). Attribution only — echo prevention does not depend on it.
+    origin = Column(String(8), nullable=False, default='discord')
     content = Column(Text, nullable=True)
     attachments_json = Column(Text, nullable=True)
     date_sent = Column(DateTime, nullable=False)

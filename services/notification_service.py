@@ -1359,6 +1359,16 @@ class NotificationService:
                 notification.error_message = f"Unknown notification type: {notification_type}"
                 print(f"Notification type not found: '{notification_type}'")
                 db_session.commit()
+            # A delivered group notification auto-resolves any open
+            # channel/delivery notices for that group (web102a). Flag-guarded:
+            # the common case is a few Redis GETs and zero table touches.
+            _gid = notification.group_id or data.get('group_id', None)
+            if _gid and getattr(notification, "status", None) == 'sent':
+                try:
+                    from services.group_notices import auto_resolve_group_send
+                    auto_resolve_group_send(db_session, int(_gid))
+                except Exception:
+                    pass
         except interactions.errors.Forbidden:
             # Event notifications carry group_id as a COLUMN, not in the JSON
             # payload — reading only data['group_id'] silently skipped this
@@ -1388,6 +1398,30 @@ class NotificationService:
                         except Exception as e:
                             print("Couldn't DM server admin about failed notification (bot permissions in server)...")
             print(f"Forbidden access error attempting to send a notification to {group_id}")
+            # Raise (or bump) the group's channel notice so the problem shows
+            # up in the site chat widget for every admin — with a DM only the
+            # first time. Auto-resolves on the next successful send (web102a).
+            if group_id:
+                try:
+                    from services.group_notices import raise_group_notice
+                    raise_group_notice(
+                        db_session,
+                        group_id=int(group_id),
+                        code="notify_channel_forbidden",
+                        title="DropTracker can't post in your notification channel",
+                        body=(
+                            "A notification for your group could not be posted "
+                            "because the bot lacks permission in the configured "
+                            "channel (or the channel is gone). In the channel's "
+                            "settings, grant the DropTracker bot **View Channel**, "
+                            "**Send Messages**, **Embed Links** and **Attach "
+                            "Files** — notifications resume automatically, and "
+                            "this notice will close itself once a message lands."
+                        ),
+                        data={"notification_type": notification_type},
+                    )
+                except Exception:
+                    pass
             # Operational event alerts additionally get their CONTENT DM'd to
             # the group's leadership: the permission nudge above says the bot
             # can't post, but not that an event failed to start (bug #126).
