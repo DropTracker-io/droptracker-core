@@ -193,6 +193,77 @@ def test_subject_user_matches_by_party_not_staff_branch(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Participant fan-out: user_id 0 is a real account
+# --------------------------------------------------------------------------- #
+class _EmptyQuery:
+    def filter(self, *a, **k):
+        return self
+
+    def distinct(self):
+        return self
+
+    def all(self):
+        return []
+
+
+class _EmptySession:
+    def query(self, *a, **k):
+        return _EmptyQuery()
+
+
+def test_ticket_participants_include_user_zero():
+    """`if ticket.created_by:` is false for the account whose id is 0 — which
+    is a real, active account here — and would drop that person from their own
+    ticket's badge fan-out. Presence must be tested, not truthiness."""
+    from services.inbox import ticket_participant_user_ids
+
+    ticket = SimpleNamespace(ticket_id=1, created_by=0, claimed_by=None)
+    assert ticket_participant_user_ids(_EmptySession(), ticket) == {0}
+
+
+def test_ticket_participants_include_negative_ids():
+    from services.inbox import ticket_participant_user_ids
+
+    ticket = SimpleNamespace(ticket_id=1, created_by=-1, claimed_by=0)
+    assert ticket_participant_user_ids(_EmptySession(), ticket) == {-1, 0}
+
+
+def test_ticket_participants_skip_missing_claimer():
+    from services.inbox import ticket_participant_user_ids
+
+    ticket = SimpleNamespace(ticket_id=1, created_by=5, claimed_by=None)
+    assert ticket_participant_user_ids(_EmptySession(), ticket) == {5}
+
+
+def test_suggestion_participants_include_user_zero():
+    from services.inbox import suggestion_participant_user_ids
+
+    sug = SimpleNamespace(id=1, user_id=0)
+    assert suggestion_participant_user_ids(_EmptySession(), sug) == {0}
+
+
+def test_publish_inbox_unread_excludes_author_zero(monkeypatch):
+    """The author-exclusion compares with `is not None` too — excluding user 0
+    must actually exclude them, and must not exclude everyone else."""
+    import sys
+    from types import ModuleType
+
+    from services import inbox as inbox_mod
+
+    sent = []
+    fake = ModuleType("services.realtime")
+    fake.publish_event = lambda t, scope, data: sent.append((t, scope, data))
+    monkeypatch.setitem(sys.modules, "services.realtime", fake)
+
+    inbox_mod.publish_inbox_unread("ticket", 9, [0, 5], exclude_user_id=0)
+    assert [s[1] for s in sent] == ["user:5"]
+
+    sent.clear()
+    inbox_mod.publish_inbox_unread("ticket", 9, [0, 5])
+    assert sorted(s[1] for s in sent) == ["user:0", "user:5"]
+
+
+# --------------------------------------------------------------------------- #
 # Relay DM content
 # --------------------------------------------------------------------------- #
 def test_relay_dm_fits_discord_cap():

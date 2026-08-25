@@ -81,13 +81,16 @@ async def staff_user_search():
 async def open_staff_chat():
     user_id = current_user_id()
     body = await json_body()
-    try:
-        target_user_id = int(body.get("user_id") or 0)
-    except (TypeError, ValueError):
-        target_user_id = 0
-    text = str(body.get("body") or "").strip()
-    if target_user_id <= 0:
+    raw_target = body.get("user_id")
+    # Presence, not truthiness/positivity: user_id 0 is a real account and ids
+    # run negative. Whether the target EXISTS is settled by the lookup below.
+    if raw_target is None:
         abort_problem(400, "Bad request", "user_id is required.")
+    try:
+        target_user_id = int(raw_target)
+    except (TypeError, ValueError):
+        abort_problem(400, "Bad request", "user_id must be an integer.")
+    text = str(body.get("body") or "").strip()
     if not text:
         abort_problem(422, "Invalid body", "Write an opening message.")
 

@@ -223,9 +223,12 @@ def ticket_participant_user_ids(s, ticket) -> set[int]:
     from db.models import TicketMessage
 
     out: set[int] = set()
-    if ticket.created_by:
+    # `is not None`, never truthiness: user_id 0 is a real account (and ids run
+    # negative too), so `if ticket.created_by` would silently drop that person
+    # from their own ticket's badge fan-out.
+    if ticket.created_by is not None:
         out.add(int(ticket.created_by))
-    if ticket.claimed_by:
+    if ticket.claimed_by is not None:
         out.add(int(ticket.claimed_by))
     for (uid,) in (
         s.query(TicketMessage.author_user_id)
@@ -244,7 +247,7 @@ def suggestion_participant_user_ids(s, suggestion) -> set[int]:
     from db.models import SuggestionMessage
 
     out: set[int] = set()
-    if suggestion.user_id:
+    if suggestion.user_id is not None:  # user_id 0 is a real account
         out.add(int(suggestion.user_id))
     for (uid,) in (
         s.query(SuggestionMessage.author_user_id)
