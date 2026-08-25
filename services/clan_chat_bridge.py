@@ -230,16 +230,29 @@ def bridge_bound_groups(session, relayer_player_id, clan_slug: str) -> dict:
     return bound
 
 
-def bridge_channel_map(session) -> dict:
+def bridge_channel_map(session=None) -> dict:
     """``{channel_id_str: (group_id, clan_slug)}`` for every fully-configured
     bridge — the MessageCreate listener's routing table. Cached in-process for
-    60s so the listener never queries per message."""
+    60s so the listener never queries per message.
+
+    Owns a fresh session unless the caller supplies one. The listener calls this
+    under ``asyncio.to_thread``, and a *scoped* session touched on a pool worker
+    thread is cleaned up by nothing — the registry holds it for the life of the
+    thread, so the read below autobegins a transaction that never ends. That is
+    the 2026-08-25 incident: ~15 permanently idle-in-transaction connections
+    blocked InnoDB purge for 7h, drove the history list to 797k, and starved
+    both submission processors until the bot was restarted.
+    """
     now = time.monotonic()
     if now < _channel_map_cache["expires"]:
         return _channel_map_cache["map"]
 
-    from db.models import GroupConfiguration
+    from db.models import GroupConfiguration, Session
     from utils.clan_broadcasts import clan_slug as make_slug
+
+    owns_session = session is None
+    if owns_session:
+        session = Session()
 
     result = {}
     try:
@@ -271,14 +284,20 @@ def bridge_channel_map(session) -> dict:
         _channel_map_cache["expires"] = now + _CHANNEL_MAP_TTL_SECONDS
     except Exception as e:
         print(f"[ClanChatBridge] channel map refresh failed: {e}")
-        # A failed transaction left on the shared scoped session would make
-        # every future refresh fail too — clear it so the next 60s expiry
-        # can actually recover instead of serving the stale map forever.
+        # A failed transaction left on a caller-owned session would make every
+        # future refresh fail too — clear it so the next 60s expiry can
+        # actually recover instead of serving the stale map forever.
         try:
             session.rollback()
         except Exception:
             pass
         return _channel_map_cache["map"]
+    finally:
+        # Rolls back the read that `.query()` autobegan and hands the
+        # connection back to the pool. Without this the *success* path leaks:
+        # the old code only rolled back when the query raised.
+        if owns_session:
+            session.close()
     return result
 
 

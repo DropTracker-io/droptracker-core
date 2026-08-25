@@ -367,8 +367,10 @@ async def on_clan_bridge_message(event: MessageCreate):
 
         # The 60s-expiry cache miss runs a GroupConfiguration query; with
         # GUILD_MESSAGES on, this listener sees every guild message, so the
-        # query must not run on the gateway loop.
-        channel_map = await asyncio.to_thread(bridge_channel_map, session)
+        # query must not run on the gateway loop. It owns its own session —
+        # never hand it the scoped one, which the worker thread would then
+        # hold idle-in-transaction for the life of the process (2026-08-25).
+        channel_map = await asyncio.to_thread(bridge_channel_map)
         route = channel_map.get(str(message.channel.id))
         if route is None:
             return
