@@ -68,14 +68,14 @@ def check_active_upgrade(group_id: int = None, user_id: int = None):
         
         # Execute the appropriate query based on parameters
         if user_id is not None and group_id is None:
-            print(f"Executing query for user {user_id}")
+            #print(f"Executing query for user {user_id}")
             result = session.execute(text(raw_query), {"user_id": xf_uid}).fetchall()
         elif group_id is not None and user_id is None:
-            print(f"Executing query for group {group_id}")
+            #print(f"Executing query for group {group_id}")
             result = session.execute(text(raw_query), {"group_id": group_id}).fetchall()        
 
         else:  # Both parameters provided
-            print(f"Executing query for user {user_id} and group {group_id}")
+            #print(f"Executing query for user {user_id} and group {group_id}")
             result = session.execute(text(raw_query), {"user_id": xf_uid, "group_id": group_id}).fetchall()
 
             
