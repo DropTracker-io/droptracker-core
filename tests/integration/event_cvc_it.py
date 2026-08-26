@@ -184,7 +184,12 @@ def main():
                    has_bingo=False, requires_confirmation=False, board_size=5,
                    bonus_line_points=0, bonus_blackout_points=0,
                    discord_event_policy="immediate",
-                   discord_guild_id=str(host.guild_id))
+                   discord_guild_id=str(host.guild_id),
+                   # Pin the auto-apply policy: the ORM default became
+                   # confirm_non_api (5d7933c) and these envelopes carry no
+                   # used_api flag, which would land every match as "pending".
+                   # What's under test here is clan-vs-clan credit routing.
+                   submission_policy="all")
         session.add(ev)
         session.flush()
         event_id = ev.id
@@ -243,9 +248,9 @@ def main():
 
         # ── Roster: each player on their own clan's team ─────────────────────
         session.add(EventTeamMember(team_id=team_h.id, player_id=p_host.player_id,
-                                    joined_at=joined))
+                                    event_id=ev.id, joined_at=joined))
         session.add(EventTeamMember(team_id=team_o.id, player_id=p_opp.player_id,
-                                    joined_at=joined))
+                                    event_id=ev.id, joined_at=joined))
         t_item = EventTask(event_id=ev.id, type="item_collection", label="1 whip",
                            target="Abyssal whip", target_value=1, points=10)
         session.add(t_item)
