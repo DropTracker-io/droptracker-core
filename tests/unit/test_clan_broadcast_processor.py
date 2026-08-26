@@ -334,7 +334,10 @@ def test_plugin_copy_check_unresolvable_item_is_not_covered(monkeypatch):
 # ── personal bests from broadcasts ───────────────────────────────────────────
 
 def test_pb_time_parsing_display_formats():
-    assert cb._pb_time_to_ms("1:04") == 64_000
+    # Precise times are already on the game's 600ms tick grid and pass through
+    # untouched; a whole second means the broadcasting client had precise
+    # timing off, so it snaps to the nearest tick (utils.pb_time).
+    assert cb._pb_time_to_ms("1:04") == 64_200
     assert cb._pb_time_to_ms("21:55.80") == 21 * 60_000 + 55_800
     assert cb._pb_time_to_ms("0:31.20") == 31_200
     assert cb._pb_time_to_ms("garbage") == 0

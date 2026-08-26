@@ -121,7 +121,12 @@ async def adventure_log_processor(adventure_log_data, external_session=None):
                 continue
 
             try:
-                time_ms = int(convert_to_ms(kill_time))
+                # Snapped onto the game's tick grid: the adventure log renders
+                # the player's own times, so it inherits their precise-timing
+                # setting the same way the chat line does (utils.pb_time).
+                from utils.pb_time import snap_to_tick
+
+                time_ms = snap_to_tick(int(convert_to_ms(kill_time)))
             except Exception:
                 debug_print(
                     f"Adventure log PB skipped (time conversion error): "

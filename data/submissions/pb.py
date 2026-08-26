@@ -43,13 +43,23 @@ def _time_to_ms(value) -> int:
     """Milliseconds from a plugin time value: formatted ("1:23.40"), raw ms
     int (form API path), or garbage ("N/A" on untimed kills, None) → 0.
     convert_to_ms alone returns None on unparseable input and raises on
-    non-strings, and its results were compared unguarded."""
+    non-strings, and its results were compared unguarded.
+
+    The result is snapped onto the game's 600ms tick grid. A client with
+    precise timing off prints whole seconds, so its times are a rounded
+    version of the real duration and cannot be compared against a precise
+    client's on the same board. Snapping is a fixed point on every
+    tick-aligned value, so it only ever moves a time that is provably
+    non-precise — see ``utils.pb_time``.
+    """
+    from utils.pb_time import snap_to_tick
+
     if value is None:
         return 0
     if isinstance(value, (int, float)):
-        return max(int(value), 0)
+        return snap_to_tick(max(int(value), 0))
     ms = convert_to_ms(str(value))
-    return max(int(ms), 0) if ms else 0
+    return snap_to_tick(max(int(ms), 0)) if ms else 0
 
 
 def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_changed):

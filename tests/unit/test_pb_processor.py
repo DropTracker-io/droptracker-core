@@ -143,10 +143,30 @@ class TestSilentSync:
     def test_kill_beating_stale_row_but_not_reported_best_is_a_sync_not_a_pb(self):
         """The game did not call it a PB, so neither do we — but the row heals."""
         row = _existing_row(904800)
-        _, notify = _run(_payload(current_ms=900000, pb_ms=890000, is_pb=False), row=row)
-        assert row.personal_best == 890000
+        _, notify = _run(_payload(current_ms=900000, pb_ms=889800, is_pb=False), row=row)
+        assert row.personal_best == 889800
         assert row.new_pb is False
         assert notify.await_count == 0
+
+
+class TestTickSnapping:
+    """Times arrive quantized two different ways depending on the client's
+    precise-timing setting; intake puts both on the game's tick grid so one
+    board never holds two quantizations (utils.pb_time)."""
+
+    def test_whole_second_times_snap_to_the_nearest_tick(self):
+        _, _notify = _run(_payload(current_ms=890000, pb_ms=890000, is_pb=True), row=None)
+        kwargs = db.PersonalBestEntry.call_args.kwargs
+        assert kwargs["personal_best"] == 889800
+        assert kwargs["kill_time"] == 889800
+
+    def test_tick_aligned_times_are_untouched(self):
+        """The safety property: a time a precise client could have produced
+        must survive intake exactly as sent."""
+        _, _notify = _run(_payload(current_ms=888000, pb_ms=888000, is_pb=True), row=None)
+        kwargs = db.PersonalBestEntry.call_args.kwargs
+        assert kwargs["personal_best"] == 888000
+        assert kwargs["kill_time"] == 888000
 
     def test_untimed_kill_with_faster_reported_best_syncs(self):
         """current_ms == 0 ("N/A") must not block the reported-best heal."""

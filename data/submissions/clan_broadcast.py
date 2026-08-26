@@ -339,12 +339,19 @@ def _record_group_exclusions(session, drop_id, exclusions: dict) -> None:
 
 
 def _pb_time_to_ms(time_text) -> int:
-    """Broadcast display time ("21:55.80", "1:04") → milliseconds, 0 on junk."""
+    """Broadcast display time ("21:55.80", "1:04") → milliseconds, 0 on junk.
+
+    Snapped onto the game's tick grid for the same reason the plugin path is:
+    a broadcast rendered by a client with precise timing off carries whole
+    seconds, and those cannot share a board with true tick times. See
+    ``utils.pb_time``.
+    """
     from utils.format import convert_to_ms
+    from utils.pb_time import snap_to_tick
 
     try:
         ms = convert_to_ms(str(time_text or "").strip().rstrip("."))
-        return max(int(ms), 0) if ms else 0
+        return snap_to_tick(max(int(ms), 0)) if ms else 0
     except Exception:
         return 0
 
