@@ -60,21 +60,21 @@ def _existing_row(personal_best):
     return row
 
 
-def _payload(current_ms, pb_ms, is_pb):
+def _payload(current_ms, pb_ms, is_pb, npc_name="Theatre of Blood", team_size="4"):
     return {
         "player_name": "Ashey",
         "acc_hash": "-5493473578450257792",
-        "npc_name": "Theatre of Blood",
+        "npc_name": npc_name,
         "current_time_ms": current_ms,
         "personal_best_ms": pb_ms,
-        "team_size": "4",
+        "team_size": team_size,
         "is_new_pb": "true" if is_pb else "false",
         "guid": "test-guid-1",
         "p_v": "5.4.0",
     }
 
 
-def _run(payload, row=None):
+def _run(payload, row=None, npc=(13699, "Theatre of Blood")):
     import data.submissions.pb as pb
 
     player = _FakePlayer()
@@ -89,8 +89,7 @@ def _run(payload, row=None):
         p = lambda name, **kw: stack.enter_context(patch.object(pb, name, **kw))
         p("select_session_and_flag", new=MagicMock(return_value=(session, True)))
         p("ensure_can_create", new=AsyncMock(return_value=True))
-        p("ensure_npc_id_for_player",
-          new=AsyncMock(return_value=(13699, "Theatre of Blood")))
+        p("ensure_npc_id_for_player", new=AsyncMock(return_value=npc))
         p("ensure_player_by_name_then_auth",
           new=AsyncMock(return_value=(player, True, True)))
         p("get_player_groups_with_global",
@@ -147,6 +146,36 @@ class TestSilentSync:
         assert row.personal_best == 889800
         assert row.new_pb is False
         assert notify.await_count == 0
+
+
+class TestTeamSizeBracketing:
+    """Suggestion #153: a client that truncated the game's bucket label must
+    still land on the bucket's board, because that is where the clan-chat and
+    adventure-log copies of the same raid go."""
+
+    COX = (13696, "Chambers of Xeric")
+
+    def test_truncated_bucket_label_lands_on_the_bracket_board(self):
+        _run(_payload(current_ms=1_200_000, pb_ms=0, is_pb=True,
+                      npc_name="Chambers of Xeric", team_size="16"),
+             row=None, npc=self.COX)
+        assert db.PersonalBestEntry.call_args.kwargs["team_size"] == "16-23"
+
+    def test_correct_bucket_label_is_unchanged(self):
+        _run(_payload(current_ms=1_200_000, pb_ms=0, is_pb=True,
+                      npc_name="Chambers of Xeric", team_size="16-23"),
+             row=None, npc=self.COX)
+        assert db.PersonalBestEntry.call_args.kwargs["team_size"] == "16-23"
+
+    def test_exact_sizes_below_the_first_bucket_stay_exact(self):
+        _run(_payload(current_ms=1_200_000, pb_ms=0, is_pb=True,
+                      npc_name="Chambers of Xeric", team_size="5"),
+             row=None, npc=self.COX)
+        assert db.PersonalBestEntry.call_args.kwargs["team_size"] == "5"
+
+    def test_a_bucketless_boss_keeps_its_exact_team_size(self):
+        _run(_payload(current_ms=888_000, pb_ms=0, is_pb=True, team_size="4"), row=None)
+        assert db.PersonalBestEntry.call_args.kwargs["team_size"] == "4"
 
 
 class TestTickSnapping:
