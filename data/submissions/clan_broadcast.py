@@ -407,10 +407,18 @@ def _resolve_npc(session, name_text):
 
 def _pb_bracket(parsed) -> str:
     """Canonical team-size label for a PB broadcast (raids carry it in the
-    line; everything else brackets Solo, same default the plugin path uses)."""
-    from utils.npc_names import sanitize_team_size
+    line; everything else brackets Solo, same default the plugin path uses).
 
-    return sanitize_team_size(parsed.extra.get("team_size") or "Solo")
+    Goes through the same normalizer as the plugin and adventure-log paths so
+    all three agree on the label — a broadcast reading "16-23 players" and a
+    plugin submission reading "16" are the same raid and must share a board
+    (suggestion #153).
+    """
+    from utils.npc_names import canonical_team_size
+
+    return canonical_team_size(
+        parsed.extra.get("activity"), parsed.extra.get("team_size") or "Solo"
+    )
 
 
 async def _plugin_copy_exists(session, subject, parsed, stamp) -> bool:

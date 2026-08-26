@@ -258,6 +258,71 @@ def test_clamp_team_size_rejects_impossible_raid_teams():
     assert c(None, "9") == "9"
 
 
+def test_team_size_brackets_cover_the_bucketed_activities():
+    from utils.npc_names import team_size_brackets
+
+    assert team_size_brackets("Chambers of Xeric")
+    # Mode variants inherit the base activity's buckets.
+    assert team_size_brackets("Chambers of Xeric Challenge Mode") == team_size_brackets(
+        "Chambers of Xeric"
+    )
+    assert team_size_brackets("The Nightmare") == ((6, None, "6+"),)
+    # Phosani's is a solo encounter and shares no key with The Nightmare.
+    assert team_size_brackets("Phosani's Nightmare") == ()
+    assert team_size_brackets("Theatre of Blood") == ()
+    assert team_size_brackets(None) == ()
+
+
+def test_bracket_team_size_folds_truncated_bucket_labels():
+    """Suggestion #153: the plugin's chat parser matched only the leading digits
+    of a bucket label, so one Chambers raid reported "16" through the plugin and
+    "16-23" through clan chat and the adventure log — three boards, one raid."""
+    from utils.npc_names import bracket_team_size as b
+
+    for size in ("11", "12", "13", "14", "15"):
+        assert b("Chambers of Xeric", size) == "11-15"
+    for size in ("16", "19", "23"):
+        assert b("Chambers of Xeric", size) == "16-23"
+    for size in ("24", "30", "100"):
+        assert b("Chambers of Xeric", size) == "24+"
+    assert b("Chambers of Xeric Challenge Mode", "16") == "16-23"
+
+    # The Nightmare's only bucket is open-ended.
+    for size in ("6", "7", "40"):
+        assert b("The Nightmare", size) == "6+"
+
+    # Sizes below the first bucket are real, exact boards.
+    for size in ("Solo", "2", "5", "9", "10"):
+        assert b("Chambers of Xeric", size) == size
+    for size in ("Solo", "2", "5"):
+        assert b("The Nightmare", size) == size
+
+    # Correct labels are fixed points, and unbucketed bosses never fold.
+    for label in ("11-15", "16-23", "24+", "6+", "Solo"):
+        assert b("Chambers of Xeric", label) == label
+    assert b("Theatre of Blood", "5") == "5"
+    assert b("Vorkath", "3") == "3"
+    assert b(None, "16") == "16"
+
+
+def test_canonical_team_size_is_sanitize_clamp_and_fold():
+    from utils.npc_names import canonical_team_size as c
+
+    # Fold: the whole point of suggestion #153.
+    assert c("Chambers of Xeric", "16") == "16-23"
+    assert c("Chambers of Xeric", 24) == "24+"
+    assert c("The Nightmare", "6 players") == "6+"
+    # Sanitize still runs first, so raw log fragments fold too.
+    assert c("Chambers of Xeric", "(16 players)") == "16-23"
+    assert c("Chambers of Xeric", "11 s") == "11-15"
+    # Clamp still runs, and capped raids have no buckets to fold into.
+    assert c("Theatre of Blood", "9") == "5"
+    assert c("Tombs of Amascut: Expert Mode", "15") == "8"
+    # Ordinary values are untouched.
+    assert c("Chambers of Xeric", "5") == "5"
+    assert c("Vorkath", None) == "Solo"
+
+
 def test_sql_expr_matches_python_rule():
     expr = npc_slug_sql_expr("npc_name")
     assert "REGEXP_REPLACE" in expr and "LOWER(npc_name)" in expr

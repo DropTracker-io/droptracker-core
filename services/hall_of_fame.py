@@ -1758,8 +1758,11 @@ class HallOfFame(Extension):
             return (2, "")
         if value.casefold() == "trio":
             return (3, "")
+        # A bracket sorts by its lowest member, so Chambers' "11-15" sits
+        # between "10" and "16-23" rather than after every exact size.
+        head = value.split("-", 1)[0].rstrip("+").strip()
         try:
-            return (int(value.rstrip("+")), "")
+            return (int(head), "")
         except ValueError:
             return (99, value.casefold())
 

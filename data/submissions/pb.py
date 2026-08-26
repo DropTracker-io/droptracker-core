@@ -120,10 +120,12 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     # Canonical team encoding ("Solo", "2", …, "11-15") — see suggestion #50 —
     # capped at the number of players the boss can actually be fought with, so a
     # contaminated client roster can't invent a 7-man Theatre of Blood board
-    # (suggestion #140).
-    from utils.npc_names import clamp_team_size
+    # (suggestion #140), and folded into the game's own bracket so a client that
+    # truncated "16-23 players" to "16" lands on the same board as the clan-chat
+    # and adventure-log copies of that raid (suggestion #153).
+    from utils.npc_names import canonical_team_size
 
-    team_size = clamp_team_size(boss_name, pb_data.get("team_size", 1))
+    team_size = canonical_team_size(boss_name, pb_data.get("team_size", 1))
     # The embed path delivers "true"/"false" strings; the form path booleans.
     is_personal_best = pb_data.get("is_new_pb", pb_data.get("is_pb", False))
     is_personal_best = str(is_personal_best).strip().lower() in ("true", "1", "yes")

@@ -292,6 +292,71 @@ def clamp_team_size(npc_name: str | None, raw) -> str:
     return size
 
 
+#: Team-size brackets the game reports in place of an exact head count, keyed by
+#: base match key, as ``(low, high_or_None, label)`` spans in ascending order.
+#:
+#: These activities do not store a personal best per exact team size — the game
+#: buckets them, and the completion message carries only the bucket's own label
+#: ("Team size: 16-23 players"). A bare integer inside a bucket's span is
+#: therefore never a real head count; it is a mangled label, and it folds back.
+#: Sizes below the first span (Chambers of Xeric 2-10) are genuine exact boards
+#: and are left alone.
+TEAM_SIZE_BRACKETS = {
+    "chambers-of-xeric": ((11, 15, "11-15"), (16, 23, "16-23"), (24, None, "24+")),
+    "nightmare": ((6, None, "6+"),),
+}
+
+
+def team_size_brackets(npc_name: str | None) -> tuple:
+    """Bracket spans for ``npc_name``, or ``()`` when it has none.
+
+    Mode variants inherit the base activity's brackets, so Challenge Mode
+    Chambers buckets exactly like the base raid.
+    """
+    key = npc_match_key(npc_name)
+    if not key:
+        return ()
+    brackets = TEAM_SIZE_BRACKETS.get(key)
+    if brackets is not None:
+        return brackets
+    base = npc_base_slug(key)
+    return TEAM_SIZE_BRACKETS.get(base, ()) if base else ()
+
+
+def bracket_team_size(npc_name: str | None, size: str) -> str:
+    """Fold a bare head count into the bracket label the game would report.
+
+    The plugin's chat parser matched only the leading digits of a bracket, so
+    "Team size: 16-23 players" was submitted as "16" while the same raid's
+    adventure-log and clan-broadcast lines kept "16-23" — one raid, two boards
+    (suggestion #153). Folding on the server heals every client at once, which
+    matters because players run the plugin-hub pinned build and pick up a
+    plugin fix only after the pin moves.
+
+    Already-canonical labels ("16-23", "24+", "Solo") are not digits and pass
+    through untouched.
+    """
+    brackets = team_size_brackets(npc_name)
+    if not brackets or not size.isdigit():
+        return size
+    count = int(size)
+    for low, high, label in brackets:
+        if count >= low and (high is None or count <= high):
+            return label
+    return size
+
+
+def canonical_team_size(npc_name: str | None, raw) -> str:
+    """The one team-size label a PB row for ``npc_name`` should ever carry.
+
+    Sanitizes the raw fragment, clamps it to the boss's real party ceiling and
+    folds it into the game's own bracket. Every path that writes
+    ``personal_best.team_size`` must go through this, because that column is
+    part of the row's identity: two spellings of one team size are two boards.
+    """
+    return bracket_team_size(npc_name, clamp_team_size(npc_name, raw))
+
+
 def npc_slug_sql_expr(column: str) -> str:
     """SQL computing ``npc_slug(column)`` (MariaDB/MySQL 8 REGEXP_REPLACE).
 
