@@ -248,6 +248,32 @@ def main():
                 },
             )
 
+    # A held boss-record badge is keyed "npc:<id>:<team_size>", and
+    # services.badges.evaluate_boss_records only walks slots that still exist in
+    # personal_best. Once a label is gone the evaluator never visits it again,
+    # so a badge left on it would advertise a board nobody can see or beat
+    # forever. Retire those holders the same way a transfer does — the evaluator
+    # awards the merged board's slot on its next run.
+    retired = 0
+    for npc_id, raw in sorted(foldable_pairs):
+        active_key = f"npc:{npc_id}:{raw}"
+        held = s.execute(
+            text("SELECT COUNT(*) FROM player_badges WHERE active_key=:k AND status='active'"),
+            {"k": active_key},
+        ).scalar()
+        if not held:
+            continue
+        retired += held
+        print(f"[{mode}] retiring {held} held badge(s) on vanished slot {active_key!r}")
+        if args.apply:
+            s.execute(
+                text(
+                    "UPDATE player_badges SET status='lost', active_key=NULL, lost_at=NOW() "
+                    "WHERE active_key=:k AND status='active'"
+                ),
+                {"k": active_key},
+            )
+
     backup_path = None
     if deleted:
         os.makedirs("logs", exist_ok=True)
@@ -262,7 +288,8 @@ def main():
 
     print(
         f"\n[{mode}] {relabelled} rows relabelled with no collision; "
-        f"{merged_groups} boards merged, absorbing {len(deleted)} duplicate rows."
+        f"{merged_groups} boards merged, absorbing {len(deleted)} duplicate rows; "
+        f"{retired} held badges retired."
     )
     if backup_path:
         print(f"[{mode}] merged-away rows written to {backup_path}")
