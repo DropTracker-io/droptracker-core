@@ -3,6 +3,7 @@
   GET    /api/v1/chat/threads                  the caller's threads + unread counts
   GET    /api/v1/chat/threads/{id}             metadata, participants, my parties
   GET    /api/v1/chat/threads/{id}/messages    ?before=&limit=  (oldest-first page)
+  GET    /api/v1/chat/threads/{id}/delivery    who the thread reaches + DM outcomes
   POST   /api/v1/chat/threads/{id}/messages    {body, attachments[], as_party?}
   POST   /api/v1/chat/threads/{id}/read        {message_id}
   DELETE /api/v1/chat/messages/{id}            moderator tombstone (superadmin)
@@ -244,6 +245,34 @@ async def get_thread(thread_id: int):
             )
             payload["last_read_message_id"] = last_read_id(s, thread.id, user_id)
             return payload
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@chat_bp.get("/chat/threads/<int:thread_id>/delivery")
+async def thread_delivery_route(thread_id: int):
+    """Who this conversation reaches, and what happened to each fan-out DM.
+
+    Same 404-for-non-members gate as the rest of the thread; the payload
+    itself then withholds names for parties the caller does not belong to
+    (staff excepted) — see ``services/chat_delivery``.
+    """
+    user_id = current_user_id()
+
+    def _load():
+        from services.chat_delivery import thread_delivery
+        from web_api.deps import is_support_staff
+
+        with db_session() as s:
+            thread, membership = _load_thread_for(s, thread_id, user_id)
+            # Staff, not `membership.is_moderator`: that flag is superadmin-only,
+            # and a developer already reads every message in this thread.
+            return thread_delivery(
+                s,
+                thread,
+                membership=membership,
+                staff=is_support_staff(load_user(s, user_id)),
+            )
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
 

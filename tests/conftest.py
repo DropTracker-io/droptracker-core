@@ -367,7 +367,11 @@ if "services.chat" not in sys.modules:
 # contract (DB/Redis inside functions); ticket_transcripts' module-level
 # db.models import resolves against the stub, which is fine — its pure parts
 # (_is_web_relay, marker regex) are what the tests drive.
-for _name in ("inbox", "staff_dm", "group_notices", "ticket_transcripts"):
+#
+# web103a adds chat_delivery: same contract again (the outbox/roster queries
+# all live inside functions).
+for _name in ("inbox", "staff_dm", "group_notices", "ticket_transcripts",
+              "chat_delivery"):
     _mod_key = f"services.{_name}"
     if _mod_key not in sys.modules:
         _path = _Path(__file__).resolve().parent.parent / "services" / f"{_name}.py"

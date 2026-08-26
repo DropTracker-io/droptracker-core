@@ -148,6 +148,12 @@ def _chat_items(s, user_id: int) -> list[dict]:
                 "code": notice.code,
                 "severity": notice.severity,
                 "status": notice.status,
+                # Which clan the notice is about. The thread's sole group party
+                # already resolved the name above, so this costs no query — and
+                # without it a staff member reading a list of "DropTracker can't
+                # post in your notification channel" rows cannot tell them apart.
+                "group_id": int(notice.group_id),
+                "group_name": names.get(("group", int(notice.group_id))),
             }
         items.append(item)
     return items
