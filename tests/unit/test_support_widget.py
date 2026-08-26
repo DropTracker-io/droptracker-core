@@ -349,6 +349,34 @@ def test_thread_url_shape():
 
 
 # --------------------------------------------------------------------------- #
+# Staff role implication — the shape GET /me serves to every client
+# --------------------------------------------------------------------------- #
+def test_superadmin_implies_developer():
+    """Superadmin implies developer server-side, and ``GET /me`` returns that
+    EFFECTIVE value rather than the raw column.
+
+    It shipped returning the bare flag, so each client re-derived the
+    implication and the chat widget forgot to — hiding "Message a user" from
+    the only two superadmins on the site, neither of whom carries the
+    developer flag, while the API happily accepted the request from them.
+    Clients that still need to tell the tiers apart read is_superadmin.
+    """
+    from web_api import deps
+
+    superadmin_only = SimpleNamespace(is_superadmin=True, is_developer=False)
+    assert deps.is_developer(superadmin_only) is True
+    assert deps.is_support_staff(superadmin_only) is True
+
+    developer_only = SimpleNamespace(is_superadmin=False, is_developer=True)
+    assert deps.is_developer(developer_only) is True
+    assert deps.is_superadmin(developer_only) is False
+
+    ordinary = SimpleNamespace(is_superadmin=False, is_developer=False)
+    assert deps.is_developer(ordinary) is False
+    assert deps.is_support_staff(ordinary) is False
+
+
+# --------------------------------------------------------------------------- #
 # New kinds/codes are registered everywhere they must be
 # --------------------------------------------------------------------------- #
 def test_thread_kinds_and_codes_registered():

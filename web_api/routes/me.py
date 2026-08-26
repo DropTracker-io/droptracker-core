@@ -26,6 +26,7 @@ from web_api.flair import group_flairs
 from web_api.deps import (
     current_user_id,
     event_manager_group_ids,
+    is_developer,
     is_group_admin_role,
     json_body,
     load_user,
@@ -289,7 +290,14 @@ async def get_me():
                 "user_id": user.user_id,
                 "discord_id": str(user.discord_id or ""),
                 "is_superadmin": bool(getattr(user, "is_superadmin", False)),
-                "is_developer": bool(getattr(user, "is_developer", False)),
+                # The EFFECTIVE right, not the raw column: superadmin implies
+                # developer everywhere on the server (deps.is_developer), and
+                # returning the bare flag made every client re-derive that —
+                # which one of them then forgot, hiding a staff action from
+                # the two superadmins who don't carry the developer flag.
+                # Clients that need to tell the tiers apart check
+                # is_superadmin, which is still the raw thing.
+                "is_developer": is_developer(user),
                 "is_supporter": is_supporter,
                 "players": players,
                 "groups": groups,
