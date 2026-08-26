@@ -132,11 +132,14 @@ def main():
         s.commit()
         print(f"[APPLY] committed {min(i + CHUNK, len(changes))}/{len(changes)}")
 
+    # MOD() rather than the % operator: this string passes through SQLAlchemy's
+    # text() and then pymysql's own %-formatting, and getting the escaping wrong
+    # only surfaces here, after the writes have already committed.
     remaining = s.execute(
         text(
             "SELECT COUNT(*) FROM personal_best "
-            "WHERE (personal_best > 0 AND personal_best %% :t <> 0) "
-            "   OR (kill_time > 0 AND kill_time %% :t <> 0)"
+            "WHERE (personal_best > 0 AND MOD(personal_best, :t) <> 0) "
+            "   OR (kill_time > 0 AND MOD(kill_time, :t) <> 0)"
         ),
         {"t": TICK_MS},
     ).scalar()
