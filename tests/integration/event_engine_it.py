@@ -123,7 +123,8 @@ def main():
         team_b = EventTeam(event_id=ev.id, name="B", score=15)  # initial leader
         session.add_all([team_a, team_b])
         session.flush()
-        session.add(EventTeamMember(team_id=team_a.id, player_id=pid, joined_at=joined))
+        session.add(EventTeamMember(team_id=team_a.id, player_id=pid,
+                                    event_id=ev.id, joined_at=joined))
         # Every task under test is bound to its own board tile: a bingo event
         # only tracks completion for cell-bound tasks.
         cell = EventBingoCell(event_id=ev.id, idx=0, label="2 whips", task_id=t_item.id)
