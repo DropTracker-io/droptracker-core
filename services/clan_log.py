@@ -688,6 +688,20 @@ def refresh_group(session, group_id: int, catalog: Optional[dict] = None,
         or cursor.get("roster_hash") != current_roster
     )
 
+    # Watermarks are read BEFORE the scan, never after. The scan is unbounded
+    # above (``... WHERE drop_id > :cursor``), so a watermark read afterwards
+    # can include rows the scan never saw — the next tail then starts past
+    # them and they are lost until a full rebuild. Under REPEATABLE READ both
+    # reads shared one transaction snapshot and that could not happen; under
+    # READ COMMITTED it can. Same ceiling-first ordering as
+    # ``services/item_totals.process_new_drops``. Re-scanning a row on the next
+    # cycle is harmless: upsert_ledger folds by earliest-wins and max().
+    watermarks = {
+        "drop_id": _max_id(session, "drops", "drop_id"),
+        "log_id": _max_id(session, "collection", "log_id"),
+        "pet_id": _max_id(session, "player_pets", "id"),
+    }
+
     if stale:
         stats = rebuild_group(session, group_id, catalog=catalog, player_ids=player_ids)
         mode = "rebuild"
@@ -695,12 +709,7 @@ def refresh_group(session, group_id: int, catalog: Optional[dict] = None,
         stats = _tail_group(session, group_id, catalog, player_ids, cursor)
         mode = "tail"
 
-    cursor.update({
-        "roster_hash": current_roster,
-        "drop_id": _max_id(session, "drops", "drop_id"),
-        "log_id": _max_id(session, "collection", "log_id"),
-        "pet_id": _max_id(session, "player_pets", "id"),
-    })
+    cursor.update({"roster_hash": current_roster, **watermarks})
 
     for period in (periods or current_periods()):
         payload = build_payload(session, group_id, period, catalog=catalog,

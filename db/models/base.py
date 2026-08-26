@@ -38,6 +38,20 @@ engine = create_engine(
     # idle-transaction incident — a read that autobegan a transaction and was
     # never committed/rolled back held a MetaData lock on `web_events` for ~1.7h).
     pool_reset_on_return='rollback',
+    # READ COMMITTED, matching xenforo_engine below. Defence-in-depth after the
+    # 2026-08-25 outage: under the server default REPEATABLE READ a single
+    # leaked/idle-in-transaction session pins an InnoDB read view that blocks
+    # purge FLEET-WIDE, so ~15 leaked core-bot sessions drove the history list
+    # to 797,628 and starved both submission processors for ~20 minutes. Under
+    # READ COMMITTED a leaked session releases its read view at the end of each
+    # statement, so the same leak degrades gracefully instead of stopping purge.
+    # Safe here: log_bin is OFF (so the statement-binlog restriction on RC does
+    # not apply), and the events apply lanes already opt into RC explicitly
+    # (workers/event_consumer._use_read_committed). This is a SESSION-level
+    # setting on this engine's connections only — @@global.tx_isolation stays
+    # REPEATABLE READ, so scripts/db_backup.sh's `mysqldump
+    # --single-transaction` is unaffected and still gets a consistent snapshot.
+    isolation_level="READ COMMITTED",
     connect_args={
         'connect_timeout': 10,
         'read_timeout': 30,
