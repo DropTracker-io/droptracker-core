@@ -111,15 +111,56 @@ class TestFlagMultipathLootDuplicates:
         repeat = _gg_bundle(killcount=523)
         assert flag_multipath_loot_duplicates(repeat) == len(repeat)
 
-    def test_different_loot_is_a_different_kill(self, fake_redis):
+    def test_loot_never_seen_before_passes(self, fake_redis):
+        """Matching is per item, so an item the window hasn't seen lands even
+        when it arrives alongside items it has."""
         flag_multipath_loot_duplicates(_gg_bundle())
-        assert flag_multipath_loot_duplicates(
-            _gg_bundle(items=((21726, 58), (560, 101)))) == 0
+        fresh = _gg_bundle(items=((4151, 1),))
+        assert flag_multipath_loot_duplicates(fresh) == 0
 
-    def test_different_quantity_is_a_different_kill(self, fake_redis):
-        flag_multipath_loot_duplicates(_gg_bundle())
-        assert flag_multipath_loot_duplicates(
-            _gg_bundle(items=((21726, 59), (21739, 1), (560, 101)))) == 0
+    def test_a_different_quantity_is_a_different_item_fingerprint(self, fake_redis):
+        """Quantity is part of the fingerprint: the same item id at a new
+        quantity is not the copy we already took."""
+        flag_multipath_loot_duplicates(_gg_bundle(items=((21726, 58),)))
+        assert flag_multipath_loot_duplicates(_gg_bundle(items=((21726, 59),))) == 0
+
+    def test_partial_overlap_flags_only_the_repeated_items(self, fake_redis):
+        """The bug this exists for (Shiny Quag, 2026-08-26).
+
+        RuneLite's two loot events do NOT agree on the item list: the
+        encounter path carries Granite dust, the NPC path omits it. Bundle
+        hashing therefore never matched and the shared items were written
+        twice. Per item, the repeats are caught and the item unique to one
+        path still lands exactly once.
+        """
+        first = _gg_bundle(source="Dusk", items=((2364, 5), (21742, 1)))
+        assert flag_multipath_loot_duplicates(first) == 0
+
+        second = _gg_bundle(
+            source="Grotesque Guardians",
+            items=((21726, 99), (2364, 5), (21742, 1)),
+        )
+        assert flag_multipath_loot_duplicates(second) == 2
+        by_item = {item["id"]: item.get(MULTIPATH_FLAG, False) for item in second}
+        assert by_item[21726] is False, "Granite dust only ever arrived once"
+        assert by_item[2364] is True
+        assert by_item[21742] is True
+
+    def test_repeat_inside_one_payload_is_flagged(self, fake_redis):
+        """Both loot events can land in a single payload, in which case the
+        duplicate has to be caught within the batch rather than across two."""
+        both = _gg_bundle(items=((21742, 1),)) + _gg_bundle(items=((21742, 1),))
+        assert flag_multipath_loot_duplicates(both) == 1
+        assert both[0].get(MULTIPATH_FLAG) is None
+        assert both[1].get(MULTIPATH_FLAG) is True
+
+    def test_npc_name_is_accepted_as_a_source_alias(self, fake_redis):
+        """drop_processor reads `source` OR `npc_name`; a payload naming the
+        boss the second way must not slip past the dedup."""
+        first = [dict(item, npc_name=item.pop("source")) for item in _gg_bundle()]
+        assert flag_multipath_loot_duplicates(first) == 0
+        repeat = [dict(item, npc_name=item.pop("source")) for item in _gg_bundle()]
+        assert flag_multipath_loot_duplicates(repeat) == len(repeat)
 
     def test_other_account_is_untouched(self, fake_redis):
         flag_multipath_loot_duplicates(_gg_bundle())

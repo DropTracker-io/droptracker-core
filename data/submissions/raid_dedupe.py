@@ -7,9 +7,13 @@ GUID-keyed defence we have (``ensure_can_create``, and the events ledger's
 here, before dispatch, by fingerprinting the payload's drop bundle:
 
 * :func:`flag_raid_reloot_duplicates` — a raid reward chest re-opened at the
-  bank collection chest, minutes or hours later.
+  bank collection chest, minutes or hours later. Fingerprints the whole
+  bundle, because a re-opened chest replays the chest's full contents.
 * :func:`flag_multipath_loot_duplicates` — a multi-part boss whose single kill
   RuneLite delivers through more than one loot event, in the same tick.
+  Fingerprints each ITEM, because those two events disagree on the item list
+  (one carries the encounter's always-drop, the other omits it) and so never
+  produce a matching whole-bundle hash.
 
 Re-looted raid reward chests
 ----------------------------
@@ -55,11 +59,18 @@ RELOOT_REJECT_MESSAGE = (
 )
 
 #: One kill of a multi-part boss reaches intake through more than one RuneLite
-#: loot event, so the window only has to outlive queue latency — both copies
-#: are enqueued in the same second and drain adjacently even under a backlog.
-#: Kept well under the fastest possible re-kill of any multi-path encounter
-#: (Araxxor, the quickest, is ~25s) so a genuine second kill is never eaten.
-MULTIPATH_TTL_SECONDS = 60
+#: loot event, fired in the SAME tick, so the window only has to outlive the
+#: gap between the two copies — they are enqueued in the same second and drain
+#: adjacently even under a backlog, which makes that gap near-zero regardless
+#: of absolute queue lag.
+#:
+#: Now that matching is per ITEM rather than per bundle, this bound is load
+#: bearing rather than nominal. A whole bundle repeating by chance is
+#: vanishingly unlikely; a single common item repeating at the same quantity
+#: on a genuine next kill is not — Araxxor, the quickest of these encounters
+#: to re-kill at ~25s, would do it with any staple drop. So the window sits
+#: below that re-kill time instead of above it, where 60s left it.
+MULTIPATH_TTL_SECONDS = 20
 
 MULTIPATH_FLAG = "multipath_loot_duplicate"
 
@@ -159,18 +170,50 @@ def flag_multipath_loot_duplicates(processed_items) -> int:
     recorded twice, inflating loot totals and scoring event tasks twice (a
     Renatus bingo player's Granite ring paid 4 points twice on 2026-08-03).
 
+    Fingerprints each ITEM, not the bundle. The two loot events do not agree on
+    the item LIST: RuneLite's encounter path carries the always-drop
+    (Granite dust for the Guardians) that its NPC path omits, so one kill
+    arrives as, say, {Runite bar x5, Granite hammer x1} and
+    {Granite dust x99, Runite bar x5, Granite hammer x1}. Those bundles hash
+    differently, which is why whole-bundle fingerprinting suppressed nothing
+    and Shiny Quag's Granite hammer was still recorded twice on 2026-08-26 —
+    ~300 duplicate rows a day across these encounters. Per item, the overlap
+    is caught and the item unique to one path still lands exactly once.
+
     Safe because it is scoped to ``MULTI_PATH_LOOT_SOURCES``: those encounters
-    cannot be re-killed inside the window, so an identical bundle in it is
-    always one kill arriving twice. Ordinary NPCs are excluded precisely
-    because they CAN be legitimately multi-killed in one tick with identical
-    loot (AoE slayer routinely does it), and must never be suppressed.
+    cannot be re-killed inside the window, so the same item and quantity from
+    the same account inside it is always one kill arriving twice. Ordinary NPCs
+    are excluded precisely because they CAN be legitimately multi-killed in one
+    tick with identical loot (AoE slayer routinely does it), and must never be
+    suppressed.
 
     Call once per payload, after ``process_webhook_data`` and before
     dispatching embeds to processors. Returns the number of embeds flagged.
     """
-    return _flag_duplicate_bundles(
-        processed_items, _multipath_source_key,
-        "bossloot:multipath", MULTIPATH_TTL_SECONDS, MULTIPATH_FLAG)
+    flagged = 0
+    for item in processed_items or []:
+        if str(item.get("type") or "").strip().lower() not in _DROP_TYPES:
+            continue
+        # Both spellings: drop_processor reads `source` OR `npc_name`
+        # (data/submissions/drop.py), so a payload naming the boss the second
+        # way must not slip past the dedup that names it the first.
+        source_key = _multipath_source_key(
+            item.get("source") or item.get("npc_name"))
+        if source_key is None:
+            continue
+        acc_hash = item.get("acc_hash")
+        if not acc_hash:
+            continue
+        world = str(item.get("world_type") or "main").strip().lower() or "main"
+        signature = f"{item.get('item_id', item.get('id'))}:{item.get('quantity')}"
+        digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:24]
+        redis_key = (
+            f"bossloot:multipath:{world}:{acc_hash}:{source_key}:{digest}"
+        )
+        if not _bundle_is_new(redis_key, MULTIPATH_TTL_SECONDS):
+            item[MULTIPATH_FLAG] = True
+            flagged += 1
+    return flagged
 
 
 def duplicate_reject_message(item) -> str | None:

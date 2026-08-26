@@ -196,6 +196,42 @@ class TestGuildPerms:
 
 class TestApp:
     @pytest.fixture()
+    def _sql_columns(self, monkeypatch):
+        """Give the stubbed ORM classes columns that survive SQL-expression
+        syntax.
+
+        conftest replaces ``db`` with a MagicMock, whose ordering dunders
+        return NotImplemented — so a route building ``Column > 0`` raises
+        TypeError rather than a BinaryExpression. Routes run their queries in
+        ``asyncio.to_thread``, so that surfaces only as a 500.
+        """
+
+        class _Col:
+            # Every comparison yields an opaque stand-in for the
+            # BinaryExpression a real Column produces; the mocked session only
+            # ever passes it to .filter()/.order_by().
+            def _expr(self, other):
+                return object()
+
+            __eq__ = __ne__ = __gt__ = __ge__ = __lt__ = __le__ = _expr
+            __hash__ = None
+
+            def asc(self):
+                return object()
+
+            def desc(self):
+                return object()
+
+        class _FakeTier:
+            active = _Col()
+            scope = _Col()
+            price_cents = _Col()
+
+        import web_api.routes.subscriptions as subs
+
+        monkeypatch.setattr(subs, "SubscriptionTier", _FakeTier)
+
+    @pytest.fixture()
     def client(self):
         import web_api
 
@@ -283,11 +319,17 @@ class TestApp:
         r = await getattr(client, method)(path, json={})
         assert r.status_code == 401, f"{method} {path} -> {r.status_code}"
 
-    async def test_public_reads_do_not_require_session(self, client):
-        # These must not 401 (they may 200/404/502 depending on data/redis).
+    async def test_public_reads_do_not_require_session(self, client, _sql_columns):
+        # These must not 401, and must not 5xx. The 5xx half matters: with
+        # every dependency stubbed there is no legitimate reason for a public
+        # read to fail here, and /subscriptions/tiers was in fact returning
+        # 500 — `SubscriptionTier.price_cents > 0` raises TypeError against
+        # the MagicMock stub, inside the `asyncio.to_thread` worker where
+        # nothing surfaces it — while the old "!= 401" assertion passed.
         for path in ["/api/v1/subscriptions/tiers", "/api/v1/events", "/api/v1/announcements"]:
             r = await client.get(path)
             assert r.status_code != 401, f"{path} unexpectedly gated"
+            assert r.status_code < 500, f"{path} -> {r.status_code}"
 
     async def test_bot_invite_is_public(self, client, monkeypatch):
         monkeypatch.setenv("DISCORD_BOT_CLIENT_ID", "424242")
