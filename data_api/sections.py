@@ -48,6 +48,25 @@ class Section(NamedTuple):
     description: str
 
 
+def _iso(value):
+    """A timestamp column as ISO-8601, or None.
+
+    Not every DATETIME arrives as a ``datetime``. MySQL's zero-date,
+    ``'0000-00-00 00:00:00'``, is not a representable moment, so the driver
+    hands back the raw string — 2,459 ``player_state`` rows carry exactly that.
+    A bare ``.isoformat()`` therefore raises on real data. Treat the zero-date
+    as what it means, "no timestamp", and pass any other string through rather
+    than guessing at its format.
+    """
+    if value is None:
+        return None
+    isoformat = getattr(value, "isoformat", None)
+    if isoformat is not None:
+        return isoformat()
+    text_value = str(value)
+    return None if text_value.startswith("0000-00-00") else text_value
+
+
 def _rows_by_player(rows) -> Dict[int, list]:
     grouped = defaultdict(list)
     for row in rows:
@@ -81,8 +100,8 @@ def _load_identity(session, player_ids: List[int], ctx) -> Dict[int, dict]:
             "combat_level": r[8],
             "total_level": r[2],
             "ehb": float(r[3]) if r[3] is not None else None,
-            "first_seen": r[5].isoformat() if r[5] else None,
-            "last_synced": r[9].isoformat() if r[9] else None,
+            "first_seen": _iso(r[5]),
+            "last_synced": _iso(r[9]),
         }
     return out
 
@@ -100,7 +119,7 @@ def _load_stats(session, player_ids: List[int], ctx) -> Dict[int, dict]:
         out[int(r[0])] = {
             "skills": skills,
             "total_experience": sum(skills.values()),
-            "last_updated": r[len(SKILLS) + 1].isoformat() if r[len(SKILLS) + 1] else None,
+            "last_updated": _iso(r[len(SKILLS) + 1]),
         }
     return out
 
@@ -147,7 +166,7 @@ def _load_combat_achievements(session, player_ids: List[int], ctx) -> Dict[int, 
         FROM player_ca_varps WHERE player_id IN :ids
     """).bindparams(ids=tuple(player_ids)))
     return {int(r[0]): {"tasks_completed": r[1], "points": r[2],
-                        "updated_at": r[3].isoformat() if r[3] else None}
+                        "updated_at": _iso(r[3])}
             for r in rows}
 
 
@@ -225,7 +244,7 @@ def _load_badges(session, player_ids: List[int], ctx) -> Dict[int, dict]:
         entry = out.setdefault(int(player_id), {"badges": []})
         entry["badges"].append({
             "key": key, "name": name, "group_id": group_id,
-            "awarded_at": awarded_at.isoformat() if awarded_at else None,
+            "awarded_at": _iso(awarded_at),
         })
     return out
 
@@ -242,7 +261,7 @@ def _load_pets(session, player_ids: List[int], ctx) -> Dict[int, dict]:
         entry["pets"].append({
             "item_id": int(item_id) if item_id is not None else None,
             "name": pet_name,
-            "received": date_added.isoformat() if date_added else None,
+            "received": _iso(date_added),
         })
     return out
 
@@ -252,7 +271,7 @@ def _load_deaths(session, player_ids: List[int], ctx) -> Dict[int, dict]:
         SELECT player_id, COUNT(*), MAX(date_added) FROM player_deaths
         WHERE player_id IN :ids GROUP BY player_id
     """).bindparams(ids=tuple(player_ids)))
-    return {int(pid): {"count": int(count), "last": last.isoformat() if last else None}
+    return {int(pid): {"count": int(count), "last": _iso(last)}
             for pid, count, last in rows}
 
 

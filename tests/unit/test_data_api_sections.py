@@ -84,6 +84,28 @@ class TestCostModel:
         assert sect.cost_of(sect.ALL_SECTION_KEYS, 100) > 300
 
 
+class TestTimestampCoercion:
+    """MySQL zero-dates arrive as strings, not datetimes."""
+
+    def test_datetime_becomes_iso(self):
+        from datetime import datetime
+
+        assert sect._iso(datetime(2026, 8, 27, 12, 30)) == "2026-08-27T12:30:00"
+
+    def test_none_stays_none(self):
+        assert sect._iso(None) is None
+
+    def test_zero_date_is_no_timestamp_not_a_crash(self):
+        # '0000-00-00 00:00:00' is not a representable moment, so the driver
+        # returns the raw string; 2,459 player_state rows carry it. Calling
+        # .isoformat() on that raised and took the whole section down.
+        assert sect._iso("0000-00-00 00:00:00") is None
+        assert sect._iso("0000-00-00") is None
+
+    def test_other_strings_pass_through(self):
+        assert sect._iso("2026-08-27 12:30:00") == "2026-08-27 12:30:00"
+
+
 class TestRegistryIntegrity:
     def test_every_section_has_a_loader_and_a_description(self):
         for key in sect.ALL_SECTION_KEYS:
