@@ -13,6 +13,18 @@ import asyncio
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _allow_external_apis(monkeypatch):
+    """Opt this module back into third-party calls.
+
+    tests/conftest.py sets STATE=dev for the whole suite, and a dev instance
+    declines wiki lookups outright (utils/external_calls.py) — so without this
+    the helper would short-circuit to its fail-open True and these tests would
+    assert nothing about the verification logic they exist to cover.
+    """
+    monkeypatch.setenv("DEV_ALLOW_EXTERNAL_APIS", "true")
+
+
 class _FakeClient:
     def __init__(self, result=None, delay=0.0, exc=None):
         self._result = result

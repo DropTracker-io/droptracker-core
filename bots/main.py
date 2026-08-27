@@ -204,6 +204,10 @@ if os.getenv("STATUS") == "dev" or os.getenv("STATE") == "dev":
     from utils.dev_guild_guard import install as install_dev_guild_guard, describe as describe_dev_guild_guard
     install_dev_guild_guard(bot)
     print(describe_dev_guild_guard())
+    # Third-party API policy is the other half of confining a dev instance, and
+    # the one nobody notices is wrong until a maintainer emails us.
+    from utils.external_calls import describe as describe_external_calls
+    print(describe_external_calls())
 else:
     bot_token = os.getenv('BOT_TOKEN')
     use_profile("core")

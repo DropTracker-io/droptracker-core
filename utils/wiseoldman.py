@@ -48,6 +48,26 @@ return tostring(next_slot)
 """
 
 
+#: Last time we said why WOM calls are being declined, and how many we swallowed
+#: since. The player-updates loop asks continuously, so an unthrottled log line
+#: here would be the loudest thing in the journal on a dev box.
+_blocked_wom_log = {"ts": 0.0, "count": 0}
+_BLOCKED_WOM_LOG_INTERVAL = 300.0
+
+
+def _log_blocked_wom(reason: str) -> None:
+    _blocked_wom_log["count"] += 1
+    now = time.time()
+    if now - _blocked_wom_log["ts"] < _BLOCKED_WOM_LOG_INTERVAL:
+        return
+    logger.info(
+        "WOM calls declined (%s); %d skipped since the last note",
+        reason, _blocked_wom_log["count"],
+    )
+    _blocked_wom_log["ts"] = now
+    _blocked_wom_log["count"] = 0
+
+
 class _SharedRateLimiter:
     """Distributed leaky-bucket limiter backed by Redis.
 
@@ -65,7 +85,28 @@ class _SharedRateLimiter:
 
         Returns False (without sleeping or consuming budget) when the backlog
         already exceeds max_wait -- the caller should skip the WOM call.
+
+        Also returns False when this instance is not permitted to talk to WOM at
+        all. Every one of this method's callers already treats False as "skip
+        the call" and has a fallback for it, which is why the policy lives here
+        rather than at 17 call sites where a new one could forget it.
         """
+        # Checked BEFORE the Redis reservation below, which deliberately fails
+        # OPEN ("proceeding unthrottled") on a Redis error. On a dev box that
+        # would mean an unthrottled dev instance calling WOM -- precisely the
+        # outcome this is here to prevent.
+        from utils.external_calls import external_apis_allowed
+        from utils.mirror_context import is_mirrored_submission
+
+        if not external_apis_allowed():
+            _log_blocked_wom("dev instance and DEV_ALLOW_EXTERNAL_APIS is not set")
+            return False
+        if is_mirrored_submission():
+            # Holds even when a dev box has opted in: mirrored traffic arrives
+            # at production rates, which is the volume problem itself.
+            _log_blocked_wom("mirrored production traffic does not spend WOM quota")
+            return False
+
         now = time.time()
         try:
             reserved = float(
