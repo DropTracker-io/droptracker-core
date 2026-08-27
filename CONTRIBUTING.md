@@ -32,6 +32,14 @@ pytest tests/integration -q   # needs live MySQL + Redis
 
 `tests/conftest.py` stubs the environment and heavy modules, so unit tests run without any services or secrets. Please add unit coverage for new logic in `data/submissions/`, `services/`, or `web_api/routes/` — those areas already have test patterns you can copy.
 
+**`tests/unit` has to pass on a clean checkout**, because that is all CI gets: no `.env`, no gitignored asset trees (`static/assets/img`, `alembic/versions`, `lootboard/themes`), and no sibling `web` repo. It is easy to write a test that passes only on a machine that has been developed on for a year, and the failure lands on whoever pushes next rather than on you. If a check needs something a fresh clone lacks, use `tests/local_artifacts.py`: split off the part that is answerable anywhere and let only the remainder skip. Never pin a path to one machine — `web_repo_root()` finds the web repo beside this one (or `DROPTRACKER_WEB_ROOT`).
+
+To check before pushing, run the suite the way CI will — against a clean clone rather than your working tree:
+
+```bash
+git clone --branch new-api . /tmp/ci-check && (cd /tmp/ci-check && pytest tests/unit -q -rs)
+```
+
 ## Database changes
 
 1. Add/modify the model in `db/models/` (and export it from `db/models/__init__.py`).

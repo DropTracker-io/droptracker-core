@@ -6,16 +6,16 @@ web repo isn't checked out beside this one, the parity check is skipped.
 """
 
 import json
-import os
 import re
 
 import pytest
 
+from tests.local_artifacts import ts_registry
 from web_api import config_registry as reg
 
 
-# Sibling web repo location (see workspace layout).
-_TS_REGISTRY = "/store/droptracker/web/packages/api-types/src/group-config.ts"
+#: The shared registry in the sibling web repo; None when it is not beside us.
+_TS_REGISTRY = ts_registry("group-config.ts")
 
 
 class TestRegistry:
@@ -140,7 +140,7 @@ class TestRegistry:
             reg.coerce_to_storage("unknown_key", 1)
 
     @pytest.mark.skipif(
-        not os.path.exists(_TS_REGISTRY), reason="web repo not present for parity check"
+        _TS_REGISTRY is None, reason="web repo not checked out beside this one"
     )
     def test_parity_with_ts_registry(self):
         with open(_TS_REGISTRY, "r", encoding="utf-8") as f:
@@ -171,7 +171,7 @@ class TestRegistry:
         assert got == expected, f"missing={expected - got} extra={got - expected}"
 
     @pytest.mark.skipif(
-        not os.path.exists(_TS_REGISTRY), reason="web repo not present for parity check"
+        _TS_REGISTRY is None, reason="web repo not checked out beside this one"
     )
     def test_metadata_parity_with_ts_registry(self):
         # label / category / help are copied VERBATIM from the TS registry —

@@ -1,14 +1,15 @@
 """Entitlements registry parity tests (Task 15)."""
 
-import os
 import re
 
 import pytest
 
+from tests.local_artifacts import ts_registry
 from web_api import entitlements_registry as reg
 
 
-_TS_REGISTRY = "/store/droptracker/web/packages/api-types/src/entitlements.ts"
+#: The shared registry in the sibling web repo; None when it is not beside us.
+_TS_REGISTRY = ts_registry("entitlements.ts")
 
 
 class TestEntitlementsRegistry:
@@ -52,7 +53,7 @@ class TestEntitlementsRegistry:
         assert "personal_best_embed_boss_list" in reg.HALL_OF_FAME_CONFIG_KEYS
         assert "hof_individual_boss_messages" in reg.HALL_OF_FAME_CONFIG_KEYS
 
-    @pytest.mark.skipif(not os.path.exists(_TS_REGISTRY), reason="web repo not present")
+    @pytest.mark.skipif(_TS_REGISTRY is None, reason="web repo not checked out beside this one")
     def test_parity_with_ts_registry(self):
         with open(_TS_REGISTRY, "r", encoding="utf-8") as f:
             src = f.read()

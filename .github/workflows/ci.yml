@@ -25,5 +25,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
 
+      # -rs lists why anything skipped. A check that needs something a clean
+      # checkout lacks turns itself off rather than failing, so without this the
+      # log cannot tell "5200 passed" from "5200 passed and the parity checks
+      # have not run since March".
       - name: Run unit tests
-        run: python -m pytest tests/unit/ -q --tb=short
+        run: python -m pytest tests/unit/ -q --tb=short -rs

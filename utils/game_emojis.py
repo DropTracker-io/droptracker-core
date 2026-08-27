@@ -350,8 +350,23 @@ def art_path_for(entry: dict) -> Path:
     return directory / f"{entry['id']}.png"
 
 
-def validate_manifest() -> list:
-    """Reasons the manifest could not be seeded as written (empty when fine)."""
+def art_is_available() -> bool:
+    """Whether this checkout carries the icon art at all.
+
+    ``static/assets/img`` is gitignored, so a fresh clone has none of it and
+    every entry looks unseedable. That says nothing about the manifest.
+    """
+    return ITEM_ART_DIR.is_dir() or NPC_ART_DIR.is_dir()
+
+
+def validate_manifest(check_art: bool = True) -> list:
+    """Reasons the manifest could not be seeded as written (empty when fine).
+
+    ``check_art=False`` asks only whether the manifest is sound in itself —
+    valid names, nothing claimed twice — which is answerable from the file
+    alone. The art lives outside the repository, so whether it is on disk is a
+    fact about the machine and not about the manifest.
+    """
     problems, seen_names, seen_keys = [], {}, {}
     for entry in manifest_entries():
         label = f"{entry.get('kind')} {entry.get('name')!r}"
@@ -365,6 +380,6 @@ def validate_manifest() -> list:
         if key in seen_keys:
             problems.append(f"{label}: key {key[1]!r} is also claimed by {seen_keys[key]!r}")
         seen_keys[key] = entry.get("name")
-        if not art_path_for(entry).exists():
+        if check_art and not art_path_for(entry).exists():
             problems.append(f"{label}: no art at {art_path_for(entry)}")
     return problems

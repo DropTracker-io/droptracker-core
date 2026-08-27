@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.local_artifacts import skip_without
 from utils import game_emojis
 from utils.game_emojis import (
     ITEM_PREFIX,
@@ -119,10 +120,12 @@ class TestEmojiNames:
 
 
 class TestManifest:
-    def test_manifest_is_uploadable_as_written(self):
+    def test_manifest_is_internally_consistent(self):
         _manifest()
-        # Valid names, no name or key claimed twice, art on disk for every one.
-        assert validate_manifest() == []
+        # Valid names, and no name or key claimed twice. Whether the art is on
+        # disk is a fact about the machine, not the manifest — TestArtIsPresent
+        # covers that, on the machines that can answer it.
+        assert validate_manifest(check_art=False) == []
 
     def test_manifest_fits_inside_the_application_ceiling(self):
         manifest = _manifest()
@@ -284,6 +287,11 @@ class TestSeedersDoNotDeleteEachOther:
 class TestArtIsPresent:
     def test_every_entry_has_art_on_disk(self):
         _manifest()
+        skip_without(
+            game_emojis.art_is_available(),
+            "the item and NPC art under static/assets/img",
+            "Populate it with scripts/rank_game_emojis.py --write.",
+        )
         missing = [e["name"] for e in manifest_entries()
                    if not game_emojis.art_path_for(e).exists()]
         assert not missing, (
