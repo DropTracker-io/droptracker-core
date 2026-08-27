@@ -16,6 +16,7 @@ from api.routes.group_create import require_service_key
 from api.routes.helpers import assemble_submission_data
 from lootboard import generator
 from services.redis_updates import get_player_list_loot_sum
+from utils.discord_urls import public_discord_url
 from utils.format import format_number
 from db import Player, Group, GroupConfiguration, NotifiedSubmission, NpcList, get_current_partition
 from db.ops import sync_group_from_wom_with_stats
@@ -254,7 +255,7 @@ async def group_search():
             "group_description": group.description,
             "group_image_url": group.icon_url,
             "group_image_path": icon_relative_path(group.group_id, group.icon_url),
-            "public_discord_link": group.invite_url if group.invite_url else None,
+            "public_discord_link": public_discord_url(group.invite_url),
             "discord_invite_code": discord_invite_code(group.invite_url),
             "group_droptracker_id": group.group_id,
             "group_members": player_count,

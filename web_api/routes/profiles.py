@@ -28,6 +28,7 @@ from db import (
 )
 from db.models import PlayerState
 from utils.account_types import account_type_from_varbit
+from utils.discord_urls import public_discord_url
 from web_api.common import (
     cache_get,
     cache_set,
@@ -1053,8 +1054,9 @@ async def group_profile(group_id: int):
                 payload["description"] = group.description
             if group.icon_url:
                 payload["icon_url"] = group.icon_url
-            if group.invite_url:
-                payload["discord_url"] = group.invite_url
+            discord_url = public_discord_url(group.invite_url)
+            if discord_url:
+                payload["discord_url"] = discord_url
             if rank is not None:
                 payload["global_rank"] = rank
             if top_player is not None:
