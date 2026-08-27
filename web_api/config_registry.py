@@ -540,7 +540,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "label": "Monthly loot voice channel",
         "category": "integration",
         "type": "channel",
-        "help": "Voice channel renamed every 10 minutes to show the group's monthly loot total. Voice channels aren't listed in the picker — use manual ID entry.",
+        "help": "Voice channel renamed every 10 minutes to show the group's monthly loot total. Nobody needs to be able to talk in it — the name is the display. Give the bot Manage Channel on it.",
         "default": None,
     },
     {
@@ -556,7 +556,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "label": "Member count voice channel",
         "category": "integration",
         "type": "channel",
-        "help": "Voice channel renamed every 10 minutes to show the group's tracked member count. Voice channels aren't listed in the picker — use manual ID entry.",
+        "help": "Voice channel renamed every 10 minutes to show the group's tracked member count. Nobody needs to be able to talk in it — the name is the display. Give the bot Manage Channel on it.",
         "default": None,
     },
     {

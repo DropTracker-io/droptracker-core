@@ -1,5 +1,5 @@
 """services/channel_cache.shape_channel_cache — the guild channel cache payload
-that backs the website's channel pickers (text channels, forums, forum threads).
+that backs the website's channel pickers (text, forum, thread, category, voice).
 
 Loaded via importlib (`services/` is not a package — same pattern as
 test_event_notifications.py)."""
@@ -36,6 +36,14 @@ class GuildCategory(SimpleNamespace):
     pass
 
 
+class GuildStageVoice(SimpleNamespace):
+    pass
+
+
+class GuildNews(SimpleNamespace):
+    pass
+
+
 def _channel(cls, id, name, position):
     return cls(id=id, name=name, position=position)
 
@@ -60,8 +68,24 @@ def test_text_and_forum_channels_typed_and_position_sorted():
     ]
 
 
-def test_non_messageable_channel_kinds_are_excluded():
-    out = shape_channel_cache([_channel(GuildVoice, 9, "voice", 0)], [])
+def test_voice_channels_are_typed_for_the_stat_display_pickers():
+    # Voice channels are not messageable, but the `vc_to_display_*` settings
+    # RENAME one every 10 minutes rather than post in it, so they have to be
+    # offered. They used to be dropped here, which is why those two settings
+    # could only be configured by pasting a raw channel id.
+    out = shape_channel_cache([_channel(GuildVoice, 9, "General", 0)], [])
+    assert out == [{"id": "9", "name": "General", "position": 0, "type": "voice"}]
+
+
+def test_stage_channels_count_as_voice():
+    out = shape_channel_cache([_channel(GuildStageVoice, 10, "Stage", 0)], [])
+    assert [c["type"] for c in out] == ["voice"]
+
+
+def test_channel_kinds_the_cache_has_no_use_for_are_still_excluded():
+    # Announcement channels and DMs have no picker behind them; leaving the
+    # fallthrough in place keeps the payload to kinds a picker actually offers.
+    out = shape_channel_cache([_channel(GuildNews, 11, "announcements", 0)], [])
     assert out == []
 
 

@@ -36,7 +36,13 @@ class ChannelNames(Extension):
                             channel = await bot.fetch_channel(channel_id=channel_setting.config_value)
                             if channel:
                                 #print("Channel is not None")
-                                if channel.type == ChannelType.GUILD_VOICE:
+                                # Stage channels count too: they rename and sit
+                                # in the sidebar exactly like a voice channel,
+                                # and the website's picker offers both. Gating
+                                # on GUILD_VOICE alone meant a stage channel
+                                # was selectable and then silently never
+                                # updated.
+                                if channel.type in (ChannelType.GUILD_VOICE, ChannelType.GUILD_STAGE_VOICE):
                                     #print("Channel is a voice channel")
                                     template = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_monthly_loot_text',
                                                                                         GroupConfiguration.group_id == channel_setting.group_id).first()
