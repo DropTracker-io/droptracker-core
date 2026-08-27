@@ -82,10 +82,11 @@ class TestCostModel:
         # The sizing case the budgets were set from: a clan pulling everything
         # about a 400-member roster. The page cap makes that 4 requests, and
         # the whole sweep has to fit inside one minute on 'standard'
-        # (150,000 cost units) or the entry tier cannot do the job it exists
-        # for. See alembic dapi2_recalibrate_tiers.
+        # (200,000 cost units) with room to spare — a budget that only just
+        # clears its target case 429s on the first retry, which is exactly what
+        # happened when it was sized at 150,000. See dapi2_recalibrate_tiers.
         sweep = sect.cost_of(sect.ALL_SECTION_KEYS, 100) * 4
-        assert sweep <= 150_000, sweep
+        assert sweep <= 200_000 * 0.75, sweep
 
     def test_the_two_heavy_sections_dominate_the_price(self):
         # Measured: clog_slots and loot_items are ~475x and ~357x the cheapest
