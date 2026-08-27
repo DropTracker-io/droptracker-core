@@ -19,8 +19,14 @@ Separate from the shared ``db.models.base`` engine on purpose:
 """
 import os
 
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+# Production runs `hypercorn "data_api:create_app()"` — nothing on that path
+# reads .env, so do it where the credentials are consumed (the
+# db/models/base.py convention).
+load_dotenv()
 
 STATEMENT_TIMEOUT_SECONDS = 10
 
