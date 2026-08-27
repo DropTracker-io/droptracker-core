@@ -61,6 +61,17 @@ def _verify_high_value_drop_sync(item_name, npc_name, timeout: float = 20.0) -> 
     entire check. check_drop revalidates any cache-derived rejection live, so
     the cache cannot false-reject.
     """
+    from utils.mirror_context import is_mirrored_submission
+
+    # Mirrored production traffic skips the wiki entirely. Dev's redis cache is
+    # cold, so mirroring at production rates would put a second full stream of
+    # api.php queries behind a second User-Agent — and the wiki blocklisted our
+    # last one for exactly that volume, which silently fail-opened this check
+    # for everyone. Fail-open is already this function's answer for "could not
+    # check", so a mirrored high-value drop is simply unverified.
+    if is_mirrored_submission():
+        return True
+
     from .common import osrs_api
 
     async def _check() -> bool:

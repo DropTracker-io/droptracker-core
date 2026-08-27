@@ -146,6 +146,14 @@ def queue_submission(kind: str, player_id, guid, data: dict,
     """
     if world_type != "main":
         return
+    from utils.mirror_context import skip_mirrored_extras
+
+    # Mirrored production traffic: dev's database is a production dump, so this
+    # would apply progress to real clans' live events (in dev's copy of them) at
+    # production rates. Contained, but it buries whatever is being tested.
+    # MIRROR_PROCESS_EXTRAS=true opts in when soaking the event engine is the point.
+    if skip_mirrored_extras():
+        return
     try:
         from utils.redis import redis_client
         conn = getattr(redis_client, "client", None)

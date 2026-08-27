@@ -33,6 +33,34 @@ MAIN_WORLD_TYPE = "main"
 _QUEUE_MODE = os.getenv("WEBHOOK_QUEUE_MODE", "").lower() in ("true", "1", "yes")
 _WEBHOOK_TEMP_DIR = os.getenv("WEBHOOK_TEMP_DIR", "/tmp/webhook_uploads")
 
+# Past this depth a dev instance drops mirrored submissions instead of queueing
+# them. The queue is an unbounded Redis list with no backpressure of its own, and
+# mirrored traffic arrives at production rates -- without a ceiling it would bury
+# whatever the operator is actually trying to test.
+_MIRROR_SHED_DEPTH = int(os.getenv("MIRROR_SHED_DEPTH", "2000") or 2000)
+
+
+def _is_mirrored_request() -> bool:
+    """Whether this is a mirrored copy of production traffic.
+
+    Set by the Cloudflare Worker (edge/intake-capture) when the admin panel has
+    mirroring switched on.
+    """
+    return request.headers.get("X-DT-Mirror") == "1"
+
+
+def _accepts_mirrored() -> bool:
+    """Only a dev instance may accept mirrored traffic.
+
+    This is the dev-side accept gate, and it is deliberately `STATE=dev` rather
+    than a switch of its own: one fewer thing to set, and it cannot be left on
+    by accident on a box that is not dev. It is also what stops a mistyped
+    MIRROR_HOST from feeding production its own submissions back.
+    """
+    from utils.dev_guild_guard import is_dev_mode
+
+    return is_dev_mode()
+
 
 # Per-submission ingestion diagnostics are very high volume (several lines per
 # drop); keep them off unless explicitly debugging with DROP_REQUEST_DEBUG=true.
@@ -243,8 +271,14 @@ async def _queue_webhook_request():
         files = await request.files
         image_file = files.get("file") if files else None
 
+        mirrored = _is_mirrored_request()
+
         image_tmp_path = image_filename = image_content_type = None
-        if image_file:
+        # Mirrored submissions keep no screenshot. utils/download.py bakes the
+        # production URL into image_url, so a copy stored on dev would render as
+        # a broken link anyway -- all it would buy is dev's disk filling at
+        # production rates.
+        if image_file and not mirrored:
             image_tmp_path, image_filename, image_content_type = await _save_upload_to_temp(image_file)
             if image_tmp_path is None:
                 # The stash failed (almost always a full disk) but the payload
@@ -265,6 +299,8 @@ async def _queue_webhook_request():
             "image_content_type": image_content_type,
             "enqueued_at": datetime.utcnow().isoformat(),
         }
+        if mirrored:
+            entry["mirrored"] = True
 
         # A 200 from here means "we have durably taken responsibility for this
         # submission", and the plugin stops retrying on the strength of it. So
@@ -273,6 +309,15 @@ async def _queue_webhook_request():
         # keeps its copy and retries. (2026-08-18: this path silently swallowed
         # the Redis error and answered 200 ~40,800 times.)
         rc = RedisClient()
+        if mirrored:
+            # Shed rather than buffer. The production copy of this submission is
+            # already durably handled, so a dropped mirror costs nothing, while a
+            # mirror-driven backlog would delay everything behind it.
+            try:
+                if rc.client.llen("webhook:queue") > _MIRROR_SHED_DEPTH:
+                    return jsonify({"message": "Shed"}), 200
+            except Exception:
+                pass  # If we cannot measure the queue, take the submission.
         try:
             rc.rpush("webhook:queue", json.dumps(entry))
         except Exception as redis_error:
@@ -313,6 +358,10 @@ async def submit_data():
 @webhook_bp.post("/webhook")
 @rate_limit(limit=100, period=timedelta(seconds=1))
 async def webhook_data():
+    if _is_mirrored_request() and not _accepts_mirrored():
+        # 200, not 4xx: the Worker fires the mirror and never reads the result,
+        # so there is nobody to tell. What matters is that we do not process it.
+        return jsonify({"message": "Ignored"}), 200
     if _QUEUE_MODE:
         return await _queue_webhook_request()
     import time

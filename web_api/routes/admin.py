@@ -366,6 +366,75 @@ async def admin_set_seasonal():
     return jsonify({"ok": True, "active": active})
 
 
+@admin_bp.get("/admin/edge-mirror")
+async def admin_get_edge_mirror():
+    """Current state of the edge Worker's dev-mirror switch."""
+    await _require_superadmin()
+    from services.edge_config import mirror_state
+
+    try:
+        state = await asyncio.to_thread(mirror_state)
+    except Exception:
+        # Deliberately not a confident "off": an admin looking at this needs to
+        # know the difference between "nobody turned it on" and "we cannot tell".
+        abort_problem(502, "Unavailable", "Could not read the mirror switch.")
+    return private_no_store(jsonify(state))
+
+
+@admin_bp.post("/admin/edge-mirror")
+async def admin_set_edge_mirror():
+    """Mirror production submissions at the dev instance, or stop.
+
+    The Cloudflare Worker in edge/intake-capture polls GET /edge-config on the
+    intake API and starts sending a second, fire-and-forget copy of every
+    submission to the dev box. Production is untouched either way — the mirror
+    runs in waitUntil and its result is never read.
+
+    Always time-boxed unless someone deliberately asks otherwise: this is a
+    debugging mode, and one left on over a weekend is how the dev box fills its
+    disk. The TTL is the whole mechanism — the Redis key lapsing IS the switch
+    turning itself off, so there is no separate flag to get out of sync.
+    """
+    actor = await _require_superadmin()
+    body = await json_body()
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        abort_problem(422, "Invalid value", "enabled must be a boolean.")
+
+    from services.edge_config import TTL_CHOICES, mirror_state, set_mirror
+
+    ttl_seconds = body.get("ttl_seconds")
+    # `isinstance(True, int)` is True in Python, so exclude bool explicitly
+    # rather than relying on the membership test to catch it.
+    if ttl_seconds is not None and (
+        isinstance(ttl_seconds, bool) or ttl_seconds not in TTL_CHOICES
+    ):
+        abort_problem(
+            422,
+            "Invalid value",
+            f"ttl_seconds must be null or one of {sorted(TTL_CHOICES)}.",
+        )
+
+    try:
+        await asyncio.to_thread(set_mirror, enabled, 1.0, ttl_seconds)
+    except Exception:
+        abort_problem(502, "Toggle failed", "Could not persist the mirror switch.")
+
+    if not enabled:
+        after = "off"
+    elif ttl_seconds:
+        after = f"on ({int(ttl_seconds) // 3600}h)"
+    else:
+        after = "on (no expiry)"
+    _audit(actor, "edge.mirror.toggle", "global", after=after)
+
+    try:
+        state = await asyncio.to_thread(mirror_state)
+    except Exception:
+        state = {"enabled": enabled, "sample": 1.0, "expires_at": None}
+    return jsonify({"ok": True, **state})
+
+
 # --------------------------------------------------------------------------- #
 # Event types (game formats) — site-wide enable/disable + test-group allowlist.
 # The durable analogue of the seasonal switch: rows in web_event_types gate

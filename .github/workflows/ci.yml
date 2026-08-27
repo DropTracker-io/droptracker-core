@@ -31,3 +31,23 @@ jobs:
       # have not run since March".
       - name: Run unit tests
         run: python -m pytest tests/unit/ -q --tb=short -rs
+
+  # The edge Worker sits in front of POST /webhook and decides whether a
+  # submission is answered 200. Its contract tests encode the 2026-08-18 lesson
+  # -- never 2xx for something we did not durably store -- and until now they
+  # only ran when a human remembered to type `npm test`.
+  edge-worker-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # No install step: the only dependency is wrangler, which is a deploy
+      # tool the tests never import. `node --test` runs them from source.
+      - name: Run Worker contract tests
+        working-directory: edge/intake-capture
+        run: npm test

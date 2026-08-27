@@ -56,12 +56,15 @@ DEAD_CHANNEL_TTL = 6 * 3600
 #: a JSON array (matching TARGET_GUILDS' existing shape) or a bare
 #: comma-separated list, so either spelling in a .env works.
 ALLOWLIST_ENV = "DEV_ALLOWED_GUILDS"
+#: Discord user ids this instance may resolve, and therefore DM. Unlike the
+#: guild allowlist, an unset value here blocks everything — see user_allowed().
+USER_ALLOWLIST_ENV = "DEV_ALLOWED_USERS"
 
 #: Set when Redis is unreachable, so the guard still works (per-process,
 #: re-learned on restart) rather than falling back to hammering Discord.
 _local_dead_channels: dict = {}
 
-_blocked_counts = {"guild": 0, "channel": 0}
+_blocked_counts = {"guild": 0, "channel": 0, "user": 0}
 
 
 def _env_flag(name: str) -> str:
@@ -77,14 +80,14 @@ def is_dev_mode() -> bool:
     return _env_flag("STATE") == "dev" or _env_flag("STATUS") == "dev"
 
 
-def allowed_guild_ids() -> Set[int]:
-    """The guild ids this instance may contact, as ints.
+def _parse_id_env(env_name: str) -> Set[int]:
+    """Snowflake ids from an env var, as a comma/semicolon list or a JSON array.
 
-    Deliberately re-read per call rather than cached at import: the guard is
-    cheap, and a cached value would make the allowlist untestable and
+    Deliberately re-read per call rather than cached at import: the parse is
+    cheap, and a cached value would make the allowlists untestable and
     un-tweakable without a restart.
     """
-    raw = (os.getenv(ALLOWLIST_ENV) or "").strip()
+    raw = (os.getenv(env_name) or "").strip()
     if not raw:
         return set()
 
@@ -108,6 +111,37 @@ def allowed_guild_ids() -> Set[int]:
         except (TypeError, ValueError):
             continue
     return ids
+
+
+def allowed_guild_ids() -> Set[int]:
+    """The guild ids this instance may contact, as ints."""
+    return _parse_id_env(ALLOWLIST_ENV)
+
+
+def allowed_user_ids() -> Set[int]:
+    """The Discord user ids this instance may resolve, and therefore DM."""
+    return _parse_id_env(USER_ALLOWLIST_ENV)
+
+
+def user_allowed(user_id) -> bool:
+    """Whether this instance may resolve `user_id`.
+
+    Note the polarity is the opposite of :func:`guild_allowed`, and
+    deliberately so. A guild id we cannot attribute is let through, because the
+    guard's job there is to block ids it can positively place elsewhere. A
+    *user* id we cannot place is refused, because the failure mode is a real
+    person receiving a DM from the dev bot about someone else's drop — and
+    unlike a channel post, there is no permission error to stop it. The dev core
+    bot has been observed sharing a production relay guild with real users, so
+    "it will 403 anyway" is not a safety property we have.
+    """
+    allowed = allowed_user_ids()
+    if not allowed:
+        return False
+    try:
+        return int(user_id) in allowed
+    except (TypeError, ValueError):
+        return False
 
 
 def is_active() -> bool:
@@ -222,6 +256,7 @@ def install(bot) -> bool:
 
     original_fetch_guild = bot.fetch_guild
     original_fetch_channel = bot.fetch_channel
+    original_fetch_user = getattr(bot, "fetch_user", None)
 
     async def guarded_fetch_guild(guild_id, *args, **kwargs):
         if not guild_allowed(guild_id):
@@ -260,8 +295,19 @@ def install(bot) -> bool:
 
         return channel
 
+    async def guarded_fetch_user(user_id, *args, **kwargs):
+        if not user_allowed(user_id):
+            _blocked_counts["user"] += 1
+            # None is fetch_user's own "no such user" answer, so callers already
+            # handle it. Every DM path in the codebase resolves its recipient
+            # through here first, which is what makes this the choke point.
+            return None
+        return await original_fetch_user(user_id, *args, **kwargs)
+
     bot.fetch_guild = guarded_fetch_guild
     bot.fetch_channel = guarded_fetch_channel
+    if original_fetch_user is not None:
+        bot.fetch_user = guarded_fetch_user
     bot._dev_guild_guard_installed = True
     return True
 
@@ -274,5 +320,10 @@ def describe() -> str:
     if not ids:
         return (f"dev guild guard: INACTIVE — dev mode but {ALLOWLIST_ENV} is unset, "
                 f"so Discord calls are unconfined")
+    users = allowed_user_ids()
+    dm_note = (
+        f"DMs limited to {sorted(users)}" if users
+        else f"DMs BLOCKED ({USER_ALLOWLIST_ENV} is unset)"
+    )
     return (f"dev guild guard: active, confined to {sorted(ids)} "
-            f"(channels re-probed every {DEAD_CHANNEL_TTL // 3600}h)")
+            f"(channels re-probed every {DEAD_CHANNEL_TTL // 3600}h); {dm_note}")

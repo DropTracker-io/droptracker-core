@@ -32,9 +32,11 @@ const SPOOL_ON_STATUS = (status) =>
   status >= 500 ||       // 502/503/504 from nginx, 500 from the acceptor
   status === 413;        // body over nginx's cap; replays cleanly once raised
 
-// The plugin treats these as terminal and will not retry, so capturing them
-// would only produce objects that re-reject forever on replay.
-const TERMINAL_STATUS = new Set([400, 401, 403]);
+// How long a fetched mirror config is trusted, and how long we keep trusting
+// the last good one when /edge-config stops answering. Past the stale bound we
+// stop mirroring: a toggle nobody can turn off is worse than one that lapses.
+const CFG_TTL_MS = 30_000;
+const CFG_MAX_STALE_MS = 600_000;
 
 export default {
   async fetch(request, env, ctx) {
@@ -78,6 +80,12 @@ export default {
 
 async function handle(request, body, env, ctx) {
   const started = Date.now();
+
+  // Fire-and-forget copy to the dev instance, started before the awaited origin
+  // call so the two overlap. Nothing below may read its result: a mirror that
+  // fails, times out or throws has to be indistinguishable from one that was
+  // never switched on. Rule 2 applies to this as much as to the capture path.
+  if (mirrorOn(env, ctx)) ctx.waitUntil(mirror(request, body, env));
 
   let response = null;
   let status = 0;
@@ -156,6 +164,96 @@ function forward(request, body, env) {
     body,
     signal: AbortSignal.timeout(Number(env.ORIGIN_TIMEOUT_MS ?? 15000)),
   });
+}
+
+/**
+ * Mirror config, memoised per isolate.
+ *
+ * Keyed on `env` rather than held in a module global: `env` is one object for
+ * the life of an isolate, so production behaviour is identical, and each test
+ * gets its own state for free instead of inheriting the previous test's.
+ */
+const _cfgCache = new WeakMap();
+
+function cfgFor(env) {
+  let c = _cfgCache.get(env);
+  if (!c) {
+    c = { enabled: false, sample: 1, exp: 0, ok: 0 };
+    _cfgCache.set(env, c);
+  }
+  return c;
+}
+
+/**
+ * Whether to mirror this request. Never blocks: a cold isolate answers "no" and
+ * kicks the first refresh into waitUntil, so the hot path never waits on
+ * /edge-config and the worst case of an unreachable config is that mirroring
+ * quietly stops.
+ */
+function mirrorOn(env, ctx) {
+  // Deploy-time hard disable. Checked first so an unset MIRROR_HOST costs not
+  // even the config fetch.
+  if (!env.MIRROR_HOST) return false;
+
+  const c = cfgFor(env);
+  const now = Date.now();
+  if (now >= c.exp) ctx.waitUntil(refreshCfg(env, c));
+  if (now - c.ok > CFG_MAX_STALE_MS) return false;
+  return c.enabled && Math.random() < c.sample;
+}
+
+async function refreshCfg(env, c) {
+  // Bump the deadline before awaiting, so concurrent requests on this isolate
+  // queue one refresh between them rather than one each.
+  c.exp = Date.now() + CFG_TTL_MS;
+  try {
+    const r = await fetch(`https://${env.ORIGIN_HOST}/edge-config`, {
+      cf: { cacheTtl: 30, cacheEverything: true },
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!r.ok) return; // keep the last known good until it goes stale
+    const cfg = await r.json();
+    c.enabled = cfg?.mirror?.enabled === true;
+    // A malformed sample coerces to NaN, and `Math.random() < NaN` is false --
+    // garbage in the config turns mirroring off rather than on.
+    c.sample = Number(cfg?.mirror?.sample ?? 1);
+    c.ok = Date.now();
+  } catch {
+    // Keep the last known good. A cold isolate has none, so it stays off.
+  }
+}
+
+/**
+ * Post a second copy at the dev instance. Deliberately does not touch R2, the
+ * ledger, or the response: dev is a soak target, and a submission it drops is
+ * already durably handled by the production leg.
+ */
+function mirror(request, body, env) {
+  const url = new URL(request.url);
+
+  const headers = new Headers(request.headers);
+  headers.delete("host");
+  headers.set("X-DT-Mirror", "1");
+
+  // Same reason as forward(): the dev acceptor rate-limits on
+  // request.access_route[0] with a per-process store, so without the real
+  // client IP every mirrored submission lands in one 100/s bucket and dev
+  // starts 429ing the traffic it was given to test with.
+  const clientIp = request.headers.get("CF-Connecting-IP");
+  if (clientIp) {
+    headers.set("X-Forwarded-For", clientIp);
+    headers.set("X-Real-IP", clientIp);
+  }
+
+  return fetch(`https://${env.MIRROR_HOST}${url.pathname}${url.search}`, {
+    method: request.method,
+    headers,
+    body,
+    signal: AbortSignal.timeout(Number(env.MIRROR_TIMEOUT_MS ?? 5000)),
+  }).then(
+    () => {},
+    () => {},
+  );
 }
 
 async function spool(body, request, env, status, isSample) {

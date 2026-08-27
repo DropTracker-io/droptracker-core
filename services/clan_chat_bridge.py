@@ -335,6 +335,14 @@ def _claim_first_sight(key: str, ttl: int) -> bool:
 
 
 def _stage_entry(group_id, channel_id, kind, message, sender=None, rank=None) -> bool:
+    from utils.mirror_context import is_mirrored_submission
+
+    # Mirrored production traffic never reaches the bridge. Staged entries are
+    # drained by drain_and_send(), which resolves the channel through the bot —
+    # and a cache hit on bot.get_channel() bypasses the dev guild guard entirely,
+    # so a mirrored clan-chat line could be relayed into a real clan's Discord.
+    if is_mirrored_submission():
+        return False
     try:
         entry = {
             "group_id": int(group_id),

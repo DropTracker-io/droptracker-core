@@ -22,6 +22,11 @@ ORIGIN_HOST = "api-origin.droptracker.io"
 ORIGIN_TIMEOUT_MS = "8000"
 # No sampling in staging: every capture here should be one you caused.
 FORCE_SPOOL_SAMPLE = "0"
+# Staging shares the production origin, so it must never also mirror -- one
+# submission reaching dev twice is noise nobody will think to explain. Empty
+# means the Worker does not even fetch /edge-config. Leave it empty.
+MIRROR_HOST = ""
+MIRROR_TIMEOUT_MS = "5000"
 
 [[r2_buckets]]
 binding = "SPOOL"
@@ -65,6 +70,19 @@ ORIGIN_TIMEOUT_MS = "8000"
 # Fraction of *successful* requests also written to R2, to keep the spool and
 # drain paths exercised. GUID dedup makes the replay a no-op. ~370 objects/day.
 FORCE_SPOOL_SAMPLE = "0.001"
+# Where the dev copy goes. Two independent gates gate it, both shut by default:
+# this var must be non-empty, AND redis edge:mirror must say enabled (the admin
+# CP toggle, which self-expires). So deploying this as-is mirrors nothing.
+#
+# It is a deploy-time var rather than part of the polled config on purpose: the
+# CP can turn mirroring on and off, but it can never aim it somewhere new, so
+# a compromised or fat-fingered admin surface cannot redirect submissions.
+# For a first deploy you want provably inert, override it:
+#   npx wrangler deploy --env production --var MIRROR_HOST:''
+MIRROR_HOST = "dev-api.droptracker.io"
+# Well under ORIGIN_TIMEOUT_MS. The mirror is fire-and-forget, so this only
+# bounds how long a stalled dev box can hold an isolate open in waitUntil.
+MIRROR_TIMEOUT_MS = "5000"
 
 [[env.production.r2_buckets]]
 binding = "SPOOL"

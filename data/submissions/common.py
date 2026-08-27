@@ -734,7 +734,19 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
             session.rollback()
         except Exception:
             pass
-        wom_player, resolved_name, wom_player_id, log_slots = await get_wom_user_cached(player_name)
+        from utils.mirror_context import is_mirrored_submission
+
+        # Mirrored production traffic does not get to spend WOM quota — the key
+        # is shared with production, and this would double the call rate for
+        # accounts dev has no reason to learn about. The hash+name hot path
+        # above already covers everyone present in dev's production dump;
+        # anyone else falls through to the name-only refusal below, which
+        # usefully scopes mirrored traffic to accounts dev already knows.
+        wom_player, resolved_name, wom_player_id, log_slots = (
+            (None, None, None, None)
+            if is_mirrored_submission()
+            else await get_wom_user_cached(player_name)
+        )
         if wom_player and wom_player_id not in (None, "", 0):
             expected_wom_id = int(wom_player_id)
             wom_log_slots = log_slots
@@ -1380,11 +1392,38 @@ def suppress_notifications(*notification_types):
         _suppressed_notification_types.reset(token)
 
 
+# Mirrored-production-traffic context. Defined in utils/mirror_context.py (a
+# leaf module) rather than here, because services/ and osrs_api/ need to ask the
+# same question and importing this module from there would risk a cycle.
+# Re-exported so the notification choke point and its callers read as one piece.
+from utils.mirror_context import mirror_sink, sink_group_id  # noqa: E402
+
+
 async def create_notification(notification_type, player_id, data, group_id=None, existing_session=None):
     """Create a notification queue entry."""
 
     if notification_type in _suppressed_notification_types.get():
         return None
+
+    # Mirrored production traffic: the player's real groups are not this
+    # instance's to announce in, and their configuration is not this instance's
+    # to evaluate. Rerouting *here*, ahead of the channel / hidden-player /
+    # blacklist gates below, is the whole point — everything downstream then
+    # reads the sink group's own config, so a mirrored drop is measured against
+    # the sink's minimum_value_to_notify and posted to the sink's channel rather
+    # than failing against some real clan's settings.
+    sink = sink_group_id()
+    if sink is not None:
+        # DMs have no group to reroute *to*, and the recipient is a real person
+        # who did not ask to hear from the dev bot. There is no safe version of
+        # this, so mirrored traffic never DMs. Every DM type is dm_-prefixed.
+        if notification_type.startswith("dm_"):
+            return None
+        # Global (group-less) notifications — new_player, new_npc, name_change.
+        # Nothing to reroute, and the sink does not want them.
+        if group_id in (None, 0):
+            return None
+        group_id = sink
 
     global stored_notifications
     try:

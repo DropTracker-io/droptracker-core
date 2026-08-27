@@ -38,7 +38,25 @@ load_dotenv()
 from utils.sentry import init_sentry
 init_sentry("droptracker-hof")
 
-bot = interactions.Client(token=os.getenv("HALL_OF_FAME_BOT_TOKEN"), intents=Intents.ALL)
+def _hof_token():
+    """The token for this instance, refusing to fall back to production's.
+
+    Unlike bots/main.py this had no dev variant at all, so a dev box with
+    HALL_OF_FAME_BOT_TOKEN populated (it shares production's .env) connected as
+    the *production* HOF bot. Returning None makes an unconfigured dev instance
+    fail to start rather than impersonate prod.
+
+    Note the HOF work was folded into the core bot on 2026-08-20; if this unit
+    is retired on dev, disabling it is the better answer than configuring it.
+    """
+    from utils.dev_guild_guard import is_dev_mode
+
+    if is_dev_mode():
+        return os.getenv("DEV_HALL_OF_FAME_BOT_TOKEN")
+    return os.getenv("HALL_OF_FAME_BOT_TOKEN")
+
+
+bot = interactions.Client(token=_hof_token(), intents=Intents.ALL)
 
 # The global/template group is always active and exempt from the premium gate
 # (mirrors services.hall_of_fame._GLOBAL_GROUP_ID).

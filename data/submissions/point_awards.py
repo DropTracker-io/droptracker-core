@@ -351,6 +351,15 @@ async def check_and_award_points(
         "awarded_members": [],
     }
 
+    from utils.mirror_context import skip_mirrored_extras
+
+    # Mirrored production traffic: the point configs and players here are real
+    # ones from the production dump, so this would write a ledger of awards
+    # nobody earned on this instance. The "no points awarded" shape is already
+    # the contract for every other bail-out, so callers need no special case.
+    if skip_mirrored_extras():
+        return empty_result
+
     try:
         if external_session is None:
             return await _check_and_award_points(

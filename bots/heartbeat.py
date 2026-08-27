@@ -24,7 +24,24 @@ init_sentry("droptracker-heartbeat")
 # Set up more detailed logging
 # logging.basicConfig(level=logging.DEBUG)
 import os
-bot_token = os.getenv("HEARTBEAT_BOT_TOKEN")
+
+
+def _heartbeat_token():
+    """The token for this instance, refusing to fall back to production's.
+
+    Unlike bots/main.py this had no dev variant at all, so a dev box with
+    HEARTBEAT_BOT_TOKEN populated (it shares production's .env) connected as the
+    *production* heartbeat bot. Returning None makes an unconfigured dev
+    instance fail to start rather than impersonate prod.
+    """
+    from utils.dev_guild_guard import is_dev_mode
+
+    if is_dev_mode():
+        return os.getenv("DEV_HEARTBEAT_BOT_TOKEN")
+    return os.getenv("HEARTBEAT_BOT_TOKEN")
+
+
+bot_token = _heartbeat_token()
 bot = interactions.Client(token=bot_token)
 
 # Global variables for systemd watchdog

@@ -17,6 +17,8 @@ const ORIGIN = "api-origin.droptracker.io";
 
 let fetchCalls;
 let originResponder;
+let configResponder;
+let mirrorResponder;
 
 function makeEnv(over = {}) {
   const puts = [];
@@ -34,6 +36,33 @@ function makeEnv(over = {}) {
 }
 
 const ctx = { waitUntil: (p) => { if (p && p.catch) p.catch(() => {}); } };
+
+/**
+ * A ctx that can be drained. The mirror config is refreshed inside waitUntil,
+ * so "the isolate has since learned the config" is only reachable in a test by
+ * awaiting what waitUntil was handed.
+ */
+function makeCtx() {
+  const pending = [];
+  return {
+    waitUntil(p) {
+      if (p && p.then) {
+        pending.push(p);
+        if (p.catch) p.catch(() => {});
+      }
+    },
+    async flush() {
+      while (pending.length) await Promise.allSettled(pending.splice(0));
+    },
+  };
+}
+
+const MIRROR = "dev-api.droptracker.io";
+
+/** Every fetch the Worker made to `host`. */
+function callsTo(host) {
+  return fetchCalls.filter((c) => c.url.startsWith(`https://${host}`));
+}
 
 /** A realistic plugin submission: payload_json first, guid as the 5th field. */
 function multipartBody(guid = "1787272773-4146262546365686368-229304989") {
@@ -71,9 +100,15 @@ function postRequest(url = "https://api.droptracker.io/webhook", guid) {
 beforeEach(() => {
   fetchCalls = [];
   originResponder = async () => new Response(JSON.stringify({ message: "Queued" }), { status: 200 });
+  configResponder = async () =>
+    new Response(JSON.stringify({ version: "t", mirror: { enabled: false, sample: 1 } }), { status: 200 });
+  mirrorResponder = async () => new Response("", { status: 200 });
   globalThis.fetch = async (url, init) => {
-    fetchCalls.push({ url: String(url), init });
-    return originResponder(url, init);
+    const u = String(url);
+    fetchCalls.push({ url: u, init });
+    if (u.includes("/edge-config")) return configResponder(u, init);
+    if (u.startsWith(`https://${MIRROR}`)) return mirrorResponder(u, init);
+    return originResponder(u, init);
   };
 });
 
@@ -253,5 +288,203 @@ describe("the ledger is observability, never a failure mode", () => {
     await worker.fetch(postRequest(), env, ctx);
     assert.equal(env._points.length, 1);
     assert.equal(env._points[0].doubles[0], 200);
+  });
+});
+
+/**
+ * Mirroring production submissions at the dev instance.
+ *
+ * The governing rule is the Worker's rule 2: a mirror that fails, times out,
+ * throws, or was misconfigured must be indistinguishable to the client from one
+ * that was never switched on. Nothing about the capture contract may move.
+ */
+describe("the dev mirror", () => {
+  function mirrorEnv(over = {}) {
+    return makeEnv({ MIRROR_HOST: MIRROR, MIRROR_TIMEOUT_MS: "5000", ...over });
+  }
+
+  function configSays(mirrorCfg) {
+    configResponder = async () =>
+      new Response(JSON.stringify({ version: "t", mirror: mirrorCfg }), { status: 200 });
+  }
+
+  /** One request to teach this isolate the config, then a clean slate. */
+  async function prime(env, c) {
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    fetchCalls = [];
+  }
+
+  const configFetches = () => fetchCalls.filter((c) => c.url.includes("/edge-config"));
+
+  test("an unset MIRROR_HOST mirrors nothing and never even fetches the config", async () => {
+    configSays({ enabled: true, sample: 1 });
+    const env = makeEnv(); // no MIRROR_HOST
+    const c = makeCtx();
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 0);
+    assert.equal(configFetches().length, 0, "an unset host must not cost even the config lookup");
+  });
+
+  test("a cold isolate does not mirror, even when the config says enabled", async () => {
+    configSays({ enabled: true, sample: 1 });
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await worker.fetch(postRequest(), env, c);
+    assert.equal(callsTo(MIRROR).length, 0, "the hot path must never block on /edge-config");
+    assert.equal(configFetches().length, 1, "but it should kick off the refresh");
+  });
+
+  test("once the isolate has the config, submissions are mirrored", async () => {
+    configSays({ enabled: true, sample: 1 });
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+
+    const mirrored = callsTo(MIRROR);
+    assert.equal(mirrored.length, 1);
+    assert.equal(mirrored[0].url, `https://${MIRROR}/webhook`);
+    assert.equal(
+      fetchCalls.filter((f) => f.url === `https://${ORIGIN}/webhook`).length, 1,
+      "the production leg still happens exactly once",
+    );
+  });
+
+  test("config says disabled -> never mirrors", async () => {
+    configSays({ enabled: false, sample: 1 });
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 0);
+  });
+
+  test("sample 0 -> never mirrors, so the throttle works with no redeploy", async () => {
+    configSays({ enabled: true, sample: 0 });
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    for (let i = 0; i < 25; i++) await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 0);
+  });
+
+  test("a malformed sample turns mirroring off rather than on", async () => {
+    configSays({ enabled: true, sample: "banana" });
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    for (let i = 0; i < 10; i++) await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 0, "NaN must fail closed");
+  });
+
+  test("an unreachable /edge-config leaves mirroring off", async () => {
+    configResponder = async () => { throw new Error("origin down"); };
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 0);
+  });
+
+  test("a 500 from /edge-config leaves mirroring off", async () => {
+    configResponder = async () => new Response("boom", { status: 500 });
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 0);
+  });
+
+  test("a mirror that throws does not change what the client sees", async () => {
+    configSays({ enabled: true, sample: 1 });
+    mirrorResponder = async () => { throw new Error("dev box is down"); };
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+
+    const res = await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(res.status, 200);
+    assert.equal(await res.json().then((j) => j.message), "Queued");
+  });
+
+  test("a mirror that 503s does not change the spool decision", async () => {
+    configSays({ enabled: true, sample: 1 });
+    mirrorResponder = async () => new Response("nope", { status: 503 });
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+
+    // Only now, so the priming request does not spool a capture of its own.
+    originResponder = async () => new Response("bad gateway", { status: 502 });
+    const res = await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(res.status, 200, "the origin failure still spools and still answers 200");
+    assert.equal(env._puts.length, 1);
+    assert.equal(callsTo(MIRROR).length, 1);
+  });
+
+  test("mirroring a success still writes nothing to R2", async () => {
+    configSays({ enabled: true, sample: 1 });
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(env._puts.length, 0, "the mirror is not a capture path");
+  });
+
+  test("a non-POST is never mirrored", async () => {
+    configSays({ enabled: true, sample: 1 });
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(new Request("https://api.droptracker.io/webhook", { method: "GET" }), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 0);
+  });
+
+  test("the mirror leg carries the real client IP and marks itself", async () => {
+    configSays({ enabled: true, sample: 1 });
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+
+    const h = new Headers(callsTo(MIRROR)[0].init.headers);
+    assert.equal(h.get("x-dt-mirror"), "1", "dev keys every mirror-only behaviour off this header");
+    assert.equal(h.get("x-forwarded-for"), "203.0.113.9",
+      "without this every mirrored submission shares one rate-limit bucket on dev");
+    assert.equal(h.get("host"), null);
+  });
+
+  test("the query string survives the mirror hop", async () => {
+    configSays({ enabled: true, sample: 1 });
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest("https://api.droptracker.io/submit?x=1"), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR)[0].url, `https://${MIRROR}/submit?x=1`);
+  });
+
+  test("the config is fetched once per TTL, not once per request", async () => {
+    configSays({ enabled: true, sample: 1 });
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    for (let i = 0; i < 20; i++) await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(configFetches().length, 0, "20 requests inside the TTL must not be 20 lookups");
   });
 });

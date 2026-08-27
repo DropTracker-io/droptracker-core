@@ -121,7 +121,100 @@ def _push_plugin_notice(db_session, processed_data, response) -> None:
         log.debug("plugin notice push failed: %s", e)
 
 
+#: Resolved once per process — the answer cannot change without a restart, and
+#: the check costs a DB query we do not want on every mirrored submission.
+_mirror_sink_cache = {"resolved": False, "value": None}
+
+
+def _validate_mirror_sink():
+    """Resolve MIRROR_SINK_GROUP_ID, or explain why it cannot be trusted.
+
+    Returns ``(group_id, None)`` or ``(None, reason)``. Every failure path
+    returns None: a typo here would aim live production traffic at a real
+    clan's Discord, which is the exact outcome the mirror exists to avoid, so
+    "cannot confirm it is safe" and "is not safe" have to mean the same thing.
+    """
+    from utils.dev_guild_guard import allowed_guild_ids, is_dev_mode
+
+    if not is_dev_mode():
+        return None, "this is not a dev instance (STATE/STATUS is not 'dev')"
+
+    raw = (os.getenv("MIRROR_SINK_GROUP_ID") or "").strip().strip('"').strip("'")
+    if not raw:
+        return None, "MIRROR_SINK_GROUP_ID is unset"
+    try:
+        sink_id = int(raw)
+    except ValueError:
+        return None, f"MIRROR_SINK_GROUP_ID={raw!r} is not an integer"
+
+    allowed = allowed_guild_ids()
+    if not allowed:
+        return None, "DEV_ALLOWED_GUILDS is unset, so no guild can be confirmed safe"
+
+    from api.core import get_db_session
+    from db.models import Group
+
+    db_session = get_db_session()
+    try:
+        guild_id = (
+            db_session.query(Group.guild_id).filter(Group.group_id == sink_id).scalar()
+        )
+    finally:
+        db_session.close()
+
+    if guild_id is None:
+        return None, f"group {sink_id} does not exist, or has no guild"
+    if int(guild_id) not in allowed:
+        return None, (
+            f"group {sink_id} lives in guild {guild_id}, which is not in "
+            "DEV_ALLOWED_GUILDS — that is a real clan's Discord"
+        )
+    return sink_id, None
+
+
+def _resolve_mirror_sink():
+    """The group mirrored submissions reroute to, or None to refuse them."""
+    if _mirror_sink_cache["resolved"]:
+        return _mirror_sink_cache["value"]
+    _mirror_sink_cache["resolved"] = True
+
+    try:
+        value, reason = _validate_mirror_sink()
+    except Exception as exc:  # noqa: BLE001 - any failure means "not safe"
+        value, reason = None, f"sink validation raised: {exc}"
+
+    if value is None:
+        log.error("Refusing mirrored submissions: %s", reason)
+    else:
+        log.info("Mirrored submissions will be rerouted to group %s", value)
+    _mirror_sink_cache["value"] = value
+    return value
+
+
 async def _process_entry(entry_bytes: bytes) -> None:
+    """Process one queue entry, rerouting it first if it is mirrored traffic."""
+    try:
+        mirrored = bool(json.loads(entry_bytes).get("mirrored"))
+    except Exception:
+        mirrored = False
+
+    if not mirrored:
+        await _process_submission(entry_bytes)
+        return
+
+    sink = _resolve_mirror_sink()
+    if sink is None:
+        # Already logged, once, with the reason. Drop rather than process: an
+        # unvalidated sink is how mirrored traffic reaches a real clan.
+        return
+
+    from utils.mirror_context import mirror_sink
+
+    with mirror_sink(sink):
+        await _process_submission(entry_bytes)
+
+
+async def _process_submission(entry_bytes: bytes) -> None:
     from api.core import get_db_session
     from api.routes.webhook import (
         _dispatch_seasonal_submission,
