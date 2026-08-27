@@ -1,3 +1,4 @@
+from utils.discord_urls import public_discord_url
 from interactions import Task, IntervalTrigger
 from db.models import Group, session
 from sqlalchemy import text
@@ -18,7 +19,7 @@ async def insert_xf_group(group: Group):
             "guild_id": group.guild_id,
             "group_description": group.description,
             "group_icon": group.icon_url if group.icon_url else "https://www.droptracker.io/img/droptracker-small.gif",
-            "discord_url": group.invite_url if group.invite_url else "",
+            "discord_url": public_discord_url(group.invite_url) or "",
             "date_added": int(group.date_added.timestamp()),
             "date_updated": int(group.date_updated.timestamp()),
             "current_total": 0,

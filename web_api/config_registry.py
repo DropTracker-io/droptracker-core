@@ -798,6 +798,11 @@ _BY_KEY = {f["key"]: f for f in GROUP_CONFIG_FIELDS}
 # guard explicitly per §11 / Task 05).
 SENSITIVE_KEYS = {"export_api_key", "wom_verification_code"}
 
+# Keys whose value is a public Discord link shown to visitors, and which must
+# therefore never hold a webhook URL — that carries its own auth token, so
+# publishing one hands write access to the clan's server to anyone who looks.
+_DISCORD_LINK_KEYS = frozenset({"discord_url"})
+
 
 def all_config_keys() -> List[str]:
     """All effective keys, including seasonal mirrors (mirrors TS allConfigKeys)."""
@@ -945,6 +950,24 @@ def coerce_to_storage(key: str, value: Any) -> str:
     if not isinstance(value, (str, int)):
         raise ConfigValidationError(key, f"'{key}' must be a string.")
     text_value = str(value)
+
+    # A Discord webhook URL contains its own token: anyone who reads it can post
+    # into the clan's server as the clan. This field is published on the group
+    # page, so accepting one would hand it to every visitor. Rejected loudly
+    # rather than silently blanked, because the person pasting it has almost
+    # certainly confused this box with the webhook setting and needs telling.
+    if key in _DISCORD_LINK_KEYS:
+        from utils.discord_urls import is_discord_credential_url
+
+        if is_discord_credential_url(text_value):
+            raise ConfigValidationError(
+                key,
+                f"'{key}' is a public invite link shown on your group page, and "
+                "that is a Discord webhook URL — anyone who saw it could post to "
+                "your server. Use an invite link (discord.gg/…) here; webhooks "
+                "belong in the notification channel settings.",
+            )
+
     # A declared max_length means "trimmed, bounded string" — trailing spaces
     # must not push a name over the limit its column can hold.
     limit = field.get("max_length")
