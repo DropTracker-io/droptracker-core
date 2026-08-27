@@ -10,6 +10,9 @@
 - GET /event_state — the Enhanced Display HUD / Events-tab state (focus task,
   standings, team info, the team's recent scoring submissions) for every
   active event the player is rostered in.
+- GET /event_roster — team membership for the in-game clan-chat badges, fetched
+  only when /event_state's ``roster_version`` changes. Roster-gated and cached
+  per event, deliberately apart from the continuously-polled /event_state.
 - GET /events/<id>/board.png — the server-rendered board (bingo grid /
   board-game track), team-scoped, roster-gated, Redis-cached.
 
@@ -207,6 +210,102 @@ async def get_event_state():
     except Exception:
         pass
     return jsonify(state), 200
+
+
+@notifications_bp.get("/event_roster")
+@rate_limit(limit=12, period=timedelta(seconds=60))
+async def get_event_roster():
+    """Who is on which team, for the in-game clan-chat team badges (web103a).
+
+    Deliberately not part of /event_state: this is the whole event's
+    membership, and /event_state is polled continuously. The client refetches
+    only when the ``roster_version`` it sees there stops matching the one it
+    holds, so a settled event costs nothing.
+
+    The cache is keyed per EVENT rather than per identity — every client in an
+    event reads the identical map, so a roster's worth of clients arriving
+    together is one composition, not N (audit P0-14).
+    """
+    player_name = request.args.get("player_name", None)
+    acc_hash = request.args.get("acc_hash", None)
+    if not player_name or not acc_hash:
+        return jsonify({"error": "player_name and acc_hash are required"}), 400
+    raw_event = (request.args.get("event_id") or "").strip()
+    event_id = None
+    if raw_event:
+        try:
+            event_id = int(raw_event)
+        except ValueError:
+            return jsonify({"error": "event_id must be an integer"}), 422
+
+    import json as _json
+
+    def _load():
+        db_session = get_db_session()
+        try:
+            player_id = _resolve_player_id(db_session, player_name, acc_hash)
+            if player_id is None:
+                return None
+            from services.plugin_notifications import (
+                ROSTER_CACHE_KEY_TEMPLATE,
+                ROSTER_CACHE_SECONDS,
+                compose_event_roster,
+                rostered_event_ids,
+            )
+
+            # Membership decides which entries this caller may see and is
+            # never cached; the cached bytes are the per-event map, which is
+            # the same for everyone in it. Keeping the two apart is what lets
+            # the cache be shared without it ever widening the gate.
+            ids = rostered_event_ids(db_session, player_id)
+            if event_id is not None:
+                ids = [e for e in ids if e == event_id]
+            if not ids:
+                return {"events": []}
+
+            cached = []
+            try:
+                from utils.redis import redis_client
+
+                for eid in ids:
+                    raw = redis_client.client.get(
+                        ROSTER_CACHE_KEY_TEMPLATE.format(event_id=eid))
+                    # A partial hit is not usable: badging half a clan reads as
+                    # "these players are in no team", so fall through and
+                    # compose the lot.
+                    if not raw:
+                        cached = None
+                        break
+                    cached.append(_json.loads(raw))
+            except Exception:
+                cached = None
+            if cached:
+                return {"events": cached}
+
+            composed = compose_event_roster(db_session, player_id, event_id)
+            try:
+                from utils.redis import redis_client
+
+                for entry in composed.get("events", []):
+                    redis_client.client.set(
+                        ROSTER_CACHE_KEY_TEMPLATE.format(event_id=entry["event_id"]),
+                        _json.dumps(entry, default=str),
+                        ex=ROSTER_CACHE_SECONDS,
+                    )
+            except Exception:
+                pass
+            return composed
+        finally:
+            db_session.close()
+
+    try:
+        roster = await asyncio.to_thread(_load)
+    except Exception as e:
+        print(f"/event_roster error: {e}")
+        return jsonify({"error": "Internal error"}), 500
+    if roster is None:
+        return jsonify({"error": "Player not found"}), 404
+    return jsonify(roster), 200
 
 
 @notifications_bp.get("/events/<int:event_id>/board.png")

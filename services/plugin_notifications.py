@@ -82,6 +82,21 @@ TASKS_LIMIT = 60
 REQUIREMENTS_LIMIT = 12
 MEMBERS_LIMIT = 60
 
+# GET /event_roster caps (web103a). This payload is the WHOLE event's
+# membership, not the viewer's team: a three-clan clan-vs-clan of 400-member
+# clans is ~1200 names, roughly 6 KB gzipped. That is fine for a fetch the
+# client only repeats when ``roster_version`` changes, and would be indefensible
+# inside the continuous /event_state poll — which is why it lives apart.
+# Truncation keeps the oldest joiners so the badge set stays stable as a roster
+# grows past the cap, rather than reshuffling under the player every refresh.
+ROSTER_TEAMS_LIMIT = 32
+ROSTER_NAMES_LIMIT = 2000
+# Cached per EVENT, not per viewer: every client in the event reads byte-for-byte
+# the same map, and a roster change is announced by roster_version anyway, so a
+# stale window costs nothing but a late badge (audit P0-14's lesson).
+ROSTER_CACHE_KEY_TEMPLATE = "plugin:event_roster:{event_id}"
+ROSTER_CACHE_SECONDS = 300
+
 # Team submissions feed (t68): the viewer's own team's scoring ledger, in the
 # shape the plugin's RecentSubmission renderer already consumes. Cached per
 # TEAM rather than per viewer — one completion wakes a whole roster's clients
@@ -1187,6 +1202,10 @@ def compose_event_state(session, player_id) -> dict:
                 "team_id": team.id,
             },
             "standings": standings,
+            # Version-gate for GET /event_roster (web103a). Additive: older
+            # plugins ignore it, newer ones refetch the roster only when it
+            # changes rather than polling a payload this size.
+            "roster_version": _roster_version(session, event.id, teams),
         })
 
     screenshot_item_ids: list = []
@@ -1195,6 +1214,163 @@ def compose_event_state(session, player_id) -> dict:
     except Exception as e:
         print(f"[plugin_notifications] screenshot-id resolve failed: {e}")
     return {"events": entries, "screenshot_item_ids": screenshot_item_ids}
+
+
+def roster_digest(member_count, latest_join, teams) -> str:
+    """Short hash that changes whenever an event's chat badges would look
+    different, and not otherwise.
+
+    Three things move a badge: who is on a roster, which team they are on, and
+    how a team renders. The member count catches joins and leaves; the newest
+    ``joined_at`` catches a same-count swap (one player out, one in, or a move
+    between teams, which rewrites the row); the team tuple catches a rename,
+    recolor, retag or icon change. Anything else — a score tick, a completion,
+    a board redraw — leaves it alone, which is the point: this string is polled
+    continuously and every change costs every client in the event a fetch.
+    """
+    import hashlib
+
+    parts = [str(member_count or 0), str(latest_join or "")]
+    parts.extend(
+        f"{t.id}:{t.name}:{t.color}:{getattr(t, 'short_tag', None)}:{t.piece_item_id}"
+        for t in teams
+    )
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _roster_version(session, event_id, teams) -> str:
+    """:func:`roster_digest` over one event's live roster aggregate."""
+    from sqlalchemy import func
+
+    from db.models import EventTeamMember
+
+    try:
+        count, latest = (
+            session.query(func.count(EventTeamMember.player_id),
+                          func.max(EventTeamMember.joined_at))
+            .filter(EventTeamMember.event_id == event_id)
+            .first()
+        ) or (0, None)
+    except Exception as e:
+        # An empty stamp means "no badges" to the client, which is the right
+        # failure: better than a stable-looking hash over an unread roster.
+        print(f"[plugin_notifications] roster version aggregate failed: {e}")
+        return ""
+    return roster_digest(count, latest, teams)
+
+
+def rostered_event_ids(session, player_id) -> list:
+    """Live events this player is on a team of, newest first.
+
+    This is the roster gate for /event_roster: an event absent from this list
+    is not merely filtered from the response, it is not acknowledged to exist —
+    private events are invisible to the plugin's identity model otherwise.
+    """
+    from db.models import Event, EventTeam, EventTeamMember
+
+    rows = (
+        session.query(EventTeam.event_id)
+        .join(EventTeamMember, EventTeamMember.team_id == EventTeam.id)
+        .join(Event, Event.id == EventTeam.event_id)
+        .filter(EventTeamMember.player_id == int(player_id),
+                Event.status == "active")
+        .order_by(Event.id.desc())
+        .all()
+    )
+    return [eid for (eid,) in rows]
+
+
+def compose_event_roster(session, player_id, event_id=None) -> dict:
+    """Who is on which team, for every live event this player is rostered in.
+
+    The point of the whole feature is that nobody maintains this list: the
+    plugin badges clan chat straight from the event's real roster, so a player
+    an admin moved between teams is badged correctly on their next refresh and
+    a clanmate who never opens the website is badged at all.
+
+    Roster-gated in both directions — an event the caller is not on a team of
+    is not in the response, and ``event_id`` naming such an event returns
+    nothing rather than confirming it exists. Hidden players are masked (they
+    simply get no badge), matching every other event read surface.
+
+    Names come back already normalized for comparison
+    (``normalize_player_display_equivalence``): the client matches a chat
+    sender against these keys, and a name that differs only in the underscore
+    the plugin submits or the U+00A0 the game renders must not miss.
+    """
+    from utils.format import normalize_player_display_equivalence
+
+    from db.models import EventTeam, EventTeamMember, Player
+    from services.event_teams import assign_short_tags, team_badge
+
+    visible = rostered_event_ids(session, player_id)
+    if event_id is not None:
+        event_id = int(event_id)
+        visible = [e for e in visible if e == event_id]
+
+    entries = []
+    for eid in visible:
+        all_teams = (
+            session.query(EventTeam)
+            .filter(EventTeam.event_id == eid)
+            .order_by(EventTeam.id.asc())
+            .all()
+        )
+        truncated = len(all_teams) > ROSTER_TEAMS_LIMIT
+        teams = all_teams[:ROSTER_TEAMS_LIMIT]
+        # Tags are assigned over ALL teams so a team past the cap can never
+        # take a tag that a visible one is already using.
+        tags = assign_short_tags(all_teams)
+        team_payload = []
+        for index, team in enumerate(teams):
+            team_payload.append({
+                "id": team.id,
+                "name": team.name,
+                "short_tag": tags.get(team.id),
+                "icon_path": _img_relative(team.piece_icon_url),
+                **team_badge(team, index),
+            })
+
+        # auto_clan (whole-clan) teams carry no roster rows in principle, but
+        # services.event_lifecycle.sync_auto_clan_rosters materializes them
+        # every sweep tick precisely so read surfaces like this one work. Read
+        # the rows like everyone else; never re-expand the clan here.
+        team_ids = [t.id for t in teams]
+        members: dict = {}
+        members_total = 0
+        if team_ids:
+            member_rows = (
+                session.query(EventTeamMember.team_id, Player.player_name)
+                .join(Player, Player.player_id == EventTeamMember.player_id)
+                .filter(EventTeamMember.team_id.in_(team_ids),
+                        (Player.hidden.is_(False)) | (Player.hidden.is_(None)))
+                .order_by(EventTeamMember.joined_at.asc(),
+                          EventTeamMember.player_id.asc())
+                .limit(ROSTER_NAMES_LIMIT + 1)
+                .all()
+            )
+            if len(member_rows) > ROSTER_NAMES_LIMIT:
+                truncated = True
+                member_rows = member_rows[:ROSTER_NAMES_LIMIT]
+            for team_id, player_name in member_rows:
+                key = normalize_player_display_equivalence(player_name)
+                if not key:
+                    continue
+                members.setdefault(str(team_id), []).append(key)
+                members_total += 1
+
+        entries.append({
+            "event_id": eid,
+            # Hashed over the untruncated team list so this always equals the
+            # stamp /event_state hands the same client — a mismatch would make
+            # it refetch on every poll.
+            "roster_version": _roster_version(session, eid, all_teams),
+            "teams": team_payload,
+            "members": members,
+            "members_total": members_total,
+            "truncated": truncated,
+        })
+    return {"events": entries}
 
 
 def player_has_active_event(session, player_id) -> bool:

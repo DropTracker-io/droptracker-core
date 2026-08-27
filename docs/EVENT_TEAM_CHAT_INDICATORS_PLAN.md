@@ -1,6 +1,10 @@
 # Event Team Indicators in Clan Chat — Design Plan
 
-Status: INVESTIGATION / NOT BUILT (2026-08-25).
+Status: **BUILT 2026-08-27** — P1, the orb sprites from P2, and P4's public-chat
+       toggle. Still open: item-sprite badges and the web team-icon picker for
+       non-board events (rest of P2), clan broadcasts (P3), and the tag chip on
+       public event pages. Three corrections found on implementation are noted
+       inline below (migration slug, `setOnStateUpdated`, the Discord orb).
 Scope: disc (intake API roster endpoint, `/event_state` version stamp, `short_tag`
        column + admin PATCH, manifest kill switch), web (team cosmetics editor,
        tag chip on public surfaces), plugin (roster cache, chat decoration,
@@ -160,8 +164,10 @@ Older plugins ignore the new key — the additive contract in
 
 ### 3. `web_event_teams.short_tag`
 
-Migration `alembic/versions/web101a_event_team_short_tag.py` (template:
-`web97a_player_account_type.py`):
+Migration `alembic/versions/web103a_event_team_short_tag.py` (template:
+`web101a_notification_blacklist.py`). **Correction:** the `web101a` slug this
+plan first named was taken by `web101a_notification_blacklist` before the
+feature was picked up — check `alembic heads` before choosing one.
 
 ```python
 op.add_column("web_event_teams", sa.Column("short_tag", sa.String(8), nullable=True))
@@ -198,8 +204,13 @@ Singleton, injected into `DropTrackerPlugin`. Holds:
 - `String rosterVersion` — last version fetched, per event id.
 - Slot table `Map<Integer, Integer> teamIdToIconSlot`.
 
-**Feeding it.** `EventNotificationService.setOnStateUpdated` already fires
-off-EDT whenever a fresh `/event_state` lands. Compare `roster_version` per
+**Feeding it.** `EventNotificationService` fires off-EDT whenever a fresh
+`/event_state` lands. **Correction:** that signal was a single
+`@Setter` `Runnable` slot already owned by `DropTrackerPanel` (set on open,
+nulled on close), so a second consumer would have silently killed the panel's
+refresh. It is now a `CopyOnWriteArrayList` with
+`addStateUpdatedListener` / `removeStateUpdatedListener`, and the panel holds
+its own registration so a re-init deregisters before re-adding. Compare `roster_version` per
 event; on mismatch (or first load) fetch `/event_roster` on the executor and
 swap the map. No new poll loop, no new cadence.
 
@@ -256,7 +267,16 @@ later.
   `color`. ~5 chars of chat width. `</col>` resets to the chat default rather
   than an enclosing tag (already documented in `ChatMessageUtil`), so it must be
   appended as a sibling, never nested.
-- **ICON** — a mod-icon slot per team: `team.icon_item_id` →
+- **ORB (shipped default)** — the colored circle the team's Discord channel
+  already carries. `services/event_team_discord.py` maps an accent color to
+  one of 🟢🔴🔵🟡🟠🟣⚪ through named hue bands to name team channels; the
+  roster payload returns that circle plus its own Twemoji fill (`orb_color`),
+  and the client draws a 12px disc in that fill. Chat has no glyph for an
+  emoji, so it has to be a sprite — but routing it through the same bands is
+  what makes the badge, the Discord channel icon and the site's team dot agree.
+  This answers the suggestion's own follow-up ("probably use the same color orb
+  as in discord?").
+- **ICON (not built)** — a mod-icon slot per team from `team.icon_item_id` →
   `itemManager.getImage(id)` → `ImageUtil.resizeImage(img, 18, 16)` →
   `ImageUtil.getImageIndexedSprite(img, client)`. Exactly `loadPets`
   (`WidgetEventHandler.java:374-392`). No `icon_item_id` → generate a solid

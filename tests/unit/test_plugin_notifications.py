@@ -637,3 +637,80 @@ class TestTaskScreenshotNames:
     def test_bad_config_never_raises(self):
         assert pn._task_screenshot_names("item_collection", None, None) == set()
         assert pn._task_screenshot_names("loot_sweep", None, {"groups": "junk"}) == set()
+
+
+class FakeRosterTeam:
+    """Only what roster_digest reads off a team row."""
+
+    def __init__(self, id, name, color=None, short_tag=None, piece_item_id=None):
+        self.id = id
+        self.name = name
+        self.color = color
+        self.short_tag = short_tag
+        self.piece_item_id = piece_item_id
+
+
+class TestRosterDigest:
+    """The version gate for GET /event_roster (web103a).
+
+    Every client in an event polls this string continuously, so it has to move
+    for exactly the changes that alter a chat badge and stay put for everything
+    else — a hash that churns turns a version gate into a fetch loop.
+    """
+
+    def _teams(self):
+        return [FakeRosterTeam(1, "Red Rockets", "#cc3333", "RR", 11802),
+                FakeRosterTeam(2, "Blue Blazers", "#3355cc", None, None)]
+
+    def test_stable_across_two_composes(self):
+        teams = self._teams()
+        assert pn.roster_digest(12, "2026-08-27 10:00:00", teams) == \
+            pn.roster_digest(12, "2026-08-27 10:00:00", teams)
+
+    def test_changes_on_member_added_or_removed(self):
+        teams = self._teams()
+        base = pn.roster_digest(12, "2026-08-27 10:00:00", teams)
+        assert pn.roster_digest(13, "2026-08-27 10:05:00", teams) != base
+        assert pn.roster_digest(11, "2026-08-27 10:00:00", teams) != base
+
+    def test_changes_on_same_count_swap(self):
+        # One player out, one in — or a move between teams, which rewrites the
+        # row. The count alone would miss all of these.
+        teams = self._teams()
+        assert pn.roster_digest(12, "2026-08-27 11:00:00", teams) != \
+            pn.roster_digest(12, "2026-08-27 10:00:00", teams)
+
+    def test_changes_on_rename_recolor_retag_and_icon(self):
+        base = pn.roster_digest(12, "t", self._teams())
+        for mutate in (
+            lambda t: setattr(t, "name", "Red Ravens"),
+            lambda t: setattr(t, "color", "#00ff00"),
+            lambda t: setattr(t, "short_tag", "ROCK"),
+            lambda t: setattr(t, "piece_item_id", 4151),
+        ):
+            teams = self._teams()
+            mutate(teams[0])
+            assert pn.roster_digest(12, "t", teams) != base
+
+    def test_changes_when_a_team_is_added(self):
+        teams = self._teams()
+        base = pn.roster_digest(12, "t", teams)
+        teams.append(FakeRosterTeam(3, "Green Giants"))
+        assert pn.roster_digest(12, "t", teams) != base
+
+    def test_ignores_score_and_other_churn(self):
+        # Scores tick on every scoring submission. If they moved the digest,
+        # a busy event would refetch the whole roster continuously.
+        teams = self._teams()
+        base = pn.roster_digest(12, "t", teams)
+        teams[0].score = 9999
+        teams[1].coins = 500
+        assert pn.roster_digest(12, "t", teams) == base
+
+    def test_short_and_url_safe(self):
+        digest = pn.roster_digest(12, "t", self._teams())
+        assert len(digest) == 16
+        assert digest.isalnum()
+
+    def test_empty_event_still_digests(self):
+        assert pn.roster_digest(0, None, [])

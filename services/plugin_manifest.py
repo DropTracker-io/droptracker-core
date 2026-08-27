@@ -47,6 +47,7 @@ CLIENT_SECTIONS = (
     "combat_achievement_varps",
     "quest_ids",
     "sync",
+    "team_indicators",
 )
 
 # Seed contents for a database that has never had the manifest built. These are
@@ -97,6 +98,20 @@ DEFAULT_SECTIONS: Dict[str, Dict[str, Any]] = {
             "enabled": True,
         },
         "description": "State-sync cadence and kill switch.",
+    },
+    "team_indicators": {
+        "payload": {
+            # Kill switch for the in-game event team badges (web103a). A
+            # decoration that misbehaves — wrong badge, chat spam, a sprite
+            # slot fight with another plugin — can be stopped for every client
+            # in minutes here, instead of waiting out a Plugin Hub review.
+            "enabled": True,
+            # How long a client may hold a roster before refetching even if
+            # roster_version never changed. Backstop against a client that
+            # missed a version bump; the version gate is the real mechanism.
+            "max_roster_age_minutes": 60,
+        },
+        "description": "Clan-chat event team indicators: kill switch and roster staleness bound.",
     },
 }
 

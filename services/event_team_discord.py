@@ -289,6 +289,21 @@ _ICON_HUE_BANDS = (
     (360.0, "🔴"),
 )
 
+# Each circle's own fill color, as Discord actually draws it (Twemoji). A
+# surface that cannot render an emoji — the game's chat font has no glyph for
+# one — draws its own circle in these instead of in the team's raw accent
+# color, which is what makes the in-game badge look like the Discord channel
+# icon rather than merely close to it.
+ORB_COLORS = {
+    "🔴": "#dd2e44",
+    "🟠": "#f4900c",
+    "🟡": "#fdcb58",
+    "🟢": "#78b159",
+    "🔵": "#55acee",
+    "🟣": "#aa8dd8",
+    "⚪": "#e6e7e8",
+}
+
 # Below this saturation a color has no nameable hue (grays, near-black,
 # near-white) and falls to the neutral circle.
 _ICON_MIN_SATURATION = 0.15
@@ -326,6 +341,14 @@ def team_channel_icon(color=None, index: int = 0) -> str:
     :func:`team_icon_index`) so sibling teams stay distinguishable."""
     return (_icon_for_color(color)
             or TEAM_CHANNEL_ICONS[index % len(TEAM_CHANNEL_ICONS)])
+
+
+def team_orb(color=None, index: int = 0) -> tuple:
+    """``(circle, fill)`` for a team: the emoji Discord shows on its channel
+    and that emoji's own color, for surfaces that must draw the circle
+    themselves. See :data:`ORB_COLORS`."""
+    icon = team_channel_icon(color, index)
+    return icon, ORB_COLORS.get(icon, ORB_COLORS["⚪"])
 
 
 def team_icon_index(session, event_id: int, team_id) -> int:

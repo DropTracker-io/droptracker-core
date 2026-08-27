@@ -487,6 +487,11 @@ class EventTeam(Base):
     group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=True)
     # Admin-assigned accent color ("#rrggbb"); NULL = frontend palette default.
     color = Column(String(7), nullable=True)
+    # Short label for surfaces with no room for the full name — today the
+    # in-game clan-chat badge (web103a). NULL means "derive one from the name"
+    # (services.event_teams.derive_short_tag), so a team that never sets one
+    # still gets a stable tag.
+    short_tag = Column(String(8), nullable=True)
     # Whole-clan fallback (clan_vs_clan): auto-created at activation when no
     # teams were set up. Credits every current member of ``group_id`` — no
     # explicit roster rows — so it runs as "anyone in this clan". See

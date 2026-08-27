@@ -588,6 +588,13 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
                         .get("ehb_estimated_hours", 0.0),
                 } if show_effort else {}),
             })
+    # Effective in-game chat tags (web103a): what the plugin will actually
+    # print, derived here for teams that never set one so the site and the
+    # game agree on what "RR" means. Assigned over every team at once because
+    # collisions are broken within the event.
+    from services.event_teams import assign_short_tags
+
+    chat_tags = assign_short_tags(sorted(teams_rows, key=lambda t: t.id))
     teams = []
     for tm in teams_rows:
         members = members_by_team.get(tm.id, [])
@@ -603,6 +610,10 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             "score": score_num(tm.score),
             "group_id": getattr(tm, "group_id", None),  # clan bound (clan_vs_clan)
             "color": getattr(tm, "color", None),  # admin accent; null = palette default
+            # In-game clan-chat badge (web103a): the admin's override (null =
+            # not set) and the tag that will actually print.
+            "short_tag": getattr(tm, "short_tag", None),
+            "chat_tag": chat_tags.get(tm.id),
             # Board game (web44a): coin wallet + game piece.
             "coins": int(getattr(tm, "coins", 0) or 0),
             "piece_item_id": getattr(tm, "piece_item_id", None),
@@ -5152,12 +5163,16 @@ async def add_team(event_id: int):
 
 @events_bp.patch("/events/<int:event_id>/teams/<int:team_id>")
 async def update_team(event_id: int, team_id: int):
-    """Edit a team's cosmetics: rename (fix a typo) and/or set its accent
-    color. Admin-only; audit-logged. The clan a clan_vs_clan team represents
-    is fixed at create time. Allowed in any lifecycle state (cosmetic only).
+    """Edit a team's cosmetics: rename (fix a typo), set its accent color
+    and/or its in-game chat tag. Admin-only; audit-logged. The clan a
+    clan_vs_clan team represents is fixed at create time. Allowed in any
+    lifecycle state (cosmetic only).
 
     ``color`` is "#rrggbb", or null/"" to clear back to the palette default;
-    ``name`` may be omitted to change the color alone."""
+    ``short_tag`` is the ≤8-character label the plugin prints beside a
+    teammate's name in clan chat, or null/"" to fall back to the tag derived
+    from the team's name; any field may be omitted to change the others
+    alone."""
     user_id = current_user_id()
     body = await json_body()
     name = (body.get("name") or "").strip() if "name" in body else None
@@ -5178,8 +5193,20 @@ async def update_team(event_id: int, team_id: int):
             or piece_item_id <= 0):
         abort_problem(422, "Invalid piece",
                       "'piece_item_id' must be a positive item id (or null to clear).")
-    if name is None and not has_color and not has_piece:
-        abort_problem(422, "Nothing to update", "Provide a name, color, and/or piece.")
+    # In-game chat tag (web103a). The charset is what the game's chat font can
+    # draw: a tag it has no glyph for renders as empty boxes in the one place
+    # the tag exists to be read. Null/"" clears back to the derived tag.
+    has_tag = "short_tag" in body
+    short_tag = body.get("short_tag")
+    if has_tag and short_tag is not None:
+        short_tag = " ".join(str(short_tag).split()) or None
+        if short_tag is not None and not re.fullmatch(r"[A-Za-z0-9 ]{1,8}", short_tag):
+            abort_problem(422, "Invalid chat tag",
+                          "Chat tag must be 1–8 letters, numbers or spaces "
+                          "(or null to reset).")
+    if name is None and not has_color and not has_piece and not has_tag:
+        abort_problem(422, "Nothing to update",
+                      "Provide a name, color, chat tag, and/or piece.")
 
     def _apply():
         with db_session() as s:
@@ -5193,6 +5220,7 @@ async def update_team(event_id: int, team_id: int):
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
             before = {"name": team.name, "color": team.color,
+                      "short_tag": getattr(team, "short_tag", None),
                       "piece_item_id": getattr(team, "piece_item_id", None)}
             if name is not None:
                 team.name = name
@@ -5200,7 +5228,10 @@ async def update_team(event_id: int, team_id: int):
                 team.color = color
             if has_piece:
                 team.piece_item_id = piece_item_id
+            if has_tag:
+                team.short_tag = short_tag
             after = {"name": team.name, "color": team.color,
+                     "short_tag": getattr(team, "short_tag", None),
                      "piece_item_id": getattr(team, "piece_item_id", None)}
             if before == after:
                 return  # no-op
