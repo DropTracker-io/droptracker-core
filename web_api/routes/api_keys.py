@@ -11,6 +11,11 @@
   PATCH  /api/v1/admin/api-keys/{id}         - promote a tier / set overrides
   GET    /api/v1/admin/api-usage             - who is spending what
 
+The two self-serve mint routes are gated by ``DATA_API_SELF_SERVE_KEYS``
+(default off) — see :func:`self_serve_enabled`. Staff minting and every other
+route stay available, so keys can be handed out deliberately while the feature
+is unannounced.
+
 The plaintext token is returned by exactly one response — the mint — and is
 not recoverable afterwards; only its SHA-256 is stored. Revocation is a
 timestamp, never a delete, so a key that appears in old usage data can still
@@ -27,6 +32,7 @@ about *who may ask*, not about what a key is:
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime
 
 from quart import Blueprint, jsonify, request
@@ -41,6 +47,29 @@ from web_api.deps import (
 )
 
 api_keys_bp = Blueprint("v1_api_keys", __name__)
+
+
+def self_serve_enabled() -> bool:
+    """Whether users and group admins may mint their own keys.
+
+    Off until the Data API is announced. Staff can still mint keys for anyone
+    (``POST /admin/api-keys`` and ``scripts/mint_api_key.py``), and a key made
+    that way works normally — this gates only the self-serve doors, so the API
+    can run in production while access to it is still handed out deliberately.
+
+    Listing and revoking stay open regardless: someone who has been given a key
+    should be able to see and kill it.
+    """
+    return os.getenv("DATA_API_SELF_SERVE_KEYS", "false").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _assert_self_serve_open() -> None:
+    """404 rather than 403 — an unlaunched feature should not advertise itself."""
+    if not self_serve_enabled():
+        abort_problem(404, "Not Found", "This endpoint is not available.")
+
 
 #: Entitlement that unlocks self-serve user keys.
 SUPPORTER_ENTITLEMENT_CANDIDATES = ("api_access", "supporter", "premium_profile")
@@ -108,13 +137,14 @@ async def list_my_keys():
                     .filter(ApiKey.owner_user_id == user_id)
                     .order_by(ApiKey.id.desc()).all())
             return {"keys": [_serialize(r) for r in rows],
-                    "may_mint": _user_may_mint(session, user_id)}
+                    "may_mint": self_serve_enabled() and _user_may_mint(session, user_id)}
 
     return jsonify(await asyncio.to_thread(work))
 
 
 @api_keys_bp.route("/me/api-keys", methods=["POST"])
 async def mint_my_key():
+    _assert_self_serve_open()
     user_id = current_user_id()
     body = await request.get_json(silent=True) or {}
     label = str(body.get("label") or "")[:64]
@@ -191,6 +221,7 @@ async def list_group_keys(group_id: int):
 
 @api_keys_bp.route("/groups/<int:group_id>/api-keys", methods=["POST"])
 async def mint_group_key(group_id: int):
+    _assert_self_serve_open()
     user_id = current_user_id()
     body = await request.get_json(silent=True) or {}
     label = str(body.get("label") or "")[:64]

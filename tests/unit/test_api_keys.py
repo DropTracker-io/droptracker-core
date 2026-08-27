@@ -146,3 +146,33 @@ class TestDescriptor:
     def tier():
         return SimpleNamespace(requests_per_min=60, cost_units_per_min=300,
                                requests_per_day=10_000, max_concurrency=4)
+
+
+class TestSelfServeGate:
+    """Self-serve minting is off until the API is announced.
+
+    Production runs the API before the feature is public, so the two doors a
+    user or group admin could mint through are closed by env flag while staff
+    minting and key *use* stay open.
+    """
+
+    def _routes(self, monkeypatch, value):
+        if value is None:
+            monkeypatch.delenv("DATA_API_SELF_SERVE_KEYS", raising=False)
+        else:
+            monkeypatch.setenv("DATA_API_SELF_SERVE_KEYS", value)
+        import importlib
+
+        module = importlib.import_module("web_api.routes.api_keys")
+        return module
+
+    def test_closed_by_default(self, monkeypatch):
+        assert self._routes(monkeypatch, None).self_serve_enabled() is False
+
+    def test_stays_closed_for_falsey_spellings(self, monkeypatch):
+        for value in ("false", "0", "no", "off", "", "  "):
+            assert self._routes(monkeypatch, value).self_serve_enabled() is False, value
+
+    def test_opens_for_truthy_spellings(self, monkeypatch):
+        for value in ("true", "1", "yes", "on", "TRUE", " True "):
+            assert self._routes(monkeypatch, value).self_serve_enabled() is True, value
