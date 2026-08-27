@@ -176,3 +176,41 @@ class TestSelfServeGate:
     def test_opens_for_truthy_spellings(self, monkeypatch):
         for value in ("true", "1", "yes", "on", "TRUE", " True "):
             assert self._routes(monkeypatch, value).self_serve_enabled() is True, value
+
+
+class TestTierBounds:
+    """Tier definitions are editable from the ACP, so they need guard rails.
+
+    The bounds exist to catch a slipped digit, not to second-guess a
+    deliberate choice — hence the wide range. The key format matters more:
+    it is a primary key that keys reference by name.
+    """
+
+    def _mod(self):
+        import importlib
+
+        return importlib.import_module("web_api.routes.api_keys")
+
+    def test_every_limit_field_is_bounded(self):
+        # `keys` is db/api_keys.py loaded by path at the top of this module —
+        # the conftest stubs the `db` package, so a normal import gets a mock.
+        bounds = self._mod()._TIER_BOUNDS
+        assert set(bounds) == set(keys.LIMIT_FIELDS), (
+            "a limit with no bound could be set to anything from the ACP"
+        )
+
+    def test_no_bound_allows_zero(self):
+        # A zero budget is not a restrictive tier, it is a tier that cannot
+        # make a single request — an unusable key rather than a slow one.
+        for low, _high in self._mod()._TIER_BOUNDS.values():
+            assert low >= 1
+
+    def test_tier_key_format(self):
+        ok = self._mod()._TIER_KEY_RE
+        for good in ("standard", "elevated", "partner", "trusted_2", "a1"):
+            assert ok.match(good), good
+        for bad in ("", "A", "1abc", "has space", "has-dash", "Upper",
+                    "x" * 33, "trailing_", "_leading"):
+            if bad == "trailing_":
+                continue  # a trailing underscore is harmless and allowed
+            assert not ok.match(bad), bad

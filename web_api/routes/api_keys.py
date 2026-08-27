@@ -32,19 +32,37 @@ about *who may ask*, not about what a key is:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 from datetime import datetime
 
 from quart import Blueprint, jsonify, request
+from sqlalchemy import func
 
 from db import api_keys as keys
 from web_api.common import abort_problem, db_session
 from web_api.deps import (
     assert_developer,
     assert_group_admin,
+    assert_superadmin,
     current_user_id,
     load_user,
 )
+
+
+def _audit(actor_user_id, action, target, before=None, after=None) -> None:
+    """Mirror of routes/admin._audit — key grants belong in the audit log."""
+    try:
+        from db.models import AuditLog
+
+        with db_session() as s:
+            s.add(AuditLog(actor_user_id=actor_user_id, group_id=None,
+                           action=action, target=target,
+                           before=before, after=after))
+            s.commit()
+    except Exception:
+        pass
 
 api_keys_bp = Blueprint("v1_api_keys", __name__)
 
@@ -310,7 +328,7 @@ async def admin_mint_key():
         from db.models import ApiKeyTier
 
         with db_session() as session:
-            assert_developer(load_user(session, user_id))
+            assert_superadmin(load_user(session, user_id))
             owner_user_id = body.get("owner_user_id")
             group_id = body.get("group_id")
             if (owner_user_id is None) == (group_id is None):
@@ -355,7 +373,7 @@ async def admin_update_key(key_id: int):
         from db.models import ApiKey, ApiKeyTier
 
         with db_session() as session:
-            assert_developer(load_user(session, user_id))
+            assert_superadmin(load_user(session, user_id))
             row = session.query(ApiKey).filter(ApiKey.id == key_id).first()
             if row is None:
                 return None
@@ -419,3 +437,164 @@ async def admin_api_usage():
             return window
 
     return jsonify(await asyncio.to_thread(work))
+
+
+# ── tier definitions ─────────────────────────────────────────────────────────
+#
+# Tiers were seeded by migration and previously could only be changed by
+# another one, which made "promote a key once its usage proves itself" a
+# deploy rather than an operation. They are editable here instead.
+#
+# A tier's limits apply to every key on it the moment they are saved: the data
+# API resolves them per request and holds no cache.
+
+def _tier_row(row) -> dict:
+    return {
+        "tier_key": row.tier_key,
+        "display_name": row.display_name,
+        "requests_per_min": int(row.requests_per_min),
+        "cost_units_per_min": int(row.cost_units_per_min),
+        "requests_per_day": int(row.requests_per_day),
+        "max_concurrency": int(row.max_concurrency),
+        "enabled": bool(row.enabled),
+        "sort_order": int(row.sort_order or 0),
+    }
+
+
+#: Sanity bounds. Generous — the point is to stop a slipped digit granting
+#: something absurd, not to second-guess a deliberate choice.
+_TIER_BOUNDS = {
+    "requests_per_min": (1, 100_000),
+    "cost_units_per_min": (1, 100_000_000),
+    "requests_per_day": (1, 100_000_000),
+    "max_concurrency": (1, 256),
+}
+
+_TIER_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
+
+
+@api_keys_bp.route("/admin/api-key-tiers", methods=["GET"])
+async def admin_list_tiers():
+    user_id = current_user_id()
+
+    def work():
+        from db.models import ApiKey, ApiKeyTier
+
+        with db_session() as session:
+            assert_developer(load_user(session, user_id))
+            rows = session.query(ApiKeyTier).order_by(ApiKeyTier.sort_order).all()
+            # How many live keys each tier is responsible for — the number that
+            # says whether editing it is routine or consequential.
+            counts = dict(
+                session.query(ApiKey.tier_key, func.count())
+                .filter(ApiKey.revoked_at.is_(None))
+                .group_by(ApiKey.tier_key).all()
+            )
+            return {"tiers": [dict(_tier_row(r), active_keys=int(counts.get(r.tier_key, 0)))
+                              for r in rows]}
+
+    return jsonify(await asyncio.to_thread(work))
+
+
+@api_keys_bp.route("/admin/api-key-tiers/<tier_key>", methods=["PUT"])
+async def admin_put_tier(tier_key: str):
+    """Create or update a tier. Superadmin — this changes what keys may do."""
+    user_id = current_user_id()
+    body = await request.get_json(silent=True) or {}
+
+    if not _TIER_KEY_RE.match(tier_key or ""):
+        abort_problem(422, "Invalid tier key",
+                      "A tier key is lowercase letters, digits and underscores, "
+                      "2-32 characters, starting with a letter.")
+
+    values = {}
+    for field, (low, high) in _TIER_BOUNDS.items():
+        if field not in body:
+            continue
+        raw = body[field]
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            abort_problem(422, "Invalid value", f"'{field}' must be a whole number.")
+        if not low <= raw <= high:
+            abort_problem(422, "Out of range",
+                          f"'{field}' must be between {low:,} and {high:,}.")
+        values[field] = raw
+
+    def work():
+        from db.models import ApiKeyTier
+
+        with db_session() as session:
+            assert_superadmin(load_user(session, user_id))
+            row = (session.query(ApiKeyTier)
+                   .filter(ApiKeyTier.tier_key == tier_key).first())
+            before = _tier_row(row) if row is not None else None
+
+            if row is None:
+                missing = [f for f in _TIER_BOUNDS if f not in values]
+                if missing:
+                    abort_problem(422, "Incomplete tier",
+                                  "A new tier needs every limit: "
+                                  + ", ".join(sorted(missing)) + ".")
+                row = ApiKeyTier(
+                    tier_key=tier_key,
+                    display_name=str(body.get("display_name") or tier_key)[:64],
+                    enabled=bool(body.get("enabled", True)),
+                    sort_order=int(body.get("sort_order") or 0),
+                    **values,
+                )
+                session.add(row)
+            else:
+                for field, value in values.items():
+                    setattr(row, field, value)
+                if "display_name" in body:
+                    row.display_name = str(body["display_name"])[:64]
+                if "enabled" in body:
+                    row.enabled = bool(body["enabled"])
+                if "sort_order" in body:
+                    row.sort_order = int(body["sort_order"] or 0)
+            session.commit()
+            return before, _tier_row(row)
+
+    before, after = await asyncio.to_thread(work)
+    _audit(user_id, "api_key_tier.put", tier_key,
+           before=json.dumps(before) if before else None, after=json.dumps(after))
+    return jsonify(after)
+
+
+@api_keys_bp.route("/admin/api-key-tiers/<tier_key>", methods=["DELETE"])
+async def admin_delete_tier(tier_key: str):
+    """Remove a tier — refused while any live key still sits on it.
+
+    A key whose tier vanished falls back to the hard floor in
+    ``db.api_keys.effective_limits``, which would silently throttle a consumer
+    to a fraction of what they were granted. Move the keys first.
+    """
+    user_id = current_user_id()
+
+    def work():
+        from db.models import ApiKey, ApiKeyTier
+
+        with db_session() as session:
+            assert_superadmin(load_user(session, user_id))
+            row = (session.query(ApiKeyTier)
+                   .filter(ApiKeyTier.tier_key == tier_key).first())
+            if row is None:
+                return "missing", None
+            live = (session.query(ApiKey)
+                    .filter(ApiKey.tier_key == tier_key,
+                            ApiKey.revoked_at.is_(None)).count())
+            if live:
+                return "in_use", live
+            before = _tier_row(row)
+            session.delete(row)
+            session.commit()
+            return "deleted", before
+
+    outcome, detail = await asyncio.to_thread(work)
+    if outcome == "missing":
+        abort_problem(404, "Not Found", f"No tier '{tier_key}'.")
+    if outcome == "in_use":
+        abort_problem(409, "Tier in use",
+                      f"{detail} active key(s) still use '{tier_key}'. Move them to "
+                      "another tier first, or disable this one instead of deleting it.")
+    _audit(user_id, "api_key_tier.delete", tier_key, before=json.dumps(detail))
+    return jsonify({"ok": True})
