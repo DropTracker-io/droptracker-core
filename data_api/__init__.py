@@ -31,11 +31,15 @@ def create_app() -> Quart:
     app = Quart(__name__)
     app.config["JSON_SORT_KEYS"] = False
 
+    from data_api.routes.groups import groups_bp
     from data_api.routes.health import health_bp
     from data_api.routes.meta import meta_bp
+    from data_api.routes.players import players_bp
 
     app.register_blueprint(health_bp, url_prefix=API_PREFIX)
     app.register_blueprint(meta_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(players_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(groups_bp, url_prefix=API_PREFIX)
 
     @app.before_request
     async def _authenticate():
