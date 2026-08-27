@@ -99,9 +99,11 @@ def effective_limits(row, tier_row) -> dict:
     fallbacks are deliberately the floor, not a failure — a dangling tier must
     never grant unlimited access.
     """
+    # Half the entry tier: a key whose tier row vanished still works, but on
+    # noticeably less than the cheapest real tier grants.
     fallback = {
         "requests_per_min": 30,
-        "cost_units_per_min": 100,
+        "cost_units_per_min": 75_000,
         "requests_per_day": 5_000,
         "max_concurrency": 2,
     }

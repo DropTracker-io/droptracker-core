@@ -78,10 +78,22 @@ class TestCostModel:
         assert sect.cost_of(["identity"], 1) >= 1
         assert sect.cost_of([], 0) >= 1
 
-    def test_a_full_group_page_outprices_the_standard_tier(self):
-        # 'standard' allows 300 cost units/min. Asking for everything about a
-        # 100-player page must be refused rather than executed.
-        assert sect.cost_of(sect.ALL_SECTION_KEYS, 100) > 300
+    def test_a_full_400_member_sweep_fits_the_entry_tier(self):
+        # The sizing case the budgets were set from: a clan pulling everything
+        # about a 400-member roster. The page cap makes that 4 requests, and
+        # the whole sweep has to fit inside one minute on 'standard'
+        # (150,000 cost units) or the entry tier cannot do the job it exists
+        # for. See alembic dapi2_recalibrate_tiers.
+        sweep = sect.cost_of(sect.ALL_SECTION_KEYS, 100) * 4
+        assert sweep <= 150_000, sweep
+
+    def test_the_two_heavy_sections_dominate_the_price(self):
+        # Measured: clog_slots and loot_items are ~475x and ~357x the cheapest
+        # section. If a change ever makes them comparable to the rest, the
+        # weights have drifted from the measurement and need re-taking.
+        heavy = sect.REGISTRY["clog_slots"].cost + sect.REGISTRY["loot_items"].cost
+        everything = sum(sect.REGISTRY[k].cost for k in sect.ALL_SECTION_KEYS)
+        assert heavy > everything * 0.7, (heavy, everything)
 
 
 class TestTimestampCoercion:
@@ -134,3 +146,40 @@ class TestRegistryIntegrity:
         source = (_ROOT / "data_api" / "sections.py").read_text()
         body = source.split("# ── loaders", 1)[1]
         assert not re.search(r"partition\s*=\s*:", body, re.IGNORECASE)
+
+
+class TestClogSlotsShape:
+    """The compact collection-log encoding.
+
+    61% of slots have quantity 1, so the payload repeats that key hundreds of
+    thousands of times in the naive shape. The compact form is an id array
+    plus a sparse map, and "absent means 1" is the contract consumers rely on.
+    """
+
+    def _rows(self):
+        # (player_id, item_id, quantity) as the driver returns them.
+        return [(7, 100, 1), (7, 200, 5), (7, 300, 1), (9, 100, 1)]
+
+    def _load(self, rows):
+        class _Session:
+            def execute(self, *_a, **_k):
+                return rows
+
+        return sect._load_clog_slots(_Session(), [7, 9], {})
+
+    def test_items_are_a_plain_sorted_id_array(self):
+        out = self._load(self._rows())
+        assert out[7]["items"] == [100, 200, 300]
+        assert out[9]["items"] == [100]
+
+    def test_only_quantities_other_than_one_are_carried(self):
+        out = self._load(self._rows())
+        # 200 had quantity 5; the two quantity-1 slots are absent entirely.
+        assert out[7]["quantities"] == {"200": 5}
+        assert out[9]["quantities"] == {}
+
+    def test_a_zero_quantity_is_recorded_not_dropped(self):
+        # Absent means 1, so a genuine 0 has to be stated explicitly or it
+        # would read back as 1.
+        out = self._load([(7, 100, 0)])
+        assert out[7]["quantities"] == {"100": 0}

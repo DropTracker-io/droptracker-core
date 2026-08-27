@@ -8,13 +8,19 @@ keep in sync, and no N+1: a loader issues one query for the whole page.
 
 Each section declares a **cost weight**. A request's cost is
 ``len(player_ids) * sum(weight of each requested section)``, and that number
-is what the rate limiter budgets against (``data_api.limits``). Weights are
-ordered by how much work the data actually is:
+is what the rate limiter budgets against (``data_api.limits``).
 
-    1  — a Redis GET that is already batched
-    2  — one indexed row (or short PK range) per player
-    3  — a bounded per-player set (~85 PBs, ~10 recent rows)
-    5  — a rollup aggregation over a date range
+**The weights are measured, not guessed.** One unit is roughly 0.05 ms of
+server work per player, taken from timing every loader over 100 real players
+with warm caches. The first version of this table was ordered by intuition on
+a 1-8 scale; the real spread turned out to be 475:1, which meant the two
+sections that actually cost something were priced like the ones that cost
+nothing. Re-measure (and re-scale) if a loader's query changes materially —
+`scripts/` has no runner for this, it is a manual benchmark.
+
+Production is roughly twice as slow as the box these were taken on, which the
+tier budgets account for rather than the weights: the weights only need to be
+right *relative to each other*.
 
 Nothing here may touch ``drops``. The 207M-row table has exactly one safe
 shape (``player_id`` + ``date_added`` range, index forced) and it does not
@@ -392,33 +398,33 @@ def _load_loot_items(session, player_ids: List[int], ctx) -> Dict[int, dict]:
 _SECTIONS = (
     Section("identity", 0, _load_identity,
             "Name, account type, combat/total level, EHB, last sync."),
-    Section("stats", 2, _load_stats,
+    Section("stats", 1, _load_stats,
             "Experience in all 24 skills, and their total."),
-    Section("clog", 2, _load_clog,
+    Section("clog", 8, _load_clog,
             "Collection log progress: obtained / total, and rows we track."),
-    Section("clog_slots", 8, _load_clog_slots,
+    Section("clog_slots", 161, _load_clog_slots,
             "Every recorded collection log slot with its quantity (~1.5k rows/player)."),
-    Section("combat_achievements", 2, _load_combat_achievements,
+    Section("combat_achievements", 1, _load_combat_achievements,
             "Combat achievement tasks completed and points."),
-    Section("quests", 2, _load_quests,
+    Section("quests", 4, _load_quests,
             "Quest counts by state."),
-    Section("diaries", 2, _load_diaries,
+    Section("diaries", 8, _load_diaries,
             "Achievement diary completion counts per area and tier."),
-    Section("personal_bests", 3, _load_personal_bests,
+    Section("personal_bests", 8, _load_personal_bests,
             "Best time per boss and team-size bracket."),
-    Section("points", 2, _load_points,
+    Section("points", 8, _load_points,
             "Lifetime points earned."),
-    Section("badges", 2, _load_badges,
+    Section("badges", 1, _load_badges,
             "Currently held badges."),
-    Section("pets", 2, _load_pets,
+    Section("pets", 3, _load_pets,
             "Pets received."),
-    Section("deaths", 2, _load_deaths,
+    Section("deaths", 3, _load_deaths,
             "Recorded death count and most recent."),
     Section("loot", 1, _load_loot,
             "Headline loot GP this month and all time (matches the leaderboard)."),
-    Section("loot_npcs", 5, _load_loot_npcs,
+    Section("loot_npcs", 16, _load_loot_npcs,
             "Top NPCs by loot value over the requested window."),
-    Section("loot_items", 5, _load_loot_items,
+    Section("loot_items", 121, _load_loot_items,
             "Top items by loot value over the requested window."),
 )
 
