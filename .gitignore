@@ -46,6 +46,11 @@ __pycache__/
 *.pyx
 venv/*
 oldvenv/*
+# Also match a *symlink* named venv: 'venv/*' only matches paths inside a real
+# directory, so a symlink slips through, gets committed, and then replaces the
+# real venv on every other checkout with a link to itself.
+/venv
+/oldvenv
 *.zip
 *.png
 *.jpg
