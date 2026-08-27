@@ -535,6 +535,20 @@ def private_no_store(response):
     return response
 
 
+# Submissions carry whatever URL the proof ended up at, and the older ones point
+# at the Discord CDN, whose links expire. Serving one of those gives a player a
+# broken image where a screenshot should be, so only URLs we host ourselves are
+# handed out.
+_PROOF_PREFIXES = ("https://www.droptracker.io/", "https://droptracker.io/")
+
+
+def proof_url(url) -> Optional[str]:
+    """``url`` if it is a screenshot we still host, otherwise ``None``."""
+    if isinstance(url, str) and url.startswith(_PROOF_PREFIXES):
+        return url
+    return None
+
+
 def parse_page(request, default_limit: int = 25, max_limit: int = 100) -> tuple[int, int]:
     try:
         page = max(1, int(request.args.get("page", 1)))

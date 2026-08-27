@@ -8,6 +8,15 @@ collection log page, which is how the problem was noticed.
 Only rows whose item id appears in **no** page of the current structure are
 removed, so a real slot can never be deleted by this.
 
+**Think twice before running it now.** The sync no longer filters what it
+stores, precisely because the structure was wrong about a hundred slots and the
+filter was destroying the game's correct answer on the way in. Rows the
+structure cannot place are therefore the *evidence* that it is wrong — they are
+what ``scripts.sync_collection_log --audit`` reads to find the right id, and
+what makes a structure correction repair accounts that have already synced.
+Delete them and that goes with them. Run the audit first, and only prune what it
+agrees is not a slot.
+
 Dry-run by default. Re-run the structure sync first if a game update has added
 slots, or this will treat genuinely-new items as unknown:
 

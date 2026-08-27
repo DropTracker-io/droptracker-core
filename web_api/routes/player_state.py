@@ -17,6 +17,7 @@ from quart import Blueprint, jsonify
 
 from db import ItemList, NpcList, PersonalBestEntry, Player
 from db.models import (
+    CollectionLogEntry,
     PersonalBestLoadout,
     PlayerCollectionLogItem,
     PlayerCombatAchievementVarps,
@@ -24,7 +25,7 @@ from db.models import (
     PlayerQuestState,
     PlayerState,
 )
-from web_api.common import db_session, problem, with_cache_headers
+from web_api.common import db_session, problem, proof_url, with_cache_headers
 
 player_state_bp = Blueprint("v1_player_state", __name__)
 
@@ -190,7 +191,7 @@ def _combat_achievements_for(s, player_id: int):
 
 
 def _collection_log_structure(s):
-    """Tabs -> pages -> item ids, from the manifest the wiki sync populates.
+    """Tabs -> pages -> item ids, from the manifest the structure sync populates.
 
     Empty until ``scripts/sync_collection_log.py`` has run; the endpoint reports
     that as ``has_structure: false`` rather than inventing a hierarchy.
@@ -223,6 +224,122 @@ def _item_names(s, item_ids):
     return {r.item_id: r.item_name for r in rows}
 
 
+def _name_key(name):
+    """The form the two name sources can be compared in, or ``None``.
+
+    Our items table and the structure's names disagree on spacing and case often
+    enough that comparing the raw strings loses matches that are plainly the
+    same item ("Trident of the seas" against "Trident of the Seas").
+    """
+    if not isinstance(name, str):
+        return None
+    return " ".join(name.split()).lower() or None
+
+
+def _slot_by_name(slot_ids, item_names, structure_names):
+    """name key -> the one slot it identifies. Ambiguous names map to ``None``.
+
+    Both name sources feed the index because neither covers every slot: a dozen
+    slots have no ``items`` row at all, which is exactly why the structure
+    carries the game's own name for each slot alongside the ids.
+
+    A name that several slots share identifies none of them, and the index says
+    so rather than picking one. "Graceful hood" is two slots, "Ancient page" is
+    twenty-six, "Chompy bird hat" eighteen — guessing would put one player's
+    screenshot on a slot they never filled.
+    """
+    by_name = {}
+    for slot_id in slot_ids:
+        for name in (item_names.get(slot_id), structure_names.get(slot_id)):
+            key = _name_key(name)
+            if key is None:
+                continue
+            if by_name.setdefault(key, slot_id) != slot_id:
+                by_name[key] = None
+    return by_name
+
+
+def _fold_clog_rows(rows):
+    """One ``{"ts", "image_url"}`` from every row recorded against a slot.
+
+    A player can have several rows for one item — clog unlocks are not deduped
+    (the ``notified`` table only guards drops), so a re-sent notification just
+    writes another row. The date comes from the earliest row, because that is
+    when they actually got it; the screenshot comes from the earliest row that
+    *has* one, because the later rows re-announce the same unlock and a
+    screenshot we hold beats a slot showing nothing. Roughly 100 of the ~1,400
+    duplicated player/item pairs in production only have their screenshot on a
+    later row.
+
+    Returns ``None`` when the rows say nothing worth sending.
+    """
+    entries = sorted(
+        ((_epoch(date_added), proof_url(image_url)) for _, date_added, image_url in rows),
+        # Undated rows sort last: they cannot answer "when", and a dated row can.
+        key=lambda entry: (entry[0] is None, entry[0] or 0),
+    )
+    ts = next((t for t, _ in entries if t is not None), None)
+    image = next((img for _, img in entries if img), None)
+    if ts is None and image is None:
+        return None
+    return {"ts": ts, "image_url": image}
+
+
+def _epoch(value):
+    try:
+        return int(value.timestamp())
+    except (AttributeError, OSError, OverflowError, ValueError):
+        return None
+
+
+def collection_details(rows, slot_ids, item_names, structure_names):
+    """slot id -> what a submission can add to that slot, for the few that have one.
+
+    ``rows`` is every ``collection`` row for one player as
+    ``(item_id, date_added, image_url)``. The result is sparse by design: a row
+    exists only for an unlock the plugin announced while the player was running
+    it, and everything older was backfilled by the interface scrape with no date
+    and no screenshot. Most slots therefore have nothing, which is the common
+    case rather than the edge case.
+
+    The mismatch this has to survive: ``collection.item_id`` is not the log's
+    slot id. The plugin resolves the item from the chat line's *name* via
+    ``ItemIDSearch``, which answers with the earliest cache id sharing that
+    name — 764 where the log's "Coal bag" slot is 25627, 4133 where "Crawling
+    hand" is 7975, 766 where "Gem bag" is 25628. Joining on the id alone loses
+    those silently, so a row whose id is not a slot falls back to matching on
+    the item's name, and only when that name identifies exactly one slot.
+
+    An ambiguous name is dropped rather than resolved to its first candidate,
+    which is the whole safety margin here: a screenshot on the wrong slot is far
+    worse than no screenshot at all. Once a name does identify a single slot,
+    its rows simply join that slot's — folding is order-independent, so it makes
+    no difference whether they arrived by id or by name.
+
+    Measured over production's 37,420 screenshot-carrying rows: 36,582 match by
+    id, 752 of the remaining 838 recover uniquely by name, and 86 stay missing.
+    """
+    by_slot = {}
+    unmatched = {}
+    for row in rows:
+        target = by_slot if row[0] in slot_ids else unmatched
+        target.setdefault(row[0], []).append(row)
+
+    if unmatched:
+        by_name = _slot_by_name(slot_ids, item_names, structure_names)
+        for item_id, item_rows in unmatched.items():
+            slot_id = by_name.get(_name_key(item_names.get(item_id)))
+            if slot_id is not None:
+                by_slot.setdefault(slot_id, []).extend(item_rows)
+
+    details = {}
+    for slot_id, slot_rows in by_slot.items():
+        detail = _fold_clog_rows(slot_rows)
+        if detail is not None:
+            details[slot_id] = detail
+    return details
+
+
 @player_state_bp.get("/players/<int:player_id>/collection-log")
 async def collection_log(player_id: int):
     """The player's collection log, grouped into the game's tabs and pages.
@@ -252,14 +369,39 @@ async def collection_log(player_id: int):
             }
 
             # Every id the log actually contains, so anything else can be
-            # ignored and so names can be fetched in one query.
-            defined_ids = {
-                item_id
-                for tab in structure
-                for page in tab.get("pages", [])
-                for item_id in page.get("items", [])
-            }
-            names = _item_names(s, defined_ids)
+            # ignored and so names can be fetched in one query. The game's name
+            # for each slot is collected in the same pass: it is both the
+            # display fallback for ids our items table has no row for and one
+            # half of the name index the detail matcher needs.
+            defined_ids = set()
+            structure_names = {}
+            for tab in structure:
+                for page in tab.get("pages", []):
+                    page_names = page.get("names") or []
+                    for index, item_id in enumerate(page.get("items", [])):
+                        defined_ids.add(item_id)
+                        if index < len(page_names):
+                            structure_names.setdefault(item_id, page_names[index])
+
+            # The whole player's submission history in one read — ~150-900 rows
+            # against ~1,900 slots, so indexing it in memory is far cheaper than
+            # asking per slot. Only the three columns the detail needs, since
+            # nothing here wants a hydrated ORM object.
+            clog_rows = (
+                s.query(
+                    CollectionLogEntry.item_id,
+                    CollectionLogEntry.date_added,
+                    CollectionLogEntry.image_url,
+                )
+                .filter(CollectionLogEntry.player_id == player_id)
+                .all()
+            )
+
+            # Submitted ids join the lookup rather than forming a second query:
+            # the name fallback needs a name for the id the plugin recorded,
+            # which is by definition an id the structure does not define.
+            names = _item_names(s, defined_ids | {row[0] for row in clog_rows})
+            details = collection_details(clog_rows, defined_ids, names, structure_names)
 
             tabs = []
             total_slots = 0
@@ -269,13 +411,19 @@ async def collection_log(player_id: int):
                 for page in tab.get("pages", []):
                     items = []
                     page_obtained = 0
-                    for item_id in page.get("items", []):
+                    # The structure carries the game's name for each slot,
+                    # which covers the ids our items table has no row for yet —
+                    # a slot reading "Item 30805" is worse than one reading
+                    # "Dossier".
+                    page_names = page.get("names") or []
+                    for index, item_id in enumerate(page.get("items", [])):
                         quantity = obtained.get(item_id, 0)
                         if quantity > 0:
                             page_obtained += 1
+                        fallback = page_names[index] if index < len(page_names) else None
                         items.append({
                             "item_id": item_id,
-                            "name": names.get(item_id) or f"Item {item_id}",
+                            "name": names.get(item_id) or fallback or f"Item {item_id}",
                             "quantity": quantity,
                             "obtained": quantity > 0,
                         })
@@ -302,6 +450,13 @@ async def collection_log(player_id: int):
             # surfacing rather than hiding.
             unknown = len([i for i in obtained if i not in defined_ids])
 
+            # Distinct items, which is what the game's own counter counts. The
+            # page totals above count slot *instances*, and plenty of items sit
+            # on several pages (a dragon pickaxe is on six), so ``obtained`` is
+            # always the larger number and comparing it against the game's
+            # figure would say a complete log was still missing things.
+            obtained_unique = len([i for i in obtained if i in defined_ids])
+
             return {
                 "player_id": player_id,
                 # What the game itself reports, which stays right even when our
@@ -309,11 +464,20 @@ async def collection_log(player_id: int):
                 "slots": state.clog_slots if state else None,
                 "slots_total": state.clog_slots_total if state else None,
                 # What we can actually account for against the known structure.
+                # ``obtained``/``total`` count slot instances (what the pages
+                # add up to); ``obtained_unique`` counts items, which is the
+                # only figure comparable with ``slots``.
                 "obtained": total_obtained,
+                "obtained_unique": obtained_unique,
                 "total": total_slots,
                 "unknown_recorded": unknown,
                 "has_structure": bool(structure),
                 "tabs": tabs,
+                # Kept beside the tabs rather than on each slot: only a couple
+                # of hundred slots have a submission behind them, so two extra
+                # (mostly null) fields on all ~1,900 would have added ~15% to a
+                # 145 KB payload to say "nothing" 1,700 times.
+                "details": {str(slot_id): d for slot_id, d in details.items()},
                 "last_synced": state.last_synced_at.isoformat() if state and state.last_synced_at else None,
                 "has_synced": state is not None,
             }

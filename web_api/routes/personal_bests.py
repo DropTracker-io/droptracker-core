@@ -31,6 +31,7 @@ from web_api.common import (
     cache_set,
     db_session,
     hidden_player_ids,
+    proof_url,
     with_cache_headers,
 )
 
@@ -61,9 +62,6 @@ _IMPLAUSIBLE_FACTOR = 4
 
 _DATASET_TTL_GLOBAL = 300.0
 _DATASET_TTL_GROUP = 120.0
-
-# Only surface proof screenshots we host (Discord CDN links expire).
-_PROOF_PREFIXES = ("https://www.droptracker.io/", "https://droptracker.io/")
 
 _RANGE_RE = re.compile(r"^(\d+)\s*-\s*(\d+)$")
 _PLUS_RE = re.compile(r"^(\d+)\s*\+$")
@@ -135,12 +133,6 @@ def team_size_label(ts: str) -> str:
     return f"{ts} players"
 
 
-def _proof_url(url) -> str | None:
-    if isinstance(url, str) and url.startswith(_PROOF_PREFIXES):
-        return url
-    return None
-
-
 def _build_dataset(group_id: int | None) -> dict:
     """{npc_id: {name, entry_count, player_count, boards{ts: [entry…]}}}.
 
@@ -188,7 +180,7 @@ def _build_dataset(group_id: int | None) -> dict:
                 date_ts = int(date_added.timestamp()) if date_added else None
             except Exception:
                 date_ts = None
-            board[int(pid)] = (int(pb_ms), date_ts, _proof_url(image_url))
+            board[int(pid)] = (int(pb_ms), date_ts, proof_url(image_url))
 
     for (npc_id, ts), by_player in best.items():
         entries = sorted(

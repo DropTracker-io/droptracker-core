@@ -18,6 +18,7 @@ from services.state_sync import (
     parse_diary_tiers,
     parse_int_map,
     parse_skills,
+    repair_name_derived_items,
     serialize_varps,
     snapshot_summary,
 )
@@ -109,6 +110,62 @@ class TestCollectionLogDiff:
 
     def test_boundary_does_not_suppress_a_small_first_batch(self):
         assert is_late_collection_log_init(known_count=LATE_INIT_KNOWN_ITEMS_MAX - 1, new_count=1) is False
+
+
+class TestNameDerivedItemRepair:
+    """The plugin resolves a single unlock from its chat message, by *name*.
+
+    RuneLite's item cache answers with the earliest id sharing that name, which
+    for a duplicated name is the wrong item — the collection log's Coal bag is
+    25627, the cache says 764. The unlock is real; only the id is wrong.
+    """
+
+    slots = {25627, 12921}
+    by_name = {"coal bag": 25627, "pet snakeling": 12921}
+
+    def test_moves_the_quantity_onto_the_real_slot(self):
+        items = {764: 1}
+        assert repair_name_derived_items(items, self.slots, self.by_name,
+                                         {764: "Coal bag"}) == 1
+        assert items == {25627: 1}
+
+    def test_a_real_quantity_already_recorded_wins(self):
+        # The unlock path always says 1; a full read may have said 40. Repairing
+        # must not talk a stack back down to one.
+        items = {25627: 40, 764: 1}
+        assert repair_name_derived_items(items, self.slots, self.by_name,
+                                         {764: "Coal bag"}) == 1
+        assert items == {25627: 40}
+
+    def test_an_unexplained_id_is_left_alone(self):
+        # A game update adds slots before we ingest them. Storing the id as
+        # reported is what lets a structure refresh repair it later.
+        items = {30805: 1}
+        assert repair_name_derived_items(items, self.slots, self.by_name,
+                                         {30805: "Dossier"}) == 0
+        assert items == {30805: 1}
+
+    def test_an_unnamed_id_is_left_alone(self):
+        items = {99999: 1}
+        assert repair_name_derived_items(items, self.slots, self.by_name, {}) == 0
+        assert items == {99999: 1}
+
+    def test_defined_slots_are_never_touched(self):
+        items = {25627: 3, 12921: 1}
+        assert repair_name_derived_items(items, self.slots, self.by_name,
+                                         {25627: "Coal bag"}) == 0
+        assert items == {25627: 3, 12921: 1}
+
+    def test_does_nothing_without_a_structure(self):
+        items = {764: 1}
+        assert repair_name_derived_items(items, set(), {}, {764: "Coal bag"}) == 0
+        assert items == {764: 1}
+
+    def test_matching_ignores_case_and_padding(self):
+        items = {764: 1}
+        assert repair_name_derived_items(items, self.slots, self.by_name,
+                                         {764: "  coal BAG "}) == 1
+        assert items == {25627: 1}
 
 
 class TestQuestDiff:

@@ -21,6 +21,9 @@ latest values.
 Sizing note before this ships to production: ``player_clog_items`` is up to
 ~1,500 rows per player who opens their collection log. Do the arithmetic against
 the real player count — the dev box carries a 7-day slice and will understate it.
+The sync stores ids the collection log structure does not define as well (they
+are how a wrong id in the structure is found), so the real ceiling is the
+structure's size plus ``api.routes.state_sync.MAX_UNDEFINED_ITEMS``.
 """
 from __future__ import annotations
 

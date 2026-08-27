@@ -152,6 +152,46 @@ def new_collection_log_items(previous: Dict[int, int],
             if qty > 0 and item_id not in previous]
 
 
+def repair_name_derived_items(items: Dict[int, int], known_slots: set,
+                              slot_by_name: Dict[str, int],
+                              names: Dict[int, str]) -> int:
+    """Move a name-derived unlock id onto the slot it was meant to be.
+
+    A full collection log read reports ids straight from the game and is always
+    right. A *single* unlock is announced by a chat message carrying only the
+    item's name, which the plugin resolves against RuneLite's item cache — and
+    that returns the earliest id sharing the name, which for a duplicated name
+    is the wrong item. The collection log's Coal bag is 25627; the item cache
+    answers 764.
+
+    Those ids are real items with real names, so the unlock itself is not in
+    doubt — only which id records it. Where the structure has exactly one slot
+    of that name, the quantity goes there. Anything else is left alone: an id
+    the structure cannot explain is more likely a game update we have not
+    ingested than a mistake, and inventing a slot for it would be worse than
+    storing it as reported.
+
+    ``slot_by_name`` must already be restricted to unambiguous names — every
+    Graceful piece and all the decorative armour sit on several slots at once,
+    and a name cannot say which of them a player unlocked.
+
+    Returns how many were moved. Mutates ``items``.
+    """
+    if not slot_by_name or not known_slots:
+        return 0
+
+    repaired = 0
+    for item_id in [i for i in items if i not in known_slots]:
+        slot_id = slot_by_name.get((names.get(item_id) or "").strip().lower())
+        if slot_id is None or slot_id == item_id:
+            continue
+        # Quantities from this path are always 1 (an unlock, not a count), so a
+        # real quantity already recorded for the slot must win.
+        items[slot_id] = max(items.get(slot_id, 0), items.pop(item_id))
+        repaired += 1
+    return repaired
+
+
 def is_late_collection_log_init(known_count: int, new_count: int) -> bool:
     """True when a batch of "new" items is really a first full read.
 

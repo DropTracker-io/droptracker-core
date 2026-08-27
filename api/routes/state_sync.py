@@ -25,6 +25,7 @@ traffic first.
 import asyncio
 import json
 import os
+import time
 from datetime import datetime
 
 from quart import Blueprint, jsonify, request
@@ -51,6 +52,7 @@ from services.state_sync import (
     parse_diary_tiers,
     parse_int_map,
     parse_skills,
+    repair_name_derived_items,
     serialize_varps,
     snapshot_summary,
 )
@@ -64,6 +66,13 @@ _SYNC_EMIT_EVENTS = os.getenv("STATE_SYNC_EMIT_EVENTS", "false").lower() == "tru
 
 # A snapshot is a few hundred KB at worst; anything larger is not a real client.
 _MAX_BODY_BYTES = 2 * 1024 * 1024
+
+# How many reported slots the structure cannot place are kept per snapshot.
+# They are worth keeping — that is how a wrong id in the structure gets found
+# and repaired — but they are also the one part of a snapshot the structure
+# cannot bound, so they get an allowance rather than free rein. Accounts on a
+# correct structure report a handful.
+MAX_UNDEFINED_ITEMS = 200
 
 
 @state_sync_bp.post("/state/sync")
@@ -103,13 +112,29 @@ async def state_sync():
 
 
 # Reference data, so it is read once per process rather than per snapshot.
+# Cached for a few minutes rather than forever: re-running the structure sync
+# used to leave every long-lived API worker on the old slot set until it was
+# restarted, which made a structure fix look like it had not worked.
 _KNOWN_SLOTS_CACHE = None
+_KNOWN_SLOTS_CACHED_AT = 0.0
+_KNOWN_SLOTS_TTL_SECONDS = 300
 
 
 def _known_collection_log_slots(db_session):
-    """Every item id the collection log actually contains, or None if unknown."""
-    global _KNOWN_SLOTS_CACHE
-    if _KNOWN_SLOTS_CACHE is not None:
+    """``(slot ids, name -> the one slot with that name)`` from the structure.
+
+    The slot set is used to *report* how much of a snapshot the structure cannot
+    place; nothing is filtered on it — see ``_apply_snapshot``. The name index
+    is what repairs the plugin's name-derived unlock ids, and deliberately holds
+    only names belonging to exactly one slot: twenty-three names (every Graceful
+    piece, all the decorative armour) sit on several slots at once, and a name
+    cannot say which of them a player unlocked.
+
+    Both are empty when the structure is unknown.
+    """
+    global _KNOWN_SLOTS_CACHE, _KNOWN_SLOTS_CACHED_AT
+    now = time.monotonic()
+    if _KNOWN_SLOTS_CACHE is not None and now - _KNOWN_SLOTS_CACHED_AT < _KNOWN_SLOTS_TTL_SECONDS:
         return _KNOWN_SLOTS_CACHE
 
     from db.models import PluginManifestSection
@@ -120,18 +145,43 @@ def _known_collection_log_slots(db_session):
         .first()
     )
     slots = set()
+    by_name = {}
     if row is not None:
         try:
             for tab in json.loads(row.payload):
                 for page in tab.get("pages", []):
-                    for item_id in page.get("items", []):
-                        if isinstance(item_id, int):
-                            slots.add(item_id)
+                    names = page.get("names") or []
+                    for index, item_id in enumerate(page.get("items", [])):
+                        if not isinstance(item_id, int):
+                            continue
+                        slots.add(item_id)
+                        name = names[index] if index < len(names) else ""
+                        if isinstance(name, str) and name.strip():
+                            by_name.setdefault(name.strip().lower(), set()).add(item_id)
         except (TypeError, ValueError):
-            slots = set()
+            slots, by_name = set(), {}
 
-    _KNOWN_SLOTS_CACHE = slots
-    return slots
+    unique_by_name = {name: ids.pop() for name, ids in by_name.items() if len(ids) == 1}
+
+    _KNOWN_SLOTS_CACHE = (slots, unique_by_name)
+    _KNOWN_SLOTS_CACHED_AT = now
+    return _KNOWN_SLOTS_CACHE
+
+
+def _name_lookup(db_session, item_ids):
+    """Item id -> name, for the handful of ids the structure cannot place."""
+    if not item_ids:
+        return {}
+
+    from db.models import ItemList
+
+    return {
+        row[0]: row[1]
+        for row in db_session.query(ItemList.item_id, ItemList.item_name)
+        .filter(ItemList.item_id.in_(list(item_ids)))
+        .all()
+        if row[1]
+    }
 
 
 def _resolve_player_id(db_session, player_name, acc_hash):
@@ -154,14 +204,39 @@ def _apply_snapshot(player_name, acc_hash, snapshot):
             return None
 
         items = parse_int_map(snapshot.get("items"), limit=MAX_ITEMS, min_key=1, min_value=1)
-        # Keep only real collection log slots. A client reports whatever the
-        # interface transmitted, which has included things that are not slots at
-        # all; storing those put coins and ordinary equipment on players'
-        # collection log pages. Skipped entirely when the structure is unknown,
-        # so a stale manifest cannot silently reject a whole log.
-        known_slots = _known_collection_log_slots(db_session)
+        # Everything the client reports is stored, including ids the structure
+        # does not define. This used to filter against the structure, on the
+        # grounds that a client had once reported things that are not slots —
+        # but back then the structure was scraped from the wiki and was *wrong*
+        # about ~100 slots (variant ids: the log holds the uncharged Alchemist's
+        # amulet, the empty Master scroll book), so the filter was throwing away
+        # correct data from the game and leaving players' pages permanently
+        # short. The structure now comes from the game cache and no longer
+        # guesses, but the reasoning outlives that fix: a game update adds slots
+        # before we ingest them, and the rendering side already ignores
+        # undefined ids, so nothing reaches a collection log page that does not
+        # belong on one. Keeping the rows means a structure refresh repairs
+        # everyone who has already synced instead of only those who open their
+        # log again afterwards.
+        #
+        # The structure is still what bounds the table, though: everything it
+        # defines is kept, and only a small allowance of anything else, so a
+        # client that reports five thousand invented ids cannot write five
+        # thousand rows. Real accounts land two to four over.
+        known_slots, slot_by_name = _known_collection_log_slots(db_session)
+        undefined_items = 0
+        repaired_items = 0
         if known_slots:
-            items = {i: q for i, q in items.items() if i in known_slots}
+            repaired_items = repair_name_derived_items(
+                items,
+                known_slots,
+                slot_by_name,
+                _name_lookup(db_session, [i for i in items if i not in known_slots]),
+            )
+            undefined = [i for i in items if i not in known_slots]
+            undefined_items = len(undefined)
+            for item_id in undefined[MAX_UNDEFINED_ITEMS:]:
+                del items[item_id]
         quests = parse_int_map(snapshot.get("quests"), limit=MAX_QUESTS, min_key=0, min_value=0)
         # min_value=None: a varp with its top bit set arrives as a negative
         # signed int, and dropping those would lose 32 completed tasks each.
@@ -217,6 +292,13 @@ def _apply_snapshot(player_name, acc_hash, snapshot):
             "quests_completed": len(finished_quests),
             "diary_tiers_improved": len(improved_diaries),
             "late_clog_init": late_init,
+            # Slots the game reported that the structure cannot place. A steady
+            # non-zero figure here is the structure being wrong, not the client:
+            # see scripts.sync_collection_log --audit.
+            "undefined_items": undefined_items,
+            # Name-derived unlock ids moved onto the slot they meant; zero once
+            # clients resolve them against the log's own slots.
+            "repaired_items": repaired_items,
         }
         print(
             f"/state/sync player={player_id} "
