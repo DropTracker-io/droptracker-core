@@ -5,6 +5,7 @@ This module handles all interactions with the OSRS Wiki's Bucket API,
 replacing the deprecated Semantic MediaWiki (SMW) API.
 """
 
+import asyncio
 import json
 import html
 from datetime import date, datetime
@@ -254,7 +255,70 @@ class SemanticAPI:
         """
         item_id = await self.get_item_id(item_name)
         return item_id is not None
-    
+
+    # Combat achievement tasks are enumerable, unlike drop sources, so this
+    # fetches the whole table once rather than querying per name. There are
+    # ~650 of them and the list only moves on a game update; the caller
+    # (utils/ca_tasks.py) caches it for a week.
+    CA_TASK_PAGE_SIZE = 500
+
+    async def get_combat_achievement_names(self) -> List[str]:
+        """Every combat achievement task name the wiki knows.
+
+        Empty list on any failure — the caller must read that as "could not
+        confirm", never as "no such task", because an empty answer here would
+        otherwise invalidate every task in the game.
+
+        Paginates explicitly: an unlimited Bucket query silently returns the
+        API's default 500 rows with no truncation flag (the same trap
+        documented on DROPSLINE_ROW_LIMIT), and the task list is already past
+        that.
+        """
+        names: List[str] = []
+        seen = set()
+        offset = 0
+        try:
+            while True:
+                query = (
+                    "bucket('combat_achievement')"
+                    ".select('name')"
+                    f".limit({self.CA_TASK_PAGE_SIZE}).offset({offset}).run()"
+                )
+                result = await self._bucket_query(query)
+                if 'bucket' not in result:
+                    # Transport or API error — distinguishable from an empty
+                    # page, and it must not look like the end of the table.
+                    print(f"CA task fetch failed at offset {offset}")
+                    return []
+                rows = result.get('bucket') or []
+                for row in rows:
+                    value = row.get('name')
+                    if isinstance(value, list):
+                        value = value[0] if value else None
+                    if not value:
+                        continue
+                    name = html.unescape(str(value)).strip()
+                    if name and name not in seen:
+                        seen.add(name)
+                        names.append(name)
+                if len(rows) < self.CA_TASK_PAGE_SIZE:
+                    break
+                offset += self.CA_TASK_PAGE_SIZE
+                # Courtesy gap between pages, as in scripts/sync_wiki_drops.py.
+                await asyncio.sleep(1.0)
+                if offset > 20000:
+                    # Guard against a pagination bug (an ignored offset, a page
+                    # that is always full) turning into a crawl. Return nothing
+                    # rather than what we have: a truncated list is worse than
+                    # no list, because the caller caches it for a week and
+                    # every task past the cut then looks like it doesn't exist.
+                    print("CA task fetch aborted: implausible row count")
+                    return []
+        except Exception as e:
+            print(f"Error fetching combat achievement names: {e}")
+            return []
+        return names
+
     @classmethod
     def _parse_wiki_release_date(cls, value: Any) -> Optional[date]:
         """Parse an infobox ``release_date`` cell ("28 August 2024") to a date.

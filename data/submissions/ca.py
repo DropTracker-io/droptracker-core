@@ -20,7 +20,9 @@ from .common import (
     envelope_from_plugin,
     SEASONAL_WORLD_TYPE,
     SeasonalCombatAchievementEntry,
+    redis_client,
 )
+from utils.ca_tasks import note_unverified, resolve_task_name
 
 
 async def ca_processor(ca_data, external_session=None, world_type="main"):
@@ -38,7 +40,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
     points_awarded = ca_data["points"]
     points_total = ca_data["total_points"]
     completed_tier = ca_data.get("completed", None)
-    task_name = ca_data.get("task", None)
+    raw_task_name = ca_data.get("task", None)
     tier = ca_data["tier"]
     auth_key = ca_data.get("auth_key", "")
     attachment_url = ca_data.get("attachment_url", None)
@@ -51,8 +53,9 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
     video_url = ca_data.get("video_url")
     plugin_version = ca_data.get("p_v", None)
     notice = ""
+
     debug_print(
-        f"Extracted CA data - Player: {player_name}, Task: {task_name}, Tier: {tier}"
+        f"Extracted CA data - Player: {player_name}, Task: {raw_task_name}, Tier: {tier}"
     )
     debug_print(
         f"Points awarded: {points_awarded}, Total points: {points_total}, Completed tier: {completed_tier}"
@@ -79,6 +82,34 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
             f"Combat Achievement entry with Unique ID {unique_id} already exists in the database, aborting"
         )
         return
+    # The task name is this submission's identity — the "already completed?"
+    # lookup just below matches on it — so it is folded to a canonical form
+    # first. Jagex wraps the name in client markup (``@ach_comp@`` since
+    # 2026-08-26), and an unstripped token makes every completion look new: a
+    # duplicate row, a duplicate notification, a broken wiki link in the embed.
+    # Resolution never rejects; see utils/ca_tasks.py.
+    #
+    # Deliberately AFTER the auth and duplicate checks. /webhook enqueues in
+    # queue mode without authenticating, so everything above this line is the
+    # only thing standing between an anonymous poster and the catalog lookup
+    # and the unverified-name counter.
+    resolved = await resolve_task_name(
+        raw_task_name, session=session, cache=getattr(redis_client, "client", None)
+    )
+    task_name = resolved.name
+    if not task_name:
+        # Nothing but markup or whitespace was submitted. There is no task here
+        # to record, and storing the raw string would put the markup back.
+        debug_print(f"CA submission has no usable task name ({raw_task_name!r}), aborting")
+        return
+    if resolved.cleaned:
+        debug_print(f"Cleaned CA task name: {raw_task_name!r} -> {task_name!r}")
+    if not resolved.verified:
+        # Recorded, not rejected: the registry lags every game update, so an
+        # unknown name is far more often new content than it is junk.
+        note_unverified(getattr(redis_client, "client", None), task_name)
+        debug_print(f"CA task in neither the catalog nor the wiki: {task_name!r}")
+
     from db import CombatAchievementEntry
 
     ca_model = SeasonalCombatAchievementEntry if is_seasonal else CombatAchievementEntry

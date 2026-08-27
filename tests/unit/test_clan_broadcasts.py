@@ -33,6 +33,28 @@ def test_clean_strips_jagex_metadata_markers():
     assert clean_broadcast_text("CA_ID:1|B:2|X has joined.") == "X has joined."
 
 
+def test_clean_strips_jagex_chat_tokens():
+    """``@token@`` markup is consumed by the client, so the player never sees
+    it — leaving it in makes the Discord mirror say something the game did not.
+    ``@ach_comp@`` arrived with the 2026-08-26 update."""
+    assert clean_broadcast_text(
+        "CA_ID:112|hype mann has completed a master combat task: @ach_comp@Smite Fight."
+    ) == "hype mann has completed a master combat task: Smite Fight."
+    assert clean_broadcast_text("@red@X has joined.") == "X has joined."
+
+
+def test_clean_leaves_unlisted_at_text_alone():
+    """The token list is an allowlist because this also cleans player-typed
+    clan chat: an unstripped token is a blemish, but eating a player's words
+    between two ``@`` is a bug."""
+    for text in (
+        "meet me @ ge",
+        "trade @Zezima@ for it",
+        "@ nobody @",
+    ):
+        assert clean_broadcast_text(text) == text
+
+
 def test_clean_leaves_broadcast_prose_alone():
     """The marker pattern must not bite real text that merely contains a pipe,
     a colon or digits — a mangled line is worse than an unstripped one."""

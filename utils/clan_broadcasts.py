@@ -59,11 +59,34 @@ _WS_RE = re.compile(r"\s+")
 #: digits, pipe. The id is dropped; every kind we parse is identified by text.
 _METADATA_PREFIX_RE = re.compile(r"^(?:[A-Z][A-Z0-9_]*:\d+\|)+")
 
+#: Jagex's ``@token@`` chat markup, which the client consumes rather than
+#: renders — the player never sees these, so leaving them in makes the Discord
+#: mirror say something the game did not. ``ach_comp`` is the newest
+#: (2026-08-26) and wraps combat achievement names to make them click-through;
+#: the rest are the long-standing colour codes.
+#:
+#: An ALLOWLIST, not ``@\w+@``, because this function also cleans player-typed
+#: clan chat (``data/submissions/clan_chat.py``), where a generic pattern would
+#: silently eat whatever a player wrote between two ``@``. An unrecognized token
+#: surviving into Discord is a blemish; deleting someone's words is a bug. When
+#: Jagex adds one, add it here.
+#:
+#: ``utils/ca_tasks.py`` strips ``@…@`` generically instead. It is allowed to:
+#: it only ever sees a combat achievement task name, and no real task name
+#: contains an ``@``.
+_CHAT_TOKENS = (
+    "ach_comp",
+    "red", "gre", "blu", "yel", "cya", "mag", "whi", "bla",
+    "lre", "dre", "dbl", "or1", "or2", "or3", "gr1", "gr2", "gr3",
+)
+_CHAT_TOKEN_RE = re.compile(r"@(?:%s)@" % "|".join(_CHAT_TOKENS), re.IGNORECASE)
+
 
 def clean_broadcast_text(raw) -> str:
     """Client markup + whitespace normalization for one broadcast line.
 
-    Strips ``<img=..>``/``<col=..>`` spans and leading Jagex metadata markers
+    Strips ``<img=..>``/``<col=..>`` spans, Jagex ``@token@`` chat markup (see
+    :data:`_CHAT_TOKENS`) and leading Jagex metadata markers
     (see :data:`_METADATA_PREFIX_RE`), folds non-breaking spaces (Jagex renders
     them inside player names) to plain spaces, and collapses runs of whitespace.
     Returns ``""`` for anything non-string-like.
@@ -75,6 +98,7 @@ def clean_broadcast_text(raw) -> str:
     if raw is None:
         return ""
     text = _TAG_RE.sub("", str(raw))
+    text = _CHAT_TOKEN_RE.sub("", text)
     text = text.replace(" ", " ")
     text = _WS_RE.sub(" ", text).strip()
     # After the tag/whitespace pass: a marker can sit behind a colour span, and

@@ -45,9 +45,11 @@ def _bust_cache() -> None:
 def _load_generated(key):
     """Generated payloads that are too large to keep inline in DEFAULT_SECTIONS.
 
-    The combat achievement registry is 398 entries derived from RuneLite's
-    VarbitID constants; it lives beside this script so regenerating it after a
-    RuneLite update is a file swap rather than a code edit.
+    The combat achievement registry is ~650 entries; it lives beside this
+    script so regenerating it after a game update is a file swap rather than a
+    code edit. Do regenerate it: the registry is what the profile's achievement
+    browser counts against, and between an update and a rebuild every task
+    added by that update is invisible there.
     """
     if key != "combat_achievement_tasks":
         return None
