@@ -305,14 +305,11 @@ async def admin_list_keys():
             tiers = session.query(ApiKeyTier).order_by(ApiKeyTier.sort_order).all()
             return {
                 "keys": [_serialize(r) for r in rows],
-                "tiers": [{
-                    "key": t.tier_key, "name": t.display_name,
-                    "requests_per_min": t.requests_per_min,
-                    "cost_units_per_min": t.cost_units_per_min,
-                    "requests_per_day": t.requests_per_day,
-                    "max_concurrency": t.max_concurrency,
-                    "enabled": bool(t.enabled),
-                } for t in tiers],
+                # One serializer for both endpoints. These used to differ
+                # ("key"/"name" here, "tier_key"/"display_name" there), which
+                # meant a client that validated the tier shape worked against
+                # one endpoint and threw against the other.
+                "tiers": [_tier_row(t) for t in tiers],
             }
 
     return jsonify(await asyncio.to_thread(work))

@@ -214,3 +214,57 @@ class TestTierBounds:
             if bad == "trailing_":
                 continue  # a trailing underscore is harmless and allowed
             assert not ok.match(bad), bad
+
+
+class TestTierSerialisationIsConsistent:
+    """Both endpoints that return tiers must return the SAME shape.
+
+    They did not: /admin/api-keys emitted {"key", "name"} while
+    /admin/api-key-tiers emitted {"tier_key", "display_name", "sort_order"}.
+    The frontend validates one schema, so the admin page threw on load in
+    production while every unit test passed — the schema was tested against
+    itself and never against what the route actually emits.
+    """
+
+    def _mod(self):
+        import importlib
+
+        return importlib.import_module("web_api.routes.api_keys")
+
+    class _Tier:
+        tier_key = "standard"
+        display_name = "Standard"
+        requests_per_min = 60
+        cost_units_per_min = 200_000
+        requests_per_day = 10_000
+        max_concurrency = 4
+        enabled = True
+        sort_order = 0
+
+    def test_tier_row_carries_the_fields_the_client_validates(self):
+        # Mirrors ApiKeyTierSchema in packages/api-types.
+        row = self._mod()._tier_row(self._Tier())
+        assert set(row) == {
+            "tier_key", "display_name", "requests_per_min", "cost_units_per_min",
+            "requests_per_day", "max_concurrency", "enabled", "sort_order",
+        }
+
+    def test_tier_row_is_the_only_tier_serialiser_in_the_module(self):
+        # Guards against a second hand-rolled dict drifting from this one again.
+        import re
+        from pathlib import Path
+
+        source = Path(self._mod().__file__).read_text()
+        # A literal building a tier by its old field names is the regression.
+        assert '"key": t.tier_key' not in source
+        assert '"name": t.display_name' not in source
+        # Every tier list must go through the helper.
+        assert len(re.findall(r"_tier_row\(", source)) >= 3
+
+    def test_types_are_plain_json(self):
+        row = self._mod()._tier_row(self._Tier())
+        for field in ("requests_per_min", "cost_units_per_min",
+                      "requests_per_day", "max_concurrency", "sort_order"):
+            assert isinstance(row[field], int), field
+        assert isinstance(row["enabled"], bool)
+        assert isinstance(row["tier_key"], str)
