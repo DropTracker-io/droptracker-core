@@ -281,8 +281,7 @@ def _load_loot(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     Deliberately not recomputed from ``drops``: the leaderboard and this API
     must never disagree, and Redis already holds the answer batched.
     """
-    from web_api.common import player_month_totals
-    from utils.partitions import get_current_partition
+    from web_api.common import get_current_partition, player_month_totals
 
     partition = ctx.get("partition") or get_current_partition()
     month = player_month_totals(player_ids, partition)
