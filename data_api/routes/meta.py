@@ -17,6 +17,9 @@ async def meta():
         "key_id": descriptor["key_id"],
         "label": descriptor["label"],
         "tier": descriptor["tier"],
+        # 'user' | 'group' | 'global'. A client can branch on this rather than
+        # discovering its own reach from a 403.
+        "scope": descriptor["scope"],
         "owner_type": descriptor["owner_type"],
         "group_id": descriptor["group_id"],
         "limits": descriptor["limits"],

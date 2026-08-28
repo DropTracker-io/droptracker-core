@@ -48,7 +48,17 @@ Maximum 5 active keys per owner. Revoking is immediate.
 A key sees only what its owner could see on the website, and no more:
 
 * a **group** key reads that group's members;
-* a **user** key reads the accounts that user has claimed.
+* a **user** key reads the accounts that user has claimed;
+* a **global** key reads every group and every player. These are issued by
+  staff to third-party integrations — a site displaying clan information, for
+  example — and are never self-serve.
+
+`GET /v2/meta` reports which one you hold as `scope`.
+
+**A global key is not a visibility override.** Players who have hidden
+themselves, and players whose account owner is hidden, are invisible through
+this API to every scope, exactly as they are to a logged-out visitor on the
+website. "Everything" means everything the site itself would show.
 
 A player who is hidden — or whose account owner is hidden — is invisible here
 exactly as they are on droptracker.io, and returns `404`. A player outside your
@@ -124,6 +134,23 @@ One player. `{id_or_name}` is a numeric player id or an exact RSN.
 
 ```
 GET /v2/players/12345?include=identity,stats,loot,personal_bests
+```
+
+### `GET /v2/groups`
+Every group, cursor-paginated. **Global keys only.** Returns each group's id,
+name, creation date and visible member count.
+
+```
+GET /v2/groups?limit=100&cursor=0
+  -> { "count": 100, "next_cursor": 431, "groups": [...] }
+```
+
+### `GET /v2/players`
+Every visible player, cursor-paginated, carrying the sections you ask for.
+**Global keys only** — a group key pages its own roster at the endpoint below.
+
+```
+GET /v2/players?include=identity,loot&limit=100&cursor=0
 ```
 
 ### `GET /v2/groups/{group_id}/players`
