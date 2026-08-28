@@ -248,7 +248,46 @@ def _partial_gaps_rate(session, npc_id, marker_item: str):
     return _pct(sorted(per_player), GAPS_PERCENTILE), len(per_player)
 
 
-def _run_partials(session, apply: bool) -> int:
+def partial_rate_is_sane(rate, wom_rate) -> bool:
+    """Whether a measured partial-attempt rate is publishable.
+
+    A partial attempt is a fraction of a full run, so it can only be FASTER
+    than a completion — strictly more of them per hour. Measuring otherwise
+    means the marker item stopped identifying completions (an item rename, a
+    drop-table change, a plugin that stopped sending it) and every attempt is
+    being read as a bail. Refusing to publish keeps the last good rate instead
+    of quietly redefining what the number means.
+
+    With no WOM rate to compare against there is nothing to check, so this
+    passes — the caller warns separately that completions will price at 0.
+    """
+    try:
+        rate = float(rate)
+        wom_rate = float(wom_rate or 0)
+    except (TypeError, ValueError):
+        return False
+    if rate <= 0:
+        return False
+    return wom_rate <= 0 or rate > wom_rate
+
+
+def _marker_npc_ids(session) -> set:
+    """npc_ids of every ``COMPLETION_MARKERS`` NPC — the rows the normal pass
+    must never touch, because their rate measures a different quantity."""
+    from sqlalchemy import text
+    from services.event_effort import COMPLETION_MARKERS
+
+    ids = set()
+    for npc_norm in COMPLETION_MARKERS:
+        row = session.execute(text(
+            "SELECT npc_id FROM npc_list WHERE LOWER(npc_name) = :n"),
+            {"n": npc_norm}).fetchone()
+        if row is not None:
+            ids.add(int(row[0]))
+    return ids
+
+
+def _run_partials(session, apply: bool, wom_rates: dict) -> int:
     """Compute + write the partial-attempt rate for every marker NPC."""
     from sqlalchemy import text
     from db.models import NpcEhbRate
@@ -275,6 +314,16 @@ def _run_partials(session, apply: bool) -> int:
             print(f"{npc_id:>7}  {(name or ''):32.32} {'partial_gaps':12} "
                   f"{rate:>7.1f} {n:>5}  outside sanity bounds, skipped")
             continue
+        wom = wom_rates.get(marker["metric"])
+        if not partial_rate_is_sane(rate, wom):
+            print(f"{npc_id:>7}  {(name or ''):32.32} {'partial_gaps':12} "
+                  f"{rate:>7.1f} {n:>5}  NOT FASTER than the completion rate "
+                  f"({wom}/h) — marker item may be stale, keeping previous")
+            continue
+        if not wom:
+            print(f"{npc_id:>7}  {(name or ''):32.32} {'partial_gaps':12} "
+                  f"{rate:>7.1f} {n:>5}  WARNING: WOM publishes no "
+                  f"{marker['metric']} rate — completions will price at 0")
         print(f"{npc_id:>7}  {(name or ''):32.32} {'partial_gaps':12} "
               f"{rate:>7.1f} {n:>5}  partial attempts only "
               f"(completions keep {marker['metric']})")
@@ -304,9 +353,9 @@ def main():
     parser.add_argument("--apply", action="store_true",
                         help="write the rates (default: dry run)")
     parser.add_argument("--partials", action="store_true",
-                        help="compute the PARTIAL-attempt rate for "
-                             "COMPLETION_MARKERS NPCs instead of the normal "
-                             "unpriced-boss pass")
+                        help="run ONLY the partial-attempt pass for "
+                             "COMPLETION_MARKERS NPCs (it is part of a normal "
+                             "run too, so the weekly timer recalibrates it)")
     args = parser.parse_args()
 
     from db import Session
@@ -325,7 +374,7 @@ def main():
     written = 0
     if args.partials:
         try:
-            written = _run_partials(session, args.apply)
+            written = _run_partials(session, args.apply, wom_rates)
             if args.apply and written:
                 session.commit()
                 print(f"\nwrote {written} partial rate(s)")
@@ -341,8 +390,23 @@ def main():
         print(f"{len(candidates)} candidate NPC(s)\n")
         print(f"{'npc':>7}  {'name':32} {'metric':28} {'method':10} "
               f"{'kph':>7} {'n':>5}  note")
+        marker_ids = _marker_npc_ids(session)
         for npc_id in sorted(candidates):
             name, metric = candidates[npc_id]
+            if npc_id in marker_ids:
+                # A marker NPC's npc_ehb_rates row means "partial attempts per
+                # hour", not "kills per hour" — a different quantity that only
+                # --partials knows how to measure. Today WOM prices
+                # sol_heredit, so the `wom` guard below would skip it anyway;
+                # this does not rely on that. If WOM ever renames or drops the
+                # metric, the incidental guard evaporates and this pass would
+                # overwrite the partial rate with an all-attempts cadence,
+                # silently changing what the number means and putting bails
+                # back on the completion clock.
+                print(f"{npc_id:>7}  {(name or ''):32.32} {(metric or '—'):28} "
+                      f"{'—':10} {'—':>7} {'—':>5}  completion-marker NPC, "
+                      f"only --partials may write it")
+                continue
             wom = wom_rates.get(metric) if metric else None
             if wom and not args.include_priced:
                 continue
@@ -383,12 +447,21 @@ def main():
                 row.computed_at = datetime.now()
             written += 1
 
+        # Marker NPCs are excluded from the pass above, so their rate has to be
+        # recomputed here or it never recalibrates at all — it is measured from
+        # a rolling 30-day window like every other derived rate, and a rate
+        # that silently freezes at whatever the content looked like on the day
+        # it shipped is exactly the kind of slow drift nobody notices.
+        print()
+        partials = _run_partials(session, args.apply, wom_rates)
+
         if args.apply:
             session.commit()
-            print(f"\napplied: {written} rate(s) written to npc_ehb_rates")
+            print(f"\napplied: {written} rate(s) + {partials} partial rate(s) "
+                  f"written to npc_ehb_rates")
         else:
-            print(f"\ndry run: {written} rate(s) would be written "
-                  f"(re-run with --apply)")
+            print(f"\ndry run: {written} rate(s) + {partials} partial rate(s) "
+                  f"would be written (re-run with --apply)")
     finally:
         session.close()
 

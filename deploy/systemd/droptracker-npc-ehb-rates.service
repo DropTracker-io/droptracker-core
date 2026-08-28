@@ -7,6 +7,13 @@
 # a WOM rate; these are labelled estimates. See scripts/compute_npc_ehb_rates.py
 # for methods, calibration and thresholds.
 #
+# A plain run ALSO recomputes the partial-attempt rate for
+# services/event_effort.COMPLETION_MARKERS NPCs (the Colosseum), which the
+# normal pass deliberately refuses to touch — that row means partial attempts
+# per hour, not kills per hour. Both halves are in the default invocation on
+# purpose: split across two scheduled units, the partial rate is the one that
+# quietly stops being recalibrated.
+#
 # Weekly matches the WOM rate cache TTL (WOM_EHB_RATES_CACHE_TTL, 7d) — rates
 # only move when content or the meta does. The drop_gaps method reads a 30-day
 # window per boss, so a missed week costs nothing.

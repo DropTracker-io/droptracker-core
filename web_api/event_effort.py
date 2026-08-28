@@ -97,6 +97,12 @@ def _summarize(rows, rates, derived_rates, *, boss_limit: int) -> dict:
     for b in summary.get("bosses", [])[:boss_limit]:
         bosses.append({**b, "ehb_hours": round(float(b.get("ehb_hours") or 0.0), 2)})
     return {
+        # False when the WOM rate cache is cold, in which case every
+        # WOM-priced boss scored 0 and the figure below is an undercount, not
+        # a measurement. On 2026-08-28 that cache sat expired for a day and
+        # every surface rendered a confident "—" instead of saying so; the
+        # admin report had this flag, the public reads did not.
+        "rates_known": bool(rates),
         "ehb_hours": round(float(summary.get("ehb_hours") or 0.0), 2),
         # Subset of ehb_hours priced with OUR derived rates rather than WOM's
         # published ones — >0 tells the UI to mark the figure as an estimate.
@@ -111,10 +117,16 @@ def _summarize(rows, rates, derived_rates, *, boss_limit: int) -> dict:
 
 def effort_by_player(s, event_id: int, player_ids: Iterable[int],
                      *, boss_limit: int = 8) -> Dict[int, dict]:
-    """``{player_id: {ehb_hours, kills, bosses, boss_count, last_at, frozen}}``.
+    """``{player_id: {ehb_hours, kills, bosses, boss_count, last_at, frozen,
+    rates_known}}``.
 
     Only players with recorded effort appear; callers render the rest as zero,
     the same way they already handle a member with no contributions.
+
+    ``rates_known`` is False when the WOM rate cache is cold. It rides on each
+    summary rather than the response envelope because every public read
+    embeds this dict per player and none of them share a wrapper — one key
+    here reaches all five without touching a route.
     """
     pids = sorted({int(p) for p in player_ids if p})
     if not pids:
