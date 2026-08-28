@@ -195,4 +195,16 @@ def prune_old_models(player_id: int, keep: int = 5,
             removed += 1
         except OSError:
             pass
+        # The avatar crop is derived from the render and exists only to serve
+        # this outfit; once the outfit is gone it is dead weight, and leaving it
+        # behind is how this directory accumulated far more derived files than
+        # models in the first place. Regenerable, so deleting it is free — a
+        # later request rebuilds it from the render if that still exists.
+        crop = os.path.join(
+            directory, f"{_fingerprint_of_filename(name)}-avatar.png"
+        )
+        try:
+            os.unlink(crop)
+        except OSError:
+            pass
     return removed

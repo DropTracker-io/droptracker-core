@@ -261,6 +261,17 @@ if "services.player_model" not in sys.modules:
     sys.modules["services.player_model"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/player_avatar.py — geometry of the torso-up avatar crop. Imports only
+# stdlib at module level (Pillow and numpy are pulled in inside the functions),
+# so the real module loads here and the tests can assert on the crop it picks
+# for a figure holding a weapon overhead.
+_PLAYER_AVATAR_PATH = _Path(__file__).resolve().parent.parent / "services" / "player_avatar.py"
+if "services.player_avatar" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.player_avatar", _PLAYER_AVATAR_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.player_avatar"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/loadout.py — decoding of the PB gear/inventory wire format.
 # Stdlib-only; the tests assert on its handling of malformed client input.
 _LOADOUT_PATH = _Path(__file__).resolve().parent.parent / "services" / "loadout.py"

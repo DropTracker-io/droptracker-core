@@ -1,6 +1,7 @@
 # api.py
 
 from datetime import datetime, timedelta
+import asyncio
 import json
 import os
 import re
@@ -106,11 +107,95 @@ def create_frontend(bot: interactions.Client):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         return response
 
+    def _missing_model_image():
+        """The response for a character avatar that does not exist.
+
+        Scoped to ``models/``, and for the same reason ``_missing_item_icon``
+        is scoped to ``itemdb/``: the generic fallback below serves group icons
+        and NPC art, whose callers rely on getting an image back.
+
+        This path needs it more than items do. Most players have no character
+        model — that is the designed default, not a fault — so the frontend
+        asks for an avatar it usually will not get, and the letter placeholder
+        it falls back to is reached through the `<img>` error event. A 200 with
+        a 672 KB logo does not fire that event, so every model-less player in a
+        leaderboard would have rendered a full-size animated logo.
+
+        Unlike a missing item icon, a missing avatar is not a repairable fault,
+        so it is cacheable: re-asking on every page view would be pure waste.
+        The TTL is short enough that a player who uploads a model sees it
+        appear within minutes.
+        """
+        response = Response(
+            item_images.TRANSPARENT_PNG, status=404, mimetype='image/png'
+        )
+        response.headers[item_images.PLACEHOLDER_HEADER] = 'model'
+        response.headers['Cache-Control'] = 'public, max-age=600'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+
+    # models/{player_id}/avatar.png              -> current outfit, resolved live
+    # models/{player_id}/{fingerprint}-avatar.png -> one specific outfit
+    _AVATAR_RE = re.compile(r'^models/(\d+)/(avatar|[0-9a-f]{1,32}-avatar)\.png$')
+
+    async def _serve_avatar(player_id: int, which: str):
+        """Torso-up avatar crop, derived from the full render on first request.
+
+        Derived on demand rather than only at upload time so the 2600 outfits
+        that predate this feature work without a backfill, and so a crop lost to
+        a prune or a disk repair comes back by itself.
+
+        The work runs in a thread: this route is served from inside the core bot
+        process, and a Pillow crop of an 800x1200 PNG on the event loop would
+        stall the Discord gateway — a burst of uncached avatars from one
+        leaderboard view is exactly the shape of stall this repo has hit before.
+        """
+        from services import player_avatar
+
+        if which == 'avatar':
+            fingerprint = await asyncio.to_thread(
+                player_avatar.current_fingerprint, player_id
+            )
+            if not fingerprint:
+                return _missing_model_image()
+        else:
+            fingerprint = which[:-len('-avatar')]
+
+        path = await asyncio.to_thread(
+            player_avatar.ensure_avatar, player_id, fingerprint
+        )
+        if not path:
+            return _missing_model_image()
+
+        response = await send_from_directory(
+            os.path.dirname(path), os.path.basename(path)
+        )
+        # `avatar.png` is a stable alias whose *content* changes when the player
+        # changes gear, so it cannot take the directory default (12 hours) — an
+        # outfit change would take half a day to show up. An hour bounds that
+        # while keeping avatars off the origin for the length of a session.
+        # (Cloudflare's zone Browser Cache TTL rewrites short max-ages upward
+        # anyway, so anything under ~30 minutes is not actually honoured.)
+        response.headers['Cache-Control'] = 'public, max-age=3600'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+
     @front.route('/img/<path:filename>')
     async def serve_img(filename):
         _is_inline_image = filename.lower().endswith(_INLINE_IMAGE_EXTS)
+        # Avatars are derived artifacts, so this runs BEFORE the exists() check
+        # below: `avatar.png` is a stable per-player alias that never exists on
+        # disk under that name, and a fingerprinted crop may not have been
+        # built yet.
+        _avatar = _AVATAR_RE.match(filename)
+        if _avatar:
+            return await _serve_avatar(int(_avatar.group(1)), _avatar.group(2))
         ## Check if the file exists
         if not os.path.exists(os.path.join('static/assets/img', filename)):
+            # A missing character model or render is not a repairable fault and
+            # must not answer with the logo — see _missing_model_image.
+            if filename.startswith('models/'):
+                return _missing_model_image()
             # Grayscale receipt-tab variants (Loot Sweep board): serve
             # itemdb/gray/{id}.png. Pre-baked files are served straight through
             # by the send_from_directory at the end of this function; this
