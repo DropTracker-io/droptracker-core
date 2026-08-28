@@ -111,6 +111,63 @@ def _parse_int_list_config(value) -> list[int]:
         return []
 
 
+def _milestone_levels_for_group(cfg: dict) -> list[int]:
+    """Resolve a group's TOTAL-level milestone list from its config rows.
+
+    ``level_milestones`` is the canonical key the web config editor writes;
+    ``level_milestones_to_notify`` is the legacy key this processor used to
+    read, and which neither config registry exposes — so a group can neither
+    see nor clear it. Presence of the canonical row, not its truthiness,
+    decides: clearing the list in the editor stores "", and treating that as
+    "unset" sent the group straight back to the invisible legacy list, which
+    made the setting impossible to turn off (group 315, 2026-08-27).
+    """
+    if "level_milestones" in cfg:
+        return _parse_int_list_config(cfg["level_milestones"])
+    return _parse_int_list_config(cfg.get("level_milestones_to_notify"))
+
+
+def _crosses_total_milestone(previous_total: int, new_total: int, milestones) -> bool:
+    """Whether this submission CROSSED a total-level milestone.
+
+    Not "is the total sitting on one": total_level counts real levels only
+    (the plugin caps each skill at 99), so a maxed player parks on 2376
+    permanently. A membership test re-announced the milestone on every later
+    level-up, and for a maxed player every one of those is a virtual level —
+    which is how >99 levels reached groups with notify_virtual_levels off.
+
+    A zero baseline means this is the first total we have seen for the player;
+    we cannot tell what they crossed, so we do not announce.
+    """
+    if new_total < 1 or previous_total < 1:
+        return False
+    return any(previous_total < m <= new_total for m in milestones)
+
+
+def _skill_visible_to_group(
+    skill: dict,
+    *,
+    notify_virtual_levels: bool,
+    notify_combat_levels: bool,
+) -> bool:
+    """Whether a skill may be *named* in a group's announcement at all.
+
+    The opt-in half of :func:`_skill_qualifies_for_group`, without the
+    minimum/increment filters. Those two decide whether a level-up is worth an
+    announcement of its own; this decides whether a level is one the group
+    agreed to ever see. Total-level milestones need exactly this split: the
+    milestone is its own event (so a below-minimum skill still belongs on its
+    context line) but it must not name a virtual or combat level to a group
+    that opted out of them.
+    """
+    new_level = _safe_int(skill.get("new_level"), default=0)
+    if new_level < 1:
+        return False
+    if skill.get("skill_key") == "combat":
+        return notify_combat_levels
+    return new_level <= 99 or notify_virtual_levels
+
+
 def _skill_qualifies_for_group(
     skill: dict,
     *,
@@ -558,8 +615,12 @@ async def experience_processor(experience_data, external_session=None):
             session.add(exp_entry)
             #print(f"[EXP] Created new PlayerExperience for player {player_id}")
     
-        # Update player's total level if provided and higher
+        # Update player's total level if provided and higher. Snapshot the
+        # pre-update value first: it is the baseline the total-level milestone
+        # crossing test in the group loop needs, and after this block
+        # player.total_level *is* the new total.
         stage = "update_player_total_level"
+        previous_total_level = _safe_int(player.total_level, default=0)
         if total_level > 0 and (not player.total_level or total_level > player.total_level):
             player.total_level = total_level
             #print(f"[EXP] Updated player total level to {total_level}")
@@ -851,16 +912,8 @@ async def experience_processor(experience_data, external_session=None):
                 level_increment = 1
             notify_virtual_levels = is_truthy_config(cfg.get("notify_virtual_levels"))
             notify_combat_levels = is_truthy_config(cfg.get("notify_combat_levels"))
-            # Canonical key is level_milestones (what the web config editor
-            # writes); level_milestones_to_notify is the legacy key this
-            # processor used to read. These are TOTAL-level milestones.
-            milestone_levels_to_notify = _parse_int_list_config(
-                cfg.get("level_milestones") or cfg.get("level_milestones_to_notify")
-            )
-            is_total_milestone = (
-                total_level is not None
-                and total_level >= 1
-                and total_level in milestone_levels_to_notify
+            is_total_milestone = _crosses_total_milestone(
+                previous_total_level, total_level, _milestone_levels_for_group(cfg)
             )
 
             # Per-skill filtering: only skills that individually pass this
@@ -878,6 +931,35 @@ async def experience_processor(experience_data, external_session=None):
                     notify_combat_levels=notify_combat_levels,
                 )
             ]
+
+            # Context skills for a total-level milestone: every skill in the
+            # submission the group agreed to see, min/increment filters aside
+            # (the milestone is its own event, so a below-minimum skill still
+            # belongs on its context line). A virtual level cannot contribute
+            # to a total-level milestone in the first place — total counts real
+            # levels only — and naming one here was how >99 levels reached
+            # groups with notify_virtual_levels off: the milestone renders with
+            # the group's level_up embed template, so in Discord it is
+            # indistinguishable from a level-up notification.
+            #
+            # A crossing is always driven by a real sub-100 level, so this is
+            # normally non-empty; when it isn't, the crossing cannot be
+            # attributed to anything showable and an empty announcement is
+            # worse than none.
+            milestone_skills = (
+                [
+                    s
+                    for s in skills
+                    if _skill_visible_to_group(
+                        s,
+                        notify_virtual_levels=notify_virtual_levels,
+                        notify_combat_levels=notify_combat_levels,
+                    )
+                ]
+                if is_total_milestone
+                else []
+            )
+            is_total_milestone = bool(milestone_skills)
 
             if not qualifying_skills and not is_total_milestone:
                 continue
@@ -903,12 +985,12 @@ async def experience_processor(experience_data, external_session=None):
                 )
 
             if is_total_milestone:
-                # Milestone total levels always notify; show every skill from
-                # the submission for context, filters notwithstanding.
+                # Milestone total levels notify regardless of the min/increment
+                # filters, on the group-visible skills built above.
                 await create_notification(
                     "total_level_milestone",
                     player_id,
-                    _build_notification_data(skills),
+                    _build_notification_data(milestone_skills),
                     group_id,
                     existing_session=session if use_external_session else None,
                 )

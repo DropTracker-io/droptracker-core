@@ -3,9 +3,19 @@
 Covers the rework that made "only announce 99s" configurable: per-skill
 qualification (no more tag-along skills), the notify_virtual_levels and
 notify_combat_levels opt-ins, and crossed-level checks on multi-level jumps.
+
+Also covers the total-level milestone path, which rendered with the level_up
+embed template and so leaked virtual levels into groups that had opted out:
+milestone-list resolution, the crossing (not membership) test, and the
+opt-in-only skill visibility its context line uses.
 """
 
-from data.submissions.experience import _skill_qualifies_for_group
+from data.submissions.experience import (
+    _crosses_total_milestone,
+    _milestone_levels_for_group,
+    _skill_qualifies_for_group,
+    _skill_visible_to_group,
+)
 
 
 def _skill(key, level, gained=1):
@@ -27,6 +37,13 @@ DEFAULTS = dict(
 
 def qualifies(skill, **overrides):
     return _skill_qualifies_for_group(skill, **{**DEFAULTS, **overrides})
+
+
+VISIBLE_DEFAULTS = dict(notify_virtual_levels=False, notify_combat_levels=False)
+
+
+def visible(skill, **overrides):
+    return _skill_visible_to_group(skill, **{**VISIBLE_DEFAULTS, **overrides})
 
 
 class TestOnly99sConfig:
@@ -109,3 +126,86 @@ class TestIncrementAndCrossedLevels:
     def test_crossed_virtual_levels_ignored_when_disabled(self):
         # 100 -> 102: only virtual levels crossed, virtual disabled.
         assert not qualifies(_skill("magic", 102, gained=2))
+
+
+class TestSkillVisibleToGroup:
+    """`_skill_visible_to_group` — the opt-in half, used for milestone context.
+
+    Total-level milestones are their own event, so the min/increment filters
+    must NOT apply; the virtual/combat opt-ins still must.
+    """
+
+    def test_real_levels_always_visible(self):
+        assert visible(_skill("attack", 1))
+        assert visible(_skill("attack", 99))
+
+    def test_virtual_hidden_unless_opted_in(self):
+        assert not visible(_skill("magic", 100))
+        assert not visible(_skill("magic", 126))
+        assert visible(_skill("magic", 100), notify_virtual_levels=True)
+
+    def test_combat_hidden_unless_opted_in(self):
+        assert not visible(_skill("combat", 105))
+        assert visible(_skill("combat", 105), notify_combat_levels=True)
+
+    def test_minimum_and_increment_do_not_apply(self):
+        # A skill that would never earn its own level-up announcement still
+        # belongs on a milestone's context line.
+        assert visible(_skill("attack", 3))
+
+    def test_invalid_level_never_visible(self):
+        assert not visible(_skill("attack", 0))
+        assert not visible({"skill_key": "attack"})
+
+
+class TestMilestoneLevelsForGroup:
+    """Canonical `level_milestones` vs the registry-invisible legacy key."""
+
+    LEGACY = "[1500,1750,2000,2050,2100,2150,2200,2277,2376]"
+
+    def test_legacy_used_when_canonical_row_absent(self):
+        assert _milestone_levels_for_group(
+            {"level_milestones_to_notify": self.LEGACY}
+        ) == [1500, 1750, 2000, 2050, 2100, 2150, 2200, 2277, 2376]
+
+    def test_canonical_wins_when_present(self):
+        assert _milestone_levels_for_group(
+            {"level_milestones": "2000,2277", "level_milestones_to_notify": self.LEGACY}
+        ) == [2000, 2277]
+
+    def test_cleared_canonical_disables_milestones(self):
+        # Group 315, 2026-08-27: the admin cleared the list in the editor and
+        # kept getting milestone posts, because "" fell back to the legacy key.
+        assert _milestone_levels_for_group(
+            {"level_milestones": "", "level_milestones_to_notify": self.LEGACY}
+        ) == []
+
+    def test_no_rows_at_all(self):
+        assert _milestone_levels_for_group({}) == []
+
+
+class TestCrossesTotalMilestone:
+    MILESTONES = [1500, 2000, 2277, 2376]
+
+    def test_crossing_fires(self):
+        assert _crosses_total_milestone(1999, 2000, self.MILESTONES)
+
+    def test_multi_level_jump_over_a_milestone_fires(self):
+        assert _crosses_total_milestone(1498, 1501, self.MILESTONES)
+
+    def test_sitting_on_a_milestone_does_not_refire(self):
+        # The bug: a maxed player parks on 2376, so every later level-up (all
+        # of them virtual) re-announced the milestone.
+        assert not _crosses_total_milestone(2376, 2376, self.MILESTONES)
+
+    def test_unchanged_total_never_fires(self):
+        assert not _crosses_total_milestone(2000, 2000, self.MILESTONES)
+
+    def test_no_baseline_does_not_fire(self):
+        assert not _crosses_total_milestone(0, 2000, self.MILESTONES)
+
+    def test_gain_between_milestones_does_not_fire(self):
+        assert not _crosses_total_milestone(2001, 2100, self.MILESTONES)
+
+    def test_empty_milestone_list_never_fires(self):
+        assert not _crosses_total_milestone(1999, 2000, [])
