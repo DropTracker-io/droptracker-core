@@ -8,8 +8,9 @@ mostly legs.
 
 So the avatar is a *derived* artifact: a square, head-and-torso crop, cached on
 disk beside the render as ``{fingerprint}-avatar.png``. Deriving once and
-caching is what makes it affordable — the crop is ~4 KB, and a player who has
-not changed gear costs nothing after the first request.
+caching is what makes it affordable — the crop is ~15 KB against the render's
+~80 KB, and a player who has not changed gear costs nothing after the first
+request.
 
 Why a real cached crop rather than a CSS transform on the full render: CSS would
 still ship the 80 KB body to every row and still decode 800x1200 per avatar. The
@@ -25,21 +26,37 @@ bounds well above the head, and a fixed offset from the top of the bbox then
 frames the weapon instead of the face. Measured across a 55-render sample, the
 bbox top varies by ~200 px for exactly this reason.
 
-Two things in the same sample are, by contrast, extremely stable, because the
-camera is fixed and every character is the same rig in different clothes:
+The **feet** are, by contrast, extremely stable — the bottom of the alpha
+bounds, stdev 7 px out of 1200 (0.6%) — because the camera is fixed, every
+character is the same rig in different clothes, and nothing a player can wear or
+hold extends below the ground plane. Everything here is measured relative to
+them, so camera drift or a re-render at another size self-corrects.
 
-* the **feet** — the bottom of the alpha bounds, stdev 7 px out of 1200 (0.6%);
-  nothing a player can wear or hold extends below the ground plane.
-* the **boot band centroid** — the horizontal centre of mass of the strip just
-  above the feet. Legs are always under the body, and a weapon is either held to
-  one side (outside the band) or a thin sliver resting on the ground (which a
-  mass-weighted centroid barely notices, unlike a bounding box).
+Three quantities are then derived, each guarded against a different way a held
+item can impersonate the player:
 
-So the crop anchors on those two measured quantities and walks *up* by a
-proportion of the image height. Both anchors are measured per image, so camera
-drift or a re-render at a different size self-corrects; only the body's
-proportion of the frame is a constant, and that is a property of the fixed
-camera rather than a magic number tuned to one screenshot.
+* **the body axis** — mass median of the strip just above the feet, which the
+  legs dominate. Immune to weapons, but it is not where the *torso* is: measured
+  over 145 renders, the head sits a systematic 8.4 px (of 128) to one side of
+  the leg centre, because the idle stance is not symmetric.
+* **the horizontal centre** — mass median over the region actually being
+  cropped, which centres the face rather than the stance, *leashed* to the body
+  axis so a tower shield cannot capture it outright.
+* **the crown** — found by scanning down for the first contiguous run across the
+  centre line that is at least head-wide. Width is the discriminator, and it is
+  the whole trick: a godsword held upright passes straight through the centre
+  line, so any "topmost pixel above the torso" test frames the blade and pushes
+  the face to the bottom of the tile. A blade is ~0.01 of a body across; a skull
+  is ~0.06. The scan is confined to the band a head can physically occupy, which
+  bounds the damage when a weapon does slip through — the figure sits low, but
+  its head is still in frame.
+
+Anchoring vertically on the detected crown rather than on a fixed offset from
+the feet is what lets the avatar be drawn with no background behind it. Headgear
+is real height that varies by ~0.16 of a body height (a wizard hat against a
+bare head), so a fixed offset left the figure sitting low by a different amount
+for every player — measured at a 20 px gap above the head against 0 below. A
+solid tile hid that; transparency does not.
 
 Renders that fail the sanity check — a partial or broken screenshot, of which
 there are some on disk — yield no crop at all, which surfaces as the letter
@@ -64,18 +81,29 @@ AVATAR_SIZE = 128
 # works without touching this.
 _BODY_FRACTION = 0.525
 
-# How far above the feet the crop's top edge sits, in body heights. 1.0 would be
-# the crown of a bare head; the extra 13% is headroom for tall helms and wizard
-# hats, which are real height rather than a held item.
-_TOP_ABOVE_FEET = 1.13
+# Where a bare head's crown sits above the feet, in body heights. Only a
+# fallback: the crown is detected per image, and this stands in when detection
+# fails, so it is the *typical* head rather than the tallest.
+_NOMINAL_HEAD = 1.04
 
-# Side of the square crop, in body heights. 0.60 lands the bottom edge around
-# the hips (1.13 - 0.60 = 0.53 of the body still below it), which is the
-# "torso-up, no legs" framing this is for.
-_SIDE = 0.60
+# Gap above the crown, as a fraction of the crop's side. Small and deliberate:
+# with no background fill the figure is the whole picture, and dead space above
+# the head reads as the avatar sitting low in its frame rather than as framing.
+_HEADROOM = 0.055
+
+# Side of the square crop, in body heights. 0.50 puts the bottom edge just under
+# the chest, which is the "torso-up, no legs" framing this is for, and fills the
+# tile better than a looser crop once there is no background behind it.
+_SIDE = 0.50
 
 # The strip above the feet used to find the horizontal centre, in body heights.
 _BOOT_BAND = 0.11
+
+# Narrowest contiguous run, in body heights, that counts as a head rather than a
+# held weapon. Measured: a blade is ~0.01 of a body across and a skull ~0.06, so
+# anything in between separates them; erring low keeps the detector working on
+# renders where only the crown is visible above a cape.
+_MIN_HEAD_WIDTH = 0.045
 
 # Alpha at or below this is background, not character. Renders are composited
 # against transparency, so edge pixels feather.
@@ -153,6 +181,48 @@ def avatar_exists(player_id: int, fingerprint: str) -> bool:
     return os.path.exists(avatar_path(player_id, fingerprint))
 
 
+def _find_crown(solid, body: float, feet: int, centre_x: float,
+                width: int) -> Optional[float]:
+    """Row of the top of the player's head, or None if it cannot be found.
+
+    Walks down the band where a head can possibly be and returns the first row
+    whose contiguous run across the body's centre line is at least head-wide.
+    Only the plausible band is scanned, so this is a few hundred short row
+    operations rather than a pass over the image.
+
+    Returning None is a normal outcome (~12% of renders — hair merged into a
+    cape, an obscured head) and the caller falls back to the nominal head
+    position, which is sound because the camera is fixed.
+    """
+    import numpy as np
+
+    minimum = max(3, int(body * _MIN_HEAD_WIDTH))
+    reach = body * 0.10
+    x = int(centre_x)
+    start = max(0, int(feet - body * 1.20))
+    stop = max(1, int(feet - body * 0.95))
+
+    for y in range(start, stop):
+        row = solid[y]
+        lit = np.flatnonzero(row)
+        if lit.size == 0:
+            continue
+        # Nearest lit pixel to the body's centre line; anything further away
+        # than an arm's reach belongs to something the player is holding.
+        nearest = int(lit[np.argmin(np.abs(lit - x))])
+        if abs(nearest - x) > reach:
+            continue
+        left = nearest
+        while left > 0 and row[left - 1]:
+            left -= 1
+        right = nearest
+        while right < width - 1 and row[right + 1]:
+            right += 1
+        if (right - left + 1) >= minimum:
+            return float(y)
+    return None
+
+
 def _crop_box(alpha) -> Optional[Tuple[int, int, int, int]]:
     """Locates the torso-up square in an alpha channel, or None if implausible.
 
@@ -208,12 +278,58 @@ def _crop_box(alpha) -> Optional[Tuple[int, int, int, int]]:
     half = max(1, int(body * 0.10))
     lo, hi = max(0, median - half), min(width, median + half + 1)
     window = column_mass[lo:hi]
-    centre_x = float((window * np.arange(lo, hi)).sum() / window.sum())
+    axis_x = float((window * np.arange(lo, hi)).sum() / window.sum())
 
-    side = body * _SIDE
-    left = centre_x - side / 2.0
-    box_top = feet - body * _TOP_ABOVE_FEET
-    return (round(left), round(box_top), round(left + side), round(box_top + side))
+    # The legs give the body's *axis*, but not the centre of what this crop
+    # actually shows. Measured over 145 renders, the head sits a systematic
+    # 8.4 px (of 128) to one side of the leg centre — the idle stance is not
+    # symmetric — so centring on the axis alone leaves every face visibly
+    # off-centre. Re-take the centre over the region being cropped, where the
+    # torso dominates the mass.
+    torso = a[max(0, int(feet - body * 1.20)):max(1, int(feet - body * 0.53))]
+    torso = torso.astype("float64")
+    torso[torso <= _ALPHA_FLOOR] = 0.0
+    torso_mass = torso.sum(axis=0)
+    if torso_mass.sum() <= 0:
+        return None
+    torso_cum = np.cumsum(torso_mass)
+    centre_x = float(np.searchsorted(torso_cum, torso_cum[-1] / 2.0))
+
+    # ...but leashed to the body axis. A tower shield or a banner is enough mass
+    # up here to capture the median outright, and an avatar centred on someone's
+    # shield with their head in the corner is worse than one a few pixels off.
+    # The legs cannot be captured that way, so they get the final say on how far
+    # this is allowed to travel.
+    leash = body * 0.05
+    centre_x = min(max(centre_x, axis_x - leash), axis_x + leash)
+
+    # Vertical anchor: find the actual crown, rather than measuring down from
+    # the feet. Headgear is real height that varies by ~0.16 of a body height
+    # (a wizard hat against a bare head), so a fixed offset leaves the figure
+    # sitting low in the tile by a different amount for every player — measured
+    # at a 20 px top gap against 0 px at the bottom, which a solid tile hid and
+    # a transparent one would not.
+    #
+    # A head is found by how WIDE it is, not by where the topmost pixel is.
+    # That distinction is the whole detector: a godsword or staff held upright
+    # passes straight through the body's centre line, so any test based on "the
+    # first thing above the torso" frames the blade and pushes the player's face
+    # to the bottom of the tile (observed on 6 of 20 sampled renders). A blade
+    # is a few pixels across and a skull is tens, so requiring a contiguous run
+    # of head-like width tells them apart directly.
+    nominal = feet - body * _NOMINAL_HEAD
+    crown = _find_crown(solid, body, feet, centre_x, width)
+    if crown is None:
+        crown = nominal
+
+    # Rounded to an integer side and added to a rounded origin, rather than
+    # rounding all four edges independently — that can land a 314x315 box, which
+    # the resize to a square then stretches by a third of a percent. Small, but
+    # it is a distortion applied to faces for no reason.
+    side = int(round(body * _SIDE))
+    left = int(round(centre_x - side / 2.0))
+    box_top = int(round(crown - side * _HEADROOM))
+    return (left, box_top, left + side, box_top + side)
 
 
 def build_avatar(source_path: str, size: int = AVATAR_SIZE):

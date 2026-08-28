@@ -49,6 +49,17 @@ class TestCropBox:
         # The excluded strip is the legs: over a third of the body height.
         assert (FEET - bottom) > BODY * 0.35
 
+    def test_sits_the_head_just_below_the_top_edge(self):
+        """The framing guarantee that lets the tile drop its background.
+
+        With a fill behind it, dead space above the head read as padding; with
+        nothing behind it, the same gap reads as the figure sitting low in its
+        frame. Measured at 20 px of 128 before the crown was detected per image.
+        """
+        left, top, right, bottom = _crop_box(figure())
+        gap = (HEAD - top) / (bottom - top)
+        assert 0 < gap < 0.10
+
     def test_centres_on_the_character(self):
         assert abs(centre_of(_crop_box(figure(centre=400))) - 400) < 15
 
@@ -70,10 +81,37 @@ class TestCropBox:
         assert armed[1] < HEAD
 
     def test_a_weapon_held_to_one_side_does_not_pull_the_crop_sideways(self):
-        # A wide banner off the character's left: mass well outside the body,
-        # but not in the boot band the centroid is taken over.
+        """A banner heavier than the torso rides the leash, and no further.
+
+        The horizontal centre is taken over the cropped region so that it
+        follows the torso rather than the stance, which means a big enough held
+        item can outweigh the player. The body axis — which the legs give, and
+        which no weapon can move — caps how far that is allowed to go.
+        """
         banner = (620, 200, 760, 700)
-        assert abs(centre_of(_crop_box(figure(extras=(banner,)))) - 400) < 25
+        drift = abs(centre_of(_crop_box(figure(extras=(banner,)))) - 400)
+        assert drift <= BODY * 0.05 + 2
+
+    def test_a_blade_held_upright_is_not_mistaken_for_a_head(self):
+        """The regression the crown detector exists for.
+
+        A godsword held upright passes through the body's centre line and
+        reaches well above the head, so locating the crown by "first pixel above
+        the torso" frames the blade and pushes the face to the bottom of the
+        tile — seen on 6 of 20 sampled production renders. The blade is narrow
+        and a head is not, which is what separates them.
+        """
+        blade = (392, 60, 408, HEAD)
+        plain = _crop_box(figure())
+        armed = _crop_box(figure(extras=(blade,)))
+        assert armed is not None
+        assert abs(armed[1] - plain[1]) < 20
+
+    def test_a_head_is_still_found_when_it_is_the_widest_thing_up_there(self):
+        # Guards the discriminator from the other side: raising the width
+        # threshold far enough to reject blades must not also reject heads.
+        box = _crop_box(figure())
+        assert box is not None and box[1] < HEAD
 
     def test_a_staff_resting_on_the_ground_barely_moves_the_centre(self):
         """A bounding-box centre would swing here; a mass-weighted one does not.
