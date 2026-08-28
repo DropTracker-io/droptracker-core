@@ -25,6 +25,8 @@ from db.models import (
     PlayerQuestState,
     PlayerState,
 )
+from utils.item_catalogue import item_names as catalogue_names, stack_display_id
+from utils.item_images import item_image_exists
 from web_api.common import db_session, problem, proof_url, with_cache_headers
 
 player_state_bp = Blueprint("v1_player_state", __name__)
@@ -401,6 +403,10 @@ async def collection_log(player_id: int):
             # the name fallback needs a name for the id the plugin recorded,
             # which is by definition an id the structure does not define.
             names = _item_names(s, defined_ids | {row[0] for row in clog_rows})
+            # Same backstop as the loadout view: the catalogue names every slot
+            # the log defines, including the ones no player here has submitted
+            # and `items` therefore knows nothing about.
+            names.update(catalogue_names(defined_ids | {row[0] for row in clog_rows}))
             details = collection_details(clog_rows, defined_ids, names, structure_names)
 
             tabs = []
@@ -594,19 +600,43 @@ async def pb_loadout(pb_id: int):
             equipment = loadout_from_json(row.equipment)
             inventory = loadout_from_json(row.inventory)
 
-            names = _item_names(
-                s, {e["item_id"] for e in equipment} | {e["item_id"] for e in inventory}
-            )
+            referenced = {e["item_id"] for e in equipment} | {
+                e["item_id"] for e in inventory
+            }
+            # The catalogue first, the items table only as a backstop. Worn gear
+            # is routinely an item nobody has submitted, so `items` has no row
+            # for it — 89 of 95 such ids, which is exactly the set that also had
+            # no icon. Driving the tooltip off `items` alone would read
+            # "Item 30000" for precisely the items that already looked broken.
+            names = _item_names(s, referenced)
+            names.update(catalogue_names(referenced))
 
             def decorate(entries):
-                return [
-                    {
+                out = []
+                for entry in entries:
+                    item_id = entry["item_id"]
+                    quantity = entry.get("quantity") or 1
+                    # The game draws a bigger pile as a stack grows, and each
+                    # pile is its own item id. The name stays the base item's —
+                    # a stack of coins is "Coins", not the internal name of the
+                    # 10,000-coin sprite.
+                    #
+                    # Only swap when the pile sprite is actually on disk.
+                    # RuneLite's icon cache carries no stack variants at all
+                    # (even coins 996..1004 are 404 there), so ~10% of them
+                    # cannot be fetched — and swapping to an id with no icon
+                    # would turn a correct base sprite into a blank slot, making
+                    # this change a regression for exactly those items.
+                    display_id = stack_display_id(item_id, quantity)
+                    if display_id != item_id and not item_image_exists(display_id):
+                        display_id = item_id
+                    out.append({
                         **entry,
-                        "name": names.get(entry["item_id"]) or f"Item {entry['item_id']}",
-                        "icon": f"{IMG_BASE}/itemdb/{entry['item_id']}.png",
-                    }
-                    for entry in entries
-                ]
+                        "name": names.get(item_id) or f"Item {item_id}",
+                        "display_item_id": display_id,
+                        "icon": f"{IMG_BASE}/itemdb/{display_id}.png",
+                    })
+                return out
 
             npc = s.query(NpcList).filter(NpcList.npc_id == pb.npc_id).first()
             return {

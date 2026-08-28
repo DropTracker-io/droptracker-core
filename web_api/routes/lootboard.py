@@ -105,13 +105,17 @@ async def lootboard_styles():
 # generator's load_rl_cache_img).
 _ITEMDB_DIR = "/store/droptracker/disc/static/assets/img/itemdb"
 
-# Coin (item 995) icon variant by quantity — mirrors utils.dynamic_handling.get_coin_image_id.
-_COIN_VARIANTS = {1: 995, 2: 996, 3: 997, 4: 998, 5: 999, 10: 1000, 50: 1001, 100: 1002, 1000: 1003, 10000: 1004}
-
-
 def _coin_image_id(quantity: int) -> int:
-    possible = [k for k in _COIN_VARIANTS if quantity >= k]
-    return _COIN_VARIANTS[max(possible)] if possible else _COIN_VARIANTS[1]
+    """Coin pile sprite for ``quantity``.
+
+    This used to be a third hand-written copy of the coin table, and carried the
+    same wrong thresholds as the other two (10/50/100 rather than the game's
+    25/100/250). It now defers to the shared helper, which reads them from the
+    game cache.
+    """
+    from utils.dynamic_handling import get_coin_image_id
+
+    return get_coin_image_id(quantity)
 
 
 def _player_key(player_id: int, token: str, suffix: str) -> str:

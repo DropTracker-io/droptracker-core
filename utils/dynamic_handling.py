@@ -53,43 +53,43 @@ def get_dynamic_color(image):
     r, g, b = hsv_to_rgb(dominant_hue / 360, adjusted_s, adjusted_v)
     return (int(r * 255), int(g * 255), int(b * 255))
 
-def get_coin_image_id(quantity):
-    """
-    Returns the coin image id based on the coin quantity.
-    
-    Mapping:
-      1    -> 995.png
-      2    -> 996.png
-      3    -> 997.png
-      4    -> 998.png
-      5    -> 999.png
-      10   -> 1000.png
-      50   -> 1001.png
-      100  -> 1002.png
-      1000 -> 1003.png
-      10000-> 1004.png
+COINS_ITEM_ID = 995
 
-    For quantities that do not exactly match a key, returns the image corresponding
-    to the highest key that is less than or equal to the quantity.
+#: Fallback coin thresholds for a box with no generated catalogue. These are the
+#: game's real switch points, read from the cache: the hand-written table this
+#: replaces had 10 -> 1000, 50 -> 1001 and 100 -> 1002, so a stack of 100 coins
+#: was drawn with the 250-pile sprite and a stack of 10 with the 25-pile.
+_COIN_FALLBACK = [
+    (2, 996), (3, 997), (4, 998), (5, 999), (25, 1000),
+    (100, 1001), (250, 1002), (1000, 1003), (10000, 1004),
+]
+
+
+def get_coin_image_id(quantity):
+    """The coin pile sprite id for ``quantity`` coins.
+
+    Thin wrapper over :func:`utils.item_catalogue.stack_display_id`, which reads
+    the thresholds the game itself uses. Kept as a named function because the
+    loot board generators call it directly and coins are the one stackable they
+    special-case.
     """
-    mapping = {
-        1: 995,
-        2: 996,
-        3: 997,
-        4: 998,
-        5: 999,
-        10: 1000,
-        50: 1001,
-        100: 1002,
-        1000: 1003,
-        10000: 1004,
-    }
-    # Find all keys less than or equal to the quantity.
-    possible = [k for k in mapping.keys() if quantity >= k]
-    if not possible:
-        return mapping[1]
-    best = max(possible)
-    return mapping[best]
+    from utils.item_catalogue import stack_display_id
+
+    resolved = stack_display_id(COINS_ITEM_ID, quantity)
+    if resolved != COINS_ITEM_ID:
+        return resolved
+    # No catalogue on this box (or a quantity below the first threshold).
+    try:
+        count = int(quantity)
+    except (TypeError, ValueError):
+        return COINS_ITEM_ID
+    display = COINS_ITEM_ID
+    for threshold, variant_id in _COIN_FALLBACK:
+        if count >= threshold:
+            display = variant_id
+        else:
+            break
+    return display
 
 def get_stacked_display_id(item_id, session):
     """Resolve an OSRS item id to the icon id that best represents a *stack* of it.
@@ -112,6 +112,21 @@ def get_stacked_display_id(item_id, session):
         item_id = int(item_id)
     except (TypeError, ValueError):
         return item_id
+    # The game cache knows the real variant table, so prefer it and skip the
+    # name-matching heuristic below entirely. Same thresholds as
+    # get_coin_image_id now reads — one source of truth for what a stack
+    # variant is, even though the two callers want different policies (fullest
+    # pile here, quantity-matched there).
+    #
+    # Coins stay excluded, as they were before: their pile is picked by
+    # magnitude at the call site, and answering "the fullest pile" here would
+    # draw every coin drop as 10,000 coins.
+    if item_id != COINS_ITEM_ID:
+        from utils.item_catalogue import largest_stack_id
+
+        catalogued = largest_stack_id(item_id)
+        if catalogued is not None:
+            return catalogued
     # Local import keeps this module light and avoids import-time DB coupling.
     from db.models import ItemList
     item = session.query(ItemList).filter(ItemList.item_id == item_id).first()

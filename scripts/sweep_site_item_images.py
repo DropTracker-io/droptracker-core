@@ -1,9 +1,9 @@
 """Backfill item icons the website can display but nothing else fetches.
 
 ``scripts/backfill_item_images.py`` walks the ``items`` table, which only ever
-contains items somebody has *submitted*. Two surfaces display item ids that
-were never submitted by anyone, so neither is reached by that backfill nor by
-the icon fetch on the item-lookup path:
+contains items somebody has *submitted*. Three surfaces display item ids that
+were never submitted by anyone, so none is reached by that backfill nor by the
+icon fetch on the item-lookup path:
 
 * **Worn gear on a personal best.** A player can set a best time in an item
   nobody has ever dropped; its id lives in ``personal_best_loadouts`` and
@@ -11,11 +11,14 @@ the icon fetch on the item-lookup path:
 * **Collection log slots.** A profile renders every slot the *game* defines,
   obtained or not — that is the point of a collection log — so it needs icons
   for the whole catalogue rather than for what has been submitted.
+* **Stack-size sprite variants.** A stackable item is stored as its single-unit
+  id but drawn as a progressively larger pile as the stack grows, and each pile
+  is a separate item id that is never submitted as anything.
 
-Both rendered as the placeholder for exactly the same reason, and this sweep
-closes both from the same direction: collect every id the site can actually
-display, keep the ones with no icon on disk, fetch them from the RuneLite
-cache.
+All three rendered as the placeholder for exactly the same reason, and this
+sweep closes them from the same direction: collect every id the site can
+actually display, keep the ones with no icon on disk, fetch them from the
+RuneLite cache.
 
 Gear is also covered as it arrives by the ingest hook
 (``data/submissions/pb._store_loadout`` -> ``utils.item_images``), so for gear
@@ -38,6 +41,7 @@ import pymysql
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from utils.item_catalogue import stack_variant_ids  # noqa: E402
 from utils.item_images import (  # noqa: E402
     ITEMDB_DIR,
     ensure_item_images,
@@ -111,8 +115,16 @@ def _collection_log_item_ids(cur) -> set[int]:
     return ids
 
 
-def _referenced_item_ids() -> tuple[set[int], set[int], set[int]]:
-    """(equipment, inventory, collection log) item ids the site can display."""
+def _referenced_item_ids() -> tuple[set[int], set[int], set[int], set[int]]:
+    """(equipment, inventory, collection log, stack variants) the site can show.
+
+    Stack variants are the fourth id space with the same problem as the other
+    three: a stackable item is stored as its single-unit id but drawn as a
+    larger pile sprite once the stack grows, and each pile is a distinct item id
+    that has never been submitted, worn or dropped by anyone. Nothing else would
+    think to fetch those icons, so an inventory of 100k coins rendered the
+    single-coin sprite or nothing at all.
+    """
     conn = pymysql.connect(
         host="localhost",
         port=3306,
@@ -127,7 +139,12 @@ def _referenced_item_ids() -> tuple[set[int], set[int], set[int]]:
         clog = _collection_log_item_ids(cur)
     finally:
         conn.close()
-    return equipment, inventory, clog
+
+    # Every pile sprite reachable from something the site can display. Resolved
+    # from the whole referenced set rather than from observed quantities, so a
+    # stack that has not grown yet still has its icon ready.
+    variants = stack_variant_ids(equipment | inventory | clog)
+    return equipment, inventory, clog, variants
 
 
 def main() -> int:
@@ -138,8 +155,8 @@ def main() -> int:
     parser.add_argument("--concurrency", type=int, default=8)
     args = parser.parse_args()
 
-    equipment, inventory, clog = _referenced_item_ids()
-    referenced = equipment | inventory | clog
+    equipment, inventory, clog, variants = _referenced_item_ids()
+    referenced = equipment | inventory | clog | variants
     missing = sorted(
         i for i in referenced if i >= 0 and not os.path.exists(item_image_path(i))
     )
@@ -147,6 +164,7 @@ def main() -> int:
     print(f"referenced by the site: {len(referenced)} distinct item ids")
     print(f"  worn equipment: {len(equipment)}   inventory: {len(inventory)}")
     print(f"  collection log slots: {len(clog)}")
+    print(f"  stack-size sprite variants: {len(variants)}")
     print(f"missing an icon on disk: {len(missing)}")
     if missing:
         preview = ", ".join(str(i) for i in missing[:20])
