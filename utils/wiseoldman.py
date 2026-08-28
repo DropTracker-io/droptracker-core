@@ -1337,11 +1337,26 @@ async def get_player_gained_ehb(username: str, start_dt, end_dt) -> Optional[flo
 # GET /efficiency/rates?metric=ehb&type=main -> [{"boss": slug, "rate": kph}].
 # ~66 entries and it only moves when Jagex/WOM rebalance, so it's cached for a
 # week; the in-process memo keeps the hot read path off Redis entirely.
+#
+# The Redis key is the platform-wide source of truth — the web API prices every
+# EHE figure off it and has no refresher of its own — so it is renewed on a
+# TTL threshold rather than on a miss. A per-process memo must never stand in
+# for it (see `get_ehb_rates`).
 _EFFICIENCY_RATES_ROUTE = _wom_routes.Route("GET", "/efficiency/rates")
 EHB_RATES_CACHE_TTL = int(os.getenv("WOM_EHB_RATES_CACHE_TTL", str(7 * 24 * 3600)))
 _EHB_RATES_MEMO_TTL = float(os.getenv("WOM_EHB_RATES_MEMO_TTL", "3600"))
+#: Renew the shared cache once it drops below this much remaining life, instead
+#: of waiting for it to disappear entirely. The Redis key is what every OTHER
+#: process reads, so letting it lapse — even briefly — silently zeroes EHE
+#: platform-wide; see :func:`get_ehb_rates`.
+EHB_RATES_REFRESH_BEFORE = int(
+    os.getenv("WOM_EHB_RATES_REFRESH_BEFORE", str(24 * 3600)))
+#: Floor between fetch attempts when the cache is cold and WOM is not
+#: answering, so a failing refresh cannot become a 30s poll.
+_EHB_RATES_RETRY_SECONDS = float(os.getenv("WOM_EHB_RATES_RETRY_SECONDS", "300"))
 _REDIS_EHB_RATES_PREFIX = "wom:ehb_rates:"
 _ehb_rates_memo: Dict[str, Tuple[float, Dict[str, float]]] = {}
+_ehb_rates_last_attempt: Dict[str, float] = {}
 
 
 def _parse_ehb_rates(data) -> Dict[str, float]:
@@ -1362,12 +1377,38 @@ def _parse_ehb_rates(data) -> Dict[str, float]:
     return out
 
 
+def _ehb_rates_needs_refresh(key: str) -> Optional[bool]:
+    """Whether the SHARED (Redis) rate cache wants re-fetching.
+
+    ``None`` means Redis could not answer, in which case a fetch could not be
+    cached for anyone else either and the caller should not bother. This looks
+    at the key's TTL rather than at whether a *value* came back, because
+    :func:`get_ehb_rates_sync` deliberately falls back to this process's memo on
+    a miss — see :func:`get_ehb_rates`.
+    """
+    try:
+        ttl = int(redis_client.client.ttl(f"{_REDIS_EHB_RATES_PREFIX}{key}"))
+    except Exception as e:
+        logger.debug("WOM EHB rates TTL read failed: %s", e)
+        return None
+    if ttl == -1:  # present, no expiry (primed by hand) — leave it alone
+        return False
+    if ttl < 0:  # -2: absent
+        return True
+    return ttl <= EHB_RATES_REFRESH_BEFORE
+
+
 def get_ehb_rates_sync(account_type: str = "main") -> Dict[str, float]:
     """Cached EHB rates without any network I/O — ``{}`` when never fetched.
 
     The read paths (event engine apply, web API) are synchronous and must never
     block on WOM, so they use this; :func:`get_ehb_rates` keeps it warm from
     the async workers. An empty map degrades to "no EHB", never an error.
+
+    On a Redis miss this falls back to whatever this process last saw, because
+    a rate table that only moves on a Jagex rebalance is far better stale than
+    absent. That fallback is for READERS only — never use a truthy return here
+    to decide whether the shared cache still needs refreshing.
     """
     key = str(account_type or "main").strip().lower() or "main"
     memo = _ehb_rates_memo.get(key)
@@ -1389,14 +1430,31 @@ def get_ehb_rates_sync(account_type: str = "main") -> Dict[str, float]:
 
 
 async def get_ehb_rates(account_type: str = "main") -> Dict[str, float]:
-    """``{boss slug: kills per hour}`` for WOM's EHB rates, refreshing the
-    shared cache when it has expired. Returns the last known map (possibly
-    empty) rather than raising — effort scoring degrades to 0 EHB, it never
-    fails a submission."""
+    """``{boss slug: kills per hour}`` for WOM's EHB rates, renewing the shared
+    cache *before* it expires. Returns the last known map (possibly empty)
+    rather than raising — effort scoring degrades to 0 EHB, it never fails a
+    submission."""
     key = str(account_type or "main").strip().lower() or "main"
     cached = get_ehb_rates_sync(key)
-    if cached:
+
+    # Freshness is decided from the SHARED cache's TTL, never from `cached`.
+    # `cached` may be this process's own memo, which get_ehb_rates_sync keeps
+    # serving indefinitely once Redis misses — and trusting it made this
+    # refresher self-silencing: on 2026-08-28 the events worker had answered
+    # from an hour-old memo for two days while the Redis key sat expired, so
+    # the web API (which prices every EHE figure off that key) read an empty
+    # map and every WOM-priced boss scored 0 hours platform-wide.
+    stale = _ehb_rates_needs_refresh(key)
+    if stale is None or stale is False:
         return cached
+    last = _ehb_rates_last_attempt.get(key, 0.0)
+    if (time.time() - last) < _EHB_RATES_RETRY_SECONDS:
+        return cached
+    _ehb_rates_last_attempt[key] = time.time()
+    if cached:
+        logger.warning(
+            "WOM EHB rates cache needs renewing (type=%s); refetching while "
+            "serving %d stale rate(s) in-process", key, len(cached))
 
     if not await limiter.wait():
         return cached
