@@ -87,10 +87,14 @@ def _plugin_evidence(session, player_id: int, npc_id: int, start, end) -> dict:
             "no_kc": int(no_kc), "lo": lo, "hi": hi}
 
 
-def audit(session, event_ids, apply: bool, min_kills: int = MIN_KILLS) -> int:
+def audit(session, event_ids, apply: bool, min_kills: int = MIN_KILLS) -> tuple:
+    """``(flagged, repairable)``. The two differ by the WOM-fed rows, which are
+    reported but never rewritten — counting them as corrections overstates what
+    an ``--apply`` run actually did."""
     from db.models import Event, EventEffort
 
     flagged = 0
+    repairable = 0
     events = session.query(Event).filter(Event.id.in_(event_ids)).all() \
         if event_ids else session.query(Event).all()
     for event in sorted(events, key=lambda e: e.id):
@@ -130,9 +134,10 @@ def audit(session, event_ids, apply: bool, min_kills: int = MIN_KILLS) -> int:
                       "(WOM sees kills no drop reports)")
                 continue
             print(f"      -> {kills} => {supported}")
+            repairable += 1
             if apply:
                 row.kills = supported
-    return flagged
+    return flagged, repairable
 
 
 def main() -> int:
@@ -148,14 +153,19 @@ def main() -> int:
     from db import Session
 
     with Session() as session:
-        flagged = audit(session, args.event or [], args.apply, args.min_kills)
-        if args.apply and flagged:
+        flagged, repairable = audit(
+            session, args.event or [], args.apply, args.min_kills)
+        wom_only = flagged - repairable
+        tail = f" ({wom_only} WOM-fed, reported only)" if wom_only else ""
+        if args.apply and repairable:
             session.commit()
-            print(f"\ncommitted corrections for {flagged} row(s)")
+            print(f"\ncommitted corrections for {repairable} of "
+                  f"{flagged} flagged row(s){tail}")
         else:
             session.rollback()
-            print(f"\n{flagged} row(s) flagged"
-                  f"{'' if flagged == 0 else ' — re-run with --apply to correct'}")
+            hint = (f" — {repairable} repairable, re-run with --apply to correct"
+                    if repairable else "")
+            print(f"\n{flagged} row(s) flagged{tail}{hint}")
     return 0
 
 
