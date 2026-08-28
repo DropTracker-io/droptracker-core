@@ -15,12 +15,81 @@ lootboard package.
 """
 
 import asyncio
+import base64
 import logging
 import os
+import time
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+# A 1x1 fully transparent PNG, served in place of an item icon we cannot get.
+#
+# What this replaces: the image server used to answer a missing icon with
+# `droptracker-small.gif`, a 672 KB animated logo, at HTTP 200. Every surface
+# that draws items — the equipment panel, the loot tracker, item pickers —
+# therefore rendered a large branded blob where a 400-byte sprite belonged, and
+# because the status said success the frontend's onError could never intervene.
+#
+# Transparent rather than a drawn "unknown item" glyph because this composites
+# over surfaces that already say the right thing: the equipment panel draws its
+# own stone slot tile underneath, and a list row keeps its own spacing. A drawn
+# placeholder would fight all of them. 1x1 also gives the frontend a reliable
+# marker (naturalWidth === 1) since real icons are 36x32 — an <img> cannot read
+# response headers, so the body has to carry the signal.
+TRANSPARENT_PNG = base64.b64decode(
+    b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
+
+# Header naming the response a fallback, for consumers that CAN read headers
+# (Discord's unfurler, monitoring, curl). The status code carries the same
+# meaning; this makes it greppable in logs without decoding the body.
+PLACEHOLDER_HEADER = "X-DT-Placeholder"
+
+# A failure response is never cacheable. This is not belt-and-braces — it is
+# the fix for the half of the reported bug that lived at the edge: the old
+# placeholder went out as `max-age=43200`, Cloudflare's zone-level Browser Cache
+# TTL rewrote it to `max-age=86400`, and the CDN then served a 672 KB GIF for a
+# further day against item ids whose icons the origin had already repaired.
+#
+# `max-age=60` is not enough, because that same zone override rewrites any
+# positive max-age upward (measured: 60 -> 1800). `no-store` is the only value
+# it leaves alone, and it is what this response actually means. The cost is that
+# every request for a genuinely missing icon reaches the origin — which is fine,
+# because the negative cache below makes that answer a dict lookup (~2 ms, 68
+# bytes) rather than a round trip to RuneLite.
+PLACEHOLDER_CACHE_CONTROL = "no-store"
+
+# Ids RuneLite has already told us it has no icon for, and when to ask again.
+# Without this every page view of a genuinely-iconless item costs an outbound
+# HTTPS round trip to static.runelite.net before we can answer, which is the
+# "repeated misses are cheap" requirement — a board full of unknown items would
+# otherwise hammer them once per tile per view.
+_NEGATIVE_TTL_SECONDS = 3600
+_MAX_NEGATIVE_ENTRIES = 20_000
+_negative_cache: dict[int, float] = {}
+
+
+def _negatively_cached(item_id: int) -> bool:
+    expires = _negative_cache.get(item_id)
+    if expires is None:
+        return False
+    if expires <= time.monotonic():
+        _negative_cache.pop(item_id, None)
+        return False
+    return True
+
+
+def _remember_missing(item_id: int) -> None:
+    # Bounded: this is a long-lived process, and an unbounded dict keyed by
+    # anything a client can name is a slow memory leak. Dropping the whole map
+    # is fine — the worst case is one extra fetch attempt per id afterwards.
+    if len(_negative_cache) >= _MAX_NEGATIVE_ENTRIES:
+        _negative_cache.clear()
+    _negative_cache[item_id] = time.monotonic() + _NEGATIVE_TTL_SECONDS
+
+
 
 # Canonical on-disk location for item icons. Mirrors the paths hard-coded in
 # lootboard/generator.py and web_api/routes/lootboard.py.
@@ -85,6 +154,12 @@ async def ensure_item_image(item_id, session: "aiohttp.ClientSession | None" = N
     if os.path.exists(path):
         return True
 
+    # Already known to be unavailable upstream. Answering straight away is the
+    # difference between a placeholder costing a dict lookup and it costing an
+    # HTTPS round trip on every single page view.
+    if _negatively_cached(iid):
+        return False
+
     url = RUNELITE_ICON_URL.format(item_id=iid)
     owns_session = session is None
     try:
@@ -92,11 +167,17 @@ async def ensure_item_image(item_id, session: "aiohttp.ClientSession | None" = N
             session = aiohttp.ClientSession()
         async with session.get(url) as response:
             if response.status != 200:
-                # RuneLite genuinely has no icon for plenty of ids (placeholders,
-                # Leagues variants). Normal, not worth a log line.
+                # 404 is definitive: RuneLite has no icon for plenty of ids
+                # (placeholders, Leagues variants), and that will not change
+                # until the next cache build, so stop asking. Any other status
+                # is the server having a bad moment — retry that one, or a
+                # blip would blank an icon for the whole TTL.
+                if response.status == 404:
+                    _remember_missing(iid)
                 return False
             data = await response.read()
         if not data:
+            _remember_missing(iid)
             return False
         ensure_public_dir(ITEMDB_DIR)
         # Write atomically so a concurrent reader never sees a partial file.

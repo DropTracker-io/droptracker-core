@@ -11,7 +11,9 @@ import markdown
 from utils.format import get_sorted_doc_files, convert_from_ms, parse_authed_users, human_readable_time_difference
 from db.models import Session, NpcList
 
-from quart import Blueprint, jsonify, redirect, render_template, request, session as sesh, send_from_directory, url_for
+from quart import Blueprint, Response, jsonify, redirect, render_template, request, session as sesh, send_from_directory, url_for
+
+from utils import item_images
 from quart_jwt_extended import (
     JWTManager,
     jwt_required,
@@ -75,6 +77,35 @@ def create_frontend(bot: interactions.Client):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         return response
 
+    def _missing_item_icon():
+        """The response for an item icon we could not produce.
+
+        Scoped deliberately to ``itemdb/`` and nothing else. The generic
+        fallback below (the DropTracker GIF at 200) is reached by group icons,
+        NPC art and every other path under this route, and several of those
+        surfaces rely on getting *an* image back — changing the contract for all
+        of them to fix item icons would be a much larger blast radius than the
+        bug warrants.
+
+        404 rather than 200 because the old 200 actively defeated the frontend:
+        `<img>` onError never fires for a "successful" response, so a missing
+        icon was indistinguishable from a real one and rendered a 672 KB logo
+        instead of a 400-byte sprite. The body is still a valid (transparent,
+        1x1) PNG so that consumers which ignore the status — Discord's unfurler,
+        the many raw `<img>` tags that do not go through ItemDbIcon — degrade to
+        something invisible rather than to a browser's broken-image glyph.
+        """
+        response = Response(
+            item_images.TRANSPARENT_PNG, status=404, mimetype='image/png'
+        )
+        response.headers[item_images.PLACEHOLDER_HEADER] = 'item'
+        # Uncacheable, so a failure cannot outlive its cause. The previous
+        # placeholder was held at the edge for a full day after the origin had
+        # already been repaired.
+        response.headers['Cache-Control'] = item_images.PLACEHOLDER_CACHE_CONTROL
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+
     @front.route('/img/<path:filename>')
     async def serve_img(filename):
         _is_inline_image = filename.lower().endswith(_INLINE_IMAGE_EXTS)
@@ -106,7 +137,9 @@ def create_frontend(bot: interactions.Client):
                     color_rel = f'itemdb/{gid}.png'
                     if os.path.exists(os.path.join('static/assets/img', color_rel)):
                         return await send_from_directory('static/assets/img', color_rel)
-                return await send_from_directory('static/assets/img', 'droptracker-small.gif')
+                # A receipt tab with no icon at all is an item icon we could not
+                # produce, so it gets the item placeholder rather than the logo.
+                return _missing_item_icon()
             # Item icons: recover a missing itemdb/{id}.png on demand from the
             # RuneLite cache, the same way the lootboard generator does. Without
             # this the website perpetually renders newly-tracked items as the
@@ -120,6 +153,11 @@ def create_frontend(bot: interactions.Client):
                         return await send_from_directory('static/assets/img', filename)
                 except Exception as e:
                     print(f"On-demand item icon fetch failed for {filename}: {e}")
+                # The self-heal above still ran, so requesting a missing icon
+                # repairs it for next time; this only answers the request that
+                # discovered the gap. Repeat misses are a dict lookup, not
+                # another round trip — see item_images._negative_cache.
+                return _missing_item_icon()
             if ".png" in filename or ".jpeg" in filename or ".jpg" in filename or ".gif" in filename:
                 # Strip the directory prefix and extension to recover the bare
                 # npc id (e.g. "npcdb/12345.png" -> "12345"). Each step must

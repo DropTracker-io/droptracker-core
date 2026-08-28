@@ -1,0 +1,42 @@
+# Backfills item icons the website can display but nothing else fetches:
+# worn gear on personal bests, and every collection log slot.
+# Triggered by droptracker-site-icons.timer — do not enable the service itself.
+#
+# For gear the primary mechanism is the ingest hook
+# (data/submissions/pb._store_loadout -> utils.item_images), and this is the
+# safety net: the hook only covers what it saw, not ids stored before it
+# existed, ids whose download failed transiently, or ids missed while the icon
+# directory was unwritable (which is how the gap went unnoticed the first time —
+# every caller treats a missing icon as a soft failure, so nothing complained).
+#
+# For the collection log this IS the primary mechanism. A profile renders every
+# slot the game defines, so it needs the whole catalogue's icons rather than
+# what players have submitted; the catalogue changes only when the game does,
+# which a daily pass tracks fine.
+#
+# Cheap by construction: reads personal_best_loadouts and one manifest row
+# (never the drops table) and does one stat() per referenced id. With nothing
+# missing it makes no network calls at all.
+#
+# Runs as `user` so a failure here proves the icon directory is still writable
+# by the account the bots run as — which is the condition that actually broke.
+#
+# Manual dry run:  cd /store/droptracker/disc && venv/bin/python -m scripts.sweep_site_item_images
+# Manual real run: sudo systemctl start droptracker-site-icons.service
+# Watch it:        journalctl -u droptracker-site-icons.service -f
+
+[Unit]
+Description=DropTracker site item-icon sweep (PB gear + collection log catalogue)
+Wants=network-online.target
+After=network-online.target mariadb.service mysql.service
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/store/droptracker/disc
+EnvironmentFile=/store/droptracker/disc/.env
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.sweep_site_item_images --apply
+TimeoutStartSec=30m
+# Decorative cache warming; never urgent.
+Nice=15
+IOSchedulingClass=idle

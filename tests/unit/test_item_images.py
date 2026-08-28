@@ -106,3 +106,106 @@ class TestEnsureItemImageWriteFailure:
 
         assert ok is False
         assert any("Could not write item icon" in r.message for r in caplog.records)
+
+
+class TestPlaceholder:
+    """The bytes served when an icon cannot be produced.
+
+    The old placeholder was a 672 KB animated logo returned at HTTP 200, which
+    is two bugs in one: every item surface rendered a branded blob where a
+    ~400-byte sprite belonged, and the success status meant the frontend could
+    never tell a real icon from a failure.
+    """
+
+    def test_placeholder_is_a_tiny_transparent_png(self):
+        data = item_images.TRANSPARENT_PNG
+        assert data.startswith(b"\x89PNG\r\n\x1a\n")
+        # Two orders of magnitude smaller than the GIF it replaces; the exact
+        # size matters less than it staying negligible.
+        assert len(data) < 200
+
+    def test_placeholder_is_one_by_one(self):
+        # The frontend identifies the fallback by intrinsic size (an <img> can
+        # read neither the status code nor a header), and every real OSRS item
+        # sprite is 36x32 — so 1x1 must stay 1x1.
+        width = int.from_bytes(item_images.TRANSPARENT_PNG[16:20], "big")
+        height = int.from_bytes(item_images.TRANSPARENT_PNG[20:24], "big")
+        assert (width, height) == (1, 1)
+
+    def test_failures_are_never_cached(self):
+        """Cloudflare held the old placeholder for a day past the origin fix.
+
+        A positive max-age is not sufficient: the zone's Browser Cache TTL
+        rewrites any positive value upward (measured: 60 -> 1800), so the only
+        directive that survives intact is no-store.
+        """
+        assert "no-store" in item_images.PLACEHOLDER_CACHE_CONTROL
+        assert "max-age" not in item_images.PLACEHOLDER_CACHE_CONTROL
+
+
+class TestNegativeCache:
+    def setup_method(self):
+        item_images._negative_cache.clear()
+
+    teardown_method = setup_method
+
+    def _session_returning(self, status):
+        class _Response:
+            def __init__(self):
+                self.status = status
+
+            async def read(self):
+                return b""
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class _Session:
+            calls = 0
+
+            def get(self_inner, url):
+                _Session.calls += 1
+                return _Response()
+
+        return _Session()
+
+    def test_a_404_stops_us_asking_again(self, tmp_path):
+        """Repeated misses must be cheap.
+
+        Without this, every page view of an item RuneLite has no icon for costs
+        an outbound HTTPS round trip before we can answer — once per tile, per
+        view.
+        """
+        session = self._session_returning(404)
+        with patch.object(item_images, "ITEMDB_DIR", str(tmp_path)):
+            for _ in range(5):
+                asyncio.run(item_images.ensure_item_image(4151, session=session))
+        assert type(session).calls == 1
+
+    def test_a_server_error_is_retried(self, tmp_path):
+        # A 5xx is RuneLite having a bad moment, not a verdict; caching it would
+        # blank a perfectly good icon for the whole TTL.
+        session = self._session_returning(503)
+        with patch.object(item_images, "ITEMDB_DIR", str(tmp_path)):
+            for _ in range(3):
+                asyncio.run(item_images.ensure_item_image(4151, session=session))
+        assert type(session).calls == 3
+
+    def test_an_existing_file_short_circuits_before_the_cache(self, tmp_path):
+        # Ordering matters: another process (the sweep) may have written the
+        # icon since we cached the miss, and the file on disk always wins.
+        item_images._remember_missing(4151)
+        (tmp_path / "4151.png").write_bytes(b"x")
+        with patch.object(item_images, "ITEMDB_DIR", str(tmp_path)):
+            ok = asyncio.run(item_images.ensure_item_image(4151))
+        assert ok is True
+
+    def test_the_cache_is_bounded(self, tmp_path):
+        # Keyed by anything a client can name, in a process that runs for
+        # months — unbounded growth would be a slow leak.
+        for iid in range(item_images._MAX_NEGATIVE_ENTRIES + 10):
+            item_images._remember_missing(iid)
+        assert len(item_images._negative_cache) <= item_images._MAX_NEGATIVE_ENTRIES
