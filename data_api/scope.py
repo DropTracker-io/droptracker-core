@@ -94,16 +94,22 @@ def group_page(session, after_id: int, limit: int) -> List[dict]:
     Excludes the global pseudo-group, and reports the visible member count so
     a partner site's "members" figure matches the website's.
     """
+    # The count is a CASE, not COUNT(a.player_id): a LEFT JOIN with the hidden
+    # filter in its ON clause does not remove the association row, it only
+    # nulls the joined columns — so counting the association counted hidden
+    # players too and advertised more members than the API would return.
+    # LEFT JOINs are kept so a group with no visible members still lists.
     rows = session.execute(text("""
         SELECT g.group_id, g.group_name, g.date_added,
-               COUNT(DISTINCT a.player_id) AS members
+               COUNT(DISTINCT CASE
+                   WHEN p.player_id IS NOT NULL AND COALESCE(u.hidden, 0) = 0
+                   THEN p.player_id END) AS members
         FROM groups g
         LEFT JOIN user_group_association a
                ON a.group_id = g.group_id AND a.player_id IS NOT NULL
         LEFT JOIN players p
                ON p.player_id = a.player_id AND COALESCE(p.hidden, 0) = 0
-        LEFT JOIN users u
-               ON u.user_id = p.user_id AND COALESCE(u.hidden, 0) = 0
+        LEFT JOIN users u ON u.user_id = p.user_id
         WHERE g.group_id > :after AND g.group_id <> :pseudo
         GROUP BY g.group_id, g.group_name, g.date_added
         ORDER BY g.group_id

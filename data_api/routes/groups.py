@@ -140,7 +140,11 @@ async def list_groups():
             stats = group_stats(session, [g["group_id"] for g in groups],
                                 partition, with_all_time=False)
             for row in groups:
-                row["stats"] = stats.get(row["group_id"])
+                entry = dict(stats.get(row["group_id"]) or {})
+                # `members` is already on the row; two fields meaning the same
+                # thing is how they drift apart.
+                entry.pop("members", None)
+                row["stats"] = entry
         return {
             "count": len(groups),
             "next_cursor": groups[-1]["group_id"] if len(groups) == limit else None,

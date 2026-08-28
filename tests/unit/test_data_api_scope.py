@@ -83,3 +83,33 @@ class TestVisibilityIsNotPartOfScope:
 
         params = inspect.signature(scope.visible_player_ids).parameters
         assert "key" not in params and "scope" not in params
+
+
+class TestMemberCountsExcludeHiddenPlayers:
+    """The listing's member count must match what the API will actually serve.
+
+    It did not: `LEFT JOIN players ... AND hidden = 0` does not drop the
+    association row, it only nulls the joined columns, so COUNT(a.player_id)
+    counted hidden players. A partner site would have shown 25 members for a
+    clan whose roster returns 24.
+    """
+
+    def _source(self):
+        return (_ROOT / "data_api" / "scope.py").read_text()
+
+    def test_the_listing_does_not_count_the_association_row(self):
+        body = self._source().split("def group_page(", 1)[1].split("\ndef ", 1)[0]
+        assert "COUNT(DISTINCT a.player_id)" not in body, (
+            "counting the association counts hidden players"
+        )
+
+    def test_the_listing_counts_only_matched_visible_players(self):
+        body = self._source().split("def group_page(", 1)[1].split("\ndef ", 1)[0]
+        assert "p.player_id IS NOT NULL" in body
+        assert "COALESCE(u.hidden, 0) = 0" in body
+
+    def test_the_listing_still_left_joins_so_empty_groups_appear(self):
+        # An inner join would silently drop any group with no visible members
+        # from the listing entirely.
+        body = self._source().split("def group_page(", 1)[1].split("\ndef ", 1)[0]
+        assert "LEFT JOIN user_group_association" in body
