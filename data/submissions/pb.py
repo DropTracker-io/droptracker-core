@@ -68,12 +68,23 @@ def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_chang
     Wrapped in its own try/except and a SAVEPOINT: this is an additive nicety,
     so a malformed loadout must not roll back or fail the personal best it is
     attached to.
+
+    Returns the set of item ids the loadout references so the caller can make
+    sure their icons exist. Worn gear is frequently an item nobody has ever
+    submitted as a drop, so it is never reached by the icon fetch on the item
+    lookup path (``data/submissions/common._ensure_item_icon``) — without this
+    the website renders those slots as the placeholder GIF forever.
     """
+    item_ids: set[int] = set()
     try:
         from services.loadout import parse_loadout, serialize_loadout
 
-        equipment = serialize_loadout(parse_loadout(equipment_raw))
-        inventory = serialize_loadout(parse_loadout(inventory_raw))
+        equipment_entries = parse_loadout(equipment_raw)
+        inventory_entries = parse_loadout(inventory_raw)
+        item_ids = {e["item_id"] for e in equipment_entries + inventory_entries}
+
+        equipment = serialize_loadout(equipment_entries)
+        inventory = serialize_loadout(inventory_entries)
 
         from db.models import PersonalBestLoadout
 
@@ -88,7 +99,7 @@ def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_chang
                         .filter(PersonalBestLoadout.pb_id == pb_entry.id)
                         .delete()
                     )
-            return
+            return item_ids
 
         session.flush()  # ensure pb_entry.id exists
         with session.begin_nested():
@@ -109,6 +120,7 @@ def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_chang
                 row.inventory = inventory
     except Exception as e:
         debug_print(f"Could not store PB loadout: {e}")
+    return item_ids
 
 
 async def pb_processor(pb_data, external_session=None, world_type="main"):
@@ -348,7 +360,18 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     # Attach the loadout once the PB row has an id. Best-effort by design: a
     # decorative extra must never cost the player their personal best.
     if pb_entry is not None and not is_seasonal:
-        _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_changed)
+        loadout_item_ids = _store_loadout(
+            session, pb_entry, equipment_raw, inventory_raw, pb_row_changed
+        )
+        # Make sure the site can actually draw what we just stored. Costs one
+        # stat() per id once the icons are cached, which is the normal case.
+        if loadout_item_ids:
+            try:
+                from utils.item_images import ensure_item_images
+
+                await ensure_item_images(loadout_item_ids)
+            except Exception as e:
+                debug_print(f"Could not ensure loadout item icons: {e}")
 
     if use_external_session:
         session.flush()

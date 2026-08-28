@@ -293,3 +293,32 @@ class TestTeamSizeCeiling:
     def test_real_tob_team_sizes_are_untouched(self):
         for submitted in ("Solo", "2", "3", "4", "5"):
             assert self._stored_team_size(submitted) == submitted
+
+
+class TestLoadoutItemIds:
+    """`_store_loadout` reports the items it stored so their icons can be cached.
+
+    Worn gear is routinely an item nobody has ever submitted as a drop, so it
+    never passes through the item-lookup path that fetches icons. Without these
+    ids coming back out, those slots render as the placeholder on the website
+    indefinitely — which is exactly what happened in production.
+    """
+
+    def _store(self, equipment, inventory):
+        import data.submissions.pb as pb
+
+        session = MagicMock()
+        session.query.return_value.filter.return_value.first.return_value = None
+        entry = MagicMock()
+        entry.id = 7
+        return pb._store_loadout(session, entry, equipment, inventory, False)
+
+    def test_returns_every_item_id_across_gear_and_inventory(self):
+        assert self._store("0-11802-1,3-995-100", "0-4151-1") == {11802, 995, 4151}
+
+    def test_returns_empty_set_when_nothing_was_sent(self):
+        assert self._store(None, None) == set()
+
+    def test_reports_ids_even_from_a_partly_malformed_payload(self):
+        # A bad slot must not cost us the icons for the good ones.
+        assert 11802 in self._store("0-11802-1,garbage,2-4-1", None)
