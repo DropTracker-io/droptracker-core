@@ -72,6 +72,10 @@ class PlayerState(Base):
     # Lets the renderer find the right file without listing a directory, and
     # tells the upload endpoint whether it already has this outfit.
     model_fingerprint = Column(String(32), nullable=True)
+    # The outfit the player explicitly chose for their profile via the plugin's
+    # "Send Player Model" button. When set (and the file still exists), the
+    # profile shows this model instead of whatever was auto-uploaded last.
+    pinned_model_fingerprint = Column(String(32), nullable=True)
     last_synced_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

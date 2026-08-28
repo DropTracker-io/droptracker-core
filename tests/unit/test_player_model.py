@@ -93,3 +93,71 @@ class TestFingerprint:
         assert not is_valid_fingerprint("")
         assert not is_valid_fingerprint("ABCDEF")
         assert not is_valid_fingerprint("a" * 33)
+
+
+class TestPruneProtection:
+    """A pinned outfit is a promise — outfit churn must never delete it."""
+
+    def _touch(self, directory, name, mtime):
+        import os
+
+        path = os.path.join(directory, name)
+        with open(path, "wb") as fh:
+            fh.write(b"glb")
+        os.utime(path, (mtime, mtime))
+
+    def test_protected_fingerprint_survives_even_as_the_oldest(self, tmp_path, monkeypatch):
+        import os
+        import sys
+
+        # conftest loads the real module under this key; the ``services``
+        # package itself is a stub, so attribute-style import would hand
+        # back a MagicMock.
+        pm = sys.modules["services.player_model"]
+
+        monkeypatch.setattr(pm, "MODEL_ROOT", str(tmp_path))
+        directory = pm.model_dir(7)
+        os.makedirs(directory)
+
+        # The pinned outfit (and its pet) are the oldest files by far...
+        self._touch(directory, "aaaa.glb", 1_000)
+        self._touch(directory, "aaaa-pet.glb", 1_000)
+        # ...buried under more recent outfits than the keep window holds.
+        for i in range(8):
+            self._touch(directory, f"bbb{i}.glb", 2_000 + i)
+
+        removed = pm.prune_old_models(7, keep=2, protect=frozenset({"aaaa"}))
+
+        survivors = sorted(os.listdir(directory))
+        assert "aaaa.glb" in survivors
+        assert "aaaa-pet.glb" in survivors
+        # The unprotected files still obey the keep window (2 outfits' worth).
+        assert removed == 4
+        assert len([n for n in survivors if n.startswith("bbb")]) == 4
+
+    def test_without_protection_the_oldest_go_first(self, tmp_path, monkeypatch):
+        import os
+        import sys
+
+        # conftest loads the real module under this key; the ``services``
+        # package itself is a stub, so attribute-style import would hand
+        # back a MagicMock.
+        pm = sys.modules["services.player_model"]
+
+        monkeypatch.setattr(pm, "MODEL_ROOT", str(tmp_path))
+        directory = pm.model_dir(8)
+        os.makedirs(directory)
+        for i in range(6):
+            self._touch(directory, f"ccc{i}.glb", 1_000 + i)
+
+        pm.prune_old_models(8, keep=2)
+
+        # keep counts outfits, each budgeted as a player+pet pair of files.
+        assert sorted(os.listdir(directory)) == [
+            "ccc2.glb", "ccc3.glb", "ccc4.glb", "ccc5.glb"]
+
+    def test_pet_files_resolve_to_their_outfits_fingerprint(self):
+        from services.player_model import _fingerprint_of_filename
+
+        assert _fingerprint_of_filename("1a2b.glb") == "1a2b"
+        assert _fingerprint_of_filename("1a2b-pet.glb") == "1a2b"

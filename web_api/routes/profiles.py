@@ -549,10 +549,20 @@ async def player_profile(player_id: int):
                     .filter(PlayerState.player_id == player_id)
                     .first()
                 )
-                if state is not None and state.model_fingerprint:
-                    payload["model_fingerprint"] = state.model_fingerprint
+                fingerprint = None
+                if state is not None:
+                    # A pinned model is the outfit the player chose for their
+                    # profile; it wins over whatever was auto-uploaded last,
+                    # as long as its file is still on disk.
+                    pinned = state.pinned_model_fingerprint
+                    if pinned and model_exists(player_id, pinned):
+                        fingerprint = pinned
+                    elif state.model_fingerprint:
+                        fingerprint = state.model_fingerprint
+                if fingerprint:
+                    payload["model_fingerprint"] = fingerprint
                     payload["model_has_pet"] = model_exists(
-                        player_id, state.model_fingerprint, pet=True
+                        player_id, fingerprint, pet=True
                     )
             except Exception:
                 pass

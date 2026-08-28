@@ -150,17 +150,29 @@ def store_model(player_id: int, fingerprint: str, data: bytes,
     return model_url(player_id, fingerprint, pet=pet)
 
 
+def _fingerprint_of_filename(name: str) -> str:
+    """``<fp>.glb`` and ``<fp>-pet.glb`` both belong to fingerprint ``<fp>``."""
+    stem = name[:-4] if name.endswith(".glb") else name
+    return stem[:-4] if stem.endswith("-pet") else stem
+
+
 def model_exists(player_id: int, fingerprint: str, *, pet: bool = False) -> bool:
     if not is_valid_fingerprint(fingerprint):
         return False
     return os.path.exists(model_path(player_id, fingerprint, pet=pet))
 
 
-def prune_old_models(player_id: int, keep: int = 5) -> int:
+def prune_old_models(player_id: int, keep: int = 5,
+                     protect: frozenset = frozenset()) -> int:
     """Keeps only the most recently modified models for a player.
 
     Without this the directory grows forever: a player who changes gear often
     would leave a model behind for every outfit they have ever worn.
+
+    ``protect`` is a set of fingerprints that must survive regardless of age —
+    the pinned profile model, chiefly. A pin is a promise ("your profile shows
+    this outfit"), and outfit churn must not be able to break it. The pet file
+    travels with its protected fingerprint.
     """
     directory = model_dir(player_id)
     try:
@@ -168,6 +180,7 @@ def prune_old_models(player_id: int, keep: int = 5) -> int:
             (os.path.getmtime(os.path.join(directory, name)), name)
             for name in os.listdir(directory)
             if name.endswith(".glb")
+            and _fingerprint_of_filename(name) not in protect
         ]
     except OSError:
         return 0

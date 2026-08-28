@@ -40,6 +40,10 @@ async def upload_player_model():
     if not acc_hash or not fingerprint:
         return jsonify({"error": "acc_hash and fingerprint are required"}), 422
 
+    # The plugin's "Send Player Model" button: the player chose this outfit
+    # for their profile, so record it as pinned rather than merely current.
+    pin = (form.get("pin") or "").strip() in ("1", "true")
+
     model_file = files.get("model")
     if model_file is None:
         return jsonify({"error": "model file is required"}), 422
@@ -50,7 +54,7 @@ async def upload_player_model():
 
     try:
         result = await asyncio.to_thread(
-            _store, acc_hash, fingerprint, model_bytes, pet_bytes
+            _store, acc_hash, fingerprint, model_bytes, pet_bytes, pin
         )
     except Exception as exc:
         print(f"/player/model failed: {exc}")
@@ -82,7 +86,7 @@ async def _render_in_background(player_id: int, fingerprint: str) -> None:
         print(f"Background gear render failed for player {player_id}: {exc}")
 
 
-def _store(acc_hash, fingerprint, model_bytes, pet_bytes):
+def _store(acc_hash, fingerprint, model_bytes, pet_bytes, pin=False):
     from services.player_model import (
         is_valid_fingerprint,
         model_exists,
@@ -103,8 +107,23 @@ def _store(acc_hash, fingerprint, model_bytes, pet_bytes):
             return None
         player_id = player.player_id
 
+        state = (
+            db_session.query(PlayerState)
+            .filter(PlayerState.player_id == player_id)
+            .first()
+        )
+
         if model_exists(player_id, fingerprint):
-            return {"stored": False, "player_id": player_id,
+            # An outfit we already hold is a no-op for the disk — but a pin of
+            # it is still news: the player just chose it for their profile.
+            if pin:
+                if state is None:
+                    state = PlayerState(player_id=player_id)
+                    db_session.add(state)
+                state.model_fingerprint = fingerprint
+                state.pinned_model_fingerprint = fingerprint
+                db_session.commit()
+            return {"stored": False, "player_id": player_id, "pinned": pin,
                     "url": model_url(player_id, fingerprint)}
 
         url = store_model(player_id, fingerprint, model_bytes)
@@ -117,19 +136,20 @@ def _store(acc_hash, fingerprint, model_bytes, pet_bytes):
 
         # Record which outfit is current so the renderer knows what to draw
         # without listing the directory.
-        state = (
-            db_session.query(PlayerState)
-            .filter(PlayerState.player_id == player_id)
-            .first()
-        )
         if state is None:
             state = PlayerState(player_id=player_id)
             db_session.add(state)
         state.model_fingerprint = fingerprint
+        if pin:
+            state.pinned_model_fingerprint = fingerprint
+        pinned_fingerprint = state.pinned_model_fingerprint
         db_session.commit()
 
-        pruned = prune_old_models(player_id)
-        return {"stored": True, "player_id": player_id, "url": url, "pruned": pruned}
+        # The pinned outfit is a promise to the player; age must not delete it.
+        protect = frozenset({pinned_fingerprint} if pinned_fingerprint else ())
+        pruned = prune_old_models(player_id, protect=protect)
+        return {"stored": True, "player_id": player_id, "url": url,
+                "pinned": pin, "pruned": pruned}
     except Exception:
         db_session.rollback()
         raise
