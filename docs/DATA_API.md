@@ -221,6 +221,48 @@ unchanged will usually produce the same result; make it smaller.
 
 ---
 
+## `meta` — standing, at no cost
+
+`include=meta` adds where an entity sits on the boards. It is priced at **0**:
+the whole page costs two pipelined Redis round trips plus one indexed query,
+with no per-player work.
+
+On a player it adds ranks and memberships:
+
+```json
+"meta": {
+  "partition": 202608,
+  "month_rank": 820,      "ranked_players": 4413,
+  "all_time_rank": 878,   "ranked_players_all_time": 4525,
+  "groups": [{ "group_id": 19, "name": "Aviarium" }]
+}
+```
+
+On `GET /v2/groups/{id}/players` it also attaches the group's own row, which
+describes the *group* rather than the page — so it reads the same on page 4 of
+a roster as on page 1:
+
+```json
+"group": {
+  "group_id": 19, "name": "Aviarium", "created": "2024-11-09T01:07:36",
+  "members": 58, "partition": 202608,
+  "month_gp": 2714077533, "month_rank": 31, "ranked_groups": 268,
+  "all_time_gp": 3029998196
+}
+```
+
+On `GET /v2/groups` each row gains a `stats` block with the monthly figures.
+
+Two deliberate absences. There is **no all-time group rank**: monthly group
+standings are a maintained sorted set, so a rank is one lookup, but no
+all-time equivalent exists and deriving one means summing every group across
+all history — too expensive to sit in a free section. And `all_time_gp` is
+returned for a *single* group, not on the listing, where it would be that
+derivation once per row.
+
+Ranks and totals come from the same sorted sets the website's leaderboards
+render, so a figure here cannot disagree with the profile page.
+
 ## Notes on the data
 
 * **Loot totals come from the same source as the leaderboard**, so the two can
