@@ -184,3 +184,34 @@ class TestClogSlotsShape:
         # would read back as 1.
         out = self._load([(7, 100, 0)])
         assert out[7]["quantities"] == {"100": 0}
+
+
+class TestMetaSection:
+    """Board standing, advertised as free — so it must actually be batched."""
+
+    def test_meta_is_free(self):
+        # The owner's requirement: attachable at no cost to the caller.
+        assert sect.REGISTRY["meta"].cost == 0
+
+    def test_meta_does_not_change_the_price_of_a_request(self):
+        without = sect.cost_of(["identity", "loot"], 100)
+        with_meta = sect.cost_of(["identity", "loot", "meta"], 100)
+        assert with_meta == without
+
+    def test_meta_loader_batches_rather_than_looping_per_player(self):
+        # A per-player loop would be 400 Redis round trips on a big roster,
+        # which is what web_api.common.player_list_loot_sum does and why it is
+        # not reused. Pin the shape: one query, one batched rank call.
+        import inspect
+
+        source = inspect.getsource(sect._load_meta)
+        assert "player_ranks(player_ids" in source, "ranks must be fetched for the whole page"
+        assert source.count("session.execute") == 1, "should be one query, not one per player"
+
+    def test_meta_never_reads_the_naive_sum_helper(self):
+        from pathlib import Path
+
+        source = (_ROOT / "data_api" / "group_meta.py").read_text()
+        # player_list_loot_sum is a sequential loop; player_month_totals pipelines.
+        assert "player_list_loot_sum" not in source.split('"""', 2)[-1]
+        assert "player_month_totals" in source

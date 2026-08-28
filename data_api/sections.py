@@ -393,6 +393,37 @@ def _load_loot_items(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     return out
 
 
+
+def _load_meta(session, player_ids: List[int], ctx) -> Dict[int, dict]:
+    """Where each player sits on the boards, and which groups they are in.
+
+    Free (cost 0) because it is two pipelined Redis round trips for the whole
+    page plus one indexed query — no per-player work. The ranks come from the
+    same sorted sets the site's leaderboards render, so they cannot disagree
+    with a player's profile page.
+    """
+    from data_api.group_meta import player_ranks
+    from web_api.common import get_current_partition
+
+    partition = ctx.get("partition") or get_current_partition()
+    ranks = player_ranks(player_ids, partition)
+
+    memberships: Dict[int, list] = {pid: [] for pid in player_ids}
+    rows = session.execute(text("""
+        SELECT a.player_id, g.group_id, g.group_name
+        FROM user_group_association a
+        JOIN groups g ON g.group_id = a.group_id
+        WHERE a.player_id IN :ids AND a.group_id > 2
+        ORDER BY a.player_id, g.group_id
+    """).bindparams(ids=tuple(player_ids)))
+    for player_id, group_id, name in rows:
+        memberships[int(player_id)].append({"group_id": int(group_id), "name": name})
+
+    return {pid: {"partition": partition, **ranks.get(pid, {}),
+                  "groups": memberships.get(pid, [])}
+            for pid in player_ids}
+
+
 # ── registry ─────────────────────────────────────────────────────────────────
 
 _SECTIONS = (
@@ -420,6 +451,10 @@ _SECTIONS = (
             "Pets received."),
     Section("deaths", 3, _load_deaths,
             "Recorded death count and most recent."),
+    Section("meta", 0, _load_meta,
+            "Board standing (monthly and all-time rank) and group memberships. "
+            "Free: two pipelined Redis round trips for the whole page. On a "
+            "group request it also attaches the group's own stats."),
     Section("loot", 1, _load_loot,
             "Headline loot GP this month and all time (matches the leaderboard)."),
     Section("loot_npcs", 16, _load_loot_npcs,
