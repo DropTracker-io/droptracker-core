@@ -268,3 +268,66 @@ class TestTierSerialisationIsConsistent:
             assert isinstance(row[field], int), field
         assert isinstance(row["enabled"], bool)
         assert isinstance(row["tier_key"], str)
+
+
+class TestGlobalScope:
+    """A global key reads everything visible — and nothing hidden.
+
+    The dangerous shape for this feature is inference: if "no owner set" meant
+    "reads everything", then any bug that failed to set an owner would mint an
+    all-access key. Scope is therefore stored, required, and never guessed
+    upward.
+    """
+
+    def test_scope_defaults_to_the_owner_supplied(self):
+        assert keys.create_key.__doc__  # documented contract
+        row = _row(scope="group", group_id=2, owner_user_id=None)
+        assert keys.key_descriptor(row, None)["scope"] == "group"
+
+    def test_a_row_with_no_owner_and_no_scope_reads_as_narrow_not_global(self):
+        # A broken row must degrade to the *narrowest* reading. Inferring
+        # 'global' from absent owners is the bug this guards against.
+        broken = _row(scope=None, owner_user_id=None, group_id=None)
+        assert keys.key_descriptor(broken, None)["scope"] != "global"
+
+    def test_an_unrecognised_scope_is_not_honoured(self):
+        row = _row(scope="superuser", owner_user_id=None, group_id=2)
+        assert keys.key_descriptor(row, None)["scope"] in keys.SCOPES
+
+    def test_descriptor_reports_global_when_stored(self):
+        row = _row(scope="global", owner_user_id=None, group_id=None)
+        desc = keys.key_descriptor(row, None)
+        assert desc["scope"] == "global"
+        assert desc["group_id"] is None and desc["owner_user_id"] is None
+
+    def test_create_rejects_a_global_key_that_also_has_an_owner(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            keys.create_key(_FakeSession(), scope="global", group_id=7)
+        with pytest.raises(ValueError):
+            keys.create_key(_FakeSession(), scope="global", owner_user_id=1)
+
+    def test_create_rejects_an_unknown_scope(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            keys.create_key(_FakeSession(), scope="everything", group_id=7)
+
+    def test_create_rejects_an_ownerless_key_that_did_not_ask_to_be_global(self):
+        # Omitting both owners defaults to scope 'group', which then has no
+        # group_id — an error, not a silent grant of everything.
+        import pytest
+
+        with pytest.raises(ValueError):
+            keys.create_key(_FakeSession())
+
+
+class _FakeSession:
+    """Enough of a Session for create_key's validation to run and raise."""
+
+    def add(self, _row):  # pragma: no cover - never reached in these tests
+        raise AssertionError("validation should have rejected this first")
+
+    def flush(self):  # pragma: no cover
+        raise AssertionError("validation should have rejected this first")

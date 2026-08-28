@@ -25,15 +25,16 @@ async def group_players(group_id: int):
     """
     key = g.api_key
 
-    if key["owner_type"] != "group" or key["group_id"] != group_id:
+    if not scope.key_may_read_group(key, group_id):
+        if group_id == scope.GLOBAL_GROUP_ID:
+            return jsonify({
+                "error": "forbidden",
+                "detail": "Group 2 is the global pseudo-group and cannot be "
+                          "exported. Use /v2/players to enumerate players.",
+            }), 403
         return jsonify({
             "error": "forbidden",
             "detail": "This key is not scoped to that group.",
-        }), 403
-    if group_id == scope.GLOBAL_GROUP_ID:
-        return jsonify({
-            "error": "forbidden",
-            "detail": "Group 2 is the global pseudo-group and cannot be exported.",
         }), 403
 
     try:
@@ -62,3 +63,50 @@ async def group_players(group_id: int):
         }
 
     return await serve("groups.players", resolve, build)
+
+
+@groups_bp.route("/groups", methods=["GET"])
+async def list_groups():
+    """Every group, cursor-paginated. Global keys only.
+
+    A group-scoped key already knows which group it is; enumerating the site
+    is the one thing scope exists to prevent, so this is not "its own group
+    plus nothing" for those keys — it is simply not theirs to call.
+    """
+    key = g.api_key
+    if key.get("scope") != "global":
+        return jsonify({
+            "error": "forbidden",
+            "detail": "Listing groups requires a global key.",
+        }), 403
+
+    try:
+        limit = int(request.args.get("limit", DEFAULT_PAGE))
+    except ValueError:
+        limit = DEFAULT_PAGE
+    limit = max(1, min(limit, MAX_PAGE))
+    try:
+        cursor = int(request.args.get("cursor", 0))
+    except ValueError:
+        cursor = 0
+
+    # serve() calls resolve() to price the request and build() to fill it.
+    # The page is fetched once in resolve and reused, because the grouped
+    # member count is the expensive part and running it twice would double
+    # the cost of every call to this endpoint.
+    page: dict = {}
+
+    def resolve(session):
+        page["groups"] = scope.group_page(session, cursor, limit)
+        # Priced per row, like a page of players.
+        return list(range(len(page["groups"])))
+
+    def build(_session, _player_ids, _ctx):
+        groups = page["groups"]
+        return {
+            "count": len(groups),
+            "next_cursor": groups[-1]["group_id"] if len(groups) == limit else None,
+            "groups": groups,
+        }
+
+    return await serve("groups.list", resolve, build)

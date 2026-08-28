@@ -106,7 +106,10 @@ def _serialize(row, include_token: str | None = None) -> dict:
         "label": row.label,
         "state": state,
         "tier": row.tier_key,
-        "owner_type": "user" if row.owner_user_id is not None else "group",
+        "scope": getattr(row, "scope", None)
+                 or ("user" if row.owner_user_id is not None else "group"),
+        "owner_type": getattr(row, "scope", None)
+                      or ("user" if row.owner_user_id is not None else "group"),
         "owner_user_id": row.owner_user_id,
         "group_id": row.group_id,
         "display": f"dtk_{row.id}_{row.token_prefix}...",
@@ -328,7 +331,17 @@ async def admin_mint_key():
             assert_superadmin(load_user(session, user_id))
             owner_user_id = body.get("owner_user_id")
             group_id = body.get("group_id")
-            if (owner_user_id is None) == (group_id is None):
+            # Default to whichever owner was given, so existing callers keep
+            # working; 'global' has to be asked for by name.
+            key_scope = body.get("scope") or (
+                "user" if owner_user_id is not None else "group"
+            )
+            if key_scope not in keys.SCOPES:
+                return None, "bad_scope"
+            if key_scope == "global":
+                if owner_user_id is not None or group_id is not None:
+                    return None, "global_has_no_owner"
+            elif (owner_user_id is None) == (group_id is None):
                 return None, "one_owner_required"
             tier_key = str(body.get("tier") or keys.DEFAULT_TIER)
             if session.query(ApiKeyTier).filter(
@@ -339,6 +352,7 @@ async def admin_mint_key():
                 session,
                 owner_user_id=int(owner_user_id) if owner_user_id is not None else None,
                 group_id=int(group_id) if group_id is not None else None,
+                scope=key_scope,
                 label=str(body.get("label") or "")[:64],
                 tier_key=tier_key,
                 created_by_user_id=user_id,
@@ -354,7 +368,16 @@ async def admin_mint_key():
     payload, error = await asyncio.to_thread(work)
     if error == "one_owner_required":
         abort_problem(400, "Bad Request",
-                      "Provide exactly one of owner_user_id or group_id.")
+                      "Provide exactly one of owner_user_id or group_id, "
+                      "or scope='global' for an all-access key.")
+    if error == "bad_scope":
+        abort_problem(400, "Bad Request",
+                      f"scope must be one of {', '.join(keys.SCOPES)}.")
+    if error == "global_has_no_owner":
+        abort_problem(400, "Bad Request",
+                      "A global key reads every group and player, so it has no "
+                      "owner — send scope='global' with neither owner_user_id "
+                      "nor group_id.")
     if error == "unknown_tier":
         abort_problem(400, "Bad Request", "No such tier.")
     return jsonify(payload), 201

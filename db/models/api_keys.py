@@ -61,10 +61,18 @@ class ApiKey(Base):
 
     __tablename__ = "api_keys"
     __table_args__ = (
-        # Exactly one owner: a user key or a group key, never both or neither.
+        # Scope and ownership must agree, and `global` must be *stated*.
+        #
+        # The obvious encoding — "neither owner set means it can read
+        # everything" — makes an all-access key the result of forgetting to
+        # set an owner. Any bug on the mint path would silently produce one.
+        # Requiring scope='global' explicitly means the same bug violates this
+        # constraint and the insert fails instead.
         CheckConstraint(
-            "(owner_user_id IS NULL) != (group_id IS NULL)",
-            name="ck_api_keys_one_owner",
+            "(scope = 'user'   AND owner_user_id IS NOT NULL AND group_id IS NULL)"
+            " OR (scope = 'group'  AND group_id IS NOT NULL AND owner_user_id IS NULL)"
+            " OR (scope = 'global' AND owner_user_id IS NULL AND group_id IS NULL)",
+            name="ck_api_keys_scope_owner",
         ),
         Index("idx_api_keys_owner_user", "owner_user_id"),
         Index("idx_api_keys_group", "group_id"),
@@ -77,6 +85,11 @@ class ApiKey(Base):
     token_prefix = Column(String(8), nullable=False)
     label = Column(String(64), nullable=False, default="")
 
+    #: 'user' | 'group' | 'global'. A global key reads every group and every
+    #: player — for third-party integrations — and is staff-issued only.
+    #: Visibility is NOT part of scope: a hidden player stays invisible to a
+    #: global key, exactly as they are on the website.
+    scope = Column(String(16), nullable=False, default="group")
     owner_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=True)
 

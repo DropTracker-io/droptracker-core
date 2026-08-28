@@ -51,3 +51,49 @@ async def list_sections():
                       "cost_units_per_min budget before the query runs.",
         "your_limits": g.api_key["limits"],
     })
+
+
+#: Players per page when enumerating. Same ceiling as a group roster.
+MAX_PAGE = 100
+DEFAULT_PAGE = 25
+
+
+@players_bp.route("/players", methods=["GET"])
+async def list_players():
+    """Every visible player, cursor-paginated. Global keys only.
+
+    Hidden players are filtered inside the query, so a page is never short by
+    however many hidden accounts its id range happened to span — and the
+    cursor still advances past them.
+    """
+    key = g.api_key
+    if key.get("scope") != "global":
+        return jsonify({
+            "error": "forbidden",
+            "detail": "Listing players requires a global key. A group key can "
+                      "page its own roster at /v2/groups/{id}/players.",
+        }), 403
+
+    try:
+        limit = int(request.args.get("limit", DEFAULT_PAGE))
+    except ValueError:
+        limit = DEFAULT_PAGE
+    limit = max(1, min(limit, MAX_PAGE))
+    try:
+        cursor = int(request.args.get("cursor", 0))
+    except ValueError:
+        cursor = 0
+
+    def resolve(session):
+        return scope.all_players_page(session, cursor, limit)
+
+    def build(session, player_ids, ctx):
+        loaded = sect.load_sections(session, ctx["sections"], player_ids, ctx)
+        return {
+            "count": len(player_ids),
+            "sections": ctx["sections"],
+            "next_cursor": player_ids[-1] if len(player_ids) == limit else None,
+            "players": [loaded[pid] for pid in player_ids],
+        }
+
+    return await serve("players.list", resolve, build)

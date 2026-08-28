@@ -26,6 +26,10 @@ from datetime import datetime
 from typing import Optional, Tuple
 
 TOKEN_PREFIX = "dtk"
+#: What a key may read. 'global' is every group and every player — for
+#: third-party integrations, staff-issued only. It is NOT a visibility
+#: override: hidden players stay hidden to every scope.
+SCOPES = ("user", "group", "global")
 #: Secret half: 48 hex chars = 24 random bytes.
 SECRET_HEX_CHARS = 48
 DEFAULT_TIER = "standard"
@@ -122,11 +126,18 @@ def key_descriptor(row, tier_row) -> dict:
     """The request-context dict the data API carries around per request."""
     owner_user_id = getattr(row, "owner_user_id", None)
     group_id = getattr(row, "group_id", None)
+    # Read the stored scope, but never *infer* 'global' from absent owners:
+    # a row that somehow has neither is a broken row, and the safe reading of
+    # a broken row is the narrowest scope, not the widest.
+    scope = getattr(row, "scope", None)
+    if scope not in SCOPES:
+        scope = "user" if owner_user_id is not None else "group"
     return {
         "key_id": int(row.id),
         "label": getattr(row, "label", "") or "",
         "tier": getattr(row, "tier_key", None) or DEFAULT_TIER,
-        "owner_type": "user" if owner_user_id is not None else "group",
+        "scope": scope,
+        "owner_type": scope,
         "owner_user_id": owner_user_id,
         "group_id": group_id,
         "limits": effective_limits(row, tier_row),
@@ -155,6 +166,7 @@ def create_key(
     *,
     owner_user_id: Optional[int] = None,
     group_id: Optional[int] = None,
+    scope: Optional[str] = None,
     label: str = "",
     tier_key: str = DEFAULT_TIER,
     created_by_user_id: Optional[int] = None,
@@ -162,12 +174,26 @@ def create_key(
 ) -> Tuple[object, str]:
     """Insert a key and return ``(row, plaintext_token)``. Caller commits.
 
-    Exactly one of ``owner_user_id`` / ``group_id`` must be set (the table
-    CHECK enforces it too; checked here so the error is a ValueError rather
-    than an IntegrityError from deep inside a route).
+    ``scope`` defaults to whichever owner was supplied. **A global key must
+    ask for one**: ``scope="global"`` with no owner. Omitting both owners
+    without saying so is an error, not an implicit grant of everything — the
+    table CHECK enforces the same rule, but failing here gives the caller a
+    ValueError instead of an IntegrityError from deep inside a route.
     """
-    if (owner_user_id is None) == (group_id is None):
-        raise ValueError("exactly one of owner_user_id / group_id must be set")
+    if scope is None:
+        scope = "user" if owner_user_id is not None else "group"
+    if scope not in SCOPES:
+        raise ValueError(f"scope must be one of {SCOPES}")
+
+    if scope == "global":
+        if owner_user_id is not None or group_id is not None:
+            raise ValueError("a global key has no owner")
+    elif scope == "user":
+        if owner_user_id is None or group_id is not None:
+            raise ValueError("a user key needs owner_user_id and no group_id")
+    else:
+        if group_id is None or owner_user_id is not None:
+            raise ValueError("a group key needs group_id and no owner_user_id")
 
     from db.models import ApiKey
 
@@ -175,6 +201,7 @@ def create_key(
         token_hash="",  # placeholder until the id exists
         token_prefix="",
         label=label[:64],
+        scope=scope,
         owner_user_id=owner_user_id,
         group_id=group_id,
         tier_key=tier_key,
