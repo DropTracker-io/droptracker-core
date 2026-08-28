@@ -48,6 +48,38 @@ EFFORT_MAX_NPCS = 300
 #: scope (``_kc_state_scope`` uses bare task ids / ``{task}:{npc}``) so effort
 #: folding can never consume a crediting task's watermark, or vice versa.
 EFFORT_SCOPE_PREFIX = "eff"
+#: Scope prefix for the COMPLETION counter at partial-credit NPCs — see
+#: :data:`COMPLETION_MARKERS`. Separate from ``eff:`` because it counts a
+#: different event, which is the entire point.
+COMPLETION_SCOPE_PREFIX = "effc"
+
+#: NPCs where the plugin's loot kill count and the WOM boss metric count
+#: DIFFERENT events, because the content pays out for a partial attempt.
+#:
+#: The Colosseum is the case that forced this. You may leave after any wave and
+#: keep a reward chest, so the plugin's chest KC counts *attempts*, while WOM's
+#: ``sol_heredit`` only counts the wave-12 kill. Pricing an attempt at the
+#: completion rate charged 22 minutes for a run that our own timings say takes
+#: about two: consecutive-attempt gaps measured 2026-08-28 over 4,516 attempts
+#: read a median 34.6 min between completions and 1.9 min between bails, and
+#: **86% of all Colosseum attempts are bails**. One splinter farmer with 200
+#: attempts and 5 completions booked 74 EHE hours against a true ~8.
+#:
+#: So a marker NPC keeps two counters: ``kills`` (attempts) and ``completions``
+#: (the subset that reached the WOM-counted event), priced separately by
+#: :func:`rows_to_summary`. ``item`` is the drop that proves a completion —
+#: Sol Heredit awards exactly one uncharged quiver per kill, so counting those
+#: envelopes counts completions.
+#:
+#: Adding an NPC here is a data decision, not a config one: it needs a drop
+#: that is awarded once and only on completion, and a measured partial rate in
+#: ``npc_ehb_rates`` (``scripts/compute_npc_ehb_rates.py --partials``).
+COMPLETION_MARKERS = {
+    "fortis colosseum": {
+        "item": "dizana's quiver (uncharged)",
+        "metric": "sol_heredit",
+    },
+}
 
 
 def _norm(value) -> str:
@@ -69,6 +101,27 @@ def effort_scope(npc_norm: str) -> str:
     triple-count it.
     """
     return f"{EFFORT_SCOPE_PREFIX}:{_norm(npc_norm).replace(' ', '_')}"
+
+
+def completion_scope(npc_norm: str) -> str:
+    """Watermark scope for a marker NPC's COMPLETION counter.
+
+    Deliberately a different scope from :func:`effort_scope`: the two count
+    different events (attempts vs completions) and folding them together is the
+    bug this whole mechanism exists to prevent.
+    """
+    return f"{COMPLETION_SCOPE_PREFIX}:{_norm(npc_norm).replace(' ', '_')}"
+
+
+def completion_marker(npc_norm) -> Optional[dict]:
+    """The :data:`COMPLETION_MARKERS` entry for an NPC, or ``None``."""
+    return COMPLETION_MARKERS.get(_norm(npc_norm))
+
+
+def is_completion_drop(npc_norm, item_name) -> bool:
+    """Whether this drop proves a completion at a marker NPC."""
+    marker = completion_marker(npc_norm)
+    return bool(marker) and _norm(item_name) == marker["item"]
 
 
 def build_effort_map(
@@ -174,12 +227,52 @@ def _derived_rate(derived_rates: Optional[dict], npc_id) -> float:
     return rate if rate > 0 else 0.0
 
 
+def _price_marker_row(row, kills: int, rates: dict,
+                      derived_rates: Optional[dict]) -> Optional[tuple]:
+    """``(hours, estimated_hours)`` for a :data:`COMPLETION_MARKERS` NPC, or
+    ``None`` when this row is not one.
+
+    Completions are priced at the WOM rate for the metric they actually earn;
+    everything else is a partial attempt, priced at our measured attempt rate
+    from ``npc_ehb_rates``. Charging a bail the completion rate is what put a
+    player at 329 EHE hours on 2026-08-28.
+
+    ``completions`` may legitimately exceed ``kills``: WOM sees completions for
+    a player whose plugin never reported an attempt, so the attempt total is
+    ``max`` of the two rather than the plugin's alone.
+    """
+    marker = completion_marker(row.get("npc_name"))
+    if marker is None:
+        return None
+    try:
+        completions = max(0, int(row.get("completions") or 0))
+    except (TypeError, ValueError):
+        completions = 0
+    attempts = max(kills, completions)
+    completions = min(completions, attempts)
+    partials = attempts - completions
+
+    wom_rate = 0.0
+    try:
+        wom_rate = float((rates or {}).get(row.get("boss_metric")) or 0)
+    except (TypeError, ValueError):
+        wom_rate = 0.0
+    partial_rate = _derived_rate(derived_rates, row.get("npc_id"))
+
+    hours = (completions / wom_rate) if (wom_rate > 0 and completions) else 0.0
+    # A partial with no measured rate contributes 0 — the honest zero, and far
+    # closer to the truth than a completion's worth of hours.
+    estimated = (partials / partial_rate) if (partial_rate > 0 and partials) else 0.0
+    return hours + estimated, estimated
+
+
 def rows_to_summary(rows: Iterable[dict], rates: dict,
                     derived_rates: Optional[dict] = None) -> dict:
     """Fold one player's effort rows into the shape the read model exposes.
 
-    ``rows`` are ``{"npc_id", "npc_name", "boss_metric", "kills", "last_at",
-    "frozen_at"}``. Returns ``{"ehb_hours", "ehb_estimated_hours", "kills",
+    ``rows`` are ``{"npc_id", "npc_name", "boss_metric", "kills", "completions",
+    "last_at", "frozen_at"}``. Returns ``{"ehb_hours", "ehb_estimated_hours",
+    "kills",
     "bosses": [...], "last_at", "frozen"}`` with bosses ordered by EHB
     contribution (then kills), so the biggest investment reads first.
 
@@ -193,6 +286,11 @@ def rows_to_summary(rows: Iterable[dict], rates: dict,
        flagged ``estimated`` on the boss entry and summed separately into
        ``ehb_estimated_hours`` (a subset of ``ehb_hours``, not an addition).
     3. Nothing — the honest 0 this feature started with.
+
+    :data:`COMPLETION_MARKERS` NPCs take a different path entirely
+    (:func:`_price_marker_row`): their two counters are priced separately,
+    because for those the WOM rate answers a question the plugin's counter is
+    not asking.
     """
     bosses, total_kills = [], 0
     total_hours = 0.0
@@ -204,9 +302,17 @@ def rows_to_summary(rows: Iterable[dict], rates: dict,
             kills = int(row.get("kills") or 0)
         except (TypeError, ValueError):
             kills = 0
+        metric = row.get("boss_metric") or None
+        marker_priced = _price_marker_row(row, kills, rates, derived_rates)
+        if marker_priced is not None:
+            # A marker row's attempt total is max(plugin attempts, completions):
+            # WOM can see completions the plugin never reported.
+            try:
+                kills = max(kills, int(row.get("completions") or 0))
+            except (TypeError, ValueError):
+                pass
         if kills <= 0:
             continue
-        metric = row.get("boss_metric") or None
         total_kills += kills
         row_last = row.get("last_at")
         if row_last is not None and (last_at is None or row_last > last_at):
@@ -214,16 +320,20 @@ def rows_to_summary(rows: Iterable[dict], rates: dict,
         is_frozen = row.get("frozen_at") is not None
         if is_frozen:
             frozen += 1
-        hours = ehb_hours({metric: kills}, rates) if metric else 0.0
-        estimated = False
-        if hours <= 0:
-            derived = _derived_rate(derived_rates, row.get("npc_id"))
-            if derived > 0:
-                hours = kills / derived
-                estimated = True
+        if marker_priced is not None:
+            hours, row_estimated_hours = marker_priced
+            estimated = row_estimated_hours > 0
+        else:
+            hours = ehb_hours({metric: kills}, rates) if metric else 0.0
+            estimated = False
+            if hours <= 0:
+                derived = _derived_rate(derived_rates, row.get("npc_id"))
+                if derived > 0:
+                    hours = kills / derived
+                    estimated = True
+            row_estimated_hours = hours if estimated else 0.0
         total_hours += hours
-        if estimated:
-            estimated_hours += hours
+        estimated_hours += row_estimated_hours
         bosses.append(
             {
                 "npc_id": row.get("npc_id"),

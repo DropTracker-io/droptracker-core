@@ -14,14 +14,18 @@ conftest sys.modules stubs never interfere.
 import importlib.util
 import os
 import sys
+from datetime import datetime
 
 import pytest
 
 from services.event_effort import (
     EFFORT_SCOPE_PREFIX,
     build_effort_map,
+    completion_marker,
+    completion_scope,
     effort_scope,
     ehb_hours,
+    is_completion_drop,
     rows_to_summary,
 )
 
@@ -253,6 +257,107 @@ class TestDerivedRates:
         assert [b["name"] for b in out["bosses"]] == ["Zulrah", "The Maggot King"]
 
 
+class TestCompletionMarkers:
+    """Partial-credit NPCs — a bail must not be priced as a completion.
+
+    The Colosseum pays out a reward chest whenever you leave, so the plugin's
+    KC counts attempts while WOM's ``sol_heredit`` only counts the wave-12
+    kill. Charging every attempt the completion rate put one player at 329 EHE
+    hours on 2026-08-28 (2.7 completions/hour = 22 min each, against measured
+    bails of about two minutes). Completions and partials are counted and
+    priced separately; these pin that down.
+    """
+
+    # 2.7 completions/h is WOM's published sol_heredit rate; 50.0 partials/h
+    # is the measured partial_gaps rate (72s a bail).
+    RATES = {"sol_heredit": 2.7}
+    DERIVED = {13741: 50.0}
+
+    def _row(self, kills, completions, **over):
+        row = {"npc_id": 13741, "npc_name": "Fortis Colosseum",
+               "boss_metric": "sol_heredit", "kills": kills,
+               "completions": completions, "last_at": 1, "frozen_at": None}
+        row.update(over)
+        return row
+
+    def test_registry_recognises_the_marker_drop(self):
+        assert completion_marker("Fortis Colosseum")["metric"] == "sol_heredit"
+        assert completion_marker("fortis  colosseum") is not None  # normalized
+        assert completion_marker("Zulrah") is None
+        assert is_completion_drop("Fortis Colosseum",
+                                  "Dizana's quiver (uncharged)") is True
+        # Every other item from the same chest is not proof of a completion.
+        assert is_completion_drop("Fortis Colosseum", "Sunfire splinters") is False
+        assert is_completion_drop("Zulrah", "Dizana's quiver (uncharged)") is False
+
+    def test_completions_and_partials_price_separately(self):
+        # iZuny's real event-46 row: 16 attempts, 12 of them completions.
+        out = rows_to_summary([self._row(16, 12)], self.RATES, self.DERIVED)
+        assert out["ehb_hours"] == pytest.approx(12 / 2.7 + 4 / 50.0)
+        assert out["kills"] == 16
+        # Only the partial portion is our own estimate.
+        assert out["ehb_estimated_hours"] == pytest.approx(4 / 50.0)
+        assert out["bosses"][0]["estimated"] is True
+
+    def test_the_splinter_farmer_is_no_longer_charged_74_hours(self):
+        # 200 attempts, 5 completions — the shape the old model punished most.
+        out = rows_to_summary([self._row(200, 5)], self.RATES, self.DERIVED)
+        old = 200 / 2.7
+        assert old == pytest.approx(74.07, abs=0.01)
+        assert out["ehb_hours"] == pytest.approx(5 / 2.7 + 195 / 50.0)
+        assert out["ehb_hours"] < 6.0
+
+    def test_all_completions_still_price_at_the_full_wom_rate(self):
+        # The split must not quietly shortchange someone who finishes every run.
+        out = rows_to_summary([self._row(12, 12)], self.RATES, self.DERIVED)
+        assert out["ehb_hours"] == pytest.approx(12 / 2.7)
+        assert out["ehb_estimated_hours"] == 0.0
+        assert out["bosses"][0]["estimated"] is False
+
+    def test_wom_only_player_keeps_their_completions(self):
+        """WOM reports completions for a player whose plugin never sent an
+        attempt, so ``completions`` may exceed ``kills`` and the attempt total
+        is max() of the two — otherwise the row is dropped as zero-kill."""
+        out = rows_to_summary([self._row(0, 9)], self.RATES, self.DERIVED)
+        assert out["kills"] == 9
+        assert out["ehb_hours"] == pytest.approx(9 / 2.7)
+
+    def test_a_missing_partial_rate_costs_the_partials_not_the_completions(self):
+        out = rows_to_summary([self._row(16, 12)], self.RATES, {})
+        # Partials contribute the honest zero; completions are unaffected.
+        assert out["ehb_hours"] == pytest.approx(12 / 2.7)
+
+    def test_a_cold_wom_cache_still_prices_the_partials(self):
+        out = rows_to_summary([self._row(16, 12)], {}, self.DERIVED)
+        assert out["ehb_hours"] == pytest.approx(4 / 50.0)
+
+    def test_backfill_gap_reads_as_all_partials_not_all_completions(self):
+        """A row written before web104a has completions=0. That must under-
+        price rather than over-price — the whole point of the change."""
+        out = rows_to_summary([self._row(16, 0)], self.RATES, self.DERIVED)
+        assert out["ehb_hours"] == pytest.approx(16 / 50.0)
+        assert out["ehb_hours"] < 16 / 2.7
+
+    def test_junk_completions_do_not_break_pricing(self):
+        for junk in (None, "", "x", -3):
+            out = rows_to_summary([self._row(10, junk)], self.RATES, self.DERIVED)
+            assert out["ehb_hours"] == pytest.approx(10 / 50.0), junk
+
+    def test_ordinary_bosses_ignore_the_completions_column(self):
+        out = rows_to_summary(
+            [{"npc_id": 1, "npc_name": "Zulrah", "boss_metric": "zulrah",
+              "kills": 46, "completions": 3, "last_at": 1, "frozen_at": None}],
+            RATES, {1: 10.0})
+        assert out["ehb_hours"] == pytest.approx(1.0)
+
+    def test_completion_scope_is_distinct_from_the_attempt_scope(self):
+        # Folding completions into the attempts watermark is precisely the
+        # unit confusion behind report #131.
+        assert completion_scope("Fortis Colosseum") == "effc:fortis_colosseum"
+        assert completion_scope("Fortis Colosseum") != effort_scope(
+            "Fortis Colosseum")
+
+
 class TestScopeIsolation:
     def test_effort_scope_is_namespaced_away_from_credit_scopes(self):
         # A crediting kc_target scope is a bare task id or "id:npc"; effort
@@ -274,6 +379,151 @@ class _FakeRedis:
 
     def smembers(self, key):
         return self.sets.get(key, set())
+
+
+#: Any datetime works — record_effort is stubbed out in these tests.
+_NOW = datetime(2026, 8, 28, 12, 0, 0)
+
+
+class _State:
+    """Stand-in for MatcherState: _apply_effort only reads one attribute."""
+
+    def __init__(self, effort_npcs_by_event):
+        self.effort_npcs_by_event = effort_npcs_by_event
+
+
+class _KvRedis(_FakeRedis):
+    """Enough of a Redis for the watermark fold: strings + sets."""
+
+    def __init__(self, sets=None):
+        super().__init__(sets)
+        self.kv = {}
+
+    def get(self, key):
+        v = self.kv.get(key)
+        return None if v is None else str(v).encode()
+
+    def set(self, key, value, ex=None):
+        self.kv[key] = value
+
+    def incr(self, key):
+        self.kv[key] = int(self.kv.get(key, 0)) + 1
+        return self.kv[key]
+
+    def expire(self, key, ttl):
+        return True
+
+    def delete(self, key):
+        self.kv.pop(key, None)
+
+    def sadd(self, key, member):
+        bucket = self.sets.setdefault(key, set())
+        if member in bucket:
+            return 0
+        bucket.add(member)
+        return 1
+
+    def sismember(self, key, member):
+        return member in self.sets.get(key, set())
+
+
+class TestApplyEffortRouting:
+    """Which counter an envelope feeds at a partial-credit NPC.
+
+    The read-model split is only as good as what the fold writes: WOM's metric
+    must reach ``completions`` and never the attempt counter (that conflation
+    IS report #131), and the marker drop must credit a completion exactly once
+    per attempt even though the same chest sends a dozen other items.
+    """
+
+    NPCS = {"fortis colosseum": {"npc_id": 13741, "metric": "sol_heredit",
+                                 "tasks": []}}
+
+    @pytest.fixture
+    def apply_effort(self, monkeypatch):
+        """Drive ``_apply_effort`` and return what it asked record_effort for.
+
+        Redis is shared across calls within a test so the dedupe and watermark
+        state carry, the way they do for one player in one event.
+        """
+        recorded = []
+
+        def _record(session, event_id, team_id, player_id, npc_norm, entry,
+                    delta, *, source, at, completions=0):
+            recorded.append({"delta": delta, "completions": completions,
+                             "source": source})
+
+        monkeypatch.setattr(engine, "record_effort", _record)
+        redis = _KvRedis()
+
+        def run(envelope, npcs=None):
+            recorded.clear()
+            state = _State(effort_npcs_by_event={1: npcs or self.NPCS})
+            engine._apply_effort(None, redis, state, {"id": 1}, 9, 725,
+                                 envelope, _NOW, {})
+            return list(recorded)
+
+        return run
+
+    def _drop(self, kc, item):
+        return {"kind": "drop", "ts": 1000,
+                "data": {"npc_name": "Fortis Colosseum", "kill_count": kc,
+                         "item_name": item}}
+
+    def test_wom_metric_credits_completions_and_no_attempts(self, apply_effort):
+        # The reconciler's shape: lifetime kc 12, window-start seed 3, so nine
+        # completions happened inside the event.
+        recorded = apply_effort({
+            "kind": "wom_kc",
+            "data": {"boss_metric": "sol_heredit", "kc": 12, "kc_start": 3,
+                     "target_event_id": 1},
+        })
+        assert len(recorded) == 1
+        # 0 attempts: the plugin's chest KC already counted them. Crediting
+        # both is what made one counter's lifetime lead land as in-event kills.
+        assert recorded[0]["delta"] == 0
+        assert recorded[0]["completions"] == 9
+        assert recorded[0]["source"] == engine.KC_SOURCE_WOM
+
+    def test_wom_completions_never_reach_the_attempt_watermark(self, apply_effort):
+        """The report #131 shape, at the NPC that caused it.
+
+        A lifetime sol_heredit of 172 arriving after the plugin has reported
+        920 attempts must not credit the difference — under the old single
+        watermark it credited 748.
+        """
+        apply_effort(self._drop(920, "Sunfire splinters"))
+        recorded = apply_effort({
+            "kind": "wom_kc",
+            "data": {"boss_metric": "sol_heredit", "kc": 172},
+        })
+        assert all(r["delta"] == 0 for r in recorded)
+        assert sum(r["completions"] for r in recorded) == 0  # first WOM sighting = baseline
+
+    def test_marker_drop_credits_one_completion_per_attempt(self, apply_effort):
+        first = apply_effort(self._drop(921, "Dizana's quiver (uncharged)"))
+        assert sum(r["completions"] for r in first) == 1
+        # The same chest's other items must not re-credit it...
+        again = apply_effort(self._drop(921, "Sunfire splinters"))
+        assert sum(r["completions"] for r in again) == 0
+        # ...nor may a redelivery of the quiver envelope itself.
+        replay = apply_effort(self._drop(921, "Dizana's quiver (uncharged)"))
+        assert sum(r["completions"] for r in replay) == 0
+
+    def test_a_bail_credits_an_attempt_and_no_completion(self, apply_effort):
+        recorded = apply_effort(self._drop(922, "Sunfire splinters"))
+        assert len(recorded) == 1
+        assert recorded[0]["delta"] == 1
+        assert recorded[0]["completions"] == 0
+
+    def test_ordinary_npc_never_touches_the_completion_counter(self, apply_effort):
+        recorded = apply_effort(
+            {"kind": "drop", "ts": 1000,
+             "data": {"npc_name": "Zulrah", "kill_count": 500,
+                      "item_name": "Dizana's quiver (uncharged)"}},
+            npcs={"zulrah": {"npc_id": 2042, "metric": "zulrah", "tasks": []}},
+        )
+        assert [r["completions"] for r in recorded] == [0]
 
 
 class TestFreeze:

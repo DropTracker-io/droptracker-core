@@ -2479,18 +2479,28 @@ def mark_task_done(redis_conn, event_id: int, team_id, task_id) -> None:
 
 
 def record_effort(session, event_id: int, team_id, player_id: int, npc_norm: str,
-                  entry: dict, delta: int, *, source: str, at: datetime) -> None:
-    """Add ``delta`` kills to one (event, player, npc) effort row.
+                  entry: dict, delta: int, *, source: str, at: datetime,
+                  completions: int = 0) -> None:
+    """Add ``delta`` kills (and ``completions`` completions) to one
+    (event, player, npc) effort row.
 
     Upsert rather than append: effort is a running counter per NPC, not a
     ledger. ``source`` records which side of the hybrid fold fed it — a row
     touched by both becomes ``both``, which is what tells the read model the
     freeze on that row is plugin-precise rather than WOM-lagged.
+
+    ``completions`` is non-zero only at ``COMPLETION_MARKERS`` NPCs, where an
+    attempt and a completion are different events and have to be priced
+    separately. A call may carry completions with ``delta == 0`` (the plugin
+    proving a completion for an attempt its chest KC already counted), so
+    ``delta <= 0`` alone is not a reason to return.
     """
     from db.models import EventEffort
 
     npc_id = entry.get("npc_id")
-    if not npc_id or delta <= 0:
+    delta = max(0, int(delta or 0))
+    completions = max(0, int(completions or 0))
+    if not npc_id or (delta <= 0 and completions <= 0):
         return
     row = (session.query(EventEffort)
            .filter(EventEffort.event_id == event_id,
@@ -2501,10 +2511,13 @@ def record_effort(session, event_id: int, team_id, player_id: int, npc_norm: str
         session.add(EventEffort(
             event_id=event_id, team_id=team_id, player_id=player_id,
             npc_id=npc_id, boss_metric=entry.get("metric"),
-            kills=int(delta), source=source, first_at=at, last_at=at,
+            kills=int(delta), completions=int(completions),
+            source=source, first_at=at, last_at=at,
         ))
         return
     row.kills = int(row.kills or 0) + int(delta)
+    if completions:
+        row.completions = int(row.completions or 0) + int(completions)
     row.last_at = at
     if team_id is not None:
         row.team_id = team_id
@@ -2587,13 +2600,52 @@ def _apply_effort(session, redis_conn, state: "MatcherState", event: dict,
         return
     if _effort_frozen(redis_conn, event["id"], team_id, entry.get("tasks"), done_cache):
         return
+    marker = _effort_completion_marker(npc_norm)
     try:
+        if marker is not None and source == KC_SOURCE_WOM:
+            # At a marker NPC, WOM's metric counts COMPLETIONS while the
+            # plugin's chest KC counts attempts. Folding it into the attempts
+            # scope is exactly the unit confusion behind bug report #131, so it
+            # gets its own scope and its own column — and credits NO kills,
+            # because the plugin's chest KC already counted that attempt. The
+            # read model takes max(kills, completions), which keeps a WOM-only
+            # player (kills 0) whole.
+            delta = _fold_kc_watermark(
+                redis_conn, event["id"], _completion_scope(npc_norm), player_id,
+                kc_abs, seed=seed, first_credit_offset=offset, source=source,
+                staged=staged)
+            if delta > 0:
+                record_effort(session, event["id"], team_id, player_id, npc_norm,
+                              entry, 0, source=source, at=submitted_at,
+                              completions=delta)
+            return
         delta = _fold_kc_watermark(
             redis_conn, event["id"], _effort_scope(npc_norm), player_id, kc_abs,
             seed=seed, first_credit_offset=offset, source=source, staged=staged)
-        if delta > 0:
+        completions = 0
+        if marker is not None and kind == "drop" and _is_completion_drop(
+                npc_norm, data.get("item_name")):
+            # The marker item proves this attempt reached the WOM-counted
+            # event. Deduped per (npc, kill_count) on the completion scope, so
+            # the other items from the same chest cannot re-credit it. The
+            # fallback counter is the same one the pb path uses: a later
+            # absolute WOM fold on this scope subtracts what we credited here
+            # rather than counting the completion twice.
+            comp_scope = _completion_scope(npc_norm)
+            if _kc_dedupe(redis_conn, event["id"], comp_scope, player_id,
+                          envelope, staged=staged):
+                fb_key = _kc_fallback_key(event["id"], comp_scope, player_id)
+                if staged is not None:
+                    staged.stage("incr", fb_key)
+                    staged.stage("expire", fb_key, _STATE_KEY_TTL)
+                else:
+                    redis_conn.incr(fb_key)
+                    redis_conn.expire(fb_key, _STATE_KEY_TTL)
+                completions = 1
+        if delta > 0 or completions:
             record_effort(session, event["id"], team_id, player_id, npc_norm,
-                          entry, delta, source=source, at=submitted_at)
+                          entry, delta, source=source, at=submitted_at,
+                          completions=completions)
     except Exception:
         import logging
 
@@ -2606,6 +2658,24 @@ def _effort_scope(npc_norm: str) -> str:
     from services.event_effort import effort_scope
 
     return effort_scope(npc_norm)
+
+
+def _completion_scope(npc_norm: str) -> str:
+    from services.event_effort import completion_scope
+
+    return completion_scope(npc_norm)
+
+
+def _effort_completion_marker(npc_norm: str):
+    from services.event_effort import completion_marker
+
+    return completion_marker(npc_norm)
+
+
+def _is_completion_drop(npc_norm: str, item_name) -> bool:
+    from services.event_effort import is_completion_drop
+
+    return is_completion_drop(npc_norm, item_name)
 
 
 # Without a usable kill count, stacks from one kill are only distinguishable

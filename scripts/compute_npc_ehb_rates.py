@@ -31,12 +31,26 @@ in fidelity order:
     from ``player_npc_hourly_totals`` and drops are fetched per player via
     the (player_id, date_added) index — never a full-table scan.
 
+``partial_gaps`` (``--partials``)
+    For ``services/event_effort.COMPLETION_MARKERS`` NPCs, where the content
+    pays out for a partial attempt so the plugin's KC and WOM's metric count
+    different things. The published rate is the p90 of per-player median gaps
+    between consecutive attempts that did NOT carry the completion marker
+    item — i.e. how fast a *bail* actually goes.
+
+    Measured for the Colosseum on 2026-08-28: 4,516 attempts, 14% completions;
+    a bail's median inter-attempt gap is 1.9 min against 34.6 min for a
+    completion. Charging bails the completion rate is what put one player at
+    329 EHE hours.
+
 Guard rails (suggestions thread #93):
 
 * A derived rate is only ever a FALLBACK — the read path checks WOM first, so
   nothing here can override a published rate. Priced bosses are skipped by
   default (``--include-priced`` computes them for calibration display only,
-  and never writes them).
+  and never writes them). ``partial_gaps`` is the one method that writes for a
+  WOM-priced boss, and it still overrides nothing: the WOM rate keeps pricing
+  completions, this rate prices only the attempts WOM never counted.
 * Below the sample thresholds no row is written — the boss keeps its honest
   0 EHB rather than a rate invented from noise.
 * Clue caskets / clue-scroll pseudo-NPCs are excluded outright: stacked
@@ -54,6 +68,7 @@ Usage
     python -m scripts.compute_npc_ehb_rates --apply
     python -m scripts.compute_npc_ehb_rates --npc 15742 --apply
     python -m scripts.compute_npc_ehb_rates --include-priced   # calibration
+    python -m scripts.compute_npc_ehb_rates --partials --apply # marker NPCs
 """
 
 import argparse
@@ -187,6 +202,98 @@ def _drop_gaps_rate(session, npc_id):
     return _pct(sorted(per_player), GAPS_PERCENTILE), len(per_player)
 
 
+def _partial_gaps_rate(session, npc_id, marker_item: str):
+    """(rate_kph, qualifying_players) for a COMPLETION_MARKERS NPC's PARTIAL
+    attempts, or None.
+
+    An attempt is one (player, kill_count) pair; it completed if any of its
+    drops was ``marker_item``. The gap from the previous attempt is that
+    attempt's duration plus re-entry, so gaps are read only between
+    CONSECUTIVE kill counts — a jump means an unreported attempt sat in
+    between and the gap would cover both.
+
+    Same shape as :func:`_drop_gaps_rate` (per-player median, p90 across
+    players, identical bounds) so a partial rate is comparable to every other
+    derived rate rather than a second convention.
+    """
+    from sqlalchemy import text
+
+    rows = session.execute(text("""
+        SELECT d.player_id, d.kill_count, MIN(d.date_added) AS at_,
+               MAX(i.item_name = :item) AS completed
+        FROM drops d JOIN items i ON i.item_id = d.item_id
+        WHERE d.npc_id = :n AND d.kill_count IS NOT NULL
+          AND d.date_added >= NOW() - INTERVAL :d DAY
+        GROUP BY d.player_id, d.kill_count
+        ORDER BY d.player_id, d.kill_count
+    """), {"n": npc_id, "item": marker_item, "d": GAPS_WINDOW_DAYS}).fetchall()
+
+    per_player, gaps, prev = [], [], None
+    for player_id, kc, at_, completed in rows:
+        if (prev is not None and prev[0] == player_id and int(kc) == prev[1] + 1
+                and not int(completed or 0)):
+            gap = (at_ - prev[2]).total_seconds()
+            if MIN_GAP_SECONDS <= gap <= MAX_GAP_SECONDS:
+                gaps.append(gap)
+        elif prev is not None and prev[0] != player_id:
+            if len(gaps) >= MIN_GAPS_PER_PLAYER:
+                per_player.append(3600.0 / statistics.median(gaps))
+            gaps = []
+        prev = (player_id, int(kc), at_)
+    if len(gaps) >= MIN_GAPS_PER_PLAYER:
+        per_player.append(3600.0 / statistics.median(gaps))
+
+    if len(per_player) < GAPS_MIN_PLAYERS:
+        return None
+    return _pct(sorted(per_player), GAPS_PERCENTILE), len(per_player)
+
+
+def _run_partials(session, apply: bool) -> int:
+    """Compute + write the partial-attempt rate for every marker NPC."""
+    from sqlalchemy import text
+    from db.models import NpcEhbRate
+    from services.event_effort import COMPLETION_MARKERS
+
+    written = 0
+    print(f"{'npc':>7}  {'name':32} {'method':12} {'kph':>7} {'n':>5}  note")
+    for npc_norm, marker in sorted(COMPLETION_MARKERS.items()):
+        row = session.execute(text(
+            "SELECT npc_id, npc_name FROM npc_list WHERE LOWER(npc_name) = :n"),
+            {"n": npc_norm}).fetchone()
+        if row is None:
+            print(f"{'—':>7}  {npc_norm:32.32} {'—':12} {'—':>7} {'—':>5}  "
+                  f"no npc_list row, skipped")
+            continue
+        npc_id, name = int(row[0]), row[1]
+        result = _partial_gaps_rate(session, npc_id, marker["item"])
+        if result is None:
+            print(f"{npc_id:>7}  {(name or ''):32.32} {'partial_gaps':12} "
+                  f"{'—':>7} {'—':>5}  too few samples, keeping 0 EHB")
+            continue
+        rate, n = result
+        if not (RATE_MIN_KPH <= rate <= RATE_MAX_KPH):
+            print(f"{npc_id:>7}  {(name or ''):32.32} {'partial_gaps':12} "
+                  f"{rate:>7.1f} {n:>5}  outside sanity bounds, skipped")
+            continue
+        print(f"{npc_id:>7}  {(name or ''):32.32} {'partial_gaps':12} "
+              f"{rate:>7.1f} {n:>5}  partial attempts only "
+              f"(completions keep {marker['metric']})")
+        if apply:
+            existing = session.get(NpcEhbRate, npc_id)
+            if existing is None:
+                session.add(NpcEhbRate(
+                    npc_id=npc_id, boss_metric=marker["metric"],
+                    rate_kph=round(rate, 2), sample_size=n,
+                    method="partial_gaps", computed_at=datetime.now()))
+            else:
+                existing.rate_kph = round(rate, 2)
+                existing.sample_size = n
+                existing.method = "partial_gaps"
+                existing.computed_at = datetime.now()
+            written += 1
+    return written
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--npc", type=int, action="append",
@@ -196,6 +303,10 @@ def main():
                              "display (their rows are NEVER written)")
     parser.add_argument("--apply", action="store_true",
                         help="write the rates (default: dry run)")
+    parser.add_argument("--partials", action="store_true",
+                        help="compute the PARTIAL-attempt rate for "
+                             "COMPLETION_MARKERS NPCs instead of the normal "
+                             "unpriced-boss pass")
     args = parser.parse_args()
 
     from db import Session
@@ -212,6 +323,19 @@ def main():
 
     session = Session()
     written = 0
+    if args.partials:
+        try:
+            written = _run_partials(session, args.apply)
+            if args.apply and written:
+                session.commit()
+                print(f"\nwrote {written} partial rate(s)")
+            else:
+                session.rollback()
+                print(f"\n{written or 0} partial rate(s) would be written "
+                      "— re-run with --apply")
+        finally:
+            session.close()
+        return 0
     try:
         candidates = _candidates(session, args.npc)
         print(f"{len(candidates)} candidate NPC(s)\n")

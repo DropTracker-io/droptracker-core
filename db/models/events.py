@@ -854,6 +854,13 @@ class EventEffort(Base):
     # re-resolving names. NULL = tracked activity with no WOM rate (0 EHB).
     boss_metric = Column(String(48), nullable=True)
     kills = Column(BigInteger, nullable=False, default=0)
+    # Attempts that reached the WOM-counted event, at the NPCs where those are
+    # not the same thing — see services/event_effort.COMPLETION_MARKERS. Always
+    # 0 elsewhere, where every kill is a completion by definition. May exceed
+    # `kills`: WOM reports completions for a player whose plugin never sent an
+    # attempt, so the attempt total is max() of the two, not `kills` alone.
+    completions = Column(BigInteger, nullable=False, default=0,
+                         server_default="0")
     # 'plugin', 'wom', or 'both' — which side of the hybrid fold fed this row.
     # Freeze precision depends on it: plugin folds are real-time and freeze
     # exactly, WOM snapshots lag and lose the tail (documented approximation).

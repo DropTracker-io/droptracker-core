@@ -57,6 +57,7 @@ def _rows_for(s, event_id: int, player_ids: Optional[Iterable[int]] = None) -> l
 
     q = (s.query(EventEffort.player_id, EventEffort.team_id, EventEffort.npc_id,
                  NpcList.npc_name, EventEffort.boss_metric, EventEffort.kills,
+                 EventEffort.completions,
                  EventEffort.last_at, EventEffort.frozen_at, EventEffort.source)
          .outerjoin(NpcList, NpcList.npc_id == EventEffort.npc_id)
          .filter(EventEffort.event_id == event_id))
@@ -70,13 +71,16 @@ def _rows_for(s, event_id: int, player_ids: Optional[Iterable[int]] = None) -> l
 
 def _group_rows(rows) -> dict:
     grouped: dict = {}
-    for (player_id, _team_id, npc_id, npc_name, metric, kills,
+    for (player_id, _team_id, npc_id, npc_name, metric, kills, completions,
          last_at, frozen_at, source) in rows:
         grouped.setdefault(int(player_id), []).append({
             "npc_id": int(npc_id) if npc_id is not None else None,
             "npc_name": npc_name,
             "boss_metric": metric,
             "kills": kills,
+            # Non-zero only at COMPLETION_MARKERS NPCs; the pricing split lives
+            # in services/event_effort.rows_to_summary.
+            "completions": completions,
             "last_at": last_at,
             "frozen_at": frozen_at,
             "source": source,
