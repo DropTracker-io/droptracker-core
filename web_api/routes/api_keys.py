@@ -10,6 +10,7 @@
   POST   /api/v1/admin/api-keys              - mint with custom limits (developer)
   PATCH  /api/v1/admin/api-keys/{id}         - promote a tier / set overrides
   GET    /api/v1/admin/api-usage             - who is spending what
+  GET    /api/v1/api-key-reveals/{token}     - claim a one-time key link
 
 The two self-serve mint routes are gated by ``DATA_API_SELF_SERVE_KEYS``
 (default off) — see :func:`self_serve_enabled`. Staff minting and every other
@@ -363,7 +364,39 @@ async def admin_mint_key():
             if body.get("notes"):
                 row.notes = str(body["notes"])
             session.commit()
-            return _serialize(row, include_token=token), None
+
+            payload = _serialize(row, include_token=token)
+
+            # Optional one-time delivery: instead of the minter copying the
+            # secret out of this response and pasting it somewhere, hand the
+            # recipient a link only they can open, once.
+            if body.get("deliver_link"):
+                from db import api_key_reveals as reveals
+
+                audience_user = row.owner_user_id
+                audience_group = row.group_id
+                if audience_user is None and audience_group is None:
+                    # A global key has no owner, so someone must be named.
+                    audience_user = body.get("deliver_to_user_id")
+                    if audience_user is None:
+                        return payload, "deliver_needs_recipient"
+                    audience_user = int(audience_user)
+
+                _row, reveal_token = reveals.create_reveal(
+                    session,
+                    api_key_id=int(row.id),
+                    plaintext=token,
+                    audience_user_id=audience_user,
+                    audience_group_id=None if audience_user is not None else audience_group,
+                    created_by_user_id=user_id,
+                )
+                session.commit()
+                payload["reveal_url"] = f"{_site_base()}/api-keys/claim/{reveal_token}"
+                payload["reveal_dm_sent"] = _dm_reveal(
+                    session, audience_user, audience_group, payload["reveal_url"],
+                    row.label,
+                )
+            return payload, None
 
     payload, error = await asyncio.to_thread(work)
     if error == "one_owner_required":
@@ -380,6 +413,10 @@ async def admin_mint_key():
                       "nor group_id.")
     if error == "unknown_tier":
         abort_problem(400, "Bad Request", "No such tier.")
+    if error == "deliver_needs_recipient":
+        abort_problem(400, "Bad Request",
+                      "A global key has no owner, so deliver_to_user_id is required "
+                      "to send it as a link. The key was created; deliver it manually.")
     return jsonify(payload), 201
 
 
@@ -618,3 +655,97 @@ async def admin_delete_tier(tier_key: str):
                       "another tier first, or disable this one instead of deleting it.")
     _audit(user_id, "api_key_tier.delete", tier_key, before=json.dumps(detail))
     return jsonify({"ok": True})
+
+
+def _site_base() -> str:
+    return (os.getenv("SITE_URL") or "https://www.droptracker.io").rstrip("/")
+
+
+def _dm_reveal(session, audience_user_id, audience_group_id, url: str,
+               label: str) -> bool:
+    """DM the recipient their link. Best-effort: the URL is returned regardless.
+
+    Goes through the Discord outbox because the web API must never open a
+    gateway connection. A group reveal DMs the group's owner, since "any
+    admin" is not a person to send a message to.
+    """
+    try:
+        from db.models import GroupAdmin, User
+        from services.discord_outbox import enqueue
+
+        target_user_id = audience_user_id
+        if target_user_id is None and audience_group_id is not None:
+            owner = (session.query(GroupAdmin)
+                     .filter(GroupAdmin.group_id == int(audience_group_id),
+                             GroupAdmin.role == "owner").first())
+            target_user_id = getattr(owner, "user_id", None)
+        if target_user_id is None:
+            return False
+
+        user = session.query(User).filter(User.user_id == int(target_user_id)).first()
+        discord_id = getattr(user, "discord_id", None)
+        if not discord_id:
+            return False
+
+        name = f" for **{label}**" if label else ""
+        enqueue(
+            channel_id=str(discord_id),
+            kind="dm",
+            content=(
+                f"Your DropTracker API key{name} is ready.\n\n"
+                f"{url}\n\n"
+                "The link opens once, only for you while signed in, and expires in "
+                "72 hours. The key itself is shown a single time — store it "
+                "somewhere safe before closing the page."
+            ),
+        )
+        return True
+    except Exception:
+        return False
+
+
+# ── one-time delivery ────────────────────────────────────────────────────────
+
+@api_keys_bp.route("/api-key-reveals/<reveal_token>", methods=["GET"])
+async def claim_api_key_reveal(reveal_token: str):
+    """Hand over a minted key, once, to the person it was meant for.
+
+    Requires a signed-in session: the link alone is not authorisation. Every
+    way of failing that could confirm a token exists — unknown, expired, or
+    the wrong viewer — returns the same body, so the URL cannot be probed.
+    "Already viewed" is reported honestly, because by then the holder knows
+    the link was real and needs to be told it has been spent (possibly by
+    someone else).
+    """
+    user_id = current_user_id()
+
+    def work():
+        from db import api_key_reveals as reveals
+
+        with db_session() as session:
+            return reveals.claim(session, reveal_token, user_id)
+
+    outcome, payload = await asyncio.to_thread(work)
+
+    if outcome == "ok":
+        return jsonify({
+            "token": payload["token"],
+            "key_id": payload["key_id"],
+            "label": payload["label"],
+            "tier": payload["tier"],
+            "scope": payload["scope"],
+            "group_id": payload["group_id"],
+            "warning": "This link is now spent. The token is not recoverable — "
+                       "store it before leaving this page.",
+        })
+
+    if outcome == "already_viewed":
+        abort_problem(410, "Already used",
+                      "This link has already been opened. Keys are shown once, so "
+                      "if you did not see it, ask staff for a new one.",
+                      extra={"code": "already_viewed"})
+
+    # unknown / expired / not your link — deliberately identical.
+    abort_problem(404, "Not Found",
+                  "This link is not valid, has expired, or is not yours to open.",
+                  extra={"code": "unavailable"})

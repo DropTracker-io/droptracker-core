@@ -39,7 +39,9 @@ from web_api.mentions import resolve_user_mentions
 
 tickets_bp = Blueprint("v1_tickets", __name__)
 
-_TICKET_TYPES = ("players", "clans", "support", "other")
+#: Order matters — the site renders the picker in this order, with the
+#: catch-all last. Mirrors services.ticket_system.TICKET_TYPE_META.
+_TICKET_TYPES = ("players", "clans", "support", "api_token", "other")
 # close_requested is presented as "closing" so the UI can show the transient
 # state without treating it as a distinct lifecycle stage; pending (web-created,
 # channel not yet provisioned) is presented as open — the user's contract is
@@ -269,7 +271,7 @@ async def create_ticket():
     ticket_type = str(body.get("type") or "").strip().lower()
     text = str(body.get("body") or "").strip()
     if ticket_type not in _TICKET_TYPES:
-        abort_problem(400, "Bad request", "type must be one of players|clans|support|other.")
+        abort_problem(400, "Bad request", "type must be one of " + "|".join(_TICKET_TYPES) + ".")
     if not (_CREATE_MIN <= len(text) <= _CREATE_MAX):
         abort_problem(
             422, "Invalid body",

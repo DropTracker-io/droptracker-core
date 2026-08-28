@@ -103,6 +103,18 @@ TICKET_TYPE_META = {
             "Screenshots or error messages, if you have any",
         ],
     },
+    "api_token": {
+        "label": "API Token Request",
+        "emoji": "🔑",
+        "accent": 0x1ABC9C,
+        "intro": "Want to pull DropTracker data into your own app or site? Tell us what you're building.",
+        "checklist": [
+            "**What you're building** and where the data will be displayed",
+            "Whether you need one **group's** data or **every** group (a global key)",
+            "Which data you need — loot, collection log, personal bests, ranks…",
+            "Roughly **how often** you'll call the API, so we can size your limits",
+        ],
+    },
     "other": {
         "label": "General Inquiry",
         "emoji": "📩",
@@ -114,6 +126,31 @@ TICKET_TYPE_META = {
         ],
     },
 }
+def ticket_panel_buttons():
+    """The "open a ticket" buttons, built FROM the registry.
+
+    The live panel was posted to Discord by hand, so its buttons were a
+    separate list that no longer existed anywhere in this repo — adding a
+    ticket type updated the site and the welcome card but could never grow a
+    button. Rendering them from ``TICKET_TYPE_META`` means the two cannot
+    disagree again; re-post with ``scripts/post_ticket_panel.py``.
+
+    Discord allows five buttons per row, which is exactly the number of types
+    today; a sixth would need a second row, so this splits rather than
+    silently dropping one.
+    """
+    buttons = [
+        Button(
+            label=meta["label"],
+            emoji=meta["emoji"],
+            style=ButtonStyle.SECONDARY if key == "other" else ButtonStyle.PRIMARY,
+            custom_id=f"create_ticket_{key}",
+        )
+        for key, meta in TICKET_TYPE_META.items()
+    ]
+    return [ActionRow(*buttons[i:i + 5]) for i in range(0, len(buttons), 5)]
+
+
 def _docs_footer_blocks():
     """Trailing docs pointer for the account-snapshot card variants."""
     return [
@@ -863,7 +900,10 @@ class Tickets(Extension):
             custom_id = event.ctx.custom_id
             
             if "create_ticket_" in custom_id:
-                ticket_type = custom_id.split("_")[2]
+                # Split on the prefix, not on "_": custom_id.split("_")[2] read
+                # "create_ticket_api_token" as "api" and silently opened the
+                # wrong kind of ticket.
+                ticket_type = custom_id.split("create_ticket_", 1)[1]
                 await self.create_ticket(event.ctx, ticket_type)
                 return  # Exit early to prevent further processing
 
