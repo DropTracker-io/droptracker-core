@@ -7,6 +7,7 @@ from db.models import Group
 
 from .common import (
     SubmissionResponse,
+    attach_webhook_screenshot,
     ensure_player_by_name_then_auth,
     get_player_groups_with_global,
     is_user_dm_enabled,
@@ -102,6 +103,22 @@ async def death_processor(death_data, external_session=None, world_type="main"):
     else:
         session.commit()
         session.refresh(death_entry)
+
+    # Discord-webhook transport: the screenshot arrives as a CDN link, not as a
+    # saved file. Resolve it here, before the loop, so the image reaches the
+    # notification payload and the screenshot-required gate below — not just
+    # the stored row.
+    if not image_url:
+        image_url = await attach_webhook_screenshot(
+            session,
+            player,
+            death_entry,
+            death_data,
+            submission_type="death",
+            entry_name=source or "death",
+            subfolder=source,
+            use_external_session=use_external_session,
+        )
 
     # Group notifications
     player_groups = get_player_groups_with_global(session, player)

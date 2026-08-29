@@ -8,6 +8,7 @@ from db.models import Group
 from .common import (
     SubmissionResponse,
     apply_account_type,
+    attach_webhook_screenshot,
     ensure_player_by_name_then_auth,
     get_player_groups_with_global,
     is_user_dm_enabled,
@@ -116,6 +117,21 @@ async def quest_processor(quest_data, external_session=None, world_type="main"):
     else:
         session.commit()
         session.refresh(quest_entry)
+
+    # Discord-webhook transport: the screenshot arrives as a CDN link, not as a
+    # saved file. Resolve it here, before the loop, so the image reaches the
+    # notification payload and the screenshot-required gate below — not just
+    # the stored row.
+    if not image_url:
+        image_url = await attach_webhook_screenshot(
+            session,
+            player,
+            quest_entry,
+            quest_data,
+            submission_type="quest",
+            entry_name=quest_name,
+            use_external_session=use_external_session,
+        )
 
     # Group notifications
     player_groups = get_player_groups_with_global(session, player)

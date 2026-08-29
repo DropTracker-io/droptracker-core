@@ -3,6 +3,7 @@
 import asyncio
 import json
 import traceback
+import uuid
 from datetime import datetime
 
 from services.points import is_feature_active_for_group
@@ -14,6 +15,7 @@ from .common import (
     get_player_groups_with_global,
     is_user_dm_enabled,
     create_notification,
+    download_webhook_screenshot,
     is_truthy_config,
     screenshot_required,
     select_session_and_flag,
@@ -407,6 +409,30 @@ def _parse_milestone_skills(experience_data: dict) -> list[dict]:
     return out
 
 
+async def _resolve_webhook_screenshot(player, experience_data, *, entry_name, subfolder):
+    """Resolve a webhook-transport submission's screenshot to a public URL.
+
+    Clients with the plugin's ``useApi`` option off — the default — submit
+    through a Discord webhook, and on that transport the screenshot only ever
+    arrives as a CDN link on ``attachment_url``; the two API transports save
+    the file themselves and hand over a finished ``image_url``.
+
+    XP submissions keep no per-event row to persist the URL onto
+    (``PlayerExperience`` is a rolling per-player snapshot, not a log of
+    level-ups), so the download's URL goes straight into the notification
+    payloads and nowhere else. With no row id to name the file, the submission
+    guid stands in.
+    """
+    return await download_webhook_screenshot(
+        player,
+        experience_data,
+        submission_type="experience",
+        entry_name=entry_name or "experience",
+        entry_id=experience_data.get("guid") or uuid.uuid4().hex,
+        subfolder=subfolder,
+    )
+
+
 async def experience_processor(experience_data, external_session=None):
     """Process experience/level-up submissions.
     
@@ -669,6 +695,19 @@ async def experience_processor(experience_data, external_session=None):
                 f"{s['skill_name']} — {s['milestone_xp']:,} XP" for s in milestone_skills
             )
 
+            # Resolve the webhook transport's screenshot before the group loop:
+            # the URL has to reach both the notification payloads and the
+            # screenshot_required() gate below, and a group that requires one
+            # would otherwise skip the announcement outright.
+            stage = "xp_milestone_screenshot"
+            if not image_url:
+                image_url = await _resolve_webhook_screenshot(
+                    player,
+                    experience_data,
+                    entry_name=milestone_skills[0]["skill_name"],
+                    subfolder="milestones",
+                )
+
             stage = "xp_milestone_group_loop"
             for group in get_player_groups_with_global(session, player):
                 await asyncio.sleep(0)  # Yield to event loop
@@ -819,6 +858,18 @@ async def experience_processor(experience_data, external_session=None):
     #     except Exception as e:
     #         debug_print(f"Failed to award milestone points: {e}")
     
+        # Same resolution for the level-up path (see the milestone branch
+        # above). Placed after the bulk-sync early return so an initial level
+        # sync, which never notifies, does not pull an image down for nothing.
+        stage = "level_up_screenshot"
+        if not image_url:
+            image_url = await _resolve_webhook_screenshot(
+                player,
+                experience_data,
+                entry_name=skill_name,
+                subfolder="levels",
+            )
+
         # Create notifications for groups
         stage = "load_player_groups"
         player_groups = get_player_groups_with_global(session, player)

@@ -1156,6 +1156,120 @@ def resolve_attachment_from_drop_data(drop_data):
     return _safe_submitted_image_url(image_url), None
 
 
+async def download_webhook_screenshot(
+    player,
+    data,
+    *,
+    submission_type,
+    entry_name,
+    entry_id,
+    subfolder="",
+):
+    """Download a Discord-webhook submission's screenshot; return its URL.
+
+    The row-less half of :func:`attach_webhook_screenshot`, for submission
+    types that keep no per-event row to hang an ``image_url`` column on.
+    Experience is the one: ``PlayerExperience`` is a rolling per-player XP
+    snapshot, not a log of level-ups, so there is nothing to persist the URL
+    onto — the caller passes the return value straight into its notification
+    payloads instead.
+
+    ``entry_id`` is only ever part of the stored filename, so any stable
+    per-submission token works; callers without a row id pass the submission
+    guid. It has to be unique per submission, because collisions are resolved
+    by scanning the directory for a free ``_1``, ``_2`` … suffix.
+
+    Returns the public URL, or "" when there was nothing to download.
+    """
+    if data.get("downloaded"):
+        # An API transport already wrote the file and set image_url.
+        return ""
+    attachment_url = data.get("attachment_url")
+    if not attachment_url:
+        return ""
+
+    try:
+        _local_path, external_url = await download_player_image(
+            submission_type=submission_type,
+            # Ignored by download_player_image (entry_name + entry_id name the
+            # file); passed for parity with the other processors' call sites.
+            file_name=entry_name,
+            player=player,
+            attachment_url=attachment_url,
+            file_extension=get_extension_from_content_type(data.get("attachment_type")),
+            entry_id=entry_id,
+            entry_name=entry_name or submission_type,
+            npc_name=subfolder or "",
+        )
+    except Exception as e:
+        app_logger.log(
+            log_type="error",
+            data=f"Couldn't download {submission_type} image: {e}",
+            app_name="core",
+            description=f"{submission_type}_processor",
+        )
+        return ""
+
+    return external_url or ""
+
+
+async def attach_webhook_screenshot(
+    session,
+    player,
+    entry,
+    data,
+    *,
+    submission_type,
+    entry_name,
+    subfolder="",
+    use_external_session=False,
+):
+    """Pull a Discord-webhook submission's screenshot onto ``entry``.
+
+    Both API transports (``api/routes/webhook.py``, ``workers/webhook_consumer``)
+    save the uploaded file themselves and hand the processor a finished
+    ``image_url`` with ``downloaded=True``. The legacy Discord-webhook reader
+    (``bots/webhook_bot.py``) cannot: it only ever sees the Discord CDN link,
+    which it puts on the payload as ``attachment_url``. A processor that reads
+    ``image_url`` and nothing else therefore discards the screenshot of every
+    submission arriving on that transport — silently, because the row still
+    saves and the notification still posts, just without an image.
+
+    That is exactly what happened to deaths and quests: 100% of their
+    webhook-path rows had no image (2,803 of 2,803 deaths over one two-day
+    sample) against ~0.5% on the API paths, while clogs and CAs — which do read
+    ``attachment_url`` — came through fine on the very same Discord messages.
+    ``useApi`` defaults to false in the plugin, so this is the majority of
+    clients, not an edge case.
+
+    Returns the public URL, or "" when there was nothing to download. Callers
+    assign it to their local ``image_url`` so the screenshot reaches the
+    group-notification payload and the screenshot-required gate, not just the
+    stored row.
+    """
+    external_url = await download_webhook_screenshot(
+        player,
+        data,
+        submission_type=submission_type,
+        entry_name=entry_name,
+        # entry_id becomes part of the stored filename, so the row must already
+        # be flushed — every caller adds and flushes it before getting here.
+        entry_id=getattr(entry, "id", 0) or 0,
+        subfolder=subfolder,
+    )
+    if not external_url:
+        return ""
+
+    entry.image_url = external_url
+    # The row was already committed (or flushed) when it was added, so this
+    # second write needs its own boundary rather than riding along on one.
+    if use_external_session:
+        session.flush()
+    else:
+        session.commit()
+    return external_url
+
+
 def get_player_groups_with_global(session, player: Player):
     """Fetch groups via association table, ensure global group membership."""
 
