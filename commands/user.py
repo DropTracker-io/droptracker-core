@@ -430,11 +430,61 @@ class UserCommands(Extension):
                         "https://discord.gg/droptracker",
                         ephemeral=True)
         elif status == "already_yours":
-            await ctx.send(f"It looks like you've already claimed this account ({result.get('player_name')}) {joined_time}\\n" +
-                        "\\nSomething not seem right?\\n" +
-                        "Please reach out in our discord server:\\n" +
-                        "https://discord.gg/droptracker",
-                        ephemeral=True)
+            # Users re-run this command to fix "my drops aren't showing up in
+            # our clan channel". claim_player attaches the guild's group when
+            # that sticks; when the group is WOM-backed it deliberately does
+            # not, because its roster owns the membership — say so, since
+            # re-claiming will never fix it (support ticket 413).
+            player_name = result.get("player_name")
+            group_status = result.get("group_status")
+            group_name = result.get("group_name")
+            is_real_group = result.get("group_id") not in (None, 2)
+            embed = Embed(
+                title="Already claimed",
+                # joined_time is a Discord <t:..:R> stamp -> "2 months ago".
+                description=f"**{player_name}** has been linked to your Discord account {joined_time}."
+                if joined_time
+                else f"**{player_name}** is already linked to your Discord account.",
+            )
+            if group_status == "attached" and is_real_group:
+                embed.add_field(
+                    name="Group",
+                    value=f"You've now also been added to **{group_name}**.",
+                    inline=False,
+                )
+            elif group_status == "wom_managed":
+                wom_id = result.get("group_wom_id")
+                wom_url = f"https://wiseoldman.net/groups/{wom_id}"
+                embed.add_field(
+                    name=f"Not seeing your drops in {group_name}?",
+                    value=(
+                        f"**{group_name}** builds its member list from its "
+                        f"[Wise Old Man group]({wom_url}) — not from claiming. "
+                        f"Claiming links `{player_name}` to you and tracks it on the website; "
+                        "posting in this server's channels needs the account on that roster.\n\n"
+                        f"Ask a clan leader to add `{player_name}` on "
+                        f"[wiseoldman.net]({wom_url}). We re-sync every hour, so posting "
+                        "starts within an hour of them adding you."
+                    ),
+                    inline=False,
+                )
+            elif group_status == "in_group" and is_real_group:
+                embed.add_field(
+                    name="Group",
+                    value=(
+                        f"You're already a member of **{group_name}**, so new drops "
+                        "should post in this server. If they aren't, open a ticket "
+                        "in our Discord and we'll take a look."
+                    ),
+                    inline=False,
+                )
+            embed.add_field(
+                name="Something not seem right?",
+                value="Please reach out in our discord server:\nhttps://discord.gg/droptracker",
+                inline=False,
+            )
+            embed.set_footer(text="Powered by the DropTracker | https://www.droptracker.io/")
+            await ctx.send(embed=embed, ephemeral=True)
         elif status == "claimed":
             embed = Embed(title="Success!",
                           description=f"Your in-game name has been successfully associated with your Discord account.\n" +

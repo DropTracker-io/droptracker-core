@@ -116,6 +116,82 @@ def main():
         prev3 = pc.preview_claim(rsn, discord_id=owner_discord)
         assert prev3["status"] == "already_yours"
 
+        # --- re-claim: the guild-group attach reruns, but only where it sticks ---
+        # Support ticket 413: claim_player used to return already_yours *before*
+        # resolving/attaching the guild group, so re-running /claim-rsn in the
+        # clan's Discord was a silent no-op. It now re-runs the attach, and
+        # refuses it where _sync_group_from_wom would evict (and announce) it.
+        # These ids/names are read now because the service's _release_scoped_session
+        # detaches every instance the moment it returns.
+        group_id_ = group.group_id
+        group_wom_ = group.wom_id
+
+        # (a) already a member -> nothing to do, reported as such.
+        rejoin = pc.claim_player(rsn, discord_id=owner_discord, guild_id=guild_id)
+        assert rejoin["status"] == "already_yours", rejoin
+        assert rejoin["group_status"] == "in_group", rejoin
+        assert rejoin["group_id"] == group_id_, rejoin
+
+        # (b) WOM-backed group + player with a wom_id -> must NOT be attached:
+        # the hourly sync evicts anyone off the roster and notify_group posts a
+        # "Member Removed" embed for it.
+        player2 = Player(
+            wom_id=86_000_000 + salt,
+            player_name=f"ClaimWom{salt}",
+            account_hash=f"claim-it-wom-{salt}",
+        )
+        s.add(player2)
+        s.commit()
+        created_player_ids.append(player2.player_id)
+        p2_id, p2_name = player2.player_id, player2.player_name
+        assert pc.claim_player(p2_name, discord_id=owner_discord)["status"] == "claimed"
+        womres = pc.claim_player(p2_name, discord_id=owner_discord, guild_id=guild_id)
+        assert womres["status"] == "already_yours", womres
+        assert womres["group_status"] == "wom_managed", womres
+        assert womres["group_id"] == group_id_, womres
+        assert womres["group_wom_id"] == group_wom_, womres
+        s.expire_all()
+        assert s.query(user_group_association).filter_by(
+            player_id=p2_id, group_id=group_id_).first() is None, \
+            "must not attach a wom_id player to a WOM-roster-owned group"
+
+        # (c) player with no wom_id -> the sync's removal pass skips them
+        # (`if member.wom_id and ...`), so the attach is durable: self-heal.
+        player3 = Player(
+            wom_id=None,
+            player_name=f"ClaimNoWom{salt}",
+            account_hash=f"claim-it-nowom-{salt}",
+        )
+        s.add(player3)
+        s.commit()
+        created_player_ids.append(player3.player_id)
+        p3_id, p3_name = player3.player_id, player3.player_name
+        assert pc.claim_player(p3_name, discord_id=owner_discord)["status"] == "claimed"
+        healed = pc.claim_player(p3_name, discord_id=owner_discord, guild_id=guild_id)
+        assert healed["status"] == "already_yours", healed
+        assert healed["group_status"] == "attached", healed
+        s.expire_all()
+        assert s.query(user_group_association).filter_by(
+            player_id=p3_id, group_id=group_id_).first() is not None, \
+            "re-claim must attach when the WOM sync cannot evict it"
+
+        # (d) group with no wom_id -> update_group_members' int(wom_id) raises
+        # and skips it, so nothing ever syncs the group: attach is durable.
+        # No Guild row needed — _resolve_guild_group reads Group.guild_id.
+        guild_id2 = str(811_000_000 + salt)
+        group_nowom = Group(f"ClaimIt N{salt}"[:30], None, guild_id2)
+        s.add(group_nowom)
+        s.commit()
+        created_group_ids.append(group_nowom.group_id)
+        nowom_id = group_nowom.group_id
+        nowom = pc.claim_player(p2_name, discord_id=owner_discord, guild_id=guild_id2)
+        assert nowom["status"] == "already_yours", nowom
+        assert nowom["group_status"] == "attached", nowom
+        s.expire_all()
+        assert s.query(user_group_association).filter_by(
+            player_id=p2_id, group_id=nowom_id).first() is not None, \
+            "a group with no wom_id is never synced, so the attach is safe"
+
         # --- unclaim: ownership gate, group removal, user_id cleared ---
         not_yours = pc.unclaim_player(discord_id=rival_discord, player_id=player.player_id)
         assert not_yours["status"] == "not_yours"

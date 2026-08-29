@@ -132,7 +132,12 @@ async def claim_rsn():
         return {
             "status": result["status"],
             "player": _public_player(result),
-            "group": _public_group(result) if result["status"] == "claimed" else None,
+            # already_yours can now carry a group too: a re-claim re-runs the
+            # guild-group attach when the hourly WOM sync would not undo it
+            # (db.player_claims._reclaim_attach_group).
+            "group": _public_group(result)
+            if result["status"] in ("claimed", "already_yours")
+            else None,
             "players": players,
         }
 
