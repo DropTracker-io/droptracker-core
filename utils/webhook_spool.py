@@ -120,6 +120,10 @@ def drain(redis_conn, queue_key: str = "webhook:queue", limit: int = 500) -> tup
             continue
 
         try:
+            # RPUSH on purpose, against the grain of the acceptor's LPUSH:
+            # the consumer pops the right end, and spooled entries predate
+            # everything in the live queue (they were accepted while Redis was
+            # down), so they belong at the pop end, not behind new traffic.
             redis_conn.rpush(queue_key, json.dumps(entry))
         except Exception:
             break

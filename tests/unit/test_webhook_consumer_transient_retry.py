@@ -25,7 +25,9 @@ class _FakeRedis:
     def __init__(self):
         self.pushed = []
 
-    def rpush(self, key, value):
+    def lpush(self, key, value):
+        # Requeues go to the producer's end (back of the FIFO line); an rpush
+        # would make the failed entry the very next pop — no backoff at all.
         self.pushed.append((key, value))
         return 1
 
@@ -96,7 +98,7 @@ class TestRequeueEscalation:
 
     def test_a_redis_failure_falls_back_to_dead_lettering(self):
         class _Broken:
-            def rpush(self, *a, **k):
+            def lpush(self, *a, **k):
                 raise RuntimeError("redis down")
 
         assert wc._requeue_with_backoff(_Broken(), self._entry()) is False

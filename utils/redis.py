@@ -41,7 +41,15 @@ class RedisClient:
         landed. A queue write that fails has to be visible to its caller.
         """
         self.client.rpush(key, value)
-        
+
+    def lpush(self, key: str, value: str) -> None:
+        """Prepend to a list. **Raises** on failure, for the same reason as
+        :meth:`rpush` — the `/webhook` acceptor treats a silent return as
+        "durably queued" and answers 200, so a swallowed error would throw
+        submissions away while telling the plugin they landed.
+        """
+        self.client.lpush(key, value)
+
     def lpop(self, key: str) -> Optional[str]:
         try:
             return self.client.lpop(key)

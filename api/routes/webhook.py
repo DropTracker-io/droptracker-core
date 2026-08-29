@@ -319,7 +319,17 @@ async def _queue_webhook_request():
             except Exception:
                 pass  # If we cannot measure the queue, take the submission.
         try:
-            rc.rpush("webhook:queue", json.dumps(entry))
+            # LPUSH, because the consumer pops the RIGHT end (BRPOPLPUSH).
+            # This used to be RPUSH — producer and consumer on the same end
+            # makes the list a STACK, and a stack starves its far end: on
+            # 2026-08-28 a 12-minute evening burst the consumer couldn't match
+            # became a ~3.7k block stranded at the left end for 14.8 hours,
+            # aging in place while every newer arrival processed instantly.
+            # The "backlog" metric looked constant when it was really one
+            # frozen cohort. LPUSH here restores FIFO: oldest submission is
+            # always the next one processed, so a backlog ages fairly instead
+            # of stranding whoever was unlucky enough to submit first.
+            rc.lpush("webhook:queue", json.dumps(entry))
         except Exception as redis_error:
             if webhook_spool.write(entry):
                 logger.log_sync(

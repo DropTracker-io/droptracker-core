@@ -225,6 +225,9 @@ def drain_dead(args) -> int:
     for raw in entries:
         # Requeue first, remove second: a crash in between replays the entry,
         # which GUID dedup absorbs. The other order would lose it.
+        # RPUSH is the consumer's pop end (the acceptor LPUSHes): dead entries
+        # predate everything live, so they jump the line rather than queue
+        # behind traffic that arrived hours after them.
         rc.rpush("webhook:queue", raw)
         rc.lrem("webhook:dead", 1, raw)
         requeued += 1

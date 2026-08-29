@@ -23,6 +23,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("webhook_consumer")
 
+# FIFO orientation: the acceptor LPUSHes (left = newest), workers BRPOPLPUSH
+# from the right (right = oldest). Both ends matter — with producer and
+# consumer on the SAME end this list is a stack, and a stack strands its far
+# end: a burst the consumer can't match becomes a frozen block that ages in
+# place while newer arrivals process instantly (2026-08-28: ~3.7k entries
+# stuck for 14.8h while the depth gauge sat "constant"). Requeues LPUSH (back
+# of the line); reclaim LMOVEs RIGHT->RIGHT (oldest work resumes first);
+# the disk spool drains via RPUSH (its entries predate the live queue).
 QUEUE_KEY = "webhook:queue"
 # In-flight entries live here between the pop and the end of _process_entry.
 # BRPOPLPUSH makes that move atomic, so a SIGKILL / OOM / power loss leaves the
@@ -542,7 +550,11 @@ def _requeue_with_backoff(r, entry_bytes) -> bool:
             log.error("Envelope exhausted %d attempts — dead-lettering", attempts)
             return False
         entry[_ATTEMPTS_KEY] = attempts
-        r.rpush(QUEUE_KEY, json.dumps(entry))
+        # Back of the line (the producer's end), like event_consumer's requeue.
+        # RPUSH would put the retry at the consumer's pop end, i.e. it would be
+        # the very next entry BLPOP'd — no backoff at all, just a hot loop on
+        # whatever infrastructure fault made it fail.
+        r.lpush(QUEUE_KEY, json.dumps(entry))
         log.warning("Transient failure — requeued (attempt %d/%d)",
                     attempts, RETRY_MAX_ATTEMPTS)
         return True
@@ -556,13 +568,15 @@ def _reclaim_inflight(r) -> int:
     """Put entries a dead worker was mid-processing back on the queue.
 
     Only safe at startup, before any worker runs: anything still in PROCESSING
-    then belongs to a process that no longer exists. Entries go back to the
-    tail so they are retried ahead of newer traffic, matching event_consumer.
+    then belongs to a process that no longer exists. Entries go to the pop end
+    (LMOVE RIGHT RIGHT) so they are retried ahead of newer traffic — they are
+    the oldest accepted submissions in the system. RPOPLPUSH could not say
+    that: it always lands on the far end, behind everything.
     """
     moved = 0
     try:
         while True:
-            entry = r.rpoplpush(PROCESSING_KEY, QUEUE_KEY)
+            entry = r.lmove(PROCESSING_KEY, QUEUE_KEY, "RIGHT", "RIGHT")
             if entry is None:
                 break
             moved += 1

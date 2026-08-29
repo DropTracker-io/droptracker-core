@@ -106,16 +106,20 @@ def test_reclaim_returns_stranded_entries_to_the_queue():
     """
     r = MagicMock()
     stranded = [b"a", b"b"]
-    r.rpoplpush.side_effect = lambda src, dst: stranded.pop(0) if stranded else None
+    r.lmove.side_effect = lambda src, dst, f, t: stranded.pop(0) if stranded else None
 
     moved = wc._reclaim_inflight(r)
 
     assert moved == 2
-    r.rpoplpush.assert_called_with(wc.PROCESSING_KEY, wc.QUEUE_KEY)
+    # RIGHT->RIGHT: recovered entries are the oldest accepted work in the
+    # system and land at the consumer's pop end, ahead of newer traffic.
+    # (The queue is FIFO — acceptor LPUSHes, workers pop the right end; a
+    # left-landing reclaim would park them behind the entire backlog.)
+    r.lmove.assert_called_with(wc.PROCESSING_KEY, wc.QUEUE_KEY, "RIGHT", "RIGHT")
 
 
 def test_reclaim_is_quiet_when_nothing_was_stranded():
     r = MagicMock()
-    r.rpoplpush.return_value = None
+    r.lmove.return_value = None
 
     assert wc._reclaim_inflight(r) == 0
