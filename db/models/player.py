@@ -13,9 +13,9 @@ Author: joelhalen
 """
 
 from typing import List
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey
+from sqlalchemy import Column, Computed, Integer, String, Boolean, DateTime, Float, ForeignKey
 from sqlalchemy import func
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import deferred, relationship
 
 from .associations import user_group_association
 from .base import session
@@ -80,6 +80,40 @@ class Player(Base):
     # OSRS game mode (varbit 1777) reported with submissions; last-write-wins.
     # NULL until the player's plugin first reports it (Task 23).
     account_type = Column(String(32), nullable=True)
+
+    # Display-equivalence key for name resolution, computed by MariaDB from
+    # player_name -- never written directly. It mirrors
+    # utils.format.normalize_player_display_equivalence exactly: '-' and '_'
+    # fold to a space, runs of whitespace collapse to one, then trim and
+    # lowercase.
+    #
+    # It exists to be indexed. The resolver's last-resort branch used to apply
+    # those same functions to the *column*, which is non-sargable, so every
+    # unresolvable name (any unregistered participant in a raid roster, once
+    # per group) scanned all 22k rows at ~15ms. Against the index that lookup
+    # is a ~0.3ms seek. See db.ops.resolve_player_for_display.
+    #
+    # VIRTUAL, not PERSISTENT: it is only ever read through the index, so
+    # materialising it per row would cost storage and write amplification for
+    # nothing.
+    # deferred(): nothing ever reads this as an attribute -- it exists purely to
+    # be matched in a WHERE clause, which does not need the value loaded. Left
+    # in the default SELECT it would make MariaDB evaluate the regex once per
+    # returned row: no measurable cost on the single-row lookups that dominate,
+    # but +48% (236ms -> 349ms) on a full 22k-row read, which is a real tax on
+    # group-roster queries in exchange for a value nobody looks at.
+    player_name_norm = deferred(
+        Column(
+            String(20, collation="utf8mb4_general_ci"),
+            Computed(
+                "LOWER(TRIM(REGEXP_REPLACE("
+                "REPLACE(REPLACE(player_name, '_', ' '), '-', ' '),"
+                " '[[:space:]]+', ' ')))",
+                persisted=False,
+            ),
+            index=True,
+        )
+    )
     
     # Relationships
     user = relationship("User", back_populates="players")

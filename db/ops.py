@@ -737,17 +737,27 @@ def resolve_player_for_display(db_session, player_name: str, player_id = None):
 
     # Last resort, and the only branch that also covers the reverse direction
     # (a stored ``Itz_Baal`` from WOM group import vs a submitted ``Itz Baal``).
+    #
+    # Matched against the generated ``player_name_norm`` column (web100a), not
+    # by wrapping ``player_name`` in the same functions: that form could not
+    # use an index and scanned all ~22k rows every time, which is the single
+    # hottest query in the fleet -- 64% of the webhook consumer's wall-clock,
+    # because this branch is reached for every name that resolves to nothing
+    # (every unregistered raid participant) once per group.
+    #
+    # ``order_by(player_id)`` is load-bearing rather than cosmetic. There are
+    # ~23 sets of duplicate rows that normalize to the same key (the wom_temp
+    # identity ghosts, e.g. two ``Brondt``). They were already ambiguous here,
+    # but the winner used to fall out of scan order; pinning it to the lowest
+    # id makes the choice stable across restarts and index changes, and picks
+    # the original account over the later stub.
     normalized = normalize_player_display_equivalence(player_name)
     if not normalized:
         return None
     return (
         db_session.query(Player)
-        .filter(
-            func.lower(
-                func.replace(func.replace(func.trim(Player.player_name), "_", " "), "-", " ")
-            )
-            == normalized
-        )
+        .filter(Player.player_name_norm == normalized)
+        .order_by(Player.player_id)
         .first()
     )
 

@@ -28,6 +28,8 @@ import pytest
 from sqlalchemy import Column, Integer, String, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
+from utils.format import normalize_player_display_equivalence
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -47,9 +49,24 @@ def ops_env():
         __tablename__ = "players"
         player_id = Column(Integer, primary_key=True)
         player_name = Column(String(64))
+        # In production this is a MariaDB VIRTUAL generated column (web100a).
+        # sqlite cannot express its REGEXP_REPLACE whitespace collapse, so here
+        # it is a plain column filled by ``_player()`` from the very normalizer
+        # the generated column mirrors -- never written by hand, so a test can
+        # not assert on a normalization production would not produce. That the
+        # DDL and the normalizer agree is a separate claim, asserted against a
+        # real MariaDB in tests/integration/player_name_norm_it.py.
+        player_name_norm = Column(String(64))
         # get_formatted_name only reads .user to decide on an @-mention;
         # None means "no linked Discord account, never ping".
         user = None
+
+    def _player(player_id, player_name):
+        return Player(
+            player_id=player_id,
+            player_name=player_name,
+            player_name_norm=normalize_player_display_equivalence(player_name),
+        )
 
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -62,11 +79,11 @@ def ops_env():
 
     rows = [
         # WOM-canonical spelling: what the submission path stores.
-        Player(player_id=1, player_name="Beast Owned"),
-        Player(player_id=2, player_name="tzuk kal lag"),
+        _player(1, "Beast Owned"),
+        _player(2, "tzuk kal lag"),
         # WOM group import keeps display_name, so underscores survive there.
-        Player(player_id=3, player_name="Itz_Baal"),
-        Player(player_id=4, player_name="Solo"),
+        _player(3, "Itz_Baal"),
+        _player(4, "Solo"),
     ]
     session.add_all(rows)
     session.commit()

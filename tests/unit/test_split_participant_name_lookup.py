@@ -40,6 +40,7 @@ from data.submissions import drop as drop_module
 from data.submissions import point_awards
 from data.submissions.manual_discord import parse_split_players
 from data.submissions.point_awards import _normalize_player_names
+from utils.format import normalize_player_display_equivalence
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -60,7 +61,22 @@ def resolver_env(monkeypatch):
         __tablename__ = "players"
         player_id = Column(Integer, primary_key=True)
         player_name = Column(String(64))
+        # In production this is a MariaDB VIRTUAL generated column (web100a).
+        # sqlite cannot express its REGEXP_REPLACE whitespace collapse, so here
+        # it is a plain column filled by ``_player()`` from the very normalizer
+        # the generated column mirrors -- never written by hand, so a test can
+        # not assert on a normalization production would not produce. That the
+        # DDL and the normalizer agree is a separate claim, asserted against a
+        # real MariaDB in tests/integration/player_name_norm_it.py.
+        player_name_norm = Column(String(64))
         user = None
+
+    def _player(player_id, player_name):
+        return Player(
+            player_id=player_id,
+            player_name=player_name,
+            player_name_norm=normalize_player_display_equivalence(player_name),
+        )
 
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -75,18 +91,18 @@ def resolver_env(monkeypatch):
     session.add_all([
         # WOM-canonical spelling: what the submission path stores, and what
         # every one of the live casualties actually looks like in `players`.
-        Player(player_id=RECEIVER_ID, player_name="wi beer guy"),
-        Player(player_id=1, player_name="x tra"),
-        Player(player_id=2, player_name="tzuk kal lag"),
-        Player(player_id=3, player_name="NoX EvilAce"),
+        _player(RECEIVER_ID, "wi beer guy"),
+        _player(1, "x tra"),
+        _player(2, "tzuk kal lag"),
+        _player(3, "NoX EvilAce"),
         # WOM group import keeps display_name, so separators survive there —
         # the reverse direction still has to fold.
-        Player(player_id=4, player_name="Itz_Baal"),
-        Player(player_id=5, player_name="Blip-A"),
-        Player(player_id=6, player_name="Solo"),
+        _player(4, "Itz_Baal"),
+        _player(5, "Blip-A"),
+        _player(6, "Solo"),
         # player_id 0 is a real account (the project owner's), so the receiver
         # check has to compare ids, not their truthiness.
-        Player(player_id=0, player_name="zero acc"),
+        _player(0, "zero acc"),
     ])
     session.commit()
 
