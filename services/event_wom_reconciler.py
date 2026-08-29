@@ -38,7 +38,7 @@ from typing import Optional
 
 log = logging.getLogger("event_wom_reconciler")
 
-RELEVANT_TASK_TYPES = ("xp_target", "skill_target", "kc_target")
+RELEVANT_TASK_TYPES = ("xp_target", "skill_target", "kc_target", "competition")
 
 WOM_RECONCILE_SECONDS = int(os.getenv("WOM_RECONCILE_SECONDS", "300"))
 WOM_EVENT_UPDATE_BUDGET = int(os.getenv("WOM_EVENT_UPDATE_BUDGET", "10"))
@@ -165,6 +165,28 @@ def _relevant_metrics(state, event_id) -> tuple[dict, set, set]:
             else:
                 log.info("Event %s task %s: no WOM metric for NPC %r (plugin-only)",
                          event_id, task.get("id"), target)
+        elif ttype == "competition":
+            # SOTW/BOTW race task: one skill (hosted skill races ride the
+            # same bulk-gained experience lane as xp_target) or a boss set
+            # whose metrics were precomputed on the task dict like
+            # kc_target's (services.event_engine._task_to_dict).
+            comp = task.get("competition") or {}
+            if comp.get("metric_kind") == "skill" and comp.get("skill"):
+                key = str(comp["skill"]).strip().lower()
+                slug = wom_skill_metric(key)
+                if slug:
+                    skills[key] = slug
+                else:
+                    log.warning("Event %s task %s: no WOM metric for skill %r",
+                                event_id, task.get("id"), comp.get("skill"))
+            else:
+                metrics = task.get("wom_metrics")
+                if isinstance(metrics, dict) and metrics:
+                    bosses.update(metrics)
+                elif comp.get("npcs"):
+                    log.info("Event %s task %s: no WOM metric for NPCs %r "
+                             "(plugin-only)", event_id, task.get("id"),
+                             comp.get("npcs"))
         else:
             # any_path metric paths (item_collection): KC paths resolve their
             # NPCs to boss metrics at state load, merged into ``wom_metrics``

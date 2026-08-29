@@ -84,6 +84,20 @@ MAX_CONFIG_BYTES = 60000
 # kc_target may list several NPCs ("kill 50 of any Dagannoth King") via
 # config.npcs — a kill of ANY listed NPC advances the one shared counter.
 MAX_KC_NPCS = 10
+
+# SOTW/BOTW competition config bounds — mirror services/competition.py (this
+# module keeps its no-service-imports rule, so the numbers live twice; the
+# unit tests assert they agree).
+COMP_MAX_NPCS = 10
+COMP_MAX_BONUS_RULES = 6
+COMP_MIN_BONUS_POINTS = 1
+COMP_MAX_BONUS_POINTS = 10_000_000
+COMP_MAX_AWARDS_PER_PLAYER = 100
+COMP_MIN_GAINED_PER_POINT = 1
+COMP_MAX_GAINED_PER_POINT = 1_000_000_000
+COMP_MIN_TIME_THRESHOLD_MS = 600
+COMP_MAX_TIME_THRESHOLD_MS = 6 * 60 * 60 * 1000
+COMP_RANKING_MODES = ("gained", "points")
 # item_collection tasks may optionally restrict which NPC(s) an item must drop
 # from: config.source_npcs (single-item) / config.item_npcs (per-item map). The
 # picker seeds the restriction with EVERY known wiki drop source of the item
@@ -829,6 +843,162 @@ def _validated_loot_sweep(s, config: dict | None) -> dict:
     }
 
 
+def validated_competition_config(s, event_kind: str, raw) -> dict:
+    """Validate + normalize a sotw/botw event's ``competition`` block into the
+    canonical hidden-task config (``services/competition.py`` schema).
+
+    Called by the EVENT routes (POST /events / PATCH competition settings) —
+    never by the task routes: the race task is managed, and
+    :func:`validate_task_payload` rejects direct writes to it. Raises 422
+    problems; returns the config dict ``ensure_competition_scaffold`` stores.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    metric_kind = "skill" if event_kind == "sotw" else "boss"
+    out: dict = {"kind": "competition", "metric_kind": metric_kind}
+    metric = raw.get("metric") if isinstance(raw.get("metric"), dict) else {}
+
+    canonical_npcs: list[str] = []
+    if metric_kind == "skill":
+        key = str(metric.get("key") or raw.get("skill") or "").strip().lower()
+        if not key:
+            abort_problem(422, "Missing skill",
+                          "Pick the skill this Skill of the Week races.")
+        if key == "overall":
+            abort_problem(422, "Unsupported metric",
+                          "Overall isn't supported yet — pick one skill.")
+        from utils.wiseoldman import wom_skill_metric
+
+        if not wom_skill_metric(key):
+            abort_problem(422, "Unknown skill",
+                          f"'{key}' is not a trackable skill.")
+        out["skill"] = key
+    else:
+        names = raw.get("npcs")
+        if not names:
+            fallback = metric.get("display") or metric.get("key")
+            names = [fallback] if fallback else []
+        if not isinstance(names, list) or not names:
+            abort_problem(422, "Missing boss",
+                          "Pick the boss this Boss of the Week races.")
+        if len(names) > COMP_MAX_NPCS:
+            abort_problem(422, "Too many NPCs",
+                          f"At most {COMP_MAX_NPCS} NPCs per boss race.")
+        unknown: list[str] = []
+        for name in names:
+            # Same liberal treatment as kc_target: a source alias
+            # ("Wintertodt") expands to the NPC rows drops actually record.
+            for real in expand_source_names(str(name)):
+                canonical = _canonical_npc(s, real)
+                if not canonical:
+                    unknown.append(str(name))
+                elif canonical not in canonical_npcs:
+                    canonical_npcs.append(canonical)
+        if unknown:
+            abort_problem(
+                422, "Unknown NPC",
+                f"Not in the NPC database: {', '.join(sorted(set(unknown)))} — "
+                "the exact in-game name is required.")
+        if len(canonical_npcs) > COMP_MAX_NPCS:
+            abort_problem(422, "Too many NPCs",
+                          f"At most {COMP_MAX_NPCS} NPCs per boss race "
+                          "(a merged source expanded past the cap).")
+        out["npcs"] = canonical_npcs
+
+    ranking = raw.get("ranking") if isinstance(raw.get("ranking"), dict) else {}
+    mode = ranking.get("mode") or "gained"
+    if mode not in COMP_RANKING_MODES:
+        abort_problem(422, "Invalid ranking mode",
+                      f"Ranking mode must be one of {list(COMP_RANKING_MODES)}.")
+    out["ranking"] = {"mode": mode}
+    if mode == "points":
+        default_rate = 1 if metric_kind == "boss" else 10_000
+        out["ranking"]["gained_per_point"] = _clamp_int(
+            ranking.get("gained_per_point"), default=default_rate,
+            lo=COMP_MIN_GAINED_PER_POINT, hi=COMP_MAX_GAINED_PER_POINT)
+
+    rules_raw = raw.get("bonus_rules") or []
+    if not isinstance(rules_raw, list):
+        abort_problem(422, "Invalid config", "'bonus_rules' must be an array.")
+    if len(rules_raw) > COMP_MAX_BONUS_RULES:
+        abort_problem(422, "Too many bonus rules",
+                      f"At most {COMP_MAX_BONUS_RULES} bonus rules per event.")
+    rules: list[dict] = []
+    npc_norms = {" ".join(n.strip().lower().split()) for n in canonical_npcs}
+    seen_pet_rule = False
+    for i, rr in enumerate(rules_raw, start=1):
+        rr = rr if isinstance(rr, dict) else {}
+        rtype = rr.get("type")
+        rule: dict = {
+            "id": i,  # reassigned sequentially — stable once the config locks
+            "type": rtype,
+            "points": _clamp_int(rr.get("points"), default=COMP_MIN_BONUS_POINTS,
+                                 lo=COMP_MIN_BONUS_POINTS, hi=COMP_MAX_BONUS_POINTS),
+            "max_awards": _clamp_int(rr.get("max_awards"), default=1,
+                                     lo=1, hi=COMP_MAX_AWARDS_PER_PLAYER),
+        }
+        if rr.get("label"):
+            rule["label"] = str(rr["label"]).strip()[:120]
+        if rtype == "pet":
+            if seen_pet_rule:
+                abort_problem(422, "Duplicate bonus rule",
+                              "Only one pet bonus rule per event.")
+            seen_pet_rule = True
+            from utils.osrs_pets import canonical_pet_name
+
+            pets: list[str] = []
+            for p in rr.get("pets") or []:
+                canonical = canonical_pet_name(str(p))
+                if not canonical:
+                    abort_problem(422, "Unknown pet",
+                                  f"'{p}' is not a known pet name.")
+                if canonical not in pets:
+                    pets.append(canonical)
+            if not pets and metric_kind == "skill":
+                # Default: the raced skill's skilling pet, when it has one
+                # (keys are normalized — canonicalize back to display names).
+                from utils.osrs_pets import SKILLING_PET_SKILL
+
+                skill_norm = out["skill"]
+                pets = sorted({
+                    canonical_pet_name(pet) or pet
+                    for pet, skill in SKILLING_PET_SKILL.items()
+                    if str(skill).strip().lower() == skill_norm
+                })
+            if not pets:
+                abort_problem(422, "Missing pets",
+                              "A pet bonus needs at least one pet name.")
+            rule["pets"] = pets
+        elif rtype == "time_under":
+            if metric_kind != "boss":
+                abort_problem(422, "Invalid bonus rule",
+                              "Kill-time bonuses only apply to a boss race.")
+            threshold = rr.get("threshold_ms")
+            if not isinstance(threshold, (int, float)) or not (
+                    COMP_MIN_TIME_THRESHOLD_MS <= int(threshold)
+                    <= COMP_MAX_TIME_THRESHOLD_MS):
+                abort_problem(422, "Invalid bonus time",
+                              "The bonus kill time must be between one game "
+                              "tick and six hours.")
+            rule["threshold_ms"] = int(threshold)
+            npc_name = str(rr.get("npc") or "").strip()
+            canonical = _canonical_npc(s, npc_name) if npc_name else None
+            if canonical is None and len(canonical_npcs) == 1:
+                canonical = canonical_npcs[0]  # single-boss race: implied
+            if canonical is None or \
+                    " ".join(canonical.strip().lower().split()) not in npc_norms:
+                abort_problem(422, "Invalid bonus rule",
+                              "A kill-time bonus must name one of the "
+                              "race's bosses.")
+            rule["npc"] = canonical
+        else:
+            abort_problem(422, "Invalid bonus rule",
+                          "Bonus rule type must be 'pet' or 'time_under'.")
+        rules.append(rule)
+    if rules:
+        out["bonus_rules"] = rules
+    return out
+
+
 def validate_task_payload(s, body: dict) -> dict:
     """Validate + normalize a full task create payload.
 
@@ -836,6 +1006,13 @@ def validate_task_payload(s, body: dict) -> dict:
     the engine expects them); raises 422 problems otherwise.
     """
     ttype = body.get("type")
+    if ttype == "competition":
+        # The race task is managed by the event itself (created/updated via
+        # the competition settings, services/competition_setup.py) — direct
+        # task-route writes would desync it from the event's WOM linkage.
+        abort_problem(422, "Managed task",
+                      "The competition race task is managed by the event — "
+                      "edit it from the event's Competition settings.")
     target = (body.get("target") or "").strip()
     tv = body.get("target_value")
     config = _parse_config(body.get("config"))

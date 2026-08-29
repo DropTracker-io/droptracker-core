@@ -815,6 +815,12 @@ async def update_task(event_id: int, task_id: int):
             )
             if not task:
                 abort_problem(404, "Task not found", f"No task {task_id} in this event.")
+            if task.type == "competition":
+                # SOTW/BOTW race task: managed by the event's Competition
+                # settings — direct edits would desync it from the WOM linkage.
+                abort_problem(422, "Managed task",
+                              "The competition race task is managed by the "
+                              "event — edit it from the Competition settings.")
             _before_task = {
                 "label": task.label, "points": int(task.points or 0),
                 "target": task.target, "target_value": task.target_value,

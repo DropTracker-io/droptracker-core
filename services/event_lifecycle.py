@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -40,6 +40,15 @@ _ACTIVATION_FAILED_TTL = 7 * 24 * 3600
 # Same one-time guard for a failing scheduled end: the sweep retries every
 # tick until the end succeeds, and the admin channel should hear about it once.
 END_FAILED_KEY = "events:sweep:end-failed:{event_id}"
+
+# One-shot lifecycle reminders ("starts in an hour" / "ends in an hour"): the
+# NX flag per (event, side) that makes each fire exactly once however many
+# sweep ticks land inside the lead window. Kind-agnostic (added with the
+# competition kinds — WOM's bot sends these, and every kind benefits).
+REMINDER_SENT_KEY = "events:remind:{event_id}:{side}"
+_REMINDER_SENT_TTL = 14 * 24 * 3600
+DEFAULT_REMINDER_LEAD_MINUTES = 60
+_MAX_REMINDER_LEAD_MINUTES = 24 * 60
 
 # Recurring schedules (web82a): the last observed window state per event —
 # "open:{window row id}" or "closed" — so the sweep announces transitions
@@ -162,6 +171,40 @@ def activation_blocker_items(session, event, now: Optional[datetime] = None) -> 
             "message": "The end date is in the past — move it into the future first.",
         })
 
+    # SOTW/BOTW (competition kinds): the race needs a scoreable config, and a
+    # WOM-linked/-created event needs its linkage in place before going live
+    # (the poller starts crediting from the linked competition immediately).
+    from db.models import COMPETITION_EVENT_KINDS
+
+    if (getattr(event, "kind", None) or "standard") in COMPETITION_EVENT_KINDS:
+        from services.competition import CompetitionConfig
+        from services.competition_setup import competition_row, competition_task
+
+        task = competition_task(session, event.id)
+        cfg = CompetitionConfig(task.config if task is not None else None)
+        if task is None or not cfg.valid:
+            blockers.append({
+                "code": "competition_missing_metric", "target": "competition",
+                "message": ("Pick what the race tracks — a skill (Skill of the "
+                            "Week) or a boss (Boss of the Week)."),
+            })
+        row = competition_row(session, event.id)
+        source_mode = getattr(row, "source_mode", "hosted") if row is not None else "hosted"
+        if source_mode in ("linked", "created"):
+            if row is None or not row.wom_competition_id:
+                blockers.append({
+                    "code": "wom_link_missing", "target": "competition",
+                    "message": ("The event is set to mirror a WiseOldMan "
+                                "competition, but none is linked yet — link "
+                                "one or switch to DropTracker-hosted."),
+                })
+            elif source_mode == "created" and not row.wom_competition_code:
+                blockers.append({
+                    "code": "wom_code_missing", "target": "competition",
+                    "message": ("The WiseOldMan competition was never created "
+                                "— finish the create step or switch modes."),
+                })
+
     # Recurring schedules (web82a). The write paths validate all of this too;
     # these blockers catch drift (dates moved after the schedule was set, a
     # kind change, every window already elapsed by start time).
@@ -171,6 +214,16 @@ def activation_blocker_items(session, event, now: Optional[datetime] = None) -> 
                 "code": "schedule_board_game", "target": "dates",
                 "message": ("Board-game events can't use a recurring schedule — "
                             "remove the schedule or change the event type."),
+            })
+        if (getattr(event, "kind", None) or "standard") in COMPETITION_EVENT_KINDS:
+            # A linked WOM competition runs continuously, and split-window
+            # standings semantics are unresolved — v1 keeps competitions on a
+            # single continuous window.
+            blockers.append({
+                "code": "schedule_competition", "target": "dates",
+                "message": ("Skill/Boss of the Week events run on one "
+                            "continuous window — remove the recurring "
+                            "schedule or change the event type."),
             })
         if event.starts_at is None or event.ends_at is None:
             blockers.append({
@@ -488,15 +541,114 @@ def _board_final_standings(session, event, limit: int) -> list:
             for t in ordered]
 
 
+def _competition_ranked_rows(session, event) -> tuple:
+    """``(ranked_rows, config, team)`` for a competition event — the full
+    merged standings (DT ledger fold + cached WOM-only participants), ranked
+    under the event's ranking mode. ``([], None, None)`` when unscaffolded."""
+    from db.models import Player
+    from services import event_engine
+    from services.competition import CompetitionConfig, fold_rows, standings
+    from services.competition_setup import (competition_row, competition_task,
+                                            competition_team)
+
+    task = competition_task(session, event.id)
+    team = competition_team(session, event.id)
+    if task is None or team is None:
+        return [], None, None
+    config = CompetitionConfig(task.config)
+    rows = event_engine._competition_applied_rows(
+        session, {"id": task.id}, team.id)
+    per = fold_rows(rows, config)
+    names = {}
+    if per:
+        names = dict(
+            session.query(Player.player_id, Player.player_name)
+            .filter(Player.player_id.in_(list(per.keys())))
+            .all()
+        )
+    wom_rows = None
+    comp_row = competition_row(session, event.id)
+    if comp_row is not None and comp_row.wom_standings:
+        try:
+            parsed = json.loads(comp_row.wom_standings)
+            wom_rows = parsed if isinstance(parsed, list) else None
+        except (TypeError, ValueError):
+            wom_rows = None
+    return standings(per, config, names, wom_rows), config, team
+
+
+def _competition_final_standings(session, event, limit: int) -> list:
+    """Competition standings for the lifecycle surfaces: top PLAYERS (there is
+    only one roster team), shape-compatible with the team standings the ended
+    announcement and pot line consume — plus ``score_text`` so renderers can
+    say "2.48M XP" instead of a bare number labelled "pts"."""
+    from services.competition import score_text
+
+    ranked, config, team = _competition_ranked_rows(session, event)
+    if config is None:
+        return []
+    out = []
+    for row in ranked[:limit]:
+        value = row["points"] if config.ranking_mode == "points" else row["gained"]
+        out.append({
+            "team_id": team.id,
+            "name": row["player_name"],
+            "score": value,
+            "score_text": score_text(value, config),
+        })
+    return out
+
+
+def finalize_competition(session, event, now: Optional[datetime] = None) -> dict:
+    """Freeze a competition's result at end: the full merged standings land in
+    ``web_event_competitions.final_standings`` (the result page must never
+    depend on a re-fold or a long-gone WOM competition), and per-player
+    contribution points are written ONCE (``EventPlayerPoints`` — deliberately
+    not maintained live: an XP-snapshot stream would rewrite the whole roster
+    thousands of times a day). Idempotent; caller owns the commit."""
+    from db.models import EventPlayerPoints
+    from services.competition_setup import competition_row, competition_task
+
+    now = now or datetime.now()
+    ranked, config, team = _competition_ranked_rows(session, event)
+    row = competition_row(session, event.id)
+    if config is None or row is None:
+        return {"players": 0, "frozen": False}
+
+    task = competition_task(session, event.id)
+    (session.query(EventPlayerPoints)
+     .filter(EventPlayerPoints.task_id == task.id,
+             EventPlayerPoints.team_id == team.id)
+     .delete(synchronize_session=False))
+    written = 0
+    for entry in ranked:
+        if not entry.get("registered") or entry.get("player_id") is None:
+            continue
+        value = (entry["points"] if config.ranking_mode == "points"
+                 else entry["gained"])
+        session.add(EventPlayerPoints(
+            event_id=event.id, task_id=task.id, team_id=team.id,
+            player_id=entry["player_id"], points=float(value)))
+        written += 1
+
+    row.final_standings = json.dumps(ranked)
+    row.finalized_at = now
+    session.flush()
+    return {"players": written, "frozen": True}
+
+
 def final_standings(session, event_id: int, limit: int = 5) -> list:
     """[{team_id, name, score}] best-first. Board-game events rank by the
-    finish-line race (see :func:`_board_final_standings`); every other event
+    finish-line race (see :func:`_board_final_standings`); competition events
+    rank PLAYERS (see :func:`_competition_final_standings`); every other event
     ranks by task score."""
-    from db.models import Event, EventTeam
+    from db.models import COMPETITION_EVENT_KINDS, Event, EventTeam
 
     event = session.query(Event).filter(Event.id == event_id).first()
     if event is not None and getattr(event, "kind", None) == "board_game":
         return _board_final_standings(session, event, limit)
+    if event is not None and getattr(event, "kind", None) in COMPETITION_EVENT_KINDS:
+        return _competition_final_standings(session, event, limit)
 
     rows = (
         session.query(EventTeam)
@@ -507,6 +659,26 @@ def final_standings(session, event_id: int, limit: int = 5) -> list:
     )
     return [{"team_id": t.id, "name": t.name, "score": _fmt_score(t.score)}
             for t in rows]
+
+
+def _competition_metric_line(session, event) -> Optional[str]:
+    """The one-line race description for lifecycle announcements ("**Boss**
+    Zulrah — most kills gained wins"), or None for every other kind — so the
+    layouts' ``{competition_metric_line}`` block token-drops cleanly."""
+    from db.models import COMPETITION_EVENT_KINDS
+
+    if (getattr(event, "kind", None) or "standard") not in COMPETITION_EVENT_KINDS:
+        return None
+    try:
+        from services.competition import CompetitionConfig, metric_line
+        from services.competition_setup import competition_task
+
+        task = competition_task(session, event.id)
+        if task is None:
+            return None
+        return metric_line(CompetitionConfig(task.config))
+    except Exception:
+        return None
 
 
 def _pot_advertise_line(session, event, team_count, *, ended=False, winner=None):
@@ -666,8 +838,15 @@ def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> in
     Idempotent and safe to run repeatedly — the sweep calls it every tick for
     active clan_vs_clan events, so joining or leaving a participating clan
     mid-event propagates within one tick. Returns the number of roster changes
-    (added + removed); caller owns the commit."""
-    if (getattr(event, "mode", None) or "standard") != "clan_vs_clan":
+    (added + removed); caller owns the commit.
+
+    Whole-clan COMPETITION events (sotw/botw) reuse this machinery unchanged:
+    their scaffold seeds one ``auto_clan`` roster team, so the same mirror
+    keeps "everyone in the clan is entered" true as the clan changes."""
+    from db.models import COMPETITION_EVENT_KINDS
+
+    if ((getattr(event, "mode", None) or "standard") != "clan_vs_clan"
+            and (getattr(event, "kind", None) or "standard") not in COMPETITION_EVENT_KINDS):
         return 0
     from db.models import EventTeam, EventTeamMember
     from db.models.associations import user_group_association
@@ -809,6 +988,24 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
     # Then put every current clan member ON their clan's team — no sign-up
     # needed; that's the whole point of skipping team setup.
     _ensure_whole_clan_teams(session, event)
+    # SOTW/BOTW: heal a missing scaffold piece (roster team / competition row)
+    # from the stored task config before rosters sync. Settings never change
+    # here — the blockers above already guaranteed a valid config exists.
+    from db.models import COMPETITION_EVENT_KINDS as _COMP_KINDS
+
+    if (getattr(event, "kind", None) or "standard") in _COMP_KINDS:
+        import json as _json
+
+        from services.competition_setup import (competition_task,
+                                                ensure_competition_scaffold)
+
+        _comp_task = competition_task(session, event.id)
+        if _comp_task is not None:
+            try:
+                _cfg = _json.loads(_comp_task.config or "{}")
+            except (TypeError, ValueError):
+                _cfg = {}
+            ensure_competition_scaffold(session, event, _cfg)
     sync_auto_clan_rosters(session, event, now=now)
     # G7: tell admins (once) which players were left off the whole-clan teams
     # because they belong to more than one participating clan — each needs a
@@ -852,6 +1049,10 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
     _pot_line = _pot_advertise_line(session, event, team_count)
     if _pot_line:
         started_extra["pot_started_line"] = _pot_line
+    # SOTW/BOTW: the race in one line (token-drops for other kinds).
+    _metric_line = _competition_metric_line(session, event)
+    if _metric_line:
+        started_extra["competition_metric_line"] = _metric_line
     event_engine._enqueue_notification(
         session, "event_started", ev_dict,
         _representative_player_id(session, event.id),
@@ -964,6 +1165,21 @@ def end_event(session, event, *, actor_user_id=None,
         log.error("end_event(%s): final standings failed",
                   event.id, exc_info=True)
 
+    # SOTW/BOTW: freeze the merged result + write the one-time per-player
+    # contribution points. Best-effort like every wrap-up step — the ledger
+    # keeps the standings derivable regardless.
+    from db.models import COMPETITION_EVENT_KINDS as _COMP_KINDS
+
+    if (getattr(event, "kind", None) or "standard") in _COMP_KINDS:
+        try:
+            finalize_competition(session, event, now=now)
+            session.commit()
+        except Exception:
+            session.rollback()
+            failed_steps.append("competition result freeze")
+            log.error("end_event(%s): competition finalize failed",
+                      event.id, exc_info=True)
+
     try:
         ev_dict = event_engine._event_to_dict(event)
         ended_extra = {"standings": standings, "ended_at": _ts(event.ended_at)}
@@ -973,6 +1189,9 @@ def end_event(session, event, *, actor_user_id=None,
                                         winner=winner_name)
         if _pot_line:
             ended_extra["pot_result_line"] = _pot_line
+        _metric_line = _competition_metric_line(session, event)
+        if _metric_line:
+            ended_extra["competition_metric_line"] = _metric_line
         event_engine._enqueue_notification(
             session, "event_ended", ev_dict,
             _representative_player_id(session, event.id),
@@ -1233,6 +1452,104 @@ def run_window_sweep(session, redis_conn, events, now: Optional[datetime] = None
     return summary
 
 
+def _reminder_lead_minutes(event, side: str) -> int:
+    """Per-event reminder lead (minutes) for one side ("start"/"end") —
+    ``message_config.reminders.{side}_lead_minutes``, default 60, 0 disables.
+    The message TOGGLES (event_starting_soon / event_ending_soon) gate
+    delivery at send time; this only decides when the row is enqueued."""
+    try:
+        mc = event.message_config
+        mc = json.loads(mc) if isinstance(mc, str) else (mc or {})
+        raw = (mc.get("reminders") or {}).get(f"{side}_lead_minutes",
+                                              DEFAULT_REMINDER_LEAD_MINUTES)
+        return max(0, min(int(raw), _MAX_REMINDER_LEAD_MINUTES))
+    except Exception:
+        return DEFAULT_REMINDER_LEAD_MINUTES
+
+
+def _reminder_once(redis_conn, event_id: int, side: str) -> bool:
+    """True exactly once per (event, side) — Redis NX flag. Without Redis the
+    reminder is skipped entirely: duplicated "starting soon" spam on every
+    60s tick is strictly worse than none."""
+    if redis_conn is None:
+        return False
+    try:
+        return bool(redis_conn.set(
+            REMINDER_SENT_KEY.format(event_id=event_id, side=side),
+            "1", nx=True, ex=_REMINDER_SENT_TTL))
+    except Exception:
+        return False
+
+
+def run_reminder_sweep(session, redis_conn, rows, due, now: datetime) -> None:
+    """Enqueue the one-shot lifecycle reminders whose lead window ``now`` sits
+    inside: ``event_starting_soon`` for scheduled drafts (they activate at
+    ``starts_at``), ``event_ending_soon`` — with the top-3 so far — for active
+    events approaching ``ends_at``. Commits per enqueue; every failure is
+    contained (the sweep's poison-event philosophy)."""
+    from services import event_engine
+
+    for event in rows:
+        # "Starting soon": a draft with a future scheduled start (an event
+        # activated early is already running — nothing to tease).
+        if (event.status == "draft" and event.starts_at is not None
+                and now < event.starts_at):
+            lead = _reminder_lead_minutes(event, "start")
+            if lead and now >= event.starts_at - timedelta(minutes=lead) \
+                    and _reminder_once(redis_conn, event.id, "start"):
+                try:
+                    minutes_left = max(
+                        1, int((event.starts_at - now).total_seconds() // 60))
+                    payload = {
+                        "starts_at": _ts(event.starts_at),
+                        "ends_at": _ts(event.ends_at),
+                        "minutes_left": minutes_left,
+                        "description": event.description or None,
+                    }
+                    _metric = _competition_metric_line(session, event)
+                    if _metric:
+                        payload["competition_metric_line"] = _metric
+                    event_engine._enqueue_notification(
+                        session, "event_starting_soon",
+                        event_engine._event_to_dict(event),
+                        _representative_player_id(session, event.id),
+                        payload,
+                    )
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    log.error("Reminder sweep: starting-soon enqueue failed "
+                              "for event %s", event.id, exc_info=True)
+
+        # "Ending soon": an active event approaching its scheduled end (ones
+        # ending THIS tick are already being ended above — skip).
+        if (event.status == "active" and event.id not in due["end"]
+                and event.ends_at is not None and now < event.ends_at):
+            lead = _reminder_lead_minutes(event, "end")
+            if lead and now >= event.ends_at - timedelta(minutes=lead) \
+                    and _reminder_once(redis_conn, event.id, "end"):
+
+                try:
+                    minutes_left = max(
+                        1, int((event.ends_at - now).total_seconds() // 60))
+                    standings = final_standings(session, event.id, limit=3)
+                    event_engine._enqueue_notification(
+                        session, "event_ending_soon",
+                        event_engine._event_to_dict(event),
+                        _representative_player_id(session, event.id),
+                        {
+                            "ends_at": _ts(event.ends_at),
+                            "minutes_left": minutes_left,
+                            "standings": standings,
+                        },
+                    )
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    log.error("Reminder sweep: ending-soon enqueue failed "
+                              "for event %s", event.id, exc_info=True)
+
+
 def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None) -> dict:
     """One scheduler tick: activate due drafts / end due actives through the
     exact same transition functions the routes use. Commits per transition
@@ -1311,13 +1628,16 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
             summary["failed"].append({"id": event_id, "detail": detail})
 
     # Whole-clan roster reconcile: players who joined a participating clan after
-    # a clan_vs_clan event started get their team row on the next tick, and
-    # players who left get their row removed. No-op (one cheap query) for
-    # events without auto_clan teams.
+    # a clan_vs_clan (or whole-clan competition) event started get their team
+    # row on the next tick, and players who left get their row removed. No-op
+    # (one cheap query) for events without auto_clan teams.
+    from db.models import COMPETITION_EVENT_KINDS as _COMP_KINDS
+
     for event in rows:
         if event.status != "active" or event.id in due["end"]:
             continue
-        if (getattr(event, "mode", None) or "standard") != "clan_vs_clan":
+        if ((getattr(event, "mode", None) or "standard") != "clan_vs_clan"
+                and (getattr(event, "kind", None) or "standard") not in _COMP_KINDS):
             continue
         try:
             if sync_auto_clan_rosters(session, event, now=now):
@@ -1359,5 +1679,12 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
             session.rollback()
             log.error("Sweep: shop refresh failed for event %s",
                       event.id, exc_info=True)
+
+    # One-shot "starting soon" / "ending soon" reminders (kind-agnostic).
+    try:
+        run_reminder_sweep(session, redis_conn, rows, due, now)
+    except Exception:
+        session.rollback()
+        log.error("Sweep: reminder sweep failed", exc_info=True)
 
     return summary

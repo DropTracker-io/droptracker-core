@@ -432,16 +432,32 @@ async def _drain_queue_inline(r, lane_queues) -> int:
 
 async def _run_wom_final_passes(r, shared, lane_queues) -> bool:
     """Final WOM reconcile + inline drain for events whose window closed but
-    which the lifecycle sweep hasn't ended yet. Returns True if any ran."""
+    which the lifecycle sweep hasn't ended yet. Returns True if any ran.
+    Linked/created SOTW/BOTW events get their final competition poll in the
+    same breath — both must land before end_event freezes the standings."""
+    from services import competition_wom
     from services import event_wom_reconciler as wom
 
     state = shared["state"]
+    ran = False
     event_ids = wom.pending_final_event_ids(state, r)
-    if not event_ids:
-        return False
     for event_id in event_ids:
         stats = await wom.final_reconcile(state, r, event_id)
         log.info("WOM final reconcile for event %s: %s", event_id, stats)
+        ran = True
+    try:
+        comp_ids = competition_wom.pending_final_competition_ids(state, r)
+    except Exception:
+        log.error("Competition final-pass planning failed:\n%s",
+                  traceback.format_exc())
+        comp_ids = []
+    for event_id in comp_ids:
+        stats = await competition_wom.final_competition_poll(state, r, event_id)
+        if stats is not None:
+            log.info("Competition final poll for event %s: %s", event_id, stats)
+            ran = True
+    if not ran:
+        return False
     drained = await _drain_queue_inline(r, lane_queues)
     if drained:
         log.info("Drained %d queue entries ahead of event end", drained)
@@ -469,7 +485,9 @@ async def run_consumer() -> None:
     last_refresh = 0.0
     last_sweep = 0.0
     last_reconcile = 0.0
+    last_comp_poll = 0.0
     reconcile_task = None
+    comp_poll_task = None
     last_dead_count = 0
 
     # Batch 2: apply lanes. The main loop only claims + routes; the lanes do
@@ -489,6 +507,19 @@ async def run_consumer() -> None:
                 log.info("WOM reconcile: %s", stats)
         except Exception:
             log.error("WOM reconcile failed:\n%s", traceback.format_exc())
+
+    async def _run_competition_poll(current_state):
+        # Linked/created SOTW/BOTW: one GET /competitions/:id per event per
+        # cycle (see services/competition_wom.py). Background like the
+        # reconciler — a rate-limiter backlog must not stall queue draining.
+        try:
+            from services import competition_wom
+
+            stats = await competition_wom.poll_linked_once(current_state, r)
+            if stats.get("targets"):
+                log.info("Competition poll: %s", stats)
+        except Exception:
+            log.error("Competition poll failed:\n%s", traceback.format_exc())
 
     while True:
         try:
@@ -529,6 +560,19 @@ async def run_consumer() -> None:
                              summary.get("activated"), summary.get("ended"),
                              summary.get("failed"))
                     bumped = True  # transitions changed the active set
+                    # Created-mode WOM competitions close with their event
+                    # (scheduled ends run here, not through the web route).
+                    for _ended_id in summary.get("ended") or ():
+                        try:
+                            from services.competition_wom import (
+                                mirror_competition_end,
+                            )
+
+                            await mirror_competition_end(_ended_id)
+                        except Exception:
+                            log.error("Competition end mirror failed for "
+                                      "event %s:\n%s", _ended_id,
+                                      traceback.format_exc())
                 # P0-5 visibility: queue / in-flight / dead depths once per
                 # tick (~60s) — the one heartbeat line an operator needs to
                 # tell a degraded consumer from a healthy one. DLQ growth is
@@ -608,6 +652,15 @@ async def run_consumer() -> None:
                     reconcile_task = asyncio.create_task(_run_reconcile(state))
                 else:
                     log.warning("WOM reconcile still running; skipping this cycle")
+            from services.competition_wom import WOM_COMPETITION_POLL_SECONDS
+
+            if (time.time() - last_comp_poll) >= WOM_COMPETITION_POLL_SECONDS:
+                last_comp_poll = time.time()
+                if comp_poll_task is None or comp_poll_task.done():
+                    comp_poll_task = asyncio.create_task(
+                        _run_competition_poll(state))
+                else:
+                    log.warning("Competition poll still running; skipping this cycle")
             try:
                 await wom.run_key_moment_updates(state, r)
             except Exception:

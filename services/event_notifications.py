@@ -68,6 +68,16 @@ KIND_FOR_TYPE = {
     # Board game (web61a): an offensive/defensive item hit a rival (or was
     # blocked) — the PvP layer made visible.
     "event_board_action": "completions",
+    # Kind-agnostic lifecycle reminders (added with the competition kinds):
+    # one-shot "starts in an hour" / "ends in an hour — top 3 so far",
+    # enqueued by the lifecycle sweep (services/event_lifecycle.py).
+    "event_starting_soon": "announcements",
+    "event_ending_soon": "announcements",
+    # SOTW/BOTW (sotw/botw kinds): a bonus-rule award landed (+N pts — a pet,
+    # a sub-threshold kill time). The kind's signature moments.
+    "event_competition_bonus": "completions",
+    # Reserved for gained-milestone chatter; no sender emits it yet.
+    "event_competition_milestone": "completions",
 }
 
 EVENT_NOTIFICATION_TYPES = tuple(KIND_FOR_TYPE)
@@ -111,6 +121,10 @@ _COLORS = {
     "event_board_turn": 0xF1C40F,  # dice gold — movement on the board
     "event_board_roll_prompt": 0xF1C40F,  # same dice family — a nudge to roll
     "event_board_action": 0xE74C3C,  # combat red — an item struck a rival
+    "event_starting_soon": 0x5865F2,  # blurple — a heads-up, not a result
+    "event_ending_soon": 0xFAA61A,    # amber — the clock is running out
+    "event_competition_bonus": 0x57F287,  # green — points just landed
+    "event_competition_milestone": 0x3498DB,  # informational blue (reserved)
 }
 
 
@@ -148,6 +162,13 @@ DEFAULT_MESSAGE_TOGGLES = {
     "event_sweep_item": False,
     "event_sweep_group": True,
     "event_sweep_set": True,
+    # Lifecycle reminders + competition bonus awards: on by default (the
+    # reminder ENQUEUE is additionally governed by
+    # message_config.reminders.*_lead_minutes — 0 disables the enqueue).
+    "event_starting_soon": True,
+    "event_ending_soon": True,
+    "event_competition_bonus": True,
+    "event_competition_milestone": False,  # reserved; nothing emits it yet
 }
 
 # Loot Sweep messaging sub-config defaults (message_config["loot_sweep"]).
@@ -615,7 +636,10 @@ def _standings_lines(standings, limit: int) -> str:
     lines = []
     for i, team in enumerate((standings or [])[:limit]):
         medal = _MEDALS[i] if i < len(_MEDALS) else "•"
-        lines.append(f"{medal} **{team.get('name')}** — `{int(team.get('score') or 0)} pts`")
+        # ``score_text`` (competition standings: "2.48M XP" / "312 KC" /
+        # "270 pts") wins over the bare-number "pts" rendering.
+        score = team.get("score_text") or f"{int(team.get('score') or 0)} pts"
+        lines.append(f"{medal} **{team.get('name')}** — `{score}`")
     return "\n".join(lines) if lines else "No teams yet."
 
 
@@ -930,8 +954,62 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         if url:
             field("Manage teams", f"[Open the event manager]({url})", inline=False)
 
+    elif notification_type == "event_starting_soon":
+        minutes = int(data.get("minutes_left") or 0)
+        when = _fmt_minutes_left(minutes)
+        spec["title"] = f"⏳ {event_name} starts in {when}"
+        desc = data.get("description") or None
+        line = f"[View the event]({url})" if url else None
+        spec["description"] = "\n\n".join(p for p in (desc, line) if p)
+        starts, ends = _fmt_ts(data.get("starts_at")), _fmt_ts(data.get("ends_at"))
+        if starts:
+            field("Starts", starts)
+        if ends:
+            field("Ends", ends)
+        if data.get("competition_metric_line"):
+            field("Race", data["competition_metric_line"], inline=False)
+
+    elif notification_type == "event_ending_soon":
+        minutes = int(data.get("minutes_left") or 0)
+        when = _fmt_minutes_left(minutes)
+        spec["title"] = f"⌛ {event_name} ends in {when}"
+        spec["description"] = (f"Last push — [follow it live]({url})"
+                               if url else "Last push!")
+        field("Top 3 so far", _standings_lines(standings, 3), inline=False)
+        ends = _fmt_ts(data.get("ends_at"))
+        if ends:
+            field("Ends", ends)
+
+    elif notification_type == "event_competition_bonus":
+        bonus = data.get("bonus") or {}
+        pts = int(data.get("points") or bonus.get("points") or 0)
+        spec["title"] = f"🎉 {player or 'A player'} earned +{pts} pts"
+        reason = bonus.get("reason") or bonus.get("label") or "Bonus award"
+        lines = [f"**{reason}**"]
+        if bonus.get("cap_line"):
+            lines.append(f"-# {bonus['cap_line']}")
+        rank = data.get("rank")
+        if rank:
+            total = data.get("total_points")
+            entry = (f"Now **#{rank}**" + (f" · {total:,} pts" if total else ""))
+            lines.append(entry)
+        if url:
+            lines.append(f"[View the leaderboard]({url})")
+        spec["description"] = "\n".join(lines)
+
     else:
         # Unknown event type — generic card so nothing crashes.
         spec["description"] = f"[View the event]({url})" if url else None
 
     return spec
+
+
+def _fmt_minutes_left(minutes: int) -> str:
+    """``90`` -> "1h 30m", ``60`` -> "1 hour", ``5`` -> "5 minutes"."""
+    minutes = max(int(minutes or 0), 1)
+    hours, mins = divmod(minutes, 60)
+    if hours and mins:
+        return f"{hours}h {mins}m"
+    if hours:
+        return f"{hours} {'hour' if hours == 1 else 'hours'}"
+    return f"{mins} {'minute' if mins == 1 else 'minutes'}"

@@ -111,6 +111,12 @@ _STUBS = [
     "services.wiki",
     "services.xf_services",
     "services.bot_state",
+    # SOTW/BOTW competition kinds (web105a). services.competition itself is
+    # pure/stdlib and some tests swap the real module in; the stub keeps
+    # route modules importable for everything else.
+    "services.competition",
+    "services.competition_setup",
+    "services.competition_wom",
     # Discord library
     "interactions",
     # Monitor / systemd integration

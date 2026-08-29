@@ -103,11 +103,14 @@ def text_progress_bar(current, target, width: int = 10) -> str:
 
 def standings_lines(standings, limit: int) -> str:
     """Medal list for a standings block — shared by every layout that shows
-    scores (same shape event_embed_spec used, kept here so both paths agree)."""
+    scores (same shape event_embed_spec used, kept here so both paths agree).
+    An entry's ``score_text`` (competition standings: "2.48M XP" / "312 KC" /
+    "270 pts") wins over the bare-number "pts" rendering."""
     lines = []
     for i, team in enumerate((standings or [])[:limit]):
         medal = _MEDALS[i] if i < len(_MEDALS) else f"`#{i + 1}`"
-        lines.append(f"{medal} **{team.get('name')}** — `{int(team.get('score') or 0)} pts`")
+        score = team.get("score_text") or f"{int(team.get('score') or 0)} pts"
+        lines.append(f"{medal} **{team.get('name')}** — `{score}`")
     return "\n".join(lines) if lines else "No teams yet."
 
 
@@ -123,6 +126,9 @@ DEFAULT_LAYOUTS = {
             {"type": "text", "content": "## \U0001F3C1 {event_name} has started!"},
             {"type": "separator"},
             {"type": "text", "content": "{description}"},
+            # SOTW/BOTW: the race in one line ("**Boss** Zulrah — most kills
+            # gained wins"); drops for every other kind (token-drop rule).
+            {"type": "text", "content": "{competition_metric_line}"},
             {
                 "type": "text",
                 "content": "**Started** {starts_at}\n**Ends** {ends_at}\n**Teams** `{team_count}`",
@@ -181,6 +187,8 @@ DEFAULT_LAYOUTS = {
         "blocks": [
             {"type": "text", "content": "## \U0001F3C6 {event_name} has ended!"},
             {"type": "separator"},
+            # SOTW/BOTW: what was raced; drops for every other kind.
+            {"type": "text", "content": "{competition_metric_line}"},
             {"type": "standings", "limit": 5, "title": "**Final standings**"},
             # Prize pot result (web52a) — "🏆 {winner} takes the {pot} pot" etc.
             {"type": "text", "content": "{pot_result_line}"},
@@ -482,6 +490,9 @@ DEFAULT_LAYOUTS = {
             {"type": "standings", "limit": 10, "title": "**Standings**"},
             {"type": "separator"},
             {"type": "text", "content": "{tasks_summary}"},
+            # SOTW/BOTW: "⚔️ 34 players · 129M XP gained" — replaces the task
+            # summary for competition events (each drops for the other kinds).
+            {"type": "text", "content": "{competition_summary_line}"},
             # Prize pot (web52a): one pre-composed token, so the block drops
             # cleanly when the pot is off / not advertised. Read fresh each sweep.
             {"type": "text", "content": "{pot_line}"},
@@ -493,6 +504,57 @@ DEFAULT_LAYOUTS = {
                     {"label": "Full standings", "url": "{event_url}"},
                 ],
             },
+        ],
+    },
+    # Kind-agnostic lifecycle reminders (added with the competition kinds):
+    # enqueued once per side by the lifecycle sweep at starts_at/ends_at
+    # minus the configured lead (services/event_lifecycle.run_reminder_sweep).
+    "event_starting_soon": {
+        "accent_color": "#5865F2",
+        "blocks": [
+            {"type": "text", "content": "## ⏳ {event_name} starts in {time_left_text}"},
+            {"type": "separator"},
+            {"type": "text", "content": "{description}"},
+            # SOTW/BOTW: the race in one line; drops for other kinds.
+            {"type": "text", "content": "{competition_metric_line}"},
+            {"type": "text", "content": "**Starts** {starts_at}\n**Ends** {ends_at}"},
+            {"type": "separator"},
+            _EVENT_BUTTON,
+        ],
+    },
+    "event_ending_soon": {
+        "accent_color": "#FAA61A",
+        "blocks": [
+            {"type": "text", "content": "## ⌛ {event_name} ends in {time_left_text}"},
+            {"type": "text", "content": "-# Last push — everything still counts."},
+            {"type": "separator"},
+            {"type": "standings", "limit": 3, "title": "**Top 3 so far**"},
+            {"type": "separator"},
+            _EVENT_BUTTON,
+        ],
+    },
+    # SOTW/BOTW: a bonus-rule award landed. The thumbnail is the pet's item
+    # icon when the award is a pet (resolved by the sender via completion_icon).
+    "event_competition_bonus": {
+        "accent_color": "#57F287",
+        "blocks": [
+            {
+                "type": "section",
+                "content": "### \U0001F389 {player_name} earned `+{points} pts`\n"
+                           "{bonus_reason_line}\n"
+                           "{bonus_cap_line}",
+                "thumbnail": "{completion_icon}",
+            },
+            {"type": "text", "content": "{competition_position_line}"},
+            {"type": "buttons", "buttons": [{"label": "View leaderboard", "url": "{event_url}"}]},
+        ],
+    },
+    # Reserved (nothing emits it yet): gained-milestone chatter.
+    "event_competition_milestone": {
+        "accent_color": "#3498DB",
+        "blocks": [
+            {"type": "text", "content": "### \U0001F4C8 {player_name} — {milestone_line}"},
+            _EVENT_BUTTON,
         ],
     },
 }
@@ -632,6 +694,20 @@ TOKEN_DOCS = {
     "sweep_standing_line": {"help": "Team total + position",
                             "sample": "**Team total** `120.5 pts` • `#1/8`"},
     "sweep_set_again_suffix": {"help": "\" (×n)\" on repeat set sweeps", "sample": ""},
+    # Lifecycle reminders + SOTW/BOTW competition tokens.
+    "time_left_text": {"help": "Time until the start/end this reminder is about",
+                       "sample": "1 hour"},
+    "competition_metric_line": {"help": "The race in one line (SOTW/BOTW only)",
+                                "sample": "**Boss** Zulrah — most kills gained wins"},
+    "competition_summary_line": {"help": "Participants + total gained (SOTW/BOTW live board)",
+                                 "sample": "⚔️ 34 players · 129M XP gained"},
+    "bonus_reason_line": {"help": "Why the bonus points landed",
+                          "sample": "**Zulrah in 0:52 (under 1:00)**"},
+    "bonus_cap_line": {"help": "How many of the rule's awards this player has used",
+                       "sample": "-# Award 2 of 3 for this bonus"},
+    "competition_position_line": {"help": "The player's position after the award",
+                                  "sample": "Now **#4** · 213 pts"},
+    "milestone_line": {"help": "Reserved (competition milestones)", "sample": ""},
 }
 
 # Tokens available on every message type (the notification_context basics).
@@ -645,7 +721,8 @@ TYPE_META = {
     "event_started": {
         "label": "Event started", "group": "Lifecycle",
         "description": "Posted to the announcements channel when the event goes live.",
-        "tokens": ("team_count", "pot_started_line", "schedule_line"),
+        "tokens": ("team_count", "pot_started_line", "schedule_line",
+                   "competition_metric_line"),
         "standings": False,
     },
     "event_window_opened": {
@@ -665,7 +742,8 @@ TYPE_META = {
     "event_ended": {
         "label": "Event ended", "group": "Lifecycle",
         "description": "The wrap-up announcement with final standings.",
-        "tokens": ("pot_result_line",), "standings": True,
+        "tokens": ("pot_result_line", "competition_metric_line"),
+        "standings": True,
     },
     "event_activation_failed": {
         "label": "Activation failed", "group": "Lifecycle",
@@ -780,8 +858,34 @@ TYPE_META = {
     "event_board": {
         "label": "Live standings board", "group": "Live board",
         "description": "The auto-refreshing standings message in the leaderboard channel.",
-        "tokens": ("board_status_line", "tasks_summary", "pot_line", "updated_ts"),
+        "tokens": ("board_status_line", "tasks_summary", "competition_summary_line",
+                   "pot_line", "updated_ts"),
         "standings": True,
+    },
+    "event_starting_soon": {
+        "label": "Starting soon", "group": "Lifecycle",
+        "description": "One-shot reminder before a scheduled start "
+                       "(lead configurable per event; default 60 minutes).",
+        "tokens": ("time_left_text", "competition_metric_line"),
+        "standings": False,
+    },
+    "event_ending_soon": {
+        "label": "Ending soon", "group": "Lifecycle",
+        "description": "One-shot reminder before the end, with the top 3 so far.",
+        "tokens": ("time_left_text",), "standings": True,
+    },
+    "event_competition_bonus": {
+        "label": "Competition bonus award", "group": "Competition",
+        "description": "A Skill/Boss of the Week bonus landed — a pet, or a "
+                       "kill under the bonus time.",
+        "tokens": ("player_name", "points", "bonus_reason_line", "bonus_cap_line",
+                   "competition_position_line", "completion_icon"),
+        "standings": False,
+    },
+    "event_competition_milestone": {
+        "label": "Competition milestone", "group": "Competition",
+        "description": "Reserved — nothing sends this yet.",
+        "tokens": ("player_name", "milestone_line"), "standings": False,
     },
 }
 
@@ -1234,9 +1338,9 @@ def notification_context(notification_type: str, data: dict) -> dict:
     the layouts substitute from. Values that are None/empty/zero are omitted
     so their lines drop out of the rendered message."""
     from services.event_notifications import (
-        _completion_item_redundant, _fmt_ts, _received_item_text,
-        event_url, fmt_pts, format_gp, line_bonus_summary,
-        sweep_contributor_lines,
+        _completion_item_redundant, _fmt_minutes_left, _fmt_ts,
+        _received_item_text, event_url, fmt_pts, format_gp,
+        line_bonus_summary, sweep_contributor_lines,
     )
 
     data = data or {}
@@ -1486,5 +1590,27 @@ def notification_context(notification_type: str, data: dict) -> dict:
                     f"-# Completed ×{n} — the bonus decays each time")
             if notification_type == "event_sweep_set":
                 context["sweep_set_again_suffix"] = f" (×{n})" if n > 1 else ""
+
+    # Lifecycle reminders + SOTW/BOTW competition tokens. The metric line is
+    # pre-composed by the enqueuer (lifecycle / engine) so this stays a pure
+    # pass-through and drops cleanly for every other kind.
+    if data.get("minutes_left"):
+        put("time_left_text", _fmt_minutes_left(data["minutes_left"]))
+    put("competition_metric_line", data.get("competition_metric_line"))
+    put("competition_summary_line", data.get("competition_summary_line"))
+    put("milestone_line", data.get("milestone_line"))
+    if notification_type == "event_competition_bonus":
+        bonus = data.get("bonus") or {}
+        reason = bonus.get("reason") or bonus.get("label")
+        if reason:
+            put("bonus_reason_line", f"**{reason}**")
+        if bonus.get("cap_line"):
+            put("bonus_cap_line", f"-# {bonus['cap_line']} for this bonus")
+        rank = data.get("rank")
+        if rank:
+            value_text = data.get("rank_value_text")
+            put("competition_position_line",
+                f"Now **#{int(rank)}**"
+                + (f" · `{value_text}`" if value_text else ""))
 
     return context

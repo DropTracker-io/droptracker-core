@@ -61,6 +61,10 @@ REFRESH_AFTER_TYPES = (
     # Redis-cached image already cover it without an edit per drop).
     "event_sweep_group",
     "event_sweep_set",
+    # SOTW/BOTW bonus awards move the points column immediately; the gained
+    # stream itself rides the 2-min sweep (an edit per XP snapshot would hit
+    # Discord's edit limits for nothing).
+    "event_competition_bonus",
 )
 
 # Skip hook-triggered refreshes when the board was edited this recently; the
@@ -132,6 +136,40 @@ def _standings(session, event_id: int, limit: int) -> list:
     return [{"name": t.name, "score": int(t.score or 0)} for t in rows]
 
 
+def _is_competition(event) -> bool:
+    from db.models import COMPETITION_EVENT_KINDS
+
+    return (getattr(event, "kind", None) or "standard") in COMPETITION_EVENT_KINDS
+
+
+def _competition_board_data(session, event, limit: int) -> tuple:
+    """``(standings_rows, summary_line, player_count)`` for a sotw/botw board:
+    PLAYER standings (there is one roster team — team rows would render a
+    single meaningless line) with pre-worded ``score_text``, plus the
+    "⚔️ 34 players · 129M XP gained" headline. Fails soft to empty — the
+    board must render regardless."""
+    try:
+        from services.competition import format_gained, score_text
+        from services.event_lifecycle import _competition_ranked_rows
+
+        ranked, config, _team = _competition_ranked_rows(session, event)
+        if config is None:
+            return [], None, 0
+        rows = []
+        for r in ranked[:limit]:
+            value = r["points"] if config.ranking_mode == "points" else r["gained"]
+            rows.append({"name": r["player_name"], "score": value,
+                         "score_text": score_text(value, config)})
+        total_gained = sum(r["gained"] for r in ranked)
+        summary = None
+        if ranked:
+            summary = (f"⚔️ {len(ranked)} player{'s' if len(ranked) != 1 else ''}"
+                       f" · {format_gained(total_gained, config.metric_kind)} gained")
+        return rows, summary, len(ranked)
+    except Exception:
+        return [], None, 0
+
+
 def _tasks_summary(session, event) -> Optional[str]:
     """Aggregate progress line: task completions across all teams, plus
     claimed bingo cells when the event has a board."""
@@ -189,6 +227,11 @@ def _board_context(session, event, config: dict) -> dict:
     from services.event_notifications import event_url
 
     team_count = session.query(EventTeam).filter(EventTeam.event_id == event.id).count()
+    # SOTW/BOTW: the board is a PLAYER leaderboard — "1 team" would be a
+    # meaningless status; count entrants and add the summary headline instead.
+    comp_summary, comp_players = None, None
+    if _is_competition(event):
+        _rows, comp_summary, comp_players = _competition_board_data(session, event, 0)
     if event.status == "past":
         status_line = "Final standings \U0001F3C1"
     else:
@@ -205,7 +248,10 @@ def _board_context(session, event, config: dict) -> dict:
                 bits.append(f"Window closes <t:{window_state['current_end']}:R>")
             elif event.ends_at:
                 bits.append(f"Ends <t:{int(event.ends_at.timestamp())}:R>")
-        bits.append(f"{team_count} team{'s' if team_count != 1 else ''}")
+        if comp_players is not None:
+            bits.append(f"{comp_players} player{'s' if comp_players != 1 else ''}")
+        else:
+            bits.append(f"{team_count} team{'s' if team_count != 1 else ''}")
         status_line = " • ".join(bits)
 
     context = {
@@ -219,7 +265,12 @@ def _board_context(session, event, config: dict) -> dict:
         "starts_at_unix": int(event.starts_at.timestamp()) if event.starts_at else None,
         "ends_at_unix": int(event.ends_at.timestamp()) if event.ends_at else None,
     }
-    if config["leaderboard"].get("show_tasks", True):
+    if _is_competition(event):
+        # The task summary is meaningless for a race (one hidden task); the
+        # competition headline replaces it (its own layout token).
+        if comp_summary:
+            context["competition_summary_line"] = comp_summary
+    elif config["leaderboard"].get("show_tasks", True):
         summary = _tasks_summary(session, event)
         if summary:
             context["tasks_summary"] = summary
@@ -320,6 +371,10 @@ async def _refresh_event_board_locked(bot, session, event, *,
             layout = _apply_top_n(
                 load_layout(session, event.group_id, "event_board", event_id=event.id),
                 top_n)
+            # SOTW/BOTW: player standings, not the single roster team.
+            standings = (_competition_board_data(session, event, top_n)[0]
+                         if _is_competition(event)
+                         else _standings(session, event.id, top_n))
             # Threads/announcement channels can't host a LAUNCH_ACTIVITY
             # callback — render an Activity Link URL button (client-side
             # launch) instead.
@@ -328,7 +383,7 @@ async def _refresh_event_board_locked(bot, session, event, *,
             spec = render_message_spec(
                 layout,
                 context,
-                standings=_standings(session, event.id, top_n),
+                standings=standings,
                 deep_link=enabled and supported,
                 launch_link=enabled and not supported,
                 footer=event_footer_line(

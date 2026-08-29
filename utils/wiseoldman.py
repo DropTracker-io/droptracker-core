@@ -1141,6 +1141,13 @@ from wom import routes as _wom_routes
 
 _BULK_GAINED_ROUTE = _wom_routes.Route("GET", "/groups/{}/bulk-gained")
 _BULK_HISCORES_ROUTE = _wom_routes.Route("GET", "/groups/{}/bulk-hiscores")
+# Competition detail — RAW deliberately: the fork's typed Competition model
+# predates multi-metric competitions (single legacy ``metric`` field; msgspec
+# silently drops the modern ``metrics`` array), and the SOTW/BOTW link
+# validator must SEE that array to refuse multi-metric comps rather than
+# silently mirroring only the primary metric. Response: {..., participations:
+# [{player: {...}, progress: {start, end, gained}, ...}]}.
+_COMPETITION_ROUTE = _wom_routes.Route("GET", "/competitions/{}")
 # Per-player gains. wom.py does wrap this one, but its model layer decodes
 # metric keys as enums (see the fork note above), and the recap harvest wants a
 # single float out of one nested key — the raw route is the shorter path.
@@ -1153,6 +1160,7 @@ WOM_BULK_CACHE_TTL = int(os.getenv("WOM_BULK_CACHE_TTL", "240"))
 _REDIS_BULK_GAINED_PREFIX = "wom:bulkgained:"
 _REDIS_BULK_HISCORES_PREFIX = "wom:bulkhiscores:"
 _REDIS_PLAYER_GAINED_PREFIX = "wom:playergained:ehb:"
+_REDIS_COMPETITION_PREFIX = "wom:competition:"
 UPDATE_ALL_BADCODE_PREFIX = "wom:updateall:badcode:"
 
 # Skill/boss slug sets for family separation in metric mapping below. Single
@@ -1283,6 +1291,169 @@ async def get_group_bulk_hiscores(wom_group_id: int) -> Optional[list]:
     route = _BULK_HISCORES_ROUTE.compile(int(wom_group_id))
     return await _fetch_bulk_route(
         route, f"{_REDIS_BULK_HISCORES_PREFIX}{int(wom_group_id)}")
+
+
+async def get_competition_raw(competition_id: int) -> Optional[dict]:
+    """GET /competitions/:id — the full competition detail as RAW JSON (see
+    the ``_COMPETITION_ROUTE`` note: the typed client hides the multi-metric
+    array). Cached ``WOM_BULK_CACHE_TTL`` seconds — below the SOTW/BOTW poll
+    cycle, so each cycle reads fresh while wizard-preview bursts collapse."""
+    route = _COMPETITION_ROUTE.compile(int(competition_id))
+    return await _fetch_bulk_route(
+        route, f"{_REDIS_COMPETITION_PREFIX}{int(competition_id)}", expect=dict)
+
+
+# ── Competition writes (SOTW/BOTW ``created`` mode) ──────────────────────────
+# All through the typed client — the request side of the fork is current; only
+# competition RESPONSES need the raw route (see _COMPETITION_ROUTE). Each is
+# best-effort: None/False means "didn't happen" and the caller stamps
+# wom_sync_error / retries later, never blocks the DT-side action.
+
+def _wom_metric_enum(slug):
+    """The fork's ``wom.Metric`` member for a slug, or None (a brand-new
+    metric the pinned fork hasn't learned yet — creation must fail readable
+    rather than 500 on an enum miss)."""
+    try:
+        return wom.Metric(str(slug or "").strip().lower())
+    except (ValueError, KeyError):
+        return None
+
+
+async def create_wom_competition(title: str, metric_slug: str, starts_at,
+                                 ends_at, wom_group_id: int,
+                                 group_verification_code: str) -> Optional[dict]:
+    """POST /competitions — a group-linked classic competition. Returns
+    ``{"competition_id", "verification_code"}`` (the COMPETITION's own code —
+    the caller must persist it; it is the only edit/delete credential) or
+    None. A 400/403 marks the group's code bad (same negative cache as
+    update-all) so callers stop retrying it."""
+    metric = _wom_metric_enum(metric_slug)
+    if metric is None or not group_verification_code:
+        return None
+    if not await limiter.wait():
+        return None
+    await client.start()
+    try:
+        _log_wom_call("competitions.create_competition", group=wom_group_id,
+                      metric=str(metric_slug))
+        result = await client.competitions.create_competition(
+            str(title), metric, starts_at, ends_at,
+            group_id=int(wom_group_id),
+            group_verification_code=str(group_verification_code))
+    except Exception as e:
+        logger.warning("WOM competition create errored (group %s): %s",
+                       wom_group_id, e)
+        return None
+    if result.is_ok:
+        created = result.unwrap()
+        comp = getattr(created, "competition", None)
+        comp_id = getattr(comp, "id", None)
+        code = getattr(created, "verification_code", None)
+        if comp_id and code:
+            return {"competition_id": int(comp_id),
+                    "verification_code": str(code)}
+        logger.warning("WOM competition create returned an unexpected shape")
+        return None
+    err = result.unwrap_err()
+    status = getattr(err, "status", -1)
+    logger.warning("WOM competition create failed (group %s, status=%s): %s",
+                   wom_group_id, status, getattr(err, "message", err))
+    if status in (400, 403):
+        try:
+            redis_client.client.setex(
+                f"{UPDATE_ALL_BADCODE_PREFIX}{int(wom_group_id)}",
+                7 * 86400, str(status))
+        except Exception:
+            pass
+    return None
+
+
+async def edit_wom_competition(competition_id: int, verification_code: str, *,
+                               title: Optional[str] = None,
+                               starts_at=None, ends_at=None) -> bool:
+    """PUT /competitions/:id — mirror a DT-side title/date edit out to a
+    created-mode competition."""
+    if not verification_code or not await limiter.wait():
+        return False
+    await client.start()
+    try:
+        _log_wom_call("competitions.edit_competition", id=competition_id)
+        result = await client.competitions.edit_competition(
+            int(competition_id), str(verification_code),
+            title=title, starts_at=starts_at, ends_at=ends_at)
+    except Exception as e:
+        logger.warning("WOM competition edit errored (%s): %s",
+                       competition_id, e)
+        return False
+    if result.is_ok:
+        return True
+    err = result.unwrap_err()
+    logger.warning("WOM competition edit failed (%s, status=%s): %s",
+                   competition_id, getattr(err, "status", -1),
+                   getattr(err, "message", err))
+    return False
+
+
+async def delete_wom_competition(competition_id: int,
+                                 verification_code: str) -> bool:
+    """DELETE /competitions/:id — irreversible on WOM's side; only for
+    created-mode competitions whose DT event is being discarded/deleted."""
+    if not verification_code or not await limiter.wait():
+        return False
+    await client.start()
+    try:
+        _log_wom_call("competitions.delete_competition", id=competition_id)
+        result = await client.competitions.delete_competition(
+            int(competition_id), str(verification_code))
+    except Exception as e:
+        logger.warning("WOM competition delete errored (%s): %s",
+                       competition_id, e)
+        return False
+    if result.is_ok:
+        return True
+    err = result.unwrap_err()
+    logger.warning("WOM competition delete failed (%s, status=%s): %s",
+                   competition_id, getattr(err, "status", -1),
+                   getattr(err, "message", err))
+    return False
+
+
+async def request_competition_update_all(competition_id: int,
+                                         verification_code: str) -> Optional[str]:
+    """POST /competitions/:id/update-all — queue this competition's outdated
+    participants for a WOM-side hiscores refresh (the competition-scoped
+    version of the group update-all; exactly what a created comp's code buys)."""
+    if not verification_code or not await limiter.wait():
+        return None
+    await client.start()
+    try:
+        _log_wom_call("competitions.update_outdated_participants",
+                      id=competition_id)
+        result = await client.competitions.update_outdated_participants(
+            int(competition_id), str(verification_code))
+    except Exception as e:
+        logger.warning("WOM competition update-all errored (%s): %s",
+                       competition_id, e)
+        return None
+    if result.is_ok:
+        return getattr(result.unwrap(), "message", "ok")
+    err = result.unwrap_err()
+    logger.warning("WOM competition update-all failed (%s, status=%s): %s",
+                   competition_id, getattr(err, "status", -1),
+                   getattr(err, "message", err))
+    return None
+
+
+def wom_metric_kind(slug) -> Optional[str]:
+    """``"skill"`` / ``"boss"`` / None for a WOM metric slug — the SOTW/BOTW
+    link validator's family test (activities/computed metrics return None:
+    DropTracker can't mirror those races)."""
+    token = str(slug or "").strip().lower()
+    if token in _WOM_SKILL_SLUGS:
+        return "skill"
+    if token in _WOM_BOSS_SLUGS:
+        return "boss"
+    return None
 
 
 async def close_client() -> None:

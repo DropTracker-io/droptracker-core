@@ -306,6 +306,9 @@ class TestDefaultLayouts:
             "event_board_turn", "event_board_win", "event_pot",
             "event_board_roll_prompt", "event_board_action",
             "event_sweep_item", "event_sweep_group", "event_sweep_set",
+            # Lifecycle reminders + SOTW/BOTW competition messages (web105a).
+            "event_starting_soon", "event_ending_soon",
+            "event_competition_bonus", "event_competition_milestone",
         }
         assert set(ml.DEFAULT_LAYOUTS) == expected
 
@@ -370,6 +373,24 @@ class TestDefaultLayouts:
                                 "task_label": "Barrows", "bonus_points": 40, "points_based": True,
                                 "team_score": 620, "team_rank": 1, "team_count": 4,
                                 "contributors": [{"player_name": "Zed", "quantity": 22}]},
+            # Lifecycle reminders + SOTW/BOTW competition messages (web105a).
+            "event_starting_soon": {"event_id": 7, "event_name": "E", "description": "d",
+                                    "minutes_left": 60, "starts_at": 1700000000,
+                                    "ends_at": 1700003600,
+                                    "competition_metric_line":
+                                        "**Boss** Zulrah — most kills gained wins"},
+            "event_ending_soon": {"event_id": 7, "event_name": "E", "minutes_left": 90,
+                                  "ends_at": 1700003600},
+            "event_competition_bonus": {
+                "event_id": 7, "event_name": "E", "player_name": "Zed",
+                "points": 5, "rank": 4, "rank_value_text": "213 pts",
+                "completion_icon": "https://p.png",
+                "bonus": {"rule_id": 2, "type": "time_under", "points": 5,
+                          "reason": "Zulrah in 0:52 (under 1:00)",
+                          "cap_line": "Award 2 of 3", "max_awards": 3}},
+            "event_competition_milestone": {"event_id": 7, "event_name": "E",
+                                            "player_name": "Zed",
+                                            "milestone_line": "10M XP gained"},
         }
         standings = [{"name": "Reds", "score": 30}, {"name": "Blues", "score": 20}]
         for message_type, data in payloads.items():

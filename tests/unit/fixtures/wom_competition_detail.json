@@ -1,0 +1,63 @@
+{
+  "id": 90210,
+  "title": "Zulrah Blitz",
+  "metric": "zulrah",
+  "metrics": [{"metric": "zulrah", "weight": 1}],
+  "type": "classic",
+  "groupId": 141,
+  "participantCount": 3,
+  "startsAt": "2026-08-20T00:00:00.000Z",
+  "endsAt": "2026-08-27T00:00:00.000Z",
+  "participations": [
+    {
+      "playerId": 2188996,
+      "competitionId": 90210,
+      "player": {
+        "id": 2188996,
+        "username": "btw fe male",
+        "displayName": "btw fe male",
+        "updatedAt": "2026-08-22T13:35:36.000Z"
+      },
+      "progress": {"start": 250, "end": 291, "gained": 41}
+    },
+    {
+      "playerId": 399504,
+      "competitionId": 90210,
+      "player": {
+        "id": 399504,
+        "username": "named match",
+        "displayName": "Named Match",
+        "updatedAt": "2026-08-22T10:00:00.000Z"
+      },
+      "deltas": [
+        {
+          "metric": "zulrah",
+          "values": {"start": 100, "end": 180, "gained": 80},
+          "levels": {"start": 0, "end": 0, "gained": 0}
+        }
+      ]
+    },
+    {
+      "playerId": 777001,
+      "competitionId": 90210,
+      "player": {
+        "id": 777001,
+        "username": "total stranger",
+        "displayName": "Total Stranger",
+        "updatedAt": "2026-08-21T09:00:00.000Z"
+      },
+      "progress": {"start": 10, "end": 400, "gained": 390}
+    },
+    {
+      "playerId": 777002,
+      "competitionId": 90210,
+      "player": {
+        "id": 777002,
+        "username": "never updated",
+        "displayName": "Never Updated",
+        "updatedAt": null
+      },
+      "progress": {"start": null, "end": null, "gained": null}
+    }
+  ]
+}

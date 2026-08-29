@@ -29,6 +29,9 @@ ALL_TYPES = (
     "event_board_turn", "event_pot", "event_board_roll_prompt",
     "event_board_action",
     "event_sweep_item", "event_sweep_group", "event_sweep_set",
+    # Lifecycle reminders + SOTW/BOTW competition messages (web105a).
+    "event_starting_soon", "event_ending_soon",
+    "event_competition_bonus", "event_competition_milestone",
 )
 
 
@@ -59,6 +62,11 @@ class TestKindMapping:
             "event_sweep_item": "completions",
             "event_sweep_group": "completions",
             "event_sweep_set": "completions",
+            # Lifecycle reminders + SOTW/BOTW competition messages (web105a).
+            "event_starting_soon": "announcements",
+            "event_ending_soon": "announcements",
+            "event_competition_bonus": "completions",
+            "event_competition_milestone": "completions",
         }
 
     def test_all_families_covered(self):

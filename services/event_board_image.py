@@ -202,6 +202,34 @@ def _loot_sweep_signature(session, event) -> Optional[dict]:
     }
 
 
+def _competition_signature(session, event) -> Optional[dict]:
+    """State signature for a SOTW/BOTW event's standings snapshot (web105a):
+    the ordered per-player (gained, bonus) totals off the applied ledger —
+    every crediting envelope moves one of them (dead-weight rows never reach
+    the ledger), so this re-screenshots exactly when the table changes.
+    ``None`` when the event carries no competition task."""
+    from services.competition import CompetitionConfig, fold_rows
+    from services.competition_setup import competition_task, competition_team
+
+    task = competition_task(session, event.id)
+    team = competition_team(session, event.id)
+    if task is None or team is None:
+        return None
+    from services.event_engine import _competition_applied_rows
+
+    rows = _competition_applied_rows(session, {"id": task.id}, team.id)
+    per = fold_rows(rows, CompetitionConfig(task.config))
+    ordered = sorted(
+        ((pid, e["gained"], e["bonus_points"]) for pid, e in per.items()),
+        key=lambda t: (-t[1], t[0]))
+    return {
+        "kind": "competition",
+        "name": event.name,
+        "status": event.status,
+        "players": ordered,
+    }
+
+
 def _collect_render_inputs(session, event, team_id=None) -> Optional[dict]:
     """State signature for one event's board view: ``{"kind", "hash_src"}`` —
     or ``None`` for events with no visual board (standard task-list events).
@@ -218,6 +246,8 @@ def _collect_render_inputs(session, event, team_id=None) -> Optional[dict]:
         sig = _board_game_signature(session, event)
     elif getattr(event, "kind", None) == "loot_sweep":
         sig = _loot_sweep_signature(session, event)
+    elif getattr(event, "kind", None) in ("sotw", "botw"):
+        sig = _competition_signature(session, event)
     else:
         return None
     if sig is None:

@@ -2372,12 +2372,14 @@ class NotificationService:
             # fallback so a completion is never image-less. Loot Sweep verbosity
             # messages (event_sweep_*) show the received item's icon too.
             _SWEEP_TYPES = ('event_sweep_item', 'event_sweep_group', 'event_sweep_set')
-            if (notification_type in ('event_completion', 'event_task_progress') + _SWEEP_TYPES
+            if (notification_type in ('event_completion', 'event_task_progress',
+                                      'event_competition_bonus') + _SWEEP_TYPES
                     and data.get('task_id')):
                 task_icon = self._resolve_task_icon_url(db_session, data.get('task_id'))
                 if task_icon:
                     data['task_icon'] = task_icon
-                if notification_type in ('event_completion',) + _SWEEP_TYPES:
+                if notification_type in ('event_completion',
+                                         'event_competition_bonus') + _SWEEP_TYPES:
                     # Section thumbnail = the item that was received (falls back
                     # to the task tile when there's no resolvable item). Sweep
                     # group/set completions prefer the group's custom boss art
@@ -2399,7 +2401,8 @@ class NotificationService:
             # ...) get — on top of the small task-tile thumbnail above, which
             # stays icon-only. Progress messages now carry the proof of the
             # ledger row that drove them (services.event_engine enrichment).
-            if notification_type in ('event_completion', 'event_task_progress') + _SWEEP_TYPES:
+            if notification_type in ('event_completion', 'event_task_progress',
+                                     'event_competition_bonus') + _SWEEP_TYPES:
                 proof_url = data.get('proof_url')
                 if proof_url:
                     image_attachment, image_temp_path = await self._resolve_image_attachment(
@@ -2413,13 +2416,29 @@ class NotificationService:
             # going into the break. Resolved live here like the others, not
             # from the queued payload, so a row sent late isn't stale.
             if notification_type in ('event_lead_change', 'event_ended',
-                                     'event_window_closed'):
-                limit = 3 if notification_type == 'event_lead_change' else 5
-                rows = (db_session.query(EventTeam)
-                        .filter(EventTeam.event_id == event.id)
-                        .order_by(EventTeam.score.desc(), EventTeam.id.asc())
-                        .limit(limit).all())
-                standings = [{"name": t.name, "score": int(t.score or 0)} for t in rows]
+                                     'event_window_closed', 'event_ending_soon'):
+                limit = (3 if notification_type in ('event_lead_change',
+                                                    'event_ending_soon') else 5)
+                comp_kinds = ('sotw', 'botw')
+                if (getattr(event, 'kind', None) or 'standard') in comp_kinds:
+                    # SOTW/BOTW: PLAYER standings (one roster team — team rows
+                    # would render a single meaningless line), with score_text
+                    # ("2.48M XP") the line renderers prefer.
+                    try:
+                        from services.event_lifecycle import (
+                            _competition_final_standings,
+                        )
+                        standings = _competition_final_standings(
+                            db_session, event, limit)
+                    except Exception:
+                        standings = []
+                else:
+                    rows = (db_session.query(EventTeam)
+                            .filter(EventTeam.event_id == event.id)
+                            .order_by(EventTeam.score.desc(), EventTeam.id.asc())
+                            .limit(limit).all())
+                    standings = [{"name": t.name, "score": int(t.score or 0)}
+                                 for t in rows]
 
             # Board image on the lifecycle announcements (start/end): the whole
             # bingo grid or board-game board, so players see it without leaving

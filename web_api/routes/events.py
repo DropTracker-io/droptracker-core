@@ -63,6 +63,8 @@ from db import (
     EventTask,
     EventTeam,
     EventTeamMember,
+    COMPETITION_EVENT_KINDS,
+    EventCompetition,
     EVENT_DISCORD_POLICIES,
     EVENT_FORMATION_MODES,
     EVENT_KINDS,
@@ -541,10 +543,30 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             # Raw JSON config (item lists, source NPCs) so participants can
             # see exactly which items/NPCs count toward a task.
             "config": t.config or None,
+            # SOTW/BOTW race task: managed by the event's Competition
+            # settings — task UIs render it read-only/hidden.
+            "managed": t.type == "competition",
         }
         for t in s.query(EventTask).filter(EventTask.event_id == ev.id).all()
     ]
     _attach_task_tiles(s, tasks)
+
+    # SOTW/BOTW: the competition block (config + WOM linkage + participation)
+    # so the wizard/manager can resume without a second request. Standings
+    # live on GET /events/{id}/competition.
+    if (getattr(ev, "kind", None) or "standard") in COMPETITION_EVENT_KINDS:
+        from services.competition import CompetitionConfig
+        from services.competition_setup import (competition_row,
+                                                competition_task,
+                                                competition_team,
+                                                participation_mode)
+
+        comp_task = competition_task(s, ev.id)
+        comp_cfg = CompetitionConfig(comp_task.config if comp_task is not None else None)
+        block = _serialize_competition_config(s, comp_cfg, competition_row(s, ev.id))
+        block["participation"] = participation_mode(competition_team(s, ev.id))
+        block["configured"] = comp_cfg.valid
+        base["competition"] = block
 
     teams_rows = s.query(EventTeam).filter(EventTeam.event_id == ev.id).all()
     team_names = {tm.id: tm.name for tm in teams_rows}
@@ -3279,6 +3301,722 @@ def _assert_event_admin(s, user_id, ev_or_group_id):
     )
 
 
+def _serialize_competition_config(s, config, comp_row) -> dict:
+    """The competition block every read surface shares — config + WOM linkage
+    state. NEVER includes ``wom_competition_code`` (a secret granting WOM
+    edit/delete rights)."""
+    from db import NpcList
+    from services.competition import rule_label
+
+    metric: dict = {"kind": config.metric_kind}
+    if config.metric_kind == "skill":
+        metric["skill"] = config.skill
+        metric["display"] = (config.skill or "").title() or None
+    else:
+        metric["npcs"] = list(config.npcs)
+        metric["display"] = (config.npcs[0].title() if config.npcs else None)
+        if config.npcs:
+            metric["npc_ids"] = {
+                nname: nid
+                for nid, nname in (
+                    s.query(NpcList.npc_id, NpcList.npc_name)
+                    .filter(func.lower(NpcList.npc_name).in_(
+                        [n.lower() for n in config.npcs]))
+                    .all()
+                )
+            }
+    ranking: dict = {"mode": config.ranking_mode}
+    if config.ranking_mode == "points":
+        ranking["gained_per_point"] = config.gained_per_point
+    rules = []
+    for rule in config.bonus_rules:
+        entry = {"id": rule.id, "type": rule.type, "points": rule.points,
+                 "max_awards": rule.max_awards, "label": rule_label(rule)}
+        if rule.type == "pet":
+            entry["pets"] = list(rule.pets)
+        else:
+            entry["npc"] = rule.npc
+            entry["threshold_ms"] = rule.threshold_ms
+        rules.append(entry)
+    out = {
+        "metric": metric,
+        "ranking": ranking,
+        "bonus_rules": rules,
+        "source_mode": getattr(comp_row, "source_mode", "hosted") if comp_row else "hosted",
+        "wom": None,
+    }
+    if comp_row is not None and comp_row.wom_competition_id:
+        out["wom"] = {
+            "competition_id": comp_row.wom_competition_id,
+            "url": f"https://wiseoldman.net/competitions/{comp_row.wom_competition_id}",
+            "title": comp_row.wom_title,
+            "starts_at": int(comp_row.wom_starts_at.timestamp()) if comp_row.wom_starts_at else None,
+            "ends_at": int(comp_row.wom_ends_at.timestamp()) if comp_row.wom_ends_at else None,
+            "synced_at": int(comp_row.wom_synced_at.timestamp()) if comp_row.wom_synced_at else None,
+            "sync_error": comp_row.wom_sync_error,
+        }
+    return out
+
+
+@events_bp.get("/events/<int:event_id>/competition")
+async def get_competition_standings(event_id: int):
+    """SOTW/BOTW read model: the competition config + merged, ranked
+    standings (DT ledger fold + cached WOM-only participants). Past events
+    serve the frozen ``final_standings`` so the result never depends on a
+    re-fold or a long-gone WOM competition."""
+    viewer_id = optional_user_id()
+    # Internal board-image render bypass (same as GET /events/{id}): the
+    # chrome-less snapshot page must read private/draft competitions too.
+    render_bypass = render_token_authorized()
+
+    def _load():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if (_is_restricted(ev) and not render_bypass
+                    and not _can_view_restricted(s, viewer_id, ev)):
+                _deny_restricted(ev, viewer_id)
+                return None
+            if (ev.kind or "standard") not in COMPETITION_EVENT_KINDS:
+                abort_problem(422, "Not a competition event",
+                              "This event is not a Skill/Boss of the Week.")
+            from services.competition import CompetitionConfig
+            from services.competition_setup import (competition_row,
+                                                    competition_task)
+            from services.event_lifecycle import _competition_ranked_rows
+
+            task = competition_task(s, event_id)
+            comp_row = competition_row(s, event_id)
+            config = CompetitionConfig(task.config if task is not None else None)
+
+            ranked = None
+            if (ev.status == "past" and comp_row is not None
+                    and comp_row.final_standings):
+                try:
+                    parsed = json.loads(comp_row.final_standings)
+                    ranked = parsed if isinstance(parsed, list) else None
+                except (TypeError, ValueError):
+                    ranked = None
+            if ranked is None:
+                ranked, live_config, _team = _competition_ranked_rows(s, ev)
+                if live_config is not None:
+                    config = live_config
+
+            totals = {
+                "participants": len(ranked),
+                "gained": sum(int(r.get("gained") or 0) for r in ranked),
+                "bonus_points": sum(int(r.get("bonus_points") or 0) for r in ranked),
+            }
+            return {
+                "event_id": event_id,
+                "kind": ev.kind,
+                "status": ev.status,
+                "competition": _serialize_competition_config(s, config, comp_row),
+                "totals": totals,
+                "standings": ranked,
+                "finalized": bool(comp_row is not None and comp_row.finalized_at),
+                "updated_at": int(datetime.now().timestamp()),
+            }
+
+    data = await asyncio.to_thread(_load)
+    if data is None:
+        abort_problem(404, "Event not found", f"No event {event_id}.")
+    return jsonify(data)
+
+
+@events_bp.get("/events/<int:event_id>/competition/players/<int:player_id>")
+async def get_competition_player(event_id: int, player_id: int):
+    """One participant's drill-in: their standings row + every bonus award
+    (auditable ledger rows — when, which rule, what for, the proof)."""
+    viewer_id = optional_user_id()
+
+    def _load():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                return None
+            if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
+                _deny_restricted(ev, viewer_id)
+                return None
+            if (ev.kind or "standard") not in COMPETITION_EVENT_KINDS:
+                abort_problem(422, "Not a competition event",
+                              "This event is not a Skill/Boss of the Week.")
+            from services.competition import (CompetitionConfig, bonus_detail,
+                                              parse_bonus_note)
+            from services.competition_setup import competition_task
+            from services.event_lifecycle import _competition_ranked_rows
+
+            task = competition_task(s, event_id)
+            if task is None:
+                abort_problem(404, "No competition",
+                              "This event has no competition configured.")
+            config = CompetitionConfig(task.config)
+            ranked, live_config, _team = _competition_ranked_rows(s, ev)
+            if live_config is not None:
+                config = live_config
+            me = next((r for r in ranked
+                       if r.get("player_id") == player_id), None)
+
+            awards = []
+            seen_by_rule: dict = {}
+            rows = (
+                s.query(EventCompletion)
+                .filter(EventCompletion.event_id == event_id,
+                        EventCompletion.task_id == task.id,
+                        EventCompletion.player_id == player_id,
+                        EventCompletion.status.in_(_APPLIED_STATUSES))
+                .order_by(EventCompletion.created_at.asc(),
+                          EventCompletion.id.asc())
+                .all()
+            )
+            for r in rows:
+                parsed = parse_bonus_note(r.note)
+                if parsed is None:
+                    continue
+                _rtype, rule_id = parsed
+                seen_by_rule[rule_id] = seen_by_rule.get(rule_id, 0) + 1
+                time_text = None
+                raw_note = str(r.note or "")
+                if "|" in raw_note:
+                    time_text = raw_note.split("|", 1)[1].strip() or None
+                detail = bonus_detail(rule_id, config, seen_by_rule[rule_id],
+                                      matched_target=r.matched_target,
+                                      time_text=time_text)
+                awards.append({
+                    "rule_id": rule_id,
+                    "type": detail.get("type"),
+                    "points": max(int(r.quantity or 0), 0),
+                    "label": detail.get("reason") or detail.get("label"),
+                    "matched_target": r.matched_target,
+                    "proof_url": r.proof_url,
+                    "awarded_at": int(r.created_at.timestamp()) if r.created_at else None,
+                    "counted": seen_by_rule[rule_id] <= detail.get("max_awards", 1),
+                })
+            return {
+                "event_id": event_id,
+                "player_id": player_id,
+                "row": me,
+                "awards": awards,
+            }
+
+    data = await asyncio.to_thread(_load)
+    if data is None:
+        abort_problem(404, "Event not found", f"No event {event_id}.")
+    return jsonify(data)
+
+
+# wiseoldman.net/competitions/<id> (any scheme/path tail) or a bare number.
+_WOM_COMP_URL_RE = re.compile(
+    r"(?:wiseoldman\.net/competitions/)(\d+)", re.IGNORECASE)
+
+
+def _parse_wom_competition_query(query) -> Optional[int]:
+    """Competition id from a pasted URL or bare number, else None."""
+    text = str(query or "").strip()
+    if not text:
+        return None
+    m = _WOM_COMP_URL_RE.search(text)
+    if m:
+        return int(m.group(1))
+    if text.isdigit():
+        return int(text)
+    return None
+
+
+def _npc_display_for_boss_slug(s, slug) -> tuple[Optional[str], Optional[int]]:
+    """Best-effort reverse of ``wom_boss_metric``: a canonical NpcList name
+    (+ id) for a WOM boss slug, so the wizard can pre-fill the botw picker.
+    None when no cheap transform lands — the admin picks the boss by hand."""
+    from db import NpcList
+    from utils.wiseoldman import _BOSS_METRIC_OVERRIDES
+
+    token = str(slug or "").strip().lower()
+    if not token:
+        return None, None
+    candidates = [token]
+    # Names whose slug went through an override ("barrows" -> barrows_chests):
+    # walking the override map backwards recovers the plugin-side token.
+    candidates.extend(t for t, mapped in _BOSS_METRIC_OVERRIDES.items()
+                      if mapped == token)
+    for cand in candidates:
+        name = cand.replace("_", " ")
+        row = (s.query(NpcList.npc_id, NpcList.npc_name)
+               .filter(func.lower(NpcList.npc_name) == name.lower())
+               .order_by(NpcList.npc_id.asc())
+               .first())
+        if row is not None:
+            return row.npc_name, row.npc_id
+    return None, None
+
+
+@events_bp.get("/events/meta/wom-competition")
+async def preview_wom_competition():
+    """Wizard link-validator: resolve a pasted WiseOldMan competition URL/id
+    to a preview (title/metric/dates/participants) plus the machine-readable
+    reasons it can or can't back a sotw/botw event. Session required; results
+    ride the shared 240s raw-fetch cache."""
+    current_user_id()
+    comp_id = _parse_wom_competition_query(request.args.get("query"))
+    if comp_id is None:
+        abort_problem(422, "Invalid competition",
+                      "Paste the full wiseoldman.net competition link or its "
+                      "number.")
+    event_kind = request.args.get("kind")
+    group_id = request.args.get("group_id", type=int)
+
+    from services.competition_wom import (competition_link_problems,
+                                          parse_competition)
+    from utils.wiseoldman import get_competition_raw, wom_metric_kind
+
+    raw = await get_competition_raw(comp_id)
+    if raw is None:
+        abort_problem(503, "WiseOldMan unavailable",
+                      "WiseOldMan is busy — try again in a minute.")
+    comp = parse_competition(raw)
+    if comp is None:
+        abort_problem(404, "Competition not found",
+                      f"No WiseOldMan competition {comp_id}.")
+
+    metric_kind = wom_metric_kind(comp.get("metric"))
+    problems = competition_link_problems(
+        comp, event_kind or ("sotw" if metric_kind == "skill" else "botw"))
+
+    def _load_extras():
+        with db_session() as s:
+            from db import EventCompetition, Group
+
+            linked_event_id = None
+            row = (s.query(EventCompetition.event_id)
+                   .filter(EventCompetition.wom_competition_id == comp_id)
+                   .first())
+            if row is not None:
+                linked_event_id = row.event_id
+            group_matches = None
+            if group_id:
+                g = s.query(Group.wom_id).filter(
+                    Group.group_id == group_id).first()
+                if g is not None and g.wom_id and comp.get("group_id"):
+                    group_matches = int(g.wom_id) == int(comp["group_id"])
+            mappable = None
+            if metric_kind == "skill":
+                mappable = {"event_kind": "sotw",
+                            "skill": comp.get("metric"),
+                            "display": str(comp.get("metric") or "").title()}
+            elif metric_kind == "boss":
+                name, npc_id = _npc_display_for_boss_slug(s, comp.get("metric"))
+                mappable = {"event_kind": "botw", "npc": name,
+                            "npc_id": npc_id,
+                            "display": name or str(comp.get("metric") or "").title()}
+            return linked_event_id, group_matches, mappable
+
+    linked_event_id, group_matches, mappable = await asyncio.to_thread(_load_extras)
+    if linked_event_id is not None:
+        problems = list(problems) + ["already_linked"]
+    return private_no_store(jsonify({
+        "id": comp["id"],
+        "title": comp["title"],
+        "url": f"https://wiseoldman.net/competitions/{comp['id']}",
+        "metric": comp["metric"],
+        "metric_kind": metric_kind,
+        "multi_metric": comp["multi_metric"],
+        "type": comp["type"],
+        "starts_at": int(comp["starts_at"].timestamp()) if comp["starts_at"] else None,
+        "ends_at": int(comp["ends_at"].timestamp()) if comp["ends_at"] else None,
+        "wom_group_id": comp["group_id"],
+        "group_matches": group_matches,
+        "participant_count": comp["participant_count"],
+        "linkable": not problems,
+        "problems": problems,
+        "linked_event_id": linked_event_id,
+        "mappable": mappable,
+    }))
+
+
+@events_bp.get("/events/meta/wom-readiness")
+async def wom_readiness():
+    """Create-on-WOM gating for the wizard: whether the group has a WOM group
+    id and a stored verification code. Boolean-only — the code itself is a
+    SENSITIVE_KEYS config and never leaves the server."""
+    user_id = current_user_id()
+    group_id = request.args.get("group_id", type=int)
+    if not group_id:
+        abort_problem(422, "Missing group", "group_id is required.")
+
+    def _check():
+        with db_session() as s:
+            from db import Group, GroupConfiguration
+
+            _assert_event_admin(s, user_id, group_id)
+            g = s.query(Group.wom_id).filter(Group.group_id == group_id).first()
+            wom_group_id = int(g.wom_id) if g is not None and g.wom_id else None
+            code_row = (
+                s.query(GroupConfiguration)
+                .filter(GroupConfiguration.group_id == group_id,
+                        GroupConfiguration.config_key == "wom_verification_code")
+                .first()
+            )
+            has_code = bool(code_row is not None
+                            and (code_row.long_value or code_row.config_value
+                                 or "").strip())
+            reason = None
+            if wom_group_id is None:
+                reason = "no_wom_id"
+            elif not has_code:
+                reason = "no_code"
+            return {
+                "wom_group_id": wom_group_id,
+                "has_verification_code": has_code,
+                "can_create": wom_group_id is not None and has_code,
+                "reason": reason,
+            }
+
+    return private_no_store(jsonify(await asyncio.to_thread(_check)))
+
+
+@events_bp.post("/events/<int:event_id>/competition/wom-link")
+async def link_wom_competition(event_id: int):
+    """Attach an existing WiseOldMan competition to a DRAFT sotw/botw event
+    (source mode ``linked``): validates the competition backs the event's
+    kind/metric, adopts its window, and stores the linkage. The poller takes
+    it from there."""
+    user_id = current_user_id()
+    body = await json_body()
+    comp_id = _parse_wom_competition_query(
+        body.get("competition_id") or body.get("query"))
+    if comp_id is None:
+        abort_problem(422, "Invalid competition",
+                      "Pass the WiseOldMan competition id (or its URL).")
+
+    from services.competition_wom import (competition_link_problems,
+                                          parse_competition)
+    from utils.wiseoldman import get_competition_raw, wom_skill_metric
+
+    raw = await get_competition_raw(comp_id)
+    if raw is None:
+        abort_problem(503, "WiseOldMan unavailable",
+                      "WiseOldMan is busy — try again in a minute.")
+    comp = parse_competition(raw)
+    if comp is None:
+        abort_problem(404, "Competition not found",
+                      f"No WiseOldMan competition {comp_id}.")
+
+    def _apply():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                abort_problem(404, "Event not found", f"No event {event_id}.")
+            _assert_event_admin(s, user_id, ev)
+            if (ev.kind or "standard") not in COMPETITION_EVENT_KINDS:
+                abort_problem(422, "Not a competition event",
+                              "Only Skill/Boss of the Week events can link a "
+                              "WiseOldMan competition.")
+            if ev.status != "draft":
+                abort_problem(409, "Event already started",
+                              "The WOM link can only change while the event "
+                              "is a draft.")
+            problems = competition_link_problems(comp, ev.kind)
+            if problems:
+                abort_problem(
+                    422, "Competition not linkable",
+                    "This competition can't back the event: "
+                    + ", ".join(problems) + ".",
+                    extra={"problems": problems})
+
+            from services.competition import CompetitionConfig
+            from services.competition_setup import (competition_row,
+                                                    competition_task)
+
+            other = (s.query(EventCompetition)
+                     .filter(EventCompetition.wom_competition_id == comp_id,
+                             EventCompetition.event_id != event_id)
+                     .first())
+            if other is not None:
+                abort_problem(409, "Already linked",
+                              f"That competition is already linked to event "
+                              f"#{other.event_id}.")
+
+            task = competition_task(s, event_id)
+            config = CompetitionConfig(task.config if task is not None else None)
+            if not config.valid:
+                abort_problem(422, "Pick the metric first",
+                              "Set the event's skill/boss on the Competition "
+                              "step before linking — it must match the "
+                              "WiseOldMan competition.")
+            # Metric consistency: the event races exactly what the comp measures.
+            if config.metric_kind == "skill":
+                ours = wom_skill_metric(config.skill)
+                if ours != comp.get("metric"):
+                    abort_problem(
+                        422, "Metric mismatch",
+                        f"The competition tracks '{comp.get('metric')}' but "
+                        f"this event races '{config.skill}'.",
+                        extra={"problems": ["metric_mismatch"]})
+            else:
+                slugs = set(_task_wom_slugs(task))
+                if comp.get("metric") not in slugs:
+                    abort_problem(
+                        422, "Metric mismatch",
+                        f"The competition tracks '{comp.get('metric')}', which "
+                        "isn't one of this event's bosses.",
+                        extra={"problems": ["metric_mismatch"]})
+
+            row = competition_row(s, event_id)
+            if row is None:
+                row = EventCompetition(event_id=event_id)
+                s.add(row)
+            row.source_mode = "linked"
+            row.wom_competition_id = comp_id
+            row.wom_competition_code = None
+            row.wom_title = comp["title"]
+            row.wom_starts_at = comp["starts_at"]
+            row.wom_ends_at = comp["ends_at"]
+            row.wom_synced_at = None
+            row.wom_sync_error = None
+            row.wom_standings = None
+            # WOM owns the window from here (the poller re-syncs drift).
+            if comp["starts_at"] is not None:
+                ev.starts_at = comp["starts_at"]
+            if comp["ends_at"] is not None:
+                ev.ends_at = comp["ends_at"]
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=getattr(ev, "group_id", None),
+                event_id=event_id, action="event.competition.wom_link",
+                target=f"web_event_competitions.{event_id}",
+                before=None, after=f"competition_id:{comp_id}",
+            ))
+            s.commit()
+            return _detail(s, ev, viewer_id=user_id)
+
+    payload = await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return jsonify(payload)
+
+
+@events_bp.post("/events/<int:event_id>/competition/wom-create")
+async def create_wom_competition_route(event_id: int):
+    """Create the WiseOldMan competition for a DRAFT sotw/botw event
+    (source mode ``created``): a group-linked classic competition matching
+    the event's metric and window. DropTracker keeps the returned
+    competition verification code — the only edit/delete credential — and
+    from here the event behaves like ``linked`` plus write mirroring.
+    Idempotent: an event that already has its competition is a no-op."""
+    user_id = current_user_id()
+
+    def _prepare():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                abort_problem(404, "Event not found", f"No event {event_id}.")
+            _assert_event_admin(s, user_id, ev)
+            if (ev.kind or "standard") not in COMPETITION_EVENT_KINDS:
+                abort_problem(422, "Not a competition event",
+                              "Only Skill/Boss of the Week events can create "
+                              "a WiseOldMan competition.")
+            if ev.status != "draft":
+                abort_problem(409, "Event already started",
+                              "The WOM competition can only be created while "
+                              "the event is a draft.")
+            from services.competition import CompetitionConfig
+            from services.competition_setup import (competition_row,
+                                                    competition_task)
+
+            row = competition_row(s, event_id)
+            if (row is not None and row.wom_competition_id
+                    and row.source_mode == "created"):
+                return {"done": _detail(s, ev, viewer_id=user_id)}
+            if row is not None and row.wom_competition_id:
+                abort_problem(409, "Already linked",
+                              "This event already mirrors a WiseOldMan "
+                              "competition — unlink it first.")
+            if ev.starts_at is None or ev.ends_at is None:
+                abort_problem(422, "Dates required",
+                              "Set the event's start and end dates first — "
+                              "the WOM competition adopts them.")
+            if ev.ends_at <= ev.starts_at:
+                abort_problem(422, "Invalid dates",
+                              "The end date must be after the start date.")
+            task = competition_task(s, event_id)
+            config = CompetitionConfig(task.config if task is not None else None)
+            if not config.valid:
+                abort_problem(422, "Pick the metric first",
+                              "Set the event's skill/boss on the Competition "
+                              "step before creating the WOM competition.")
+            from utils.wiseoldman import wom_boss_metric, wom_skill_metric
+
+            if config.metric_kind == "skill":
+                slug = wom_skill_metric(config.skill)
+            else:
+                if len(config.npcs) != 1:
+                    abort_problem(
+                        422, "Single boss required",
+                        "A WiseOldMan competition measures one boss — a "
+                        "multi-boss race can only run DropTracker-hosted.")
+                slug = wom_boss_metric(config.npcs[0])
+            if not slug:
+                abort_problem(422, "No WOM metric",
+                              "This metric isn't on the WiseOldMan hiscores — "
+                              "the race can only run DropTracker-hosted.")
+            from db import Group, GroupConfiguration
+
+            g = s.query(Group.wom_id).filter(
+                Group.group_id == ev.group_id).first() if ev.group_id else None
+            wom_group_id = int(g.wom_id) if g is not None and g.wom_id else None
+            code_row = (
+                s.query(GroupConfiguration)
+                .filter(GroupConfiguration.group_id == ev.group_id,
+                        GroupConfiguration.config_key == "wom_verification_code")
+                .first()
+            ) if ev.group_id else None
+            group_code = ((code_row.long_value or code_row.config_value or "").strip()
+                          if code_row is not None else "")
+            if not wom_group_id or not group_code:
+                abort_problem(
+                    422, "WiseOldMan not configured",
+                    "Creating the competition needs your WOM group linked and "
+                    "its verification code saved in Group settings → "
+                    "Integrations.",
+                    extra={"code": "wom_not_ready"})
+            return {
+                "title": ev.name,
+                "slug": slug,
+                "starts_at": ev.starts_at,
+                "ends_at": ev.ends_at,
+                "wom_group_id": wom_group_id,
+                "group_code": group_code,
+            }
+
+    prep = await asyncio.to_thread(_prepare)
+    if "done" in prep:
+        return jsonify(prep["done"])
+
+    from utils.wiseoldman import create_wom_competition
+
+    created = await create_wom_competition(
+        prep["title"], prep["slug"], prep["starts_at"], prep["ends_at"],
+        prep["wom_group_id"], prep["group_code"])
+    if created is None:
+        abort_problem(502, "WiseOldMan create failed",
+                      "WiseOldMan did not accept the competition — check the "
+                      "group verification code in Group settings and try "
+                      "again in a minute.")
+
+    def _persist():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                abort_problem(404, "Event not found", f"No event {event_id}.")
+            from services.competition_setup import competition_row
+
+            row = competition_row(s, event_id)
+            if row is None:
+                row = EventCompetition(event_id=event_id)
+                s.add(row)
+            row.source_mode = "created"
+            row.wom_competition_id = created["competition_id"]
+            row.wom_competition_code = created["verification_code"]
+            row.wom_title = prep["title"]
+            row.wom_starts_at = prep["starts_at"]
+            row.wom_ends_at = prep["ends_at"]
+            row.wom_sync_error = None
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=getattr(ev, "group_id", None),
+                event_id=event_id, action="event.competition.wom_create",
+                target=f"web_event_competitions.{event_id}",
+                before=None,
+                after=f"competition_id:{created['competition_id']}",
+            ))
+            s.commit()
+            return _detail(s, ev, viewer_id=user_id)
+
+    payload = await asyncio.to_thread(_persist)
+    _bump(event_id)
+    return jsonify(payload)
+
+
+@events_bp.delete("/events/<int:event_id>/competition/wom-link")
+async def unlink_wom_competition(event_id: int):
+    """Detach the WOM competition from a DRAFT event — back to ``hosted``.
+    A created-mode competition is DELETED on WiseOldMan first (DropTracker
+    made it; an orphan comp with a lost code helps no one) — best-effort."""
+    user_id = current_user_id()
+
+    def _peek():
+        with db_session() as s:
+            from services.competition_setup import competition_row
+
+            row = competition_row(s, event_id)
+            if row is None:
+                return None
+            return (row.source_mode, row.wom_competition_id,
+                    row.wom_competition_code)
+
+    peek = await asyncio.to_thread(_peek)
+    if peek is not None and peek[0] == "created" and peek[1] and peek[2]:
+        from utils.wiseoldman import delete_wom_competition
+
+        if not await delete_wom_competition(peek[1], peek[2]):
+            # Keep going — the DT side must never be held hostage by WOM
+            # availability; the orphaned comp is logged for manual cleanup.
+            pass
+
+    def _apply():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if not ev:
+                abort_problem(404, "Event not found", f"No event {event_id}.")
+            _assert_event_admin(s, user_id, ev)
+            if ev.status != "draft":
+                abort_problem(409, "Event already started",
+                              "The WOM link can only change while the event "
+                              "is a draft.")
+            from services.competition_setup import competition_row
+
+            row = competition_row(s, event_id)
+            if row is None or not row.wom_competition_id:
+                return _detail(s, ev, viewer_id=user_id)
+            before_id = row.wom_competition_id
+            row.source_mode = "hosted"
+            row.wom_competition_id = None
+            row.wom_competition_code = None
+            row.wom_title = None
+            row.wom_starts_at = None
+            row.wom_ends_at = None
+            row.wom_synced_at = None
+            row.wom_sync_error = None
+            row.wom_standings = None
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=getattr(ev, "group_id", None),
+                event_id=event_id, action="event.competition.wom_unlink",
+                target=f"web_event_competitions.{event_id}",
+                before=f"competition_id:{before_id}", after=None,
+            ))
+            s.commit()
+            return _detail(s, ev, viewer_id=user_id)
+
+    payload = await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return jsonify(payload)
+
+
+def _task_wom_slugs(task) -> list:
+    """The WOM boss slugs a competition task's NPC set maps to."""
+    import json as _json
+
+    from utils.wiseoldman import wom_boss_metric
+
+    try:
+        config = _json.loads(task.config or "{}") if task is not None else {}
+    except (TypeError, ValueError):
+        config = {}
+    slugs = []
+    for npc in config.get("npcs") or ():
+        slug = wom_boss_metric(npc)
+        if slug:
+            slugs.append(slug)
+    return slugs
+
+
 @events_bp.post("/events")
 async def create_event():
     user_id = current_user_id()
@@ -3419,6 +4157,28 @@ async def create_event():
                     responded_at=func.now(),
                 ))
                 s.commit()
+            if kind in COMPETITION_EVENT_KINDS:
+                # SOTW/BOTW: build the managed scaffold (hidden race task +
+                # roster team + web_event_competitions row). The wizard may
+                # create the draft with basics only and fill the competition
+                # in on its own step — an empty config scaffolds as a typed
+                # placeholder the activation blockers refuse until it's set.
+                from services.competition_setup import (
+                    ensure_competition_scaffold,
+                )
+                from web_api.routes.event_task_validation import (
+                    validated_competition_config,
+                )
+
+                comp_body = body.get("competition")
+                participation = _competition_participation_input(comp_body)
+                if comp_body:
+                    cfg = validated_competition_config(s, kind, comp_body)
+                else:
+                    cfg = {"kind": "competition",
+                           "metric_kind": "skill" if kind == "sotw" else "boss"}
+                ensure_competition_scaffold(s, ev, cfg, participation)
+                s.commit()
             if ev.discord_guild_id:
                 # Desired-state rows for the Discord scheduled event mirror.
                 # Default policy ('on_activate') makes this a no-op for the
@@ -3431,6 +4191,20 @@ async def create_event():
 
     ev_id = await asyncio.to_thread(_apply)
     return jsonify({"id": ev_id})
+
+
+def _competition_participation_input(comp_body) -> str | None:
+    """The wizard's participation choice ("whole_clan" / "signup"), validated;
+    None = keep/derive the current mode (competition kinds only)."""
+    if not isinstance(comp_body, dict):
+        return None
+    participation = comp_body.get("participation")
+    if participation is None:
+        return None
+    if participation not in ("whole_clan", "signup"):
+        abort_problem(422, "Invalid participation",
+                      "participation must be 'whole_clan' or 'signup'.")
+    return participation
 
 
 def _event_settings_snapshot(ev) -> dict:
@@ -3488,6 +4262,24 @@ async def update_event(event_id: int):
                         f"visibility must be one of {list(EVENT_VISIBILITIES)}.",
                     )
                 ev.visibility = vis
+            if "starts_at" in body or "ends_at" in body:
+                # LINKED competitions: WOM owns the window — the poller
+                # re-syncs drift FROM the competition, so a DT-side edit
+                # would be silently overwritten (or worse, freeze gains out
+                # at the window gate until the next poll). CREATED comps are
+                # DropTracker's own: the edit lands here and mirrors out
+                # (the route body pushes it after commit).
+                if (ev.kind or "standard") in COMPETITION_EVENT_KINDS:
+                    from services.competition_setup import competition_row
+
+                    comp_row = competition_row(s, ev.id)
+                    if comp_row is not None and comp_row.source_mode == "linked" \
+                            and comp_row.wom_competition_id:
+                        abort_problem(
+                            422, "Dates follow WiseOldMan",
+                            "This event mirrors a WiseOldMan competition — "
+                            "edit the dates on WiseOldMan and they sync here "
+                            "within a few minutes.")
             if "starts_at" in body:
                 ev.starts_at = _dt(body.get("starts_at"))
             if "ends_at" in body:
@@ -3568,7 +4360,61 @@ async def update_event(event_id: int):
                             "Board-game events can't use a recurring schedule — "
                             "clear the schedule before switching the event type.",
                             extra={"code": "invalid_schedule", "target": "dates"})
+                    if (new_kind in COMPETITION_EVENT_KINDS
+                            and getattr(ev, "schedule_config", None)
+                            and not body.get("schedule")):
+                        abort_problem(
+                            409, "Schedule not supported",
+                            "Skill/Boss of the Week events run on one continuous "
+                            "window — clear the schedule before switching the "
+                            "event type.",
+                            extra={"code": "invalid_schedule", "target": "dates"})
+                    prev_kind = getattr(ev, "kind", None) or "standard"
                     ev.kind = new_kind
+                    # SOTW/BOTW scaffold follows the kind: build it on the way
+                    # in (typed placeholder — the Competition step fills it),
+                    # tear it down on the way out. A sotw<->botw flip resets
+                    # the metric side of the config (skill vs boss).
+                    from services.competition_setup import (
+                        ensure_competition_scaffold,
+                        remove_competition_scaffold,
+                    )
+
+                    if (prev_kind in COMPETITION_EVENT_KINDS
+                            and new_kind not in COMPETITION_EVENT_KINDS):
+                        remove_competition_scaffold(s, ev)
+                    elif new_kind in COMPETITION_EVENT_KINDS:
+                        ensure_competition_scaffold(s, ev, {
+                            "kind": "competition",
+                            "metric_kind": ("skill" if new_kind == "sotw"
+                                            else "boss"),
+                        })
+            if "competition" in body:
+                # SOTW/BOTW settings (metric / source prep / ranking / bonus
+                # rules / participation). Draft-only: baselines, WOM linkage
+                # and paid-out bonuses all hang off this config once live.
+                if (getattr(ev, "kind", None) or "standard") not in COMPETITION_EVENT_KINDS:
+                    abort_problem(
+                        422, "Not a competition event",
+                        "Competition settings only apply to Skill/Boss of "
+                        "the Week events.")
+                if ev.status != "draft":
+                    abort_problem(
+                        409, "Competition settings locked",
+                        "Competition settings are locked once the event "
+                        "starts — you can still edit the end time, "
+                        "description and Discord messages.")
+                from services.competition_setup import (
+                    ensure_competition_scaffold,
+                )
+                from web_api.routes.event_task_validation import (
+                    validated_competition_config,
+                )
+
+                comp_body = body.get("competition") or {}
+                cfg = validated_competition_config(s, ev.kind, comp_body)
+                participation = _competition_participation_input(comp_body)
+                ensure_competition_scaffold(s, ev, cfg, participation)
             if "requires_confirmation" in body:
                 # Event-level force: all completions queue for review (PRD D3).
                 ev.requires_confirmation = bool(body.get("requires_confirmation"))
@@ -3729,9 +4575,92 @@ async def update_event(event_id: int):
             s.commit()
             return _detail(s, ev, viewer_id=user_id)
 
+    # A kind switch AWAY from a competition kind tears the scaffold down —
+    # peek the created-mode linkage first so the WOM comp can be deleted
+    # after (the row, and its code, are gone once _apply commits).
+    switching_kind = "kind" in body
+    created_before = None
+    if switching_kind:
+        def _peek_created_link():
+            # Fail-soft like the delete peek: a kind switch on any ordinary
+            # event must survive the pre-web105a-DDL window.
+            try:
+                with db_session() as s:
+                    from services.competition_setup import competition_row
+
+                    row = competition_row(s, event_id)
+                    if (row is None or row.source_mode != "created"
+                            or not row.wom_competition_id
+                            or not row.wom_competition_code):
+                        return None
+                    return (row.wom_competition_id, row.wom_competition_code)
+            except Exception:
+                return None
+
+        created_before = await asyncio.to_thread(_peek_created_link)
+
     payload = await asyncio.to_thread(_apply)
+    if (created_before is not None
+            and (body.get("kind") or "standard") not in COMPETITION_EVENT_KINDS):
+        try:
+            from utils.wiseoldman import delete_wom_competition
+
+            await delete_wom_competition(*created_before)
+        except Exception:
+            pass  # best-effort; the orphan is logged by the wrapper
+    # Created-mode competitions mirror name/date edits out to WiseOldMan
+    # (best-effort — a WOM hiccup stamps wom_sync_error, never blocks the
+    # edit; the admin sees the sync state on the event page).
+    if any(k in body for k in ("name", "starts_at", "ends_at")):
+        await _mirror_competition_edit(event_id)
     _bump(event_id)
     return private_no_store(jsonify(payload))
+
+
+async def _mirror_competition_edit(event_id: int) -> None:
+    """Push a DT-side name/date edit out to a created-mode WOM competition."""
+    def _peek():
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if ev is None or (ev.kind or "standard") not in COMPETITION_EVENT_KINDS:
+                return None
+            from services.competition_setup import competition_row
+
+            row = competition_row(s, event_id)
+            if (row is None or row.source_mode != "created"
+                    or not row.wom_competition_id or not row.wom_competition_code):
+                return None
+            return {"competition_id": row.wom_competition_id,
+                    "code": row.wom_competition_code,
+                    "title": ev.name,
+                    "starts_at": ev.starts_at, "ends_at": ev.ends_at}
+
+    info = await asyncio.to_thread(_peek)
+    if info is None:
+        return
+    from utils.wiseoldman import edit_wom_competition
+
+    ok = await edit_wom_competition(
+        info["competition_id"], info["code"], title=info["title"],
+        starts_at=info["starts_at"], ends_at=info["ends_at"])
+
+    def _stamp():
+        with db_session() as s:
+            row = (s.query(EventCompetition)
+                   .filter(EventCompetition.event_id == event_id).first())
+            if row is None:
+                return
+            if ok:
+                row.wom_title = info["title"]
+                row.wom_starts_at = info["starts_at"]
+                row.wom_ends_at = info["ends_at"]
+                row.wom_sync_error = None
+            else:
+                row.wom_sync_error = ("edit mirror failed — WOM didn't accept "
+                                      "the title/date update")[:255]
+            s.commit()
+
+    await asyncio.to_thread(_stamp)
 
 
 def _enqueue_orphan_scheduled_events(s, event_id: int) -> None:
@@ -3878,6 +4807,11 @@ def _cascade_delete_event(s, ev: Event) -> None:
     _wipe(EventCompletion, EventCompletion.event_id == event_id)
     _wipe(EventBuyin, EventBuyin.event_id == event_id)
 
+    # SOTW/BOTW linkage row (web105a). Any DT-created WOM competition is NOT
+    # deleted here — phase 3's delete-mirroring handles it before this runs.
+    from db import EventCompetition
+    _wipe(EventCompetition, EventCompetition.event_id == event_id)
+
     # Bingo completions hang off cells (no event_id), so scope them by cell.
     if cell_ids:
         _wipe(EventBingoCompletion, EventBingoCompletion.cell_id.in_(cell_ids))
@@ -3940,6 +4874,24 @@ async def delete_event(event_id: int):
     body = await json_body()
     confirm = body.get("confirm_name")
 
+    def _peek_created():
+        # Fail-soft: this peek must never block an event delete — including
+        # on a deploy that raced ahead of the web105a DDL (no table yet).
+        try:
+            with db_session() as s:
+                from services.competition_setup import competition_row
+
+                row = competition_row(s, event_id)
+                if (row is None or row.source_mode != "created"
+                        or not row.wom_competition_id
+                        or not row.wom_competition_code):
+                    return None
+                return (row.wom_competition_id, row.wom_competition_code)
+        except Exception:
+            return None
+
+    created_comp = await asyncio.to_thread(_peek_created)
+
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
@@ -3990,6 +4942,17 @@ async def delete_event(event_id: int):
             s.commit()
 
     await asyncio.to_thread(_apply)
+    # The event's DT rows are gone; a created-mode WOM competition goes with
+    # it (DropTracker made it — an orphan with a lost code helps no one).
+    # After the DB delete deliberately: a failed confirm above must never
+    # cost the WOM comp. Best-effort — a WOM hiccup just logs the orphan.
+    if created_comp is not None:
+        try:
+            from utils.wiseoldman import delete_wom_competition
+
+            await delete_wom_competition(*created_comp)
+        except Exception:
+            pass
     # Forget it in Redis: drop from the active-matching set and nudge the
     # consumer to refresh its matcher state (both best-effort no-ops on error).
     try:
@@ -4060,9 +5023,17 @@ async def activate_event(event_id: int):
 
 @events_bp.post("/events/<int:event_id>/end")
 async def end_event(event_id: int):
-    """Explicit end (event admin): active -> past, final standings announced."""
+    """Explicit end (event admin): active -> past, final standings announced.
+    A created-mode WOM competition is closed alongside (endsAt = now), so the
+    public WOM page stops collecting gains this event no longer counts."""
     user_id = current_user_id()
     payload = await asyncio.to_thread(_run_lifecycle_transition, event_id, user_id, "end")
+    try:
+        from services.competition_wom import mirror_competition_end
+
+        await mirror_competition_end(event_id)
+    except Exception:
+        pass  # best-effort; wom_sync_error carries the state
     _bump(event_id)
     return private_no_store(jsonify(payload))
 
@@ -4823,6 +5794,10 @@ async def search_npcs():
                 }
         # Source aliases ("Wintertodt" for its reward containers) lead the
         # list — task validators expand them back to the real recorded names.
+        # ``wom_metric``: the NPC's WOM hiscores boss slug (None = plugin-only
+        # tracking) — the botw picker badges non-rankable bosses with it.
+        from utils.wiseoldman import wom_boss_metric
+
         entries = alias_search_entries(q)
         entries.extend(
             {
@@ -4830,6 +5805,7 @@ async def search_npcs():
                 "name": n,
                 "icon_url": f"{IMG_BASE}/npcdb/{i}.png",
                 "tracked": n in tracked_names,
+                "wom_metric": wom_boss_metric(n),
             }
             for i, n in rows
         )
@@ -5023,6 +5999,13 @@ async def delete_task(event_id: int, task_id: int):
             )
             if not task:
                 return
+            if task.type == "competition":
+                # SOTW/BOTW race task: managed with the event itself — it only
+                # goes away by switching the event's kind (draft) or deleting
+                # the event.
+                abort_problem(422, "Managed task",
+                              "The competition race task is managed by the "
+                              "event — it can't be deleted on its own.")
             task_label = task.label
 
             # Take back points the task granted: a completed (task, team)

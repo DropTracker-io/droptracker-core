@@ -332,6 +332,16 @@ class TestSearchNpcsEndpoint:
             [("Kree'arra",)],
         )
         self._wire(monkeypatch, s)
+        # The route resolves each name's WOM boss slug (the botw picker badge);
+        # the conftest wiseoldman stub would return a MagicMock — pin a real
+        # mapping so the JSON payload stays serializable and assertable.
+        import sys
+
+        monkeypatch.setattr(
+            sys.modules["utils.wiseoldman"], "wom_boss_metric",
+            lambda name: {"Kree'arra": "kreearra"}.get(name),
+            raising=False,
+        )
         r = await client.get("/api/v1/events/meta/npcs?q=arra")
         assert r.status_code == 200
         assert (await r.get_json()) == [
@@ -340,12 +350,14 @@ class TestSearchNpcsEndpoint:
                 "name": "Kree'arra",
                 "icon_url": "https://www.droptracker.io/img/npcdb/3162.png",
                 "tracked": True,
+                "wom_metric": "kreearra",
             },
             {
                 "id": 2215,
                 "name": "General Graardor",
                 "icon_url": "https://www.droptracker.io/img/npcdb/2215.png",
                 "tracked": False,
+                "wom_metric": None,
             },
         ]
 

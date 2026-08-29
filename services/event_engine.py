@@ -128,7 +128,7 @@ _STATE_KEY_TTL = 60 * 60 * 24 * 60         # 60 days for xp-baseline / kc-dedupe
 
 # Task types the engine can evaluate automatically (v1).
 AUTO_TASK_TYPES = ("item_collection", "kc_target", "pb_target", "xp_target", "skill_target",
-                   "loot_value", "pet_collection", "loot_sweep")
+                   "loot_value", "pet_collection", "loot_sweep", "competition")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1108,6 +1108,17 @@ def pending_projection(session, task: dict, team_id) -> Optional[dict]:
             "pending_count": len(pending_rows),
             "pending_complete": False,
         }
+    if kind == "competition":
+        # "applied"/"projected" are the team's ranking-mode totals (points or
+        # gained); a competition never completes either.
+        from services.competition import CompetitionConfig, fold_rows, team_totals
+        cfg = CompetitionConfig(task.get("config") or {})
+        return {
+            "applied": team_totals(fold_rows(applied_rows, cfg), cfg)[1],
+            "projected": team_totals(fold_rows(rows, cfg), cfg)[1],
+            "pending_count": len(pending_rows),
+            "pending_complete": False,
+        }
     if kind in ("all_of", "assembly"):
         applied = _distinct_progress_from_rows(applied_rows, threshold)
         projected = _distinct_progress_from_rows(rows, threshold)
@@ -1354,6 +1365,53 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
         return {"mode": "count", "quantity": 1,
                 "matched_target": str(pet_name).strip()[:120] or None}
 
+    if task_type == "competition":
+        # SOTW/BOTW race task (services/competition.py). ``competition`` is
+        # the plain-data matcher snapshot precomputed in _task_to_dict.
+        # Gained rides the existing folds (xp baselines / kc watermarks);
+        # a pet bonus is a normal count row tagged via ``bonus`` (the
+        # time_under bonus lives in match_task_all — one pb envelope can
+        # award several time tiers at once).
+        comp = task.get("competition") or {}
+        metric_kind = comp.get("metric_kind")
+        if not metric_kind:
+            return None
+        if kind == "experience":
+            if metric_kind != "skill":
+                return None
+            skill = comp.get("skill")
+            if not skill or _norm(data.get("skill")) != skill:
+                return None
+            return {"mode": "xp", "quantity": 0}
+        if kind == "drop":
+            if metric_kind != "boss":
+                return None
+            if _norm(data.get("npc_name")) not in (comp.get("npcs") or ()):
+                return None
+            return {"mode": "kc", "quantity": 1}
+        if kind == "wom_kc":
+            if metric_kind != "boss":
+                return None
+            metric = str(data.get("boss_metric") or "").strip().lower()
+            if not metric or metric not in _kc_wom_metrics(task):
+                return None
+            return {"mode": "kc_abs", "quantity": 0}
+        if kind == "pet":
+            # A DUPLICATE pet is not an achievement worth bonus points — and
+            # the per-player cap must not be burnable by re-rolling a pet the
+            # player already owns.
+            if not _pet_is_new(data):
+                return None
+            raw_name = data.get("pet_name") or data.get("item_name")
+            rule = (comp.get("pet_rules") or {}).get(_norm(raw_name))
+            if not rule:
+                return None
+            return {"mode": "count",
+                    "quantity": max(int(rule.get("points") or 1), 1),
+                    "matched_target": str(raw_name).strip()[:120] or None,
+                    "bonus": {"rule_id": rule.get("id"), "type": "pet"}}
+        return None
+
     # ehp_target / ehb_target / custom: manual-confirmation only (Task 18).
     return None
 
@@ -1372,6 +1430,32 @@ def match_task_all(task: dict, envelope: dict) -> list:
     base = match_task(task, envelope)
     if base is not None:
         matches.append(base)
+    comp = task.get("competition") if task.get("type") == "competition" else None
+    if comp:
+        # time_under bonus rules: EVERY kill time reaches the queue (not just
+        # PBs — data/submissions/pb.py), and tiers stack deliberately — a
+        # 0:48 kill under both "sub-1:00" and "sub-0:50" rules awards both
+        # (each rule is its own ledger row, tagged with its rule id).
+        if envelope.get("kind") == "pb":
+            data = envelope.get("data") or {}
+            npc = _norm(data.get("npc_name"))
+            try:
+                time_ms = int(data.get("time_ms") or 0)
+            except (TypeError, ValueError):
+                time_ms = 0
+            if npc and time_ms > 0:
+                for rule in comp.get("time_rules") or ():
+                    threshold = int(rule.get("threshold_ms") or 0)
+                    if npc == rule.get("npc") and threshold and time_ms <= threshold:
+                        matches.append({
+                            "mode": "count",
+                            "quantity": max(int(rule.get("points") or 1), 1),
+                            "matched_target": str(data.get("npc_name") or "").strip()[:120] or None,
+                            "bonus": {"rule_id": rule.get("id"),
+                                      "type": "time_under",
+                                      "time_ms": time_ms},
+                        })
+        return matches
     metric_paths = _metric_paths(task)
     if not metric_paths:
         return matches
@@ -1539,9 +1623,10 @@ def window_scope(seq) -> str:
 
 
 def _task_wom_metrics(task_type, npcs) -> dict:
-    """``{wom metric slug -> normalized NPC name}`` for a kc_target's NPC set
-    (NPCs without a WOM hiscores metric are absent — those stay plugin-only)."""
-    if task_type != "kc_target" or not npcs:
+    """``{wom metric slug -> normalized NPC name}`` for a kc_target's (or a
+    botw competition's) NPC set (NPCs without a WOM hiscores metric are
+    absent — those stay plugin-only)."""
+    if task_type not in ("kc_target", "competition") or not npcs:
         return {}
     out: dict = {}
     for npc in npcs:
@@ -1603,6 +1688,19 @@ def _task_to_dict(task) -> dict:
             d["loot_sweep_index"] = LootSweepConfig(d["config"]).matcher_index()
         except Exception:
             d["loot_sweep_index"] = {}
+    if task.type == "competition":
+        # Precompute the sotw/botw matcher snapshot (metric + bonus-rule
+        # lookups) as plain data, plus the kc-watermark inputs a botw shares
+        # with kc_target (``kc_npcs`` scopes the per-NPC absolute-KC state,
+        # ``wom_metrics`` lets the WOM reconciler plan hiscores KC). Guarded:
+        # the unit-test conftest stubs services.competition.
+        try:
+            from services.competition import CompetitionConfig
+            d["competition"] = CompetitionConfig(d["config"]).matcher_index()
+        except Exception:
+            d["competition"] = {}
+        d["kc_npcs"] = list((d["competition"] or {}).get("npcs") or [])
+        d["wom_metrics"] = _task_wom_metrics(task.type, d["kc_npcs"])
     return d
 
 
@@ -3814,6 +3912,254 @@ def _revoke_loot_sweep(session, event: dict, task: dict, team_id, completion) ->
     return {"progress": new_total, "completed": False, "team_score": team_score}
 
 
+def _competition_applied_rows(session, task: dict, team_id) -> list:
+    """Applied ledger rows for one competition (task, team) — the recompute
+    input for its standings (same status set as the other continuous kinds)."""
+    from db.models import EventCompletion
+
+    return list(
+        session.query(EventCompletion)
+        .filter(EventCompletion.task_id == task["id"],
+                EventCompletion.team_id == team_id,
+                EventCompletion.status.in_(APPLIED_BONUS_STATUSES))
+        .all()
+    )
+
+
+def _competition_fold(session, task: dict, team_id, *, include=None,
+                      exclude_id=None) -> tuple:
+    """``(per_player, config)`` for a competition (task, team), optionally
+    folding an unsaved ``include`` row / dropping ``exclude_id`` — the same
+    before/after trick as :func:`_loot_sweep_score`."""
+    from services.competition import CompetitionConfig, fold_rows
+
+    rows = _competition_applied_rows(session, task, team_id)
+    if exclude_id is not None:
+        rows = [r for r in rows if r.id != exclude_id]
+    if include is not None and all(r.id != include.id for r in rows):
+        rows = rows + [include]
+    config = CompetitionConfig(task.get("config") or {})
+    return fold_rows(rows, config), config
+
+
+def _competition_rank(per_player: dict, config, player_id) -> tuple:
+    """``(rank, participants, leader)`` under the event's ranking mode —
+    leader is ``(player_id, value)`` (ties break to the lower id, stable)."""
+    from services.competition import rank_value
+
+    ordered = sorted(
+        ((rank_value(entry, config), pid) for pid, entry in per_player.items()),
+        key=lambda t: (-t[0], t[1]))
+    rank = None
+    for i, (_value, pid) in enumerate(ordered):
+        if pid == player_id:
+            rank = i + 1
+            break
+    leader = (ordered[0][1], ordered[0][0]) if ordered else None
+    return rank, len(ordered), leader
+
+
+def _apply_competition(session, redis_conn, event: dict, task: dict, completion,
+                       player_name: Optional[str] = None) -> dict:
+    """Apply one competition ledger row (a gained delta OR a bonus award):
+    recompute the standings fold off the ledger, refresh the roster team's
+    running totals, and emit side effects. Competition tasks never "complete"
+    — ``EventProgress.progress`` is the team's total GAINED (metric units)
+    and ``EventTeam.score`` the total under the event's ranking mode, both
+    pure functions of the applied ledger like loot_sweep's."""
+    from db.models import EventProgress, EventTeam
+    from services.competition import (bonus_detail, parse_bonus_note,
+                                      player_points, team_totals)
+
+    team_id = completion.team_id
+    player_id = completion.player_id
+
+    # P0-7: locked read — progress is a read-modify-write shared between the
+    # consumer and webapi confirm/revoke flows; unlocked, one side's update
+    # silently overwrites the other's under REPEATABLE READ.
+    progress = (session.query(EventProgress)
+                .filter(EventProgress.task_id == task["id"],
+                        EventProgress.team_id == team_id)
+                .with_for_update()
+                .first())
+    if progress is None:
+        progress = EventProgress(
+            event_id=event["id"], task_id=task["id"], team_id=team_id,
+            progress=0, completed=False)
+        session.add(progress)
+
+    prev_fold, config = _competition_fold(session, task, team_id,
+                                          exclude_id=completion.id)
+    curr_fold, _ = _competition_fold(session, task, team_id, include=completion)
+    prev_gained, prev_score = team_totals(prev_fold, config)
+    curr_gained, curr_score = team_totals(curr_fold, config)
+    progress.progress = curr_gained
+    progress.completed = False
+
+    team_score = None
+    score_delta = curr_score - prev_score
+    if score_delta and team_id is not None:
+        team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+                .with_for_update().first())  # P0-7: locked score RMW
+        if team is not None:
+            team.score = int(float(team.score or 0)) + score_delta
+            team_score = team.score
+            session.flush()
+    # Contribution points (EventPlayerPoints) are deliberately NOT rewritten
+    # per row here — on an XP-snapshot stream that O(roster) delete-and-
+    # rewrite would run thousands of times a day. finalize_competition
+    # (services/event_lifecycle.py) writes them once, at the end.
+
+    entry = curr_fold.get(player_id) or {"gained": 0, "bonus_points": 0, "bonus": {}}
+    rank, participants, leader = _competition_rank(curr_fold, config, player_id)
+    parsed_bonus = parse_bonus_note(completion.note)
+    quantity = max(int(completion.quantity or 1), 1)
+
+    result = {
+        "kind": "competition",
+        "event_id": event["id"],
+        "task_id": task["id"],
+        "team_id": team_id,
+        "player_id": player_id,
+        "delta": quantity,
+        "is_bonus": parsed_bonus is not None,
+        "gained": entry.get("gained", 0),
+        "bonus_points": entry.get("bonus_points", 0),
+        "points": player_points(entry, config),
+        "rank": rank,
+        "participants": participants,
+        "progress": curr_gained,
+    }
+    if team_score is not None:
+        result["team_score"] = team_score
+    if leader is not None:
+        result["leader"] = {"player_id": leader[0], "value": leader[1]}
+    session.flush()
+
+    frame = dict(result)
+    if player_name:
+        frame["player_name"] = player_name
+    frame["task_label"] = task.get("label")
+    _publish(event["id"], frame)
+
+    # Bonus awards are the kind's announce-worthy moments (the gained stream
+    # is continuous — a message per XP snapshot would flood every channel; the
+    # live leaderboard message carries that story instead).
+    if parsed_bonus is not None and team_id is not None:
+        from services.competition import rank_value, score_text
+
+        rule_type, rule_id = parsed_bonus
+        awarded_n = (entry.get("bonus") or {}).get(rule_id, {}).get("awarded", 0)
+        time_text = None
+        raw_note = str(completion.note or "")
+        if "|" in raw_note:
+            time_text = raw_note.split("|", 1)[1].strip() or None
+        detail = bonus_detail(rule_id, config, awarded_n,
+                              matched_target=completion.matched_target,
+                              time_text=time_text)
+        payload = {
+            "task_id": task["id"], "task_label": task.get("label"),
+            "team_id": team_id, "player_id": player_id, "player_name": player_name,
+            "competition": True, "points_based": True,
+            "points": quantity,
+            "bonus": detail,
+            "rank": rank, "participants": participants,
+            "gained": entry.get("gained", 0),
+            "bonus_points": entry.get("bonus_points", 0),
+            "total_points": player_points(entry, config),
+            # Pre-worded ranked value ("213 pts" / "2.48M XP") for the
+            # position line — the layout context stays a pure pass-through.
+            "rank_value_text": score_text(rank_value(entry, config), config),
+            "ranking_mode": config.ranking_mode,
+            "metric_kind": config.metric_kind,
+            "matched_target": completion.matched_target,
+            # Pet awards: the pet's item icon becomes the message thumbnail
+            # (the sender's completion_icon resolution keys off received_item).
+            "received_item": (completion.matched_target
+                              if rule_type == "pet" else None),
+            "source_type": completion.source_type,
+            "proof_url": completion.proof_url,
+        }
+        _enqueue_notification(session, "event_competition_bonus", event,
+                              player_id, payload)
+        # In-game plugin inbox: "+N pts — <reason>". Best-effort; unit-test
+        # stubs lack the plugin module.
+        try:
+            from services.plugin_notifications import (
+                fan_out_event_notification, resolve_item_icon_id,
+            )
+            plugin_payload = {
+                "task_id": task["id"], "task_label": task.get("label"),
+                "team_id": team_id, "player_id": player_id,
+                "player_name": player_name,
+                "points": quantity, "team_score": team_score,
+                "progress": entry.get("gained", 0),
+                "received_item": (completion.matched_target
+                                  if rule_type == "pet" else None),
+            }
+            if rule_type == "pet" and completion.matched_target:
+                icon = resolve_item_icon_id(session, completion.matched_target)
+                if icon:
+                    plugin_payload["icon_item_id"] = icon
+            fan_out_event_notification(session, "event_task_progress", event,
+                                       plugin_payload)
+        except ImportError:
+            pass
+        except Exception as plugin_err:
+            print(f"competition plugin fan-out failed: {plugin_err}")
+    return result
+
+
+def _revoke_competition(session, event: dict, task: dict, team_id, completion) -> dict:
+    """Recompute a competition (task, team) after a row was revoked. The
+    caller already flipped the row to ``revoked``, so the applied-ledger fold
+    excludes it; per-player bonus caps self-heal (the fold counts surviving
+    rows only — a freed slot pays out again on the next qualifying kill)."""
+    from db.models import EventProgress, EventTeam
+    from services.competition import team_totals
+
+    # P0-7: locked read — progress is a read-modify-write shared between the
+    # consumer and webapi confirm/revoke flows; unlocked, one side's update
+    # silently overwrites the other's under REPEATABLE READ.
+    progress = (session.query(EventProgress)
+                .filter(EventProgress.task_id == task["id"],
+                        EventProgress.team_id == team_id)
+                .with_for_update()
+                .first())
+    prev_fold, config = _competition_fold(session, task, team_id,
+                                          include=completion)
+    curr_fold, _ = _competition_fold(session, task, team_id)
+    _prev_gained, prev_score = team_totals(prev_fold, config)
+    curr_gained, curr_score = team_totals(curr_fold, config)
+
+    if progress is None:
+        if curr_gained <= 0 and curr_score <= 0:
+            return {"progress": 0, "completed": False, "team_score": None}
+        progress = EventProgress(event_id=event["id"], task_id=task["id"],
+                                 team_id=team_id, progress=0, completed=False)
+        session.add(progress)
+    progress.progress = curr_gained
+    progress.completed = False
+
+    team_score = None
+    score_delta = curr_score - prev_score
+    if score_delta and team_id is not None:
+        team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+                .with_for_update().first())  # P0-7: locked score RMW
+        if team is not None:
+            team.score = int(float(team.score or 0)) + score_delta
+            team_score = team.score
+
+    session.flush()
+    frame = {"kind": "revoke", "event_id": event["id"], "task_id": task["id"],
+             "team_id": team_id, "progress": curr_gained, "competition": True,
+             "player_id": completion.player_id}
+    if team_score is not None:
+        frame["team_score"] = team_score
+    _publish(event["id"], frame)
+    return {"progress": curr_gained, "completed": False, "team_score": team_score}
+
+
 def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
                      cells: Optional[list] = None,
                      player_name: Optional[str] = None) -> dict:
@@ -3829,6 +4175,10 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
     if _list_kind(task) == "loot_sweep":
         return _apply_loot_sweep(session, redis_conn, event, task, completion,
                                  player_name=player_name)
+    # SOTW/BOTW race task: continuous per-player standings off the ledger.
+    if _list_kind(task) == "competition":
+        return _apply_competition(session, redis_conn, event, task, completion,
+                                  player_name=player_name)
 
     team_id = completion.team_id
     player_id = completion.player_id
@@ -4185,6 +4535,20 @@ def _row_advances_progress(session, task: dict, team_id, candidate) -> bool:
         # running total wouldn't move, so don't record another popup.
         return (_loot_sweep_score(session, task, team_id, include=candidate)["total"]
                 > _loot_sweep_score(session, task, team_id)["total"])
+    if kind == "competition":
+        # Gained rows always advance the running totals. A bonus row is dead
+        # weight once its player sits at the rule's per-player cap — and the
+        # count is over SURVIVING rows, so revoking an award frees its slot.
+        from services.competition import (CompetitionConfig, bonus_award_count,
+                                          parse_bonus_note)
+        parsed = parse_bonus_note(getattr(candidate, "note", None))
+        if parsed is None:
+            return True
+        cfg = CompetitionConfig(task.get("config") or {})
+        rule = cfg.rules_by_id.get(parsed[1])
+        cap = rule.max_awards if rule is not None else 1
+        rows = _competition_applied_rows(session, task, team_id)
+        return bonus_award_count(rows, candidate.player_id, parsed[1]) < cap
     if kind in ("all_of", "assembly"):
         helper = _distinct_item_progress
     elif kind == "groups":
@@ -4297,7 +4661,8 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
                  player_id: int, quantity: int, envelope: dict,
                  cells: Optional[list] = None,
                  matched_target: Optional[str] = None,
-                 path_idx: Optional[int] = None) -> Optional[dict]:
+                 path_idx: Optional[int] = None,
+                 bonus: Optional[dict] = None) -> Optional[dict]:
     """Insert the ledger row for a match (idempotent on
     (task, team, submission_guid)); apply effects unless it needs
     confirmation. Returns a result dict, or None on duplicate replay.
@@ -4307,6 +4672,12 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
     into the right path, and its guid gets a ``#p<idx>`` suffix — one envelope
     may legitimately write the item row AND one row per qualifying metric
     path, which the bare (task, team, guid) unique index would block.
+
+    ``bonus`` (``{"rule_id", "type"}``) marks a competition bonus award: the
+    row is tagged ``note = bonus:{type}:{rule_id}`` so the fold reads its
+    quantity as POINTS (services/competition.py), and its guid gets a
+    ``#b<rule_id>`` suffix — one pb envelope may award several time tiers,
+    each its own row (same mechanism as the path suffix).
 
     Rows that can no longer contribute are NOT recorded: once the (task,
     team) rollup is completed — or the specific matched item is already
@@ -4339,6 +4710,20 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
         # Truncate the base BEFORE suffixing so a long guid (the WOM
         # reconciler's composite keys) can never shed the path marker.
         guid = f"{str(guid)[:60]}#p{int(path_idx)}"
+    elif guid and bonus is not None:
+        # Same truncate-before-suffix rule for bonus awards.
+        guid = f"{str(guid)[:60]}#b{int(bonus.get('rule_id') or 0)}"
+    note = None
+    if path_idx is not None:
+        note = _path_note(path_idx)
+    elif bonus is not None:
+        note = f"bonus:{bonus.get('type')}:{int(bonus.get('rule_id') or 0)}"
+        if bonus.get("time_ms"):
+            # The kill time rides in the note's human half (`` | 0:52.6``) so
+            # the award message and the admin ledger can both show it — the
+            # row must be self-describing (apply_completion replays from DB).
+            from services.competition import format_time_ms
+            note = f"{note} | {format_time_ms(bonus['time_ms'])}"
     proof = data.get("image_url") or None
     completion = EventCompletion(
         event_id=event["id"],
@@ -4352,7 +4737,7 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
         submission_guid=str(guid)[:64] if guid else None,
         proof_url=str(proof)[:255] if proof else None,
         matched_target=matched_target,
-        note=_path_note(path_idx) if path_idx is not None else None,
+        note=note,
     )
     if not _row_advances_progress(session, task, team_id, completion):
         return None  # matched item already satisfied — contributes nothing
@@ -4583,7 +4968,8 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
                     session, redis_conn, event, task, team_id, player_id,
                     quantity, envelope, cells=state.cells_by_task.get(task["id"]),
                     matched_target=match.get("matched_target"),
-                    path_idx=match.get("path"))
+                    path_idx=match.get("path"),
+                    bonus=match.get("bonus"))
                 if outcome is not None:
                     results.append(outcome)
     return results
@@ -4746,6 +5132,12 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
                               reason="revoke", extra=lead_extra)
         return summary
 
+    if _list_kind(task) == "competition":
+        # Per-player standings re-fold; the single-team score follows. Team
+        # lead-change announcements are meaningless with one roster team, so
+        # none fire here (the SSE frame carries the corrected numbers).
+        return _revoke_competition(session, event, task, team_id, completion)
+
     new_progress = _derive_applied_progress(session, task, team_id)
 
     # P0-7: locked read — progress is a read-modify-write shared between the
@@ -4887,6 +5279,12 @@ def recompute_task_rollups(session, event_row, task_row, *,
 
     if task.get("type") in ("custom", "ehp_target", "ehb_target") or \
             (event.get("kind") or "standard") == "board_game":
+        raise ValueError("forward_only")
+    if task.get("type") == "competition":
+        # The managed race task is never editable through the task routes and
+        # its config locks at activation — there is no legal live edit to
+        # recompute for, and a wrong refold would rewrite standings. Apply/
+        # revoke (which re-fold from the ledger) remain the correction paths.
         raise ValueError("forward_only")
 
     applied = ("auto", "confirmed", "manual")

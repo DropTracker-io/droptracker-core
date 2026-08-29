@@ -247,6 +247,15 @@ def instantiate_template(
     kind = spec.get("kind") or "standard"
     if kind not in EVENT_KINDS:
         kind = "standard"
+    from db import COMPETITION_EVENT_KINDS
+
+    if kind in COMPETITION_EVENT_KINDS:
+        # Belt-and-braces: template SAVE refuses these kinds, so such a
+        # payload shouldn't exist — but an instantiated one would create an
+        # unmanaged competition task with no scaffold.
+        abort_problem(422, "Templates not supported",
+                      "Skill/Boss of the Week events can't be created from "
+                      "templates yet — use the event wizard.")
     if kind != "standard" and not is_event_type_creatable(
         s, kind, is_superadmin=superadmin, group_id=group_id
     ):
@@ -509,6 +518,17 @@ async def save_event_template(event_id: int):
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev)
+            from db import COMPETITION_EVENT_KINDS
+
+            if (getattr(ev, "kind", None) or "standard") in COMPETITION_EVENT_KINDS:
+                # v1: the competition config (WOM linkage, bonus rules) is
+                # instance-bound and the managed task must never round-trip
+                # through the generic task pipeline. The setup is a two-minute
+                # wizard — templates add little until team competitions land.
+                abort_problem(
+                    422, "Templates not supported",
+                    "Skill/Boss of the Week events can't be saved as templates "
+                    "yet — their setup is quick to recreate from the wizard.")
 
             payload = snapshot_event(s, ev)
             if not include_teams:

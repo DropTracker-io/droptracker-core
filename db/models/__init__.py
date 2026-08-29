@@ -156,6 +156,7 @@ from .events import (
     EventMessageLayout,
     EventType,
     EventTypeTestGroup,
+    EventCompetition,
     EventRateLimit,
     EVENT_RATE_LIMIT_ALL_TYPES,
     EventBoardTile,
@@ -201,6 +202,8 @@ from .events import (
     EVENT_TASK_PROGRESS_MODES,
     EVENT_MESSAGE_TOGGLE_KEYS,
     EVENT_MESSAGE_LAYOUT_TYPES,
+    COMPETITION_EVENT_KINDS,
+    COMPETITION_SOURCE_MODES,
 )
 
 
@@ -386,6 +389,7 @@ __all__ = [
     "EventMessageLayout",
     "EventType",
     "EventTypeTestGroup",
+    "EventCompetition",
     "EventRateLimit",
     "EVENT_RATE_LIMIT_ALL_TYPES",
     "EventBoardTile",
@@ -435,4 +439,6 @@ __all__ = [
     "EVENT_TASK_PROGRESS_MODES",
     "EVENT_MESSAGE_TOGGLE_KEYS",
     "EVENT_MESSAGE_LAYOUT_TYPES",
+    "COMPETITION_EVENT_KINDS",
+    "COMPETITION_SOURCE_MODES",
 ]

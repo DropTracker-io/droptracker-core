@@ -43,6 +43,13 @@ EVENT_TASK_TYPES = (
     # collecting a full set awards a bonus (capped). Scored continuously off
     # the ledger — never "completes". Config/scoring: services/loot_sweep.py.
     "loot_sweep",
+    # SOTW/BOTW (sotw/botw kinds): the single hidden "race" task carrying the
+    # whole competition config (metric, ranking mode, bonus rules). Gained
+    # XP/KC and bonus awards all land on THIS one task so per-player standings
+    # fold from one ledger; scored continuously, never "completes". Managed by
+    # the event routes — never created/edited via the generic task routes.
+    # Config/scoring: services/competition.py.
+    "competition",
     # Manual-confirmation-only tasks (no automated evaluation).
     "custom",
 )
@@ -90,11 +97,24 @@ EVENT_MODES = ("standard", "clan_vs_clan")
 #                  completion bonuses. One EventTask (type 'loot_sweep') per
 #                  set; scoring is continuous off the ledger. See
 #                  services/loot_sweep.py + docs/LOOT_SWEEP.md.
+# - "sotw"/"botw" — Skill/Boss "of the Week" (any duration — the name is
+#                  tradition): individuals race XP gained in one skill (sotw)
+#                  or KC gained at one boss (botw), optionally enriched with
+#                  bonus points (pets, sub-threshold kill times). Runs purely
+#                  DT-hosted, mirrors an existing WiseOldMan competition, or
+#                  creates one (web_event_competitions carries the linkage).
+#                  One hidden 'competition' task + one roster team; standings
+#                  are per player. See services/competition.py.
 # Which kinds a non-superadmin may CREATE is governed site-wide by the
 # ``web_event_types`` registry (enabled/admin_only + per-type test-group
 # allowlist) — see services/event_types.py. Existing events of a disabled
 # kind keep running; the gate binds at creation only.
-EVENT_KINDS = ("standard", "bingo", "board_game", "loot_sweep")
+EVENT_KINDS = ("standard", "bingo", "board_game", "loot_sweep", "sotw", "botw")
+
+# The kinds implemented by services/competition.py (one hidden "competition"
+# task, individual standings, optional WOM linkage). Kept here so the model
+# layer, engine, lifecycle and routes all share one membership test.
+COMPETITION_EVENT_KINDS = ("sotw", "botw")
 
 # web_event_groups participant roles / invite lifecycle.
 EVENT_GROUP_ROLES = ("host", "opponent")
@@ -247,6 +267,19 @@ EVENT_MESSAGE_TOGGLE_KEYS = (
     "event_sweep_item",
     "event_sweep_group",
     "event_sweep_set",
+    # Kind-agnostic lifecycle reminders (added with the competition kinds, but
+    # every kind benefits): "starts in an hour" / "ends in an hour — top 3 so
+    # far". Fired by the lifecycle sweep at starts_at/ends_at minus the lead
+    # (message_config.reminders overrides the 60-min default per event).
+    "event_starting_soon",
+    "event_ending_soon",
+    # SOTW/BOTW (sotw/botw kinds): a bonus-rule award landed (+N pts — pet /
+    # sub-threshold kill time). Default ON — bonus awards are rare and are the
+    # kind's signature moments.
+    "event_competition_bonus",
+    # Reserved for gained-milestone chatter (e.g. "10M XP club"); no sender
+    # emits it yet. Default OFF.
+    "event_competition_milestone",
 )
 
 # Message types that have a component-layout row in web_event_message_layouts:
@@ -1504,3 +1537,64 @@ class EventCoinLedger(Base):
     acted_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     note = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+# web_event_competitions.source_mode — where a sotw/botw event's gained
+# numbers come from:
+# - "hosted"  — pure DropTracker: plugin envelopes + the group bulk-gained
+#               reconciler. No WOM competition exists.
+# - "linked"  — mirrors an EXISTING WiseOldMan competition (read-only): the
+#               poller emits its per-participant deltas as synthetic
+#               envelopes and caches non-DT participants for display.
+# - "created" — DropTracker created the WOM competition itself and holds its
+#               verification code, so edits/deletes/update-alls mirror out.
+COMPETITION_SOURCE_MODES = ("hosted", "linked", "created")
+
+
+class EventCompetition(Base):
+    """WOM linkage + sync state for one sotw/botw event (web105a), 1:1 with
+    ``web_events`` — hosted events get a row too (all ``wom_*`` NULL) so the
+    invariant stays simple.
+
+    Deliberately NOT the scoring config: metric/ranking/bonus rules live in
+    the hidden ``competition`` task's ``config`` JSON, the single source the
+    engine's matcher state, task validation and serializers already read.
+    This row carries only what has no existing home — the linkage, the
+    poller's sync bookkeeping (written every cycle; keeping it off
+    ``web_events`` avoids churning that row), the WOM-only standings cache,
+    and the frozen final standings.
+
+    ``wom_competition_code`` is a SECRET (the competition's own verification
+    code, returned by POST /competitions in created mode — it grants
+    edit/delete rights). Never serialize it; redact it in audit diffs, like
+    the ``wom_verification_code`` group config key."""
+
+    __tablename__ = "web_event_competitions"
+    __table_args__ = (
+        # "This WOM competition is already linked to event #N" — and MySQL
+        # unique indexes admit unlimited NULLs, so hosted rows don't collide.
+        Index("uq_web_evt_comp_womid", "wom_competition_id", unique=True),
+        {"extend_existing": True},
+    )
+
+    event_id = Column(Integer, ForeignKey("web_events.id"), primary_key=True)
+    source_mode = Column(String(16), nullable=False, default="hosted")  # COMPETITION_SOURCE_MODES
+    wom_competition_id = Column(Integer, nullable=True)
+    wom_competition_code = Column(String(64), nullable=True)  # SECRET — see docstring
+    # Last-seen mirrors of the WOM competition, for drift detection (a poll
+    # that sees different dates/title updates the event and restamps these).
+    wom_title = Column(String(128), nullable=True)
+    wom_starts_at = Column(DateTime, nullable=True)
+    wom_ends_at = Column(DateTime, nullable=True)
+    wom_synced_at = Column(DateTime, nullable=True)
+    wom_sync_error = Column(String(255), nullable=True)  # last failure, surfaced to admins
+    # JSON list of the linked competition's participations — including players
+    # with no DropTracker account, who exist nowhere else in the DB. Display
+    # only (greyed rows); DT players' gains flow through the ledger instead.
+    wom_standings = Column(Text, nullable=True)  # MEDIUMTEXT in MySQL (web105a)
+    # Frozen at end_event (merged DT + WOM rows, ranked) so the result page
+    # never depends on a re-fold or a long-gone WOM competition.
+    final_standings = Column(Text, nullable=True)  # MEDIUMTEXT in MySQL (web105a)
+    finalized_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
