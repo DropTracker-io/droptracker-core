@@ -14,12 +14,14 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from services.player_model import ensure_public_dir, model_exists
+from services.player_model import _b2, _b2_enabled, ensure_public_dir, model_exists
 
 # Keep in sync with WIDTH/HEIGHT in the /model-image page.
 MODEL_IMAGE_WIDTH = 400
 MODEL_IMAGE_HEIGHT = 600
 
+# Local mode only; in B2 mode renders live beside the models under
+# dt_img/models/ and are served from the CDN (see services/player_model.py).
 IMAGE_ROOT = "/store/droptracker/disc/static/assets/img/models"
 PUBLIC_BASE = "https://www.droptracker.io/img/models"
 
@@ -36,11 +38,19 @@ def image_path(player_id: int, fingerprint: str) -> str:
     return os.path.join(IMAGE_ROOT, str(int(player_id)), f"{fingerprint}.png")
 
 
+def image_key(player_id: int, fingerprint: str) -> str:
+    return f"{_b2().MODELS_PREFIX}/{int(player_id)}/{fingerprint}.png"
+
+
 def image_url(player_id: int, fingerprint: str) -> str:
+    if _b2_enabled():
+        return _b2().url_for(image_key(player_id, fingerprint))
     return f"{PUBLIC_BASE}/{int(player_id)}/{fingerprint}.png"
 
 
 def image_exists(player_id: int, fingerprint: str) -> bool:
+    if _b2_enabled():
+        return _b2().key_exists(image_key(player_id, fingerprint))
     return os.path.exists(image_path(player_id, fingerprint))
 
 
@@ -84,6 +94,14 @@ async def render_gear_image(player_id: int, fingerprint: str) -> Optional[str]:
     except Exception as exc:
         print(f"Could not render gear image for player {player_id}: {exc}")
         return None
+
+    if _b2_enabled():
+        try:
+            return await _b2().aput_bytes(
+                image_key(player_id, fingerprint), png, "image/png")
+        except Exception as exc:
+            print(f"Could not store gear image for player {player_id} in B2: {exc}")
+            return None
 
     final_path = image_path(player_id, fingerprint)
     ensure_public_dir(os.path.dirname(final_path))

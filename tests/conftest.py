@@ -267,6 +267,16 @@ if "services.player_model" not in sys.modules:
     sys.modules["services.player_model"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/gear_image.py — render paths/keys for the character images. Imports
+# stdlib + the real services.player_model just loaded above; player_avatar's
+# B2 branch resolves its render key through it, so it must be real too.
+_GEAR_IMAGE_PATH = _Path(__file__).resolve().parent.parent / "services" / "gear_image.py"
+if "services.gear_image" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.gear_image", _GEAR_IMAGE_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.gear_image"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/player_avatar.py — geometry of the torso-up avatar crop. Imports only
 # stdlib at module level (Pillow and numpy are pulled in inside the functions),
 # so the real module loads here and the tests can assert on the crop it picks

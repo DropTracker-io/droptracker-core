@@ -138,6 +138,12 @@ def create_frontend(bot: interactions.Client):
     # models/{player_id}/{fingerprint}-avatar.png -> one specific outfit
     _AVATAR_RE = re.compile(r'^models/(\d+)/(avatar|[0-9a-f]{1,32}-avatar)\.png$')
 
+    # Any real model artifact: the .glb itself, the pet variant, the full-body
+    # render, the avatar crop. Anchored so a hostile path can never turn into a
+    # bucket key — anything else under models/ stays a plain 404 placeholder.
+    _MODEL_FILE_RE = re.compile(
+        r'^models/\d+/[0-9a-f]{1,32}(-pet)?(-avatar)?\.(glb|png)$')
+
     async def _serve_avatar(player_id: int, which: str):
         """Torso-up avatar crop, derived from the full render on first request.
 
@@ -167,6 +173,15 @@ def create_frontend(bot: interactions.Client):
         if not path:
             return _missing_model_image()
 
+        if path.startswith('http'):
+            # B2 mode: ensure_avatar derived/verified the crop in the bucket
+            # and answered with its CDN URL. The redirect carries the same
+            # Cache-Control the served bytes used to, so the staleness bound
+            # on the `avatar.png` alias is unchanged.
+            response = redirect(path, code=302)
+            response.headers['Cache-Control'] = 'public, max-age=3600'
+            return response
+
         response = await send_from_directory(
             os.path.dirname(path), os.path.basename(path)
         )
@@ -195,6 +210,24 @@ def create_frontend(bot: interactions.Client):
             # A missing character model or render is not a repairable fault and
             # must not answer with the logo — see _missing_model_image.
             if filename.startswith('models/'):
+                # Models and renders moved to B2 (2026-08-30); a local file, if
+                # one still exists, was served above. Old Discord embeds and
+                # the web BFF keep using www.droptracker.io/img/models/... so
+                # this answers them with a redirect to the CDN object.
+                _model = _MODEL_FILE_RE.match(filename)
+                if _model:
+                    try:
+                        from utils import image_storage
+
+                        if image_storage.offload_enabled():
+                            key = f"{image_storage.IMG_PREFIX}/{filename}"
+                            if await asyncio.to_thread(image_storage.key_exists, key):
+                                response = redirect(image_storage.url_for(key), code=302)
+                                # Fingerprinted names are immutable content.
+                                response.headers['Cache-Control'] = 'public, max-age=86400'
+                                return response
+                    except Exception as e:
+                        print(f"B2 model redirect failed for {filename}: {e}")
                 return _missing_model_image()
             # Grayscale receipt-tab variants (Loot Sweep board): serve
             # itemdb/gray/{id}.png. Pre-baked files are served straight through

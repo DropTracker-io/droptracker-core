@@ -161,6 +161,43 @@ def local_path_for(image_url: str) -> str | None:
     return candidate
 
 
+def _b2_storage():
+    """The image-storage module, or None when B2 is not usable here.
+
+    Gated on credentials being present rather than on ``IMG_B2_OFFLOAD``:
+    B2-hosted rows exist iff the offload ever ran, and they must keep aging
+    out even if the flag is later turned off. Without credentials every
+    B2-hosted URL is treated as unresolved — a reference this script cannot
+    verify is a reference it must not touch.
+    """
+    try:
+        # Imported before the env check on purpose: utils.b2_storage runs
+        # load_dotenv() at import, and this script may be the first thing in
+        # the process to need those keys.
+        from utils import image_storage
+    except Exception:
+        return None
+    if not os.getenv("B2_KEY_ID"):
+        return None
+    return image_storage
+
+
+def b2_key_for(image_url: str):
+    """B2 object key for a CDN-hosted screenshot URL, or None.
+
+    Restricted to the user-upload namespace the same way ``local_path_for``
+    is restricted to the user-upload root: a row pointing anywhere else in
+    the bucket (a model, a video) must never become deletable from here.
+    """
+    b2 = _b2_storage()
+    if b2 is None:
+        return None
+    key = b2.key_from_url(image_url)
+    if key and key.startswith(b2.USER_UPLOAD_PREFIX + "/"):
+        return key
+    return None
+
+
 def _fmt_bytes(n: int) -> str:
     value = float(n)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
@@ -170,8 +207,9 @@ def _fmt_bytes(n: int) -> str:
     return f"{value:.1f} PiB"
 
 
-def recap_protected_paths() -> set[str]:
-    """On-disk screenshots a recap card points at, which must survive pruning.
+def recap_protected_paths() -> tuple[set[str], set[str]]:
+    """Screenshots a recap card points at, which must survive pruning —
+    returned as ``(local paths, B2 keys)`` since uploads live in both places.
 
     A recap is an archive: ``/groups/{id}/recap/{period}`` is meant to stay
     valid forever, and its biggest-drop card renders the screenshot straight
@@ -205,8 +243,10 @@ def recap_protected_paths() -> set[str]:
             continue
 
     paths = {p for p in (local_path_for(u) for u in urls) if p}
-    print(f"protected by recap snapshots: {len(paths):,} screenshot(s)")
-    return paths
+    b2_keys = {k for k in (b2_key_for(u) for u in urls) if k}
+    print(f"protected by recap snapshots: {len(paths):,} local + "
+          f"{len(b2_keys):,} B2 screenshot(s)")
+    return paths, b2_keys
 
 
 def windows_to_scan(cutoff: datetime) -> list[tuple[datetime, datetime]]:
@@ -305,15 +345,75 @@ def prune_non_drop_images(cutoff, protected, snap, apply, retention_days):
     return totals
 
 
-def heal_missing_references(cutoff, apply):
-    """Null ``image_url`` on rows whose file is gone, so the site renders "no
-    screenshot" instead of a broken image.
+def prune_b2_refless_images(retention_days, protected_b2, snap, apply):
+    """Sweep B2-hosted screenshots of the reference-less types by upload time.
 
-    Runs after the sweep and is self-healing: it only ever nulls a reference
-    whose file is *already* absent, so it is safe to re-run and never removes a
-    reference that still resolves. These tables are 30k-290k rows (against
-    drops' 188M), so a plain keyset walk on the primary key is fine here —
-    none of the index gymnastics the drops scan needs.
+    The same fact that forced the filesystem sweep — ``level_up``/``pet``/
+    ``experience_milestone`` files are referenced by no table — applies in the
+    bucket: nothing DB-driven can ever see them. One listing of the
+    user-upload prefix stands in for the directory walk; the bucket key's
+    second path segment is the submission type, and LastModified is the upload
+    time (objects are write-once, so it is exactly the local mtime's twin).
+
+    Referenced types are deliberately skipped here — their retention is
+    decided row-by-row in ``heal_missing_references`` (and ``drop`` by value
+    in the main scan) — as is anything with an unrecognised layout.
+    """
+    b2 = _b2_storage()
+    if b2 is None:
+        return {}
+    from datetime import timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    refless = {t for t, ref in NON_DROP_TYPES.items() if ref is None}
+    totals = {t: [0, 0, 0] for t in refless}  # removed, freed, skipped
+    prefix = b2.USER_UPLOAD_PREFIX + "/"
+    try:
+        listing = b2.list_keys(prefix)
+        for item in listing:
+            key = item["key"]
+            parts = key[len(prefix):].split("/")
+            if len(parts) < 3 or parts[1] not in refless:
+                continue
+            submission_type = parts[1]
+            uploaded = item.get("last_modified")
+            if uploaded is None or uploaded >= cutoff:
+                continue
+            if key in protected_b2:
+                totals[submission_type][2] += 1
+                continue
+            snap.write(f"0\t{key}\t{item['size']}\tdeleted_b2_{submission_type}\n")
+            if apply and not b2.delete_key(key):
+                continue
+            totals[submission_type][0] += 1
+            totals[submission_type][1] += item["size"]
+    except Exception as exc:
+        print(f"  ! B2 listing failed, sweep incomplete: {exc}")
+    snap.flush()
+    for submission_type in sorted(refless):
+        removed, freed, skipped = totals[submission_type]
+        if removed or skipped:
+            note = f" ({skipped:,} recap-protected)" if skipped else ""
+            print(f"  {submission_type:<22}: {removed:,} B2 objects "
+                  f"({_fmt_bytes(freed)}){note}")
+    return totals
+
+
+def heal_missing_references(cutoff, apply, protected_b2=frozenset(), snap=None):
+    """Null ``image_url`` on rows whose file is gone, so the site renders "no
+    screenshot" instead of a broken image — and, for B2-hosted rows past the
+    cutoff, delete the object first.
+
+    The B2 half is not healing but *retention*: the filesystem sweep that ages
+    these types out structurally cannot see a bucket object, and this keyset
+    walk over the referencing tables is already visiting exactly the rows that
+    have aged past the window, so the deletion lives here rather than in a
+    second identical walk. Local rows keep the original contract: only ever
+    null a reference whose file is already absent.
+
+    These tables are 30k-290k rows (against drops' 188M), so a plain keyset
+    walk on the primary key is fine here — none of the index gymnastics the
+    drops scan needs.
     """
     cleared_total = 0
     for submission_type, ref in sorted(NON_DROP_TYPES.items()):
@@ -336,8 +436,23 @@ def heal_missing_references(cutoff, apply):
             for row_pk, image_url in rows:
                 last_pk = row_pk
                 path = local_path_for(image_url)
-                if path is None or os.path.exists(path):
+                if path is not None:
+                    if os.path.exists(path):
+                        continue
+                    stale.append(row_pk)
                     continue
+                b2key = b2_key_for(image_url)
+                if b2key is None or b2key in protected_b2:
+                    continue
+                if snap is not None:
+                    snap.write(f"{row_pk}\t{image_url}\t0\t"
+                               f"deleted_b2_{submission_type}\n")
+                if apply:
+                    b2 = _b2_storage()
+                    if not b2.delete_key(b2key):
+                        # Keep the reference if the object could not be
+                        # removed — a dangling delete would orphan it forever.
+                        continue
                 stale.append(row_pk)
             if stale and apply:
                 stmt = (text(f"UPDATE {table} SET image_url = NULL "
@@ -386,7 +501,7 @@ def main() -> int:
           f"{cutoff:%Y-%m-%d %H:%M} ({args.retention_days}d)")
     print(f"snapshot: {snapshot_path}\n")
 
-    protected = recap_protected_paths()
+    protected, protected_b2 = recap_protected_paths()
 
     scanned = pruned = missing = unresolved = protected_hits = 0
     freed = 0
@@ -448,7 +563,35 @@ def main() -> int:
                     scanned += 1
                     path = local_path_for(image_url)
                     if path is None:
-                        unresolved += 1
+                        # Not a local file — a B2-hosted screenshot gets the
+                        # same treatment (delete object, clear reference);
+                        # anything else is left strictly alone.
+                        b2key = b2_key_for(image_url)
+                        if b2key is None:
+                            unresolved += 1
+                            continue
+                        if b2key in protected_b2:
+                            protected_hits += 1
+                            continue
+                        b2 = _b2_storage()
+                        try:
+                            info = b2.head(b2key)
+                        except Exception as exc:
+                            print(f"  ! could not check {b2key}: {exc}")
+                            continue
+                        if info is None:
+                            missing += 1
+                            snap.write(f"{drop_id}\t{image_url}\t0\tcleared_missing\n")
+                            pending_ids.append(drop_id)
+                            continue
+                        snap.write(f"{drop_id}\t{image_url}\t{info['size']}\tdeleted_b2\n")
+                        if args.apply and not b2.delete_key(b2key):
+                            continue
+                        pruned += 1
+                        part_pruned += 1
+                        freed += info["size"]
+                        part_freed += info["size"]
+                        pending_ids.append(drop_id)
                         continue
                     if path in protected:
                         # A recap card renders this one forever; leave both the
@@ -497,8 +640,17 @@ def main() -> int:
                 args.nondrop_retention_days)
             nd_removed = sum(n for n, _ in nd_totals.values())
             nd_freed = sum(f for _, f in nd_totals.values())
+            if _b2_storage() is not None:
+                print(f"\nB2-hosted non-drop types (older than "
+                      f"{args.nondrop_retention_days}d):")
+                b2_totals = prune_b2_refless_images(
+                    args.nondrop_retention_days, protected_b2, snap,
+                    args.apply)
+                nd_removed += sum(t[0] for t in b2_totals.values())
+                nd_freed += sum(t[1] for t in b2_totals.values())
             print(f"\nhealing dangling references:")
-            nd_cleared = heal_missing_references(nd_cutoff, args.apply)
+            nd_cleared = heal_missing_references(
+                nd_cutoff, args.apply, protected_b2, snap)
 
     verb = "freed" if args.apply else "would free"
     print(f"\ncandidates scanned : {scanned:,}")

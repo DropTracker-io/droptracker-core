@@ -171,13 +171,27 @@ def avatar_path(player_id: int, fingerprint: str) -> str:
     return os.path.join(IMAGE_ROOT, str(int(player_id)), f"{fingerprint}-avatar.png")
 
 
+def avatar_key(player_id: int, fingerprint: str) -> str:
+    from services.player_model import _b2
+
+    return f"{_b2().MODELS_PREFIX}/{int(player_id)}/{fingerprint}-avatar.png"
+
+
 def avatar_url(player_id: int, fingerprint: str) -> str:
+    from services.player_model import _b2, _b2_enabled
+
+    if _b2_enabled():
+        return _b2().url_for(avatar_key(player_id, fingerprint))
     from services.gear_image import PUBLIC_BASE
 
     return f"{PUBLIC_BASE}/{int(player_id)}/{fingerprint}-avatar.png"
 
 
 def avatar_exists(player_id: int, fingerprint: str) -> bool:
+    from services.player_model import _b2, _b2_enabled
+
+    if _b2_enabled():
+        return _b2().key_exists(avatar_key(player_id, fingerprint))
     return os.path.exists(avatar_path(player_id, fingerprint))
 
 
@@ -332,8 +346,12 @@ def _crop_box(alpha) -> Optional[Tuple[int, int, int, int]]:
     return (left, box_top, left + side, box_top + side)
 
 
-def build_avatar(source_path: str, size: int = AVATAR_SIZE):
-    """Returns the cropped avatar for a render, or None if it is not usable."""
+def build_avatar(source_path, size: int = AVATAR_SIZE):
+    """Returns the cropped avatar for a render, or None if it is not usable.
+
+    ``source_path`` is anything ``PIL.Image.open`` accepts — a filesystem path
+    in local mode, a ``BytesIO`` of the render fetched from B2 otherwise.
+    """
     from PIL import Image
 
     with Image.open(source_path) as img:
@@ -347,12 +365,19 @@ def build_avatar(source_path: str, size: int = AVATAR_SIZE):
 
 
 def ensure_avatar(player_id: int, fingerprint: str) -> Optional[str]:
-    """Derives and caches the avatar crop, returning its path.
+    """Derives and caches the avatar crop, returning where it can be served
+    from: a filesystem path in local mode, the CDN URL in B2 mode.
 
-    Idempotent and cheap on a hit (one ``stat``). Returns None when there is no
-    render to crop or the render is not a usable figure — both of which the
-    caller answers with the letter placeholder.
+    Idempotent and cheap on a hit (one ``stat`` locally; one Redis-cached HEAD
+    in B2 mode). Returns None when there is no render to crop or the render is
+    not a usable figure — both of which the caller answers with the letter
+    placeholder.
     """
+    from services.player_model import _b2, _b2_enabled
+
+    if _b2_enabled():
+        return _ensure_avatar_b2(player_id, fingerprint, _b2())
+
     from services.gear_image import image_path
 
     target = avatar_path(player_id, fingerprint)
@@ -393,3 +418,44 @@ def ensure_avatar(player_id: int, fingerprint: str) -> Optional[str]:
             pass
         return None
     return target
+
+
+def _ensure_avatar_b2(player_id: int, fingerprint: str, b2) -> Optional[str]:
+    """B2 twin of ensure_avatar's derive-and-cache: crop is fetched, derived
+    from the render object, written back beside it, and answered as a URL.
+
+    put_bytes verifies the upload (md5 vs ETag) and the atomicity concern the
+    local tmp-rename dance solves does not exist here — an S3 PUT is all-or-
+    nothing, a reader can never see a half-written object.
+    """
+    import io
+
+    from services.gear_image import image_key
+
+    target_key = avatar_key(player_id, fingerprint)
+    if b2.key_exists(target_key):
+        return b2.url_for(target_key)
+
+    try:
+        source = b2.get_bytes(image_key(player_id, fingerprint))
+    except Exception as exc:
+        print(f"Could not fetch render for player {player_id} from B2: {exc}")
+        return None
+    if source is None:
+        return None
+
+    try:
+        avatar = build_avatar(io.BytesIO(source))
+    except Exception as exc:
+        print(f"Could not build avatar for player {player_id}: {exc}")
+        return None
+    if avatar is None:
+        return None
+
+    buf = io.BytesIO()
+    avatar.save(buf, "PNG", optimize=True)
+    try:
+        return b2.put_bytes(target_key, buf.getvalue(), "image/png")
+    except Exception as exc:
+        print(f"Could not store avatar for player {player_id} in B2: {exc}")
+        return None

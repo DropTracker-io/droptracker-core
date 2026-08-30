@@ -1,12 +1,51 @@
 import aiofiles
 import os
 import re
+import shutil
+import tempfile
 from db import Player, models
 import uuid
 
 import aiohttp
 import asyncio
 import inspect
+
+
+# The public user-upload tree and the URL it is served at. Module-level so
+# tests (and any future relocation) can point both somewhere else.
+USER_UPLOAD_ROOT = "/store/droptracker/disc/static/assets/img/user-upload/"
+USER_UPLOAD_BASE_URL = "https://www.droptracker.io/img/user-upload/"
+
+
+def _b2_enabled() -> bool:
+    """Whether new screenshots go to B2 instead of the local user-upload tree.
+
+    Existing local files stay where they are (the nightly retention prune
+    churns them out over time); only *new* writes are rerouted. Every B2
+    failure below falls back to the original local write, so a bucket outage
+    degrades to the pre-offload behaviour rather than losing screenshots.
+    """
+    try:
+        from utils import image_storage
+
+        return image_storage.offload_enabled()
+    except Exception:
+        return False
+
+
+def _b2_unique_name(base_name: str, ext: str) -> str:
+    """Filename that is unique by construction.
+
+    The local writers establish uniqueness by scanning the target directory
+    for collisions — which stops working the moment files no longer land in
+    that directory. Two drops of the same item from the same NPC would then
+    map to the same B2 key, and the second would silently overwrite the first
+    (leaving the older row's image_url pointing at the newer screenshot). A
+    short random suffix removes the collision space instead of scanning it;
+    nothing parses these filenames — rows map to files via image_url only.
+    """
+    return f"{base_name}_{uuid.uuid4().hex[:8]}.{ext}"
+
 
 async def download_image(sub_type: str,
                          player: Player,
@@ -19,9 +58,8 @@ async def download_image(sub_type: str,
             #print(f"(download_image) Error: Player missing or has no wom_id: {player_wom_id}")
             return None
             
-        base_dir = "/store/droptracker/disc/static/assets/img/user-upload/"
-    
-        base_url = "https://www.droptracker.io/img/user-upload/"
+        base_dir = USER_UPLOAD_ROOT
+        base_url = USER_UPLOAD_BASE_URL
 
         # Normalize submission type aliases
         type_map = {
@@ -62,6 +100,9 @@ async def download_image(sub_type: str,
         if path_component:
             url_path = f"{url_path}{path_component}/"
 
+        b2_mode = _b2_enabled()
+        filepath = None
+
         def generate_unique_filename(directory, base_name_with_ext):
             """Generate unique filename, handling files that already have extensions"""
             # Split the filename and extension
@@ -69,7 +110,12 @@ async def download_image(sub_type: str,
                 base_name, ext = base_name_with_ext.rsplit('.', 1)
             else:
                 base_name, ext = base_name_with_ext, 'jpg'
-            
+
+            if b2_mode:
+                # The directory scan below can't see B2 objects — see
+                # _b2_unique_name for why a suffix replaces it.
+                return _b2_unique_name(base_name, ext)
+
             counter = 1
             unique_file_name = f"{base_name}.{ext}"
             while os.path.exists(os.path.join(directory, unique_file_name)):
@@ -127,8 +173,15 @@ async def download_image(sub_type: str,
                 base_name = f"{source_name}_{item_name}".strip("_") or f"submission_{uuid.uuid4()}"
                 filename = generate_unique_filename(directory_path, f"{base_name}.{ext}")
 
-            os.makedirs(directory_path, exist_ok=True)
-            filepath = os.path.join(directory_path, filename)
+            if b2_mode:
+                # Stage in the system temp dir: the multi-backend save
+                # machinery below needs a real path to write to, but the file
+                # must not land in the public tree it is being moved off of.
+                fd, filepath = tempfile.mkstemp(suffix=f"_{filename}")
+                os.close(fd)
+            else:
+                os.makedirs(directory_path, exist_ok=True)
+                filepath = os.path.join(directory_path, filename)
             #print(f"Filepath: {filepath}")
             # Save the file robustly, supporting multiple upload backends
             # Always try to rewind any underlying stream first
@@ -240,14 +293,41 @@ async def download_image(sub_type: str,
                 except Exception as retry_err:
                     print(f"Retry save failed: {type(retry_err).__name__}: {retry_err}")
 
+            if b2_mode:
+                try:
+                    from utils import image_storage
+
+                    key = f"{image_storage.USER_UPLOAD_PREFIX}/{url_path}{filename}"
+                    cdn_url = await image_storage.aput_file(key, filepath)
+                    processed_data["image_path"] = cdn_url
+                    try:
+                        os.unlink(filepath)
+                    except OSError:
+                        pass
+                    return cdn_url
+                except Exception as b2_err:
+                    # Degrade to the pre-offload behaviour: move the staged
+                    # file into the public tree and serve it from there.
+                    print(f"B2 offload failed for {filename}, keeping local: {b2_err}")
+                    os.makedirs(directory_path, exist_ok=True)
+                    local_path = os.path.join(directory_path, filename)
+                    shutil.move(filepath, local_path)
+                    filepath = local_path
+
             # Add the external URL to the processed data (mirrors filesystem)
             processed_data["image_path"] = f"{base_url}{url_path}{filename}"
-            
+
             #print(f"Saved image to {filepath}")
             #print(f"External URL set to: {processed_data['image_path']}")
             return filepath
         except Exception as e:
             print(f"Error saving image: {e}")
+            if b2_mode and filepath and filepath.startswith(tempfile.gettempdir()):
+                # Don't leak the staging file when the save/upload died midway.
+                try:
+                    os.unlink(filepath)
+                except OSError:
+                    pass
             return None
 
 async def download_player_image(submission_type: str, 
@@ -263,6 +343,11 @@ async def download_player_image(submission_type: str,
         /store/droptracker/disc/static/assets/img/user-upload/{player.wom_id}/{submission_type}/{npc_name (optional)}/{entry_name}_{entry_id}.{file_extension}
         This is served externally at:
         https://www.droptracker.io/img/user-upload/{player.wom_id}/{submission_type}/{npc_name (optional)}/{entry_name}_{entry_id}.{file_extension}
+
+        With B2 offload enabled the same layout goes under the bucket's
+        ``dt_img/user-upload/`` prefix instead and the returned external URL is
+        the CDN one; the returned path is then only a success sentinel (every
+        caller null-checks it and persists the URL — nothing reads the file).
     """
     # Validate player has a wom_id
     if not player or not player.wom_id:
@@ -270,10 +355,10 @@ async def download_player_image(submission_type: str,
         return None, None
     
     # Base internal directory path for storage
-    base_dir = "/store/droptracker/disc/static/assets/img/user-upload/"
-    
+    base_dir = USER_UPLOAD_ROOT
+
     # Base external URL for serving images
-    base_url = "https://www.droptracker.io/img/user-upload/"
+    base_url = USER_UPLOAD_BASE_URL
 
     # Normalize type and sanitize names
     type_map = {
@@ -302,18 +387,26 @@ async def download_player_image(submission_type: str,
     if subfolder:
         url_path = f"{url_path}{subfolder}/"
 
-    # Ensure the directory structure exists
-    os.makedirs(directory_path, exist_ok=True)
+    b2_mode = _b2_enabled()
 
     # Generate unique filename for the download
     def generate_unique_filename(directory, file_name, ext):
         base_name = sanitize_filename(str(file_name)) if file_name else "image"
+        if b2_mode:
+            # The collision scan below only sees local files — see
+            # _b2_unique_name for why a suffix replaces it.
+            return _b2_unique_name(base_name, ext)
         counter = 1
         unique_file_name = f"{base_name}.{ext}"
         while os.path.exists(os.path.join(directory, unique_file_name)):
             unique_file_name = f"{base_name}_{counter}.{ext}"
             counter += 1
         return unique_file_name
+
+    # Ensure the directory structure exists (B2 mode defers this to the
+    # fallback branch so the tree stops accumulating empty directories).
+    if not b2_mode:
+        os.makedirs(directory_path, exist_ok=True)
 
     # Generate the full filename with entry_name and entry_id
     complete_file_name = f"{sanitize_filename(str(entry_name))}_{entry_id}"
@@ -325,6 +418,28 @@ async def download_player_image(submission_type: str,
         async with aiohttp.ClientSession() as session:
             async with session.get(attachment_url) as response:
                 if response.status == 200:
+                    if b2_mode:
+                        # Buffer and upload — the file never touches disk
+                        # unless B2 fails. Screenshots are a few MB at most.
+                        data = await response.read()
+                        try:
+                            from utils import image_storage
+
+                            key = (f"{image_storage.USER_UPLOAD_PREFIX}/"
+                                   f"{url_path}{unique_file_name}")
+                            external_url = await image_storage.aput_bytes(
+                                key, data,
+                                image_storage.content_type_for(unique_file_name))
+                            print(f"Successfully offloaded image to {key}")
+                            return download_path, external_url
+                        except Exception as b2_err:
+                            print(f"B2 offload failed for {unique_file_name}, "
+                                  f"keeping local: {b2_err}")
+                            os.makedirs(directory_path, exist_ok=True)
+                            async with aiofiles.open(download_path, 'wb') as f:
+                                await f.write(data)
+                            external_url = f"{base_url}{url_path}{unique_file_name}"
+                            return download_path, external_url
                     async with aiofiles.open(download_path, 'wb') as f:
                         while True:
                             chunk = await response.content.read(1024)

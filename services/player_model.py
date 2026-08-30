@@ -10,6 +10,12 @@ keeps malformed files out of the render pipeline where they would fail silently.
 Models are keyed by an outfit fingerprint from the client. The same character in
 the same gear renders identically, so one file per outfit is enough and repeat
 uploads are cheap no-ops.
+
+Storage backend: when ``utils.image_storage.offload_enabled()`` (prod since
+2026-08-30) models live in B2 under ``dt_img/models/{player_id}/`` and are
+served from the CDN; the local tree remains the behaviour for dev boxes
+without B2 credentials. The validation above happens in both modes — where the
+bytes land afterwards changes nothing about needing to trust them first.
 """
 from __future__ import annotations
 
@@ -19,9 +25,23 @@ import struct
 from typing import Optional, Tuple
 
 # Public tree that nginx already serves at /img, so a stored model has a URL
-# without any new routing.
+# without any new routing. (Local mode only — see the module docstring.)
 MODEL_ROOT = "/store/droptracker/disc/static/assets/img/models"
 PUBLIC_BASE = "https://www.droptracker.io/img/models"
+
+
+def _b2():
+    """Lazy import so unit tests and B2-less installs never pay for boto3."""
+    from utils import image_storage
+
+    return image_storage
+
+
+def _b2_enabled() -> bool:
+    try:
+        return _b2().offload_enabled()
+    except Exception:
+        return False
 
 # A geared character exports well under this. The cap is what stops a client
 # filling the disk one "model" at a time.
@@ -92,7 +112,16 @@ def model_path(player_id: int, fingerprint: str, *, pet: bool = False) -> str:
     return os.path.join(model_dir(player_id), name)
 
 
+def model_key(player_id: int, fingerprint: str, *, pet: bool = False) -> str:
+    """B2 object key for a model — mirrors the on-disk layout 1:1, which is
+    what let the migration upload the existing tree without a mapping table."""
+    name = f"{fingerprint}{'-pet' if pet else ''}.glb"
+    return f"{_b2().MODELS_PREFIX}/{int(player_id)}/{name}"
+
+
 def model_url(player_id: int, fingerprint: str, *, pet: bool = False) -> str:
+    if _b2_enabled():
+        return _b2().url_for(model_key(player_id, fingerprint, pet=pet))
     name = f"{fingerprint}{'-pet' if pet else ''}.glb"
     return f"{PUBLIC_BASE}/{int(player_id)}/{name}"
 
@@ -125,6 +154,19 @@ def store_model(player_id: int, fingerprint: str, data: bytes,
     if not is_valid_fingerprint(fingerprint):
         print(f"Rejecting model upload for player {player_id}: bad fingerprint")
         return None
+
+    if _b2_enabled():
+        # No local fallback on failure, deliberately: a model written locally
+        # while B2 is down would be invisible to model_exists (a B2 HEAD), so
+        # nothing would ever render it. Failing plainly means the plugin's
+        # next opportunistic upload simply tries again.
+        try:
+            return _b2().put_bytes(
+                model_key(player_id, fingerprint, pet=pet), data,
+                "model/gltf-binary")
+        except Exception as exc:
+            print(f"Could not store model for player {player_id} in B2: {exc}")
+            return None
 
     directory = model_dir(player_id)
     ensure_public_dir(directory)
@@ -159,6 +201,10 @@ def _fingerprint_of_filename(name: str) -> str:
 def model_exists(player_id: int, fingerprint: str, *, pet: bool = False) -> bool:
     if not is_valid_fingerprint(fingerprint):
         return False
+    if _b2_enabled():
+        # Positive answers are Redis-cached (objects are immutable), so the
+        # steady-state cost is a cache hit, not a HEAD per call.
+        return _b2().key_exists(model_key(player_id, fingerprint, pet=pet))
     return os.path.exists(model_path(player_id, fingerprint, pet=pet))
 
 
@@ -173,7 +219,14 @@ def prune_old_models(player_id: int, keep: int = 5,
     the pinned profile model, chiefly. A pin is a promise ("your profile shows
     this outfit"), and outfit churn must not be able to break it. The pet file
     travels with its protected fingerprint.
+
+    Renders (``{fp}.png``) are deliberately NOT pruned in either backend: old
+    Discord notifications embed them by URL forever, exactly like drop
+    screenshots. Only the model itself and its derived avatar crop go.
     """
+    if _b2_enabled():
+        return _prune_old_models_b2(player_id, keep, protect)
+
     directory = model_dir(player_id)
     try:
         entries = [
@@ -207,4 +260,32 @@ def prune_old_models(player_id: int, keep: int = 5,
             os.unlink(crop)
         except OSError:
             pass
+    return removed
+
+
+def _prune_old_models_b2(player_id: int, keep: int,
+                         protect: frozenset) -> int:
+    """B2 twin of the local prune: same keep*2 window over .glb keys sorted by
+    upload time, same protected-fingerprint exemption, same avatar-crop
+    cleanup, same render exemption."""
+    b2 = _b2()
+    prefix = f"{b2.MODELS_PREFIX}/{int(player_id)}/"
+    try:
+        entries = [
+            (item["last_modified"], item["key"])
+            for item in b2.list_keys(prefix)
+            if item["key"].endswith(".glb")
+            and _fingerprint_of_filename(item["key"][len(prefix):]) not in protect
+        ]
+    except Exception as exc:
+        print(f"Could not list models for player {player_id} in B2: {exc}")
+        return 0
+
+    entries.sort(reverse=True)
+    removed = 0
+    for _mtime, key in entries[keep * 2:]:
+        if b2.delete_key(key):
+            removed += 1
+        fingerprint = _fingerprint_of_filename(key[len(prefix):])
+        b2.delete_key(f"{prefix}{fingerprint}-avatar.png")
     return removed
