@@ -115,3 +115,120 @@ class TestRemoteFetchAllowlist:
     def test_non_http_schemes_are_refused(self):
         for url in ("file:///etc/passwd", "gopher://x/1", "ftp://cdn.discordapp.com/x"):
             assert Service._remote_image_allowed(url) is False
+
+
+class TestResolveImageAttachment:
+    """The resolver’s three-source order: local file, our B2 bucket, then the
+    allowlisted remote fetch.
+
+    Pinned after the 2026-08-30 B2 offload silently stripped every screenshot:
+    the old hosted branch claimed anything containing "droptracker.io" — which
+    matched the new video.droptracker.io CDN URLs — mapped them to a local
+    path that no longer exists, and returned before the fallback could run.
+    """
+
+    @staticmethod
+    def _service():
+        svc = Service.__new__(Service)  # resolver needs no __init__ state
+        return svc
+
+    @staticmethod
+    def _run(coro):
+        import asyncio
+
+        return asyncio.run(coro)
+
+    @pytest.fixture(autouse=True)
+    def _cdn_env(self, monkeypatch):
+        monkeypatch.setenv("B2_CDN_BASE_URL", "https://video.droptracker.io")
+
+        # `interactions` is conftest-stubbed; stand in a File with the real
+        # class's naming behaviour (path basename / "file" for raw IO) so the
+        # file_name assertions test what Discord would actually see.
+        class _FakeFile:
+            def __init__(self, file, file_name=None, **_kw):
+                self.file = file
+                if file_name is not None:
+                    self.file_name = file_name
+                elif hasattr(file, "read"):
+                    self.file_name = "file"
+                else:
+                    self.file_name = os.path.basename(str(file))
+
+        monkeypatch.setattr(ns.interactions, "File", _FakeFile)
+
+    def test_local_file_still_wins(self, img_root):
+        att, tmp = self._run(self._service()._resolve_image_attachment(
+            "https://www.droptracker.io/img/itemdb/4708.png", 1))
+        assert att is not None and tmp is None
+        assert str(att.file).endswith("itemdb/4708.png")
+
+    def test_b2_url_attaches_object_bytes_from_memory(self, monkeypatch):
+        from utils import image_storage
+
+        async def fake_get(key):
+            assert key == "dt_img/user-upload/1/level_up/Farming/lvl_ab12cd34.png"
+            return b"png-bytes"
+
+        monkeypatch.setattr(image_storage, "aget_bytes", fake_get)
+        att, tmp = self._run(self._service()._resolve_image_attachment(
+            "https://video.droptracker.io/dt_img/user-upload/1/level_up/"
+            "Farming/lvl_ab12cd34.png", 1))
+        assert att is not None and tmp is None
+        # A bare IOBase upload is named "file" (no extension) by interactions,
+        # which Discord will not render as an image — and the components path
+        # references attachment://{file_name}. The basename must survive.
+        assert att.file_name == "lvl_ab12cd34.png"
+        assert att.file.read() == b"png-bytes"
+
+    def test_missing_b2_object_degrades_to_no_image(self, monkeypatch):
+        from utils import image_storage
+
+        async def fake_get(key):
+            return None
+
+        monkeypatch.setattr(image_storage, "aget_bytes", fake_get)
+        att, tmp = self._run(self._service()._resolve_image_attachment(
+            "https://video.droptracker.io/dt_img/user-upload/1/drop/x.png", 1))
+        assert (att, tmp) == (None, None)
+
+    def test_b2_read_never_goes_through_http(self, monkeypatch):
+        """The bucket read is server-side; aiohttp must not be touched."""
+        from utils import image_storage
+
+        async def fake_get(key):
+            return b"d"
+
+        monkeypatch.setattr(image_storage, "aget_bytes", fake_get)
+        monkeypatch.setattr(
+            ns.aiohttp, "ClientSession",
+            lambda *a, **k: pytest.fail("B2 URLs must not be fetched over HTTP"))
+        att, _ = self._run(self._service()._resolve_image_attachment(
+            "https://video.droptracker.io/dt_img/user-upload/1/drop/x.png", 1))
+        assert att is not None
+
+    def test_dangling_hosted_url_does_not_fetch(self, img_root, monkeypatch):
+        """An unmapped www URL answers (None, None) without a network trip —
+        www.droptracker.io is deliberately not on the remote allowlist."""
+        monkeypatch.setattr(
+            ns.aiohttp, "ClientSession",
+            lambda *a, **k: pytest.fail("hosted URLs must never be fetched"))
+        att, tmp = self._run(self._service()._resolve_image_attachment(
+            "https://www.droptracker.io/img/user-upload/9/drop/gone.jpg", 1))
+        assert (att, tmp) == (None, None)
+
+    def test_ssrf_targets_still_refused(self, monkeypatch):
+        monkeypatch.setattr(
+            ns.aiohttp, "ClientSession",
+            lambda *a, **k: pytest.fail("disallowed hosts must never be fetched"))
+        for url in ("http://127.0.0.1:31325/api/v1/me",
+                    "http://169.254.169.254/latest/meta-data/",
+                    "https://evil.example.com/x.png"):
+            att, tmp = self._run(
+                self._service()._resolve_image_attachment(url, 1))
+            assert (att, tmp) == (None, None)
+
+    def test_videos_on_our_cdn_are_not_image_keys(self):
+        # Same host, different namespace: key_from_url only owns dt_img/.
+        assert Service._b2_image_key(
+            "https://video.droptracker.io/videos/123/clip.mp4") is None

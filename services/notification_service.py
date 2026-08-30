@@ -431,12 +431,18 @@ class NotificationService:
             return
 
     async def _cleanup_old_video_attachments(self) -> None:
-        """Delete old temp MP4 files for notification attachments."""
+        """Delete old temp files for notification attachments.
+
+        Covers the MP4s the video path stages AND the ``notif_img_*`` images
+        the attachment resolver's remote branch downloads — senders delete
+        their own temp after a successful send, so anything old enough to
+        trip the TTL here is the residue of a send that died in between.
+        """
         try:
             os.makedirs(self._video_notif_dir, exist_ok=True)
             now_ts = datetime.now().timestamp()
             for name in os.listdir(self._video_notif_dir):
-                if not name.endswith(".mp4"):
+                if not (name.endswith(".mp4") or name.startswith("notif_img_")):
                     continue
                 path = os.path.join(self._video_notif_dir, name)
                 try:
@@ -646,29 +652,70 @@ class NotificationService:
         host = (parsed.hostname or "").lower()
         return any(host == h or host.endswith("." + h) for h in cls.REMOTE_IMAGE_HOSTS)
 
+    @staticmethod
+    def _b2_image_key(image_url: str):
+        """Bucket key when ``image_url`` is one of OUR B2 CDN URLs, else None.
+
+        ``key_from_url`` only ever answers for ``dt_img/`` keys on our own
+        CDN bases, so an attacker-influenced URL can at worst name another
+        object in our public image tree — the same exposure class
+        ``hosted_image_path`` allows for the local tree."""
+        try:
+            from utils import image_storage
+
+            return image_storage.key_from_url(image_url)
+        except Exception:
+            return None
+
     async def _resolve_image_attachment(self, image_url, notification_id) -> tuple["interactions.File | None", "str | None"]:
         """One image URL -> an attachable ``interactions.File``.
 
-        droptracker.io URLs map straight to their file under static/assets
-        (no HTTP round-trip). Any other http(s) URL — e.g. the Discord CDN
-        URL a low-value non-API drop used to carry — is fetched to a temp
-        file so the screenshot still ships with the embed instead of being
-        silently discarded (the pre-2026-07-15 behavior).
+        Screenshots are ATTACHED rather than embedded by URL on purpose:
+        Discord rehosts an attachment forever, so the message keeps its
+        image after the origin file/object is aged out by retention.
+
+        Three sources, tried in order:
+        - droptracker.io URLs map straight to their file under static/assets
+          (no HTTP round-trip) — pre-offload rows, and B2-outage fallbacks.
+        - Our B2 CDN URLs (``dt_img/`` keys, what every new row carries since
+          2026-08-30) are read server-side from the bucket and attached from
+          memory. Reading the object directly — never GETting the public CDN
+          URL — keeps this out of the SSRF-proxy business entirely.
+        - Any other http(s) URL — e.g. the Discord CDN URL a low-value
+          non-API drop used to carry — is fetched to a temp file, gated by
+          the remote-host allowlist.
 
         Returns ``(attachment, temp_path)``; ``temp_path`` is only set for
-        remote fetches and must be deleted by the caller after sending.
-        Best-effort: any failure returns ``(None, None)`` (embed sends
-        without an image, never fails the notification)."""
+        remote fetches and must be deleted by the caller after sending (the
+        janitor sweeps stragglers). Best-effort: any failure returns
+        ``(None, None)`` (embed sends without an image, never fails the
+        notification)."""
         if not image_url or not isinstance(image_url, str):
             return None, None
         try:
-            if "droptracker.io" in image_url:
-                local_path = self.hosted_image_path(image_url)
-                if local_path:
-                    return interactions.File(local_path), None
-                print(f"Debug - no hosted image for: {image_url}")
-                return None, None
+            local_path = self.hosted_image_path(image_url)
+            if local_path:
+                return interactions.File(local_path), None
+            b2_key = self._b2_image_key(image_url)
+            if b2_key:
+                from utils import image_storage
+
+                data = await image_storage.aget_bytes(b2_key)
+                if not data:
+                    print(f"Debug - no B2 object for: {image_url}")
+                    return None, None
+                import io
+
+                # file_name is load-bearing twice over: interactions names a
+                # bare IOBase upload "file" (no extension, so Discord won't
+                # render it as an image), and the components path references
+                # the upload as attachment://{file_name}.
+                return interactions.File(
+                    io.BytesIO(data), file_name=os.path.basename(b2_key)
+                ), None
             if not self._remote_image_allowed(image_url):
+                if "droptracker.io" in image_url:
+                    print(f"Debug - no hosted image for: {image_url}")
                 return None, None
             # Remote (non-hosted) image: fetch to a temp file. 10 MB cap —
             # plugin screenshots are a few hundred KB.
@@ -1546,10 +1593,11 @@ class NotificationService:
 
             if image_url:
                 try:
-                    # Resolved + containment-checked: image_url is attacker-influenced.
-                    local_path = self.hosted_image_path(image_url)
-                    if local_path:
-                        attachment = interactions.File(local_path)
+                    # Resolved + containment-checked (local tree or our B2 bucket;
+                    # anything else needs the remote-host allowlist — see the resolver).
+                    attachment, _img_tmp = await self._resolve_image_attachment(
+                        image_url, notification.id)
+                    if attachment:
                         await self._send(channel, content, embed=embed, files=attachment)
                     else:
                         await self._send(channel, content, embed=embed)
@@ -1666,10 +1714,11 @@ class NotificationService:
 
             if image_url:
                 try:
-                    # Resolved + containment-checked: image_url is attacker-influenced.
-                    local_path = self.hosted_image_path(image_url)
-                    if local_path:
-                        attachment = interactions.File(local_path)
+                    # Resolved + containment-checked (local tree or our B2 bucket;
+                    # anything else needs the remote-host allowlist — see the resolver).
+                    attachment, _img_tmp = await self._resolve_image_attachment(
+                        image_url, notification.id)
+                    if attachment:
                         await self._send(channel, content, embed=embed, files=attachment)
                     else:
                         await self._send(channel, content, embed=embed)
@@ -1782,10 +1831,11 @@ class NotificationService:
                     await self._send(channel, content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
-                        # Resolved + containment-checked: image_url is attacker-influenced.
-                        local_path = self.hosted_image_path(image_url)
-                        if local_path:
-                            attachment = interactions.File(local_path)
+                        # Resolved + containment-checked (local tree or our B2 bucket;
+                        # anything else needs the remote-host allowlist — see the resolver).
+                        attachment, _img_tmp = await self._resolve_image_attachment(
+                            image_url, notification.id)
+                        if attachment:
                             await self._send(channel, content, embed=embed, files=attachment)
                         else:
                             await self._send(channel, content, embed=embed)
@@ -1924,10 +1974,11 @@ class NotificationService:
                     await self._send(channel, content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
-                        # Resolved + containment-checked: image_url is attacker-influenced.
-                        local_path = self.hosted_image_path(image_url)
-                        if local_path:
-                            attachment = interactions.File(local_path)
+                        # Resolved + containment-checked (local tree or our B2 bucket;
+                        # anything else needs the remote-host allowlist — see the resolver).
+                        attachment, _img_tmp = await self._resolve_image_attachment(
+                            image_url, notification.id)
+                        if attachment:
                             await self._send(channel, content, embed=embed, files=attachment)
                         else:
                             await self._send(channel, content, embed=embed)
@@ -2044,10 +2095,11 @@ class NotificationService:
                     await self._send(channel, content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
-                        # Resolved + containment-checked: image_url is attacker-influenced.
-                        local_path = self.hosted_image_path(image_url)
-                        if local_path:
-                            attachment = interactions.File(local_path)
+                        # Resolved + containment-checked (local tree or our B2 bucket;
+                        # anything else needs the remote-host allowlist — see the resolver).
+                        attachment, _img_tmp = await self._resolve_image_attachment(
+                            image_url, notification.id)
+                        if attachment:
                             await self._send(channel, content, embed=embed, files=attachment)
                         else:
                             await self._send(channel, content, embed=embed)
@@ -3870,10 +3922,11 @@ class NotificationService:
                     message = await self._send(channel, content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
-                        # Resolved + containment-checked: image_url is attacker-influenced.
-                        local_path = self.hosted_image_path(image_url)
-                        if local_path:
-                            attachment = interactions.File(local_path)
+                        # Resolved + containment-checked (local tree or our B2 bucket;
+                        # anything else needs the remote-host allowlist — see the resolver).
+                        attachment, _img_tmp = await self._resolve_image_attachment(
+                            image_url, notification.id)
+                        if attachment:
                             message = await self._send(channel, content, embed=embed, files=attachment)
                         else:
                             message = await self._send(channel, content, embed=embed)
@@ -3988,10 +4041,11 @@ class NotificationService:
                         message = await self._send(channel, content, embed=embed, files=video_attachment)
                     elif image_url:
                         try:
-                            # Resolved + containment-checked: image_url is attacker-influenced.
-                            local_path = self.hosted_image_path(image_url)
-                            if local_path:
-                                attachment = interactions.File(local_path)
+                            # Resolved + containment-checked (local tree or our B2 bucket;
+                            # anything else needs the remote-host allowlist — see the resolver).
+                            attachment, _img_tmp = await self._resolve_image_attachment(
+                                image_url, notification.id)
+                            if attachment:
                                 message = await self._send(channel, content, embed=embed, files=attachment)
                             else:
                                 message = await self._send(channel, content, embed=embed)
@@ -4136,10 +4190,11 @@ class NotificationService:
             
             if image_url:
                 try:
-                    # Resolved + containment-checked: image_url is attacker-influenced.
-                    local_path = self.hosted_image_path(image_url)
-                    if local_path:
-                        attachment = interactions.File(local_path)
+                    # Resolved + containment-checked (local tree or our B2 bucket;
+                    # anything else needs the remote-host allowlist — see the resolver).
+                    attachment, _img_tmp = await self._resolve_image_attachment(
+                        image_url, notification.id)
+                    if attachment:
                         message = await self._send(channel, content, embed=embed, files=attachment)
                     else:
                         #print(f"Debug - CA image file not found at: {local_path}")
@@ -4275,13 +4330,14 @@ class NotificationService:
                     message = await self._send(channel, content, embed=embed, files=video_attachment)
                 elif image_url:
                     try:
-                        # Resolved + containment-checked: image_url is attacker-influenced.
-                        local_path = self.hosted_image_path(image_url)
-                        if local_path:
-                            attachment = interactions.File(local_path)
+                        # Resolved + containment-checked (local tree or our B2 bucket;
+                        # anything else needs the remote-host allowlist — see the resolver).
+                        attachment, _img_tmp = await self._resolve_image_attachment(
+                            image_url, notification.id)
+                        if attachment:
                             message = await self._send(channel, content, embed=embed, files=attachment)
                         else:
-                            print(f"Debug - Collection log image file not found at: {local_path}")
+                            print(f"Debug - Collection log image not resolvable: {image_url}")
                             message = await self._send(channel, content, embed=embed)
                     except Exception as e:
                         print(f"Debug - Error loading collection log attachment: {e}")

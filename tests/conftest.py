@@ -23,6 +23,11 @@ os.environ.setdefault("STATE", "dev")
 os.environ.setdefault("API_PORT", "31323")
 os.environ.setdefault("WEBHOOK_TOKEN", "fake-webhook-token")
 os.environ.setdefault("XF_KEY", "fake-xf-key")
+# The suite must not inherit the box's storage backend: load_dotenv() (called
+# at import by several real modules) never overrides existing vars, so this
+# pins unit tests to local-filesystem mode whatever the prod .env says.
+# B2-mode tests opt in with monkeypatch.setenv.
+os.environ.setdefault("IMG_B2_OFFLOAD", "false")
 
 # ── Stub heavy modules BEFORE any test module imports them ────────────────────
 # These modules either connect to DB/Redis at import time or are very large;
