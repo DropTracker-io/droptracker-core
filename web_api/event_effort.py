@@ -18,7 +18,9 @@ known yet" rather than wrong. Bosses WOM publishes no rate for fall back to
 ``npc_ehb_rates`` (our own estimates, computed by
 ``scripts/compute_npc_ehb_rates.py``); hours priced that way are flagged
 ``estimated`` so the UI can label them, and a derived rate never overrides a
-WOM one.
+WOM one. Clue tiers are priced differently again — only the openings matched by
+a scroll dealt inside the window count, so their ``ehb_hours`` is routinely
+lower than their ``kills`` implies (``services/event_effort.CLUE_TIERS``).
 """
 from __future__ import annotations
 
@@ -57,7 +59,7 @@ def _rows_for(s, event_id: int, player_ids: Optional[Iterable[int]] = None) -> l
 
     q = (s.query(EventEffort.player_id, EventEffort.team_id, EventEffort.npc_id,
                  NpcList.npc_name, EventEffort.boss_metric, EventEffort.kills,
-                 EventEffort.completions,
+                 EventEffort.completions, EventEffort.rolls,
                  EventEffort.last_at, EventEffort.frozen_at, EventEffort.source)
          .outerjoin(NpcList, NpcList.npc_id == EventEffort.npc_id)
          .filter(EventEffort.event_id == event_id))
@@ -72,7 +74,7 @@ def _rows_for(s, event_id: int, player_ids: Optional[Iterable[int]] = None) -> l
 def _group_rows(rows) -> dict:
     grouped: dict = {}
     for (player_id, _team_id, npc_id, npc_name, metric, kills, completions,
-         last_at, frozen_at, source) in rows:
+         rolls, last_at, frozen_at, source) in rows:
         grouped.setdefault(int(player_id), []).append({
             "npc_id": int(npc_id) if npc_id is not None else None,
             "npc_name": npc_name,
@@ -81,6 +83,9 @@ def _group_rows(rows) -> dict:
             # Non-zero only at COMPLETION_MARKERS NPCs; the pricing split lives
             # in services/event_effort.rows_to_summary.
             "completions": completions,
+            # Non-zero only at CLUE_TIERS NPCs: scrolls dealt inside the window,
+            # against which the tier's openings are paired before pricing.
+            "rolls": rolls,
             "last_at": last_at,
             "frozen_at": frozen_at,
             "source": source,
@@ -95,6 +100,8 @@ def _summarize(rows, rates, derived_rates, *, boss_limit: int) -> dict:
     last_at = summary.get("last_at")
     bosses = []
     for b in summary.get("bosses", [])[:boss_limit]:
+        # `rolled`/`paired` ride along as-is: they are counts, and they are None
+        # for every NPC that is not a clue tier.
         bosses.append({**b, "ehb_hours": round(float(b.get("ehb_hours") or 0.0), 2)})
     return {
         # False when the WOM rate cache is cold, in which case every

@@ -335,13 +335,25 @@ class NotificationService:
         embed.set_footer(global_footer)
         return embed
 
+    @staticmethod
+    def _death_value_text(value) -> str:
+        """A death's GP value for display, or "" when the client never sent one.
+
+        Empty rather than "0": plugins before 6.0.4 send no value at all, and
+        rendering that as 0gp would tell the clan a death was free when nobody
+        actually knows what it cost.
+        """
+        coerced = NotificationService._coerce_int(value)
+        return format_number(coerced) if coerced is not None else ""
+
     def _build_default_death_embed(self, data: dict, player_name: str, player_id: int, video_url: str = "") -> interactions.Embed:
         """
         Build a default death embed when no DB-backed template exists.
         """
         source = str(data.get("source") or "").strip()
-        location = str(data.get("location") or "").strip()
+        location = str(data.get("region_name") or data.get("location") or "").strip()
         region_id = self._coerce_int(data.get("region_id"))
+        value_lost = self._death_value_text(data.get("value_lost"))
 
         embed = interactions.Embed(
             title="Player Death",
@@ -354,8 +366,79 @@ class NotificationService:
             embed.add_field(name="Location", value=location, inline=True)
         elif region_id is not None:
             embed.add_field(name="Region", value=f"`{region_id}`", inline=True)
+        if value_lost:
+            # Only shown when the client actually sent a value; see
+            # _death_value_text for why a missing one is not rendered as 0.
+            embed.add_field(name="Value Lost", value=f"`{value_lost}`", inline=True)
         if video_url:
             embed.add_field(name="Video", value=f"[Watch clip]({video_url})", inline=False)
+        embed.set_footer(global_footer)
+        return embed
+
+    @staticmethod
+    def _ordinal(value: int) -> str:
+        """1 -> '1st', 2 -> '2nd', 1000 -> '1,000th' — for KC milestones."""
+        if 10 <= value % 100 <= 20:
+            suffix = "th"
+        else:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(value % 10, "th")
+        return f"{value:,}{suffix}"
+
+    def _kc_achievement_text(self, data: dict) -> str:
+        """The milestone spelled out: 'First Zulrah kill' / '1,000th Zulrah kill'."""
+        npc_name = str(data.get("npc_name") or "Unknown boss")
+        if data.get("is_first_kill"):
+            return f"First {npc_name} kill"
+        milestone = self._coerce_int(data.get("milestone"))
+        if milestone is not None:
+            return f"{self._ordinal(milestone)} {npc_name} kill"
+        return f"{npc_name} kill count milestone"
+
+    def _build_default_kc_embed(self, data: dict, player_name: str, player_id: int, video_url: str = "") -> interactions.Embed:
+        """
+        Build a default KC milestone embed when no DB-backed template exists.
+        """
+        kill_count = self._coerce_int(data.get("kill_count"))
+
+        embed = interactions.Embed(
+            title="Kill Count Milestone",
+            description=f"{player_link(player_name, player_id)} reached **{self._kc_achievement_text(data)}**!",
+            color="#c8aa6e",
+        )
+        if kill_count is not None:
+            embed.add_field(name="Kill Count", value=f"`{kill_count:,}`", inline=True)
+        if video_url:
+            embed.add_field(name="Video", value=f"[Watch clip]({video_url})", inline=False)
+        embed.set_footer(global_footer)
+        return embed
+
+    def _build_default_rank_embed(self, data: dict, player_name: str, player_id: int) -> interactions.Embed:
+        """
+        Build a default hiscores-rank milestone embed when no DB-backed
+        template exists.
+        """
+        metric_label = str(data.get("metric_label") or data.get("metric") or "a hiscore")
+        threshold = self._coerce_int(data.get("threshold"))
+        rank = self._coerce_int(data.get("rank"))
+        value = self._coerce_int(data.get("value"))
+        metric_kind = str(data.get("metric_kind") or "")
+
+        threshold_text = f"top {threshold:,}" if threshold is not None else "a new rank bracket"
+        embed = interactions.Embed(
+            title="Hiscores Rank Milestone",
+            description=(
+                f"{player_link(player_name, player_id)} entered the "
+                f"**{threshold_text}** on **{metric_label}**!"
+            ),
+            color="#c8aa6e",
+        )
+        if rank is not None:
+            embed.add_field(name="Rank", value=f"`{rank:,}`", inline=True)
+        if value is not None:
+            value_label = {"boss": "Kill Count", "skill": "XP", "clue": "Completions"}.get(
+                metric_kind, "Score"
+            )
+            embed.add_field(name=value_label, value=f"`{value:,}`", inline=True)
         embed.set_footer(global_footer)
         return embed
 
@@ -1278,13 +1361,19 @@ class NotificationService:
             return 0
 
     @staticmethod
-    def _blacklist_skip_reason(db_session, notification: NotificationQueue, data: dict) -> str | None:
-        """A ``skipped: …`` reason when the group muted this notification's subject.
+    def _notification_skip_reason(db_session, notification: NotificationQueue, data: dict) -> str | None:
+        """A ``skipped: …`` reason when the group muted this notification.
 
-        Fails open on any error — a blacklist lookup problem must cost a group
-        nothing more than an unfiltered notification.
+        Two rules, both also applied at enqueue time: the item/NPC/region
+        blacklist, and the safe-death setting. Re-checking here is what makes a
+        setting change apply to notifications already sitting in the queue.
+
+        Fails open on an unexpected error — a lookup problem must cost a group
+        nothing more than an unfiltered notification. (The individual rules make
+        their own, narrower calls about their own failure modes.)
         """
         try:
+            from db.death_filter import death_skip_reason
             from db.notification_blacklist import blacklist_reason
 
             reason = blacklist_reason(
@@ -1293,6 +1382,16 @@ class NotificationService:
                 notification.notification_type,
                 data,
             )
+            if not reason:
+                # Safe deaths are withheld by the same two-gate arrangement:
+                # this catches deaths queued before a leader turned the setting
+                # off, which the enqueue gate could not have known about.
+                reason = death_skip_reason(
+                    db_session,
+                    notification.group_id,
+                    notification.notification_type,
+                    data,
+                )
             return f"skipped: {reason}" if reason else None
         except Exception:
             return None
@@ -1311,7 +1410,7 @@ class NotificationService:
             # entry was added, which would otherwise still be announced minutes
             # later. Both sides share db.notification_blacklist so they cannot
             # disagree the way the channel-fallback rule once did.
-            skip_reason = self._blacklist_skip_reason(db_session, notification, data)
+            skip_reason = self._notification_skip_reason(db_session, notification, data)
             if skip_reason:
                 app_logger.log(
                     log_type="info",
@@ -1369,6 +1468,10 @@ class NotificationService:
                 await self.send_level_up_notification_with_session(notification, data, db_session)
             elif notification_type in ('xp_milestone', 'total_level_milestone'):
                 await self.send_xp_milestone_notification_with_session(notification, data, db_session)
+            elif notification_type == 'kc_milestone':
+                await self.send_kc_milestone_notification_with_session(notification, data, db_session)
+            elif notification_type == 'rank_milestone':
+                await self.send_rank_milestone_notification_with_session(notification, data, db_session)
             elif notification_type == 'quest':
                 await self.send_quest_notification_with_session(notification, data, db_session)
             elif notification_type == 'death':
@@ -1736,6 +1839,197 @@ class NotificationService:
             db_session.commit()
             raise
 
+    async def send_kc_milestone_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
+        """Send a KC milestone (first kill / every-Nth-kill) notification.
+
+        embed_type is 'kc' — GroupEmbed.embed_type is String(10), so the
+        queue type 'kc_milestone' cannot double as the template key. No
+        group-1 template row ships; groups without one get the code-default
+        embed, like quest/death/diary.
+        """
+        notification.status = 'processing'
+        db_session.commit()
+        try:
+            group_id = notification.group_id
+            player_id = notification.player_id
+
+            # Dedicated KC channel, falling back to the loot channel — the
+            # exact pair GROUP_CHANNEL_NOTIFICATION_KEYS gates enqueue on.
+            channel_id_value = self._resolve_group_channel_id(
+                db_session, group_id, 'channel_id_to_post_kc'
+            )
+            if not channel_id_value:
+                notification.status = 'failed'
+                notification.error_message = f"No channel configured for group {group_id}"
+                db_session.commit()
+                return
+
+            channel, channel_error = await self._fetch_sendable_channel(channel_id_value)
+            if channel is None:
+                notification.status = 'failed'
+                notification.error_message = channel_error or f"Channel not found for group {group_id}"
+                db_session.commit()
+                return
+
+            upgrade_active = has_custom_embeds(group_id)
+            if upgrade_active:
+                embed_template = await self.db_ops.get_group_embed('kc', group_id)
+            else:
+                embed_template = await self.db_ops.get_group_embed('kc', 1)
+
+            player_name = data.get("player_name") or ""
+            npc_name = str(data.get("npc_name") or "")
+            image_url = data.get("image_url") or ""
+            kill_count = self._coerce_int(data.get("kill_count"))
+            milestone = self._coerce_int(data.get("milestone"))
+            achievement_text = self._kc_achievement_text(data)
+
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
+            replacements = {
+                "{player_name}": player_link(player_name, player_id),
+                "{player_name_plain}": player_name,
+                "{npc_name}": npc_name,
+                "{npc_id}": str(data.get("npc_id") or ""),
+                "{kill_count}": f"{kill_count:,}" if kill_count is not None else "",
+                "{kc_milestone}": f"{milestone:,}" if milestone is not None else "",
+                "{kc_achievement}": achievement_text,
+                "{image_url}": image_url,
+                "{video_url}": "",
+                "{video_link}": "",
+            }
+            replacements.update(self._plugin_version_placeholder_map(data))
+
+            if await self._try_send_component_layout(
+                db_session, notification, channel, group_id, "kc_milestone", replacements
+            ):
+                await self._finish_component_send(db_session, notification, data)
+                return
+
+            if embed_template:
+                embed = replace_placeholders(embed_template, replacements)
+                if group_id == 2:
+                    embed = await self.remove_group_field(embed)
+            else:
+                embed = self._build_default_kc_embed(
+                    data=data,
+                    player_name=player_name,
+                    player_id=player_id,
+                )
+
+            content = f"{formatted_name} reached {achievement_text}!"
+
+            if image_url:
+                try:
+                    # Resolved + containment-checked (local tree or our B2 bucket;
+                    # anything else needs the remote-host allowlist — see the resolver).
+                    attachment, _img_tmp = await self._resolve_image_attachment(
+                        image_url, notification.id)
+                    if attachment:
+                        await self._send(channel, content, embed=embed, files=attachment)
+                    else:
+                        await self._send(channel, content, embed=embed)
+                except Exception:
+                    await self._send(channel, content, embed=embed)
+            else:
+                await self._send(channel, content, embed=embed)
+
+            notification.status = 'sent'
+            notification.processed_at = datetime.now()
+            db_session.commit()
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = str(e)
+            db_session.commit()
+            raise
+
+    async def send_rank_milestone_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
+        """Send a hiscores-rank milestone notification (WOM-fed).
+
+        embed_type is 'rank' (String(10) again); no template row ships, so
+        the code-default embed is the normal path. Rank submissions carry no
+        screenshot — there is nothing to attach.
+        """
+        notification.status = 'processing'
+        db_session.commit()
+        try:
+            group_id = notification.group_id
+            player_id = notification.player_id
+
+            channel_id_value = self._resolve_group_channel_id(
+                db_session, group_id, 'channel_id_to_post_ranks'
+            )
+            if not channel_id_value:
+                notification.status = 'failed'
+                notification.error_message = f"No channel configured for group {group_id}"
+                db_session.commit()
+                return
+
+            channel, channel_error = await self._fetch_sendable_channel(channel_id_value)
+            if channel is None:
+                notification.status = 'failed'
+                notification.error_message = channel_error or f"Channel not found for group {group_id}"
+                db_session.commit()
+                return
+
+            upgrade_active = has_custom_embeds(group_id)
+            if upgrade_active:
+                embed_template = await self.db_ops.get_group_embed('rank', group_id)
+            else:
+                embed_template = await self.db_ops.get_group_embed('rank', 1)
+
+            player_name = data.get("player_name") or ""
+            metric_label = str(data.get("metric_label") or data.get("metric") or "")
+            threshold = self._coerce_int(data.get("threshold"))
+            rank = self._coerce_int(data.get("rank"))
+            value = self._coerce_int(data.get("value"))
+
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
+            replacements = {
+                "{player_name}": player_link(player_name, player_id),
+                "{player_name_plain}": player_name,
+                "{metric}": str(data.get("metric") or ""),
+                "{metric_label}": metric_label,
+                "{metric_kind}": str(data.get("metric_kind") or ""),
+                "{rank}": f"{rank:,}" if rank is not None else "",
+                "{rank_threshold}": f"{threshold:,}" if threshold is not None else "",
+                "{metric_value}": f"{value:,}" if value is not None else "",
+                "{npc_name}": str(data.get("npc_name") or ""),
+                "{image_url}": "",
+                "{video_url}": "",
+                "{video_link}": "",
+            }
+
+            if await self._try_send_component_layout(
+                db_session, notification, channel, group_id, "rank_milestone", replacements
+            ):
+                await self._finish_component_send(db_session, notification, data)
+                return
+
+            if embed_template:
+                embed = replace_placeholders(embed_template, replacements)
+                if group_id == 2:
+                    embed = await self.remove_group_field(embed)
+            else:
+                embed = self._build_default_rank_embed(
+                    data=data,
+                    player_name=player_name,
+                    player_id=player_id,
+                )
+
+            threshold_text = f"top {threshold:,}" if threshold is not None else "a new rank bracket"
+            content = f"{formatted_name} entered the {threshold_text} on {metric_label}!"
+
+            await self._send(channel, content, embed=embed)
+
+            notification.status = 'sent'
+            notification.processed_at = datetime.now()
+            db_session.commit()
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = str(e)
+            db_session.commit()
+            raise
+
     async def send_quest_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
         """Send a quest completion notification to Discord with session"""
         notification.status = 'processing'
@@ -1915,7 +2209,13 @@ class NotificationService:
                 "{source}": str(source),
                 "{killer}": str(source),
                 "{location}": str(location),
+                "{region_name}": str(data.get("region_name") or location),
                 "{region_id}": str(data.get("region_id") or ""),
+                # Blank rather than "0" when the client did not send a value:
+                # a death of unknown cost must not read as a death that cost
+                # nothing. Pre-6.0.4 plugins send neither.
+                "{value_lost}": self._death_value_text(data.get("value_lost")),
+                "{value_kept}": self._death_value_text(data.get("value_kept")),
                 "{timestamp}": str(data.get("timestamp") or ""),
                 "{video_url}": video_url or "",
                 "{video_link}": f"[Video]({video_url})" if video_url else "",
@@ -3885,6 +4185,10 @@ class NotificationService:
                 "{npc_id}": str(npc_id),
                 "{team_size}": team_size,
                 "{personal_best}": time_formatted,
+                # Absolute boss KC at the kill (pb.py threads it through since
+                # the KC-milestone feature; empty for older queued rows).
+                "{kill_count}": f"{self._coerce_int(data.get('kill_count')):,}"
+                if self._coerce_int(data.get("kill_count")) is not None else "",
             }
             replacements.update(self._group_points_placeholder_map(data))
             replacements.update(self._plugin_version_placeholder_map(data))

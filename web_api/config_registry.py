@@ -34,6 +34,7 @@ CONFIG_CATEGORIES: List[Dict[str, str]] = [
     {"key": "drops", "label": "Drop notifications"},
     {"key": "deaths", "label": "Deaths"},
     {"key": "levels", "label": "Level notifications"},
+    {"key": "milestones", "label": "Milestones"},
     {"key": "pbs", "label": "Personal best"},
     {"key": "cas", "label": "Combat achievements"},
     {"key": "board", "label": "Lootboard"},
@@ -129,6 +130,22 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "category": "channels",
         "type": "channel",
         "help": "Channel for achievement-diary notifications. Falls back to the drops channel when unset.",
+        "default": None,
+    },
+    {
+        "key": "channel_id_to_post_kc",
+        "label": "KC milestones channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel for kill-count milestone notifications. Falls back to the drops channel when unset.",
+        "default": None,
+    },
+    {
+        "key": "channel_id_to_post_ranks",
+        "label": "Rank milestones channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Channel for hiscores-rank milestone notifications. Falls back to the drops channel when unset.",
         "default": None,
     },
     {
@@ -261,6 +278,21 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "seasonal": True,
     },
     {
+        "key": "notify_deaths_safe",
+        "label": "Notify safe deaths",
+        "category": "deaths",
+        "type": "boolean",
+        "help": (
+            "Also announce deaths that cost nothing — raid and Gauntlet wipes, "
+            "Castle Wars, Soul Wars, Barbarian Assault, Nightmare Zone, your own "
+            "house. Off by default so the deaths channel shows the ones that hurt. "
+            "Inferno and Fight Caves always count as real deaths regardless of this "
+            "setting; mute those by blacklisting the region instead."
+        ),
+        "default": False,
+        "seasonal": True,
+    },
+    {
         "key": "channel_id_to_post_deaths",
         "label": "Deaths channel",
         "category": "deaths",
@@ -273,7 +305,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "label": "Death messages",
         "category": "deaths",
         "type": "messagelist",
-        "help": "Custom death messages, one picked at random per death — like the in-game clan broadcasts. Placeholders like {player_name} and {source} are filled in. Leave empty for the default message. Groups using a Components layout for deaths keep their layout; these messages don't apply there.",
+        "help": "Custom death messages, one picked at random per death — like the in-game clan broadcasts. Placeholders like {player_name}, {source}, {region_name} and {value_lost} are filled in. {value_lost} is blank for members on a plugin older than 6.0.4, which sends no value. Leave empty for the default message. Groups using a Components layout for deaths keep their layout; these messages don't apply there.",
         "default": "",
     },
     {
@@ -356,6 +388,79 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "After a skill reaches 99, notify every N XP (e.g. 25m = every 25M). Multiples of 1M; 0 disables.",
         "default": 25000000,
         "min": 0,
+    },
+
+    # --- Milestones (KC + hiscores rank) ---
+    # KC milestones are fed from the plugin's per-kill KC reports (drops and
+    # timed kills), WOM-recognized bosses only; rank milestones from the
+    # periodic WiseOldMan bulk-hiscores sweep (services/rank_milestones.py).
+    # Neither family is seasonal: drops.kill_count is main-world only and WOM
+    # mirrors the main-game hiscores.
+    {
+        "key": "notify_kc_milestones",
+        "label": "Notify KC milestones",
+        "category": "milestones",
+        "type": "boolean",
+        "help": "Master toggle for boss kill-count milestone notifications (first kill and every-Nth-kill).",
+        "default": False,
+    },
+    {
+        "key": "notify_first_kc",
+        "label": "Announce first kills",
+        "category": "milestones",
+        "type": "boolean",
+        "help": "Announce a member's first kill of a boss. Only applies while KC milestones are enabled.",
+        "default": True,
+    },
+    {
+        "key": "kc_milestone_interval",
+        "label": "KC milestone interval",
+        "category": "milestones",
+        "type": "int",
+        "help": "Announce every Nth kill of a boss (e.g. 100 or 1000). 0 disables interval announcements (first kills can still announce).",
+        "default": 100,
+        "min": 0,
+        "max": 50000,
+    },
+    {
+        "key": "notify_rank_milestones",
+        "label": "Notify rank milestones",
+        "category": "milestones",
+        "type": "boolean",
+        "help": "Announce when a member's hiscores rank enters a configured threshold (e.g. top 10,000) on a boss, skill or clue tier. Checked periodically via WiseOldMan.",
+        "default": False,
+    },
+    {
+        "key": "rank_milestone_thresholds",
+        "label": "Rank thresholds",
+        "category": "milestones",
+        "type": "csv",
+        "help": "Comma-separated rank thresholds to announce on entering (e.g. 10000,5000,1000). Only the deepest newly-entered threshold announces.",
+        "default": "10000,5000,1000",
+    },
+    {
+        "key": "rank_milestone_bosses",
+        "label": "Boss ranks",
+        "category": "milestones",
+        "type": "boolean",
+        "help": "Include boss kill-count ranks in rank milestone checks.",
+        "default": True,
+    },
+    {
+        "key": "rank_milestone_skills",
+        "label": "Skill ranks",
+        "category": "milestones",
+        "type": "boolean",
+        "help": "Include skill XP ranks in rank milestone checks.",
+        "default": True,
+    },
+    {
+        "key": "rank_milestone_clues",
+        "label": "Clue ranks",
+        "category": "milestones",
+        "type": "boolean",
+        "help": "Include clue scroll completion ranks in rank milestone checks.",
+        "default": True,
     },
 
     # --- Personal best ---

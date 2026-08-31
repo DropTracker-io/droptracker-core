@@ -92,6 +92,8 @@ from typing import Optional
 
 from sqlalchemy.exc import DataError, IntegrityError
 
+from utils import task_progress as _tp
+
 # ── Redis keys / channels ─────────────────────────────────────────────────────
 QUEUE_KEY = "events:submissions"           # LPUSH by producers, BRPOP by worker
 # Batch 2: WOM-reconciler synthetic envelopes ride a lower-priority queue —
@@ -128,7 +130,8 @@ _STATE_KEY_TTL = 60 * 60 * 24 * 60         # 60 days for xp-baseline / kc-dedupe
 
 # Task types the engine can evaluate automatically (v1).
 AUTO_TASK_TYPES = ("item_collection", "kc_target", "pb_target", "xp_target", "skill_target",
-                   "loot_value", "pet_collection", "loot_sweep", "competition")
+                   "loot_value", "pet_collection", "ca_target", "loot_sweep",
+                   "competition")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -318,7 +321,11 @@ def _kc_state_scope(task: dict, npc_norm: str):
 # Path metrics an any_path config may carry besides item groups. ``kc`` counts
 # kills of the path's NPCs (kc_target semantics: watermark + dedupe, WOM
 # reconciliation); ``loot_value`` folds drop GP (optionally NPC-scoped).
-PATH_METRICS = ("kc", "loot_value")
+# These folds now live in utils.task_progress, shared with
+# services.competition (a service may not import a sibling service — the
+# pytest conftest MagicMocks the whole package). The private names in this
+# module stay as aliases so its ~40 call sites are untouched.
+PATH_METRICS = _tp.PATH_METRICS
 
 _PATH_NOTE_PREFIX = "path:"
 
@@ -332,19 +339,7 @@ def _path_note(idx: int, note: Optional[str] = None) -> str:
     return f"{tag} | {note}" if note else tag
 
 
-def _row_path_idx(row) -> Optional[int]:
-    """Metric-path index a ledger row was recorded for, parsed from the
-    engine's ``note`` tag (``path:N`` or ``path:N | admin note``); None for
-    item/manual/bonus rows. Reject/revoke may overwrite ``note`` with an admin
-    note — those rows are already excluded from every fold, so the tag never
-    needs to survive."""
-    note = getattr(row, "note", None)
-    if not isinstance(note, str) or not note.startswith(_PATH_NOTE_PREFIX):
-        return None
-    try:
-        return int(note[len(_PATH_NOTE_PREFIX):].split("|", 1)[0].strip())
-    except (TypeError, ValueError):
-        return None
+_row_path_idx = _tp.row_path_idx
 
 
 def display_note(note) -> Optional[str]:
@@ -363,11 +358,7 @@ def display_note(note) -> Optional[str]:
     return note.strip()
 
 
-def _path_need(path: dict) -> int:
-    try:
-        return max(int(path.get("need") or 0), 1)
-    except (TypeError, ValueError):
-        return 1
+_path_need = _tp.path_need
 
 
 def _metric_paths_from_config(config: dict, resolve_wom: bool = False) -> tuple:
@@ -816,37 +807,10 @@ def _distinct_item_progress(session, task: dict, team_id, include=None) -> int:
     return _distinct_progress_from_rows(rows, completion_threshold(task))
 
 
-def _distinct_progress_from_rows(rows, threshold: int) -> int:
-    """Pure core of :func:`_distinct_item_progress` (unit-testable)."""
-    distinct: set = set()
-    wildcard = 0
-    for r in rows:
-        if (getattr(r, "source_type", None) or "") == "bonus":
-            continue
-        target = getattr(r, "matched_target", None)
-        if target:
-            distinct.add(_norm(target))
-        else:
-            wildcard += max(int(getattr(r, "quantity", 1) or 1), 1)
-    return min(len(distinct) + wildcard, threshold)
+_distinct_progress_from_rows = _tp.distinct_progress_from_rows
 
 
-def _distinct_players_from_rows(rows, threshold: int) -> int:
-    """One unit per DISTINCT contributing player (pb unique_players /
-    whole_team rollups) — a grinder's tenth sub-threshold kill is still one
-    player. Player-less manual wildcard rows count their quantity each (the
-    admin mark-complete escape hatch), capped at the threshold."""
-    players: set = set()
-    wildcard = 0
-    for r in rows:
-        if (getattr(r, "source_type", None) or "") == "bonus":
-            continue
-        pid = getattr(r, "player_id", None)
-        if pid is not None:
-            players.add(pid)
-        else:
-            wildcard += max(int(getattr(r, "quantity", 1) or 1), 1)
-    return min(len(players) + wildcard, threshold)
+_distinct_players_from_rows = _tp.distinct_players_from_rows
 
 
 def _distinct_player_progress(session, task: dict, team_id, threshold: int,
@@ -891,58 +855,10 @@ def _grouped_item_progress(session, task: dict, team_id, include=None) -> int:
                                        completion_threshold(task))
 
 
-def _parse_requirement_groups(config: dict) -> list[tuple[str, set, int]]:
-    """``groups`` config → normalized ``(mode, item-name set, need)`` tuples
-    (shared by the grouped and any_path rollups)."""
-    groups: list[tuple[str, set, int]] = []
-    for group in (config.get("groups") or []):
-        if not isinstance(group, dict):
-            continue
-        names = {
-            _norm(it if isinstance(it, str)
-                  else (it or {}).get("item_name") or (it or {}).get("name"))
-            for it in (group.get("items") or [])
-        }
-        names.discard("")
-        if not names:
-            continue
-        mode = group.get("mode") if group.get("mode") in ("all_of", "any_of") else "all_of"
-        try:
-            need = max(int(group.get("need") or 0), 1) if mode == "any_of" else len(names)
-        except (TypeError, ValueError):
-            need = 1
-        groups.append((mode, names, need))
-    return groups
+_parse_requirement_groups = _tp.parse_requirement_groups
 
 
-def _grouped_progress_from_rows(rows, config: dict, threshold: int) -> int:
-    """Pure core of :func:`_grouped_item_progress` (unit-testable)."""
-    groups = _parse_requirement_groups(config)
-
-    distinct: list[set] = [set() for _ in groups]
-    folded = [0] * len(groups)
-    wildcard = 0
-    for r in rows:
-        if (getattr(r, "source_type", None) or "") == "bonus":
-            continue
-        name = _norm(getattr(r, "matched_target", None))
-        qty = max(int(getattr(r, "quantity", 1) or 1), 1)
-        if not name:
-            wildcard += qty
-            continue
-        for gi, (mode, names, _need) in enumerate(groups):
-            if name in names:
-                if mode == "all_of":
-                    distinct[gi].add(name)
-                else:
-                    folded[gi] += qty
-                break
-
-    progress = wildcard
-    for gi, (mode, _names, need) in enumerate(groups):
-        got = len(distinct[gi]) if mode == "all_of" else folded[gi]
-        progress += min(got, need)
-    return min(progress, threshold)
+_grouped_progress_from_rows = _tp.grouped_progress_from_rows
 
 
 def _anypath_item_progress(session, task: dict, team_id, include=None) -> int:
@@ -966,103 +882,12 @@ def _anypath_item_progress(session, task: dict, team_id, include=None) -> int:
                                        completion_threshold(task))
 
 
-def _is_points_path(path) -> bool:
-    """A POINTS path is an untagged any_path alternative whose flat item list
-    carries per-item weights and a ``need`` points goal (``kind: "points"``) —
-    the ``point_collection`` mode as an either-or branch ("Full set OR 500 pts
-    of listed items"). Distinct from metric paths (tagged kc/loot_value) and
-    from item-checklist paths (``groups``)."""
-    return isinstance(path, dict) and path.get("kind") == "points"
+_is_points_path = _tp.is_points_path
+_path_point_weights = _tp.path_point_weights
+_points_fold = _tp.points_fold
 
 
-def _path_point_weights(path: dict) -> dict:
-    """``{normalized item name -> integer point weight (≥1)}`` for a points
-    path (``items: [{item_name, points}]``). Bare-string items weigh 1."""
-    out: dict = {}
-    for it in (path.get("items") or []):
-        if isinstance(it, dict):
-            name = _norm(it.get("item_name") or it.get("name"))
-            if not name:
-                continue
-            try:
-                weight = int(round(float(it.get("points") or 1)))
-            except (TypeError, ValueError):
-                weight = 1
-            out[name] = max(weight, 1)
-        elif isinstance(it, str):
-            name = _norm(it)
-            if name:
-                out[name] = 1
-    return out
-
-
-def _points_fold(rows, weights: dict) -> int:
-    """Weighted point total of untagged item rows for a points path — each
-    row's matched-item weight times its quantity (mirrors point_collection).
-    Wildcard (no matched item) and bonus rows contribute nothing here; wildcard
-    manual awards ride the task's percent scale in :func:`_anypath_progress_from_rows`."""
-    total = 0
-    for r in rows:
-        if (getattr(r, "source_type", None) or "") == "bonus":
-            continue
-        name = _norm(getattr(r, "matched_target", None))
-        if name and name in weights:
-            total += weights[name] * max(int(getattr(r, "quantity", 1) or 1), 1)
-    return total
-
-
-def _anypath_progress_from_rows(rows, config: dict, threshold: int) -> int:
-    """Pure core of :func:`_anypath_item_progress` (unit-testable).
-
-    Paths differ in size, so the single rollup integer is the *percentage* of
-    the closest-to-done path scaled to the threshold (validation pins
-    target_value to 100). Floor rounding means the threshold is hit exactly
-    when some path's own need is fully met, never one drop early.
-
-    Metric paths (``{"metric": "kc"|"loot_value", "need": N}``) fold the
-    quantities of their own tagged rows (``note`` = ``path:<idx>``); item and
-    points paths fold only the untagged rows — so a 5,000-KC path can never
-    leak kills into a sibling item checklist, or vice versa. A POINTS path
-    (``{"kind": "points", "items": [...], "need": N}``) weights each untagged
-    item row by its point value (like a metric goal on the percent scale).
-    Untagged WILDCARD rows (manual awards, no matched item) count on the task's
-    percent scale: item paths absorb them inside the grouped fold as before,
-    and metric/points paths add them as percent points — which is what keeps
-    the admin "mark complete" award (quantity = threshold − done) completing a
-    metric-only or points-only task exactly like any other.
-    """
-    item_rows = []
-    tagged: dict = {}
-    wildcard = 0
-    for r in rows:
-        idx = _row_path_idx(r)
-        if idx is None:
-            item_rows.append(r)
-            if ((getattr(r, "source_type", None) or "") != "bonus"
-                    and not _norm(getattr(r, "matched_target", None))):
-                wildcard += max(int(getattr(r, "quantity", 1) or 1), 1)
-        elif (getattr(r, "source_type", None) or "") != "bonus":
-            tagged[idx] = tagged.get(idx, 0) + max(int(getattr(r, "quantity", 1) or 1), 1)
-    best = 0
-    for pi, path in enumerate(config.get("paths") or []):
-        if not isinstance(path, dict):
-            continue
-        if path.get("metric") in PATH_METRICS:
-            need = _path_need(path)
-            got = min(tagged.get(pi, 0), need)
-            pct = min((got * threshold) // need + wildcard, threshold)
-        elif _is_points_path(path):
-            need = _path_need(path)
-            got = min(_points_fold(item_rows, _path_point_weights(path)), need)
-            pct = min((got * threshold) // need + wildcard, threshold)
-        else:
-            need = sum(n for _mode, _names, n in _parse_requirement_groups(path))
-            if need <= 0:
-                continue
-            got = _grouped_progress_from_rows(item_rows, path, need)
-            pct = (got * threshold) // need
-        best = max(best, pct)
-    return min(best, threshold)
+_anypath_progress_from_rows = _tp.anypath_progress_from_rows
 
 
 def pending_projection(session, task: dict, team_id) -> Optional[dict]:
@@ -1201,8 +1026,17 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
         # clog carries a source string but is never a "drop from this NPC", so a
         # restricted item can't be satisfied by a collection-log unlock.
         allowed = _item_source_npcs(task, item_name)
-        if allowed and (kind != "drop" or _norm(data.get("npc_name")) not in allowed):
-            return None
+        if allowed:
+            if _norm(data.get("npc_name")) not in allowed:
+                return None
+            # ``clog_sources`` opts a config into letting the collection-log
+            # unlock count as well, when the clog names an allowed source. A
+            # restricted item is otherwise drop-only, which is right for a
+            # "get it from THIS boss" task but wrong for a competition bonus:
+            # filling a Vorkath log slot genuinely is a Vorkath achievement.
+            # Off by default — existing tasks keep drop-only semantics.
+            if kind != "drop" and not (task.get("config") or {}).get("clog_sources"):
+                return None
         # The matched name rides along to the ledger row so all_of/assembly
         # progress can count DISTINCT items rather than folding quantities.
         return {"mode": "count", "quantity": credit,
@@ -1365,6 +1199,44 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
         return {"mode": "count", "quantity": 1,
                 "matched_target": str(pet_name).strip()[:120] or None}
 
+    if task_type == "ca_target":
+        # Combat achievements. The producer (data/submissions/ca.py) only
+        # queues NEW completions, so every envelope that gets here is a first
+        # completion and no dedupe of its own is needed.
+        #
+        # ``config.task_names`` is an explicit allow-list RESOLVED AT AUTHORING
+        # from the task registry's ``monster``/``tier`` fields
+        # (utils.ca_tasks.tasks_for_monsters) — the same shape as a customized
+        # pet list, and for the same reason: the registry lives in the database
+        # and this function is pure. That resolution is what lets a combat
+        # achievement be scoped to a boss at all; the envelope itself carries
+        # only ``task_name`` and ``tier``.
+        if kind != "ca":
+            return None
+        task_name = data.get("task_name")
+        if not task_name:
+            return None
+        config = task.get("config") or {}
+        target = task.get("target")
+        if target:
+            if _norm(task_name) != _norm(target):
+                return None
+        else:
+            listed = task.get("ca_name_set")
+            if listed is None:
+                listed = {_norm(n) for n in (config.get("task_names") or ())}
+            if not listed:
+                # An unresolvable allow-list must credit NOTHING. The write
+                # validator refuses to store an empty one, so reaching here
+                # means the config was hand-built or the registry was empty
+                # when it was written — either way, crediting every CA in the
+                # game is the one answer that is certainly wrong.
+                return None
+            if _norm(task_name) not in listed:
+                return None
+        return {"mode": "count", "quantity": 1,
+                "matched_target": str(task_name).strip()[:120] or None}
+
     if task_type == "competition":
         # SOTW/BOTW race task (services/competition.py). ``competition`` is
         # the plain-data matcher snapshot precomputed in _task_to_dict.
@@ -1455,6 +1327,40 @@ def match_task_all(task: dict, envelope: dict) -> list:
                                       "type": "time_under",
                                       "time_ms": time_ms},
                         })
+        # ``task`` bonus rules: the criteria ARE a task config, so run the same
+        # match_task over the synthetic dict _task_to_dict built from it. Every
+        # shape the builder can express — a single drop, an all-of set, an
+        # either-or, a weighted pool, a collection-log slot, a fast kill, a
+        # combat achievement — comes back for free, already NPC-scoped by the
+        # source restriction the write validator injected.
+        kind = envelope.get("kind")
+        for rule in comp.get("task_rules") or ():
+            kinds = rule.get("kinds") or ()
+            if kinds and kind not in kinds:
+                continue
+            embedded = rule.get("task")
+            if not isinstance(embedded, dict):
+                continue
+            hit = match_task(embedded, envelope)
+            if hit is None:
+                continue
+            if hit.get("mode") not in ("count", "first"):
+                # Load-bearing, not defensive tidiness: a kc/kc_abs/xp match
+                # would reach handle_envelope's shared KC-watermark and
+                # XP-baseline folds, which are scoped by the TASK — and the
+                # task here is the race itself, so a bonus rule would clobber
+                # the very counter it is supposed to sit beside. The write
+                # validator refuses those embedded types; this is the second
+                # lock on the same door.
+                continue
+            matches.append({
+                "mode": "count",
+                # Credit UNITS, not points: the fold converts at
+                # ``points`` per ``need`` (services/competition.py).
+                "quantity": max(int(hit.get("quantity") or 1), 1),
+                "matched_target": hit.get("matched_target"),
+                "bonus": {"rule_id": rule.get("id"), "type": "task"},
+            })
         return matches
     metric_paths = _metric_paths(task)
     if not metric_paths:
@@ -1640,6 +1546,33 @@ def _task_wom_metrics(task_type, npcs) -> dict:
     return out
 
 
+def _enrich_matcher_precompute(d: dict) -> dict:
+    """Attach the per-type lookups ``match_task`` reads off a task dict.
+
+    Split out of :func:`_task_to_dict` because competition bonus rules embed a
+    task config VERBATIM and are matched by running the very same
+    :func:`match_task` over a synthetic dict built from it — the whole reason
+    one rule type buys the entire task-builder vocabulary. Every key here is a
+    pure function of ``type`` + ``config``, which is what makes a synthetic
+    dict a first-class citizen rather than a lookalike.
+
+    ``resolve_wom`` is deliberately NOT passed for metric paths here: WOM
+    metrics drive the reconciler's hiscores planning, and on a competition the
+    RACE owns that. A bonus rule must never widen it.
+    """
+    ttype = d.get("type")
+    config = d.get("config") or {}
+    if ttype == "item_collection":
+        d["item_source_index"] = _item_source_index(config)
+        d["task_source_npcs"] = _norm_npc_set(config.get("source_npcs"))
+        d["pet_name_set"] = _config_pet_names(config)
+        d["metric_paths"] = list(_metric_paths_from_config(config, resolve_wom=False))
+    elif ttype == "ca_target":
+        # Normalized once per state load; the matcher compares against it.
+        d["ca_name_set"] = {_norm(n) for n in (config.get("task_names") or ()) if _norm(n)}
+    return d
+
+
 def _task_to_dict(task) -> dict:
     d = {
         "id": task.id,
@@ -1688,6 +1621,8 @@ def _task_to_dict(task) -> dict:
             d["loot_sweep_index"] = LootSweepConfig(d["config"]).matcher_index()
         except Exception:
             d["loot_sweep_index"] = {}
+    if task.type == "ca_target":
+        _enrich_matcher_precompute(d)
     if task.type == "competition":
         # Precompute the sotw/botw matcher snapshot (metric + bonus-rule
         # lookups) as plain data, plus the kc-watermark inputs a botw shares
@@ -1701,6 +1636,20 @@ def _task_to_dict(task) -> dict:
             d["competition"] = {}
         d["kc_npcs"] = list((d["competition"] or {}).get("npcs") or [])
         d["wom_metrics"] = _task_wom_metrics(task.type, d["kc_npcs"])
+        # Turn each embedded bonus-rule config into a real matcher task dict.
+        # It borrows the competition task's own id so anything that reads
+        # ``task["id"]`` off a match (state scoping, the ledger insert) still
+        # points at the one hidden race task the whole event folds from.
+        for rule in ((d["competition"] or {}).get("task_rules") or ()):
+            embedded = rule.get("task")
+            if not isinstance(embedded, dict):
+                continue
+            embedded["id"] = d["id"]
+            embedded["event_id"] = d["event_id"]
+            embedded.setdefault("points", 0)
+            embedded.setdefault("requires_confirmation", d["requires_confirmation"])
+            embedded["config"] = parse_task_config(embedded.get("config"))
+            _enrich_matcher_precompute(embedded)
     return d
 
 
@@ -2578,9 +2527,9 @@ def mark_task_done(redis_conn, event_id: int, team_id, task_id) -> None:
 
 def record_effort(session, event_id: int, team_id, player_id: int, npc_norm: str,
                   entry: dict, delta: int, *, source: str, at: datetime,
-                  completions: int = 0) -> None:
-    """Add ``delta`` kills (and ``completions`` completions) to one
-    (event, player, npc) effort row.
+                  completions: int = 0, rolls: int = 0) -> None:
+    """Add ``delta`` kills (and ``completions`` completions, ``rolls`` rolls) to
+    one (event, player, npc) effort row.
 
     Upsert rather than append: effort is a running counter per NPC, not a
     ledger. ``source`` records which side of the hybrid fold fed it — a row
@@ -2592,13 +2541,18 @@ def record_effort(session, event_id: int, team_id, player_id: int, npc_norm: str
     separately. A call may carry completions with ``delta == 0`` (the plugin
     proving a completion for an attempt its chest KC already counted), so
     ``delta <= 0`` alone is not a reason to return.
+
+    ``rolls`` is non-zero only at ``CLUE_TIERS`` NPCs, and always arrives with
+    ``delta == 0``: a scroll is dealt by some *other* NPC's drop table, so the
+    call that records it is never also recording a casket opening.
     """
     from db.models import EventEffort
 
     npc_id = entry.get("npc_id")
     delta = max(0, int(delta or 0))
     completions = max(0, int(completions or 0))
-    if not npc_id or (delta <= 0 and completions <= 0):
+    rolls = max(0, int(rolls or 0))
+    if not npc_id or (delta <= 0 and completions <= 0 and rolls <= 0):
         return
     row = (session.query(EventEffort)
            .filter(EventEffort.event_id == event_id,
@@ -2609,13 +2563,15 @@ def record_effort(session, event_id: int, team_id, player_id: int, npc_norm: str
         session.add(EventEffort(
             event_id=event_id, team_id=team_id, player_id=player_id,
             npc_id=npc_id, boss_metric=entry.get("metric"),
-            kills=int(delta), completions=int(completions),
+            kills=int(delta), completions=int(completions), rolls=int(rolls),
             source=source, first_at=at, last_at=at,
         ))
         return
     row.kills = int(row.kills or 0) + int(delta)
     if completions:
         row.completions = int(row.completions or 0) + int(completions)
+    if rolls:
+        row.rolls = int(row.rolls or 0) + int(rolls)
     row.last_at = at
     if team_id is not None:
         row.team_id = team_id
@@ -2623,6 +2579,63 @@ def record_effort(session, event_id: int, team_id, player_id: int, npc_norm: str
         row.boss_metric = entry["metric"]
     if row.source and row.source != source:
         row.source = "both"
+
+
+#: Sanity clamp on one receipt's quantity. Scroll boxes arrive one at a time
+#: (one row in 3,703 carried a 2 over a week of prod drops); anything larger is
+#: a malformed envelope, not a player who was dealt 40 clues at once.
+_CLUE_ROLL_MAX_QUANTITY = 5
+
+
+def _apply_clue_roll(session, redis_conn, event: dict, npcs: dict, team_id,
+                     player_id: int, envelope: dict, submitted_at: datetime,
+                     done_cache: dict,
+                     staged: Optional[StagedWrites] = None) -> None:
+    """Credit a clue ROLL when a drop hands the player a scroll for a tier the
+    event's tasks care about. Never raises.
+
+    This is the half of suggestion #156 that could not be read off an existing
+    counter. Caskets already reach effort as ordinary kills — the plugin
+    reports one under the pseudo-NPC ``Clue Scroll (Tier)`` with the player's
+    absolute completion count — but a casket can be *banked*, so openings alone
+    say nothing about time spent inside the window. The scroll's arrival is
+    what dates the clue, and it arrives at a different NPC entirely.
+
+    Relevance and the freeze are the tier's, not the source boss's: a roll is
+    credit toward the clue tile, so it stops when that tile does.
+    """
+    data = envelope.get("data") or {}
+    clue_npc = _clue_roll_npc(data.get("item_name"))
+    if clue_npc is None:
+        return
+    entry = npcs.get(clue_npc)
+    if entry is None:
+        return
+    if _effort_frozen(redis_conn, event["id"], team_id, entry.get("tasks"),
+                      done_cache):
+        return
+    try:
+        qty = int(data.get("quantity") or 1)
+    except (TypeError, ValueError):
+        qty = 1
+    qty = max(1, min(qty, _CLUE_ROLL_MAX_QUANTITY))
+    try:
+        # Deduped on the SOURCE kill (that boss's npc name + kill_count), so
+        # neither a redelivered envelope nor the rest of that kill's loot can
+        # re-credit the scroll. A skilling receipt (a clue bottle from fishing)
+        # carries no kill count and falls to the same cooldown the crediting
+        # paths use there.
+        if not _kc_dedupe(redis_conn, event["id"], _roll_scope(clue_npc),
+                          player_id, envelope, staged=staged):
+            return
+        record_effort(session, event["id"], team_id, player_id, clue_npc, entry,
+                      0, source=KC_SOURCE_PLUGIN, at=submitted_at, rolls=qty)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "clue roll record failed (event %s, player %s, item %r)",
+            event["id"], player_id, data.get("item_name"))
 
 
 def _apply_effort(session, redis_conn, state: "MatcherState", event: dict,
@@ -2644,6 +2657,11 @@ def _apply_effort(session, redis_conn, state: "MatcherState", event: dict,
     kind = envelope.get("kind")
 
     if kind == "drop":
+        # A drop can be BOTH a kill at its own NPC and a clue roll for a tier
+        # (a Hellhound dropping a scroll box), so the roll is credited
+        # alongside this path, never instead of it.
+        _apply_clue_roll(session, redis_conn, event, npcs, team_id, player_id,
+                         envelope, submitted_at, done_cache, staged=staged)
         npc_norm = _norm(data.get("npc_name"))
         kc_abs, seed = data.get("kill_count"), None
         source, offset = KC_SOURCE_PLUGIN, 1
@@ -2774,6 +2792,18 @@ def _is_completion_drop(npc_norm: str, item_name) -> bool:
     from services.event_effort import is_completion_drop
 
     return is_completion_drop(npc_norm, item_name)
+
+
+def _roll_scope(npc_norm: str) -> str:
+    from services.event_effort import roll_scope
+
+    return roll_scope(npc_norm)
+
+
+def _clue_roll_npc(item_name):
+    from services.event_effort import clue_roll_npc
+
+    return clue_roll_npc(item_name)
 
 
 # Without a usable kill count, stacks from one kill are only distinguishable
@@ -3959,6 +3989,52 @@ def _competition_rank(per_player: dict, config, player_id) -> tuple:
     return rank, len(ordered), leader
 
 
+def _announce_milestone_crossings(session, event: dict, task: dict, config,
+                                  completion, prev_entry: dict, entry: dict,
+                                  player_name, rank, participants,
+                                  bonus_delta: int) -> None:
+    """One ``event_competition_bonus`` message per milestone rule this row
+    pushed a player past. Same payload contract as a real bonus award, so no
+    layout or token work is needed to render it."""
+    from services.competition import (bonus_detail, player_points, rank_value,
+                                      score_text)
+
+    prev_bonus = prev_entry.get("bonus") or {}
+    for rule_id, slot in (entry.get("bonus") or {}).items():
+        if slot.get("type") != "milestone":
+            continue
+        before = int((prev_bonus.get(rule_id) or {}).get("awarded") or 0)
+        gained_now = int(slot.get("awarded") or 0)
+        if gained_now <= before:
+            continue
+        rule = config.rules_by_id.get(rule_id)
+        earned = (gained_now - before) * (rule.points if rule else 0)
+        detail = bonus_detail(rule_id, config, gained_now, points=earned)
+        _enqueue_notification(session, "event_competition_bonus", event,
+                              completion.player_id, {
+                                  "task_id": task["id"],
+                                  "task_label": task.get("label"),
+                                  "team_id": completion.team_id,
+                                  "player_id": completion.player_id,
+                                  "player_name": player_name,
+                                  "competition": True, "points_based": True,
+                                  "points": earned,
+                                  "bonus": detail,
+                                  "rank": rank, "participants": participants,
+                                  "gained": entry.get("gained", 0),
+                                  "bonus_points": entry.get("bonus_points", 0),
+                                  "total_points": player_points(entry, config),
+                                  "rank_value_text": score_text(
+                                      rank_value(entry, config), config),
+                                  "ranking_mode": config.ranking_mode,
+                                  "metric_kind": config.metric_kind,
+                                  "matched_target": None,
+                                  "received_item": None,
+                                  "source_type": completion.source_type,
+                                  "proof_url": None,
+                              })
+
+
 def _apply_competition(session, redis_conn, event: dict, task: dict, completion,
                        player_name: Optional[str] = None) -> dict:
     """Apply one competition ledger row (a gained delta OR a bonus award):
@@ -4011,9 +4087,18 @@ def _apply_competition(session, redis_conn, event: dict, task: dict, completion,
     # (services/event_lifecycle.py) writes them once, at the end.
 
     entry = curr_fold.get(player_id) or {"gained": 0, "bonus_points": 0, "bonus": {}}
+    prev_entry = prev_fold.get(player_id) or {"gained": 0, "bonus_points": 0, "bonus": {}}
     rank, participants, leader = _competition_rank(curr_fold, config, player_id)
     parsed_bonus = parse_bonus_note(completion.note)
     quantity = max(int(completion.quantity or 1), 1)
+    # What this row was actually WORTH. Never the row's quantity for a bonus:
+    # a ``task`` rule's quantity is credit units, and it pays nothing at all
+    # until the rule's need is met (then the whole award at once). Reading it
+    # off the fold is correct under every rule dialect, and is already what
+    # EventTeam.score deltas on.
+    bonus_delta = (int(entry.get("bonus_points") or 0)
+                   - int(prev_entry.get("bonus_points") or 0))
+    row_value = bonus_delta if parsed_bonus is not None else quantity
 
     result = {
         "kind": "competition",
@@ -4021,7 +4106,7 @@ def _apply_competition(session, redis_conn, event: dict, task: dict, completion,
         "task_id": task["id"],
         "team_id": team_id,
         "player_id": player_id,
-        "delta": quantity,
+        "delta": row_value,
         "is_bonus": parsed_bonus is not None,
         "gained": entry.get("gained", 0),
         "bonus_points": entry.get("bonus_points", 0),
@@ -4042,6 +4127,16 @@ def _apply_competition(session, redis_conn, event: dict, task: dict, completion,
     frame["task_label"] = task.get("label")
     _publish(event["id"], frame)
 
+    # Milestone rules ("every 100 kills = 10 pts") pay off the gained total and
+    # write NO ledger row of their own, so the crossing can only be seen by
+    # diffing the folds — which is exactly what makes them impossible to
+    # double-count. A gained row may cross several steps at once (a WOM top-up
+    # can be worth thousands of kills); that is one message, for the total.
+    if parsed_bonus is None and team_id is not None and bonus_delta > 0:
+        _announce_milestone_crossings(session, event, task, config, completion,
+                                      prev_entry, entry, player_name,
+                                      rank, participants, bonus_delta)
+
     # Bonus awards are the kind's announce-worthy moments (the gained stream
     # is continuous — a message per XP snapshot would flood every channel; the
     # live leaderboard message carries that story instead).
@@ -4050,18 +4145,27 @@ def _apply_competition(session, redis_conn, event: dict, task: dict, completion,
 
         rule_type, rule_id = parsed_bonus
         awarded_n = (entry.get("bonus") or {}).get(rule_id, {}).get("awarded", 0)
+        prev_awarded = (prev_entry.get("bonus") or {}).get(rule_id, {}).get("awarded", 0)
+        # Announce a rule's AWARD, not every row it recorded. A "collect all
+        # four uniques" or "500 points of loot" rule writes a row per drop;
+        # only the one that finally earns the payout is a moment worth a
+        # message (and a common-item pool would otherwise fire dozens of times
+        # per player). Discrete rules award on every row, so this is a no-op
+        # for pet/time_under.
+        if awarded_n <= prev_awarded:
+            return result
         time_text = None
         raw_note = str(completion.note or "")
         if "|" in raw_note:
             time_text = raw_note.split("|", 1)[1].strip() or None
         detail = bonus_detail(rule_id, config, awarded_n,
                               matched_target=completion.matched_target,
-                              time_text=time_text)
+                              time_text=time_text, points=bonus_delta)
         payload = {
             "task_id": task["id"], "task_label": task.get("label"),
             "team_id": team_id, "player_id": player_id, "player_name": player_name,
             "competition": True, "points_based": True,
-            "points": quantity,
+            "points": bonus_delta,
             "bonus": detail,
             "rank": rank, "participants": participants,
             "gained": entry.get("gained", 0),
@@ -4075,8 +4179,12 @@ def _apply_competition(session, redis_conn, event: dict, task: dict, completion,
             "matched_target": completion.matched_target,
             # Pet awards: the pet's item icon becomes the message thumbnail
             # (the sender's completion_icon resolution keys off received_item).
+            # The award's item icon becomes the message thumbnail (the
+            # sender's completion_icon resolution keys off received_item).
+            # A task rule's matched_target is an item name too — a Tanzanite
+            # fang award should show the fang, not nothing.
             "received_item": (completion.matched_target
-                              if rule_type == "pet" else None),
+                              if rule_type in ("pet", "task") else None),
             "source_type": completion.source_type,
             "proof_url": completion.proof_url,
         }
@@ -4092,12 +4200,12 @@ def _apply_competition(session, redis_conn, event: dict, task: dict, completion,
                 "task_id": task["id"], "task_label": task.get("label"),
                 "team_id": team_id, "player_id": player_id,
                 "player_name": player_name,
-                "points": quantity, "team_score": team_score,
+                "points": bonus_delta, "team_score": team_score,
                 "progress": entry.get("gained", 0),
                 "received_item": (completion.matched_target
-                                  if rule_type == "pet" else None),
+                                  if rule_type in ("pet", "task") else None),
             }
-            if rule_type == "pet" and completion.matched_target:
+            if rule_type in ("pet", "task") and completion.matched_target:
                 icon = resolve_item_icon_id(session, completion.matched_target)
                 if icon:
                     plugin_payload["icon_item_id"] = icon
@@ -4540,14 +4648,23 @@ def _row_advances_progress(session, task: dict, team_id, candidate) -> bool:
         # weight once its player sits at the rule's per-player cap — and the
         # count is over SURVIVING rows, so revoking an award frees its slot.
         from services.competition import (CompetitionConfig, bonus_award_count,
-                                          parse_bonus_note)
+                                          parse_bonus_note, rule_rows,
+                                          task_rule_progress)
         parsed = parse_bonus_note(getattr(candidate, "note", None))
         if parsed is None:
             return True
         cfg = CompetitionConfig(task.get("config") or {})
         rule = cfg.rules_by_id.get(parsed[1])
-        cap = rule.max_awards if rule is not None else 1
         rows = _competition_applied_rows(session, task, team_id)
+        if rule is not None and rule.type == "task":
+            # A task rule's rows are PROGRESS, not awards, so the gate is
+            # "did the number move?" — not "is there an award left?". The
+            # third item of a five-item set earns nothing yet and must still
+            # be recorded, or the set could never complete.
+            held = rule_rows(rows, candidate.player_id, rule.id)
+            return (task_rule_progress(held + [candidate], rule)
+                    > task_rule_progress(held, rule))
+        cap = rule.max_awards if rule is not None else 1
         return bonus_award_count(rows, candidate.player_id, parsed[1]) < cap
     if kind in ("all_of", "assembly"):
         helper = _distinct_item_progress
@@ -4574,7 +4691,7 @@ CLOG_ECHO_WINDOW_SECONDS = 600
 
 
 def _dedupe_clog_echo(session, task: dict, team_id, player_id,
-                      kind, matched_target, quantity):
+                      kind, matched_target, quantity, bonus=None):
     """Cross-kind (drop <-> clog) dedupe for one item_collection acquisition.
 
     Returns the quantity to credit, or None to drop the row entirely.
@@ -4590,16 +4707,27 @@ def _dedupe_clog_echo(session, task: dict, team_id, player_id,
 
     ``pending`` echoes count too: the acquisition is already represented in
     the ledger awaiting review, and confirming it later must not double-pay.
+
+    Competition ``task`` bonus rules need this just as much — an item rule
+    would otherwise pay twice, once for the drop and once for the collection
+    log slot it unlocks seconds later, and the two rows carry different guids
+    so the unique index does not help. But every rule on a competition shares
+    ONE task id, so the echo lookup is additionally scoped to the candidate's
+    own rule tag: without that, rule 3's drop would silently suppress rule 5's
+    clog for the same item.
     """
-    if task.get("type") != "item_collection" or not matched_target:
+    ttype = task.get("type")
+    if ttype not in ("item_collection", "competition") or not matched_target:
         return quantity
     if kind not in ("drop", "clog"):
+        return quantity
+    if ttype == "competition" and (bonus or {}).get("type") != "task":
         return quantity
     from db.models import EventCompletion
 
     other = "drop" if kind == "clog" else "clog"
     cutoff = datetime.now() - timedelta(seconds=CLOG_ECHO_WINDOW_SECONDS)
-    echoes = (
+    query = (
         session.query(EventCompletion)
         .filter(EventCompletion.task_id == task["id"],
                 EventCompletion.team_id == team_id,
@@ -4607,8 +4735,17 @@ def _dedupe_clog_echo(session, task: dict, team_id, player_id,
                 EventCompletion.source_type == other,
                 EventCompletion.status.in_(("auto", "confirmed", "manual", "pending")),
                 EventCompletion.created_at >= cutoff)
-        .all()
     )
+    if ttype == "competition":
+        from services.competition import bonus_note
+        tag = bonus_note("task", int((bonus or {}).get("rule_id") or 0))
+        # EQUALITY, not a prefix: `bonus:task:1%` also matches rules 10-12, so
+        # on an event with ten or more rules a low-numbered rule would inherit
+        # its neighbours' echoes and suppress its own legitimate credit. A task
+        # row's note has no ` | ` human half (only time_under writes one), so
+        # the tag is the whole string.
+        query = query.filter(EventCompletion.note == tag)
+    echoes = query.all()
     matched = [r for r in echoes if _norm(r.matched_target) == _norm(matched_target)]
     if not matched:
         return quantity
@@ -4620,7 +4757,7 @@ def _dedupe_clog_echo(session, task: dict, team_id, player_id,
 
 
 def _dedupe_vestige_chain(session, task: dict, team_id, player_id, kind,
-                          matched_target) -> bool:
+                          matched_target, bonus=None) -> bool:
     """True when this vestige credit may record; False when the player's
     ring/vestige chain already credited it (item_collection only).
 
@@ -4631,8 +4768,19 @@ def _dedupe_vestige_chain(session, task: dict, team_id, player_id, kind,
     second full vestige cycle by the same player inside one event won't
     auto-credit again (astronomically rare; admins can award manually —
     manual rows neither block nor are blocked here).
+
+    Competition ``task`` bonus rules need this for the same reason they need
+    the clog-echo dedupe: ``_ring_vestige_for_task`` rewrites each Gold ring
+    drop to the vestige name for the synthetic embedded task too, so a
+    three-drop pity chain would count as three items toward the rule. Scoped
+    to the candidate's own rule tag — every rule on a competition shares one
+    task id, so an unscoped lookup would let one rule's chain silence
+    another's.
     """
-    if task.get("type") != "item_collection" or player_id is None:
+    ttype = task.get("type")
+    if ttype not in ("item_collection", "competition") or player_id is None:
+        return True
+    if ttype == "competition" and (bonus or {}).get("type") != "task":
         return True
     if kind not in ("drop", "clog"):
         return True
@@ -4641,15 +4789,19 @@ def _dedupe_vestige_chain(session, task: dict, team_id, player_id, kind,
         return True
     from db.models import EventCompletion
 
-    prior = (
+    query = (
         session.query(EventCompletion)
         .filter(EventCompletion.task_id == task["id"],
                 EventCompletion.team_id == team_id,
                 EventCompletion.player_id == player_id,
                 EventCompletion.source_type.in_(("drop", "clog")),
                 EventCompletion.status.in_(("auto", "confirmed", "manual", "pending")))
-        .all()
     )
+    if ttype == "competition":
+        from services.competition import bonus_note
+        query = query.filter(EventCompletion.note == bonus_note(
+            "task", int((bonus or {}).get("rule_id") or 0)))
+    prior = query.all()
     return not any(
         _norm(r.matched_target) == target_norm
         and (r.source_type or "") in ("drop", "clog")
@@ -4696,10 +4848,12 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
     # Vestige chain (rings + vestige + its clog = one acquisition, no time
     # window) — strictly stronger than the drop↔clog echo below for these.
     if not _dedupe_vestige_chain(session, task, team_id, player_id,
-                                 envelope.get("kind"), matched_target):
+                                 envelope.get("kind"), matched_target,
+                                 bonus=bonus):
         return None
     quantity = _dedupe_clog_echo(session, task, team_id, player_id,
-                                 envelope.get("kind"), matched_target, quantity)
+                                 envelope.get("kind"), matched_target, quantity,
+                                 bonus=bonus)
     if quantity is None:
         return None
 

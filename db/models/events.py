@@ -38,6 +38,12 @@ EVENT_TASK_TYPES = (
     # (boss/skilling/raids/…) resolved via utils.osrs_pets, or an explicit
     # config.pets allow list (customized category preset). See event_engine.
     "pet_collection",
+    # Combat achievements. ``target`` names one task, or ``config.task_names``
+    # is an explicit allow-list resolved at authoring from the task registry's
+    # monster/tier fields (utils.ca_tasks) so "a Hard CA at Zulrah" is a real,
+    # enforceable requirement rather than an admin's word. target_value is how
+    # many of them to complete. See event_engine.match_task.
+    "ca_target",
     # Loot Sweep (loot_sweep kind): one task per boss/"set". Each config item
     # awards points that DECAY per successive team receipt, capped per item;
     # collecting a full set awards a bonus (capped). Scored continuously off
@@ -894,6 +900,11 @@ class EventEffort(Base):
     # attempt, so the attempt total is max() of the two, not `kills` alone.
     completions = Column(BigInteger, nullable=False, default=0,
                          server_default="0")
+    # Clue scrolls of this tier the player was DEALT inside the window, at the
+    # NPCs where a "kill" can be banked — see services/event_effort.CLUE_TIERS.
+    # Always 0 elsewhere. Openings price only up to min(rolls, kills): a stack
+    # saved up before the event is real activity but not time spent during it.
+    rolls = Column(BigInteger, nullable=False, default=0, server_default="0")
     # 'plugin', 'wom', or 'both' — which side of the hybrid fold fed this row.
     # Freeze precision depends on it: plugin folds are real-time and freeze
     # exactly, WOM snapshots lag and lose the tail (documented approximation).

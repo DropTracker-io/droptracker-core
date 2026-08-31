@@ -89,7 +89,7 @@ MAX_KC_NPCS = 10
 # module keeps its no-service-imports rule, so the numbers live twice; the
 # unit tests assert they agree).
 COMP_MAX_NPCS = 10
-COMP_MAX_BONUS_RULES = 6
+COMP_MAX_BONUS_RULES = 12
 COMP_MIN_BONUS_POINTS = 1
 COMP_MAX_BONUS_POINTS = 10_000_000
 COMP_MAX_AWARDS_PER_PLAYER = 100
@@ -98,6 +98,34 @@ COMP_MAX_GAINED_PER_POINT = 1_000_000_000
 COMP_MIN_TIME_THRESHOLD_MS = 600
 COMP_MAX_TIME_THRESHOLD_MS = 6 * 60 * 60 * 1000
 COMP_RANKING_MODES = ("gained", "points")
+COMP_BONUS_RULE_TYPES = ("pet", "time_under", "task", "milestone")
+# Task types a ``task`` bonus rule may embed. kc_target/xp_target are absent on
+# purpose: the race already scores those kills and that XP, and their matcher
+# modes feed the shared KC-watermark / XP-baseline folds, so embedding one
+# would corrupt ``gained`` itself. "Every N kills" is a ``milestone`` rule.
+COMP_BONUS_TASK_TYPES = ("item_collection", "loot_value", "pb_target",
+                         "pet_collection", "skill_target", "ca_target")
+# …and what a SKILL race may embed. There is no item-to-skill dataset anywhere
+# in the codebase, so a drop-based bonus on a Skill of the Week could only ever
+# mean "from anywhere" — which is not a skill race. A pet and a level are the
+# two things genuinely scopable to one skill; everything else is a milestone.
+COMP_SOTW_BONUS_TASK_TYPES = ("pet_collection", "skill_target")
+# Mirrors utils.task_progress.PROGRESS_KINDS.
+COMP_PROGRESS_KINDS = ("count", "distinct", "groups", "any_path", "points")
+COMP_REPEATABLE_PROGRESS_KINDS = ("count", "points")
+# Embedded types whose match condition is a persistent STATE, not an event:
+# skill_target matches on every experience envelope once the level is reached,
+# so a cap above 1 would pay again on the next XP drop. Mirrors
+# services.competition.SINGLE_AWARD_TASK_TYPES.
+COMP_SINGLE_AWARD_TASK_TYPES = ("skill_target",)
+COMP_MAX_RULE_NEED = 1_000_000_000
+COMP_MIN_MILESTONE_STEP = 1
+COMP_MAX_MILESTONE_STEP = 1_000_000_000
+
+# Combat achievements: the resolved allow-list a ca_target stores. Ten raced
+# bosses at ~29 tasks each is the realistic ceiling; the cap is generous
+# because MAX_CONFIG_BYTES is the real limit and gives a better error.
+MAX_CA_TASK_NAMES = 400
 # item_collection tasks may optionally restrict which NPC(s) an item must drop
 # from: config.source_npcs (single-item) / config.item_npcs (per-item map). The
 # picker seeds the restriction with EVERY known wiki drop source of the item
@@ -229,6 +257,113 @@ def _validated_source_npcs(s, raw) -> list[str]:
             + ", ".join(sorted(set(unknown))[:10]),
         )
     return out
+
+
+def _validated_ca_target(s, target: str, tv, config: dict | None) -> tuple:
+    """Validate a ``ca_target`` task: ``(target, target_value, config)``.
+
+    A combat achievement envelope carries only ``task_name`` and ``tier`` — no
+    NPC — so "a Hard CA at Zulrah" can only be enforced by resolving the task
+    NAMES at authoring time and storing them. The registry
+    (``combat_achievement_tasks``, extracted from the game cache) carries
+    ``monster`` and ``tier`` per task, which is what makes that resolution
+    possible; ``utils.ca_tasks`` does the lookup.
+
+    An unreadable registry 422s rather than storing an empty allow-list: the
+    matcher treats "no list" as "credit nothing", and a task that silently
+    counts nothing all event is worse than a save that fails loudly.
+    """
+    from utils.ca_tasks import (CA_TIERS, catalog_index, task_key,
+                                tasks_for_monsters)
+
+    config = config or {}
+    index = catalog_index(s)
+    if not index:
+        abort_problem(
+            503, "Achievement registry unavailable",
+            "The combat achievement registry hasn't been built yet, so tasks "
+            "can't be validated. Run scripts/build_manifest.py and try again.")
+
+    if target:
+        canonical = index.get(task_key(target))
+        if not canonical:
+            abort_problem(
+                422, "Unknown combat achievement",
+                f"'{target}' is not a known combat achievement task name.")
+        return canonical, _require_target_value(
+            tv if tv is not None else 1, what="Quantity"), None
+
+    tiers_raw = config.get("tiers")
+    tiers: list[str] = []
+    if tiers_raw is not None:
+        if not isinstance(tiers_raw, list) or not tiers_raw:
+            abort_problem(422, "Invalid config",
+                          "'tiers' must be a non-empty array of tier names.")
+        by_norm = {t.lower(): t for t in CA_TIERS}
+        for t in tiers_raw:
+            canonical = by_norm.get(str(t).strip().lower())
+            if not canonical:
+                abort_problem(422, "Invalid config",
+                              f"'{t}' is not a combat achievement tier. "
+                              f"Valid: {list(CA_TIERS)}.")
+            if canonical not in tiers:
+                tiers.append(canonical)
+
+    names: list[str] = []
+    monsters: list[str] = []
+    raw_monsters = config.get("monsters")
+    if raw_monsters:
+        if not isinstance(raw_monsters, list):
+            abort_problem(422, "Invalid config",
+                          "'monsters' must be an array of names.")
+        monsters = [str(m).strip() for m in raw_monsters if str(m).strip()]
+        names = tasks_for_monsters(s, monsters, tiers)
+        if not names:
+            abort_problem(
+                422, "No matching achievements",
+                "No combat achievements match those bosses"
+                + (f" at {', '.join(tiers)} tier" if tiers else "")
+                + ". Check the boss name against the achievement list.")
+    raw_names = config.get("task_names")
+    if raw_names:
+        if not isinstance(raw_names, list):
+            abort_problem(422, "Invalid config",
+                          "'task_names' must be an array of task names.")
+        unknown: list[str] = []
+        explicit: list[str] = []
+        for n in raw_names:
+            canonical = index.get(task_key(n))
+            if not canonical:
+                unknown.append(str(n).strip() or "(empty)")
+            elif canonical not in explicit:
+                explicit.append(canonical)
+        if unknown:
+            abort_problem(
+                422, "Unknown combat achievement(s)",
+                "Not in the achievement registry: "
+                + ", ".join(sorted(set(unknown))[:10]))
+        # An explicit list NARROWS a monster selection rather than adding to
+        # it, so the boss scoping a caller injected can't be widened by also
+        # naming tasks — the same rule the item source restriction follows.
+        names = [n for n in names if n in explicit] if names else explicit
+        if not names:
+            abort_problem(422, "Invalid config",
+                          "None of those achievements belong to the selected bosses.")
+    if not names:
+        abort_problem(
+            422, "Missing achievements",
+            "Pick the bosses (or the exact achievements) this task counts.")
+    if len(names) > MAX_CA_TASK_NAMES:
+        abort_problem(422, "Too many achievements",
+                      f"At most {MAX_CA_TASK_NAMES} combat achievements per task.")
+    out: dict = {"task_names": sorted(names)}
+    if monsters:
+        out["monsters"] = monsters
+    if tiers:
+        out["tiers"] = tiers
+    return "", _require_target_value(tv if tv is not None else 1,
+                                     what="Achievements to complete",
+                                     hi=len(names)), out
 
 
 def _config_item_name_set(config: dict) -> set[str]:
@@ -843,6 +978,262 @@ def _validated_loot_sweep(s, config: dict | None) -> dict:
     }
 
 
+def _npc_norm_set(names) -> set[str]:
+    return {" ".join(str(n).strip().lower().split()) for n in (names or [])
+            if str(n).strip()}
+
+
+def _competition_pets_for_npcs(s, canonical_npcs: list[str]) -> list[str]:
+    """Pets the raced NPC(s) actually drop, from the wiki drop tables.
+
+    Resolved live rather than from a hand-maintained boss-to-pet map: the map
+    would be one more thing to update every game update, and the drop tables
+    already know. Restricted to the ``boss``/``raids`` pet categories so a
+    skilling pet can never be attributed to a boss by a stray table row.
+    """
+    from db.item_sources import items_dropped_by_npcs
+    from utils.osrs_pets import PET_DISPLAY_BY_NORM, pets_in_category
+
+    candidates = sorted({
+        PET_DISPLAY_BY_NORM[n]
+        for cat in ("boss", "raids")
+        for n in pets_in_category(cat)
+        if n in PET_DISPLAY_BY_NORM
+    })
+    if not candidates:
+        return []
+    found = items_dropped_by_npcs(s, canonical_npcs, candidates)
+    return sorted(found.keys())
+
+
+def _derived_progress_shape(ttype: str, config: dict | None, tv) -> tuple:
+    """``(progress_kind, need)`` for one embedded task config.
+
+    Derived ONCE here and stored on the rule so ``services/competition.py``
+    needs no task-type vocabulary at all — and so a config whose shape drifts
+    can never silently change how history was already counted.
+    """
+    kind = (config or {}).get("kind")
+    value = max(int(tv or 1), 1)
+    if ttype == "item_collection":
+        if kind == "any_path":
+            # any_path progress is a percentage of the closest-to-done path.
+            return "any_path", ANY_PATH_THRESHOLD
+        if kind == "groups":
+            return "groups", value
+        if kind in ("all_of", "assembly"):
+            return "distinct", value
+        if kind == "point_collection":
+            # The rows arrive pre-weighted (the matcher returns the item's
+            # point value as the quantity); ``progress_from_rows`` knows that
+            # and sums them flat. The kind is kept as "points" so every display
+            # surface still says "500 points of listed loot" rather than
+            # "500 listed drops".
+            return "points", value
+        return "count", value          # any_of, or a single item
+    if ttype == "pb_target":
+        # target_value is the TIME, not a count — one qualifying kill is one
+        # unit, and "N fast kills" rides config.need.
+        need = (config or {}).get("need") if (config or {}).get("mode") == "times" else None
+        return "count", max(int(need or 1), 1)
+    if ttype == "skill_target":
+        return "count", 1              # reaching the level is a single event
+    return "count", value              # loot_value, pet_collection, ca_target
+
+
+#: Envelope kinds that can credit each embedded task type — a cheap pre-filter
+#: on the hot path, stored on the rule so the matcher skips the other 90%.
+_BONUS_TASK_KINDS = {
+    "item_collection": ("drop", "clog", "pet"),
+    "loot_value": ("drop",),
+    "pb_target": ("pb",),
+    "pet_collection": ("pet",),
+    "skill_target": ("experience",),
+    "ca_target": ("ca",),
+}
+
+
+def _validated_bonus_task(s, raw_task, *, metric_kind: str,
+                          canonical_npcs: list[str], scope_labels: list[str],
+                          skill: str | None) -> dict:
+    """Validate one embedded task-builder config and SCOPE it to the race.
+
+    The criteria are validated by :func:`validate_task_payload` itself — the
+    same function the real task builder uses — so a bonus rule can express
+    anything a task can, and can never drift from it. What this adds is the
+    scoping: the raced NPCs are written INTO the normalized config's source
+    restriction, so the runtime gate that already enforces it for real tasks
+    (``event_engine._item_source_npcs``) enforces it here too. Scoping is a
+    property of the stored config, not a promise made in the UI.
+    """
+    raw_task = raw_task if isinstance(raw_task, dict) else {}
+    ttype = raw_task.get("type")
+    allowed = (COMP_SOTW_BONUS_TASK_TYPES if metric_kind == "skill"
+               else COMP_BONUS_TASK_TYPES)
+    if ttype not in allowed:
+        if ttype in ("kc_target", "xp_target"):
+            abort_problem(
+                422, "Invalid bonus rule",
+                "The race already scores those — use a milestone bonus "
+                "(\"every N kills\" / \"every N XP\") instead.")
+        if metric_kind == "skill" and ttype in COMP_BONUS_TASK_TYPES:
+            abort_problem(
+                422, "Invalid bonus rule",
+                "A Skill of the Week can't scope a drop to a skill — nothing "
+                "in the game says which skill an item came from. Use a pet "
+                "bonus, a level goal, or an XP milestone.")
+        abort_problem(422, "Invalid bonus rule",
+                      f"A bonus task must be one of {list(allowed)}.")
+
+    # ``config`` arrives as a JSON STRING from the wizard (EventTaskInput's
+    # shape) or as a dict from a hand-built payload; the branches below read
+    # keys off it, so normalize once here rather than in each of them.
+    body = {"type": ttype, "target": raw_task.get("target") or "",
+            "target_value": raw_task.get("target_value"),
+            "config": _parse_config(raw_task.get("config")) or {}}
+
+    npc_norms = _npc_norm_set(canonical_npcs)
+    if ttype == "ca_target":
+        # Scope BEFORE validation: the resolver turns bosses into task names,
+        # so injecting afterwards would be too late to constrain anything.
+        cfg = dict(body.get("config") or {})
+        cfg["monsters"] = list(dict.fromkeys(scope_labels))
+        body["config"] = cfg
+        body["target"] = ""            # a single named CA can't be race-scoped
+    elif ttype == "pet_collection":
+        cfg_in = body.get("config") or {}
+        pets = list(cfg_in.get("pets") or [])
+        categories = list(cfg_in.get("categories") or [])
+        if body.get("target"):
+            pets = pets or [body["target"]]
+            body["target"] = ""
+        if metric_kind == "skill" and not pets and not categories:
+            # A skill race has no drop table to fall back on, so an unfilled
+            # pet goal would store as bare "any pet" — every non-misc pet in
+            # the game, from anywhere. Default to the raced skill's own
+            # skilling pet, exactly like the primary `pet` rule does.
+            from utils.osrs_pets import SKILLING_PET_SKILL, canonical_pet_name
+
+            pets = sorted({
+                canonical_pet_name(pet) or pet
+                for pet, sk in SKILLING_PET_SKILL.items()
+                if str(sk).strip().lower() == (skill or "")
+            })
+            if not pets:
+                abort_problem(
+                    422, "No pet for this skill",
+                    f"{(skill or '').title()} has no skilling pet, so there is "
+                    "nothing for a pet bonus to pay. Pick the pets explicitly, "
+                    "or use an XP milestone instead.")
+        if metric_kind == "boss":
+            droppable = _competition_pets_for_npcs(s, canonical_npcs)
+            if not droppable:
+                abort_problem(
+                    422, "No pet to award",
+                    "The drop tables don't list a pet for "
+                    f"{', '.join(canonical_npcs[:3])}. Pick a different bonus.")
+            norm_ok = _npc_norm_set(droppable)
+            if pets:
+                stray = [p for p in pets
+                         if " ".join(str(p).strip().lower().split()) not in norm_ok]
+                if stray:
+                    abort_problem(
+                        422, "Pet isn't from this boss",
+                        f"{', '.join(sorted(set(stray))[:5])} "
+                        "doesn't drop from the boss this event races.")
+            else:
+                pets = droppable
+        # A boss race always ends with a non-empty ``pets`` (the droppable
+        # default 422s when empty), so the category fallback only ever reaches
+        # a skill race — where dropping it silently WIDENED the admin's
+        # selection from "skilling pets" to every non-misc pet in the game.
+        if pets:
+            body["config"] = {"pets": pets}
+        elif categories:
+            body["config"] = {"categories": categories}
+        else:
+            body["config"] = None
+    elif ttype == "skill_target":
+        if not skill:
+            abort_problem(422, "Invalid bonus rule",
+                          "A level goal needs the race's skill.")
+        body["target"] = skill
+    elif ttype == "pb_target":
+        target = str(body.get("target") or "").strip()
+        canonical = _canonical_npc(s, target) if target else None
+        if canonical is None and len(canonical_npcs) == 1:
+            canonical = canonical_npcs[0]      # single-boss race: implied
+        if canonical is None or \
+                " ".join(canonical.strip().lower().split()) not in npc_norms:
+            abort_problem(422, "Invalid bonus rule",
+                          "A kill-time bonus must name one of the race's bosses.")
+        body["target"] = canonical
+
+    validated = validate_task_payload(s, body)
+    config = json.loads(validated["config"]) if validated["config"] else {}
+
+    if ttype == "item_collection":
+        # An either-or METRIC branch ("… OR 5,000 KC") is dead inside a bonus
+        # rule: metric paths are matched only in match_task_all's post-loop
+        # block, and the competition branch returns before it — the task_rules
+        # loop calls plain match_task. Storing one would leave a branch that
+        # silently never credits, and the rule's need is the 100-point percent
+        # scale, so the tile would look reachable. Refuse it at write time.
+        for path in (config.get("paths") or []):
+            if isinstance(path, dict) and path.get("metric") in PATH_METRICS:
+                abort_problem(
+                    422, "Unsupported bonus rule",
+                    "An either-or bonus can't have a kill-count or GP branch — "
+                    "the race already scores kills. Use item branches, or add a "
+                    "separate milestone bonus.")
+
+    # ---- inject the source restriction (item-bearing types) ----------------
+    if ttype == "item_collection":
+        pet_items = {str(n).lower() for n in (config.get("pet_items") or ())}
+        if config.get("kind"):
+            names = _config_item_name_set(config) - pet_items
+            if names:
+                # Overwrite wholesale rather than merging: _item_source_npcs
+                # fails OPEN for an item with no entry, so a partial map is a
+                # partial scope. Every non-pet item gets the race's bosses.
+                by_canonical: dict = {}
+                for item in names:
+                    canonical = _canonical_item(s, item)
+                    if canonical:
+                        by_canonical[canonical] = list(canonical_npcs)
+                config["item_npcs"] = by_canonical
+        else:
+            config["source_npcs"] = list(canonical_npcs)
+        # Let a collection-log unlock at the raced boss count. Without this the
+        # source restriction makes a clog NEVER satisfy a scoped item, and a
+        # clog slot filled at Vorkath genuinely is a Vorkath achievement.
+        config["clog_sources"] = True
+    elif ttype == "loot_value":
+        config["source_npcs"] = list(canonical_npcs)
+
+    serialized = json.dumps(config) if config else None
+    if serialized is not None and len(serialized) > MAX_CONFIG_BYTES:
+        abort_problem(
+            422, "Bonus rule too large",
+            "That bonus rule's item list is too large to store — reduce the "
+            "number of items.")
+    progress_kind, need = _derived_progress_shape(ttype, config,
+                                                  validated["target_value"])
+    return {
+        "task": {"type": ttype, "target": validated["target"],
+                 "target_value": validated["target_value"],
+                 "config": config or None},
+        "progress_kind": progress_kind,
+        "need": min(max(int(need), 1), COMP_MAX_RULE_NEED),
+        "kinds": list(_BONUS_TASK_KINDS.get(ttype, ())),
+        "scope": list(canonical_npcs) if metric_kind == "boss" else [],
+        # A skill race can't scope anything item-shaped, and the only embedded
+        # types it allows are inherently skill-specific — so nothing here is
+        # ever "counts anywhere". Kept explicit so the flag has one owner.
+        "unscoped": False,
+    }
+
+
 def validated_competition_config(s, event_kind: str, raw) -> dict:
     """Validate + normalize a sotw/botw event's ``competition`` block into the
     canonical hidden-task config (``services/competition.py`` schema).
@@ -858,6 +1249,12 @@ def validated_competition_config(s, event_kind: str, raw) -> dict:
     metric = raw.get("metric") if isinstance(raw.get("metric"), dict) else {}
 
     canonical_npcs: list[str] = []
+    # The names an admin actually typed, kept alongside the canonical NPC rows
+    # they expanded to. The combat achievement registry names activities the
+    # way the wiki does ("Chambers of Xeric", "Tombs of Amascut: Expert Mode"),
+    # which is frequently the ALIAS rather than the NPC row loot is recorded
+    # under, so CA scoping has to be offered both spellings.
+    scope_labels: list[str] = []
     if metric_kind == "skill":
         key = str(metric.get("key") or raw.get("skill") or "").strip().lower()
         if not key:
@@ -885,6 +1282,9 @@ def validated_competition_config(s, event_kind: str, raw) -> dict:
                           f"At most {COMP_MAX_NPCS} NPCs per boss race.")
         unknown: list[str] = []
         for name in names:
+            label = str(name).strip()
+            if label and label not in scope_labels:
+                scope_labels.append(label)
             # Same liberal treatment as kc_target: a source alias
             # ("Wintertodt") expands to the NPC rows drops actually record.
             for real in expand_source_names(str(name)):
@@ -903,6 +1303,9 @@ def validated_competition_config(s, event_kind: str, raw) -> dict:
                           f"At most {COMP_MAX_NPCS} NPCs per boss race "
                           "(a merged source expanded past the cap).")
         out["npcs"] = canonical_npcs
+        for canonical in canonical_npcs:
+            if canonical not in scope_labels:
+                scope_labels.append(canonical)
 
     ranking = raw.get("ranking") if isinstance(raw.get("ranking"), dict) else {}
     mode = ranking.get("mode") or "gained"
@@ -924,7 +1327,9 @@ def validated_competition_config(s, event_kind: str, raw) -> dict:
                       f"At most {COMP_MAX_BONUS_RULES} bonus rules per event.")
     rules: list[dict] = []
     npc_norms = {" ".join(n.strip().lower().split()) for n in canonical_npcs}
-    seen_pet_rule = False
+    # Pet rules may coexist ("Pet snakeling +100, any other Zulrah pet +20"),
+    # but their lists must be DISJOINT or one pet would pay twice.
+    claimed_pets: dict[str, int] = {}
     for i, rr in enumerate(rules_raw, start=1):
         rr = rr if isinstance(rr, dict) else {}
         rtype = rr.get("type")
@@ -939,10 +1344,6 @@ def validated_competition_config(s, event_kind: str, raw) -> dict:
         if rr.get("label"):
             rule["label"] = str(rr["label"]).strip()[:120]
         if rtype == "pet":
-            if seen_pet_rule:
-                abort_problem(422, "Duplicate bonus rule",
-                              "Only one pet bonus rule per event.")
-            seen_pet_rule = True
             from utils.osrs_pets import canonical_pet_name
 
             pets: list[str] = []
@@ -964,10 +1365,58 @@ def validated_competition_config(s, event_kind: str, raw) -> dict:
                     for pet, skill in SKILLING_PET_SKILL.items()
                     if str(skill).strip().lower() == skill_norm
                 })
+                if not pets:
+                    abort_problem(
+                        422, "No pet for this skill",
+                        f"{skill_norm.title()} has no skilling pet, so there "
+                        "is nothing for a pet bonus to pay. Use an XP "
+                        "milestone or a level goal instead.")
+            if not pets and metric_kind == "boss":
+                # Default: whatever the raced boss actually drops. Resolved
+                # from the wiki drop tables, not a hand-maintained map — this
+                # is the whole reason the button used to 422 on every boss
+                # race, since only skill races had a default.
+                pets = _competition_pets_for_npcs(s, canonical_npcs)
+                if not pets:
+                    abort_problem(
+                        422, "No pet to award",
+                        "The drop tables don't list a pet for "
+                        f"{', '.join(canonical_npcs[:3])}. Pick a different "
+                        "bonus, or name the pet explicitly.")
             if not pets:
                 abort_problem(422, "Missing pets",
                               "A pet bonus needs at least one pet name.")
+            for pet in pets:
+                key = " ".join(pet.strip().lower().split())
+                if key in claimed_pets:
+                    abort_problem(
+                        422, "Overlapping pet bonuses",
+                        f"{pet} is already covered by bonus rule "
+                        f"{claimed_pets[key]} — a pet can only pay once.")
+                claimed_pets[key] = i
             rule["pets"] = pets
+        elif rtype == "task":
+            derived = _validated_bonus_task(
+                s, rr.get("task"), metric_kind=metric_kind,
+                canonical_npcs=canonical_npcs, scope_labels=scope_labels,
+                skill=out.get("skill"))
+            rule.update(derived)
+            if (derived["progress_kind"] not in COMP_REPEATABLE_PROGRESS_KINDS
+                    or derived["task"]["type"] in COMP_SINGLE_AWARD_TASK_TYPES):
+                # A set / percent fold saturates, so a second award could never
+                # be earned; a state-condition type would pay on every later
+                # envelope. Pinning here keeps "Award 1 of 3" honest.
+                rule["max_awards"] = 1
+        elif rtype == "milestone":
+            step = rr.get("step")
+            if not isinstance(step, (int, float)) or isinstance(step, bool) or not (
+                    COMP_MIN_MILESTONE_STEP <= int(step) <= COMP_MAX_MILESTONE_STEP):
+                abort_problem(
+                    422, "Invalid milestone",
+                    "A milestone needs a step of at least "
+                    f"{COMP_MIN_MILESTONE_STEP} "
+                    f"{'XP' if metric_kind == 'skill' else 'kills'}.")
+            rule["step"] = int(step)
         elif rtype == "time_under":
             if metric_kind != "boss":
                 abort_problem(422, "Invalid bonus rule",
@@ -991,11 +1440,22 @@ def validated_competition_config(s, event_kind: str, raw) -> dict:
                               "race's bosses.")
             rule["npc"] = canonical
         else:
-            abort_problem(422, "Invalid bonus rule",
-                          "Bonus rule type must be 'pet' or 'time_under'.")
+            abort_problem(
+                422, "Invalid bonus rule",
+                "Bonus rule type must be one of "
+                + ", ".join(f"'{t}'" for t in COMP_BONUS_RULE_TYPES) + ".")
         rules.append(rule)
     if rules:
         out["bonus_rules"] = rules
+    # web_event_tasks.config is a TEXT column (~64KB). Item-bearing bonus rules
+    # make that reachable for the first time on this path — validate_task_payload
+    # has always guarded its own writes, but the competition config never went
+    # through it, so the guard has to be repeated here.
+    if len(json.dumps(out)) > MAX_CONFIG_BYTES:
+        abort_problem(
+            422, "Configuration too large",
+            "This event's bonus rules are too large to store — reduce the "
+            "number of items or bonus rules.")
     return out
 
 
@@ -1254,6 +1714,9 @@ def validate_task_payload(s, body: dict) -> dict:
                 config = None  # bare "any pet" (misc excluded)
             target = ""
             tv = _require_target_value(tv if tv is not None else 1, what="Number of pets")
+
+    elif ttype == "ca_target":
+        target, tv, config = _validated_ca_target(s, target, tv, config)
 
     elif ttype in ("ehp_target", "ehb_target"):
         tv = _require_target_value(tv, what="Target " + ttype[:3].upper())

@@ -31,6 +31,7 @@ from .common import (
     envelope_from_plugin,
     SEASONAL_WORLD_TYPE,
     SeasonalDrop,
+    reraise_if_session_broken,
 )
 from utils.valuation_guard import sanitize_quantity, exceeds_value_sanity_limit
 
@@ -1056,6 +1057,35 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                     )
         except Exception as e:
             print(f"Couldn't queue personal DM notification: {e}")
+
+        # KC milestones (1st kill / every Nth) — outside the notify-criteria
+        # branch above on purpose: a below-minimum-value drop still carries the
+        # kill count that crosses a milestone. Gates (main world, plugin path,
+        # WOM-recognized boss) live in the helper; a failure here must never
+        # cost the drop itself.
+        if kill_count is not None:
+            try:
+                from .kc_milestones import handle_kill_count
+
+                await handle_kill_count(
+                    session,
+                    player,
+                    npc_id,
+                    npc_name,
+                    kill_count,
+                    world_type=world_type,
+                    from_plugin=envelope_from_plugin(drop_data),
+                    image_url=drop.image_url or "",
+                    plugin_version=plugin_version,
+                    use_external_session=use_external_session,
+                    player_groups=player_groups,
+                )
+            except Exception as e:
+                # An infrastructure fault here has already killed the
+                # transaction: swallowing it cannot save the drop, it only
+                # turns a retryable envelope into dead-lettered poison.
+                reraise_if_session_broken(e)
+                print(f"[KcMilestones] Check failed for drop {getattr(drop, 'drop_id', '?')}: {e}")
 
         if not use_external_session:
             debug_print(f"Committing session (we own it)")

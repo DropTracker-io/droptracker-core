@@ -68,3 +68,21 @@ def ts_registry(relative: str) -> Path | None:
         return None
     path = root / "packages" / "api-types" / "src" / relative
     return path if path.is_file() else None
+
+
+def plugin_repo_root() -> Path | None:
+    """The sibling RuneLite plugin repository, or ``None`` if not beside us.
+
+    Same side-by-side layout as :func:`web_repo_root` (``droptracker/disc`` and
+    ``droptracker/plugin``). Used by the checks that guard a deliberate
+    duplication — region data and the safe/dangerous region sets exist in both
+    repositories, and the point of the copy is that they agree.
+    ``DROPTRACKER_PLUGIN_ROOT`` overrides.
+    """
+    override = os.environ.get("DROPTRACKER_PLUGIN_ROOT")
+    candidates = [Path(override)] if override else []
+    candidates += [REPO_ROOT.parent / "plugin", REPO_ROOT.parent / "droptracker-plugin"]
+    for candidate in candidates:
+        if (candidate / "src" / "main" / "java" / "io" / "droptracker").is_dir():
+            return candidate
+    return None

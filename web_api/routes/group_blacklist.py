@@ -1,6 +1,7 @@
-"""Group notification blacklist — items/NPCs a clan never wants announced.
+"""Group notification blacklist — items, NPCs and places a clan never wants announced.
 
   GET    /api/v1/groups/{id}/notification-blacklist          (session + group admin)
+  GET    /api/v1/groups/{id}/notification-blacklist/regions  ?q=  (area picker)
   POST   /api/v1/groups/{id}/notification-blacklist          { entry_type, name, game_id? }
   DELETE /api/v1/groups/{id}/notification-blacklist/{entryId}
 
@@ -22,17 +23,25 @@ The picker on the settings page feeds ``game_id`` from ``/events/meta/items``
 and ``/events/meta/npcs``; it is used for the icon and nothing else, so a
 hand-typed name for something the catalog has not seen yet is still a valid
 entry.
+
+``region`` entries are the exception to that last part, because their name IS
+the match. An **area name** ("Castle Wars") must be one this server knows, and
+mutes every region that area spans; a **numeric id** ("9520") mutes exactly one
+region and is accepted for places the name data does not cover. The two are
+stored differently on purpose — see ``db.notification_blacklist.region_key`` —
+so a leader who wants only one chunk of a raid can still say so.
 """
 from __future__ import annotations
 
 import asyncio
 
-from quart import Blueprint, jsonify
+from quart import Blueprint, jsonify, request
 from sqlalchemy.exc import IntegrityError
 
 from db import AuditLog
 from db.models import GroupNotificationBlacklist
 from db.notification_blacklist import ENTRY_TYPES, entry_key
+from utils import region_names
 from web_api.common import abort_problem, db_session, private_no_store
 from web_api.deps import (
     assert_group_admin,
@@ -53,9 +62,13 @@ MAX_ENTRIES_PER_GROUP = 250
 # ``items.item_name``. Longer input is a typo or an attack, not a real name.
 MAX_NAME_LENGTH = 125
 
+# The full area list is 397 entries; the picker filters client-side from one
+# fetch, so this only bounds a pathological query.
+MAX_REGION_RESULTS = 500
+
 
 def _serialize(row: GroupNotificationBlacklist) -> dict:
-    return {
+    entry = {
         "id": int(row.id),
         "entry_type": row.entry_type,
         "name": row.entry_name,
@@ -63,6 +76,13 @@ def _serialize(row: GroupNotificationBlacklist) -> dict:
         "game_id": int(row.game_id) if row.game_id is not None else None,
         "added_at": row.date_added.isoformat() if row.date_added else None,
     }
+    if row.entry_type == "region":
+        # A raw-id entry reads as "9520" in the list, which tells a leader
+        # nothing. Resolve it for display only — the stored match_key still
+        # covers exactly that one region, not the whole area.
+        entry["resolved_name"] = region_names.name_for(row.game_id) if row.game_id else None
+        entry["covers"] = "region" if str(row.entry_name).strip().isdigit() else "area"
+    return entry
 
 
 def _entries(s, group_id: int) -> list[dict]:
@@ -87,6 +107,31 @@ async def list_blacklist(group_id: int):
             user = load_user(s, user_id)
             assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
             return {"entries": _entries(s, group_id), "limit": MAX_ENTRIES_PER_GROUP}
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@group_blacklist_bp.get("/groups/<int:group_id>/notification-blacklist/regions")
+async def list_regions(group_id: int):
+    """The area list backing the region picker.
+
+    Static reference data, but served behind the same group-admin check as the
+    rest of this blueprint so the settings page needs no second auth path.
+    Names are what a leader submits as ``name`` for a ``region`` entry; the ids
+    are shown so they can tell two same-named areas apart.
+    """
+    user_id = current_user_id()
+    query = (request.args.get("q") or "").strip().lower()
+
+    def _load():
+        with db_session() as s:
+            user = load_user(s, user_id)
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+
+        areas = region_names.all_areas()
+        if query:
+            areas = [a for a in areas if query in a["name"].lower()]
+        return {"regions": areas[:MAX_REGION_RESULTS], "types": list(region_names.AREA_TYPES)}
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
 
@@ -131,6 +176,24 @@ async def add_blacklist_entry(group_id: int):
             game_id = int(raw_game_id)
         except (TypeError, ValueError):
             abort_problem(422, "Invalid game id", "'game_id' must be an integer or null.")
+
+    if entry_type == "region":
+        if name.isdigit():
+            # A raw region id mutes exactly that region (Dink's whole filter).
+            # Record it in game_id too so the list can show what it resolves to.
+            game_id = int(name)
+        else:
+            # An area name mutes every region the area spans, so no single id
+            # describes it; a supplied one would be misleading in the UI.
+            game_id = None
+            if not region_names.regions_for(name):
+                abort_problem(
+                    422,
+                    "Unknown region",
+                    f"'{name}' is not a known area. Pick one from the region list, "
+                    "or enter a numeric region id (find one with Dink's "
+                    "'::dinkregion' chat command or an online map).",
+                )
 
     def _apply():
         with db_session() as s:

@@ -15,12 +15,35 @@ except the duration is whatever the admins choose and DropTracker can layer
                    tiers may coexist ("under 1:00 = 5, under 0:50 = 15
                    more") — each rule matches independently, so one fast
                    kill can award several rules at once.
+- ``task``       — ANY criteria the event task builder can express, embedded
+                   verbatim as ``{type, target, target_value, config}`` and
+                   evaluated by the engine's own ``match_task`` against a
+                   synthetic task dict. "Collect all four Zulrah uniques",
+                   "500 points of Vorkath loot", "10 Zulrah collection-log
+                   slots", "a sub-2:00 kill OR the pet" — the whole
+                   vocabulary, for one new rule type. The write validator
+                   INJECTS the raced NPCs into the embedded config's source
+                   restriction, so scoping is enforced at match time by the
+                   same predicate real tasks use, not by admin convention.
+                   Pays ``points`` per ``need`` units of progress, up to
+                   ``max_awards`` times.
+- ``milestone``  — every ``step`` units of GAINED metric pays ``points``
+                   ("every 100 kills = 10 pts"), up to ``max_awards`` times.
+                   Folds straight off the gained number and writes NO ledger
+                   rows at all, so it cannot double-count and needs no matcher.
 
 Everything lands on ONE hidden ``competition`` task per event, so per-player
-standings fold from a single ledger: rows tagged ``bonus:{type}:{rule_id}``
-(:func:`bonus_note`) are bonus awards whose ``quantity`` is the points; every
-other row's ``quantity`` is gained metric units (XP delta / kills). The task
-never "completes".
+standings fold from a single ledger. Rows tagged ``bonus:{type}:{rule_id}``
+(:func:`bonus_note`) belong to a bonus rule; every other row's ``quantity`` is
+gained metric units (XP delta / kills). What a tagged row's ``quantity`` MEANS
+depends on the rule type, and the note's type segment is what tells them apart
+without loading the config:
+
+- ``pet`` / ``time_under`` — one row IS one award; ``quantity`` is the points.
+- ``task`` — one row is one unit of PROGRESS (a drop, a kill, GP, a clog slot);
+  ``quantity`` is credit units and the points come from the rule at fold time.
+
+The task never "completes".
 
 Ranking is per event (``ranking.mode``):
 
@@ -44,6 +67,13 @@ from __future__ import annotations
 import json
 from typing import Iterable, Optional
 
+# The one import this module makes. utils.task_progress is a stdlib-only leaf
+# holding the pure "how far along is this?" folds that services.event_engine
+# also uses — it lives under utils/ precisely so this module can reach it (the
+# pytest conftest MagicMocks the whole ``services`` package, so a service that
+# imported a sibling service would silently score against a mock).
+from utils.task_progress import PROGRESS_KINDS, progress_from_rows
+
 # The event kinds this module implements (db.models.COMPETITION_EVENT_KINDS
 # mirrors this — kept literal here so the module stays import-free/pure).
 COMPETITION_KINDS = ("sotw", "botw")
@@ -51,7 +81,32 @@ COMPETITION_TASK_TYPE = "competition"
 
 METRIC_KINDS = ("skill", "boss")
 RANKING_MODES = ("gained", "points")
-BONUS_RULE_TYPES = ("pet", "time_under")
+BONUS_RULE_TYPES = ("pet", "time_under", "task", "milestone")
+
+# Rule types whose ledger rows are AWARDS (one row = one payout, quantity =
+# points) rather than units of progress. The note's type segment is the only
+# thing a reader needs to tell the two ledger dialects apart.
+DISCRETE_RULE_TYPES = ("pet", "time_under")
+
+# Task types the ``task`` rule may embed. ``kc_target``/``xp_target`` are
+# deliberately absent: the race ALREADY scores those kills and that XP, and
+# their matcher modes feed the shared KC-watermark / XP-baseline folds, which
+# would corrupt ``gained`` itself. A "every N kills" bonus is a ``milestone``.
+BONUS_TASK_TYPES = ("item_collection", "loot_value", "pb_target",
+                    "pet_collection", "skill_target", "ca_target")
+
+# Progress kinds that can pay MORE THAN ONCE. The others fold a set (distinct
+# items, grouped requirements, a percent-scaled either-or) that saturates by
+# construction, so a second award could never be earned — pinning max_awards
+# to 1 there keeps "Award 1 of 3" from being a lie in the UI.
+REPEATABLE_PROGRESS_KINDS = ("count", "points")
+
+# Embedded task types whose match condition is a PERSISTENT STATE rather than
+# an event: ``skill_target`` matches on every experience envelope once the
+# level is reached, so with ``max_awards`` above 1 the next XP drop would pay
+# again, and again, until the cap. Pinned in the scorer (not only the
+# validator) so an already-stored config is corrected on read too.
+SINGLE_AWARD_TASK_TYPES = ("skill_target",)
 
 DEFAULT_RANKING_MODE = "gained"
 # Points-mode conversion defaults, per metric kind: 10k XP or 1 kill = 1 pt.
@@ -61,7 +116,14 @@ DEFAULT_GAINED_PER_POINT_BOSS = 1
 # Bounds the write validator enforces (kept here so scoring and validation
 # agree on what a legal config looks like).
 MAX_NPCS = 10                       # matches kc_target's multi-NPC cap
-MAX_BONUS_RULES = 6                 # one pet rule + up to 5 time tiers
+# Raised from 6 (one pet rule + five time tiers) now that a rule can be any
+# task. NOT raised further: ``record_match`` builds ``f"{guid[:60]}#b{id}"``
+# into a String(64) column, so a three-digit rule id shears and ``#b100``
+# would collide with ``#b10``.
+MAX_BONUS_RULES = 12
+MAX_RULE_NEED = 1_000_000_000       # progress units one award may demand
+MIN_MILESTONE_STEP = 1
+MAX_MILESTONE_STEP = 1_000_000_000
 MIN_BONUS_POINTS = 1
 MAX_BONUS_POINTS = 10_000_000
 MIN_AWARDS_PER_PLAYER = 1
@@ -114,17 +176,29 @@ def bonus_note(rule_type: str, rule_id: int) -> str:
 
 def parse_bonus_note(note) -> Optional[tuple]:
     """``(rule_type, rule_id)`` for a bonus-tagged ledger note, else None.
-    Tolerates an admin note after `` | `` (manual awards)."""
+    Tolerates an admin note after `` | `` (manual awards).
+
+    The type segment is matched on SHAPE, not against
+    :data:`BONUS_RULE_TYPES` — a row written by a newer deploy must still be
+    recognised as a bonus row by an older one. Failing to recognise it is the
+    dangerous direction: every consumer downstream (:func:`fold_rows`, the
+    record-time gate, the award log) treats an unparsed row as GAINED, so an
+    unknown rule type would silently add its points to the ranked metric.
+    Recognising it and finding no matching rule pays nothing, which is wrong
+    but bounded. The rule id is the load-bearing half."""
     if not note:
         return None
     tag = str(note).split("|", 1)[0].strip()
     if not tag.startswith(BONUS_NOTE_PREFIX):
         return None
     parts = tag[len(BONUS_NOTE_PREFIX):].split(":")
-    if len(parts) != 2 or parts[0] not in BONUS_RULE_TYPES:
+    if len(parts) < 2:
+        return None
+    rule_type = parts[0]
+    if not rule_type or len(rule_type) > 32 or not rule_type.replace("_", "").isalnum():
         return None
     try:
-        return parts[0], int(parts[1])
+        return rule_type, int(parts[1])
     except (TypeError, ValueError):
         return None
 
@@ -136,9 +210,10 @@ class CompetitionBonusRule:
     """One normalized bonus rule (see the module docstring for semantics)."""
 
     __slots__ = ("id", "type", "points", "max_awards", "pets", "npc",
-                 "threshold_ms", "label")
+                 "threshold_ms", "label", "task", "progress_kind", "need",
+                 "kinds", "scope", "step", "unscoped", "metric_kind")
 
-    def __init__(self, raw: dict, idx: int):
+    def __init__(self, raw: dict, idx: int, metric_kind=None):
         raw = raw if isinstance(raw, dict) else {}
         self.type = raw.get("type") if raw.get("type") in BONUS_RULE_TYPES else None
         # Server-assigned, stable across edits; 1-based position fallback for
@@ -159,13 +234,59 @@ class CompetitionBonusRule:
         self.label = (str(raw.get("label")).strip()[:120]
                       if raw.get("label") else None)
 
+        # task: the embedded task-builder criteria, plus the shape the
+        # validator DERIVED from them once at write time. Deriving them here
+        # instead would mean this module had to know the task-type vocabulary,
+        # and a config whose shape drifted could silently change how history
+        # was counted.
+        task = raw.get("task")
+        self.task = task if isinstance(task, dict) else None
+        self.progress_kind = (raw.get("progress_kind")
+                              if raw.get("progress_kind") in PROGRESS_KINDS
+                              else "count")
+        self.need = _clamp(raw.get("need"), 1, 1, MAX_RULE_NEED)
+        # Envelope kinds that can possibly credit this rule — a cheap
+        # pre-filter so the hot path skips match_task for the other 90%.
+        # Empty means "no filter" (correct, just slower).
+        self.kinds = tuple(str(k) for k in (raw.get("kinds") or ()) if k)
+        # Display only: the NPCs the criteria were scoped to. Enforcement
+        # lives in the embedded config's source restriction, not here.
+        self.scope = tuple(_norm(n) for n in (raw.get("scope") or ()) if _norm(n))
+        # sotw item rules cannot be skill-scoped (there is no item->skill
+        # dataset), so they count from anywhere and say so on every surface.
+        self.unscoped = bool(raw.get("unscoped"))
+
+        # milestone: gained units per payout. ``metric_kind`` rides along from
+        # the config purely so the label can name the unit ("kills" vs "XP")
+        # instead of guessing it from the step's magnitude.
+        self.step = _clamp(raw.get("step"), MIN_MILESTONE_STEP,
+                           MIN_MILESTONE_STEP, MAX_MILESTONE_STEP)
+        self.metric_kind = metric_kind
+
+        if self.type == "task" and (
+                self.progress_kind not in REPEATABLE_PROGRESS_KINDS
+                or (self.task or {}).get("type") in SINGLE_AWARD_TASK_TYPES):
+            # A set/percent fold saturates, so a second award is unreachable —
+            # and a state-condition type would pay on EVERY later envelope.
+            self.max_awards = 1
+
     @property
     def valid(self) -> bool:
         if self.type == "pet":
             return bool(self.pets)
         if self.type == "time_under":
             return bool(self.npc) and self.threshold_ms >= MIN_TIME_THRESHOLD_MS
+        if self.type == "task":
+            return bool(self.task) and bool(self.task.get("type")) and self.need >= 1
+        if self.type == "milestone":
+            return self.step >= MIN_MILESTONE_STEP
         return False
+
+    @property
+    def cap_units(self) -> int:
+        """Progress units past which nothing more can ever be earned — the
+        ceiling every fold and record-time gate clamps to."""
+        return self.need * max(self.max_awards, 1)
 
 
 class CompetitionConfig:
@@ -205,7 +326,7 @@ class CompetitionConfig:
 
         rules = []
         for idx, raw_rule in enumerate((raw.get("bonus_rules") or ())[:MAX_BONUS_RULES]):
-            rule = CompetitionBonusRule(raw_rule, idx)
+            rule = CompetitionBonusRule(raw_rule, idx, self.metric_kind)
             if rule.valid:
                 rules.append(rule)
         self.bonus_rules = tuple(rules)
@@ -240,7 +361,19 @@ class CompetitionConfig:
                  "points": r.points}
                 for r in self.bonus_rules if r.type == "time_under"
             ],
+            # Embedded task criteria, verbatim. The engine turns each ``task``
+            # blob into a synthetic task dict at state load and runs the SAME
+            # ``match_task`` over it that a real task gets — that is the whole
+            # trick, and why one rule type buys the entire builder vocabulary.
+            "task_rules": [
+                {"id": r.id, "kinds": list(r.kinds), "task": dict(r.task or {})}
+                for r in self.bonus_rules if r.type == "task"
+            ],
         }
+
+    @property
+    def has_milestones(self) -> bool:
+        return any(r.type == "milestone" for r in self.bonus_rules)
 
 
 # --------------------------------------------------------------------------- #
@@ -258,12 +391,29 @@ def fold_rows(rows: Iterable, config: CompetitionConfig) -> dict:
     """Per-player standings input from applied ledger rows.
 
     Returns ``{player_id: {"gained": int, "bonus_points": int,
-    "bonus": {rule_id: {"type", "count", "awarded", "points"}}}}`` where
-    ``count`` is every surviving award row and ``awarded`` / ``points`` stop
-    at the rule's per-player cap (rows beyond it contribute 0 — the cap is
-    enforced HERE, not only at record time, so a revoked award frees its slot
-    and an over-cap row that slipped a gate can never pay out)."""
+    "bonus": {rule_id: {"type", "count", "awarded", "points",
+    "progress", "need"}}}}``.
+
+    Three dialects share the ledger, told apart by the note's type segment
+    (see the module docstring) and folded in three passes:
+
+    1. **Untagged** rows are gained metric units. **Discrete** rules
+       (``pet`` / ``time_under``) count one award per row, ``quantity`` being
+       the points; ``awarded`` / ``points`` stop at the rule's per-player cap
+       (rows beyond it contribute 0). **Task** rows are only bucketed here.
+    2. **Task** rules fold their bucketed rows through the shared progress
+       cores — the same functions the real task would use — then pay
+       ``points`` per ``need`` units, capped at ``max_awards``. The points
+       come from the RULE, not the row, so a partly-collected set pays
+       nothing and a 3× stack of one listed item is worth one item.
+    3. **Milestone** rules read the gained total computed in pass 1 and write
+       no ledger rows at all.
+
+    The cap is enforced HERE, not only at record time, so a revoked award
+    frees its slot and an over-cap row that slipped a gate can never pay out.
+    """
     per: dict = {}
+    task_rows: dict = {}
     for row in sorted(rows, key=_row_sort_key):
         player_id = getattr(row, "player_id", None)
         if player_id is None:
@@ -277,17 +427,60 @@ def fold_rows(rows: Iterable, config: CompetitionConfig) -> dict:
             continue
         rule_type, rule_id = parsed
         rule = config.rules_by_id.get(rule_id)
+        # Trust the CONFIG's type over the note's when the rule still exists:
+        # a draft-time edit may have changed the dialect under rows already
+        # written, and the fold must read them the way the live rule means.
+        effective_type = rule.type if rule is not None else rule_type
         slot = entry["bonus"].setdefault(
-            rule_id, {"type": rule_type, "count": 0, "awarded": 0, "points": 0})
+            rule_id, {"type": effective_type, "count": 0,
+                      "awarded": 0, "points": 0})
         slot["count"] += 1
+        if effective_type == "task":
+            task_rows.setdefault((player_id, rule_id), []).append(row)
+            continue
+        if effective_type not in DISCRETE_RULE_TYPES:
+            # ``milestone`` (writes no rows), or a dialect this deploy has
+            # never heard of. Recognised as a bonus row — which is what keeps
+            # it out of ``gained`` — but it pays nothing, because reading a
+            # row's quantity as points is only safe for the discrete types.
+            continue
         cap = rule.max_awards if rule is not None else 1
         if slot["awarded"] >= cap:
             continue  # over the per-player cap — dead weight, pays nothing
-        # The row's quantity IS the points at award time; a rule edit while
-        # drafting doesn't rewrite history (configs lock at activation).
+        # A discrete row's quantity IS the points at award time; a rule edit
+        # while drafting doesn't rewrite history (configs lock at activation).
         slot["awarded"] += 1
         slot["points"] += quantity
         entry["bonus_points"] += quantity
+
+    for (player_id, rule_id), rule_rows in task_rows.items():
+        rule = config.rules_by_id.get(rule_id)
+        slot = per[player_id]["bonus"][rule_id]
+        if rule is None:
+            continue  # rule deleted while drafting — its rows pay nothing
+        progress = progress_from_rows(
+            rule_rows, rule.progress_kind,
+            (rule.task or {}).get("config") or {}, rule.cap_units)
+        awarded = min(progress // rule.need, rule.max_awards)
+        slot["progress"] = progress
+        slot["need"] = rule.need
+        slot["awarded"] = awarded
+        slot["points"] = awarded * rule.points
+        per[player_id]["bonus_points"] += slot["points"]
+
+    for rule in config.bonus_rules:
+        if rule.type != "milestone":
+            continue
+        for entry in per.values():
+            awarded = min(_int(entry.get("gained")) // rule.step, rule.max_awards)
+            if awarded <= 0:
+                continue
+            points = awarded * rule.points
+            entry["bonus"][rule.id] = {
+                "type": "milestone", "count": awarded, "awarded": awarded,
+                "points": points, "progress": _int(entry.get("gained")),
+                "need": rule.step}
+            entry["bonus_points"] += points
     return per
 
 
@@ -303,6 +496,33 @@ def bonus_award_count(rows: Iterable, player_id, rule_id: int) -> int:
         if parsed is not None and parsed[1] == int(rule_id):
             n += 1
     return n
+
+
+def rule_rows(rows: Iterable, player_id, rule_id: int) -> list:
+    """One player's surviving ledger rows for one rule — the input both the
+    task fold and the record-time gate work from."""
+    out = []
+    for row in rows:
+        if getattr(row, "player_id", None) != player_id:
+            continue
+        parsed = parse_bonus_note(getattr(row, "note", None))
+        if parsed is not None and parsed[1] == int(rule_id):
+            out.append(row)
+    return out
+
+
+def task_rule_progress(rows: Iterable, rule: CompetitionBonusRule) -> int:
+    """Progress units the given rows represent toward one ``task`` rule,
+    clamped at the point past which nothing more can be earned.
+
+    The record-time gate (``_row_advances_progress``) calls this twice — with
+    and without the candidate row — and records only if the number moved. That
+    is deliberately PROGRESS, not awards: the third item of a five-item set
+    earns nothing yet but must still be recorded, or the set can never
+    complete."""
+    return progress_from_rows(rows, rule.progress_kind,
+                              (rule.task or {}).get("config") or {},
+                              rule.cap_units)
 
 
 def points_for_gained(gained: int, config: CompetitionConfig) -> int:
@@ -457,25 +677,85 @@ def rule_label(rule: CompetitionBonusRule) -> str:
     if rule.type == "time_under":
         npc = (rule.npc or "").title()
         return f"{npc} kill under {format_time_ms(rule.threshold_ms)}"
+    if rule.type == "milestone":
+        # The unit is a property of the RACE, not of the step's size — a boss
+        # race with a 1,000-kill milestone was reading "Every 1,000 XP".
+        unit = "XP" if rule.metric_kind == "skill" else "kills"
+        return f"Every {rule.step:,} {unit}"
+    if rule.type == "task":
+        return task_rule_label(rule)
     return "Bonus"
+
+
+def task_rule_label(rule: CompetitionBonusRule) -> str:
+    """Fallback sentence for a ``task`` rule the admin didn't name. The
+    validator normally writes a ``label``, so this is the safety net — it
+    describes the SHAPE, since the criteria themselves can be a 40-item list."""
+    task = rule.task or {}
+    ttype = task.get("type")
+    need = rule.need
+    if ttype == "loot_value":
+        return f"{format_gained(need, None).replace(' KC', '')} GP of loot"
+    if ttype == "pb_target":
+        return "Fast kill" if need <= 1 else f"{need:,} fast kills"
+    if ttype == "ca_target":
+        return "A combat achievement" if need <= 1 else f"{need:,} combat achievements"
+    if ttype == "pet_collection":
+        return "A pet"
+    if ttype == "skill_target":
+        return f"Reach level {need}"
+    if rule.progress_kind == "distinct":
+        return f"Collect all {need:,} listed drops"
+    if rule.progress_kind == "groups":
+        return "Complete the listed sets"
+    if rule.progress_kind == "any_path":
+        return "Complete any one of the listed goals"
+    if rule.progress_kind == "points":
+        return f"{need:,} points of listed loot"
+    return "A listed drop" if need <= 1 else f"{need:,} listed drops"
+
+
+def rule_scope_line(rule: CompetitionBonusRule) -> Optional[str]:
+    """Where a rule's criteria count — the honesty line every surface shows.
+
+    ``None`` for rules that are inherently scoped (a kill time names its
+    boss). A sotw item rule returns the "counts anywhere" wording: there is no
+    item-to-skill dataset, so it genuinely cannot be scoped to the raced
+    skill, and participants must not be left to assume otherwise."""
+    if rule.unscoped:
+        return "counts anywhere"
+    if rule.scope:
+        names = ", ".join(n.title() for n in rule.scope[:3])
+        if len(rule.scope) > 3:
+            names += f" (+{len(rule.scope) - 3} more)"
+        return f"at {names}"
+    return None
 
 
 def bonus_detail(rule_id: int, config: CompetitionConfig,
                  awarded_n: int, matched_target=None,
-                 time_text: Optional[str] = None) -> dict:
+                 time_text: Optional[str] = None,
+                 points: Optional[int] = None) -> dict:
     """Notification payload for one bonus award (``event_competition_bonus``):
     everything the message layout needs, pre-worded. ``time_text`` is the
     kill time recovered from the ledger note's human half (``bonus:… | 0:52.6``)
-    — the row is the only durable carrier of it."""
+    — the row is the only durable carrier of it. ``points`` overrides the
+    rule's per-award value with what this award actually moved the total by
+    (task rules pay ``points`` per completed ``need``, which is not the same as
+    one row's quantity)."""
     rule = config.rules_by_id.get(int(rule_id))
     if rule is None:
-        return {"rule_id": int(rule_id), "label": "Bonus", "points": 0,
-                "cap_line": None, "type": None}
+        return {"rule_id": int(rule_id), "label": "Bonus",
+                "points": _int(points), "cap_line": None, "type": None,
+                "reason": "Bonus", "scope_line": None}
     if rule.type == "time_under" and time_text:
         reason = (f"{(rule.npc or '').title()} in {time_text} "
                   f"(under {format_time_ms(rule.threshold_ms)})")
     elif rule.type == "pet" and matched_target:
         reason = f"New pet: {str(matched_target).strip()}"
+    elif rule.type == "task" and matched_target and rule.need <= 1:
+        # A one-shot task rule is fully described by what triggered it.
+        reason = f"{rule_label(rule)}: {str(matched_target).strip()}"
     else:
         reason = rule_label(rule)
     cap_line = (f"Award {min(awarded_n, rule.max_awards)} of {rule.max_awards}"
@@ -483,9 +763,10 @@ def bonus_detail(rule_id: int, config: CompetitionConfig,
     return {
         "rule_id": rule.id,
         "type": rule.type,
-        "points": rule.points,
+        "points": _int(points) if points is not None else rule.points,
         "label": rule_label(rule),
         "reason": reason,
+        "scope_line": rule_scope_line(rule),
         "cap_line": cap_line,
         "max_awards": rule.max_awards,
         "awarded_n": min(awarded_n, rule.max_awards),

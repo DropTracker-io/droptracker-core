@@ -1,10 +1,10 @@
 """Group notification blacklist — the single matching rule (pipeline + web API).
 
-A group leader blacklists an **item** or an **NPC**; every Discord notification
-that group would have received about that item, or about anything from that
-NPC, is withheld. The submission itself is untouched — it is still recorded,
-still scored, still on the lootboard and the leaderboards. This is a noise
-control, not a data control.
+A group leader blacklists an **item**, an **NPC** or a **region**; every Discord
+notification that group would have received about that item, about anything from
+that NPC, or about anything that happened in that place, is withheld. The
+submission itself is untouched — it is still recorded, still scored, still on the
+lootboard and the leaderboards. This is a noise control, not a data control.
 
 Both sides of the feature import from here so they cannot drift apart:
 
@@ -26,13 +26,26 @@ spelling/article/alias-insensitive NPC identity — plus a base-raid fold, so
 blacklisting "Chambers of Xeric" also silences its Challenge Mode. The fold is
 deliberately one-way: blacklisting *only* Challenge Mode leaves normal CoX
 notifications alone.
+
+Region keys come in two shapes, mirroring Dink's death filter and then going
+past it. A **bare id** ("9043") mutes exactly one map region, which is all Dink
+supports. An **area name** ("Castle Wars") mutes every region that area spans,
+resolved through ``utils.region_names`` — so a leader picks a place from a list
+instead of pasting the fourteen ids a raid occupies. Incoming payloads are
+keyed by both their ``region_id`` and the name *the server* resolves that id
+to, so a name entry still fires when the client sent no name, and a client
+cannot dodge an entry by spelling the area differently.
 """
 from __future__ import annotations
 
+from utils import region_names
 from utils.npc_names import npc_base_slug, npc_match_key, npc_slug
 
-#: The two kinds of thing a group can blacklist.
-ENTRY_TYPES = ("item", "npc")
+#: The kinds of thing a group can blacklist.
+ENTRY_TYPES = ("item", "npc", "region")
+
+#: How each entry type is described in a skip reason.
+_TYPE_LABELS = {"item": "item", "npc": "NPC", "region": "region"}
 
 #: Notification types the blacklist applies to: the per-submission announcements
 #: that make up a clan's feed. Deliberately NOT event notifications — an event
@@ -41,7 +54,9 @@ ENTRY_TYPES = ("item", "npc")
 #: information rather than reduce noise. DM notifications are excluded
 #: structurally instead: they carry no group_id, so no group's list can reach
 #: a member's own submission DMs.
-BLACKLISTABLE_TYPES = frozenset({"drop", "clog", "pet", "pb", "ca", "death"})
+BLACKLISTABLE_TYPES = frozenset(
+    {"drop", "clog", "pet", "pb", "ca", "death", "kc_milestone", "rank_milestone"}
+)
 
 #: Payload keys naming the ITEM a notification is about. ``pet_name`` is here
 #: because a pet is an item ("Baby mole"): a leader who blacklists the pet
@@ -51,6 +66,20 @@ ITEM_NAME_KEYS = ("item_name", "pet_name")
 #: Payload keys naming the NPC/activity a notification came FROM. ``source`` is
 #: the killer on a death and the pet's source boss; ``boss_name`` is the PB's.
 NPC_NAME_KEYS = ("npc_name", "boss_name", "source")
+
+#: Payload keys naming WHERE a notification happened. Only deaths carry these
+#: today; ``region_name`` and ``location`` are the same area name, sent twice
+#: by the plugin for different renderers.
+REGION_NAME_KEYS = ("region_name", "location")
+
+#: Payload key carrying the numeric map region.
+REGION_ID_KEY = "region_id"
+
+#: Prefix distinguishing a raw-region-id key from an area-name slug. ``npc_slug``
+#: would reduce "9043" and the id 9043 to the same string, and they must not
+#: collide: an area-name entry covers every region in the area, a raw id covers
+#: exactly one.
+_REGION_ID_PREFIX = "#"
 
 #: Source names that mean "we don't know", never a real NPC. Matching these
 #: would let one blacklist entry mute unrelated submissions.
@@ -73,9 +102,41 @@ def npc_key(name) -> str:
     return "" if key in _UNKNOWN_SOURCE_KEYS else key
 
 
+def region_id_key(region_id) -> str:
+    """The key identifying exactly one map region id."""
+    try:
+        return f"{_REGION_ID_PREFIX}{int(str(region_id).strip())}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def region_key(value) -> str:
+    """Normalized identity for a blacklisted place.
+
+    A bare number is one map region and covers only itself — Dink's whole
+    region filter, kept for regions the name data does not cover. Anything else
+    is an area name ("Castle Wars"), which covers *every* region the area spans;
+    that is the part Dink cannot do, and the reason a leader can pick "Chambers
+    of Xeric" instead of pasting fourteen ids.
+    """
+    text = str(value).strip() if value is not None else ""
+    if text.startswith(_REGION_ID_PREFIX):
+        text = text[1:].strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        return region_id_key(text)
+    key = region_names.region_key(text)
+    return "" if key in _UNKNOWN_SOURCE_KEYS else key
+
+
 def entry_key(entry_type: str, name) -> str:
     """The ``match_key`` stored for a blacklist row of this type."""
-    return npc_key(name) if entry_type == "npc" else item_key(name)
+    if entry_type == "npc":
+        return npc_key(name)
+    if entry_type == "region":
+        return region_key(name)
+    return item_key(name)
 
 
 def _npc_lookup_keys(name) -> set[str]:
@@ -95,15 +156,47 @@ def _npc_lookup_keys(name) -> set[str]:
     return keys
 
 
-def payload_subjects(data) -> tuple[set[str], set[str]]:
-    """(item keys, npc keys) a notification payload could be blacklisted on."""
+def _region_lookup_keys(data) -> set[str]:
+    """Keys an incoming payload's location should be tested against.
+
+    Both the raw id and the *server's* name for that id, so an area-name entry
+    still fires on a payload that carries only ``region_id`` — an older client,
+    or a region the plugin could not name. Resolving the id here rather than
+    trusting the payload's ``region_name`` also means a client cannot dodge a
+    blacklist entry by sending a different spelling.
+    """
+    keys: set[str] = set()
+
+    region_id = data.get(REGION_ID_KEY)
+    id_key = region_id_key(region_id)
+    if id_key:
+        keys.add(id_key)
+        resolved = region_names.name_for(region_id)
+        if resolved:
+            keys.add(region_names.region_key(resolved))
+
+    for key in REGION_NAME_KEYS:
+        slug = region_key(data.get(key))
+        # A numeric name field would produce an id key; the id belongs to
+        # REGION_ID_KEY alone, so ignore that reading here.
+        if slug and not slug.startswith(_REGION_ID_PREFIX):
+            keys.add(slug)
+
+    return keys
+
+
+def payload_subjects(data) -> dict[str, set[str]]:
+    """The keys, per entry type, a notification payload could be muted on."""
+    empty: dict[str, set[str]] = {entry_type: set() for entry_type in ENTRY_TYPES}
     if not isinstance(data, dict):
-        return set(), set()
-    items = {k for k in (item_key(data.get(key)) for key in ITEM_NAME_KEYS) if k}
-    npcs: set[str] = set()
+        return empty
+
+    subjects = dict(empty)
+    subjects["item"] = {k for k in (item_key(data.get(key)) for key in ITEM_NAME_KEYS) if k}
     for key in NPC_NAME_KEYS:
-        npcs |= _npc_lookup_keys(data.get(key))
-    return items, npcs
+        subjects["npc"] |= _npc_lookup_keys(data.get(key))
+    subjects["region"] = _region_lookup_keys(data)
+    return subjects
 
 
 def load_group_blacklist(db_session, group_id) -> dict[str, set[str]]:
@@ -126,7 +219,7 @@ def load_group_blacklist(db_session, group_id) -> dict[str, set[str]]:
         .filter(GroupNotificationBlacklist.group_id == group_id)
         .all()
     )
-    out: dict[str, set[str]] = {"item": set(), "npc": set()}
+    out: dict[str, set[str]] = {entry_type: set() for entry_type in ENTRY_TYPES}
     for entry_type, key in rows:
         if key and entry_type in out:
             out[entry_type].add(key)
@@ -146,17 +239,15 @@ def blacklist_reason(db_session, group_id, notification_type, data) -> str | Non
     """
     if not group_id or notification_type not in BLACKLISTABLE_TYPES:
         return None
-    items, npcs = payload_subjects(data)
-    if not items and not npcs:
+    subjects = payload_subjects(data)
+    if not any(subjects.values()):
         return None
     try:
         blacklist = load_group_blacklist(db_session, group_id)
     except Exception:
         return None
-    hit = items & blacklist["item"]
-    if hit:
-        return f"blacklisted item '{sorted(hit)[0]}'"
-    hit = npcs & blacklist["npc"]
-    if hit:
-        return f"blacklisted NPC '{sorted(hit)[0]}'"
+    for entry_type in ENTRY_TYPES:
+        hit = subjects[entry_type] & blacklist[entry_type]
+        if hit:
+            return f"blacklisted {_TYPE_LABELS[entry_type]} '{sorted(hit)[0]}'"
     return None

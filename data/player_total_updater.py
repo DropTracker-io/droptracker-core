@@ -472,6 +472,36 @@ async def item_totals_loop():
         await sleep_with_watchdog_heartbeats(60)
 
 
+async def rank_milestones_loop():
+    """Hiscores rank milestones (services/rank_milestones.py): every 20 min,
+    sweep each enabled WOM-linked group's bulk hiscores and announce members
+    who newly entered a configured rank threshold. 20 min sits comfortably
+    above the 240s wom:bulkhiscores cache TTL; actual snapshot freshness is
+    bounded by the hourly WOM group sync, so a crossing can lag up to ~an hour
+    plus a cycle — fine for a trophy announcement."""
+    from services import rank_milestones
+
+    while not shutdown_event.is_set():
+        try:
+            await send_watchdog_heartbeat()
+            totals = await rank_milestones.run_rank_milestone_cycle()
+            if totals["groups"]:
+                print(
+                    f"rank_milestones: {totals['groups']} groups, "
+                    f"{totals['members']} members checked, "
+                    f"{totals['seeded']} seeded, {totals['announced']} announced"
+                )
+        except Exception as e:
+            print(f"Error in rank milestones loop: {e}")
+            app_logger.log(
+                log_type="error",
+                data=f"Error in rank milestones loop: {e}",
+                app_name="player_updates",
+                description="rank_milestones_loop",
+            )
+        await sleep_with_watchdog_heartbeats(1200)
+
+
 async def github_update_loop():
     """Enhanced github_update_loop with watchdog notifications"""
     if os.getenv("STATUS") == "dev" or os.getenv("STATE") == "dev":
@@ -539,6 +569,7 @@ async def setup_background_tasks():
     app.github_task = asyncio.create_task(github_update_loop())
     app.npc_totals_task = asyncio.create_task(npc_totals_loop())
     app.item_totals_task = asyncio.create_task(item_totals_loop())
+    app.rank_milestones_task = asyncio.create_task(rank_milestones_loop())
     app_logger.log(log_type="access", data=f"Started background tasks", app_name="player_updates", description="setup_background_tasks")
 
 async def get_all_groups(session_to_use = None):
@@ -581,6 +612,13 @@ async def cleanup_background_tasks():
         app.item_totals_task.cancel()
         try:
             await app.item_totals_task
+        except asyncio.CancelledError:
+            pass
+
+    if hasattr(app, 'rank_milestones_task'):
+        app.rank_milestones_task.cancel()
+        try:
+            await app.rank_milestones_task
         except asyncio.CancelledError:
             pass
 

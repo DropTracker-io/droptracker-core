@@ -45,9 +45,12 @@ BOTW_CFG = {
 }
 
 
-def _row(player_id, qty, note=None, rid=None, created=None):
+def _row(player_id, qty, note=None, rid=None, created=None,
+         matched_target=None, source_type=None):
     return SimpleNamespace(id=rid, player_id=player_id, quantity=qty,
-                           note=note, created_at=created)
+                           note=note, created_at=created,
+                           matched_target=matched_target,
+                           source_type=source_type)
 
 
 # ── config parsing ───────────────────────────────────────────────────────────
@@ -113,8 +116,23 @@ class TestBonusNotes:
 
     def test_rejects_junk(self):
         for junk in (None, "", "path:2", "bonus:", "bonus:pet", "bonus:pet:x",
-                     "bonus:unknown:1"):
+                     "bonus::1", "bonus:has spaces:1", "bonus:" + "x" * 33 + ":1"):
             assert comp.parse_bonus_note(junk) is None
+
+    def test_tolerates_a_rule_type_this_deploy_has_never_heard_of(self):
+        # A row written by a newer deploy must still READ as a bonus row: an
+        # unparsed row is folded into gained, so failing closed here would let
+        # a forward-compatible ledger silently inflate the ranked metric.
+        assert comp.parse_bonus_note("bonus:future_thing:3") == ("future_thing", 3)
+        assert comp.parse_bonus_note("bonus:future_thing:3 | note") == ("future_thing", 3)
+
+    def test_unknown_rule_type_pays_nothing_and_never_becomes_gained(self):
+        cfg = comp.CompetitionConfig(BOTW_CFG)
+        per = comp.fold_rows(
+            [_row(5, 40),
+             _row(5, 999, note="bonus:future_thing:9")], cfg)
+        assert per[5]["gained"] == 40
+        assert per[5]["bonus_points"] == 0
 
 
 # ── ledger folds ─────────────────────────────────────────────────────────────
@@ -280,3 +298,170 @@ class TestDisplay:
         assert pet_detail["cap_line"] is None
         assert "Pet snakeling" in pet_detail["reason"]
         assert comp.bonus_detail(99, cfg, awarded_n=1)["points"] == 0
+
+
+# ── embedded task rules + milestones ─────────────────────────────────────────
+
+SET_RULE = {
+    "id": 1, "type": "task", "points": 25, "max_awards": 1,
+    "progress_kind": "distinct", "need": 3,
+    "task": {"type": "item_collection",
+             "config": {"kind": "all_of",
+                        "items": ["Tanzanite fang", "Magic fang",
+                                  "Serpentine visage"]}},
+}
+# A weighted pool. The MATCHER applies the weight (item_match_quantity returns
+# the item's points as the row quantity for a point_collection config), so the
+# "points" fold sums those pre-weighted quantities flat — applying the weights a
+# second time would square them. test_competition_engine.TestWeightedPoolEndToEnd
+# pins the two halves together.
+POOL_RULE = {
+    "id": 2, "type": "task", "points": 10, "max_awards": 3,
+    "progress_kind": "points", "need": 500,
+    "task": {"type": "item_collection",
+             "config": {"kind": "point_collection",
+                        "items": [{"item_name": "Tanzanite fang", "points": 300},
+                                  {"item_name": "Magic fang", "points": 200}]}},
+}
+MILESTONE_RULE = {"id": 3, "type": "milestone", "step": 100, "points": 10,
+                  "max_awards": 5}
+
+TASK_CFG = {
+    "kind": "competition", "metric_kind": "boss", "npcs": ["Zulrah"],
+    "ranking": {"mode": "points", "gained_per_point": 1},
+    "bonus_rules": [SET_RULE, POOL_RULE, MILESTONE_RULE],
+}
+
+
+def _task_row(player_id, item, qty=1, rid=1, row_id=None):
+    return _row(player_id, qty, note=f"bonus:task:{rid}", rid=row_id,
+                matched_target=item)
+
+
+class TestTaskRuleFold:
+    def test_a_partly_collected_set_pays_nothing(self):
+        cfg = comp.CompetitionConfig(TASK_CFG)
+        per = comp.fold_rows([_task_row(1, "Tanzanite fang"),
+                              _task_row(1, "Magic fang")], cfg)
+        slot = per[1]["bonus"][1]
+        assert slot["progress"] == 2 and slot["need"] == 3
+        assert slot["awarded"] == 0 and per[1]["bonus_points"] == 0
+
+    def test_completing_the_set_pays_the_rule_not_the_rows(self):
+        cfg = comp.CompetitionConfig(TASK_CFG)
+        per = comp.fold_rows([_task_row(1, "Tanzanite fang"),
+                              _task_row(1, "Magic fang"),
+                              _task_row(1, "Serpentine visage")], cfg)
+        # 25 for the rule — NOT 3 (one per row) and not 75.
+        assert per[1]["bonus_points"] == 25
+        assert per[1]["bonus"][1]["awarded"] == 1
+
+    def test_a_stack_of_one_listed_item_is_still_one_item(self):
+        cfg = comp.CompetitionConfig(TASK_CFG)
+        per = comp.fold_rows([_task_row(1, "Tanzanite fang", qty=50)], cfg)
+        assert per[1]["bonus"][1]["progress"] == 1
+        assert per[1]["bonus_points"] == 0
+
+    def test_credit_units_never_leak_into_gained(self):
+        cfg = comp.CompetitionConfig(TASK_CFG)
+        per = comp.fold_rows([_row(1, 40),                      # 40 kills
+                              _task_row(1, "Tanzanite fang", qty=300, rid=2)],
+                             cfg)
+        assert per[1]["gained"] == 40
+        assert per[1]["bonus"][2]["progress"] == 300
+
+    def test_weighted_pool_pays_per_need_and_repeats_to_its_cap(self):
+        cfg = comp.CompetitionConfig(TASK_CFG)
+        # 300 + 200 + 300 + 200 = 1000 points of loot = two 500-point awards.
+        # Quantities are the weights the matcher already applied.
+        rows = [_task_row(1, "Tanzanite fang", qty=300, rid=2, row_id=i)
+                if i % 2 == 0 else _task_row(1, "Magic fang", qty=200, rid=2,
+                                             row_id=i)
+                for i in range(4)]
+        per = comp.fold_rows(rows, cfg)
+        slot = per[1]["bonus"][2]
+        assert slot["progress"] == 1000 and slot["awarded"] == 2
+        assert slot["points"] == 20
+
+    def test_revoking_a_row_takes_the_award_back(self):
+        cfg = comp.CompetitionConfig(TASK_CFG)
+        full = [_task_row(1, "Tanzanite fang"), _task_row(1, "Magic fang"),
+                _task_row(1, "Serpentine visage")]
+        assert comp.fold_rows(full, cfg)[1]["bonus_points"] == 25
+        assert comp.fold_rows(full[:-1], cfg)[1]["bonus_points"] == 0
+
+    def test_a_deleted_rule_pays_nothing_rather_than_becoming_gained(self):
+        cfg = comp.CompetitionConfig(
+            {**TASK_CFG, "bonus_rules": [MILESTONE_RULE]})
+        per = comp.fold_rows([_row(1, 50),
+                              _task_row(1, "Tanzanite fang", qty=300)], cfg)
+        assert per[1]["gained"] == 50 and per[1]["bonus"][1]["points"] == 0
+
+
+class TestMilestoneFold:
+    def test_pays_per_step_with_no_ledger_rows_of_its_own(self):
+        cfg = comp.CompetitionConfig(TASK_CFG)
+        per = comp.fold_rows([_row(1, 250)], cfg)
+        slot = per[1]["bonus"][3]
+        assert slot["awarded"] == 2 and slot["points"] == 20
+        assert per[1]["bonus_points"] == 20
+
+    def test_caps_at_max_awards(self):
+        cfg = comp.CompetitionConfig(TASK_CFG)
+        per = comp.fold_rows([_row(1, 100_000)], cfg)
+        assert per[1]["bonus"][3]["awarded"] == 5
+        assert per[1]["bonus_points"] == 50
+
+    def test_below_one_step_pays_nothing_and_adds_no_slot(self):
+        cfg = comp.CompetitionConfig(TASK_CFG)
+        per = comp.fold_rows([_row(1, 99)], cfg)
+        assert per[1]["bonus_points"] == 0 and 3 not in per[1]["bonus"]
+
+    def test_counts_toward_the_ranked_total_in_points_mode(self):
+        cfg = comp.CompetitionConfig(TASK_CFG)
+        per = comp.fold_rows([_row(1, 250)], cfg)
+        # 250 kills at 1/pt + two 10-point milestones.
+        assert comp.rank_value(per[1], cfg) == 270
+
+
+class TestTaskRuleShape:
+    def test_a_saturating_progress_kind_can_only_pay_once(self):
+        cfg = comp.CompetitionConfig(
+            {**TASK_CFG,
+             "bonus_rules": [{**SET_RULE, "max_awards": 5}]})
+        assert cfg.rules_by_id[1].max_awards == 1
+
+    def test_matcher_index_carries_the_embedded_task_verbatim(self):
+        index = comp.CompetitionConfig(TASK_CFG).matcher_index()
+        assert [r["id"] for r in index["task_rules"]] == [1, 2]
+        assert index["task_rules"][0]["task"]["type"] == "item_collection"
+
+    def test_a_rule_with_no_embedded_task_is_dropped(self):
+        cfg = comp.CompetitionConfig(
+            {**TASK_CFG, "bonus_rules": [{"id": 1, "type": "task",
+                                          "points": 25}]})
+        assert cfg.bonus_rules == ()
+
+
+class TestRuleWording:
+    def test_a_milestone_names_the_races_unit_not_the_steps_size(self):
+        # A 1,000-KILL milestone on a boss race used to read "Every 1,000 XP"
+        # because the unit was guessed from the step's magnitude.
+        boss = comp.CompetitionConfig(
+            {**BOTW_CFG, "bonus_rules": [{"id": 1, "type": "milestone",
+                                          "step": 1000, "points": 10}]})
+        assert comp.rule_label(boss.bonus_rules[0]) == "Every 1,000 kills"
+        skill = comp.CompetitionConfig(
+            {**SOTW_CFG, "bonus_rules": [{"id": 1, "type": "milestone",
+                                          "step": 500, "points": 10}]})
+        assert comp.rule_label(skill.bonus_rules[0]) == "Every 500 XP"
+
+    def test_a_level_goal_rule_is_pinned_to_one_award_even_if_stored_otherwise(self):
+        # Enforced in the SCORER as well as the validator, so a config written
+        # before the pin is corrected on read.
+        cfg = comp.CompetitionConfig({**SOTW_CFG, "bonus_rules": [{
+            "id": 1, "type": "task", "points": 25, "max_awards": 9,
+            "progress_kind": "count", "need": 1,
+            "task": {"type": "skill_target", "target": "mining",
+                     "target_value": 70}}]})
+        assert cfg.rules_by_id[1].max_awards == 1

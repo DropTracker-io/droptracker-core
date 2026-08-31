@@ -181,6 +181,18 @@ if "db.notification_blacklist" not in sys.modules:
     sys.modules["db.notification_blacklist"] = _mod
     _spec.loader.exec_module(_mod)
 
+# db/death_filter.py — the shared safe-death rule. Same shape again (stdlib +
+# utils.death_regions at module level, group_config lazy-imported inside the
+# lookup), and like the blacklist it is one rule read by the enqueue gate, the
+# send-side guard and the death processor, so the tests must exercise the real
+# one rather than a mock that agrees with whatever they assert.
+_DEATH_FILTER_PATH = _Path(__file__).resolve().parent.parent / "db" / "death_filter.py"
+if "db.death_filter" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("db.death_filter", _DEATH_FILTER_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["db.death_filter"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # db/group_rename.py — the shared "rename a group everywhere" service. Same
 # shape again (SQLAlchemy-only module imports, sessions passed in), and the
 # config + admin-data routes import it at module level, so it must resolve
@@ -251,6 +263,16 @@ if "services.component_layout" not in sys.modules:
     _spec = _importlib_util.spec_from_file_location("services.component_layout", _COMPONENT_LAYOUT_PATH)
     _mod = _importlib_util.module_from_spec(_spec)
     sys.modules["services.component_layout"] = _mod
+    _spec.loader.exec_module(_mod)
+
+# services/rank_milestones.py — the hiscores-rank crossing logic. Pure at
+# import time (WOM/DB/Redis access is lazy inside functions), and its
+# seed/crossing decisions are exactly what the tests must exercise for real.
+_RANK_MILESTONES_PATH = _Path(__file__).resolve().parent.parent / "services" / "rank_milestones.py"
+if "services.rank_milestones" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.rank_milestones", _RANK_MILESTONES_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.rank_milestones"] = _mod
     _spec.loader.exec_module(_mod)
 
 # services/pb_components.py — the Components V2 personal best layout. Pure

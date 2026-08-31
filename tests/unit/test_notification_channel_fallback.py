@@ -164,6 +164,11 @@ class TestAgreesWithEnqueueGate:
         ("clog", "channel_id_to_post_clog"),
         ("pb", "channel_id_to_post_pb"),
         ("ca", "channel_id_to_post_ca"),
+        ("level_up", "channel_id_to_post_levels"),
+        ("xp_milestone", "channel_id_to_post_levels"),
+        ("total_level_milestone", "channel_id_to_post_levels"),
+        ("kc_milestone", "channel_id_to_post_kc"),
+        ("rank_milestone", "channel_id_to_post_ranks"),
     ])
     @pytest.mark.parametrize("dedicated", [None, "", "  ", "0", DEDICATED])
     @pytest.mark.parametrize("drops", [None, "", "  ", "0", DROPS])
@@ -194,6 +199,11 @@ class TestAgreesWithEnqueueGate:
             ("clog", "channel_id_to_post_clog"),
             ("pb", "channel_id_to_post_pb"),
             ("ca", "channel_id_to_post_ca"),
+            ("level_up", "channel_id_to_post_levels"),
+            ("xp_milestone", "channel_id_to_post_levels"),
+            ("total_level_milestone", "channel_id_to_post_levels"),
+            ("kc_milestone", "channel_id_to_post_kc"),
+            ("rank_milestone", "channel_id_to_post_ranks"),
         ):
             assert common.GROUP_CHANNEL_NOTIFICATION_KEYS[notification_type] == (
                 primary, "channel_id_to_post_loot",

@@ -511,16 +511,30 @@ class TestCreateNotificationChannelGate:
         )
         assert mock_session.add.called
 
-    async def test_level_up_has_no_loot_fallback(self, mock_session):
-        # level_up posts only to channel_id_to_post_levels (no loot fallback
-        # in send_level_up_notification_with_session) — mirror that here.
+    async def test_level_up_falls_back_to_loot_channel(self, mock_session):
+        # send_level_up_notification_with_session has always fallen back to
+        # the loot channel; for a while this gate did NOT, so groups with only
+        # a drops channel had their level-ups silently dropped at enqueue.
+        # The gate now mirrors the send side (the direction the docstring on
+        # GROUP_CHANNEL_NOTIFICATION_KEYS demands).
         _configure_channels(mock_session, [("channel_id_to_post_loot", "123456789012345678")])
         await self.fn(
             "level_up", player_id=42,
             data={"player_name": "Zezima", "skills_text": "Attack 99"},
             group_id=5, existing_session=mock_session,
         )
-        assert not mock_session.add.called
+        assert mock_session.add.called
+
+    async def test_kc_milestone_falls_back_to_loot_channel(self, mock_session):
+        # kc_milestone posts to channel_id_to_post_kc, falling back to the
+        # drops channel — same pair as the send side resolves.
+        _configure_channels(mock_session, [("channel_id_to_post_loot", "123456789012345678")])
+        await self.fn(
+            "kc_milestone", player_id=42,
+            data={"player_name": "Zezima", "npc_name": "Zulrah", "kill_count": 100},
+            group_id=5, existing_session=mock_session,
+        )
+        assert mock_session.add.called
 
     async def test_dm_types_never_gated(self, mock_session):
         _configure_channels(mock_session, [])

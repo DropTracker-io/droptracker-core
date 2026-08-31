@@ -1379,7 +1379,14 @@ recently_sent = []
 # system notifications, events, upgrades, ...) are never gated on this.
 GROUP_CHANNEL_NOTIFICATION_KEYS = {
     "drop": ("channel_id_to_post_loot",),
-    "level_up": ("channel_id_to_post_levels",),
+    # The three level-family senders all fall back to the loot channel at send
+    # time (send_level_up / send_xp_milestone in notification_service.py), so
+    # the enqueue gate must too — for a while "level_up" listed only the levels
+    # channel here, and groups with just a drops channel had their level-ups
+    # silently dropped at enqueue.
+    "level_up": ("channel_id_to_post_levels", "channel_id_to_post_loot"),
+    "xp_milestone": ("channel_id_to_post_levels", "channel_id_to_post_loot"),
+    "total_level_milestone": ("channel_id_to_post_levels", "channel_id_to_post_loot"),
     "quest": ("channel_id_to_post_quests", "channel_id_to_post_loot"),
     "death": ("channel_id_to_post_deaths", "channel_id_to_post_loot"),
     "diary": ("channel_id_to_post_diaries", "channel_id_to_post_loot"),
@@ -1387,6 +1394,8 @@ GROUP_CHANNEL_NOTIFICATION_KEYS = {
     "ca": ("channel_id_to_post_ca", "channel_id_to_post_loot"),
     "clog": ("channel_id_to_post_clog", "channel_id_to_post_loot"),
     "pet": ("channel_id_to_post_pets",),
+    "kc_milestone": ("channel_id_to_post_kc", "channel_id_to_post_loot"),
+    "rank_milestone": ("channel_id_to_post_ranks", "channel_id_to_post_loot"),
 }
 
 
@@ -1476,6 +1485,29 @@ def notification_blacklisted(db_session, group_id, notification_type, data) -> s
         from db.notification_blacklist import blacklist_reason
 
         return blacklist_reason(db_session, group_id, notification_type, data)
+    except Exception:
+        return None
+
+
+def safe_death_filtered(db_session, group_id, notification_type, data) -> str | None:
+    """Why this group is not told about this safe death, or ``None``.
+
+    Groups default to announcing only deaths that cost something, matching
+    Dink's client-side ``deathIgnoreSafe``; ``notify_deaths_safe`` turns the
+    rest back on. Scoped to group notifications like the blacklist above, so a
+    member's own death DM is never affected.
+
+    The rule lives in ``db.death_filter`` because the send-side guard in
+    ``services/notification_service.py`` has to apply exactly the same one —
+    otherwise flipping the setting leaves already-queued deaths behaving by the
+    old rule.
+    """
+    if not group_id:
+        return None
+    try:
+        from db.death_filter import death_skip_reason
+
+        return death_skip_reason(db_session, group_id, notification_type, data)
     except Exception:
         return None
 
@@ -1580,13 +1612,25 @@ async def create_notification(notification_type, player_id, data, group_id=None,
             description="create_notification",
         )
         return None
-    # The group's leaders blacklisted this item or its source NPC — they want
-    # it recorded but never announced in their Discord.
+    # The group's leaders blacklisted this item, its source NPC or the place it
+    # happened — they want it recorded but never announced in their Discord.
     blacklist_hit = notification_blacklisted(db_session, group_id, notification_type, data)
     if blacklist_hit:
         app_logger.log(
             log_type="debug",
             data=f"Skipping {notification_type} notification for group {group_id}: {blacklist_hit}",
+            app_name="core",
+            description="create_notification",
+        )
+        return None
+    # A death that cost nothing (raid wipe, Castle Wars, POH), which groups do
+    # not announce unless they asked to. Same one-rule-two-gates arrangement as
+    # the blacklist above; see db.death_filter.
+    safe_death_hit = safe_death_filtered(db_session, group_id, notification_type, data)
+    if safe_death_hit:
+        app_logger.log(
+            log_type="debug",
+            data=f"Skipping {notification_type} notification for group {group_id}: {safe_death_hit}",
             app_name="core",
             description="create_notification",
         )
@@ -1817,3 +1861,40 @@ async def log_to_file(data):
         app_logger.log(log_type="error", data=f"Couldn't log to file: {e}", app_name="core", description="log_to_file")
 
 
+
+
+def reraise_if_session_broken(exc: BaseException) -> None:
+    """Re-raise `exc` when it means the session can no longer be committed.
+
+    The submission processors wrap their optional side-effects (KC milestones
+    and friends) in ``except Exception`` so that a failure there "must never
+    cost the drop itself". That is right for a *logic* fault in the helper —
+    an unknown boss, a missing config — where the session is still clean and
+    the row commits normally.
+
+    It is exactly wrong for an *infrastructure* fault. 2026-08-30: MariaDB
+    timed out mid-check (``OperationalError`` 2013), the handler swallowed it,
+    and the session was left needing a rollback. The next statement — the
+    processor's own ``session.commit()`` — then raised ``PendingRollbackError``,
+    which subclasses ``InvalidRequestError`` rather than ``DBAPIError``, so
+    ``workers.webhook_consumer._is_retryable`` read it as poison and
+    dead-lettered the envelope on its FIRST failure with no retries. A
+    transient blip became permanent loss: 27 envelopes / 42 submissions.
+
+    Swallowing cannot help in that case anyway — the transaction is already
+    dead, so the row was never going to commit. Re-raising lets the original,
+    correctly-classified error reach the consumer and take its normal retries.
+    """
+    try:
+        from sqlalchemy.exc import (
+            DBAPIError, InterfaceError, OperationalError, PendingRollbackError,
+            TimeoutError as SATimeoutError,
+        )
+    except ImportError:
+        return
+
+    if isinstance(exc, (OperationalError, InterfaceError, SATimeoutError,
+                        PendingRollbackError)):
+        raise exc
+    if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
+        raise exc

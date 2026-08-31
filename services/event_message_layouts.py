@@ -876,8 +876,9 @@ TYPE_META = {
     },
     "event_competition_bonus": {
         "label": "Competition bonus award", "group": "Competition",
-        "description": "A Skill/Boss of the Week bonus landed — a pet, or a "
-                       "kill under the bonus time.",
+        "description": "A Skill/Boss of the Week bonus landed — a pet, a fast "
+                       "kill, a drop or set the event asked for, or a gained "
+                       "milestone.",
         "tokens": ("player_name", "points", "bonus_reason_line", "bonus_cap_line",
                    "competition_position_line", "completion_icon"),
         "standings": False,
@@ -1603,7 +1604,13 @@ def notification_context(notification_type: str, data: dict) -> dict:
         bonus = data.get("bonus") or {}
         reason = bonus.get("reason") or bonus.get("label")
         if reason:
-            put("bonus_reason_line", f"**{reason}**")
+            # Where it counted rides INSIDE the existing token rather than in a
+            # new one: adding a token means re-seeding every group's layout, and
+            # a rule that pays "from anywhere" must say so on the message that
+            # awards it, not only on the web page.
+            scope = bonus.get("scope_line")
+            put("bonus_reason_line",
+                f"**{reason}**" + (f" — {scope}" if scope else ""))
         if bonus.get("cap_line"):
             put("bonus_cap_line", f"-# {bonus['cap_line']} for this bonus")
         rank = data.get("rank")

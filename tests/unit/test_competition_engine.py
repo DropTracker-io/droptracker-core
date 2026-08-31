@@ -57,7 +57,7 @@ SOTW_CONFIG = {
 }
 
 
-def _task(config, task_id=10):
+def _base_task(config, task_id=10):
     """A state-load-shaped task dict (mirrors _task_to_dict's precompute)."""
     cfg = _comp.CompetitionConfig(config)
     return {
@@ -71,7 +71,27 @@ def _task(config, task_id=10):
         "competition": cfg.matcher_index(),
         "kc_npcs": list(cfg.npcs),
         "wom_metrics": {"zulrah": "zulrah"} if cfg.npcs else {},
+        "requires_confirmation": False,
+        "event_id": 1,
     }
+
+
+def _task(config, task_id=10):
+    d = _base_task(config, task_id)
+    # Mirror _task_to_dict's synthetic-task enrichment for embedded bonus
+    # rules. Without it every ``task`` rule matches against a bare dict with
+    # no source index and the scoping silently disappears from these tests.
+    for rule in (d["competition"].get("task_rules") or ()):
+        embedded = rule.get("task")
+        if not isinstance(embedded, dict):
+            continue
+        embedded["id"] = d["id"]
+        embedded["event_id"] = d["event_id"]
+        embedded.setdefault("points", 0)
+        embedded.setdefault("requires_confirmation", False)
+        embedded["config"] = engine.parse_task_config(embedded.get("config"))
+        engine._enrich_matcher_precompute(embedded)
+    return d
 
 
 def _env(kind, **data):
@@ -332,3 +352,188 @@ class TestApplyRevoke:
         assert result["points"] == 52
         assert team.score == 52
         assert progress.progress == 25_000     # progress stays raw gained
+
+
+# ── embedded task bonus rules ────────────────────────────────────────────────
+
+SET_BONUS = {
+    "id": 4, "type": "task", "points": 25, "max_awards": 1,
+    "progress_kind": "distinct", "need": 2,
+    "kinds": ["drop", "clog", "pet"],
+    "task": {"type": "item_collection", "target": None, "target_value": 2,
+             "config": {"kind": "all_of",
+                        "items": ["Tanzanite fang", "Magic fang"],
+                        "item_npcs": {"Tanzanite fang": ["Zulrah"],
+                                      "Magic fang": ["Zulrah"]},
+                        "clog_sources": True}},
+}
+GP_BONUS = {
+    "id": 5, "type": "task", "points": 10, "max_awards": 5,
+    "progress_kind": "count", "need": 1_000_000, "kinds": ["drop"],
+    "task": {"type": "loot_value", "target": "", "target_value": 1_000_000,
+             "config": {"source_npcs": ["Zulrah"]}},
+}
+BOTW_TASK_CONFIG = {**BOTW_CONFIG,
+                    "bonus_rules": BOTW_CONFIG["bonus_rules"] + [SET_BONUS, GP_BONUS]}
+
+
+class TestEmbeddedTaskMatching:
+    def test_a_listed_drop_from_the_raced_boss_credits_its_rule(self):
+        task = _task(BOTW_TASK_CONFIG)
+        matches = engine.match_task_all(
+            task, _env("drop", npc_name="Zulrah", item_name="Tanzanite fang",
+                       quantity=1, total_value=3_000_000))
+        by_rule = {(m.get("bonus") or {}).get("rule_id"): m for m in matches}
+        # The kill itself still scores the race…
+        assert any(m.get("mode") == "kc" for m in matches)
+        # …and the same drop advances both bonus rules independently.
+        assert by_rule[4]["matched_target"] == "Tanzanite fang"
+        assert by_rule[4]["quantity"] == 1
+        assert by_rule[5]["quantity"] == 3_000_000
+
+    def test_the_same_item_from_another_boss_credits_nothing(self):
+        task = _task(BOTW_TASK_CONFIG)
+        matches = engine.match_task_all(
+            task, _env("drop", npc_name="Vorkath", item_name="Tanzanite fang",
+                       quantity=1, total_value=3_000_000))
+        # Scoping is enforced by the injected source restriction at MATCH time,
+        # so an off-boss drop never even reaches the ledger.
+        assert [m for m in matches if m.get("bonus")] == []
+        assert matches == []            # not the raced NPC, so no kill either
+
+    def test_a_clog_unlock_at_the_raced_boss_counts(self):
+        task = _task(BOTW_TASK_CONFIG)
+        matches = engine.match_task_all(
+            task, _env("clog", npc_name="Zulrah", item_name="Magic fang"))
+        bonus = [m for m in matches if (m.get("bonus") or {}).get("rule_id") == 4]
+        assert len(bonus) == 1 and bonus[0]["matched_target"] == "Magic fang"
+
+    def test_an_unlisted_item_credits_nothing(self):
+        task = _task(BOTW_TASK_CONFIG)
+        matches = engine.match_task_all(
+            task, _env("drop", npc_name="Zulrah", item_name="Ruby",
+                       quantity=1, total_value=5000))
+        assert [m for m in matches if (m.get("bonus") or {}).get("rule_id") == 4] == []
+
+    def test_the_races_own_kc_watermark_is_untouched_by_bonus_rules(self):
+        task = _task(BOTW_TASK_CONFIG)
+        matches = engine.match_task_all(
+            task, _env("drop", npc_name="Zulrah", item_name="Tanzanite fang",
+                       quantity=1, total_value=3_000_000))
+        # Exactly ONE kc-mode match (the race). A bonus rule that leaked a
+        # kc/kc_abs/xp mode would reach the shared watermark folds — which are
+        # scoped by task, and the task here IS the race.
+        assert len([m for m in matches if m["mode"] in ("kc", "kc_abs", "xp")]) == 1
+        assert all(m["mode"] == "count"
+                   for m in matches if m.get("bonus"))
+
+    def test_a_kind_prefilter_skips_irrelevant_envelopes(self):
+        task = _task(BOTW_TASK_CONFIG)
+        matches = engine.match_task_all(
+            task, _env("pb", npc_name="Zulrah", time_ms=45_000))
+        # pb reaches the two time tiers, never the drop-only rules.
+        assert {(m["bonus"]["rule_id"]) for m in matches if m.get("bonus")} == {2, 3}
+
+    def test_an_embedded_kc_task_can_never_reach_the_watermark_folds(self):
+        # Belt and braces with the validator's 422: even if a kc_target config
+        # were hand-written into a rule, the mode guard drops it.
+        smuggled = {
+            "id": 6, "type": "task", "points": 5, "max_awards": 1,
+            "progress_kind": "count", "need": 1, "kinds": ["drop"],
+            "task": {"type": "kc_target", "target": "Zulrah",
+                     "target_value": 10, "config": None},
+        }
+        task = _task({**BOTW_CONFIG, "bonus_rules": [smuggled]})
+        matches = engine.match_task_all(
+            task, _env("drop", npc_name="Zulrah", item_name="Ruby",
+                       quantity=1, total_value=5000))
+        assert [m for m in matches if (m.get("bonus") or {}).get("rule_id") == 6] == []
+
+
+class TestCaTargetMatching:
+    def _ca_task(self, **over):
+        task = {"id": 11, "type": "ca_target", "target": None,
+                "target_value": 3, "points": 0, "config": {
+                    "task_names": ["Abyssal Adept", "Abyssal Veteran"]},
+                "label": "CAs"}
+        task.update(over)
+        return engine._enrich_matcher_precompute(task)
+
+    def test_a_listed_achievement_credits(self):
+        hit = engine.match_task(self._ca_task(),
+                                _env("ca", task_name="Abyssal Adept", tier="Hard"))
+        assert hit == {"mode": "count", "quantity": 1,
+                       "matched_target": "Abyssal Adept"}
+
+    def test_an_unlisted_achievement_does_not(self):
+        assert engine.match_task(
+            self._ca_task(), _env("ca", task_name="Noxious Foe", tier="Easy")) is None
+
+    def test_an_empty_allow_list_credits_nothing_rather_than_everything(self):
+        # The matcher can't reach the registry, so "no list" must mean "no",
+        # never "any combat achievement in the game".
+        task = self._ca_task(config={"task_names": []})
+        assert engine.match_task(
+            task, _env("ca", task_name="Abyssal Adept", tier="Hard")) is None
+
+    def test_a_single_named_target_matches_exactly(self):
+        task = self._ca_task(target="Noxious Foe", config={})
+        assert engine.match_task(
+            task, _env("ca", task_name="noxious foe", tier="Easy")) is not None
+        assert engine.match_task(
+            task, _env("ca", task_name="Abyssal Adept", tier="Hard")) is None
+
+
+POOL_BONUS = {
+    "id": 7, "type": "task", "points": 10, "max_awards": 5,
+    "progress_kind": "points", "need": 500, "kinds": ["drop", "clog", "pet"],
+    "task": {"type": "item_collection", "target": None, "target_value": 500,
+             "config": {"kind": "point_collection",
+                        "items": [{"item_name": "Tanzanite fang", "points": 300},
+                                  {"item_name": "Magic fang", "points": 200}],
+                        "item_npcs": {"Tanzanite fang": ["Zulrah"],
+                                      "Magic fang": ["Zulrah"]},
+                        "clog_sources": True}},
+}
+
+
+class TestWeightedPoolEndToEnd:
+    """The matcher and the fold have to agree on where the weight is applied —
+    if both apply it, a 300-point drop against a 500-point goal folds to 90,000
+    and maxes the rule on its first item."""
+
+    def _rows(self, items):
+        task = _task({**BOTW_CONFIG, "bonus_rules": [POOL_BONUS]})
+        rows, out = [], []
+        for n, item in enumerate(items):
+            env = {"v": 1, "kind": "drop", "guid": f"g{n}", "player_id": 5,
+                   "data": {"npc_name": "Zulrah", "item_name": item,
+                            "quantity": 1, "total_value": 1000}}
+            for m in engine.match_task_all(task, env):
+                if (m.get("bonus") or {}).get("rule_id") != 7:
+                    continue
+                out.append(m["quantity"])
+                rows.append(SimpleNamespace(
+                    id=len(rows) + 1, player_id=5, quantity=m["quantity"],
+                    note=_comp.bonus_note("task", 7), created_at=len(rows),
+                    matched_target=m.get("matched_target"), source_type="drop"))
+        return task, rows, out
+
+    def test_the_matcher_supplies_the_weight_once(self):
+        _task_dict, _rows, quantities = self._rows(["Tanzanite fang", "Magic fang"])
+        assert quantities == [300, 200]
+
+    def test_two_drops_worth_500_pay_exactly_one_award(self):
+        task, rows, _q = self._rows(["Tanzanite fang", "Magic fang"])
+        cfg = _comp.CompetitionConfig(task["config"])
+        per = _comp.fold_rows(rows, cfg)
+        slot = per[5]["bonus"][7]
+        assert slot["progress"] == 500 and slot["awarded"] == 1
+        assert per[5]["bonus_points"] == 10
+
+    def test_one_300_point_drop_does_not_max_the_rule(self):
+        task, rows, _q = self._rows(["Tanzanite fang"])
+        cfg = _comp.CompetitionConfig(task["config"])
+        per = _comp.fold_rows(rows, cfg)
+        assert per[5]["bonus"][7]["progress"] == 300
+        assert per[5]["bonus_points"] == 0

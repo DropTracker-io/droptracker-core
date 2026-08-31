@@ -516,11 +516,21 @@ def _is_retryable(exc) -> bool:
     """True for infrastructure errors worth retrying; False for poison."""
     try:
         from sqlalchemy.exc import (
-            DBAPIError, InterfaceError, OperationalError,
+            DBAPIError, InterfaceError, OperationalError, PendingRollbackError,
             TimeoutError as SATimeoutError,
         )
 
         if isinstance(exc, (OperationalError, InterfaceError, SATimeoutError)):
+            return True
+        # PendingRollbackError subclasses InvalidRequestError, NOT DBAPIError,
+        # so it fell through to poison. It is never the root cause: it means an
+        # earlier infrastructure fault poisoned the session and something
+        # swallowed it, so the retryable error it stands in for was already
+        # lost. 2026-08-30 dead-lettered 27 envelopes / 42 submissions on their
+        # FIRST failure this way, no retries, during routine MariaDB timeouts.
+        # The swallow is fixed at the source (data/submissions/common
+        # .reraise_if_session_broken); this is the backstop for the next one.
+        if isinstance(exc, PendingRollbackError):
             return True
         if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
             return True

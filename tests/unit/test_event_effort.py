@@ -19,13 +19,17 @@ from datetime import datetime
 import pytest
 
 from services.event_effort import (
+    CLUE_TIERS,
     EFFORT_SCOPE_PREFIX,
     build_effort_map,
+    clue_roll_npc,
+    clue_tier,
     completion_marker,
     completion_scope,
     effort_scope,
     ehb_hours,
     is_completion_drop,
+    roll_scope,
     rows_to_summary,
 )
 
@@ -358,6 +362,219 @@ class TestCompletionMarkers:
             "Fortis Colosseum")
 
 
+class TestCluePairing:
+    """Suggestion #156 — clue tiers earn hours only for openings that were
+    matched by a scroll the player was dealt inside the window.
+
+    Caskets bank, so openings alone measure nothing: joel's objection to the
+    whole idea was "stack 100 elites, spam open them, 100x the event length in
+    EHE in the first 5 minutes". The pairing rule is Fazebook's answer to it.
+    """
+
+    def _row(self, npc="Clue Scroll (Hard)", npc_id=13945, kills=0, rolls=0):
+        return {"npc_id": npc_id, "npc_name": npc, "boss_metric": None,
+                "kills": kills, "rolls": rolls, "last_at": None,
+                "frozen_at": None}
+
+    def test_every_tier_has_a_rate(self):
+        assert set(CLUE_TIERS) == {
+            f"clue scroll ({t})" for t in
+            ("beginner", "easy", "medium", "hard", "elite", "master")
+        }
+        assert all(e["rate_kph"] > 0 for e in CLUE_TIERS.values())
+        # Harder tiers take longer; the registry must stay monotonic or a
+        # master clue starts pricing cheaper than an elite.
+        order = ["medium", "hard", "elite", "master"]
+        rates = [CLUE_TIERS[f"clue scroll ({t})"]["rate_kph"] for t in order]
+        assert rates == sorted(rates, reverse=True)
+
+    def test_a_scroll_box_is_a_roll_for_its_tier(self):
+        # The case that decides whether this feature works at all: monsters
+        # drop boxes, not scrolls (3,703 hard boxes to 6 hard scrolls in a
+        # week of prod drops).
+        assert clue_roll_npc("Scroll box (hard)") == "clue scroll (hard)"
+        assert clue_roll_npc("Clue scroll (hard)") == "clue scroll (hard)"
+        assert clue_roll_npc("Clue bottle (medium)") == "clue scroll (medium)"
+        assert clue_roll_npc("Clue nest (elite)") == "clue scroll (elite)"
+        assert clue_roll_npc("Clue geode (easy)") == "clue scroll (easy)"
+
+    def test_a_reward_casket_is_not_a_roll(self):
+        """A casket is the clue's REWARD. Counting one as a roll would let a
+        banked stack pay for itself as it is opened."""
+        assert clue_roll_npc("Reward casket (hard)") is None
+
+    def test_untiered_clue_items_are_not_rolls(self):
+        assert clue_roll_npc("Clue scroll") is None
+        assert clue_roll_npc("Clue scroll (special)") is None
+        assert clue_roll_npc(None) is None
+
+    def test_a_dumped_stack_prices_nothing(self):
+        """joel's objection, priced: 100 banked elites opened, none rolled."""
+        out = rows_to_summary(
+            [self._row("Clue Scroll (Elite)", 13944, kills=100, rolls=0)], {})
+        assert out["ehb_hours"] == 0
+        # The openings are still real activity and still show.
+        assert out["kills"] == 100
+        assert out["bosses"][0]["paired"] == 0
+        assert out["bosses"][0]["rolled"] == 0
+
+    def test_fazebooks_example(self):
+        """"If 20 clues are rolled and 25 clues opened, count the first 20"."""
+        out = rows_to_summary([self._row(kills=25, rolls=20)], {})
+        boss = out["bosses"][0]
+        assert boss["paired"] == 20
+        assert boss["kills"] == 25
+        assert out["ehb_hours"] == pytest.approx(20 / 7.8)
+
+    def test_rolls_beyond_what_was_opened_pay_nothing(self):
+        """The mirror case: hoarding scrolls is not doing clues."""
+        out = rows_to_summary([self._row(kills=5, rolls=40)], {})
+        assert out["bosses"][0]["paired"] == 5
+        assert out["ehb_hours"] == pytest.approx(5 / 7.8)
+
+    def test_clue_hours_are_always_an_estimate(self):
+        """WOM prices no clue metric, so every hour here is ours."""
+        out = rows_to_summary([self._row(kills=10, rolls=10)], {})
+        assert out["bosses"][0]["estimated"] is True
+        assert out["ehb_estimated_hours"] == pytest.approx(out["ehb_hours"])
+
+    def test_a_derived_rate_row_retunes_the_tier(self):
+        """An npc_ehb_rates row lets the owner retune a tier without a deploy."""
+        out = rows_to_summary([self._row(kills=10, rolls=10)], {}, {13945: 5.0})
+        assert out["ehb_hours"] == pytest.approx(10 / 5.0)
+
+    def test_a_wom_rate_cannot_price_a_clue_tier(self):
+        """Belt and braces: clue pseudo-NPCs carry no boss metric, and a stray
+        one must not route the row back onto the WOM path — that would price
+        every unpaired opening."""
+        row = self._row(kills=25, rolls=0)
+        row["boss_metric"] = "hard_clue"
+        out = rows_to_summary([row], {"hard_clue": 5.0})
+        assert out["ehb_hours"] == 0
+
+    def test_junk_roll_values_do_not_break_pricing(self):
+        for junk in (None, "", "many", -4, object()):
+            out = rows_to_summary([self._row(kills=10, rolls=junk)], {})
+            assert out["ehb_hours"] == 0
+            assert out["bosses"][0]["paired"] == 0
+
+    def test_ordinary_bosses_carry_no_pair(self):
+        out = rows_to_summary(
+            [{"npc_id": 15742, "npc_name": "Yama", "boss_metric": "yama",
+              "kills": 40, "last_at": None, "frozen_at": None}], RATES)
+        assert out["bosses"][0]["rolled"] is None
+        assert out["bosses"][0]["paired"] is None
+        assert out["ehb_hours"] == pytest.approx(40 / 18.0)
+
+    def test_roll_scope_is_distinct_from_the_other_two(self):
+        npc = "clue scroll (hard)"
+        assert len({roll_scope(npc), effort_scope(npc), completion_scope(npc)}) == 3
+        assert roll_scope(npc) == "effr:clue_scroll_(hard)"
+
+    def test_clue_tier_lookup_normalizes_like_the_engine(self):
+        assert clue_tier("  Clue   Scroll (Hard) ") is CLUE_TIERS["clue scroll (hard)"]
+        assert clue_tier("Yama") is None
+
+
+class TestClueRollRouting:
+    """Which counter a clue-bearing envelope feeds.
+
+    A roll and an opening happen at DIFFERENT NPCs — the scroll comes off some
+    boss's drop table, the casket is opened under the tier's pseudo-NPC — so
+    the two must never consume each other's watermark, and a drop that is both
+    a kill and a roll has to credit both.
+    """
+
+    NPCS = {
+        "clue scroll (hard)": {"npc_id": 13945, "metric": None, "tasks": []},
+        "clue scroll (elite)": {"npc_id": 13944, "metric": None, "tasks": []},
+        "clue scroll (master)": {"npc_id": 13955, "metric": None, "tasks": []},
+        "hellhound": {"npc_id": 100, "metric": "hellhound", "tasks": []},
+    }
+
+    @pytest.fixture
+    def apply_effort(self, monkeypatch):
+        recorded = []
+
+        def _record(session, event_id, team_id, player_id, npc_norm, entry,
+                    delta, *, source, at, completions=0, rolls=0):
+            recorded.append({"npc": npc_norm, "delta": delta, "rolls": rolls})
+
+        monkeypatch.setattr(engine, "record_effort", _record)
+        redis = _KvRedis()
+
+        def run(envelope, npcs=None):
+            recorded.clear()
+            state = _State(effort_npcs_by_event={1: npcs or self.NPCS})
+            engine._apply_effort(None, redis, state, {"id": 1}, 9, 725,
+                                 envelope, _NOW, {})
+            return list(recorded)
+
+        return run
+
+    def _drop(self, npc, kc, item, quantity=1):
+        return {"kind": "drop", "ts": 1000,
+                "data": {"npc_name": npc, "kill_count": kc, "item_name": item,
+                         "quantity": quantity}}
+
+    def test_scroll_box_credits_the_tier_and_the_source_boss(self, apply_effort):
+        recorded = apply_effort(self._drop("Hellhound", 1234, "Scroll box (hard)"))
+        assert {(r["npc"], r["delta"], r["rolls"]) for r in recorded} == {
+            ("clue scroll (hard)", 0, 1),   # the roll
+            ("hellhound", 1, 0),            # still a Hellhound kill
+        }
+
+    def test_the_rest_of_that_kills_loot_does_not_re_credit_the_roll(self, apply_effort):
+        apply_effort(self._drop("Hellhound", 1234, "Scroll box (hard)"))
+        again = apply_effort(self._drop("Hellhound", 1234, "Ensouled hellhound head"))
+        # Nothing at all: the roll is deduped on the source kill, and the kill
+        # itself was already folded by the first envelope.
+        assert sum(r["rolls"] for r in again) == 0
+
+    def test_a_redelivered_envelope_does_not_re_credit_the_roll(self, apply_effort):
+        apply_effort(self._drop("Hellhound", 1234, "Scroll box (hard)"))
+        replay = apply_effort(self._drop("Hellhound", 1234, "Scroll box (hard)"))
+        assert sum(r["rolls"] for r in replay) == 0
+
+    def test_the_next_kill_rolls_again(self, apply_effort):
+        apply_effort(self._drop("Hellhound", 1234, "Scroll box (hard)"))
+        later = apply_effort(self._drop("Hellhound", 1240, "Scroll box (hard)"))
+        assert sum(r["rolls"] for r in later) == 1
+
+    def test_opening_a_casket_is_a_kill_not_a_roll(self, apply_effort):
+        recorded = apply_effort(self._drop("Clue Scroll (Hard)", 55, "Dragon mace"))
+        assert [(r["npc"], r["delta"], r["rolls"]) for r in recorded] == [
+            ("clue scroll (hard)", 1, 0)]
+
+    def test_a_master_from_an_elite_casket_is_both(self, apply_effort):
+        """The one envelope that is genuinely two events: opening an elite
+        casket that contained a master scroll."""
+        recorded = apply_effort(
+            self._drop("Clue Scroll (Elite)", 213, "Clue scroll (master)"))
+        assert {(r["npc"], r["delta"], r["rolls"]) for r in recorded} == {
+            ("clue scroll (master)", 0, 1),
+            ("clue scroll (elite)", 1, 0),
+        }
+
+    def test_a_tier_the_event_does_not_track_earns_nothing(self, apply_effort):
+        """Relevance is the same rule every other effort NPC obeys: no task
+        cares about beginner clues here, so a beginner roll is not recorded."""
+        recorded = apply_effort(
+            self._drop("Hellhound", 1234, "Scroll box (beginner)"))
+        assert [r["npc"] for r in recorded] == ["hellhound"]
+
+    def test_an_absurd_quantity_is_clamped(self, apply_effort):
+        recorded = apply_effort(
+            self._drop("Hellhound", 1234, "Scroll box (hard)", quantity=4000))
+        rolls = [r["rolls"] for r in recorded if r["npc"] == "clue scroll (hard)"]
+        assert rolls == [engine._CLUE_ROLL_MAX_QUANTITY]
+
+    def test_a_frozen_tier_stops_rolling(self, apply_effort, monkeypatch):
+        monkeypatch.setattr(engine, "_effort_frozen", lambda *a, **k: True)
+        recorded = apply_effort(self._drop("Hellhound", 1234, "Scroll box (hard)"))
+        assert recorded == []
+
+
 class TestScopeIsolation:
     def test_effort_scope_is_namespaced_away_from_credit_scopes(self):
         # A crediting kc_target scope is a bare task id or "id:npc"; effort
@@ -449,8 +666,9 @@ class TestApplyEffortRouting:
         recorded = []
 
         def _record(session, event_id, team_id, player_id, npc_norm, entry,
-                    delta, *, source, at, completions=0):
-            recorded.append({"delta": delta, "completions": completions,
+                    delta, *, source, at, completions=0, rolls=0):
+            recorded.append({"npc": npc_norm, "delta": delta,
+                             "completions": completions, "rolls": rolls,
                              "source": source})
 
         monkeypatch.setattr(engine, "record_effort", _record)

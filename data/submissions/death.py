@@ -3,7 +3,9 @@
 import asyncio
 
 from db import PlayerDeath
+from db.death_filter import parse_flag
 from db.models import Group
+from utils.death_regions import is_safe_region
 
 from .common import (
     SubmissionResponse,
@@ -30,15 +32,37 @@ def _safe_int(value):
         return None
 
 
+def _safe_str(value, limit):
+    """A trimmed display string, or ``None``.
+
+    ``addFields`` on the plugin side writes the literal ``"N/A"`` for anything
+    it had no value for, so that string means "absent", not a real name.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.upper() == "N/A":
+        return None
+    return text[:limit]
+
+
 async def death_processor(death_data, external_session=None, world_type="main"):
     """
     Process player death submissions.
 
     Expected death-specific keys (sent by the client/plugin):
       - source (killer NPC/player name; aliases: killer, npc_name)
-      - region_id
-      - location
+      - region_id, region_name, region_type, location
+      - killer_type ("npc" | "player" | "unknown"), is_pvp
+      - is_safe_death (whether the location costs items; plugin 6.0+)
+      - value_lost, value_kept, items_lost (plugin 6.0.4+)
       - timestamp (unix seconds)
+
+    Everything above arrives as a STRING: the plugin builds embed fields with
+    ``String.valueOf``, so ``is_safe_death`` is ``"true"``, not ``True``, and a
+    field it had no value for is the literal ``"N/A"``. Parse, never trust the
+    type — and keep "absent" distinct from "false", because the two mean very
+    different things to the safe-death filter.
 
     Standard submission keys:
       - player_name, acc_hash, auth_key, guid
@@ -66,7 +90,33 @@ async def death_processor(death_data, external_session=None, world_type="main"):
     region_id = _safe_int(death_data.get("region_id"))
     location = death_data.get("location") or ""
     timestamp = death_data.get("timestamp")
-    debug_print(f"[DEATH] source={source} unique_id={unique_id} timestamp={timestamp}")
+
+    # Everything the plugin knows about the death beyond who and where. These
+    # travelled in the payload long before anything read them; they are parsed
+    # here so the row records them AND so they reach `notification_data` below,
+    # which is the only thing the send-side filters can see.
+    region_name = _safe_str(death_data.get("region_name"), 125) or _safe_str(location, 125)
+    region_type = _safe_str(death_data.get("region_type"), 32)
+    killer_type = _safe_str(death_data.get("killer_type"), 16)
+    is_pvp = parse_flag(death_data.get("is_pvp"))
+
+    # `is_safe_death` is the client's own verdict (6.0+); it is authoritative
+    # because only the client can see account type and Pest Control state. When
+    # it is missing the server classifies the region alone — see db.death_filter.
+    is_safe_death = parse_flag(death_data.get("is_safe_death"))
+    if is_safe_death is None and region_id is not None:
+        is_safe_death = is_safe_region(region_id)
+
+    # What the death actually cost (plugin 6.0.4+). Absent from older clients,
+    # so `None` means "unknown", never "died with nothing".
+    value_lost = _safe_int(death_data.get("value_lost"))
+    value_kept = _safe_int(death_data.get("value_kept"))
+    items_lost = _safe_int(death_data.get("items_lost"))
+
+    debug_print(
+        f"[DEATH] source={source} unique_id={unique_id} timestamp={timestamp} "
+        f"safe={is_safe_death} value_lost={value_lost}"
+    )
 
     notice = ""
 
@@ -91,6 +141,11 @@ async def death_processor(death_data, external_session=None, world_type="main"):
         source=source or None,
         region_id=region_id,
         location=location or None,
+        region_name=region_name,
+        killer_type=killer_type,
+        is_pvp=is_pvp,
+        is_safe_death=is_safe_death,
+        value_lost=value_lost,
         world_type=world_type,
         image_url=image_url or None,
         video_url=video_url,
@@ -162,6 +217,18 @@ async def death_processor(death_data, external_session=None, world_type="main"):
             "video_url": video_url,
             "world_type": world_type,
             "plugin_version": plugin_version,
+            # Carried so the SEND-side gates can re-decide. A queued row is all
+            # notification_service ever sees, so a key left out here is a filter
+            # that silently cannot run — the same way dropping the envelope's
+            # `_received_at` made the month-boundary fix inert.
+            "region_name": region_name,
+            "region_type": region_type,
+            "killer_type": killer_type,
+            "is_pvp": is_pvp,
+            "is_safe_death": is_safe_death,
+            "value_lost": value_lost,
+            "value_kept": value_kept,
+            "items_lost": items_lost,
         }
         print(f"Notification data: {notification_data}")
 
@@ -193,6 +260,11 @@ async def death_processor(death_data, external_session=None, world_type="main"):
                     "video_key": video_key,
                     "world_type": world_type,
                     "plugin_version": plugin_version,
+                    # Not filtered on (a group's settings never reach a member's
+                    # own DM), but worth showing them what it cost.
+                    "region_name": region_name,
+                    "is_safe_death": is_safe_death,
+                    "value_lost": value_lost,
                 },
                 existing_session=session if use_external_session else None,
             )

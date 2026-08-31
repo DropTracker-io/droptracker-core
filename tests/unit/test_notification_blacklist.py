@@ -25,6 +25,7 @@ from db.notification_blacklist import (
     item_key,
     npc_key,
     payload_subjects,
+    region_key,
 )
 
 
@@ -84,42 +85,125 @@ class TestKeys:
         assert entry_key("npc", "The Whisperer") == "whisperer"
         # Items get no article stripping — "The stuff" is a real item name.
         assert entry_key("item", "The stuff") == "the-stuff"
+        assert entry_key("region", "Castle Wars") == "castle-wars"
+        assert entry_key("region", "9520") == "#9520"
+
+
+class TestRegionKeys:
+    """A region entry is either one map chunk or a whole named area."""
+
+    @pytest.mark.parametrize("value", ["9520", " 9520 ", "#9520", 9520])
+    def test_numeric_entries_key_to_one_region(self, value):
+        assert region_key(value) == "#9520"
+
+    @pytest.mark.parametrize("name", ["Castle Wars", "castle wars", "  CASTLE_WARS "])
+    def test_area_spellings_collapse_to_one_key(self, name):
+        assert region_key(name) == "castle-wars"
+
+    def test_an_id_and_its_area_are_different_keys(self):
+        # The whole point of the "#" prefix: muting region 9520 must not mute
+        # the other half of Castle Wars, and muting the area must do both.
+        assert region_key("9520") != region_key("Castle Wars")
+
+    @pytest.mark.parametrize("value", [None, "", "   ", "#", "Unknown", "N/A", "---"])
+    def test_placeholders_do_not_become_entries(self, value):
+        assert region_key(value) == ""
 
 
 class TestPayloadSubjects:
     def test_drop_payload_yields_item_and_npc(self):
-        items, npcs = payload_subjects(
+        subjects = payload_subjects(
             {"item_name": "Twisted bow", "npc_name": "Chambers of Xeric"}
         )
-        assert items == {"twisted-bow"}
-        assert npcs == {"chambers-of-xeric"}
+        assert subjects["item"] == {"twisted-bow"}
+        assert subjects["npc"] == {"chambers-of-xeric"}
 
     def test_pet_payload_treats_the_pet_as_an_item(self):
         # A pet IS an item; a leader blacklisting "Baby mole" means the pet post.
-        items, npcs = payload_subjects(
+        subjects = payload_subjects(
             {"pet_name": "Baby mole", "source": "Giant Mole", "npc_name": "Giant Mole"}
         )
-        assert items == {"baby-mole"}
-        assert npcs == {"giant-mole"}
+        assert subjects["item"] == {"baby-mole"}
+        assert subjects["npc"] == {"giant-mole"}
 
     def test_pb_payload_uses_boss_name(self):
-        _, npcs = payload_subjects({"boss_name": "Zulrah"})
-        assert npcs == {"zulrah"}
+        assert payload_subjects({"boss_name": "Zulrah"})["npc"] == {"zulrah"}
 
     def test_death_payload_uses_source(self):
-        _, npcs = payload_subjects({"source": "Vet'ion"})
         # Apostrophes slug to '-', the same rule the rest of the codebase uses.
-        assert npcs == {"vet-ion"}
+        assert payload_subjects({"source": "Vet'ion"})["npc"] == {"vet-ion"}
 
     def test_mode_variant_also_tests_its_base_raid(self):
         # Blacklisting "Chambers of Xeric" must silence Challenge Mode too, so
         # the incoming variant is tested against its base as well as itself.
-        _, npcs = payload_subjects({"npc_name": "Chambers of Xeric Challenge Mode"})
-        assert npcs == {"chambers-of-xeric-challenge-mode", "chambers-of-xeric"}
+        subjects = payload_subjects({"npc_name": "Chambers of Xeric Challenge Mode"})
+        assert subjects["npc"] == {"chambers-of-xeric-challenge-mode", "chambers-of-xeric"}
 
     @pytest.mark.parametrize("data", [None, {}, "not a dict", {"tier": "Grandmaster"}])
     def test_payloads_with_no_subject_yield_nothing(self, data):
-        assert payload_subjects(data) == (set(), set())
+        assert not any(payload_subjects(data).values())
+
+
+class TestRegionSubjects:
+    """A death's location, keyed both ways so either kind of entry can fire."""
+
+    def test_region_id_yields_its_id_and_its_area(self):
+        # Castle Wars spans 9520 and 9620. A payload carrying only 9520 must
+        # still match an entry a leader added as the area name — which is the
+        # whole reason the server resolves the id itself rather than trusting
+        # the client's region_name.
+        subjects = payload_subjects({"region_id": 9520})
+        assert subjects["region"] == {"#9520", "castle-wars"}
+
+    def test_unnamed_region_still_yields_its_id(self):
+        # The clan hall has no entry in the name data; a leader can still mute
+        # it by id, so the id key must survive the failed name lookup.
+        assert payload_subjects({"region_id": 6997})["region"] == {"#6997"}
+
+    def test_payload_region_name_is_also_keyed(self):
+        subjects = payload_subjects({"region_name": "Chambers of Xeric"})
+        assert subjects["region"] == {"chambers-of-xeric"}
+
+    def test_location_is_read_as_a_place_not_an_npc(self):
+        # The plugin sends the area under both keys; neither may leak into the
+        # NPC set, or blacklisting a boss would mute its whole region.
+        subjects = payload_subjects({"location": "Castle Wars"})
+        assert subjects["region"] == {"castle-wars"}
+        assert subjects["npc"] == set()
+
+    def test_string_region_ids_are_accepted(self):
+        # Embed fields arrive as strings — region_id is "9520", not 9520.
+        assert "#9520" in payload_subjects({"region_id": "9520"})["region"]
+
+    def test_unparseable_region_id_yields_nothing(self):
+        assert payload_subjects({"region_id": "N/A"})["region"] == set()
+
+
+class TestRegionBlacklistReason:
+    def test_area_entry_mutes_a_death_that_sent_only_an_id(self):
+        db = _db([("region", "castle-wars")])
+        reason = blacklist_reason(db, 303, "death", {"region_id": 9620, "source": "Zulrah"})
+        assert reason == "blacklisted region 'castle-wars'"
+
+    def test_area_entry_covers_every_region_it_spans(self):
+        db = _db([("region", "chambers-of-xeric")])
+        for region_id in (12889, 13145, 13401):
+            assert blacklist_reason(db, 303, "death", {"region_id": region_id})
+
+    def test_id_entry_mutes_only_that_region(self):
+        # Dink's semantics: a bare id is one chunk, not the whole area.
+        db = _db([("region", "#9520")])
+        assert blacklist_reason(db, 303, "death", {"region_id": 9520})
+        assert blacklist_reason(db, 303, "death", {"region_id": 9620}) is None
+
+    def test_unblacklisted_region_is_not_muted(self):
+        db = _db([("region", "castle-wars")])
+        assert blacklist_reason(db, 303, "death", {"region_id": 12889}) is None
+
+    def test_region_entries_do_not_mute_other_groups_subjects(self):
+        # An item/NPC payload with no location must be unaffected by a region list.
+        db = _db([("region", "castle-wars")])
+        assert blacklist_reason(db, 303, "drop", {"item_name": "Bones"}) is None
 
 
 class TestBlacklistReason:

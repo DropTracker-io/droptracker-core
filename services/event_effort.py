@@ -18,6 +18,10 @@ Oathplate tile" work with no admin setup.
 **Freezing.** Effort at an NPC stops accruing once every task that NPC feeds is
 complete for the team, so kills after the tile is done don't inflate the score.
 
+**Pairing.** One "kill" in OSRS can be banked: a clue casket. Clue tiers were
+excluded from EHE entirely until a player's openings could be checked against
+what they were actually dealt during the window — see :data:`CLUE_TIERS`.
+
 This module is deliberately pure — no DB, no Redis, no network, stdlib-only
 module imports — so it loads under the unit-test suite's stubbed ``services``
 package and the scoring rules can be tested directly. Config parsing stays in
@@ -52,6 +56,11 @@ EFFORT_SCOPE_PREFIX = "eff"
 #: :data:`COMPLETION_MARKERS`. Separate from ``eff:`` because it counts a
 #: different event, which is the entire point.
 COMPLETION_SCOPE_PREFIX = "effc"
+#: Scope prefix for the ROLL counter at clue-tier NPCs — see :data:`CLUE_TIERS`.
+#: A roll is not an attempt at the clue and not a completion of one; it happens
+#: at a different NPC entirely (the monster that dropped the scroll), so it gets
+#: its own scope for the same reason ``effc:`` does.
+ROLL_SCOPE_PREFIX = "effr"
 
 #: NPCs where the plugin's loot kill count and the WOM boss metric count
 #: DIFFERENT events, because the content pays out for a partial attempt.
@@ -79,6 +88,72 @@ COMPLETION_MARKERS = {
         "item": "dizana's quiver (uncharged)",
         "metric": "sol_heredit",
     },
+}
+
+
+#: Item-name prefixes that all mean "a clue scroll of this tier was rolled".
+#:
+#: The tier's own scroll is the *rare* case: monsters overwhelmingly drop a
+#: **Scroll box**, and matching only "Clue scroll (tier)" would have zeroed
+#: every tier but elite. Measured over one week of prod drops: 3,703 hard
+#: scroll boxes against 6 hard clue scrolls, 592 master boxes against 1 master
+#: scroll. The remaining three are the skilling sources (fishing, bird nests,
+#: mining), which the loot tracker sees only occasionally — included because
+#: they are free to match, not because they carry much weight.
+#:
+#: ``Reward casket (tier)`` is deliberately absent: a casket is the *reward* for
+#: a clue already finished, so counting one as a roll would pay for the same
+#: clue twice.
+CLUE_SOURCE_PREFIXES = (
+    "scroll box", "clue scroll", "clue bottle", "clue nest", "clue geode",
+)
+
+#: Clue tiers, keyed by the pseudo-NPC ``npc_list`` records a casket under
+#: (``osrs_api.semantic`` maps "Reward casket (elite)" -> "Clue Scroll (Elite)",
+#: and the plugin's ``kill_count`` on those drops is the player's absolute
+#: clue-completion count for the tier).
+#:
+#: **Why these NPCs need a second counter.** A casket is the one "kill" in OSRS
+#: a player can bank. Clues were excluded from EHE for exactly that reason
+#: (suggestion #156): a stack of 100 elites saved up beforehand and dumped in
+#: the first five minutes would book a hundred clues of hours the event never
+#: cost. The fear is not hypothetical — across 30 days of prod openings, 47% to
+#: 76% of a player's consecutive openings per tier land under 30 seconds apart.
+#:
+#: So each tier keeps two counters: ``kills`` (caskets opened in-window) and
+#: ``rolls`` (scrolls the player was *dealt* in-window, from any source), and
+#: :func:`rows_to_summary` prices ``min(rolls, kills)`` — Fazebook's two-part
+#: check: "if 20 clues are rolled and 25 clues opened, count the first 20".
+#: A dumped stack still shows its openings; it just isn't paid for.
+#:
+#: ``rate_kph`` is clues completed per hour. WOM publishes no EHB rate for clue
+#: metrics, so these are DropTracker's own and every hour priced from them is
+#: flagged ``estimated``. Measured 2026-08-30 as the median per-player median
+#: gap between consecutive casket openings over 30 days, gaps bounded to
+#: [30s, 30min] so stack dumps and logouts fall out. MEDIAN across players, not
+#: the p90 ``scripts/compute_npc_ehb_rates.py`` uses for bosses: there the tail
+#: is efficient play, here it is precisely the bulk-opening this mechanism
+#: exists to refuse to pay for. (Easy edging out beginner is what the data
+#: says — 2.3 vs 2.2 min medians — and is inside the noise of both samples.)
+#: A row in ``npc_ehb_rates`` for the pseudo-NPC overrides the built-in figure,
+#: so a tier can be retuned without a deploy.
+CLUE_TIERS = {
+    "clue scroll (beginner)": {"tier": "beginner", "rate_kph": 19.0},
+    "clue scroll (easy)": {"tier": "easy", "rate_kph": 20.5},
+    "clue scroll (medium)": {"tier": "medium", "rate_kph": 11.2},
+    "clue scroll (hard)": {"tier": "hard", "rate_kph": 7.8},
+    "clue scroll (elite)": {"tier": "elite", "rate_kph": 6.3},
+    "clue scroll (master)": {"tier": "master", "rate_kph": 4.7},
+}
+
+#: ``{receipt item name: clue pseudo-NPC}`` — the reverse of
+#: :data:`CLUE_TIERS` x :data:`CLUE_SOURCE_PREFIXES`, built once because it is
+#: consulted per drop envelope. Names that no item actually uses ("clue bottle
+#: (master)" — masters have no skilling source) simply never match.
+_CLUE_SOURCE_NPCS = {
+    f"{prefix} ({entry['tier']})": npc
+    for npc, entry in CLUE_TIERS.items()
+    for prefix in CLUE_SOURCE_PREFIXES
 }
 
 
@@ -116,6 +191,31 @@ def completion_scope(npc_norm: str) -> str:
 def completion_marker(npc_norm) -> Optional[dict]:
     """The :data:`COMPLETION_MARKERS` entry for an NPC, or ``None``."""
     return COMPLETION_MARKERS.get(_norm(npc_norm))
+
+
+def roll_scope(npc_norm: str) -> str:
+    """Watermark scope for a clue tier's ROLL counter.
+
+    Rolls arrive at other NPCs' kill counts (a Hellhound's scroll box), so this
+    scope's dedupe keys are the *source* kill's, never the casket's — which is
+    the other reason it cannot share ``eff:``.
+    """
+    return f"{ROLL_SCOPE_PREFIX}:{_norm(npc_norm).replace(' ', '_')}"
+
+
+def clue_tier(npc_norm) -> Optional[dict]:
+    """The :data:`CLUE_TIERS` entry for a clue pseudo-NPC, or ``None``."""
+    return CLUE_TIERS.get(_norm(npc_norm))
+
+
+def clue_roll_npc(item_name) -> Optional[str]:
+    """The clue pseudo-NPC an item receipt is a roll for, or ``None``.
+
+    ``clue_roll_npc("Scroll box (hard)") == "clue scroll (hard)"``: the box and
+    the scroll are the same event as far as the event window is concerned, so
+    both credit the tier the casket will later be opened under.
+    """
+    return _CLUE_SOURCE_NPCS.get(_norm(item_name))
 
 
 def is_completion_drop(npc_norm, item_name) -> bool:
@@ -266,13 +366,42 @@ def _price_marker_row(row, kills: int, rates: dict,
     return hours + estimated, estimated
 
 
+def _price_clue_row(row, kills: int, derived_rates: Optional[dict]) -> Optional[tuple]:
+    """``(hours, paired, rolled)`` for a :data:`CLUE_TIERS` NPC, or ``None``
+    when this row is not one.
+
+    ``kills`` are caskets opened inside the event window; ``rolls`` are scrolls
+    the player was dealt inside it. Only ``min`` of the two is paid for, so a
+    banked stack dumped on day one is worth whatever the player actually rolled
+    while the event was running and not one clue more. The openings still show:
+    the row keeps its kill count, it just doesn't price.
+
+    Rate order mirrors the rest of the module — an ``npc_ehb_rates`` row for the
+    pseudo-NPC wins, so a tier can be retuned in the DB; otherwise the measured
+    default from :data:`CLUE_TIERS`. Either way the hours are OUR estimate (WOM
+    prices no clue metric), so the caller flags them ``estimated`` outright
+    rather than only when the fallback was used.
+    """
+    entry = clue_tier(row.get("npc_name"))
+    if entry is None:
+        return None
+    try:
+        rolled = max(0, int(row.get("rolls") or 0))
+    except (TypeError, ValueError):
+        rolled = 0
+    paired = min(max(kills, 0), rolled)
+    rate = _derived_rate(derived_rates, row.get("npc_id")) or float(entry["rate_kph"])
+    hours = (paired / rate) if (rate > 0 and paired) else 0.0
+    return hours, paired, rolled
+
+
 def rows_to_summary(rows: Iterable[dict], rates: dict,
                     derived_rates: Optional[dict] = None) -> dict:
     """Fold one player's effort rows into the shape the read model exposes.
 
     ``rows`` are ``{"npc_id", "npc_name", "boss_metric", "kills", "completions",
-    "last_at", "frozen_at"}``. Returns ``{"ehb_hours", "ehb_estimated_hours",
-    "kills",
+    "rolls", "last_at", "frozen_at"}``. Returns ``{"ehb_hours",
+    "ehb_estimated_hours", "kills",
     "bosses": [...], "last_at", "frozen"}`` with bosses ordered by EHB
     contribution (then kills), so the biggest investment reads first.
 
@@ -290,7 +419,8 @@ def rows_to_summary(rows: Iterable[dict], rates: dict,
     :data:`COMPLETION_MARKERS` NPCs take a different path entirely
     (:func:`_price_marker_row`): their two counters are priced separately,
     because for those the WOM rate answers a question the plugin's counter is
-    not asking.
+    not asking. :data:`CLUE_TIERS` NPCs take a third (:func:`_price_clue_row`),
+    pricing only the openings a matching in-window roll paid for.
     """
     bosses, total_kills = [], 0
     total_hours = 0.0
@@ -304,6 +434,7 @@ def rows_to_summary(rows: Iterable[dict], rates: dict,
             kills = 0
         metric = row.get("boss_metric") or None
         marker_priced = _price_marker_row(row, kills, rates, derived_rates)
+        clue_priced = _price_clue_row(row, kills, derived_rates)
         if marker_priced is not None:
             # A marker row's attempt total is max(plugin attempts, completions):
             # WOM can see completions the plugin never reported.
@@ -320,9 +451,15 @@ def rows_to_summary(rows: Iterable[dict], rates: dict,
         is_frozen = row.get("frozen_at") is not None
         if is_frozen:
             frozen += 1
+        rolled = paired = None
         if marker_priced is not None:
             hours, row_estimated_hours = marker_priced
             estimated = row_estimated_hours > 0
+        elif clue_priced is not None:
+            hours, paired, rolled = clue_priced
+            # Always our own number, never WOM's — see _price_clue_row.
+            estimated = hours > 0
+            row_estimated_hours = hours
         else:
             hours = ehb_hours({metric: kills}, rates) if metric else 0.0
             estimated = False
@@ -343,6 +480,11 @@ def rows_to_summary(rows: Iterable[dict], rates: dict,
                 "ehb_hours": hours,
                 "estimated": estimated,
                 "frozen": is_frozen,
+                # Clue tiers only (None elsewhere): scrolls dealt in-window and
+                # the subset of openings those paid for. Surfaced so a player
+                # looking at "60 opened, 3h" can see it was 20 that counted.
+                "rolled": rolled,
+                "paired": paired,
             }
         )
     bosses.sort(key=lambda b: (-b["ehb_hours"], -b["kills"], str(b["name"] or "")))

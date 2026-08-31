@@ -98,11 +98,15 @@ async def test_meta_documents_every_type(client, monkeypatch):
     assert [t["key"] for t in body["types"]] == list(NOTIFICATION_TYPES)
     assert body["limits"]["max_blocks"] == MAX_BLOCKS
     # Every type has to offer the player's name and at least one image token,
-    # or the editor cannot express the message people actually want.
+    # or the editor cannot express the message people actually want. The one
+    # exemption: rank_milestone is detected server-side from WiseOldMan data,
+    # so there is never a screenshot — offering the token would document a
+    # value that is always blank.
     for t in body["types"]:
         tokens = {d["token"] for d in t["tokens"]}
         assert "player_name" in tokens
-        assert "image_url" in tokens
+        if t["key"] != "rank_milestone":
+            assert "image_url" in tokens
         assert t["label"] and t["description"]
 
 

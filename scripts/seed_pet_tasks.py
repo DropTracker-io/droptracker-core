@@ -37,6 +37,8 @@ _CATEGORY_META = {
     "boss":     ("Obtain any boss pet", "Receive any boss pet.", 80, "fire"),
     "skilling": ("Obtain any skilling pet", "Receive any skilling pet.", 60, "earth"),
     "raids":    ("Obtain any raids pet", "Receive any Chambers/Theatre/Tombs pet.", 90, "fire"),
+    "clue":     ("Obtain any clue pet", "Receive any Treasure Trails pet.", 90, "fire"),
+    "minigame": ("Obtain any minigame pet", "Receive any minigame pet.", 80, "fire"),
 }
 for _cat in DEFAULT_CATEGORIES:
     meta = _CATEGORY_META.get(_cat)

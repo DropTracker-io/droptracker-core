@@ -36,6 +36,7 @@ from .common import (
     envelope_from_plugin,
     SEASONAL_WORLD_TYPE,
     SeasonalPersonalBestEntry,
+    reraise_if_session_broken,
 )
 
 
@@ -164,6 +165,11 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     video_key = pb_data.get("video_key")
     video_url = pb_data.get("video_url")
     plugin_version = pb_data.get("p_v", None)
+    # Absolute boss KC the plugin reads off the kill message. Sent on EVERY
+    # timed kill (PbHandler puts it on the embed whether or not it's a PB) but
+    # discarded here until the KC-milestone feature needed it. 0 = unknown.
+    from .kc_milestones import parse_kill_count
+    kill_count = parse_kill_count(pb_data.get("killcount", pb_data.get("kill_count")))
     # Gear/inventory the plugin captured at the moment of the kill (P2.0).
     # Absent for older clients and for players who opted out.
     equipment_raw = pb_data.get("equipment", None)
@@ -452,6 +458,32 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     except Exception:
         pass
 
+    # KC milestones (1st kill / every Nth): every timed kill carries an
+    # absolute KC, so the watermark advances on ordinary kills too — that is
+    # the whole reason this processor now reads the field. Gates (main world,
+    # plugin path, WOM-recognized boss) live in the helper; a failure here
+    # must never cost the PB itself.
+    if kill_count is not None:
+        try:
+            from .kc_milestones import handle_kill_count
+
+            await handle_kill_count(
+                session,
+                player,
+                npc_id,
+                npc_name,
+                kill_count,
+                world_type=world_type,
+                from_plugin=envelope_from_plugin(pb_data),
+                image_url=pb_entry.image_url or "",
+                plugin_version=plugin_version,
+                use_external_session=use_external_session,
+            )
+        except Exception as e:
+            # See drop.py: a dead transaction cannot be salvaged by ignoring it.
+            reraise_if_session_broken(e)
+            print(f"[KcMilestones] Check failed for pb {getattr(pb_entry, 'id', '?')}: {e}")
+
     if is_personal_best:
         player_groups = get_player_groups_with_global(session, player)
         group_ids = [g.group_id for g in player_groups]
@@ -531,6 +563,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                     "old_time_ms": old_time,
                     "team_size": team_size,
                     "kill_time_ms": current_ms,
+                    "kill_count": kill_count,
                     "image_url": pb_entry.image_url,
                     "video_key": video_key,
                     "group_points_awarded": int(group_points_result.get("receiver_points_awarded", 0)),

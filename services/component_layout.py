@@ -389,6 +389,8 @@ NOTIFICATION_TYPES = (
     "quest",
     "death",
     "diary",
+    "kc_milestone",
+    "rank_milestone",
 )
 
 
@@ -495,7 +497,30 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
         "help": "NPC id — an icon is https://www.droptracker.io/img/npcdb/{npc_id}.png",
         "sample": "7530",
     },
-    "kill_count": {"help": "Kill count at the drop", "sample": "1,204"},
+    "kill_count": {"help": "The player's kill count at this kill", "sample": "1,204"},
+    # KC milestone
+    "kc_achievement": {
+        "help": "The milestone, spelled out (first kill or Nth kill)",
+        "sample": "1,000th Chambers of Xeric kill",
+    },
+    "kc_milestone": {
+        "help": "The crossed milestone as a number; empty on a first kill",
+        "sample": "1,000",
+        "optional": True,
+    },
+    # Hiscores rank milestone
+    "metric_label": {
+        "help": "The boss, skill or clue tier the rank is for",
+        "sample": "Chambers of Xeric",
+    },
+    "metric_kind": {"help": "boss, skill or clue", "sample": "boss"},
+    "rank": {"help": "The player's new hiscores rank", "sample": "4,821"},
+    "rank_threshold": {"help": "The threshold they crossed into", "sample": "5,000"},
+    "metric_value": {
+        "help": "The metric's value at the crossing (KC, XP or completions)",
+        "sample": "1,204",
+        "optional": True,
+    },
     "month_name": {"help": "The current month", "sample": "August"},
     "player_total_month": {"help": "The player's loot this month", "sample": "`48.2M`"},
     "group_total_month": {"help": "The group's loot this month", "sample": "`1.2B`"},
@@ -558,7 +583,13 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
     # Deaths
     "killer": {"help": "What killed the player", "sample": "Vorkath"},
     "location": {"help": "Where they died", "sample": "Ungael"},
+    "region_name": {"help": "The area they died in", "sample": "Ungael", "optional": True},
     "region_id": {"help": "OSRS region id", "sample": "9023", "optional": True},
+    # Blank for members on a plugin older than 6.0.4, which sends no value —
+    # hence optional, so a line carrying only this one disappears rather than
+    # rendering an empty heading.
+    "value_lost": {"help": "GP value of the items dropped", "sample": "4.2M", "optional": True},
+    "value_kept": {"help": "GP value of the items protected", "sample": "18.9M", "optional": True},
     # Diaries
     "diary_name": {"help": "The diary area", "sample": "Kourend & Kebos"},
     "diary_tier": {"help": "The tier completed", "sample": "Elite"},
@@ -587,9 +618,9 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Personal best",
         "group": "Achievements",
         "description": "Posted when a member sets a new personal best time.",
-        "tokens": ("npc_name", "npc_id", "personal_best", "team_size", "global_rank",
-                   "total_ranked_global", "group_rank", "total_ranked_group",
-                   "gear_image_url") + _POINTS_TOKENS + _MEDIA_TOKENS,
+        "tokens": ("npc_name", "npc_id", "personal_best", "team_size", "kill_count",
+                   "global_rank", "total_ranked_global", "group_rank",
+                   "total_ranked_group", "gear_image_url") + _POINTS_TOKENS + _MEDIA_TOKENS,
     },
     "ca": {
         "label": "Combat achievement",
@@ -629,13 +660,36 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Death",
         "group": "Progress",
         "description": "Posted when a member dies.",
-        "tokens": ("source", "killer", "location", "region_id", "timestamp") + _MEDIA_TOKENS,
+        "tokens": ("source", "killer", "location", "region_name", "region_id",
+                   "value_lost", "value_kept", "timestamp") + _MEDIA_TOKENS,
     },
     "diary": {
         "label": "Achievement diary",
         "group": "Progress",
         "description": "Posted when a member completes an achievement diary.",
         "tokens": ("diary_name", "diary_tier", "timestamp") + _MEDIA_TOKENS,
+    },
+    "kc_milestone": {
+        "label": "KC milestone",
+        "group": "Achievements",
+        "description": (
+            "Posted when a member's boss kill count crosses a configured "
+            "milestone (first kill, or every Nth)."
+        ),
+        "tokens": ("kc_achievement", "npc_name", "npc_id", "kill_count",
+                   "kc_milestone") + _MEDIA_TOKENS,
+    },
+    "rank_milestone": {
+        "label": "Hiscores rank milestone",
+        "group": "Achievements",
+        "description": (
+            "Posted when a member's hiscores rank enters a configured "
+            "threshold (e.g. top 10,000) on a boss, skill or clue tier."
+        ),
+        # No media tokens: rank crossings are detected server-side from
+        # WiseOldMan data, so there is never a screenshot.
+        "tokens": ("metric_label", "metric_kind", "rank", "rank_threshold",
+                   "metric_value", "npc_name"),
     },
 }
 
@@ -868,6 +922,29 @@ DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
             {"type": "separator", "divider": True},
             {"type": "text", "content": "## {diary_tier} {diary_name}"},
             {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
+    # No group-1 row for kc_milestone either — mirrors
+    # _build_default_kc_embed. {kc_achievement} reads correctly for both a
+    # first kill ("First Zulrah kill") and an interval milestone
+    # ("1,000th Zulrah kill"), so one static layout covers both.
+    "kc_milestone": {
+        "accent_color": "#c8aa6e",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** reached a kill count milestone!"},
+            {"type": "separator", "divider": True},
+            {"type": "text", "content": "## {kc_achievement}"},
+            {"type": "text", "content": "**Kill count** `{kill_count}`"},
+            {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
+    "rank_milestone": {
+        "accent_color": "#c8aa6e",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** climbed the hiscores!"},
+            {"type": "separator", "divider": True},
+            {"type": "text", "content": "## Top {rank_threshold} — {metric_label}"},
+            {"type": "text", "content": "**Rank** `{rank}`"},
         ],
     },
 }

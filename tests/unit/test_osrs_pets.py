@@ -65,6 +65,29 @@ def test_pet_categories_includes_misc():
     assert "boss" in keys and "skilling" in keys and "raids" in keys and "misc" in keys
 
 
+def test_clue_and_minigame_categories():
+    # Clue/minigame pets are rare grinds, not "misc" trivia: they must count
+    # toward a bare "any pet" task the same way a boss pet does.
+    assert pets.pet_matches("Bloodhound")
+    assert pets.pet_matches("Lil' creator")
+    assert pets.pet_matches("Pet penance queen")
+    assert pets.pet_matches("Bloodhound", ["clue"])
+    assert pets.pet_matches("Bloodhound", ["boss"]) is False
+    assert pets.pet_matches("Lil' creator", ["minigame"])
+    assert pets.pet_matches("Pet penance queen", ["minigame"])
+    assert pets.pet_matches("Lil' creator", ["clue"]) is False
+
+
+def test_every_all_pets_clog_entry_is_catalogued():
+    # The four gaps that prompted this: every pet on the game's "All Pets"
+    # collection log page must resolve, or it can't be picked or matched.
+    for name in ("Mr mcgroot", "Aggy", "Bloodhound",
+                 "Pet penance queen", "Lil' creator"):
+        assert pets.is_known_pet(name), name
+        assert pets.pet_category_of(name), name
+        assert pets.canonical_pet_name(name.lower()) == name
+
+
 def test_all_pets_vs_every_pet():
     # ALL_PETS (default) omits misc; EVERY_PET includes it.
     assert pets._norm("Chompy chick") not in pets.ALL_PETS
@@ -77,6 +100,7 @@ def test_skilling_pet_source_maps_skill():
     assert pets.skilling_pet_source("baby chinchompa") == "Hunter"   # case-insensitive
     assert pets.skilling_pet_source("Quetzin") == "Hunter"
     assert pets.skilling_pet_source("Soup") == "Sailing"
+    assert pets.skilling_pet_source("Mr mcgroot") == "Hunter"
 
 
 def test_skilling_pet_source_none_for_non_skilling():

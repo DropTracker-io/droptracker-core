@@ -107,7 +107,12 @@ _WS_RE = re.compile(r"\s+")
 #: "Speed Chaser", "You're a wizard"), and those are spelling, not identity.
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
+#: Combat achievement tiers, easiest first. The registry stores the display
+#: spelling; scoring surfaces filter on it, so the order is the UI order too.
+CA_TIERS = ("Easy", "Medium", "Hard", "Elite", "Master", "Grandmaster")
+
 _catalog_cache: tuple[float, dict[str, str]] | None = None
+_records_cache: tuple[float, list] | None = None
 _wiki_cache: tuple[float, dict[str, str]] | None = None
 _wiki_retry_after: float = 0.0
 
@@ -396,3 +401,94 @@ def note_unverified(cache, task_name: str) -> None:
             )
     except Exception as e:
         print(f"[CATasks] unverified-task record failed: {e}")
+
+
+# ── registry records: name -> tier / monster ─────────────────────────────────
+# ``catalog_index`` answers "does this task exist?". These answer "what is it
+# about?" — the join that makes a combat achievement scopable to a boss.
+# ``scripts/ca_tasks.json`` (extracted from the game cache, 655 tasks) carries
+# ``monster`` on all but one entry, and ``scripts/build_manifest.py`` writes the
+# whole record set into the manifest section, so no new data source is needed.
+
+def catalog_records(session) -> list:
+    """Every registry record (``{name, tier, monster, type, ...}``).
+
+    Same read + cache discipline as :func:`catalog_index`, including its
+    never-cache-an-empty-index rule: the section is written by a script that
+    may run long after this process booted, and caching the miss would pin
+    every lookup to "unknown" until a restart.
+    """
+    global _records_cache
+    now = time.monotonic()
+    if _records_cache is not None and _records_cache[0] > now:
+        return _records_cache[1]
+
+    import json
+
+    records: list = []
+    try:
+        from db.models import PluginManifestSection
+
+        row = (
+            session.query(PluginManifestSection)
+            .filter(PluginManifestSection.key == MANIFEST_SECTION)
+            .first()
+        )
+        if row is not None:
+            payload = json.loads(row.payload)
+            tasks = payload.get("tasks") if isinstance(payload, dict) else None
+            for task in tasks or []:
+                if isinstance(task, dict) and task.get("name"):
+                    records.append(task)
+    except Exception as e:
+        print(f"[CATasks] registry read failed: {e}")
+        return []
+
+    if records:
+        _records_cache = (now + _CATALOG_TTL_SECONDS, records)
+    return records
+
+
+def _monster_key(value) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def tasks_for_monsters(session, monster_names, tiers=None) -> list:
+    """Registry task NAMES whose ``monster`` is one of ``monster_names``,
+    optionally filtered to ``tiers`` (display spellings, case-insensitive).
+
+    This is what makes "a combat achievement at Zulrah" enforceable rather than
+    an admin's word: the caller resolves the list ONCE at authoring time and
+    stores it as an explicit allow-list on the rule, exactly like the pet
+    taxonomy does. Matching then stays pure — the engine compares a submitted
+    task name against the stored list and never needs the registry, which it
+    could not reach from ``match_task`` anyway.
+
+    Empty when the registry is unreadable, which callers must treat as "cannot
+    confirm" (422 the write) rather than "this boss has no achievements".
+    """
+    wanted = {_monster_key(m) for m in (monster_names or []) if _monster_key(m)}
+    if not wanted:
+        return []
+    tier_filter = {_monster_key(t) for t in (tiers or []) if _monster_key(t)}
+    out: list = []
+    for rec in catalog_records(session):
+        if _monster_key(rec.get("monster")) not in wanted:
+            continue
+        if tier_filter and _monster_key(rec.get("tier")) not in tier_filter:
+            continue
+        name = str(rec.get("name") or "").strip()
+        if name and name not in out:
+            out.append(name)
+    return sorted(out)
+
+
+def monsters_in_registry(session) -> list:
+    """Every distinct ``monster`` the registry names, sorted — the wizard's
+    "which bosses have combat achievements?" list."""
+    seen = {}
+    for rec in catalog_records(session):
+        monster = str(rec.get("monster") or "").strip()
+        if monster:
+            seen.setdefault(_monster_key(monster), monster)
+    return sorted(seen.values())

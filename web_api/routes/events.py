@@ -3301,12 +3301,103 @@ def _assert_event_admin(s, user_id, ev_or_group_id):
     )
 
 
+#: Items named on a bonus rule's public card before it collapses to a count.
+_BONUS_PREVIEW_ITEMS = 8
+
+
+def _bonus_rule_item_names(task_config: dict) -> list[str]:
+    """Every item name an embedded bonus config references, in config order —
+    flat lists, group lists, and either-or path lists alike."""
+    names: list[str] = []
+
+    def _add(items):
+        for it in (items or []):
+            name = (it if isinstance(it, str)
+                    else (it or {}).get("item_name") or (it or {}).get("name")
+                    if isinstance(it, dict) else None)
+            if name and name not in names:
+                names.append(str(name))
+
+    _add(task_config.get("items"))
+    groups = list(task_config.get("groups") or [])
+    for path in (task_config.get("paths") or []):
+        if isinstance(path, dict):
+            groups.extend(path.get("groups") or [])
+            _add(path.get("items"))
+    for group in groups:
+        if isinstance(group, dict):
+            _add(group.get("items"))
+    return names
+
+
+def _serialize_bonus_rule(rule) -> dict:
+    """One bonus rule as the public read model sees it.
+
+    Dispatches per type instead of assuming ``pet`` or ``time_under`` — a
+    third type serialized through an else-branch would ship ``npc: null,
+    threshold_ms: 0`` and its real criteria would never reach the frontend.
+
+    A ``task`` rule emits a DISPLAY PROJECTION, never its embedded config:
+    the criteria can be a 40-item list with a source restriction per item, and
+    the event detail payload is fetched by every viewer of the public page.
+    """
+    from services.competition import rule_label, rule_scope_line
+
+    entry = {"id": rule.id, "type": rule.type, "points": rule.points,
+             "max_awards": rule.max_awards, "label": rule_label(rule)}
+    if rule.label:
+        # The admin's OWN wording, kept apart from `label` (which is the
+        # DERIVED sentence when they didn't name the rule). The wizard echoes
+        # this back on a round trip; echoing `label` instead would freeze a
+        # derived name into the config and leave it stale after any edit.
+        entry["custom_label"] = rule.label
+    scope_line = rule_scope_line(rule)
+    if scope_line:
+        entry["scope_line"] = scope_line
+    if rule.type == "pet":
+        entry["pets"] = list(rule.pets)
+    elif rule.type == "time_under":
+        entry["npc"] = rule.npc
+        entry["threshold_ms"] = rule.threshold_ms
+    elif rule.type == "milestone":
+        entry["step"] = rule.step
+    elif rule.type == "task":
+        task = rule.task or {}
+        task_config = task.get("config") or {}
+        names = _bonus_rule_item_names(task_config)
+        entry.update({
+            "task_kind": task.get("type"),
+            "progress_kind": rule.progress_kind,
+            "need": rule.need,
+            "npcs": list(rule.scope),
+        })
+        if names:
+            entry["items_preview"] = names[:_BONUS_PREVIEW_ITEMS]
+            entry["item_count"] = len(names)
+        if task.get("type") == "ca_target":
+            entry["item_count"] = len(task_config.get("task_names") or ())
+            entry["tiers"] = list(task_config.get("tiers") or ())
+        if task.get("type") == "pet_collection":
+            entry["pets"] = list(task_config.get("pets") or ())
+        # The round-trippable criteria, in the shape the wizard PATCHes back.
+        # Without this the manager's block -> input -> PATCH cycle would
+        # silently ERASE every task rule the moment an admin re-saved a draft:
+        # the projection above is for display and cannot be sent back. Bounded
+        # by the same MAX_CONFIG_BYTES ceiling as the config it came from.
+        entry["task"] = {
+            "type": task.get("type"),
+            "target": task.get("target"),
+            "target_value": task.get("target_value"),
+            "config": json.dumps(task_config) if task_config else None,
+        }
+    return entry
+
+
 def _serialize_competition_config(s, config, comp_row) -> dict:
     """The competition block every read surface shares — config + WOM linkage
     state. NEVER includes ``wom_competition_code`` (a secret granting WOM
     edit/delete rights)."""
     from db import NpcList
-    from services.competition import rule_label
 
     metric: dict = {"kind": config.metric_kind}
     if config.metric_kind == "skill":
@@ -3328,16 +3419,7 @@ def _serialize_competition_config(s, config, comp_row) -> dict:
     ranking: dict = {"mode": config.ranking_mode}
     if config.ranking_mode == "points":
         ranking["gained_per_point"] = config.gained_per_point
-    rules = []
-    for rule in config.bonus_rules:
-        entry = {"id": rule.id, "type": rule.type, "points": rule.points,
-                 "max_awards": rule.max_awards, "label": rule_label(rule)}
-        if rule.type == "pet":
-            entry["pets"] = list(rule.pets)
-        else:
-            entry["npc"] = rule.npc
-            entry["threshold_ms"] = rule.threshold_ms
-        rules.append(entry)
+    rules = [_serialize_bonus_rule(rule) for rule in config.bonus_rules]
     out = {
         "metric": metric,
         "ranking": ranking,
@@ -3480,10 +3562,13 @@ async def get_competition_player(event_id: int, player_id: int):
                 raw_note = str(r.note or "")
                 if "|" in raw_note:
                     time_text = raw_note.split("|", 1)[1].strip() or None
+                rule = config.rules_by_id.get(rule_id)
+                is_task_rule = rule is not None and rule.type == "task"
                 detail = bonus_detail(rule_id, config, seen_by_rule[rule_id],
                                       matched_target=r.matched_target,
-                                      time_text=time_text)
-                awards.append({
+                                      time_text=time_text,
+                                      points=0 if is_task_rule else None)
+                entry = {
                     "rule_id": rule_id,
                     "type": detail.get("type"),
                     "points": max(int(r.quantity or 0), 0),
@@ -3492,7 +3577,19 @@ async def get_competition_player(event_id: int, player_id: int):
                     "proof_url": r.proof_url,
                     "awarded_at": int(r.created_at.timestamp()) if r.created_at else None,
                     "counted": seen_by_rule[rule_id] <= detail.get("max_awards", 1),
-                })
+                }
+                if is_task_rule:
+                    # A task rule's rows are progress, not payouts — the row's
+                    # quantity is credit units (a 50-weight drop is 50 units,
+                    # not 50 points) and the payout only exists at the rule
+                    # level, in the fold. Reporting quantity as points here
+                    # would show a player "50 points" they never scored.
+                    entry["points"] = 0
+                    entry["contribution"] = max(int(r.quantity or 0), 0)
+                    # Recorded at all ⇒ it moved the meter (the record-time
+                    # gate drops rows that don't).
+                    entry["counted"] = True
+                awards.append(entry)
             return {
                 "event_id": event_id,
                 "player_id": player_id,
@@ -5705,6 +5802,42 @@ async def pet_category_catalog():
             {"key": cat, "pets": [{"id": id_by_name.get(n), "name": n} for n in names]}
             for cat, names in names_by_cat.items()
         ]
+
+    return jsonify(await asyncio.to_thread(_catalog))
+
+
+@events_bp.get("/events/meta/ca-monsters")
+async def ca_monster_catalog():
+    """Which bosses/activities have combat achievements, and how many per tier
+    (session required) — the ``ca_target`` task builder's picker.
+
+    The counts are the point: an admin choosing "Zulrah, Master tier" needs to
+    see that it is two tasks, not twenty, BEFORE saving. Read from the same
+    registry the write validator resolves against, so the picker can never
+    offer a combination the save would reject.
+    """
+    current_user_id()
+
+    def _catalog():
+        from utils.ca_tasks import CA_TIERS, catalog_records
+
+        with db_session() as s:
+            records = catalog_records(s)
+        by_monster: dict = {}
+        for rec in records:
+            monster = str(rec.get("monster") or "").strip()
+            if not monster:
+                continue
+            entry = by_monster.setdefault(monster, {"name": monster, "total": 0,
+                                                    "tiers": {}})
+            entry["total"] += 1
+            tier = str(rec.get("tier") or "").strip()
+            if tier:
+                entry["tiers"][tier] = entry["tiers"].get(tier, 0) + 1
+        return {
+            "tiers": list(CA_TIERS),
+            "monsters": sorted(by_monster.values(), key=lambda m: m["name"]),
+        }
 
     return jsonify(await asyncio.to_thread(_catalog))
 

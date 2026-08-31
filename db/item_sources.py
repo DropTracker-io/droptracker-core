@@ -258,3 +258,41 @@ def source_npcs_for_item_names(s, item_names, *, per_item_limit: int) -> dict[st
         for row in rows:
             out.setdefault(row["name"], row["npc_id"])
     return out
+
+
+def items_dropped_by_npcs(s, npc_names, candidate_item_names) -> dict[str, list[str]]:
+    """``{candidate item name: [NPC names that drop it]}`` — the intersection
+    of a small candidate item list with a small NPC list, in one round trip.
+
+    The inverse question to :func:`source_npc_rows`, and asked from the other
+    end: the caller already knows both short lists and only wants to know which
+    pairs exist. Used to answer "which pets does this Boss of the Week actually
+    drop?" at authoring time, so a bonus rule's pet list is real drop-table
+    data rather than a hand-maintained map that goes stale every game update.
+
+    Wiki rows only (``dt_npc_loot``): a pet's observed-drops fallback would let
+    one misattributed receipt attach a pet to the wrong boss, and unlike the
+    item page there is no human reading the result — it is written straight
+    into a scoring config. Names are matched exactly, as stored.
+    """
+    wanted = [str(n).strip() for n in (candidate_item_names or []) if str(n).strip()]
+    npcs = [str(n).strip() for n in (npc_names or []) if str(n).strip()]
+    if not wanted or not npcs:
+        return {}
+    rows = s.execute(
+        text(
+            "SELECT DISTINCT i.item_name, n.npc_name "
+            "FROM xenforo.dt_npc_loot l "
+            "JOIN npc_list n ON n.npc_id = l.npc_id "
+            "JOIN items i ON i.item_id = l.item_id "
+            "WHERE n.npc_name IN :npcs AND i.item_name IN :items"
+        ).bindparams(bindparam("npcs", expanding=True),
+                     bindparam("items", expanding=True)),
+        {"npcs": npcs, "items": wanted},
+    ).fetchall()
+    out: dict[str, list[str]] = {}
+    for item_name, npc_name in rows:
+        bucket = out.setdefault(str(item_name), [])
+        if npc_name not in bucket:
+            bucket.append(str(npc_name))
+    return out

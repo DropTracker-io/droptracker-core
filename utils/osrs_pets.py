@@ -25,7 +25,7 @@ def _norm(value) -> str:
 # — the plugin's pet submission's ``pet_name`` is matched against these after
 # _norm, so punctuation/casing here only needs to match the in-game name.
 _CATEGORIES = {
-    "boss": {"Abyssal orphan", "Baby mole", "Baron", "Bran",
+    "boss": {"Abyssal orphan", "Aggy", "Baby mole", "Baron", "Bran",
              "Beef", "Butch", "Callisto cub", "Dom", "Gull", "Hellpuppy",
              "Huberte", "Ikkle hydra", "Jal-nib-rek", "Kalphite princess",
              "Lil' zik", "Lil'viathan", "Little nightmare", "Maggot marquess",
@@ -38,8 +38,12 @@ _CATEGORIES = {
              "Vet'ion jr.", "Vorki", "Wisp", "Yami", "Youngllef"},
     "skilling": {"Baby chinchompa", "Beaver", "Giant squirrel", "Heron",
                  "Rift guardian", "Rock golem", "Rocky", "Soup", "Tangleroot",
-                 "Quetzin", "Herbi"},
+                 "Quetzin", "Herbi", "Mr mcgroot"},
     "raids": {"Olmlet", "Tumeken's guardian", "Lil' zik"},
+    # Clue-scroll and minigame pets: rare grinds like any boss/skilling pet, so
+    # they count toward a bare "any pet" task — they just have no NPC to kill.
+    "clue": {"Bloodhound"},
+    "minigame": {"Lil' creator", "Pet penance queen"},
     # "misc": stackable / trivially-obtained pets. Excluded from the default
     # "any pet" set (DEFAULT_CATEGORIES) — a task must ask for the "misc"
     # category explicitly, or target one of these pets by name, for it to count.
@@ -79,6 +83,7 @@ _SKILLING_PET_SKILL = {
     "Rocky": "Thieving",
     "Soup": "Sailing",
     "Tangleroot": "Farming",
+    "Mr mcgroot": "Hunter",
 }
 SKILLING_PET_SKILL = {_norm(k): v for k, v in _SKILLING_PET_SKILL.items()}
 
