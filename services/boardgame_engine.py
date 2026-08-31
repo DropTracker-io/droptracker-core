@@ -106,6 +106,41 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+def _normalize_movement(settings: dict) -> dict:
+    """Collapse a 1-sided die into the ``fixed_step`` shape it is identical to.
+
+    ``Nd1`` always rolls exactly N, which is precisely ``fixed_step: N`` — the
+    same movement reached through the control leaders find more intuitive. The
+    designer lets you say it either way; this makes both store and read as one
+    canonical deterministic shape, so the engine, the shop's choose_roll range
+    check and every embed stop having two look-alike modes to reason about.
+
+    Mutates and returns ``settings`` (callers own a fresh dict from
+    ``_deep_merge``). Only an exact ``dice_sides == 1`` normalizes — genuine
+    garbage stays with the clamps in roll_dice.
+    """
+    movement = settings.get("movement")
+    if not isinstance(movement, dict) or movement.get("mode") == "fixed_step":
+        return settings
+    try:
+        sides = int(movement.get("dice_sides") or 6)
+    except (TypeError, ValueError):
+        return settings
+    if sides != 1:
+        return settings
+    try:
+        count = max(1, min(8, int(movement.get("dice_count") or 1)))
+    except (TypeError, ValueError):
+        count = 1
+    movement["mode"] = "fixed_step"
+    movement["fixed_step"] = count
+    # Put the die back to the default size. Leaving a 1 behind would re-collapse
+    # the document the moment the leader picked "Dice roll" again, trapping them
+    # in fixed_step with no way back through the UI.
+    movement["dice_sides"] = DEFAULT_BOARD_SETTINGS["movement"]["dice_sides"]
+    return settings
+
+
 def board_settings(raw_json) -> dict:
     """The full §2.5 settings document: stored JSON overlaid on defaults.
     Corrupt/absent JSON → pure defaults (a bad config never breaks a turn)."""
@@ -119,7 +154,7 @@ def board_settings(raw_json) -> dict:
             return copy.deepcopy(DEFAULT_BOARD_SETTINGS)
     if not isinstance(data, dict):
         return copy.deepcopy(DEFAULT_BOARD_SETTINGS)
-    return _deep_merge(DEFAULT_BOARD_SETTINGS, data)
+    return _normalize_movement(_deep_merge(DEFAULT_BOARD_SETTINGS, data))
 
 
 def load_board_settings(session, event_id: int) -> dict:
@@ -155,7 +190,7 @@ def roll_dice(settings: dict, rng: Optional[random.Random] = None) -> list[int]:
     rng = rng or random
     try:
         count = max(1, min(8, int(movement.get("dice_count") or 1)))
-        sides = max(2, min(100, int(movement.get("dice_sides") or 6)))
+        sides = max(1, min(100, int(movement.get("dice_sides") or 6)))
     except (TypeError, ValueError):
         count, sides = 1, 6
     return [rng.randint(1, sides) for _ in range(count)]
@@ -493,7 +528,7 @@ def perform_roll(session, redis_conn, event_id: int, team_id: int,
             extra = _consume_extra_dice(session, event_id, team_id)
             if extra > 0:
                 try:
-                    sides = max(2, min(100, int(movement.get("dice_sides") or 6)))
+                    sides = max(1, min(100, int(movement.get("dice_sides") or 6)))
                 except (TypeError, ValueError):
                     sides = 6
                 faces = list(faces) + [

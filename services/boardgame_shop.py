@@ -1115,7 +1115,7 @@ def _use_choose_roll(session, redis_conn, event_id, team_id, pos, item,
     else:
         try:
             count = max(1, min(8, int(movement.get("dice_count") or 1)))
-            sides = max(2, min(100, int(movement.get("dice_sides") or 6)))
+            sides = max(1, min(100, int(movement.get("dice_sides") or 6)))
         except (TypeError, ValueError):
             count, sides = 1, 6
         lo, hi = count, count * sides

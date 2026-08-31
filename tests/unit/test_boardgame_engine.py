@@ -79,10 +79,57 @@ class TestRollDice:
         assert bg.roll_dice(s) == [1]
 
     def test_dice_bounds_clamped(self):
-        s = bg.board_settings({"movement": {"dice_count": 99, "dice_sides": 1}})
+        s = bg.board_settings({"movement": {"dice_count": 99, "dice_sides": 200}})
         faces = bg.roll_dice(s, random.Random(1))
-        assert len(faces) == 8          # count capped
-        assert all(1 <= f <= 2 for f in faces)  # sides floored to 2
+        assert len(faces) == 8            # count capped
+        assert all(1 <= f <= 100 for f in faces)  # sides capped
+
+    def test_raw_one_sided_die_rolls_one(self):
+        # A hand-built dict that never went through board_settings: the clamp
+        # floor is 1, so a d1 rolls 1 rather than silently becoming a d2.
+        assert bg.roll_dice({"movement": {"dice_count": 2, "dice_sides": 1}}) == [1, 1]
+
+
+class TestSingleSidedDiceNormalization:
+    """Nd1 is deterministic, so it stores and reads as fixed_step: N."""
+
+    def test_1d1_becomes_a_fixed_step_of_one(self):
+        s = bg.board_settings({"movement": {"dice_count": 1, "dice_sides": 1}})
+        assert s["movement"]["mode"] == "fixed_step"
+        assert s["movement"]["fixed_step"] == 1
+        assert bg.roll_dice(s) == [1]
+
+    def test_nd1_becomes_a_fixed_step_of_n(self):
+        s = bg.board_settings({"movement": {"dice_count": 3, "dice_sides": 1}})
+        assert s["movement"]["mode"] == "fixed_step"
+        assert s["movement"]["fixed_step"] == 3
+        assert bg.roll_dice(s) == [3]
+
+    def test_count_is_capped_before_it_becomes_the_step(self):
+        s = bg.board_settings({"movement": {"dice_count": 99, "dice_sides": 1}})
+        assert s["movement"]["fixed_step"] == 8
+        assert bg.roll_dice(s) == [8]
+
+    def test_sides_absent_or_multi_sided_is_left_alone(self):
+        s = bg.board_settings({"movement": {"dice_count": 2, "dice_sides": 2}})
+        assert s["movement"]["mode"] == "dice"
+        assert bg.board_settings(None)["movement"]["mode"] == "dice"
+
+    def test_collapsing_resets_the_die_so_dice_mode_stays_reachable(self):
+        # The leftover d1 must not survive the collapse: it would re-normalize
+        # the document the moment the leader picked "Dice roll" again.
+        s = bg.board_settings({"movement": {"dice_count": 3, "dice_sides": 1}})
+        assert s["movement"]["dice_sides"] == 6
+        back = bg.board_settings({"movement": {**s["movement"], "mode": "dice"}})
+        assert back["movement"]["mode"] == "dice"
+        assert len(bg.roll_dice(back, random.Random(1))) == 3
+
+    def test_explicit_fixed_step_keeps_its_own_step(self):
+        # mode already fixed_step: the leftover dice_sides must not rewrite it.
+        s = bg.board_settings({"movement": {"mode": "fixed_step", "fixed_step": 5,
+                                            "dice_count": 2, "dice_sides": 1}})
+        assert s["movement"]["fixed_step"] == 5
+        assert bg.roll_dice(s) == [5]
 
     def test_garbage_settings_fall_back(self):
         s = bg.board_settings({"movement": {"dice_count": "x", "dice_sides": None}})

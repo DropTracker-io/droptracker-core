@@ -117,7 +117,9 @@ def _validate_settings_patch(body: dict) -> dict:
         if "dice_count" in movement:
             m["dice_count"] = _clean_int(movement["dice_count"], 1, 8, "movement.dice_count")
         if "dice_sides" in movement:
-            m["dice_sides"] = _clean_int(movement["dice_sides"], 2, 100, "movement.dice_sides")
+            # 1 is allowed and means "no randomness": board_settings normalizes
+            # Nd1 into the identical fixed_step: N shape (the intuitive control).
+            m["dice_sides"] = _clean_int(movement["dice_sides"], 1, 100, "movement.dice_sides")
         if "fixed_step" in movement:
             m["fixed_step"] = _clean_int(movement["fixed_step"], 1, 20, "movement.fixed_step")
         if "trigger" in movement:
@@ -783,7 +785,11 @@ async def patch_board_settings(event_id: int):
         abort_problem(422, "Empty patch", "No recognized settings keys in the body.")
 
     def _apply():
-        from services.boardgame_engine import _deep_merge, board_settings
+        from services.boardgame_engine import (
+            _deep_merge,
+            _normalize_movement,
+            board_settings,
+        )
 
         with db_session() as s:
             ev = _load_board_event(s, event_id, for_write=True)
@@ -801,7 +807,7 @@ async def patch_board_settings(event_id: int):
                         stored = parsed
                 except (TypeError, ValueError):
                     stored = {}
-            merged = _deep_merge(stored, patch)
+            merged = _normalize_movement(_deep_merge(stored, patch))
             config.settings = json.dumps(merged)
             s.add(AuditLog(
                 actor_user_id=user_id, group_id=ev.group_id,
