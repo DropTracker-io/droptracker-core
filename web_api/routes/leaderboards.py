@@ -27,6 +27,7 @@ from web_api.common import (
     money,
     npc_leaderboard_key,
     parse_page,
+    player_avatars,
     player_list_loot_sum,
     resolve_period,
     with_cache_headers,
@@ -236,6 +237,8 @@ async def leaderboards_players():
             except Exception:
                 badge_map = {}
 
+        avatar_map = await asyncio.to_thread(player_avatars, ids) if ids else {}
+
         for rank, pid, loot in scored:
             row = {
                 "rank": rank,
@@ -246,6 +249,9 @@ async def leaderboards_players():
             chips = badge_map.get(pid)
             if chips:
                 row["badges"] = chips
+            avatar = avatar_map.get(pid)
+            if avatar:
+                row["avatar"] = avatar
             entries.append(row)
 
     resp = jsonify({

@@ -63,9 +63,9 @@ async def upload_player_model():
     if result is False:
         return jsonify({"accepted": False, "reason": "invalid_model"}), 422
 
-    # Render now, in the background, so the picture already exists by the time a
-    # personal best wants it — the notification path must never wait on a
-    # multi-second screenshot.
+    # Render now, in the background, so the pictures already exist by the time a
+    # personal best wants one — the notification path must never wait on a
+    # multi-second screenshot, and nor must a leaderboard.
     if result.get("stored") and result.get("player_id"):
         asyncio.create_task(_render_in_background(result["player_id"], fingerprint))
 
@@ -73,13 +73,20 @@ async def upload_player_model():
 
 
 async def _render_in_background(player_id: int, fingerprint: str) -> None:
-    """Pre-render the gear image. Failure is logged and otherwise ignored."""
-    try:
-        from services.gear_image import render_gear_image
+    """Pre-render both pictures of this outfit: the full-body still and the
+    avatar crop. Failure of either is logged and otherwise ignored.
 
-        await render_gear_image(player_id, fingerprint)
-    except Exception as exc:
-        print(f"Background gear render failed for player {player_id}: {exc}")
+    Sequential on purpose. Each render is a headless chromium drawing WebGL on
+    the CPU; two at once on the same box costs more in contention than the
+    second one saves in wall clock, and nothing is waiting on either.
+    """
+    from services.gear_image import render_avatar_image, render_gear_image
+
+    for label, render in (("gear", render_gear_image), ("avatar", render_avatar_image)):
+        try:
+            await render(player_id, fingerprint)
+        except Exception as exc:
+            print(f"Background {label} render failed for player {player_id}: {exc}")
 
 
 def _store(acc_hash, fingerprint, model_bytes, pet_bytes):

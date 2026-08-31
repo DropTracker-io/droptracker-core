@@ -1800,6 +1800,11 @@
           },
           "flair": {
             "$ref": "#/components/schemas/GroupFlair"
+          },
+          "avatar": {
+            "type": "string",
+            "format": "uri",
+            "description": "Absolute URL of the player's rendered character avatar - a square head-and-shoulders crop of the model they uploaded through the plugin. Absent for the many players who have never uploaded one, so clients must always keep a fallback."
           }
         }
       },
@@ -1847,6 +1852,11 @@
           },
           "total_loot": {
             "$ref": "#/components/schemas/Money"
+          },
+          "avatar": {
+            "type": "string",
+            "format": "uri",
+            "description": "Absolute URL of the player's rendered character avatar - a square head-and-shoulders crop of the model they uploaded through the plugin. Absent for the many players who have never uploaded one, so clients must always keep a fallback."
           }
         }
       },
@@ -2051,6 +2061,11 @@
           },
           "loot": {
             "$ref": "#/components/schemas/Money"
+          },
+          "avatar": {
+            "type": "string",
+            "format": "uri",
+            "description": "Absolute URL of the player's rendered character avatar - a square head-and-shoulders crop of the model they uploaded through the plugin. Absent for the many players who have never uploaded one, so clients must always keep a fallback."
           }
         }
       },

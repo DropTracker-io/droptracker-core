@@ -17,6 +17,7 @@ from web_api.common import (
     db_session,
     money,
     period_to_partition,
+    player_avatars,
     player_month_total,
     with_cache_headers,
 )
@@ -42,9 +43,12 @@ def _search_players(s, q, partition):
         .limit(LIMIT_EACH)
         .all()
     )
+    avatars = player_avatars(pid for pid, _ in rows)
     out = []
     for pid, name in rows:
-        out.append({"id": pid, "name": name, "total_loot": money(player_month_total(pid, partition))})
+        out.append({"id": pid, "name": name,
+                    "total_loot": money(player_month_total(pid, partition)),
+                    **({"avatar": avatars[pid]} if pid in avatars else {})})
     return out
 
 

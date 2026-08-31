@@ -18,6 +18,7 @@ from web_api.common import (
     db_session,
     money,
     period_to_partition,
+    player_avatars,
     player_global_rank,
     player_month_total,
     private_no_store,
@@ -207,13 +208,18 @@ async def get_me():
             manage_ids = manageable_guild_ids(user_id)
 
             # Players owned by this user.
+            owned = s.query(Player).filter(Player.user_id == user_id).all()
+            avatars = player_avatars(p.player_id for p in owned)
             players = []
-            for p in s.query(Player).filter(Player.user_id == user_id).all():
+            for p in owned:
                 loot = player_month_total(p.player_id, partition)
                 rank = player_global_rank(p.player_id, partition)
                 entry = {"id": p.player_id, "name": p.player_name, "total_loot": money(loot)}
                 if rank is not None:
                     entry["global_rank"] = rank
+                avatar = avatars.get(p.player_id)
+                if avatar:
+                    entry["avatar"] = avatar
                 players.append(entry)
 
             # Groups: union of memberships + admin grants + MANAGE_GUILD guilds

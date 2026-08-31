@@ -359,6 +359,72 @@ def group_ignored_player_ids(group_id) -> set:
 
 
 # --------------------------------------------------------------------------- #
+# Character avatars — the square crop of a player's own character that the site
+# draws instead of a letter tile.
+#
+# Every list of players wants these, so this is a batch lookup: one query for
+# the whole page, not one per row. Only players who have uploaded a model
+# through the plugin have one, and a rendered file may lag the fingerprint by a
+# few seconds, so a missing entry is the normal case and never an error — the
+# front-end falls back to the letter tile.
+# --------------------------------------------------------------------------- #
+_AVATAR_TTL = 120.0
+
+
+def player_avatars(player_ids: Iterable[int]) -> dict[int, str]:
+    """Map of player id → avatar URL, for those that have one rendered.
+
+    Cached per player for ~2 minutes: an outfit changes rarely, and the cost we
+    are avoiding is a stat() per row on every leaderboard read.
+    """
+    ids = {int(pid) for pid in player_ids if pid is not None}
+    if not ids:
+        return {}
+
+    out: dict[int, str] = {}
+    missing = []
+    for pid in ids:
+        cached = cache_get(f"avatar:{pid}", _AVATAR_TTL)
+        if cached is None:
+            missing.append(pid)
+        elif cached:
+            out[pid] = cached
+
+    if not missing:
+        return out
+
+    try:
+        from db.models import PlayerState
+        from services.gear_image import avatar_exists, avatar_url
+
+        with db_session() as s:
+            rows = (
+                s.query(PlayerState.player_id, PlayerState.model_fingerprint)
+                .filter(PlayerState.player_id.in_(missing))
+                .all()
+            )
+        fingerprints = {pid: fp for pid, fp in rows if fp}
+
+        for pid in missing:
+            fingerprint = fingerprints.get(pid)
+            url = ""
+            if fingerprint and avatar_exists(pid, fingerprint):
+                url = avatar_url(pid, fingerprint)
+            # Cache the misses too — a player without a model is the common
+            # case, and re-asking the database for them every page is the
+            # expense this exists to avoid.
+            cache_set(f"avatar:{pid}", url)
+            if url:
+                out[pid] = url
+    except Exception:
+        # An avatar is decoration. A failure here must never cost a caller its
+        # leaderboard.
+        pass
+
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Slugs / "nice URLs" (web_api/routes/resolve.py + `canonical_slug` on the
 # group/player/npc/item detail payloads).
 #

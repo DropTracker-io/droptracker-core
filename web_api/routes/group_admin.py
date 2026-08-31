@@ -46,6 +46,7 @@ from web_api.common import (
     money,
     parse_page,
     period_to_partition,
+    player_avatars,
     player_month_total,
     private_no_store,
 )
@@ -785,8 +786,16 @@ async def group_members(group_id: int):
             members.sort(key=lambda m: m["total_loot"]["value"], reverse=True)
             total = len(members)
             start = (page - 1) * limit
+            shown = members[start:start + limit]
+            # Only the page being returned: a large clan has thousands of
+            # members, and one screenful of them is what the table draws.
+            avatars = player_avatars(m["id"] for m in shown)
+            for m in shown:
+                avatar = avatars.get(m["id"])
+                if avatar:
+                    m["avatar"] = avatar
             return {
-                "members": members[start:start + limit],
+                "members": shown,
                 "meta": {"page": page, "limit": limit, "total": total},
             }
 

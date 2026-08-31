@@ -261,6 +261,17 @@ if "services.player_model" not in sys.modules:
     sys.modules["services.player_model"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/gear_image.py — where the rendered still and avatar are stored, and
+# the URLs a payload hands out for them. Stdlib-only at import time (chromium
+# and the screenshot service are imported inside the render call), and it needs
+# services.player_model above, which is why it is loaded after it.
+_GEAR_IMAGE_PATH = _Path(__file__).resolve().parent.parent / "services" / "gear_image.py"
+if "services.gear_image" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.gear_image", _GEAR_IMAGE_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.gear_image"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/loadout.py — decoding of the PB gear/inventory wire format.
 # Stdlib-only; the tests assert on its handling of malformed client input.
 _LOADOUT_PATH = _Path(__file__).resolve().parent.parent / "services" / "loadout.py"

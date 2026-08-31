@@ -40,6 +40,7 @@ from web_api.common import (
     money,
     parse_page,
     period_to_partition,
+    player_avatars,
     player_global_rank,
     player_list_loot_sum,
     player_month_total,
@@ -261,6 +262,7 @@ def _group_top_players(s, conn, group_id: int, partition, hidden: set, limit: in
         p.player_id: p.player_name
         for p in s.query(Player).filter(Player.player_id.in_(ids)).all()
     }
+    avatars = player_avatars(ids)
     out = []
     for pid in ids:
         name = names.get(pid)
@@ -271,6 +273,7 @@ def _group_top_players(s, conn, group_id: int, partition, hidden: set, limit: in
             "id": pid,
             "name": name,
             "loot": money(scores[pid]),
+            **({"avatar": avatars[pid]} if pid in avatars else {}),
         })
         if len(out) >= limit:
             break
@@ -554,6 +557,11 @@ async def player_profile(player_id: int):
                     payload["model_has_pet"] = model_exists(
                         player_id, state.model_fingerprint, pet=True
                     )
+                    # The same crop the leaderboards draw, so the profile header
+                    # and the row that linked to it show the same face.
+                    avatar = player_avatars([player_id]).get(player_id)
+                    if avatar:
+                        payload["avatar"] = avatar
             except Exception:
                 pass
             points = _player_points(s, player_id)

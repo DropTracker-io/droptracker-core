@@ -58,6 +58,7 @@ from web_api.common import (
     db_session,
     hidden_player_ids,
     parse_page,
+    player_avatars,
     private_no_store,
     with_cache_headers,
 )
@@ -1355,6 +1356,7 @@ async def points_leaderboard(group_id: int):
                     .all()
                 )
 
+            avatars = player_avatars(ids)
             start_rank = (page - 1) * limit
             entries = []
             for pos, (pid, points) in enumerate(rows):
@@ -1367,6 +1369,7 @@ async def points_leaderboard(group_id: int):
                     "id": pid,
                     "name": name_map.get(pid, f"Player {pid}"),
                     "points": int(points),
+                    **({"avatar": avatars[pid]} if pid in avatars else {}),
                 })
 
             seasons = (

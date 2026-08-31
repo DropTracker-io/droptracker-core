@@ -82,8 +82,8 @@ from db import (
     user_group_association,
 )
 from web_api.common import (abort_problem, db_session, hidden_player_ids, money,
-                            parse_page, player_month_totals, private_no_store,
-                            score_num, with_cache_headers)
+                            parse_page, player_avatars, player_month_totals,
+                            private_no_store, score_num, with_cache_headers)
 from web_api.event_loot import loot_gp_by_player
 from web_api.event_players import (
     count_contributions,
@@ -1766,6 +1766,11 @@ async def get_event_teams(event_id: int):
             } if contributor_pids else {}
             hidden = (set() if _is_event_admin(s, viewer_id, ev)
                       else hidden_player_ids())
+            # Asked for the whole board at once, and only for players who are
+            # not masked: a hidden player must not be identifiable by their
+            # character any more than by their name.
+            avatars = player_avatars(p for p in contributor_pids
+                                     if p not in hidden)
 
             pot = None
             try:
@@ -1807,6 +1812,7 @@ async def get_event_teams(event_id: int):
                             "player_name": ("Hidden player" if pid in hidden
                                             else names.get(pid) or f"Player {pid}"),
                             "points": round(pts, 2),
+                            **({"avatar": avatars[pid]} if pid in avatars else {}),
                         }
                         for pid, pts in top_contribs
                     ],
@@ -2006,6 +2012,13 @@ async def get_event_players(event_id: int):
                     if row["player_id"] in hidden:
                         row["player_name"] = "Hidden player"
                         row["player_id"] = None
+            # After the masking, so a hidden row has nothing left to identify it.
+            avatars = player_avatars(row["player_id"] for row in players
+                                     if row["player_id"])
+            for row in players:
+                avatar = avatars.get(row["player_id"])
+                if avatar:
+                    row["avatar"] = avatar
             for row in players:  # raw int -> Money envelope at the boundary
                 row["loot_gp"] = money(row["loot_gp"])
             if show_effort:

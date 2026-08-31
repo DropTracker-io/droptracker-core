@@ -154,7 +154,8 @@ async def _browser_ws_url(port: int) -> str:
 async def _capture(ws_url: str, url: str, *, width: int, scale: float,
                    timeout: float, max_height: int,
                    viewport_height: int, ready_js: str | None = None,
-                   transparent: bool = False) -> bytes:
+                   transparent: bool = False,
+                   require_ready: bool = False) -> bytes:
     # max_size=None: a full-page base64 PNG easily exceeds the 1 MiB ws default.
     async with websockets.connect(ws_url, max_size=None,
                                   open_timeout=10) as ws:
@@ -191,19 +192,26 @@ async def _capture(ws_url: str, url: str, *, width: int, scale: float,
 
             # Poll until the DOM + images have settled, then let webfonts finish.
             deadline = time.monotonic() + timeout
+            ready = False
             while time.monotonic() < deadline:
                 res = await cdp.send("Runtime.evaluate", {
                     "expression": _READY_JS, "returnByValue": True,
                 }, session_id=sid)
                 if res.get("result", {}).get("value") is True:
                     if not ready_js:
+                        ready = True
                         break
                     extra = await cdp.send("Runtime.evaluate", {
                         "expression": ready_js, "returnByValue": True,
                     }, session_id=sid)
                     if extra.get("result", {}).get("value") is True:
+                        ready = True
                         break
                 await asyncio.sleep(0.15)
+            if require_ready and not ready:
+                raise TimeoutError(
+                    f"readiness probe never passed within {timeout}s: {ready_js}"
+                )
             try:
                 await cdp.send("Runtime.evaluate", {
                     "expression": "document.fonts && document.fonts.ready"
@@ -236,7 +244,8 @@ async def screenshot_url(url: str, *, width: int = 1100, scale: float = 2.0,
                          timeout: float = 30.0, max_height: int = 8000,
                          viewport_height: int = 1080,
                          ready_js: str | None = None,
-                         transparent: bool = False) -> bytes:
+                         transparent: bool = False,
+                         require_ready: bool = False) -> bytes:
     """Render ``url`` in headless chromium and return a full-page PNG.
 
     ``width`` is the CSS layout width; ``scale`` is the device pixel ratio (2 =
@@ -255,6 +264,12 @@ async def screenshot_url(url: str, *, width: int = 1100, scale: float = 2.0,
     asynchronously into a canvas (the WebGL character render) must signal its
     own readiness or it will be photographed blank.
 
+    ``require_ready`` turns a probe that never passes into a ``TimeoutError``
+    instead of a capture of whatever happened to be on screen. Off by default,
+    because a board or a poster that is 95% painted is still worth posting — but
+    the right choice for anything cached under a content-addressed name, where a
+    blank capture is stored once and served forever.
+
     ``viewport_height`` is the emulated window height, and the floor on the
     captured height: chromium reports ``cssContentSize`` as at least the
     viewport, so a page shorter than the window yields a PNG padded with body
@@ -272,7 +287,8 @@ async def screenshot_url(url: str, *, width: int = 1100, scale: float = 2.0,
         return await _capture(ws_url, url, width=width, scale=scale,
                               timeout=timeout, max_height=max_height,
                               viewport_height=viewport_height,
-                              ready_js=ready_js, transparent=transparent)
+                              ready_js=ready_js, transparent=transparent,
+                              require_ready=require_ready)
     finally:
         if proc is not None and proc.poll() is None:
             proc.terminate()
