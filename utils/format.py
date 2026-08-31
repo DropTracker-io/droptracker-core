@@ -75,6 +75,42 @@ def normalize_player_display_equivalence(name: str) -> str:
     return name.lower()
 
 
+def prefer_display_casing(current: str, candidate: str):
+    """Pick the better-capitalised spelling of one RSN, or None to keep `current`.
+
+    WOM's `username` is documented as "always lowercase", and it is what
+    check_user_by_username used to hand back, so more than half our rows were
+    created with the capitalisation flattened out of them. Both WOM's
+    `display_name` and the RSN the plugin reads off the game client carry the
+    real casing, and this decides when one of those may overwrite what we hold.
+
+    `candidate` wins only when it is the same name letter-for-letter *and*
+    separator-for-separator — differing purely in case — and `current` has no
+    capitalisation while `candidate` does. That makes the swap invisible to
+    every lookup, since all of them compare through
+    normalize_player_display_equivalence() or LOWER(), and it cannot rewrite a
+    name into a different identity.
+
+    Deliberately one-way: a name that already carries capitals is never
+    reworded, so a lowercase source can't flatten a good name back out and two
+    disagreeing sources can't write over each other on every submission.
+    """
+    if not current or not candidate:
+        return None
+    current = str(current)
+    candidate = str(candidate)
+    if current == candidate:
+        return None
+    # Same characters modulo case: guarantees only capitalisation changes.
+    if current.casefold() != candidate.casefold():
+        return None
+    if current != current.lower():
+        return None
+    if candidate == candidate.lower():
+        return None
+    return candidate
+
+
 def normalize_claim_rsn_input(name: str) -> str:
     """
     Normalize an RSN from Discord or other UI before DB lookup: NFKC, common

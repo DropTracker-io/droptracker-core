@@ -9,7 +9,7 @@ from db import Player, session, models
 
 import wom
 from wom import Err, Result
-from utils.format import normalize_player_display_equivalence
+from utils.format import normalize_player_display_equivalence, prefer_display_casing
 from utils.redis import redis_client
 from typing import Optional, Dict, Any, List, Tuple
 load_dotenv()
@@ -322,11 +322,33 @@ def _log_wom_call(action: str, **kwargs):
     if logger.isEnabledFor(logging.INFO):
         logger.info("WOM API call: %s %s", action, kwargs)
 
+def _wom_display_name(player) -> Optional[str]:
+    """The player's name as WOM spells it, capitalisation intact.
+
+    `username` is documented by the wom library as "always lowercase", so
+    returning it here is what flattened the casing on every row we created from
+    a WOM lookup. `display_name` is the same name with the capitals kept — it
+    never differs by anything else, so callers comparing through
+    normalize_player_display_equivalence() see no change.
+    """
+    display_name = getattr(player, "display_name", None)
+    if display_name and str(display_name).strip():
+        return str(display_name)
+    username = getattr(player, "username", None)
+    return str(username) if username else None
+
+
 async def check_user_by_username(username: str, *, force_refresh: bool = False) -> tuple[Any, str, int, int]:
     """ Check a user in the WiseOldMan database, returning a lightweight identity
         shim (dict with a `total_level` key, or None), their WOM ID, and their
         displayName.
         Returns (identity, player_name, player_wom_id, log_slots)
+
+        player_name is WOM's displayName, NOT its `username` — the latter is
+        always lowercase, and handing it back here is what stored half our
+        players with their capitalisation flattened. The two never differ by
+        anything but case, so every caller that compares through
+        normalize_player_display_equivalence() is unaffected.
     """
     # Cached results (success or failure) prevent hammering the API for unchanged data.
     # This cache is shared (Redis) across every process talking to WOM.
@@ -362,7 +384,7 @@ async def check_user_by_username(username: str, *, force_refresh: bool = False) 
                 return payload
             log_slots = _extract_log_slots(player)
             identity = _identity_shim(player)
-            payload = (identity, player.username, player.id, log_slots)
+            payload = (identity, _wom_display_name(player), player.id, log_slots)
             await _store_player_cache(username, payload, success=True)
             return payload
 
@@ -414,7 +436,7 @@ async def check_user_by_username(username: str, *, force_refresh: bool = False) 
             return payload
         log_slots = _extract_log_slots(player)
         identity = _identity_shim(player)
-        payload = (identity, str(player.username), str(player.id), log_slots)
+        payload = (identity, _wom_display_name(player), str(player.id), log_slots)
         await _store_player_cache(username, payload, success=True)
         return payload
     except Exception as e:
@@ -428,6 +450,12 @@ async def check_user_by_id(uid: int, *, force_refresh: bool = False):
         shim (dict with a `total_level` key, or None), their WOM ID, and their
         displayName.
         Returns (identity, player_name, player_wom_id, log_slots)
+
+        player_name is WOM's displayName, NOT its `username` — the latter is
+        always lowercase, and handing it back here is what stored half our
+        players with their capitalisation flattened. The two never differ by
+        anything but case, so every caller that compares through
+        normalize_player_display_equivalence() is unaffected.
     """
     cache_key = f"id:{uid}"
     cached = await _get_cached_player(cache_key, force_refresh)
@@ -449,7 +477,7 @@ async def check_user_by_id(uid: int, *, force_refresh: bool = False):
                 return payload
             log_slots = _extract_log_slots(player)
             identity = _identity_shim(player)
-            payload = (identity, str(player.username), str(player.id), log_slots)
+            payload = (identity, _wom_display_name(player), str(player.id), log_slots)
             await _store_player_cache(cache_key, payload, success=True)
             await _store_player_cache(player.username, payload, success=True)
             return payload
@@ -638,6 +666,14 @@ async def fetch_group_members(
                         if old_name != new_name:
                             print(f"Updated player name for {old_name} to {new_name}")
                             existing_player.player_name = new_name
+                            session.commit()
+                    else:
+                        # Same name, better spelling: the roster carries WOM's
+                        # displayName, so this is where a row created back when
+                        # we stored the lowercase username gets its capitals.
+                        better_name = prefer_display_casing(old_name, new_name)
+                        if better_name:
+                            existing_player.player_name = better_name
                             session.commit()
                 else:
                     # No player found by WOM ID. A stale wom_id (e.g. after an RSN change
@@ -970,8 +1006,8 @@ async def _extract_boss_kills_from_player_result(player_data: Result, boss_metri
 
 def get_player_metric_sync(username: str, metric_name: str):
     """
-    Returns an integer representation of a player's metric according to WiseOldMan
-    using the existing event loop
+    Blocking wrapper around get_player_metric() using the existing event loop.
+    Same return shape: a bare value, a per-bucket stat dict, or -1.
     """
     loop = asyncio.get_event_loop()
     if loop.is_running():
@@ -984,7 +1020,10 @@ def get_player_metric_sync(username: str, metric_name: str):
 
 async def get_player_metric_by_id(wom_id: int, metric_name: str):
     """
-    Returns an integer representation of a player's metric according to WiseOldMan
+    Returns a player's metric from WiseOldMan: a bare value for a top-level
+    player field, or the full stat dict for a skill / boss / activity /
+    computed metric. -1 when the metric is unknown or WOM is unavailable.
+    See _get_player_metric for the per-bucket dict shapes.
     """
     if not await limiter.wait():
         return -1
@@ -993,94 +1032,108 @@ async def get_player_metric_by_id(wom_id: int, metric_name: str):
     player_data = await client.players.get_details_by_id(wom_id)
     return await _get_player_metric(player_data, metric_name)
 
+def _metric_key(raw) -> str:
+    """Fold a WOM metric enum (``Metric.Zulrah``) or string down to its lookup key."""
+    return str(raw).split(".")[-1].lower()
+
+
 async def _get_player_metric(player_data: Result, metric_name: str):
+    """Look one metric up in a WOM player result.
+
+    Returns the bare value for a top-level player field (``id``, ``ehb``, ...),
+    or the whole stat dict for a skill / boss / activity / computed metric:
+    skills carry level+experience+rank+ehp, bosses kills+rank+ehb, activities
+    score+rank, computed value+rank. Unknown metric names, a failed result, and
+    a player with no snapshot all give -1.
+
+    Only bosses with kills > 0 are collected, so one the player has never
+    killed reads as -1 (the same answer as an unknown metric) rather than 0
+    kills. Use get_player_boss_kills() where 0 has to mean "never killed".
+    """
     metric_name = metric_name.replace(" ", "_").replace("'", "")
-    if player_data.is_ok:
-        details = player_data.unwrap()
-        snapshot = getattr(details, "latest_snapshot", None)
-        player_info = {
-            "id": getattr(details, "id", None),
-            "username": getattr(details, "username", None),
-            "display_name": getattr(details, "display_name", None),
-            "type": str(getattr(details, "type", None)),
-            "build": str(getattr(details, "build", None)),
-            "status": str(getattr(details, "status", None)),
-            "combat_level": getattr(details, "combat_level", None),
-            "exp": getattr(details, "exp", None),
-            "ehp": getattr(details, "ehp", None),
-            "ehb": getattr(details, "ehb", None),
-            "ttm": getattr(details, "ttm", None),
-            "tt200m": getattr(details, "tt200m", None),
-            "registered_at": str(getattr(details, "registered_at", None)),
-            "updated_at": str(getattr(details, "updated_at", None)),
-            "last_changed_at": str(getattr(details, "last_changed_at", None))
+    if not getattr(player_data, "is_ok", False):
+        return -1
+    details = player_data.unwrap()
+    player_info = {
+        "id": getattr(details, "id", None),
+        "username": getattr(details, "username", None),
+        "display_name": getattr(details, "display_name", None),
+        "type": str(getattr(details, "type", None)),
+        "build": str(getattr(details, "build", None)),
+        "status": str(getattr(details, "status", None)),
+        "combat_level": getattr(details, "combat_level", None),
+        "exp": getattr(details, "exp", None),
+        "ehp": getattr(details, "ehp", None),
+        "ehb": getattr(details, "ehb", None),
+        "ttm": getattr(details, "ttm", None),
+        "tt200m": getattr(details, "tt200m", None),
+        "registered_at": str(getattr(details, "registered_at", None)),
+        "updated_at": str(getattr(details, "updated_at", None)),
+        "last_changed_at": str(getattr(details, "last_changed_at", None))
+    }
+    if metric_name in player_info:
+        return player_info[metric_name]
+
+    snapshot = getattr(details, "latest_snapshot", None)
+    snapshot_data = getattr(snapshot, "data", None) if snapshot else None
+    if not snapshot_data:
+        return -1
+
+    # Callers pass display-cased names ("Chambers of Xeric", "Attack"); every
+    # snapshot bucket is keyed by the folded form, so fold the query once.
+    lookup_key = metric_name.lower()
+
+    skills_data = {}
+    for skill_name, skill_obj in (getattr(snapshot_data, "skills", {}) or {}).items():
+        skills_data[_metric_key(skill_name)] = {
+            "level": getattr(skill_obj, "level", 0),
+            "experience": getattr(skill_obj, "experience", 0),
+            "rank": getattr(skill_obj, "rank", 0),
+            "ehp": getattr(skill_obj, "ehp", 0)
         }
-        if metric_name in player_info:
-            return player_info[metric_name]
-        skills_data = {}
-        snapshot = getattr(details, "latest_snapshot", None)
-        if snapshot:
-            snapshot_data = getattr(snapshot, "data", None)
-            if snapshot_data:
-                skills = getattr(snapshot_data, "skills", {})
-                for skill_name, skill_obj in skills.items():
-                    skill_name_str = str(skill_name).split(".")[-1].lower()
-                    skills_data[skill_name_str] = {
-                        "level": getattr(skill_obj, "level", 0),
-                        "experience": getattr(skill_obj, "experience", 0),
-                        "rank": getattr(skill_obj, "rank", 0),
-                        "ehp": getattr(skill_obj, "ehp", 0)
-                    }
-            if metric_name in skills_data:
-                return skills_data[metric_name]
-        boss_data = {}
-        if snapshot and snapshot_data:
-            bosses = getattr(snapshot_data, "bosses", {})
-            print("Got bosses: " + str(bosses))
-            for boss_name, boss_obj in bosses.items():
-                kills = getattr(boss_obj, "kills", -1)
-                if kills > 0:
-                    boss_name_str = str(boss_name).split(".")[-1].lower()
-                    boss_data[boss_name_str] = {
-                        "kills": kills,
-                        "rank": getattr(boss_obj, "rank", 0),
-                        "ehb": getattr(boss_obj, "ehb", 0)
-                    }
-        
-        if metric_name.lower() in [boss.lower() for boss in boss_data]:
-            boss_data_obj = boss_data[metric_name.lower()]
-            return {"kills": boss_data_obj["kills"]}
-            # Extract activity data - include all activities
-        activity_data = {}
-        if snapshot and snapshot_data:
-            activities = getattr(snapshot_data, "activities", {})
-            for activity_name, activity_obj in activities.items():
-                activity_name_str = str(activity_name).split(".")[-1].lower()
-                score = getattr(activity_obj, "score", -1)
-                activity_data[activity_name_str] = {
-                    "score": score,
-                    "rank": getattr(activity_obj, "rank", 0)
-                }
-        if metric_name in activity_data:
-            return activity_data[metric_name]
-        computed_data = {}
-        if snapshot and snapshot_data:
-            computed = getattr(snapshot_data, "computed", {})
-            for metric_name, metric_obj in computed.items():
-                metric_name_str = str(metric_name).split(".")[-1].lower()
-                computed_data[metric_name_str] = {
-                    "value": getattr(metric_obj, "value", 0),
-                    "rank": getattr(metric_obj, "rank", 0)
-                }
-        if metric_name in computed_data:
-            return computed_data[metric_name]
-        else:
-            return -1
+    if lookup_key in skills_data:
+        return skills_data[lookup_key]
+
+    boss_data = {}
+    for boss_name, boss_obj in (getattr(snapshot_data, "bosses", {}) or {}).items():
+        try:
+            kills = int(getattr(boss_obj, "kills", -1))
+        except (TypeError, ValueError):
+            continue
+        if kills > 0:
+            boss_data[_metric_key(boss_name)] = {
+                "kills": kills,
+                "rank": getattr(boss_obj, "rank", 0),
+                "ehb": getattr(boss_obj, "ehb", 0)
+            }
+    if lookup_key in boss_data:
+        return boss_data[lookup_key]
+
+    activity_data = {}
+    for activity_name, activity_obj in (getattr(snapshot_data, "activities", {}) or {}).items():
+        activity_data[_metric_key(activity_name)] = {
+            "score": getattr(activity_obj, "score", -1),
+            "rank": getattr(activity_obj, "rank", 0)
+        }
+    if lookup_key in activity_data:
+        return activity_data[lookup_key]
+
+    computed_data = {}
+    for computed_name, computed_obj in (getattr(snapshot_data, "computed", {}) or {}).items():
+        computed_data[_metric_key(computed_name)] = {
+            "value": getattr(computed_obj, "value", 0),
+            "rank": getattr(computed_obj, "rank", 0)
+        }
+    if lookup_key in computed_data:
+        return computed_data[lookup_key]
     return -1
 
 async def get_player_metric(username: str, metric_name: str):
     """
-    Returns an integer representation of a player's metric according to WiseOldMan
+    Returns a player's metric from WiseOldMan: a bare value for a top-level
+    player field, or the full stat dict for a skill / boss / activity /
+    computed metric. -1 when the metric is unknown or WOM is unavailable.
+    See _get_player_metric for the per-bucket dict shapes.
     """
     if not await limiter.wait():
         return -1

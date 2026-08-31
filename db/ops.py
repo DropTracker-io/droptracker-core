@@ -41,7 +41,7 @@ from datetime import datetime, timedelta
 from utils.embeds import get_global_drop_embed
 from utils.app_emojis import emoji as app_emoji
 from utils.download import download_player_image
-from utils.format import normalize_player_display_equivalence
+from utils.format import normalize_player_display_equivalence, prefer_display_casing
 from utils.site_urls import player_link
 from utils.wiseoldman import fetch_group_members, check_user_by_id, check_user_by_username, _group_member_count as _wom_group_member_count
 from utils import group_config
@@ -484,6 +484,13 @@ class DatabaseOperations:
                 if normalize_player_display_equivalence(canonical_name) != normalize_player_display_equivalence(player.player_name):
                     player.player_name = canonical_name
                     changed = True
+                else:
+                    better_name = prefer_display_casing(player.player_name, canonical_name)
+                    if better_name:
+                        # Capitalisation only. Deliberately not counted as a
+                        # rename below, so it raises no name_change notification.
+                        player.player_name = better_name
+                        changed = True
                 if log_slots is not None and int(log_slots) >= 0 and int(player.log_slots or 0) != int(log_slots):
                     player.log_slots = int(log_slots)
                     changed = True

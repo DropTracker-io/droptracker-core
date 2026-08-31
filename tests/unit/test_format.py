@@ -11,6 +11,7 @@ from utils.format import (
     get_extension_from_content_type,
     normalize_player_display_equivalence,
     normalize_claim_rsn_input,
+    prefer_display_casing,
     replace_placeholders,
     replace_placeholders_in_text,
     strip_title_markdown,
@@ -462,3 +463,79 @@ class TestTidyTitle:
 
     def test_none_becomes_empty_rather_than_raising(self):
         assert tidy_title(None) == ""
+
+
+# ── prefer_display_casing ─────────────────────────────────────────────────────
+
+class TestPreferDisplayCasing:
+    """Capitalisation-only repair of a stored RSN.
+
+    WOM's `username` is always lowercase and check_user_by_username used to
+    return it, so ~54% of player rows were created with their capitals stripped
+    (11,940 of 22,267 on 2026-08-30). This decides when a better-cased spelling
+    of the *same* name may replace what we stored, without ever becoming a
+    rename.
+    """
+
+    def test_adopts_capitals_for_a_flattened_name(self):
+        assert prefer_display_casing("oakforgedxx", "OakForgedXX") == "OakForgedXX"
+
+    def test_adopts_capitals_across_a_space(self):
+        assert prefer_display_casing("white apron", "White Apron") == "White Apron"
+
+    def test_partial_capitalisation_still_counts(self):
+        # WOM really does return names like this.
+        assert prefer_display_casing("x dakk", "x Dakk") == "x Dakk"
+
+    def test_never_flattens_a_name_that_already_has_capitals(self):
+        # The whole point: WOM's lowercase username must not undo good casing.
+        assert prefer_display_casing("OakForgedXX", "oakforgedxx") is None
+
+    def test_does_not_rewrite_between_two_capitalised_spellings(self):
+        # Two sources disagreeing must not write over each other on every
+        # submission; whoever got there first keeps it.
+        assert prefer_display_casing("OakForgedXX", "OAKFORGEDXX") is None
+
+    def test_identical_names_are_left_alone(self):
+        assert prefer_display_casing("Zezima", "Zezima") is None
+        assert prefer_display_casing("zezima", "zezima") is None
+
+    def test_refuses_a_different_name(self):
+        assert prefer_display_casing("zezima", "Lynx Titan") is None
+
+    def test_refuses_a_separator_change(self):
+        # Display-equivalent under normalize_player_display_equivalence, but not
+        # a pure casing fix — swapping separators is a different decision and
+        # this function stays out of it.
+        assert prefer_display_casing("beast owned", "Beast_Owned") is None
+        assert prefer_display_casing("beast_owned", "Beast Owned") is None
+
+    def test_refuses_a_trailing_space_change(self):
+        assert prefer_display_casing("zezima", "Zezima ") is None
+
+    def test_empty_and_none_are_safe(self):
+        assert prefer_display_casing(None, "Zezima") is None
+        assert prefer_display_casing("zezima", None) is None
+        assert prefer_display_casing("", "Zezima") is None
+        assert prefer_display_casing("zezima", "") is None
+
+    def test_names_without_letters_are_untouched(self):
+        assert prefer_display_casing("12345", "12345") is None
+
+    def test_result_is_always_display_equivalent_to_the_input(self):
+        # The safety property the callers rely on: adopting the result can never
+        # change which row a name resolves to, because every lookup in the
+        # codebase compares through this normalisation (or SQL LOWER/ilike).
+        pairs = [("oakforgedxx", "OakForgedXX"), ("white apron", "White Apron"),
+                 ("x dakk", "x Dakk"), ("hardmudafuka", "HardMudafuka")]
+        for current, candidate in pairs:
+            better = prefer_display_casing(current, candidate)
+            assert better is not None
+            assert (normalize_player_display_equivalence(better)
+                    == normalize_player_display_equivalence(current))
+
+    def test_is_idempotent(self):
+        # Applying it to its own output must be a no-op, or the hot path would
+        # write to the DB on every single submission.
+        better = prefer_display_casing("oakforgedxx", "OakForgedXX")
+        assert prefer_display_casing(better, "OakForgedXX") is None

@@ -78,6 +78,7 @@ from utils.format import (
     replace_placeholders,
     convert_from_ms,
     normalize_player_display_equivalence,
+    prefer_display_casing,
 )
 import interactions
 from utils.logger import LoggerClient
@@ -307,6 +308,11 @@ def _apply_authoritative_wom_identity(
     if canonical_name and normalize_player_display_equivalence(player.player_name or "") != normalize_player_display_equivalence(canonical_name):
         player.player_name = canonical_name
         changed = True
+    elif canonical_name:
+        better_name = prefer_display_casing(player.player_name, canonical_name)
+        if better_name:
+            player.player_name = better_name
+            changed = True
 
     if total_level is not None and int(total_level) > 0 and int(player.total_level or 0) != int(total_level):
         player.total_level = int(total_level)
@@ -833,6 +839,10 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
         desired_name = canonical_name or player_name
         if normalize_player_display_equivalence(player.player_name or "") != normalize_player_display_equivalence(desired_name):
             player.player_name = desired_name
+        else:
+            better_name = prefer_display_casing(player.player_name, desired_name)
+            if better_name:
+                player.player_name = better_name
         if wom_log_slots is not None and wom_log_slots >= 0 and player.log_slots != wom_log_slots:
             player.log_slots = wom_log_slots
         if wom_total_level is not None and int(wom_total_level) > 0 and int(player.total_level or 0) != int(wom_total_level):
