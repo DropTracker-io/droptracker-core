@@ -134,6 +134,23 @@ class TestAdd:
         assert audit[0].after == "Bones"
         assert audit[0].actor_user_id == 7
 
+    async def test_the_response_is_the_whole_list_payload(self, client, monkeypatch):
+        # The editor replaces its state from this response instead of re-fetching,
+        # and validates it against the same schema as the GET. Answering with
+        # `entries` alone made a successful add read as a failure in the UI —
+        # the row was written, the card showed an error, and only a reload
+        # showed the entry that was there all along.
+        session = _S([], [], [FakeRow()])
+        _wire(monkeypatch, session)
+        r = await client.post(
+            "/api/v1/groups/42/notification-blacklist",
+            json={"entry_type": "item", "name": "Bones"},
+        )
+        body = await r.get_json()
+        assert body["limit"] == gb.MAX_ENTRIES_PER_GROUP
+        assert [e["name"] for e in body["entries"]] == ["Bones"]
+        assert body["entry"]["name"] == "Bones"
+
     async def test_re_adding_an_existing_entry_is_a_no_op(self, client, monkeypatch):
         # Idempotent rather than 409: the UI would have nothing useful to say
         # about "you already muted this", and the outcome is what was asked for.
@@ -235,6 +252,14 @@ class TestDelete:
         assert audit[0].action == "notification_blacklist.remove"
         assert audit[0].before == "Bones"
         assert session.committed
+
+    async def test_the_response_is_the_whole_list_payload(self, client, monkeypatch):
+        # Same contract as the add: the remaining list, with its cap.
+        _wire(monkeypatch, _S([FakeRow()], []))
+        r = await client.delete("/api/v1/groups/42/notification-blacklist/1")
+        body = await r.get_json()
+        assert body["limit"] == gb.MAX_ENTRIES_PER_GROUP
+        assert body["entries"] == []
 
     async def test_unknown_entry_is_a_404(self, client, monkeypatch):
         _wire(monkeypatch, _S([]))

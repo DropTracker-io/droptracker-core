@@ -98,6 +98,18 @@ def _entries(s, group_id: int) -> list[dict]:
     return [_serialize(r) for r in rows]
 
 
+def _payload(s, group_id: int) -> dict:
+    """The whole list, exactly as the GET returns it.
+
+    Every handler answers with this shape — the editor replaces its state from
+    the response of an add or a remove rather than re-fetching, and a mutation
+    that answered with a *subset* of the list payload failed the client's schema
+    check: the row was written, the UI reported an error, and only a reload
+    showed the truth.
+    """
+    return {"entries": _entries(s, group_id), "limit": MAX_ENTRIES_PER_GROUP}
+
+
 @group_blacklist_bp.get("/groups/<int:group_id>/notification-blacklist")
 async def list_blacklist(group_id: int):
     user_id = current_user_id()
@@ -106,7 +118,7 @@ async def list_blacklist(group_id: int):
         with db_session() as s:
             user = load_user(s, user_id)
             assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
-            return {"entries": _entries(s, group_id), "limit": MAX_ENTRIES_PER_GROUP}
+            return _payload(s, group_id)
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
 
@@ -212,7 +224,7 @@ async def add_blacklist_entry(group_id: int):
             if existing is not None:
                 # Idempotent: re-adding what is already muted is a no-op, not a
                 # 409 the UI would have to explain.
-                return {"entry": _serialize(existing), "entries": _entries(s, group_id)}
+                return {"entry": _serialize(existing), **_payload(s, group_id)}
 
             count = (
                 s.query(GroupNotificationBlacklist)
@@ -263,7 +275,7 @@ async def add_blacklist_entry(group_id: int):
                 )
                 if row is None:
                     raise
-            return {"entry": _serialize(row), "entries": _entries(s, group_id)}
+            return {"entry": _serialize(row), **_payload(s, group_id)}
 
     return private_no_store(jsonify(await asyncio.to_thread(_apply)))
 
@@ -301,6 +313,6 @@ async def delete_blacklist_entry(group_id: int, entry_id: int):
                 )
             )
             s.commit()
-            return {"entries": _entries(s, group_id)}
+            return _payload(s, group_id)
 
     return private_no_store(jsonify(await asyncio.to_thread(_apply)))
