@@ -11,6 +11,11 @@ query against ``recap_deliveries``. A user who joined last month therefore hits
 the same branch on their first eligible month that everyone hit on the very
 first run, so "new players get a free one" is not a special case.
 
+*Which* of a multi-account user's accounts that card covers is theirs to
+choose on the settings page (``recap_accounts``): the biggest month by default,
+one named account, or a card each. The fan-out is the only part gated on the
+opt-in — the free first card is always one card, whichever account they named.
+
 Clans work differently on purpose. Their first post is authorised by *seeding*
 ``recaps_enabled`` on a chosen cohort rather than by a first-free branch here, so
 a clan can switch it off in advance and never receive one at all — which matters
@@ -101,6 +106,18 @@ GENERATE_HOUR = 0
 USER_CFG_OPT_IN = "dm_monthly_recap"
 USER_CFG_TIMEZONE = "recap_timezone"
 USER_CFG_DM_ISSUE = "dm_delivery_issue"
+# Which of a multi-account user's accounts the DM covers. Absent or empty keeps
+# the historic behaviour (their biggest month); ACCOUNTS_ALL sends one card per
+# active account; anything else is a single player id they picked on the site.
+USER_CFG_ACCOUNTS = "recap_accounts"
+ACCOUNTS_ALL = "all"
+
+# A ceiling on the fan-out, not a preference. "All my accounts" is a reasonable
+# thing to ask for with three; with thirty it is a stream of DMs against one
+# rate-limit bucket, and the accounts past the tenth-biggest are ones whose card
+# is nearly empty anyway. Trimmed from the bottom, so what is dropped is always
+# the quietest month.
+MAX_ACCOUNT_CARDS = 10
 
 
 def delivery_enabled() -> bool:
@@ -189,23 +206,81 @@ def is_due(
 # --------------------------------------------------------------------------- #
 # Audience (pure)
 # --------------------------------------------------------------------------- #
+def rank_accounts(accounts: Iterable[tuple[int, int]]) -> list[int]:
+    """A user's accounts, biggest month first.
+
+    One ordering serves both questions this module asks — which single account
+    to send, and in what order to send several — so the answers can never
+    disagree about which of someone's accounts is "theirs". Ties break on the
+    lower player id purely so a rerun chooses the same one.
+    """
+    ranked = sorted(accounts, key=lambda a: (-(a[1] or 0), int(a[0])))
+    return [int(player_id) for player_id, _ in ranked]
+
+
 def pick_best_account(accounts: Iterable[tuple[int, int]]) -> Optional[int]:
-    """The account whose card a multi-account user should be sent.
+    """The account whose card a multi-account user should be sent by default.
 
     Their biggest month by loot, because that is the card they'd have picked.
-    Ties break on the lower player id purely so a rerun chooses the same one.
+    Overridden by the ``recap_accounts`` setting — see
+    :func:`select_recap_accounts`.
     """
-    best = None
-    for player_id, loot in accounts:
-        key = (-(loot or 0), int(player_id))
-        if best is None or key < best[0]:
-            best = (key, int(player_id))
-    return best[1] if best else None
+    ranked = rank_accounts(accounts)
+    return ranked[0] if ranked else None
 
 
 def user_is_entitled(*, opted_in: bool, had_prior: bool) -> bool:
     """One unsolicited recap, then only on request."""
     return opted_in or not had_prior
+
+
+def select_recap_accounts(
+    preference: Optional[str],
+    accounts: Iterable[tuple[int, int]],
+    *,
+    allow_multi: bool = True,
+) -> list[int]:
+    """Which of a user's accounts get a card this month, in send order.
+
+    ``accounts`` is ``(player_id, month_loot)`` for the accounts that were
+    actually active in the period — a card for an account that did nothing has
+    nothing on it, so an inactive account is never a candidate here regardless
+    of what was chosen.
+
+    ``preference`` is the stored ``recap_accounts`` value:
+
+    * empty/absent — their biggest month, which is what everyone got before this
+      setting existed and is still what someone who never opens the page gets;
+    * ``"all"`` — one card per active account, biggest first;
+    * a player id — that account and no other.
+
+    A named account that was **not** active is answered with no cards rather
+    than by quietly falling back to their best one. The setting says which
+    account's recap they want; honouring it by sending a different account's is
+    the one outcome they explicitly ruled out, and silence is recoverable from
+    the settings page in a way a wrong card is not.
+
+    ``allow_multi`` is false for the one unsolicited card everyone gets before
+    they have opted in: "all my accounts" is a request for more mail, and a
+    person who has not yet said yes to any should still receive exactly one.
+    Their pick is still honoured — only the fan-out waits for the opt-in.
+    """
+    ids = rank_accounts(accounts)
+    if not ids:
+        return []
+
+    pref = (preference or "").strip().lower()
+    if pref == ACCOUNTS_ALL:
+        return ids[:MAX_ACCOUNT_CARDS] if allow_multi else ids[:1]
+    if pref:
+        try:
+            chosen = int(pref)
+        except ValueError:
+            # A value we don't understand is a bug somewhere upstream, not a
+            # reason to send nothing — fall through to the default.
+            return ids[:1]
+        return [chosen] if chosen in ids else []
+    return ids[:1]
 
 
 # --------------------------------------------------------------------------- #
@@ -229,6 +304,11 @@ class UserTarget:
     # False when this is their first, unsolicited card — worth knowing at send
     # time because that message carries the opt-in buttons and the others don't.
     opted_in: bool = False
+    # Position within this user's set of cards for the month. Anything other
+    # than 1-of-1 means they asked for every account, and the message says so —
+    # three DMs in a row with no explanation reads as a bug.
+    card_index: int = 1
+    card_total: int = 1
 
 
 @dataclass
@@ -476,7 +556,7 @@ def collect_user_targets(
 
     out: list[UserTarget] = []
     for user_id, entry in by_user.items():
-        opted_in, tz_name = prefs.get(user_id, (False, None))
+        opted_in, tz_name, account_pref = prefs.get(user_id, (False, None, ""))
         # Their own noon, from the timezone the site seeded on their first visit
         # — a recap landing at 3am is one nobody reads.
         if not ignore_due and not is_due(now, period, tz_name, DEFAULT_POST_HOUR):
@@ -485,53 +565,73 @@ def collect_user_targets(
             opted_in=opted_in, had_prior=user_had_prior_recap(session, user_id)
         ):
             continue
-        best = pick_best_account(
-            (pid, int(totals.get(pid, 0))) for pid in entry["players"]
+        # Their choice, from the settings page: one named account, all of them,
+        # or — for the overwhelming majority who never touch it — the biggest.
+        chosen = select_recap_accounts(
+            account_pref,
+            ((pid, int(totals.get(pid, 0))) for pid in entry["players"]),
+            allow_multi=opted_in,
         )
-        if best is None:
-            continue
-        if already_delivered(session, SCOPE_PLAYER, best, period, DELIVERY_DM, is_test):
-            continue
-        out.append(
-            UserTarget(
-                user_id=user_id,
-                discord_id=entry["discord_id"],
-                player_id=best,
-                player_name=entry["players"].get(best) or f"Player {best}",
-                period=period,
-                opted_in=opted_in,
+        for position, player_id in enumerate(chosen, start=1):
+            # Numbered against the whole set, not against what survives the
+            # ledger: "2 of 3" has to mean the same thing on a rerun that
+            # already sent the first one.
+            if already_delivered(
+                session, SCOPE_PLAYER, player_id, period, DELIVERY_DM, is_test
+            ):
+                continue
+            out.append(
+                UserTarget(
+                    user_id=user_id,
+                    discord_id=entry["discord_id"],
+                    player_id=player_id,
+                    player_name=entry["players"].get(player_id) or f"Player {player_id}",
+                    period=period,
+                    opted_in=opted_in,
+                    card_index=position,
+                    card_total=len(chosen),
+                )
             )
-        )
-        if limit and len(out) >= limit:
-            break
+            if limit and len(out) >= limit:
+                return out
     return out
 
 
-def _user_prefs(session, user_ids: list[int]) -> dict[int, tuple[bool, Optional[str]]]:
-    """``{user_id: (opted_in, timezone)}`` — both keys in one read.
+def _user_prefs(
+    session, user_ids: list[int]
+) -> dict[int, tuple[bool, Optional[str], str]]:
+    """``{user_id: (opted_in, timezone, accounts)}`` — every key in one read.
 
-    Absent rows are the common case (opt-in defaults off, and a timezone only
-    exists once someone has opened the site since the feature shipped), so
-    callers get the defaults rather than a missing key.
+    Absent rows are the common case (opt-in defaults off, a timezone only exists
+    once someone has opened the site since the feature shipped, and the account
+    choice only once they have changed it), so callers get the defaults rather
+    than a missing key.
     """
     if not user_ids:
         return {}
     rows = session.execute(
         text(
             "SELECT user_id, config_key, config_value FROM user_configurations "
-            "WHERE config_key IN (:opt, :tz) AND user_id IN :ids"
+            "WHERE config_key IN (:opt, :tz, :acct) AND user_id IN :ids"
         ).bindparams(bindparam("ids", expanding=True)),
-        {"opt": USER_CFG_OPT_IN, "tz": USER_CFG_TIMEZONE, "ids": user_ids},
+        {
+            "opt": USER_CFG_OPT_IN,
+            "tz": USER_CFG_TIMEZONE,
+            "acct": USER_CFG_ACCOUNTS,
+            "ids": user_ids,
+        },
     ).fetchall()
-    out: dict[int, tuple[bool, Optional[str]]] = {}
+    out: dict[int, tuple[bool, Optional[str], str]] = {}
     for user_id, key, value in rows:
         user_id = int(user_id)
-        opted_in, tz_name = out.get(user_id, (False, None))
+        opted_in, tz_name, accounts = out.get(user_id, (False, None, ""))
         if key == USER_CFG_OPT_IN:
             opted_in = str(value).strip().lower() in ("1", "true", "yes", "on")
+        elif key == USER_CFG_ACCOUNTS:
+            accounts = (value or "").strip()
         else:
             tz_name = (value or "").strip() or None
-        out[user_id] = (opted_in, tz_name)
+        out[user_id] = (opted_in, tz_name, accounts)
     return out
 
 
@@ -938,8 +1038,16 @@ def build_dm_message(target: UserTarget, payload: dict, image_url: Optional[str]
             {"type": 2, "style": 2, "label": "Stop sending these", "custom_id": "recap_optin:off"},
         ]
         # No footnote on a card they asked for: the only thing left to say is how
-        # to stop, and the button already says it.
+        # to stop, and the button already says it. The one exception is the
+        # person receiving several — three DMs in a row need to say why there
+        # are three, and where the choice that caused them lives.
         content = greeting
+        if target.card_total > 1:
+            content += (
+                f"\n-# Account {target.card_index} of {target.card_total} — you asked "
+                "for a card per account, which you can change in your settings on "
+                "DropTracker.io."
+            )
     else:
         buttons = [
             {"type": 2, "style": 1, "label": "Keep sending these", "custom_id": "recap_optin:on"},

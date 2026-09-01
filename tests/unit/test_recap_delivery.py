@@ -145,6 +145,62 @@ class TestBestAccount:
         assert delivery.pick_best_account([(1, None), (2, 5)]) == 2
 
 
+class TestAccountChoice:
+    """`recap_accounts` — which of a multi-account user's accounts get a card."""
+
+    ACCOUNTS = [(1, 50), (2, 900), (3, 100)]
+
+    def test_no_preference_is_the_old_behaviour(self):
+        assert delivery.select_recap_accounts("", self.ACCOUNTS) == [2]
+        assert delivery.select_recap_accounts(None, self.ACCOUNTS) == [2]
+
+    def test_a_named_account_overrides_the_biggest_month(self):
+        assert delivery.select_recap_accounts("1", self.ACCOUNTS) == [1]
+
+    def test_all_sends_one_card_per_account_biggest_first(self):
+        assert delivery.select_recap_accounts("all", self.ACCOUNTS) == [2, 3, 1]
+
+    def test_all_is_case_insensitive(self):
+        assert delivery.select_recap_accounts("ALL", self.ACCOUNTS) == [2, 3, 1]
+
+    def test_a_named_account_with_no_activity_gets_no_card(self):
+        # Not a fallback to their best: the setting says which account's recap
+        # they want, and another account's is what they ruled out.
+        assert delivery.select_recap_accounts("99", self.ACCOUNTS) == []
+
+    def test_the_free_first_card_is_still_one_card(self):
+        # "All my accounts" is a request for more mail; someone who has not yet
+        # opted in has not asked for any.
+        assert delivery.select_recap_accounts(
+            "all", self.ACCOUNTS, allow_multi=False
+        ) == [2]
+
+    def test_a_pick_is_honoured_before_opting_in(self):
+        assert delivery.select_recap_accounts(
+            "1", self.ACCOUNTS, allow_multi=False
+        ) == [1]
+
+    def test_no_active_accounts_means_no_cards(self):
+        assert delivery.select_recap_accounts("all", []) == []
+
+    def test_the_fan_out_is_capped(self):
+        many = [(i, 1000 - i) for i in range(1, 30)]
+        chosen = delivery.select_recap_accounts("all", many)
+        assert len(chosen) == delivery.MAX_ACCOUNT_CARDS
+        # Trimmed from the bottom, so what is dropped is the quietest month.
+        assert chosen == list(range(1, delivery.MAX_ACCOUNT_CARDS + 1))
+
+    def test_an_unparseable_value_falls_back_rather_than_sending_nothing(self):
+        assert delivery.select_recap_accounts("banana", self.ACCOUNTS) == [2]
+
+    def test_the_default_agrees_with_pick_best_account(self):
+        # One ranking rule, so the two answers can never disagree about which
+        # account is "theirs".
+        assert delivery.select_recap_accounts("", self.ACCOUNTS) == [
+            delivery.pick_best_account(self.ACCOUNTS)
+        ]
+
+
 class TestEntitlement:
     def test_first_card_is_unsolicited(self):
         assert delivery.user_is_entitled(opted_in=False, had_prior=False)
@@ -202,6 +258,18 @@ class TestMessages:
         content = delivery.build_dm_message(self._target(opted_in=True), {}, None)["content"]
         assert "P.S." not in content
         assert "keep receiving" not in content
+
+    def test_a_single_card_says_nothing_about_accounts(self):
+        content = delivery.build_dm_message(self._target(opted_in=True), {}, None)["content"]
+        assert "Account 1 of" not in content
+
+    def test_one_of_several_cards_says_which_and_why(self):
+        # Three DMs in a row with no explanation reads as a bug.
+        msg = delivery.build_dm_message(
+            self._target(opted_in=True, card_index=2, card_total=3), {}, None
+        )
+        assert "Account 2 of 3" in msg["content"]
+        assert "settings" in msg["content"]
 
     def test_image_is_attached_when_rendered(self):
         msg = delivery.build_dm_message(self._target(), {}, "https://img/card.png")

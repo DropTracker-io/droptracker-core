@@ -96,6 +96,13 @@ _DM_DELIVERY_ISSUE_KEY = "dm_delivery_issue"
 # failing a save over.
 _RECAP_TIMEZONE_KEY = "recap_timezone"
 _RECAP_TIMEZONE_MAX_LEN = 64
+# Which linked account the monthly recap DM covers (services/recap_delivery.py
+# reads it as `recap_accounts`). Empty means the default — the account with the
+# biggest month — `all` means one card per account, and anything else is a
+# player id the caller owns. Stored as a string because it is a three-way
+# choice, not an id that happens to be optional.
+_RECAP_ACCOUNTS_KEY = "recap_accounts"
+_RECAP_ACCOUNTS_ALL = "all"
 
 
 def _is_known_timezone(name: str) -> bool:
@@ -186,6 +193,7 @@ def _settings_dict(s, user: User) -> dict:
         out[_DM_MIN_VALUE_KEY] = 0
     out[_DM_DELIVERY_ISSUE_KEY] = _config_bool(s, user.user_id, _DM_DELIVERY_ISSUE_KEY)
     out[_RECAP_TIMEZONE_KEY] = _config_value(s, user.user_id, _RECAP_TIMEZONE_KEY) or ""
+    out[_RECAP_ACCOUNTS_KEY] = _config_value(s, user.user_id, _RECAP_ACCOUNTS_KEY) or ""
     out["supporter_entitlements"] = resolve_user_entitlements(s, user.user_id, user=user)
     out["players"] = [
         {"id": p.player_id, "name": p.player_name, "hidden": bool(p.hidden)}
@@ -415,6 +423,18 @@ async def patch_me():
             if value and not _is_known_timezone(value):
                 abort_problem(422, "Invalid value", f"'{key}' must be an IANA timezone name.")
             updates[key] = value
+        elif key == _RECAP_ACCOUNTS_KEY:
+            # Shape here; ownership below, where there is a session to ask.
+            if not isinstance(value, str):
+                abort_problem(422, "Invalid value", f"'{key}' must be a string.")
+            value = value.strip().lower()
+            if value not in ("", _RECAP_ACCOUNTS_ALL) and not value.isdigit():
+                abort_problem(
+                    422,
+                    "Invalid value",
+                    f"'{key}' must be '', '{_RECAP_ACCOUNTS_ALL}', or a player id.",
+                )
+            updates[key] = value
         else:
             abort_problem(422, "Unknown setting", f"'{key}' is not a settable field.")
 
@@ -427,6 +447,27 @@ async def patch_me():
                 if key == _DM_MIN_VALUE_KEY:
                     _set_config_value(s, user.user_id, key, str(value))
                 elif key == _RECAP_TIMEZONE_KEY:
+                    _set_config_value(s, user.user_id, key, value)
+                elif key == _RECAP_ACCOUNTS_KEY:
+                    # Naming someone else's account would have the sender look
+                    # for it among this user's and find nothing — a recap that
+                    # silently stops rather than an error anyone can see. Refuse
+                    # it at the point the choice is made instead.
+                    if value not in ("", _RECAP_ACCOUNTS_ALL):
+                        owned = (
+                            s.query(Player.player_id)
+                            .filter(
+                                Player.player_id == int(value),
+                                Player.user_id == user.user_id,
+                            )
+                            .first()
+                        )
+                        if not owned:
+                            abort_problem(
+                                422,
+                                "Invalid value",
+                                f"'{key}' must name one of your linked accounts.",
+                            )
                     _set_config_value(s, user.user_id, key, value)
                 elif (
                     key in _CONFIG_SETTINGS
