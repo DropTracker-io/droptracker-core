@@ -180,6 +180,13 @@ def _player_rank(player_id: int, partition: int) -> tuple[Optional[int], Optiona
         return None, None
 
 
+# Groups that exist on the leaderboard but are not clans anyone competes with:
+# 0/1 are internal, and 2 ("DropTracker.io") is the global group every tracked
+# player belongs to. Mirrors the filter in web_api/routes/leaderboards.py
+# (`_read_group_totals_precomputed`), which is what the public board shows.
+SYSTEM_GROUP_IDS = (0, 1, 2)
+
+
 def _group_rank(
     group_id: int, partition: int
 ) -> tuple[Optional[int], Optional[int], Optional[int]]:
@@ -215,9 +222,32 @@ def _group_rank(
         if rank is None:
             return None, None, None
         score = conn.zscore(key, group_id)
+
+        # The board carries the system groups, and group 2 ("DropTracker.io")
+        # holds every tracked player, so its score is an order of magnitude
+        # above any real clan and sits at the top of the set permanently.
+        # Counting it pushed EVERY clan down exactly one place: August's
+        # top clan read "#2 of 284" on its own card while the site's own
+        # leaderboard called it #1. web_api/routes/leaderboards.py has always
+        # dropped these ids (`gid in (0, 2)`) and this is the same rule.
+        #
+        # Ranks are compared via zrevrank rather than scores so Redis's own
+        # ordering decides, leaving no tie-break for this code to get wrong.
+        above = 0
+        present = 0
+        for system_id in SYSTEM_GROUP_IDS:
+            if int(system_id) == int(group_id):
+                continue
+            system_rank = conn.zrevrank(key, system_id)
+            if system_rank is None:
+                continue
+            present += 1
+            if int(system_rank) < int(rank):
+                above += 1
+
         return (
-            int(rank) + 1,
-            int(conn.zcard(key)),
+            int(rank) + 1 - above,
+            int(conn.zcard(key)) - present,
             int(score) if score is not None else None,
         )
     except Exception:
