@@ -35,6 +35,7 @@ from db.group_rename import (
     normalize_group_name,
     rename_group,
 )
+from utils import group_config
 from web_api.common import abort_problem, db_session, private_no_store, _rc
 from web_api.config_registry import (
     ConfigValidationError,
@@ -62,6 +63,27 @@ config_bp = Blueprint("v1_config", __name__)
 # (services/hall_of_fame.py _parse_group_boss_list), so the typed endpoints
 # must round-trip long_value or long lists silently truncate on save.
 LONG_VALUE_KEYS = {"personal_best_embed_boss_list", "death_message_variants"}
+
+# Auto-provisioning and the per-group WOM sync rate limit are coupled: see the
+# post-write hook in patch_group_config. The cooldown key is owned by
+# db.ops.sync_group_from_wom_with_stats, which treats a missing row as
+# "never synced".
+_AUTO_PROVISION_KEY = "auto_provision_members"
+_WOM_SYNC_COOLDOWN_KEY = "last_wom_sync"
+
+
+def _auto_provision_turned_on(coerced: dict, before) -> bool:
+    """True when this PATCH flips ``auto_provision_members`` from off to on.
+
+    Strictly off->on: re-saving a setting that is already enabled must not
+    become a way to clear the WOM sync rate limit on demand. ``before`` is the
+    stored string (or None when the row did not exist), so the legacy ``"0"``
+    and ``"true"`` spellings are read through the same truthiness rule the bot
+    applies (utils/group_config.is_truthy).
+    """
+    if _AUTO_PROVISION_KEY not in coerced:
+        return False
+    return group_config.is_truthy(coerced[_AUTO_PROVISION_KEY]) and not group_config.is_truthy(before)
 
 
 @config_bp.get("/seasonal-status")
@@ -190,6 +212,9 @@ async def patch_group_config(group_id: int):
             assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
 
             renamed = False
+            # Prior value of auto_provision_members, captured so the post-write
+            # hook below can tell an off->on flip from a no-op re-save.
+            provision_before = None
             for key, new_value in coerced.items():
                 # `group_name` is the group's actual name rather than a setting
                 # of its own: rename_group writes the canonical column, this
@@ -223,6 +248,8 @@ async def patch_group_config(group_id: int):
                     .first()
                 )
                 before = _effective_stored_value(row) if row else None
+                if key == _AUTO_PROVISION_KEY:
+                    provision_before = before
                 # Overflow-capable keys: the full value always lives in
                 # long_value; config_value only holds it when it fits (empty
                 # otherwise, so the short-value fallback in the HoF parser
@@ -273,6 +300,21 @@ async def patch_group_config(group_id: int):
                 s.query(GroupConfiguration).filter(
                     GroupConfiguration.group_id == group_id,
                     GroupConfiguration.config_key == "recaps_seeded",
+                ).delete(synchronize_session=False)
+
+            # Turning on auto-provisioning changes what a WOM sync *does* (it
+            # starts minting profiles for roster members who have never used the
+            # plugin), so the previous sync's 1-hour cooldown must not gate it.
+            # Without this, an admin who enabled the setting shortly after any
+            # sync got "+0 / -0" from every Sync-from-WOM click for up to an
+            # hour and reasonably concluded the setting was broken. Dropping the
+            # marker row is what db.ops.sync_group_from_wom_with_stats reads as
+            # "never synced". Only on an off->on flip: re-saving an already-on
+            # setting must not become a way to bypass the rate limit.
+            if _auto_provision_turned_on(coerced, provision_before):
+                s.query(GroupConfiguration).filter(
+                    GroupConfiguration.group_id == group_id,
+                    GroupConfiguration.config_key == _WOM_SYNC_COOLDOWN_KEY,
                 ).delete(synchronize_session=False)
 
             s.commit()

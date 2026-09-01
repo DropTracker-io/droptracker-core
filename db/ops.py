@@ -1172,7 +1172,12 @@ async def sync_group_from_wom_with_stats(wom_id: int) -> dict:
         total_members (int): Group member count after the sync.
         skipped_removals (bool): True when the removal pass was skipped
             because WOM returned an incomplete member list.
-        duration_seconds (float): Wall-clock time taken for the sync.
+        duration_seconds (float): Wall-clock time taken for the sync
+            (absent on the cooldown path — no sync ran to time).
+
+    The cooldown path returns every other key above, so callers can render a
+    result without special-casing the shape; ``added``/``removed`` are empty
+    and ``total_members`` is the group's current count.
     """
     group: Group = session.query(Group).filter(Group.wom_id == wom_id).first()
     if not group:
@@ -1189,12 +1194,20 @@ async def sync_group_from_wom_with_stats(wom_id: int) -> dict:
             last_sync = datetime.fromisoformat(cooldown_cfg.config_value)
             elapsed = (datetime.utcnow() - last_sync).total_seconds()
             if elapsed < _WOM_SYNC_COOLDOWN_SECONDS:
+                # Same key set as the success path (minus duration): callers
+                # render these fields regardless of the branch they took, and
+                # omitting total_members here made a cooldown look like a group
+                # that had just lost every member ("+0 / -0 (0 total)").
                 result = {
                     "on_cooldown": True,
                     "cooldown_remaining_seconds": int(_WOM_SYNC_COOLDOWN_SECONDS - elapsed),
                     "group_name": group.group_name,
                     "group_id": group.group_id,
                     "wom_id": wom_id,
+                    "added": [],
+                    "removed": [],
+                    "total_members": group.get_player_count(),
+                    "skipped_removals": False,
                 }
                 # Pure-read early exit — end the transaction the lookups above
                 # autobegan on the scoped session.

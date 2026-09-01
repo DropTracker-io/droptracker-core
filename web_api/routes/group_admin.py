@@ -864,19 +864,19 @@ async def wom_sync(group_id: int):
     except Exception as e:
         abort_problem(502, "WOM sync failed", str(e))
 
-    if result.get("on_cooldown"):
-        # Return last-known counts rather than blocking/erroring (§15).
-        return jsonify({
-            "added": 0,
-            "removed": 0,
-            "total": int(result.get("total_members") or 0),
-            "synced_ts": int(time.time()),
-        })
+    # ``added``/``removed`` come back as lists of player names, not counts.
     return jsonify({
-        "added": int(result.get("added") or 0),
-        "removed": int(result.get("removed") or 0),
+        "added": len(result.get("added") or []),
+        "removed": len(result.get("removed") or []),
         "total": int(result.get("total_members") or 0),
         "synced_ts": int(time.time()),
+        # A cooldown is a real outcome, not a sync that changed nothing: without
+        # these the UI rendered "+0 / -0" and the admin re-clicked forever,
+        # never learning the request had not reached WOM at all (§15 — still no
+        # error status; the caller decides how to present it).
+        "on_cooldown": bool(result.get("on_cooldown")),
+        "cooldown_remaining_seconds": int(result.get("cooldown_remaining_seconds") or 0),
+        "skipped_removals": bool(result.get("skipped_removals")),
     })
 
 
