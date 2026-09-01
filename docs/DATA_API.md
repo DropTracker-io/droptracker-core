@@ -174,6 +174,10 @@ GET /v2/groups/7/players?include=identity,loot&limit=100&cursor=88213
 
 `next_cursor` is `null` on the last page.
 
+A group id that does not exist is a `404`, not an empty roster. An empty
+`players` array with a `200` means the group is real and has no *visible*
+members — the two are different answers and are reported differently.
+
 ---
 
 ## Sections
@@ -197,7 +201,11 @@ GET /v2/groups/7/players?include=identity,loot&limit=100&cursor=88213
 | `clog_slots` | 8 | Every recorded collection log slot (~1,500 rows per player) |
 
 Requesting an unknown section is a `400` naming it, rather than a response
-quietly missing the data you asked for.
+quietly missing the data you asked for. The same goes for `limit`, `cursor`,
+`days` and `top`: a value that is not an integer is a `400` naming the
+parameter, never a silent fall back to the default. A value past the
+documented maximum *is* clamped to it — the ceiling is published, so asking
+for more than it is not a mistake worth refusing.
 
 If one section fails while others succeed, that section comes back as
 `{"error": "unavailable"}` and the rest of the response is still served.
@@ -211,7 +219,7 @@ If one section fails while others succeed, that section comes back as
 | `400` | Unknown section or malformed parameter |
 | `401` | Missing, invalid, revoked or expired key |
 | `403` | Valid key, but not scoped to that group |
-| `404` | No such player, or outside your scope, or hidden |
+| `404` | No such group; or no such player, or outside your scope, or hidden |
 | `429` | A rate-limit budget was exceeded — see `Retry-After` |
 | `503` | The query exceeded the server's time limit — narrow `days` or request fewer sections |
 

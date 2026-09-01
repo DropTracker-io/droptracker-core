@@ -88,6 +88,23 @@ def key_may_read_group(key: dict, group_id: int) -> bool:
     return key["owner_type"] == "group" and key["group_id"] == group_id
 
 
+def group_exists(session, group_id: int) -> bool:
+    """Whether a group row exists at all.
+
+    Checked separately from the roster because an empty roster page is a
+    perfectly good answer for a real group whose members are all hidden — but
+    the identical answer for a group id that never existed is not an answer,
+    it is a silent 200. Callers that reach this have already cleared
+    :func:`key_may_read_group`, so a 404 here tells an in-scope caller their
+    id is wrong and tells an out-of-scope caller nothing (they got a 403
+    before the database was touched).
+    """
+    row = session.execute(text(
+        "SELECT 1 FROM groups WHERE group_id = :gid LIMIT 1"
+    ).bindparams(gid=group_id)).first()
+    return row is not None
+
+
 def group_page(session, after_id: int, limit: int) -> List[dict]:
     """One cursor page of real groups, for a global key to enumerate.
 

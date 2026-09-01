@@ -4,10 +4,10 @@ The bulk endpoint is where the cost model earns its keep: the same
 ``?include=`` that costs 8 for one player costs 800 for a page of 100, and the
 budget refuses it before the database sees it.
 """
-from quart import Blueprint, g, jsonify, request
+from quart import Blueprint, g, jsonify
 
 from data_api import scope, sections as sect
-from data_api.serving import serve
+from data_api.serving import page_params, serve
 
 groups_bp = Blueprint("groups", __name__)
 
@@ -37,17 +37,17 @@ async def group_players(group_id: int):
             "detail": "This key is not scoped to that group.",
         }), 403
 
-    try:
-        limit = int(request.args.get("limit", DEFAULT_PAGE))
-    except ValueError:
-        limit = DEFAULT_PAGE
-    limit = max(1, min(limit, MAX_PAGE))
-    try:
-        cursor = int(request.args.get("cursor", 0))
-    except ValueError:
-        cursor = 0
+    limit, cursor, error = page_params(DEFAULT_PAGE, MAX_PAGE)
+    if error is not None:
+        return error
 
     def resolve(session):
+        # Existence first: without it a group id that does not exist reads
+        # exactly like a group whose members are all hidden — an empty roster
+        # and a 200 — so a caller probing a typo'd id gets a successful
+        # response to a question about nothing. None here becomes a 404.
+        if not scope.group_exists(session, group_id):
+            return None
         return scope.group_roster_page(session, group_id, cursor, limit)
 
     def build(session, player_ids, ctx):
@@ -67,7 +67,8 @@ async def group_players(group_id: int):
             body["group"] = _group_block(session, group_id, ctx, with_all_time=True)
         return body
 
-    return await serve("groups.players", resolve, build)
+    return await serve("groups.players", resolve, build,
+                       not_found_detail="No group with that id.")
 
 
 def _group_block(session, group_id: int, ctx, with_all_time: bool) -> dict:
@@ -106,15 +107,9 @@ async def list_groups():
             "detail": "Listing groups requires a global key.",
         }), 403
 
-    try:
-        limit = int(request.args.get("limit", DEFAULT_PAGE))
-    except ValueError:
-        limit = DEFAULT_PAGE
-    limit = max(1, min(limit, MAX_PAGE))
-    try:
-        cursor = int(request.args.get("cursor", 0))
-    except ValueError:
-        cursor = 0
+    limit, cursor, error = page_params(DEFAULT_PAGE, MAX_PAGE)
+    if error is not None:
+        return error
 
     # serve() calls resolve() to price the request and build() to fill it.
     # The page is fetched once in resolve and reused, because the grouped

@@ -48,8 +48,46 @@ def parse_sections():
         }, 400)
 
 
+def int_param(name: str, default: int, minimum: int, maximum: int):
+    """``(value, error_response)`` for one integer query parameter.
+
+    A parameter that is present but not an integer is a ``400`` naming it, for
+    the same reason an unknown section is: silently substituting the default
+    answers a question the caller did not ask, and they find out from the data
+    rather than from the status code. An *in*-range-able value is clamped
+    instead — the published maximum is a ceiling, not a typo.
+    """
+    raw = request.args.get(name)
+    if raw is None or not raw.strip():
+        return default, None
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return None, _json({
+            "error": "malformed_parameter",
+            "detail": f"'{name}' must be an integer; got '{raw}'.",
+        }, 400)
+    return max(minimum, min(value, maximum)), None
+
+
+def page_params(default_page: int, max_page: int):
+    """``(limit, cursor, error_response)`` for the cursor-paginated endpoints.
+
+    One implementation for every listing route: three copies of this parsing
+    is how ``limit`` ends up meaning something different on one of them.
+    """
+    limit, error = int_param("limit", default_page, 1, max_page)
+    if error is not None:
+        return None, None, error
+    # Cursor is a player/group id, so any non-negative int is in range.
+    cursor, error = int_param("cursor", 0, 0, 2 ** 63 - 1)
+    if error is not None:
+        return None, None, error
+    return limit, cursor, None
+
+
 def date_hour_range():
-    """The ``from``/``to`` window for rollup sections, as 'YYYY-MM-DD-HH'.
+    """``(start, end, days, error)`` — the rollup window, as 'YYYY-MM-DD-HH'.
 
     Defaults to the last 30 days. Ranging on ``date_hour`` is the only shape
     the rollup indexes support well; the window is capped so one request
@@ -58,23 +96,23 @@ def date_hour_range():
     from datetime import datetime, timedelta
 
     max_days = 366
-    try:
-        days = int(request.args.get("days", "30"))
-    except ValueError:
-        days = 30
-    days = max(1, min(days, max_days))
+    days, error = int_param("days", 30, 1, max_days)
+    if error is not None:
+        return None, None, None, error
     end = datetime.utcnow()
     start = end - timedelta(days=days)
-    return start.strftime("%Y-%m-%d-%H"), end.strftime("%Y-%m-%d-%H"), days
+    return start.strftime("%Y-%m-%d-%H"), end.strftime("%Y-%m-%d-%H"), days, None
 
 
-async def serve(endpoint: str, resolve: Callable, build: Callable):
+async def serve(endpoint: str, resolve: Callable, build: Callable,
+                not_found_detail: str | None = None):
     """Run one data request end to end.
 
     ``resolve(session)`` returns the list of player ids this request will read
-    (cheap: a PK lookup or a roster page). ``build(session, player_ids, ctx)``
-    returns the response body. Both run in the same worker thread and share
-    one session.
+    (cheap: a PK lookup or a roster page), or ``None`` for "no such thing" —
+    which becomes a 404 carrying ``not_found_detail``. ``build(session,
+    player_ids, ctx)`` returns the response body. Both run in the same worker
+    thread and share one session.
     """
     key = g.api_key
     started = time.perf_counter()
@@ -83,12 +121,19 @@ async def serve(endpoint: str, resolve: Callable, build: Callable):
     if error is not None:
         return error
 
-    start_hour, end_hour, days = date_hour_range()
+    start_hour, end_hour, days, error = date_hour_range()
+    if error is not None:
+        return error
+    # Parsed through int_param like the rest: a bare int() here made '?top=abc'
+    # an unhandled ValueError, i.e. a 500 for a caller's typo.
+    per_player_limit, error = int_param("top", 10, 1, 50)
+    if error is not None:
+        return error
     ctx = {
         "date_hour_range": (start_hour, end_hour),
         "days": days,
         "sections": requested,
-        "per_player_limit": max(1, min(int(request.args.get("top", "10") or 10), 50)),
+        "per_player_limit": per_player_limit,
     }
 
     def _work():
@@ -127,7 +172,10 @@ async def serve(endpoint: str, resolve: Callable, build: Callable):
 
     if outcome is None:
         usage.record(key["key_id"], endpoint, 404, duration, 0)
-        return _json({"error": "not_found"}, 404)
+        body = {"error": "not_found"}
+        if not_found_detail:
+            body["detail"] = not_found_detail
+        return _json(body, 404)
 
     if outcome == "limited":
         decision = payload

@@ -1,8 +1,8 @@
 """``/v2/players/...`` — one player, any combination of sections."""
-from quart import Blueprint, g, jsonify, request
+from quart import Blueprint, g, jsonify
 
 from data_api import scope, sections as sect
-from data_api.serving import serve
+from data_api.serving import page_params, serve
 
 players_bp = Blueprint("players", __name__)
 
@@ -74,15 +74,9 @@ async def list_players():
                       "page its own roster at /v2/groups/{id}/players.",
         }), 403
 
-    try:
-        limit = int(request.args.get("limit", DEFAULT_PAGE))
-    except ValueError:
-        limit = DEFAULT_PAGE
-    limit = max(1, min(limit, MAX_PAGE))
-    try:
-        cursor = int(request.args.get("cursor", 0))
-    except ValueError:
-        cursor = 0
+    limit, cursor, error = page_params(DEFAULT_PAGE, MAX_PAGE)
+    if error is not None:
+        return error
 
     def resolve(session):
         return scope.all_players_page(session, cursor, limit)
