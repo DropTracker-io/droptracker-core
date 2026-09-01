@@ -5067,7 +5067,8 @@ async def delete_event(event_id: int):
 # The scheduler sweep in workers/event_consumer.py reuses the exact same
 # services.event_lifecycle functions — one code path.
 # --------------------------------------------------------------------------- #
-def _run_lifecycle_transition(event_id: int, user_id: int, action: str) -> dict:
+def _run_lifecycle_transition(event_id: int, user_id: int, action: str,
+                              *, start_now: bool = False) -> dict:
     # Lazy service import (pytest conftest stubs `services`).
     from services import event_lifecycle
 
@@ -5077,7 +5078,9 @@ def _run_lifecycle_transition(event_id: int, user_id: int, action: str) -> dict:
         user = load_user(s, user_id)
         try:
             if action == "activate":
-                event_lifecycle.activate_event(s, ev, actor_user_id=user_id, user=user)
+                event_lifecycle.activate_event(
+                    s, ev, actor_user_id=user_id, user=user, start_now=start_now,
+                )
             else:
                 event_lifecycle.end_event(s, ev, actor_user_id=user_id)
         except event_lifecycle.LifecycleError as exc:
@@ -5111,9 +5114,17 @@ async def activate_event(event_id: int):
     """Explicit activation (event admin). Validates readiness (≥1 team, a
     complete bingo board when has_bingo, a future end date) and the tier's
     ``events_max_active`` concurrency limit (409 at the limit; global events
-    and superadmins bypass). Effects live in services.event_lifecycle."""
+    and superadmins bypass). A draft scheduled for a future ``starts_at`` is
+    refused with 409 unless the body carries ``{"start_now": true}`` — the
+    schedule activates it on its own and sign-ups are already open. Effects
+    live in services.event_lifecycle."""
     user_id = current_user_id()
-    payload = await asyncio.to_thread(_run_lifecycle_transition, event_id, user_id, "activate")
+    # Body optional: the bot and older clients POST with none.
+    body = await json_body(required=False)
+    start_now = bool(body.get("start_now")) if isinstance(body, dict) else False
+    payload = await asyncio.to_thread(
+        _run_lifecycle_transition, event_id, user_id, "activate", start_now=start_now,
+    )
     _bump(event_id)
     return private_no_store(jsonify(payload))
 

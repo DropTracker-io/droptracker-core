@@ -934,22 +934,39 @@ def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> in
 
 
 def activate_event(session, event, *, actor_user_id=None, user=None,
-                   now: Optional[datetime] = None) -> None:
+                   now: Optional[datetime] = None, start_now: bool = False) -> None:
     """draft -> active. Validates readiness and tier capacity, stamps
     status/activated_at (and ``starts_at`` when unscheduled), grants bingo
     free cells to every team, enqueues the ``event_started`` announcement,
     updates the Redis gate and publishes an SSE ``{kind: "started"}`` frame.
     Audit-logged as ``event.activate``. Raises :class:`LifecycleError`;
     the caller owns the commit (and the post-commit admin bump).
-    """
-    from services import event_engine
 
+    A draft whose ``starts_at`` is still in the future is refused unless
+    ``start_now`` is set: the schedule already activates it (the lifecycle
+    sweep), and sign-ups on a scheduled draft are already open, so an
+    unqualified activate from the manager was almost always a leader who
+    thought "Activate" meant "open sign-ups" — on 2026-09-01 one started a
+    month-long October bingo on 1 September and had to end it to undo the
+    announcement, which left the event unrecoverable. Starting early is
+    still possible, but only as an explicit choice.
+    """
     now = now or datetime.now()
     if event.status == "past":
         raise LifecycleError(409, "Event is over",
                              "A past event cannot be reactivated.")
     if event.status == "active":
         raise LifecycleError(409, "Already active", "This event is already active.")
+    starts_at = getattr(event, "starts_at", None)
+    if starts_at is not None and starts_at > now and not start_now:
+        raise LifecycleError(
+            409, "Scheduled to start later",
+            f"This event is scheduled to start automatically on "
+            f"{starts_at.strftime('%Y-%m-%d %H:%M')} UTC, and sign-ups are "
+            "already open until then. Choose 'Start now' to begin it early.",
+        )
+
+    from services import event_engine
 
     blockers = activation_blockers(session, event, now=now)
     if blockers:
