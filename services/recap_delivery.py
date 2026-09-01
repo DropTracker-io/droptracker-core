@@ -87,6 +87,16 @@ CFG_HOUR = "recap_post_hour"
 CFG_TIMEZONE = "recap_timezone"
 CFG_LOOTBOARD_CHANNEL = "lootboard_channel_id"
 
+# A clan's card is *generated* at local midnight on the 1st, twelve hours before
+# DEFAULT_POST_HOUR posts it. Group cards are not built on first view the way
+# player cards are (web_api/routes/recaps.py generates only SCOPE_PLAYER), so
+# before this pass a clan's /groups/{id}/recap/{period} URL 404'd until the
+# delivery run happened to reach it — which for an America/Chicago clan meant
+# 17:00 UTC. Generating at the day's own boundary means the archive URL is live
+# for the whole of the 1st, and the noon post links to a card that already
+# exists rather than being what brings it into being.
+GENERATE_HOUR = 0
+
 # User-level keys (mirrored in web_api/routes/me.py).
 USER_CFG_OPT_IN = "dm_monthly_recap"
 USER_CFG_TIMEZONE = "recap_timezone"
@@ -526,8 +536,141 @@ def _user_prefs(session, user_ids: list[int]) -> dict[int, tuple[bool, Optional[
 
 
 # --------------------------------------------------------------------------- #
+# Pre-generation (no sending)
+# --------------------------------------------------------------------------- #
+def _safe_rollback(session) -> None:
+    """Roll back if this session can be — the recovery path must not raise its
+    own exception over the one it is recovering from."""
+    try:
+        session.rollback()
+    except Exception:
+        pass
+
+
+def collect_group_generation_ids(
+    session, period: str, now: datetime, *,
+    only_group: Optional[int] = None, ignore_due: bool = False,
+) -> list[int]:
+    """Clans whose card should already exist, newest-eligible first.
+
+    Deliberately looser than :func:`collect_group_targets`, because generating
+    is not delivering:
+
+    * no channel requirement — a clan with nowhere to post still has a public
+      archive URL, and that URL is the whole point of this pass;
+    * no ``already_delivered`` check — the ledger records *posts*, and a clan
+      posted to last month says nothing about this month's card existing;
+    * no upper bound on the window. ``is_due`` bounds delivery by
+      ``grace_days`` so a bot that was down on the 1st cannot surprise a clan
+      with a post on the 20th. Nothing is surprised by a card that merely
+      exists, and :func:`ensure_snapshot` computes each one exactly once, so
+      the gate here is only "has this clan's local 1st begun".
+
+    ``recaps_enabled`` still gates it: a clan that switched recaps off has said
+    it does not want the feature, and computing 250 cards nobody asked for is
+    the cost this avoids.
+    """
+    from utils import group_config as gc
+
+    rows = session.execute(
+        text(
+            "SELECT g.group_id FROM groups g WHERE g.group_id NOT IN (1, 2)"
+            + (" AND g.group_id = :gid" if only_group else "")
+        ),
+        {"gid": only_group} if only_group else {},
+    ).fetchall()
+    if not rows:
+        return []
+
+    group_ids = [int(r[0]) for r in rows]
+    cfg = gc.get_bulk(session, group_ids, [CFG_ENABLED, CFG_TIMEZONE])
+
+    out: list[int] = []
+    for group_id in group_ids:
+        if not gc.is_truthy(cfg.get((group_id, CFG_ENABLED))):
+            continue
+        if not ignore_due:
+            # GENERATE_HOUR, never CFG_HOUR: moving the post time must not move
+            # when the archive goes live, or a clan that posts at 20:00 would
+            # keep its own card hidden all day.
+            if due_at_utc(period, cfg.get((group_id, CFG_TIMEZONE)), GENERATE_HOUR) > now:
+                continue
+        out.append(group_id)
+    return out
+
+
+async def generate_group_cards(
+    session, *, period: str, now: datetime, apply: bool = False,
+    only_group: Optional[int] = None, ignore_due: bool = False, log=print,
+) -> tuple[int, int]:
+    """Build every eligible clan card that does not exist yet.
+
+    Returns ``(built, eligible)``. Sends nothing and renders no image — the
+    delivery pass still owns both, and reuses whatever this leaves behind.
+
+    A dry run reports and writes nothing, matching the rest of the script.
+    """
+    eligible = collect_group_generation_ids(
+        session, period, now, only_group=only_group, ignore_due=ignore_due
+    )
+    missing = [
+        group_id for group_id in eligible
+        if not snapshot_exists(session, SCOPE_GROUP, group_id, period)
+    ]
+    if not missing:
+        return 0, len(eligible)
+
+    if not apply:
+        log(f"  would generate {len(missing)} clan card(s) for {period}")
+        return 0, len(eligible)
+
+    # Before the compute, never after: EHB is the one figure on the card that
+    # comes from outside, ``ensure_snapshot`` returns an existing row untouched,
+    # and the noon post reuses whatever is stored. Harvesting afterwards would
+    # freeze an EHB-less card into the archive AND into the message.
+    try:
+        from services.recap_ehb import harvest_month_ehb
+
+        await harvest_month_ehb(session, period, group_ids=missing, player_ids=[], log=log)
+    except Exception as e:
+        log(f"  EHB harvest unavailable for generation: {e}")
+
+    built = 0
+    for group_id in missing:
+        try:
+            if ensure_snapshot(session, SCOPE_GROUP, group_id, period):
+                built += 1
+        except Exception as e:
+            # One clan's bad roster must not cost every later clan its card.
+            _safe_rollback(session)
+            app_logger.log(
+                log_type="error",
+                data=f"recap pre-generation failed for group {group_id} {period}: {e}",
+                app_name="core",
+                description="recap_delivery",
+            )
+    log(f"  generated {built}/{len(missing)} clan card(s) for {period}")
+    return built, len(eligible)
+
+
+# --------------------------------------------------------------------------- #
 # Rendering
 # --------------------------------------------------------------------------- #
+def snapshot_exists(session, scope: str, subject_id: int, period: str) -> bool:
+    """Whether the card is already stored — the cheap check the pre-generation
+    pass makes per clan, so an existing card costs a key lookup, not a compute."""
+    return (
+        session.query(RecapSnapshot.id)
+        .filter(
+            RecapSnapshot.scope == scope,
+            RecapSnapshot.subject_id == subject_id,
+            RecapSnapshot.period == period,
+        )
+        .first()
+        is not None
+    )
+
+
 def ensure_snapshot(session, scope: str, subject_id: int, period: str) -> Optional[str]:
     """The card's ``generated_at`` stamp, computing the card if it doesn't exist.
 
@@ -1013,6 +1156,24 @@ async def run_delivery(
     if apply and not delivery_enabled():
         outcome.notes.append(f"{ENV_ENABLED} is not set — refusing to send.")
         return outcome
+
+    # Generation first, and outside the "is anything due to send" question:
+    # local midnight is twelve hours before the default post hour, so on most
+    # ticks of the 1st this pass is the only work there is. Running it after the
+    # `not targets` early return would mean a clan's URL went live at the same
+    # moment as its post, which is the problem this exists to fix.
+    if include_groups:
+        try:
+            await generate_group_cards(
+                session, period=period, now=now, apply=apply,
+                only_group=only_group, ignore_due=ignore_due, log=log,
+            )
+        except Exception as e:
+            # Delivery is the job that must not be lost; a failed pre-generation
+            # only costs the archive its head start, since ensure_snapshot below
+            # still builds each card on the way out.
+            _safe_rollback(session)
+            log(f"  clan card pre-generation failed: {e}")
 
     targets: list = []
     if include_groups:
