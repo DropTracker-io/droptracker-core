@@ -8,8 +8,17 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 from utils.format import format_number, get_current_partition
 from services.group_loot_totals import board_month_total
+from services.channel_name_render import render_channel_name, resolve_channel_id
 import time
 import asyncio
+
+# Renaming is the entire point of these two settings, so only channel kinds that
+# live in the sidebar as a static label belong here. Stage channels rename and
+# sit in the sidebar exactly like a voice channel, and the website's picker
+# offers both. Gating on GUILD_VOICE alone meant a stage channel was selectable
+# and then silently never updated.
+RENAMEABLE_CHANNEL_TYPES = (ChannelType.GUILD_VOICE, ChannelType.GUILD_STAGE_VOICE)
+
 
 class ChannelNames(Extension):
     def __init__(self, bot: interactions.Client):
@@ -27,69 +36,84 @@ class ChannelNames(Extension):
             try:
                 bot: interactions.Client = self.bot
                 loot_channel_id_configs = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_monthly_loot').all()
-                #print("Got all loot channel id configs", loot_channel_id_configs)
                 for channel_setting in loot_channel_id_configs:
-                    #print("Channel setting is:", channel_setting)
-                    if channel_setting.config_value:
-                        #print("Channel setting value is not empty")
-                        try:
-                            channel = await bot.fetch_channel(channel_id=channel_setting.config_value)
-                            if channel:
-                                #print("Channel is not None")
-                                # Stage channels count too: they rename and sit
-                                # in the sidebar exactly like a voice channel,
-                                # and the website's picker offers both. Gating
-                                # on GUILD_VOICE alone meant a stage channel
-                                # was selectable and then silently never
-                                # updated.
-                                if channel.type in (ChannelType.GUILD_VOICE, ChannelType.GUILD_STAGE_VOICE):
-                                    #print("Channel is a voice channel")
-                                    template = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_monthly_loot_text',
-                                                                                        GroupConfiguration.group_id == channel_setting.group_id).first()
-                                    template_str = template.config_value if template else ""
-                                    if template_str == "" or not template_str:
-                                        template_str = "{month}: {gp_amount} gp"
-                                    # Show the number the lootboard drew, don't re-derive it.
-                                    # This used to sum every WOM member's global monthly total,
-                                    # which ignored the board's ignored_players, drop-moderation
-                                    # exclusions and split-GP credits — group 14's channel read
-                                    # 984.6M gp higher than its own board (suggestion #138).
-                                    partition = get_current_partition()
-                                    group_total = board_month_total(channel_setting.group_id, partition)
-                                    if group_total is None:
-                                        # No board rendered for this partition yet (new group, or
-                                        # the first minutes of a new month). Leave the channel name
-                                        # alone rather than posting a total the board disagrees with.
-                                        continue
-                                    month_str = datetime.now().strftime("%B")
-                                    fin_text = template_str.replace("{month}", month_str).replace("{gp_amount}", format_number(group_total))
-                                    await channel.edit(name=f"{fin_text}")
-                            else:
-                                continue
-                                #print("Channel is not found for group ID", channel_setting.group_id, "and config value", channel_setting.config_value)
-                        except Exception as e:
-                            print("Couldn't edit the channel. e:", e)
+                    group_id = channel_setting.group_id
+                    channel_id = resolve_channel_id(channel_setting.config_value)
+                    if channel_id is None:
+                        continue
+                    try:
+                        channel = await bot.fetch_channel(channel_id=channel_id)
+                        if not channel:
+                            continue
+                        if channel.type not in RENAMEABLE_CHANNEL_TYPES:
+                            print(f"Skipping loot channel {channel_id} for group {group_id}: "
+                                  f"type {channel.type} is not a voice/stage channel")
+                            continue
+                        template = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_monthly_loot_text',
+                                                                            GroupConfiguration.group_id == group_id).first()
+                        # Show the number the lootboard drew, don't re-derive it.
+                        # This used to sum every WOM member's global monthly total,
+                        # which ignored the board's ignored_players, drop-moderation
+                        # exclusions and split-GP credits — group 14's channel read
+                        # 984.6M gp higher than its own board (suggestion #138).
+                        partition = get_current_partition()
+                        group_total = board_month_total(group_id, partition)
+                        if group_total is None:
+                            # No board rendered for this partition yet (new group, or
+                            # the first minutes of a new month). Leave the channel name
+                            # alone rather than posting a total the board disagrees with.
+                            continue
+                        fin_text = render_channel_name(
+                            template.config_value if template else "",
+                            "{month}: {gp_amount} gp",
+                            "{gp_amount}",
+                            {
+                                "{month}": datetime.now().strftime("%B"),
+                                "{gp_amount}": format_number(group_total),
+                            },
+                        )
+                        await channel.edit(name=fin_text)
+                    except Exception as e:
+                        print(f"Couldn't edit loot channel {channel_id} for group {group_id}. e:", e)
                 member_channel_id_configs = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_droptracker_users',
                                                                                     GroupConfiguration.config_value != "").all()
                 print("Updating group member channel names for", len(member_channel_id_configs), "channels")
                 for channel_setting in member_channel_id_configs:
+                    group_id = channel_setting.group_id
+                    channel_id = resolve_channel_id(channel_setting.config_value)
+                    if channel_id is None:
+                        continue
                     try:
-                        if channel_setting.group_id == 2:
+                        if group_id == 2:
                             total_members = session.query(Player.player_id).count()
                         else:
-                            group = session.query(Group).filter(Group.group_id == channel_setting.group_id).first()
+                            group = session.query(Group).filter(Group.group_id == group_id).first()
                             total_members = group.get_player_count()
-                        if channel_setting.config_value != "":
-                            channel = await bot.fetch_channel(channel_id=channel_setting.config_value)
-                            template = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_droptracker_users_text',
-                                                                                GroupConfiguration.group_id == channel_setting.group_id).first()
-                            template_str = template.config_value if template else ""
-                            if template_str == "" or not template_str:
-                                template_str = "{member_count} members"
-                            if channel:
-                                await channel.edit(name=template_str.replace("{member_count}", str(total_members)))
+                        channel = await bot.fetch_channel(channel_id=channel_id)
+                        if not channel:
+                            continue
+                        # This loop had no type gate at all while the loot loop
+                        # above did, so it renamed whatever it was pointed at.
+                        # Groups 286/287/301 ended up with *text* channels named
+                        # `3-members`, `6-members` and `438-members` — Discord
+                        # slugifies text-channel names, which is where the
+                        # dashes came from. Renaming a group's real text channel
+                        # every ten minutes is worse than not counting at all.
+                        if channel.type not in RENAMEABLE_CHANNEL_TYPES:
+                            print(f"Skipping member channel {channel_id} for group {group_id}: "
+                                  f"type {channel.type} is not a voice/stage channel")
+                            continue
+                        template = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_droptracker_users_text',
+                                                                            GroupConfiguration.group_id == group_id).first()
+                        fin_text = render_channel_name(
+                            template.config_value if template else "",
+                            "{member_count} members",
+                            "{member_count}",
+                            {"{member_count}": str(total_members)},
+                        )
+                        await channel.edit(name=fin_text)
                     except Exception as e:
-                        print("Couldn't edit the channel. e:", e)
+                        print(f"Couldn't edit member channel {channel_id} for group {group_id}. e:", e)
             except Exception as e:
                 # Backstop so no unexpected error (top-level query failure, None
                 # group, etc.) can ever kill the while-True updater loop.

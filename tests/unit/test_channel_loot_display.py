@@ -113,3 +113,130 @@ class TestCounterHasNoPrivateArithmetic:
             for alias in node.names
         }
         assert "board_month_total" in imported
+
+
+class TestResolveChannelId:
+    """Junk in ``vc_to_display_*`` must cost zero Discord requests.
+
+    Every value here used to reach ``fetch_channel`` once per group per ten
+    minutes — the ``'0'`` sentinel for sixteen groups, and ``'Cage'`` for group
+    74, which raised ``ID (snowflake) should represent int`` on every pass.
+    """
+
+    def test_reads_a_snowflake(self):
+        from services.channel_name_render import resolve_channel_id
+
+        assert resolve_channel_id("1542566004398489630") == 1542566004398489630
+
+    def test_unset_values_resolve_to_none(self):
+        from services.channel_name_render import resolve_channel_id
+
+        for value in (None, "", "   "):
+            assert resolve_channel_id(value) is None
+
+    def test_legacy_zero_sentinel_is_not_a_channel(self):
+        """'0' is truthy as a string — the old code fetched channel 0 for it."""
+        from services.channel_name_render import resolve_channel_id
+
+        assert resolve_channel_id("0") is None
+        assert resolve_channel_id(0) is None
+
+    def test_free_text_is_not_a_channel(self):
+        """The picker degrades to a text box with no cached voice channels."""
+        from services.channel_name_render import resolve_channel_id
+
+        assert resolve_channel_id("Cage") is None
+        assert resolve_channel_id("#general") is None
+        assert resolve_channel_id("123abc") is None
+
+
+class TestRenderChannelName:
+    """A template missing its placeholder must still show the number.
+
+    Silently dropping it renders the static prefix and rewrites that same
+    prefix forever — indistinguishable from a dead updater (group 30).
+    """
+
+    LOOT_DEFAULT = "{month}: {gp_amount} gp"
+    MEMBER_DEFAULT = "{member_count} members"
+
+    def _loot(self, template, month="September", gp="5.2M"):
+        from services.channel_name_render import render_channel_name
+
+        return render_channel_name(
+            template, self.LOOT_DEFAULT, "{gp_amount}",
+            {"{month}": month, "{gp_amount}": gp},
+        )
+
+    def _members(self, template, count="345"):
+        from services.channel_name_render import render_channel_name
+
+        return render_channel_name(
+            template, self.MEMBER_DEFAULT, "{member_count}", {"{member_count}": count},
+        )
+
+    def test_substitutes_placeholders(self):
+        assert self._loot("{month}: {gp_amount} gp") == "September: 5.2M gp"
+        assert self._members("{member_count} members") == "345 members"
+
+    def test_empty_template_uses_the_default(self):
+        assert self._loot("") == "September: 5.2M gp"
+        assert self._members(None) == "345 members"
+
+    def test_template_without_its_placeholder_gets_the_value_appended(self):
+        """Group 30's exact configuration — a prefix and no {gp_amount}."""
+        assert self._loot("\U0001f4b0⥐Da-Loot:") == "\U0001f4b0⥐Da-Loot: 5.2M"
+        assert self._members("\U0001f9d1⥐Member-Count:") == "\U0001f9d1⥐Member-Count: 345"
+
+    def test_braced_whole_name_still_counts(self):
+        """Group 30's earlier attempt: braces wrapped around the whole label."""
+        assert self._loot("{Da Loot:}") == "{Da Loot:} 5.2M"
+
+    def test_month_alone_does_not_satisfy_the_loot_template(self):
+        """{month} is decoration; {gp_amount} is the number the counter exists for."""
+        assert self._loot("{month} loot") == "September loot 5.2M"
+
+    def test_appended_value_does_not_double_space(self):
+        assert self._loot("Loot: ") == "Loot: 5.2M"
+
+    def test_name_is_capped_at_the_discord_limit(self):
+        """Discord rejects the whole edit over 100 chars, freezing the counter."""
+        from services.channel_name_render import CHANNEL_NAME_MAX
+
+        assert len(self._loot("x" * 200)) == CHANNEL_NAME_MAX == 100
+
+
+class TestBothLoopsGateOnChannelType:
+    """The member-count loop had no type gate and renamed text channels.
+
+    Groups 286/287/301 had text channels sitting at `3-members`, `6-members`
+    and `438-members` — Discord slugifies text-channel names, hence the dashes.
+    """
+
+    def test_member_loop_checks_the_channel_type(self):
+        source = (REPO_ROOT / "services" / "channel_names.py").read_text()
+        assert source.count("RENAMEABLE_CHANNEL_TYPES") >= 3, (
+            "both the loot and member loops must gate on RENAMEABLE_CHANNEL_TYPES; "
+            "the member loop renamed whatever channel it was pointed at"
+        )
+
+    def test_gate_covers_voice_and_stage_but_not_text(self):
+        """Asserted on the source: `interactions` is a MagicMock under conftest,
+        so importing ChannelType here would compare mocks, not channel kinds.
+        GUILD_TEXT is 0 — falsy — which is why the gate is an `in` test against
+        a tuple and never a truthiness check."""
+        source = (REPO_ROOT / "services" / "channel_names.py").read_text()
+        assert "RENAMEABLE_CHANNEL_TYPES = (ChannelType.GUILD_VOICE, ChannelType.GUILD_STAGE_VOICE)" in source
+        assert source.count("channel.type not in RENAMEABLE_CHANNEL_TYPES") == 2, (
+            "both loops must gate on the tuple"
+        )
+
+
+class TestFailuresNameTheGroup:
+    """A 403 with no group_id in it is unattributable across ~90 channels."""
+
+    def test_edit_failures_log_the_group_and_channel(self):
+        source = (REPO_ROOT / "services" / "channel_names.py").read_text()
+        for phrase in ("Couldn't edit loot channel", "Couldn't edit member channel"):
+            assert phrase in source
+        assert "for group {group_id}" in source

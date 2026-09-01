@@ -225,6 +225,18 @@ if "services.activity_launch_core" not in sys.modules:
     sys.modules["services.activity_launch_core"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/channel_name_render.py — the pure half of the vc_to_display_* voice
+# channel counters (same shape as activity_launch_core: no `interactions`
+# import, no DB access). The counter tests assert on its channel-id parsing and
+# its name rendering directly, so they must run against the real module rather
+# than the ``services.channel_names`` stub.
+_CHANNEL_NAME_RENDER_PATH = _Path(__file__).resolve().parent.parent / "services" / "channel_name_render.py"
+if "services.channel_name_render" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.channel_name_render", _CHANNEL_NAME_RENDER_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.channel_name_render"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/ca_tiers.py — Combat Achievement tier thresholds + progress maths.
 # stdlib-only imports (osrs_api is imported lazily inside the fetch), so load
 # the real module: the CA notification tests assert on its tier decisions.
