@@ -115,6 +115,47 @@ class TestCounterHasNoPrivateArithmetic:
         assert "board_month_total" in imported
 
 
+class TestBothCountersOnOneChannel:
+    """A group with one channel in both counters must at least be greppable.
+
+    22 groups had ``vc_to_display_monthly_loot`` and
+    ``vc_to_display_droptracker_users`` set to the same channel id on
+    2026-09-01. The member loop runs second and renames last, so those groups
+    only ever saw a member count: no error, and no audit entry after the first
+    write. The website warns before it happens; the bot logs it once a cycle for
+    the groups already in that state.
+    """
+
+    @staticmethod
+    def _source():
+        return (REPO_ROOT / "services" / "channel_names.py").read_text()
+
+    def test_collision_is_logged_with_the_group_id(self):
+        source = self._source()
+        assert "Voice counter collision for group {group_id}" in source, (
+            "channel_names.py no longer logs the both-counters-one-channel case; "
+            "support has nothing to grep when a loot counter looks dead"
+        )
+
+    def test_log_names_both_config_keys(self):
+        """Whoever greps this line needs to know which two settings to fix."""
+        source = self._source()
+        line = next(l for l in source.splitlines() if "Voice counter collision" in l)
+        rest = source[source.index(line):]
+        assert "vc_to_display_monthly_loot" in rest and "vc_to_display_droptracker_users" in rest
+
+    def test_comparison_goes_through_resolve_channel_id(self):
+        """Junk must not collide with junk.
+
+        Two unset (or two legacy ``'0'``) fields are the common case; comparing
+        the raw column values would report every one of them as a collision.
+        Building the map with ``resolve_channel_id`` makes both sides None, and
+        the member side has already returned before the check.
+        """
+        source = self._source()
+        assert "resolve_channel_id(c.config_value) for c in loot_channel_id_configs" in source
+
+
 class TestResolveChannelId:
     """Junk in ``vc_to_display_*`` must cost zero Discord requests.
 

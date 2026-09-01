@@ -77,12 +77,29 @@ class ChannelNames(Extension):
                         print(f"Couldn't edit loot channel {channel_id} for group {group_id}. e:", e)
                 member_channel_id_configs = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_droptracker_users',
                                                                                     GroupConfiguration.config_value != "").all()
+                # This loop runs after the loot loop above and renames last, so a
+                # group that pointed BOTH counters at one channel only ever sees
+                # its member count — the loot name is overwritten every cycle,
+                # with no error and (after the first write) no guild audit entry
+                # either. 22 groups were in that state on 2026-09-01. Nothing
+                # here can fix it — they need a second voice channel, which the
+                # website's config editor now warns about — so the map exists
+                # only to make the collision greppable instead of silent.
+                loot_channel_by_group = {
+                    c.group_id: resolve_channel_id(c.config_value) for c in loot_channel_id_configs
+                }
                 print("Updating group member channel names for", len(member_channel_id_configs), "channels")
                 for channel_setting in member_channel_id_configs:
                     group_id = channel_setting.group_id
                     channel_id = resolve_channel_id(channel_setting.config_value)
                     if channel_id is None:
                         continue
+                    # Junk resolves to None on both sides, so an unconfigured or
+                    # '0'-sentinel pair can never look like a collision here.
+                    if loot_channel_by_group.get(group_id) == channel_id:
+                        print(f"Voice counter collision for group {group_id}: channel {channel_id} is set as "
+                              f"both vc_to_display_monthly_loot and vc_to_display_droptracker_users — "
+                              f"the member count is written last, so the loot total never shows")
                     try:
                         if group_id == 2:
                             total_members = session.query(Player.player_id).count()
