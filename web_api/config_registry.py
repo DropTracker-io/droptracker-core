@@ -264,18 +264,20 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     },
     # Announce anything that awarded group points but wouldn't have been
     # announced by the group's other settings (below-minimum drop, notify_*
-    # toggle off, CA tier below minimum). Default ON so points are never
-    # awarded silently; only groups with the point system active ever award
-    # points, so this is inert for everyone else. Not seasonal: group points
-    # are main-world only. Read by data/submissions/* via
-    # common.points_notify_enabled (absent row = enabled).
+    # toggle off, CA tier below minimum). Opt-in (default OFF): the default
+    # point template awards for every clog/PB/CA, so a default-ON override
+    # silently discarded the notify_* toggles of every paid group (2026-09-01).
+    # Only groups with the point system active ever award points, so this is
+    # inert for everyone else. Not seasonal: group points are main-world only.
+    # Read by data/submissions/* via common.points_notify_enabled (absent row
+    # = disabled).
     {
         "key": "notify_points_awarded",
         "label": "Announce point awards",
         "category": "drops",
         "type": "boolean",
-        "help": "When your point system awards points for a submission that wouldn't be announced on its own — a drop below the minimum value, or a notification type you've turned off — announce it anyway, so points are never awarded silently. Screenshot requirements still apply.",
-        "default": True,
+        "help": "When your point system awards points for a submission that wouldn't be announced on its own — a drop below the minimum value, a notification type you've turned off, or a combat achievement below your tier minimum — announce it anyway. Off by default; with the default point rules this posts every collection log, personal best and combat achievement. Screenshot requirements still apply.",
+        "default": False,
     },
 
     # --- Deaths ---

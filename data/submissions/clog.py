@@ -323,7 +323,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
             )
             if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:
                 # notify_clogs is off but points landed: the notify_points_awarded
-                # toggle (default ON) announces the slot so points are never
+                # toggle (opt-in, default OFF) announces the slot so points are never
                 # awarded silently.
                 from .common import points_notify_enabled
                 if points_notify_enabled(session, group_id):

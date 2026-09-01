@@ -956,8 +956,8 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                     debug_print(f"Group {group_id}: {always_hit}")
             if notify_reason is None and group_has_awarded_points:
                 # Points landed but nothing would have announced them: the
-                # notify_points_awarded toggle (default ON) posts the drop so
-                # the group is never awarded points in the dark.
+                # notify_points_awarded toggle (opt-in, default OFF) posts the
+                # drop so a group that asked is never awarded points in the dark.
                 from .common import points_notify_enabled
                 if points_notify_enabled(session, group_id):
                     notify_reason = "points"

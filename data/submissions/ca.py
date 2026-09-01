@@ -321,7 +321,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
             notify_reason = "config" if tier_notify_ok else None
             if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:
                 # Notifications are off (or the tier is below the minimum) but
-                # points landed: the notify_points_awarded toggle (default ON)
+                # points landed: the notify_points_awarded toggle (opt-in, default OFF)
                 # announces the completion so points are never awarded silently.
                 from .common import points_notify_enabled
                 if points_notify_enabled(session, group_id):

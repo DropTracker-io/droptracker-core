@@ -548,7 +548,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
             notify_reason = "config" if is_truthy_config(pb_notify_configs.get(group_id)) else None
             if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:
                 # notify_pbs is off but points landed: the notify_points_awarded
-                # toggle (default ON) announces the PB so points are never
+                # toggle (opt-in, default OFF) announces the PB so points are never
                 # awarded silently.
                 from .common import points_notify_enabled
                 if points_notify_enabled(session, group_id):

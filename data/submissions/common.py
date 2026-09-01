@@ -1490,27 +1490,32 @@ def notification_blacklisted(db_session, group_id, notification_type, data) -> s
 
 
 def points_notify_enabled(db_session, group_id) -> bool:
-    """The ``notify_points_awarded`` group toggle (default ON).
+    """The ``notify_points_awarded`` group toggle (default OFF, opt-in).
 
     When the group point system awards points for a submission the group's
     other settings would not have announced (a drop below the value minimum, a
-    tier below ``min_ca_tier_to_notify``, a notify_* toggle that is off), the
-    processors announce it anyway so points are never awarded silently. The
-    toggle only widens the announcement gate: the screenshot requirement and
-    the notification blacklist still apply to the forced post, and it never
-    fires unless points actually landed for this group.
+    tier below ``min_ca_tier_to_notify``, a notify_* toggle that is off), a
+    group that opted in has the processors announce it anyway. The toggle only
+    widens the announcement gate: the screenshot requirement and the
+    notification blacklist still apply to the forced post, and it never fires
+    unless points actually landed for this group.
 
-    Default-ON means an absent row enables the behavior; only an explicit "0"
-    turns it off. Fails open for the same reason the default is on: a config
-    read fault should not silently re-darken point awards.
+    Opt-in because "points landed" is not a signal of intent: every Sponsor or
+    Patron group gets the default point template (1 point per clog, PB and
+    easy CA), so a default-ON override amounted to ignoring notify_clogs,
+    notify_pbs, notify_cas and the CA tier minimum for every paid group — the
+    2026-09-01 "notifications I never enabled" reports. An absent row means
+    off; only an explicit truthy value turns it on. Fails closed for the same
+    reason: a config read fault must not override a leader's explicit
+    notify_* settings.
     """
     try:
         from utils import group_config as gc
 
         raw = gc.get(db_session, group_id, "notify_points_awarded")
-        return True if raw is None else gc.is_truthy(raw)
+        return False if raw is None else gc.is_truthy(raw)
     except Exception:
-        return True
+        return False
 
 
 def safe_death_filtered(db_session, group_id, notification_type, data) -> str | None:
