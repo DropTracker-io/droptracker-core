@@ -1489,6 +1489,30 @@ def notification_blacklisted(db_session, group_id, notification_type, data) -> s
         return None
 
 
+def points_notify_enabled(db_session, group_id) -> bool:
+    """The ``notify_points_awarded`` group toggle (default ON).
+
+    When the group point system awards points for a submission the group's
+    other settings would not have announced (a drop below the value minimum, a
+    tier below ``min_ca_tier_to_notify``, a notify_* toggle that is off), the
+    processors announce it anyway so points are never awarded silently. The
+    toggle only widens the announcement gate: the screenshot requirement and
+    the notification blacklist still apply to the forced post, and it never
+    fires unless points actually landed for this group.
+
+    Default-ON means an absent row enables the behavior; only an explicit "0"
+    turns it off. Fails open for the same reason the default is on: a config
+    read fault should not silently re-darken point awards.
+    """
+    try:
+        from utils import group_config as gc
+
+        raw = gc.get(db_session, group_id, "notify_points_awarded")
+        return True if raw is None else gc.is_truthy(raw)
+    except Exception:
+        return True
+
+
 def safe_death_filtered(db_session, group_id, notification_type, data) -> str | None:
     """Why this group is not told about this safe death, or ``None``.
 

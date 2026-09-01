@@ -934,19 +934,51 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             group_points_awarded = int(group_points_result.get("receiver_points_awarded", 0))
             group_has_awarded_points = int(group_points_result.get("total_points_awarded", 0)) > 0
             awarded_members = group_points_result.get("awarded_members", []) or []
-            if int(raw_drop_value) >= min_value_to_notify or (
+            value_criteria_met = int(raw_drop_value) >= min_value_to_notify or (
                 send_stacks == True and int(drop_value) > min_value_to_notify
-            ):
+            )
+            notify_reason = "value" if value_criteria_met else None
+            if notify_reason is None:
+                # Always-announce list: leaders name items/NPCs that post
+                # regardless of value (the "notable" zero-value kits and pieces
+                # the plugin force-screenshots). Fail-closed: a lookup fault
+                # leaves the drop behaving exactly as it does today.
+                try:
+                    from db.notification_always_list import always_announce_reason
+                    always_hit = always_announce_reason(
+                        session, group_id, item_name=item_name, npc_name=npc_name
+                    )
+                except Exception as e:
+                    always_hit = None
+                    print(f"[AlwaysList] Lookup failed for group {group_id}: {e}")
+                if always_hit:
+                    notify_reason = "always_list"
+                    debug_print(f"Group {group_id}: {always_hit}")
+            if notify_reason is None and group_has_awarded_points:
+                # Points landed but nothing would have announced them: the
+                # notify_points_awarded toggle (default ON) posts the drop so
+                # the group is never awarded points in the dark.
+                from .common import points_notify_enabled
+                if points_notify_enabled(session, group_id):
+                    notify_reason = "points"
+                    debug_print(
+                        f"Group {group_id}: announcing below-threshold drop because "
+                        f"{group_points_result.get('total_points_awarded', 0)} group points were awarded"
+                    )
+            if notify_reason is not None:
                 if await screenshot_required(session, group_id):
                     # Treat video submissions as satisfying screenshot requirement
                     if not drop.image_url and not video_key:
                         notice = f"Your {item_name} submission did not include a screenshot (required for {group.group_name}). Please enable screenshots in the DropTracker plugin configuration to accurately share your achievements!"
                         continue ## Skipping this group in the loop; as there is no image despite the group's requirement of one
 
-                debug_print(f"Notification criteria met for group {group_id}")
+                debug_print(f"Notification criteria met for group {group_id} (reason: {notify_reason})")
                 if not is_seasonal:
                     point_divisor = get_point_divisor()
-                    if group_id != 2 and has_awarded_points == False and int(drop_value) > point_divisor:
+                    # Global (non-group) points ride the original value gate
+                    # only — a forced always-list/points announcement must not
+                    # widen who earns global points.
+                    if group_id != 2 and has_awarded_points == False and int(drop_value) > point_divisor and value_criteria_met:
                         print(
                             f"Awarding points to {player_name} for drop {item_name} from {npc_name}"
                         )
@@ -979,6 +1011,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                     "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
                     "group_points_member_count": len(awarded_members),
                     "group_points_members_awarded": awarded_members,
+                    "notify_reason": notify_reason,
                     "world_type": world_type,
                     "plugin_version": plugin_version,
                 }

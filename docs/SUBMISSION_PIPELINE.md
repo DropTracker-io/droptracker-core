@@ -155,7 +155,17 @@ For each group the player belongs to (via `user_group_association`):
 
 **A. Check notification thresholds:**
 - Read `minimum_value_to_notify` from `group_configurations` (default: 2.5M GP)
-- If `value < threshold`: skip notification for this group
+- If `value < threshold`: skip notification for this group, unless either
+  override fires (both still respect the image requirement below):
+  - the item (or source NPC) is on the group's **always-announce list**
+    (`group_notification_always_list`, edited on the settings page; matcher in
+    `db/notification_always_list.py`) — built for notable zero-value items the
+    plugin force-screenshots
+  - group points were awarded for this drop and `notify_points_awarded` is on
+    (default ON) — points are never awarded silently. The same fallback exists
+    in the clog/ca/pb/pet processors when their notify toggle (or CA tier
+    minimum) would have stayed quiet. `notify_reason` on the queued payload
+    records which gate fired (`value` / `config` / `always_list` / `points`).
 - If group requires images (`only_send_messages_with_images = true`) and no image: skip
 
 **B. Points system (premium groups only):**

@@ -181,6 +181,17 @@ if "db.notification_blacklist" not in sys.modules:
     sys.modules["db.notification_blacklist"] = _mod
     _spec.loader.exec_module(_mod)
 
+# db/notification_always_list.py — the always-announce twin of the blacklist.
+# Imports its normalizers FROM db.notification_blacklist (loaded above), model
+# lazy-imported inside the query; the drop processor and the web API match by
+# this one rule, so tests must exercise the real one.
+_ALWAYS_LIST_PATH = _Path(__file__).resolve().parent.parent / "db" / "notification_always_list.py"
+if "db.notification_always_list" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("db.notification_always_list", _ALWAYS_LIST_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["db.notification_always_list"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # db/death_filter.py — the shared safe-death rule. Same shape again (stdlib +
 # utils.death_regions at module level, group_config lazy-imported inside the
 # lookup), and like the blacklist it is one rule read by the enqueue gate, the

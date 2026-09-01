@@ -300,6 +300,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
             from utils import group_config as gc
             ca_notify_val = gc.get(session, group_id, f"{config_prefix}notify_cas")
             debug_print("CA notify config: " + str(ca_notify_val))
+            tier_notify_ok = False
             if gc.is_truthy(ca_notify_val):
                 min_tier_raw = gc.get(session, group_id, f"{config_prefix}min_ca_tier_to_notify")
                 # Wrap in a 1-tuple to preserve the existing min_tier[0] access pattern below
@@ -314,39 +315,49 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
                             debug_print(
                                 f"Skipping {task_name} ({tier}) as it's below minimum tier {min_tier_value} for group {group_id}"
                             )
-                            continue
                         else:
                             debug_print("Tier meets minimum notification tier")
-                            if await screenshot_required(session,group_id):
-                                # Treat video submissions as satisfying screenshot requirement
-                                if not ca_entry.image_url and not video_key:
-                                    notice = f"Your combat achievement submission did not include a screenshot (required for {group.group_name}). Please enable screenshots in the DropTracker plugin configuration to accurately share your achievements!"
-                                    continue ## Skip this group inside the loop
-                            notification_data = {
-                                "player_name": player_name,
-                                "player_id": player_id,
-                                "guid": unique_id,
-                                "task_name": task_name,
-                                "tier": tier,
-                                "points_awarded": points_awarded,
-                                "points_total": points_total,
-                                "completed_tier": completed_tier,
-                                "image_url": ca_entry.image_url,
-                                "video_key": video_key,
-                                "group_points_awarded": int(group_points_result.get("receiver_points_awarded", 0)),
-                                "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
-                                "group_points_member_count": len(group_points_result.get("awarded_members", []) or []),
-                                "group_points_members_awarded": group_points_result.get("awarded_members", []) or [],
-                                "world_type": world_type,
-                                "plugin_version": plugin_version,
-                            }
-                            await create_notification(
-                                "ca",
-                                player_id,
-                                notification_data,
-                                group_id,
-                                existing_session=session if use_external_session else None,
-                            )
+                            tier_notify_ok = True
+            notify_reason = "config" if tier_notify_ok else None
+            if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:
+                # Notifications are off (or the tier is below the minimum) but
+                # points landed: the notify_points_awarded toggle (default ON)
+                # announces the completion so points are never awarded silently.
+                from .common import points_notify_enabled
+                if points_notify_enabled(session, group_id):
+                    notify_reason = "points"
+            if notify_reason is not None:
+                if await screenshot_required(session, group_id):
+                    # Treat video submissions as satisfying screenshot requirement
+                    if not ca_entry.image_url and not video_key:
+                        notice = f"Your combat achievement submission did not include a screenshot (required for {group.group_name}). Please enable screenshots in the DropTracker plugin configuration to accurately share your achievements!"
+                        continue ## Skip this group inside the loop
+                notification_data = {
+                    "player_name": player_name,
+                    "player_id": player_id,
+                    "guid": unique_id,
+                    "task_name": task_name,
+                    "tier": tier,
+                    "points_awarded": points_awarded,
+                    "points_total": points_total,
+                    "completed_tier": completed_tier,
+                    "image_url": ca_entry.image_url,
+                    "video_key": video_key,
+                    "group_points_awarded": int(group_points_result.get("receiver_points_awarded", 0)),
+                    "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
+                    "group_points_member_count": len(group_points_result.get("awarded_members", []) or []),
+                    "group_points_members_awarded": group_points_result.get("awarded_members", []) or [],
+                    "notify_reason": notify_reason,
+                    "world_type": world_type,
+                    "plugin_version": plugin_version,
+                }
+                await create_notification(
+                    "ca",
+                    player_id,
+                    notification_data,
+                    group_id,
+                    existing_session=session if use_external_session else None,
+                )
         # Personal submission DM (supporter perk): queued once per new CA,
         # OUTSIDE the group loop — group notify/tier/screenshot criteria must
         # not gate or duplicate a personal DM (same fix as drops, c258115).

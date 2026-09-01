@@ -42,6 +42,7 @@ NOTIFY_CAS = "notify_cas"
 MIN_CA_TIER_TO_NOTIFY = "min_ca_tier_to_notify"
 NOTIFY_PETS = "notify_pets"
 NOTIFY_QUESTS = "notify_quests"
+NOTIFY_POINTS_AWARDED = "notify_points_awarded"
 NOTIFY_DEATHS = "notify_deaths"
 NOTIFY_DIARIES = "notify_diaries"
 

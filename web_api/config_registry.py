@@ -262,6 +262,21 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "default": False,
         "seasonal": True,
     },
+    # Announce anything that awarded group points but wouldn't have been
+    # announced by the group's other settings (below-minimum drop, notify_*
+    # toggle off, CA tier below minimum). Default ON so points are never
+    # awarded silently; only groups with the point system active ever award
+    # points, so this is inert for everyone else. Not seasonal: group points
+    # are main-world only. Read by data/submissions/* via
+    # common.points_notify_enabled (absent row = enabled).
+    {
+        "key": "notify_points_awarded",
+        "label": "Announce point awards",
+        "category": "drops",
+        "type": "boolean",
+        "help": "When your point system awards points for a submission that wouldn't be announced on its own — a drop below the minimum value, or a notification type you've turned off — announce it anyway, so points are never awarded silently. Screenshot requirements still apply.",
+        "default": True,
+    },
 
     # --- Deaths ---
     # Death notifications get their own section: toggle, channel and the

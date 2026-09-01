@@ -35,6 +35,7 @@ from .diary_completion import DiaryCompletionEntry
 from .group_configuration import GroupConfiguration
 from .group_notification import GroupNotification
 from .group_notification_blacklist import GroupNotificationBlacklist
+from .group_notification_always_list import GroupNotificationAlwaysList
 from .notified_submission import NotifiedSubmission
 from .notification_queue import NotificationQueue
 from .player_npc_kc import PlayerNpcKc
@@ -251,6 +252,7 @@ __all__ = [
     "GroupConfiguration",
     "GroupNotification",
     "GroupNotificationBlacklist",
+    "GroupNotificationAlwaysList",
     "NotifiedSubmission",
     "NotificationQueue",
     "PlayerNpcKc",

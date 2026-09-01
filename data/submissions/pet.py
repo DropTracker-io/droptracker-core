@@ -307,8 +307,16 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                 if not dl_path and not video_key:
                     notice = f"Your pet submission did not include a screenshot (required for {group.group_name}). Please enable screenshots in the DropTracker plugin configuration to accurately share your achievements!"
                     continue
-            if gc.is_truthy(pet_notify_val):
-                debug_print(f"Group {group_id} has pet notifications enabled")
+            notify_reason = "config" if gc.is_truthy(pet_notify_val) else None
+            if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:
+                # notify_pets is off but points landed: the notify_points_awarded
+                # toggle (default ON) announces the pet so points are never
+                # awarded silently.
+                from .common import points_notify_enabled
+                if points_notify_enabled(session, group_id):
+                    notify_reason = "points"
+            if notify_reason is not None:
+                debug_print(f"Group {group_id} pet notification firing (reason: {notify_reason})")
                 awarded_members = group_points_result.get("awarded_members", []) or []
                 notification_data = {
                     "group_id": group_id,
@@ -332,6 +340,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                     "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
                     "group_points_member_count": len(awarded_members),
                     "group_points_members_awarded": awarded_members,
+                    "notify_reason": notify_reason,
                     "world_type": world_type,
                     "plugin_version": plugin_version,
                 }

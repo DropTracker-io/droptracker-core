@@ -316,7 +316,19 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                     print(f"Couldn't perform check against group point awards... e: {e}")
                     pass
             from utils import group_config as gc
-            if gc.is_truthy(gc.get(session, group_id, f"{config_prefix}notify_clogs")):
+            notify_reason = (
+                "config"
+                if gc.is_truthy(gc.get(session, group_id, f"{config_prefix}notify_clogs"))
+                else None
+            )
+            if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:
+                # notify_clogs is off but points landed: the notify_points_awarded
+                # toggle (default ON) announces the slot so points are never
+                # awarded silently.
+                from .common import points_notify_enabled
+                if points_notify_enabled(session, group_id):
+                    notify_reason = "points"
+            if notify_reason is not None:
                 if await screenshot_required(session, group_id):
                     # Treat video submissions as satisfying screenshot requirement
                     if not clog_entry.image_url and not video_key:
@@ -336,6 +348,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                     "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
                     "group_points_member_count": len(group_points_result.get("awarded_members", []) or []),
                     "group_points_members_awarded": group_points_result.get("awarded_members", []) or [],
+                    "notify_reason": notify_reason,
                     "world_type": world_type,
                     "plugin_version": plugin_version,
                 }

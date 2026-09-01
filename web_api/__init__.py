@@ -44,6 +44,7 @@ from web_api.routes.events import events_bp
 from web_api.routes.file_transfers import file_transfers_bp
 from web_api.routes.group_admin import group_admin_bp
 from web_api.routes.group_blacklist import group_blacklist_bp
+from web_api.routes.group_always_list import group_always_list_bp
 from web_api.routes.item_values import item_values_bp
 from web_api.routes.items import items_bp
 from web_api.routes.leaderboards import leaderboards_bp
@@ -212,6 +213,7 @@ def create_app() -> Quart:
     app.register_blueprint(file_transfers_bp, url_prefix=API_PREFIX)
     app.register_blueprint(group_admin_bp, url_prefix=API_PREFIX)
     app.register_blueprint(group_blacklist_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(group_always_list_bp, url_prefix=API_PREFIX)
     app.register_blueprint(item_values_bp, url_prefix=API_PREFIX)
     app.register_blueprint(items_bp, url_prefix=API_PREFIX)
     app.register_blueprint(lootboard_bp, url_prefix=API_PREFIX)
