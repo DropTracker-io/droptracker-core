@@ -11,10 +11,17 @@ retirement (immediately for removals; after the 48h grace for a naturally
 ended 'delete_48h' event).
 
 Only this module talks to Discord. Failures are isolated per row: a failing
-row is marked ``failed`` with ``last_error`` and is NOT re-polled (no retry
-storm on a permanent Forbidden) — the next config save / team edit flips it
-back to ``pending``. Sessions are opened per tick and always closed
-(rollback-on-error) — the idle-transaction lessons apply here too.
+row is marked ``failed`` with ``last_error``, raises a group notice so the
+clan's admins actually hear about it, and is re-attempted on an escalating
+backoff that tops out at a day (see "Retrying a failed row" below — it used to
+be terminal, which quietly cost real events their team channels). Sessions are
+opened per tick and always closed (rollback-on-error) — the idle-transaction
+lessons apply here too.
+
+Note that ``sync_status`` gates *provisioning*, not *posting*: the board post,
+the lootboard and team notifications all key off
+``event_team_discord.LIVE_CHANNEL_STATUSES`` instead, so a row that cannot get
+its roles right still gets its messages.
 """
 from __future__ import annotations
 
@@ -456,6 +463,206 @@ async def _sync_members(bot, guild, row, desired: set) -> bool:
     return converged
 
 
+# --------------------------------------------------------------------------- #
+# Retrying a failed row
+# --------------------------------------------------------------------------- #
+# ``failed`` used to be terminal: the candidate query below never selected it
+# again, so the row waited for a human to re-save the event's Discord settings.
+# The intent was "no retry storm on a permanent Forbidden", and the storm is
+# real — but so is the other half, which nobody was watching: the single most
+# common cause of a failed row is the DropTracker role sitting below the team
+# roles, an admin fixes that in Discord, and then NOTHING happens, because the
+# fix is invisible to us until someone thinks to re-save a settings page they
+# have no reason to revisit. Event 58 sat with eight failed rows and not one
+# channel created; event 46 lost a team channel for an entire two-week bingo.
+#
+# So failed rows are retried, on an escalating backoff that reaches a day after
+# five attempts — often enough to notice a fix within minutes of it landing,
+# rarely enough that a genuinely permanent Forbidden costs a handful of
+# requests a day. The backoff lives in Redis rather than a new column: it is
+# pure retry bookkeeping with no reporting value, it wants a TTL rather than a
+# sweep, and losing it to a restart or a flushed cache just means one early
+# retry.
+_RETRY_BACKOFF_SECONDS = (300, 900, 3600, 21600, 86400)
+# Failed rows are drained on their own small budget, NOT out of ROW_LIMIT: a
+# pile of them must never crowd out the pending rows that are someone waiting
+# on a channel to appear.
+FAILED_RETRY_LIMIT = 5
+# How many failed rows to look at to find those FAILED_RETRY_LIMIT (most are
+# usually mid-backoff).
+FAILED_SCAN_LIMIT = 60
+
+
+def _retry_gate_key(row_id) -> str:
+    return f"events:team_discord:retry:{int(row_id)}"
+
+
+def _retry_count_key(row_id) -> str:
+    return f"events:team_discord:retry:{int(row_id)}:n"
+
+
+def _raw_redis(redis_client):
+    """The raw redis handle, or None. The wrapper has no ttl/incr ops."""
+    return getattr(redis_client, "client", None)
+
+
+def _retry_is_due(redis_client, row_id) -> bool:
+    """Whether a failed row's backoff window has elapsed.
+
+    Fails OPEN: if Redis cannot answer, retry. A row that is never retried is
+    the failure mode this whole mechanism exists to prevent, and the worst case
+    of the opposite is one extra attempt per pass while Redis is down."""
+    conn = _raw_redis(redis_client)
+    if conn is None:
+        return True
+    try:
+        return not conn.exists(_retry_gate_key(row_id))
+    except Exception:
+        return True
+
+
+def _arm_retry_backoff(redis_client, row_id) -> None:
+    """Widen and re-arm the backoff after an attempt failed."""
+    conn = _raw_redis(redis_client)
+    if conn is None:
+        return
+    try:
+        attempt = int(conn.incr(_retry_count_key(row_id)))
+        # The counter outlives its own window so consecutive failures actually
+        # escalate; a row that comes good clears both keys.
+        conn.expire(_retry_count_key(row_id), _RETRY_BACKOFF_SECONDS[-1] * 2)
+        delay = _RETRY_BACKOFF_SECONDS[min(attempt, len(_RETRY_BACKOFF_SECONDS)) - 1]
+        conn.set(_retry_gate_key(row_id), str(attempt), ex=delay)
+    except Exception:
+        pass  # best effort — a lost backoff costs one early retry, nothing more
+
+
+def _clear_retry_backoff(redis_client, row_id) -> None:
+    """Forget a row's failure history — it provisioned cleanly, or an admin
+    re-saved the settings and has earned an immediate attempt."""
+    conn = _raw_redis(redis_client)
+    if conn is None:
+        return
+    try:
+        conn.delete(_retry_gate_key(row_id), _retry_count_key(row_id))
+    except Exception:
+        pass
+
+
+def _take_failed_rows_for_retry(session, redis_client) -> list:
+    """Failed rows whose backoff has elapsed, oldest first, capped at
+    FAILED_RETRY_LIMIT — arming each one's NEXT backoff window as it is taken.
+
+    Arming up front rather than in the failure handler is deliberate: it makes
+    the gate hold even if this pass never reaches its own error path (the
+    process is restarted mid-retry, a row is left ``pending`` and re-enters
+    through the ordinary query). Without that, a crash loop during a retry is
+    an unthrottled retry loop. A row that provisions cleanly clears it."""
+    from db.models import EventTeamDiscord
+
+    try:
+        candidates = (
+            session.query(EventTeamDiscord)
+            .filter(EventTeamDiscord.sync_status == "failed")
+            .order_by(EventTeamDiscord.id.asc())
+            .limit(FAILED_SCAN_LIMIT)
+            .all()
+        )
+    except Exception as exc:  # noqa: BLE001 — a scan failure must not end the pass
+        session.rollback()
+        print(f"[team-discord] failed-row scan failed: {exc}")
+        return []
+    due = []
+    for row in candidates:
+        if not _retry_is_due(redis_client, row.id):
+            continue
+        _arm_retry_backoff(redis_client, row.id)
+        due.append(row)
+        if len(due) >= FAILED_RETRY_LIMIT:
+            break
+    return due
+
+
+# --------------------------------------------------------------------------- #
+# Telling the group about it
+# --------------------------------------------------------------------------- #
+
+TEAM_DISCORD_NOTICE_CODE = "event_team_discord_failed"
+
+
+def _notice_group_id(event, row):
+    """The clan a team-channel problem belongs to: the per-clan scope in a
+    clan-vs-clan event, otherwise the event's owning group."""
+    return getattr(row, "group_id", None) or getattr(event, "group_id", None)
+
+
+def _raise_team_discord_notice(session, event, row, team) -> None:
+    """Tell the clan's admins that a team channel is not provisioning.
+
+    ``last_error`` has always carried an actionable, plain-English sentence —
+    it was just never pushed anywhere, so it sat on a row nobody opens while a
+    team channel stayed broken for two weeks. group_notices is the surface
+    built for exactly this: one row per (group, code), a chat thread the
+    admins already see, a DM on the open transition only, and a 24h cooldown
+    so a retry loop cannot turn into a spam loop."""
+    group_id = _notice_group_id(event, row)
+    if not group_id:
+        return
+    try:
+        from services.group_notices import raise_group_notice
+
+        team_name = getattr(team, "name", None) or f"team {row.team_id}"
+        raise_group_notice(
+            session,
+            group_id=int(group_id),
+            code=TEAM_DISCORD_NOTICE_CODE,
+            title="Event team channels aren't setting up",
+            body=(f"DropTracker couldn't finish setting up the Discord role "
+                  f"and channel for **{team_name}** in **"
+                  f"{getattr(event, 'name', 'your event')}**.\n\n"
+                  f"{row.last_error}\n\n"
+                  f"We'll keep retrying on our own, so once the permission is "
+                  f"fixed this sorts itself out — no need to re-save "
+                  f"anything."),
+            severity="major",
+            data={"event_id": getattr(event, "id", None),
+                  "team_id": row.team_id,
+                  "guild_id": str(row.guild_id)},
+        )
+    except Exception as exc:  # noqa: BLE001 — never break a sync over a notice
+        print(f"[team-discord] could not raise notice for group {group_id}: {exc}")
+
+
+def _resolve_team_discord_notice(session, event, row) -> None:
+    """Close the notice once this group has NO team row still in trouble.
+
+    Per-row resolution would flap: a five-team event with one broken role
+    would open and close the same notice every pass."""
+    group_id = _notice_group_id(event, row)
+    if not group_id:
+        return
+    try:
+        from db.models import Event, EventTeamDiscord
+        from services.group_notices import resolve_group_notice
+
+        still_broken = (
+            session.query(EventTeamDiscord.id)
+            .join(Event, Event.id == EventTeamDiscord.event_id)
+            .filter(EventTeamDiscord.id != row.id,
+                    or_(EventTeamDiscord.group_id == int(group_id),
+                        and_(EventTeamDiscord.group_id.is_(None),
+                             Event.group_id == int(group_id))),
+                    or_(EventTeamDiscord.sync_status == "failed",
+                        EventTeamDiscord.last_error.isnot(None)))
+            .first()
+        )
+        if still_broken is None:
+            resolve_group_notice(session, group_id=int(group_id),
+                                 code=TEAM_DISCORD_NOTICE_CODE)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[team-discord] could not resolve notice for group {group_id}: {exc}")
+
+
 async def reconcile_event_team_discord_once(bot, session_factory, redis_client) -> None:
     """One reconcile pass (called from the bots/main.py interval task).
     Skips entirely when the previous pass is still running (see
@@ -490,9 +697,20 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
             .limit(ROW_LIMIT)
             .all()
         )
+        # Failed rows whose backoff has elapsed ride along on their own budget,
+        # re-run as if pending: the whole point is to re-attempt the
+        # role/channel creation that failed in the first place. Their next
+        # window is armed as they are taken, so the failure handler below must
+        # not arm it a second time and escalate at double speed.
+        retry_ids = set()
+        for row in _take_failed_rows_for_retry(session, redis_client):
+            row.sync_status = "pending"
+            retry_ids.add(row.id)
+            rows.append(row)
         # Scope configs are per event — cache across rows of the same event.
         scopes_cache: dict = {}
         for row in rows:
+            event = team = None
             try:
                 if row.sync_status == "delete_pending":
                     if row.delete_after and now < row.delete_after:
@@ -558,6 +776,10 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                     row.last_error = None
                     row.members_dirty = True
                     session.commit()
+                    # Provisioning came good: forget the failure history and
+                    # close the group's notice if this was its last bad row.
+                    _clear_retry_backoff(redis_client, row.id)
+                    _resolve_team_discord_notice(session, event, row)
                     try:
                         from services.event_team_discord import TEAM_BOARD_DIRTY_KEY
 
@@ -575,12 +797,23 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                     converged = await _sync_members(bot, guild, row, desired)
                     row.members_dirty = not converged
                     session.commit()
+                    # _sync_members swallows per-member Forbiddens and reports
+                    # them through last_error rather than raising, so this is
+                    # the only place a role-hierarchy problem becomes visible.
+                    if row.last_error:
+                        _raise_team_discord_notice(session, event, row, team)
+                    else:
+                        _resolve_team_discord_notice(session, event, row)
             except Exception as exc:  # noqa: BLE001 — isolate per row
                 session.rollback()
                 try:
                     row.sync_status = "failed"
                     row.last_error = _friendly_row_error(exc)
                     session.commit()
+                    if row.id not in retry_ids:
+                        _arm_retry_backoff(redis_client, row.id)
+                    if event is not None:
+                        _raise_team_discord_notice(session, event, row, team)
                 except Exception:
                     session.rollback()
     finally:
@@ -596,6 +829,107 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
 BOARD_POST_RENDER_BUDGET = 6
 # How many dirty event ids one tick drains from Redis.
 BOARD_DIRTY_SPOP_LIMIT = 10
+
+
+# --------------------------------------------------------------------------- #
+# Editing a message we posted earlier
+# --------------------------------------------------------------------------- #
+# Both long-lived team-channel messages (the primary board post and the
+# lootboard beneath it) are posted once and edited forever after, which makes
+# "can I still reach the message I posted?" the load-bearing question of both
+# passes. There are exactly two answers, and they demand opposite actions:
+#
+#   * Discord says the message is GONE (404). Someone deleted it; reposting is
+#     the only way back and the id we hold is worthless.
+#   * The call did not get through — Forbidden, 5xx, a timeout, a reset
+#     connection. The message is almost certainly still sitting there.
+#     Reposting FORKS it: the old copy stays in the channel frozen forever
+#     while we quietly start editing a new one.
+#
+# Collapsing those two into `except Exception: repost` is what happened to
+# event 46 on 2026-08-19. The fork is not even self-correcting: the
+# replacement lands at the BOTTOM of a busy channel while the frozen original
+# keeps the position (and, there, the pin) everyone already knows, so the
+# team spent the last twelve days of a two-week bingo reading a lootboard
+# stuck at 611M while the bot dutifully updated an invisible one to 4.8B.
+#
+# Hence the tri-state below, and hence: never repost without first making sure
+# the thing being replaced is actually gone.
+
+_EDIT_OK = "edited"
+_EDIT_MISSING = "missing"          # confirmed 404 — a repost is correct
+_EDIT_UNAVAILABLE = "unavailable"  # could not tell — a repost would fork it
+
+
+def _is_not_found(exc) -> bool:
+    """Whether an exception means "this object no longer exists" (404).
+
+    Deliberately narrow: everything it does NOT recognise is treated as a
+    transient failure, because the cost of guessing wrong in that direction is
+    one retry a minute later, and the cost of guessing wrong in the other is a
+    permanently forked message."""
+    try:
+        from interactions.client import errors as ix_errors
+
+        if isinstance(exc, ix_errors.NotFound):
+            return True
+    except ImportError:
+        pass
+    return getattr(exc, "status", None) == 404
+
+
+async def _edit_tracked_message(channel, message_id, components, files):
+    """Edit a message this code posted earlier. Returns ``(message, outcome)``
+    with outcome one of :data:`_EDIT_OK` / :data:`_EDIT_MISSING` /
+    :data:`_EDIT_UNAVAILABLE` — see the section comment above.
+
+    Note that interactions' ``Channel.fetch_message`` answers a 404 by
+    returning None rather than raising, so "gone" arrives on the value path and
+    every *exception* here is by definition something other than a deletion.
+    The edit itself is inside the same envelope: a message can vanish between
+    the fetch (which may be answered from cache) and the write."""
+    try:
+        message = await channel.fetch_message(message_id=message_id)
+    except Exception:  # noqa: BLE001 — Forbidden / 5xx / network
+        return None, _EDIT_UNAVAILABLE
+    if message is None:
+        return None, _EDIT_MISSING
+    try:
+        if files is not None:
+            # attachments=[] drops the previous upload so files don't accumulate.
+            await message.edit(components=components, files=files,
+                               attachments=[])
+        else:
+            await message.edit(components=components, attachments=[])
+    except Exception as exc:  # noqa: BLE001
+        return None, (_EDIT_MISSING if _is_not_found(exc) else _EDIT_UNAVAILABLE)
+    return message, _EDIT_OK
+
+
+async def _delete_bot_message(channel, message_id) -> None:
+    """Best-effort delete of a message THIS code posted — the only messages it
+    ever deletes. Used to re-seat the lootboard under a re-created board post,
+    and before every repost so a replacement can never fork the original."""
+    try:
+        stale = await channel.fetch_message(message_id=message_id)
+        if stale is not None:
+            await stale.delete()
+    except Exception:
+        pass  # already gone / no permission — the repost still has to happen
+
+
+async def _repost_tracked_message(channel, stale_message_id, components, files):
+    """Send a replacement for a message that could not be edited, making sure
+    the one it replaces is gone first.
+
+    The delete is the whole point: without it a repost leaves the old copy in
+    the channel, and the old copy is the one with the history, the position and
+    (for the board post) the pin."""
+    if stale_message_id:
+        await _delete_bot_message(channel, stale_message_id)
+    if files is not None:
+        return await channel.send(components=components, files=files)
+    return await channel.send(components=components)
 
 
 def _team_post_payload(session, event, row, team, channel, png):
@@ -690,24 +1024,19 @@ async def _refresh_one_board_post(bot, session, event, row):
     components, board_file = _team_post_payload(
         session, event, row, team, channel, png)
 
-    message = None
+    outcome = _EDIT_MISSING
     if row.board_message_id:
-        try:
-            message = await channel.fetch_message(message_id=row.board_message_id)
-        except Exception:
-            message = None  # deleted / inaccessible — repost below
-    if message is not None:
-        # attachments=[] drops the previous upload so files don't accumulate.
-        if board_file is not None:
-            await message.edit(components=components, files=board_file,
-                               attachments=[])
-        else:
-            await message.edit(components=components, attachments=[])
-    else:
-        if board_file is not None:
-            message = await channel.send(components=components, files=board_file)
-        else:
-            message = await channel.send(components=components)
+        _, outcome = await _edit_tracked_message(
+            channel, row.board_message_id, components, board_file)
+        if outcome == _EDIT_UNAVAILABLE:
+            # Could not reach the post, and Discord did not say it is gone.
+            # Reposting here would fork it — and this one is PINNED, so the
+            # channel would end up with two pinned board posts, the stale one
+            # first. Change nothing and try again on a later tick.
+            return False, rendered
+    if outcome == _EDIT_MISSING:
+        message = await _repost_tracked_message(
+            channel, row.board_message_id, components, board_file)
         row.board_message_id = str(message.id)
         try:
             await message.pin()
@@ -744,7 +1073,10 @@ async def refresh_team_board_posts_once(bot, session_factory, redis_client,
 async def _board_post_pass(bot, session_factory, redis_client,
                            render_budget: int) -> None:
     from db.models import Event, EventTeamDiscord
-    from services.event_team_discord import TEAM_BOARD_DIRTY_KEY
+    from services.event_team_discord import (
+        LIVE_CHANNEL_STATUSES,
+        TEAM_BOARD_DIRTY_KEY,
+    )
 
     event_ids: set = set()
     try:
@@ -767,7 +1099,8 @@ async def _board_post_pass(bot, session_factory, redis_client,
         # primary post yet.
         try:
             for (eid,) in (session.query(EventTeamDiscord.event_id)
-                           .filter(EventTeamDiscord.sync_status == "synced",
+                           .filter(EventTeamDiscord.sync_status.in_(
+                                       LIVE_CHANNEL_STATUSES),
                                    EventTeamDiscord.channel_id.isnot(None),
                                    EventTeamDiscord.board_message_id.is_(None))
                            .distinct().limit(5).all()):
@@ -784,7 +1117,8 @@ async def _board_post_pass(bot, session_factory, redis_client,
                 continue
             rows = (session.query(EventTeamDiscord)
                     .filter(EventTeamDiscord.event_id == event_id,
-                            EventTeamDiscord.sync_status == "synced",
+                            EventTeamDiscord.sync_status.in_(
+                                LIVE_CHANNEL_STATUSES),
                             EventTeamDiscord.channel_id.isnot(None))
                     .order_by(EventTeamDiscord.id.asc())
                     .all())
@@ -950,25 +1284,13 @@ def _team_loot_payload(event, row, team, png):
         {"type": "text", "content": "## \U0001F4B0 {board_title} — team loot"},
         {"type": "text",
          "content": "-# Every drop your team has banked during this event. "
-                    "Updates automatically."},
+                    "This image is regenerated about once an hour."},
     ]}
     spec = render_message_spec(
         layout, {"board_title": board_title(event, team)}, deep_link=False)
     filename = f"team-loot-{event.id}-{row.team_id}.png"
     loot_file = interactions.File(io.BytesIO(png), file_name=filename)
     return build_components(spec, image_ref=f"attachment://{filename}"), loot_file
-
-
-async def _delete_stale_loot_post(channel, message_id) -> None:
-    """Best-effort delete of a lootboard message THIS code posted (the only
-    message it ever deletes) — used to re-seat it under a re-created board
-    post."""
-    try:
-        stale = await channel.fetch_message(message_id=message_id)
-        if stale is not None:
-            await stale.delete()
-    except Exception:
-        pass  # already gone / no permission — the repost below still fixes order
 
 
 async def _refresh_one_loot_post(bot, session, event, row):
@@ -1044,24 +1366,29 @@ async def _refresh_one_loot_post(bot, session, event, row):
 
     components, loot_file = _team_loot_payload(event, row, team, png)
 
-    message = None
+    outcome = _EDIT_MISSING
     if row.loot_message_id and below:
-        try:
-            message = await channel.fetch_message(message_id=row.loot_message_id)
-        except Exception:
-            message = None  # deleted / inaccessible — repost below
+        _, outcome = await _edit_tracked_message(
+            channel, row.loot_message_id, components, loot_file)
+        if outcome == _EDIT_UNAVAILABLE:
+            # The message could not be reached and Discord never said it was
+            # deleted. Reposting would leave the original sitting in the
+            # channel frozen — and since the lootboard is not pinned, the
+            # frozen copy is the one the team keeps finding. Spend the attempt,
+            # stamp the row so it goes to the back of the queue, and edit the
+            # message we already have on a later tick.
+            row.loot_updated_at = datetime.now()
+            return True, True
     elif row.loot_message_id:
         # The board post was re-created, so it now sits UNDER our lootboard.
         # Drop ours (we own it) and repost it beneath the new post to keep the
         # pair in order.
-        await _delete_stale_loot_post(channel, row.loot_message_id)
+        await _delete_bot_message(channel, row.loot_message_id)
         row.loot_message_id = None
 
-    if message is not None:
-        # attachments=[] drops the previous upload so files don't accumulate.
-        await message.edit(components=components, files=loot_file, attachments=[])
-    else:
-        message = await channel.send(components=components, files=loot_file)
+    if outcome == _EDIT_MISSING:
+        message = await _repost_tracked_message(
+            channel, row.loot_message_id, components, loot_file)
         row.loot_message_id = str(message.id)
         # NOT pinned: the board post above is the channel's pinned message, and
         # a second pin would bury it in the pins list.
@@ -1101,10 +1428,11 @@ def _loot_candidate_rows(session):
     so a cold start converges front-to-back and a delivered row rotates to the
     end of the queue."""
     from db.models import Event, EventTeamDiscord
+    from services.event_team_discord import LIVE_CHANNEL_STATUSES
 
     return (session.query(EventTeamDiscord, Event)
             .join(Event, Event.id == EventTeamDiscord.event_id)
-            .filter(EventTeamDiscord.sync_status == "synced",
+            .filter(EventTeamDiscord.sync_status.in_(LIVE_CHANNEL_STATUSES),
                     EventTeamDiscord.channel_id.isnot(None),
                     EventTeamDiscord.board_message_id.isnot(None),
                     Event.status == "active")

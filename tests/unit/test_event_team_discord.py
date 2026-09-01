@@ -280,3 +280,26 @@ class TestTeamMessagePings:
 
     def test_every_toggle_type_has_a_ping_default(self):
         assert set(etd.DEFAULT_TEAM_MESSAGE_PINGS) == set(etd.DEFAULT_TEAM_MESSAGE_TOGGLES)
+
+
+# ── LIVE_CHANNEL_STATUSES ────────────────────────────────────────────────────
+
+class TestLiveChannelStatuses:
+    """Which rows may be WRITTEN TO. Distinct from which rows the reconciler
+    provisions — conflating the two blacked out a whole team channel for a
+    fortnight (event 46, 2026-08-17 → 2026-09-01)."""
+
+    def test_failed_rows_still_get_their_messages(self):
+        # 'failed' means role/channel PROVISIONING failed — most often the
+        # DropTracker role sitting below the team roles. It says nothing about
+        # whether the bot can post, and the channel usually already exists.
+        assert "failed" in etd.LIVE_CHANNEL_STATUSES
+
+    def test_pending_and_synced_are_live(self):
+        assert "pending" in etd.LIVE_CHANNEL_STATUSES
+        assert "synced" in etd.LIVE_CHANNEL_STATUSES
+
+    def test_channels_on_their_way_out_are_excluded(self):
+        # The only genuine reason to stop writing: the channel is being torn
+        # down (event ended / team removed).
+        assert "delete_pending" not in etd.LIVE_CHANNEL_STATUSES

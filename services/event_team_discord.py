@@ -41,6 +41,20 @@ ORPHAN_TEAM_DISCORD_KEY = "events:team_discord:orphans"
 # noisy event doesn't re-screenshot unchanged team views).
 TEAM_BOARD_DIRTY_KEY = "events:team_board:dirty"
 
+# Statuses whose team channel EXISTS and may be written to — the gate every
+# "send something into the team channel" query uses (board post, lootboard,
+# team notifications). Note that it deliberately includes ``failed``.
+#
+# ``sync_status`` describes ROLE/CHANNEL PROVISIONING, not the bot's ability
+# to post: the overwhelmingly common failure is the DropTracker role sitting
+# below the team roles, which breaks member sync and nothing else. Gating the
+# posting surfaces on ``synced`` therefore blacked out a channel the bot could
+# still write to perfectly well — on 2026-09-01 one such row (event 46, team
+# 104) meant a team's board post froze 30 seconds after it was created and its
+# channel received no lootboard and not one event notification for a whole
+# two-week event. A row is excluded only when its channel is on its way out.
+LIVE_CHANNEL_STATUSES = ("pending", "synced", "failed")
+
 # Natural-end grace: roles/channels of a 'delete_48h' event stay usable this
 # long after the event ends (wrap-up pings), then the reconciler tears them
 # down. A hard delete ignores this and tears down immediately.
@@ -619,7 +633,7 @@ def team_channel_interest(session, event_id: int, notification_type: str,
 
     query = (session.query(EventTeamDiscord.id)
              .filter(EventTeamDiscord.event_id == event_id,
-                     EventTeamDiscord.sync_status.in_(("pending", "synced"))))
+                     EventTeamDiscord.sync_status.in_(LIVE_CHANNEL_STATUSES)))
     if notification_type in TEAM_SCOPED_TYPES and team_id is not None:
         query = query.filter(EventTeamDiscord.team_id == team_id)
     return query.first() is not None
@@ -634,7 +648,7 @@ def team_progress_interest(session, event_id: int, team_id) -> str:
     has_row = (session.query(EventTeamDiscord.id)
                .filter(EventTeamDiscord.event_id == event_id,
                        EventTeamDiscord.team_id == team_id,
-                       EventTeamDiscord.sync_status.in_(("pending", "synced")))
+                       EventTeamDiscord.sync_status.in_(LIVE_CHANNEL_STATUSES))
                .first())
     if not has_row:
         return "off"
@@ -678,7 +692,7 @@ def load_team_destinations(session, event, notification_type: str,
 
     query = (session.query(EventTeamDiscord)
              .filter(EventTeamDiscord.event_id == event.id,
-                     EventTeamDiscord.sync_status == "synced",
+                     EventTeamDiscord.sync_status.in_(LIVE_CHANNEL_STATUSES),
                      EventTeamDiscord.channel_id.isnot(None)))
     if not is_lead:
         query = query.filter(EventTeamDiscord.team_id == team_id)

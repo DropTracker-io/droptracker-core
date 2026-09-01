@@ -207,16 +207,45 @@ class _Channel:
         self._next_id = next_id
 
     async def fetch_message(self, message_id=None):
-        message = self.messages.get(str(message_id))
-        if message is None:
-            raise RuntimeError("Unknown Message")
-        return message
+        # Mirrors interactions' Channel.fetch_message: a 404 comes back as
+        # None on the VALUE path, so every exception out of here means
+        # something other than "deleted" — which is the whole distinction the
+        # delivery code hangs on.
+        return self.messages.get(str(message_id))
 
     async def send(self, **kwargs):
         self._next_id += 1
         message = _Msg(self._next_id)
         self.messages[str(message.id)] = message
         self.sends.append(kwargs)
+        return message
+
+
+class _NotFound(Exception):
+    """Discord's "this object is gone". Carries ``status`` because that is
+    what the delivery code reads — it recognises interactions' NotFound and
+    anything else advertising a 404, and treats everything else as transient."""
+
+    status = 404
+
+
+class _UnreachableChannel(_Channel):
+    """A channel whose messages exist but cannot be reached this tick —
+    Forbidden, a 5xx, a dropped connection. Reposting into it would fork the
+    message it failed to reach."""
+
+    def __init__(self, *messages, fail_on="fetch", **kwargs):
+        super().__init__(*messages, **kwargs)
+        self.fail_on = fail_on
+
+    async def fetch_message(self, message_id=None):
+        if self.fail_on == "fetch":
+            raise RuntimeError("503 Service Unavailable")
+        message = await super().fetch_message(message_id=message_id)
+        if message is not None:
+            async def _boom(**kwargs):
+                raise RuntimeError("503 Service Unavailable")
+            message.edit = _boom
         return message
 
 
@@ -270,6 +299,24 @@ class _Session:
 
     def close(self):
         self.closed = True
+
+
+def _install_team_discord(monkeypatch):
+    """Register the REAL services/event_team_discord.py under its canonical
+    name for the duration of one test.
+
+    The conftest stubs ``services`` as a bare MagicMock, so the delivery pass's
+    lazy ``from services.event_team_discord import LIVE_CHANNEL_STATUSES``
+    cannot resolve on its own ('services' is not a package). That module is
+    documented stdlib-only at import time, so loading it by path is safe and
+    the tests assert against the real status tuple rather than a copy of it."""
+    name = "services.event_team_discord"
+    spec = importlib.util.spec_from_file_location(
+        name, _ROOT / "services" / "event_team_discord.py")
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _install_fake_layouts(monkeypatch):
@@ -342,6 +389,7 @@ class TestTeamLootPosts:
         monkeypatch.setenv(tb.FEATURE_FLAG_ENV, "1")
         monkeypatch.setattr(tb, "team_board_path", lambda *a, **k: str(path))
         _install_fake_layouts(monkeypatch)
+        _install_team_discord(monkeypatch)
         return path
 
     def _hash_for(self, event, team, png=PNG):
@@ -453,6 +501,92 @@ class TestTeamLootPosts:
         assert len(channel.sends) == 1
         assert row.loot_message_id == "9001"
         assert row.loot_state_hash == self._hash_for(event, team)
+
+    # -- unreachable, but NOT gone ----------------------------------------- #
+    # The 2026-08-19 fork: a message that could not be reached was treated as
+    # deleted, so the pass posted a replacement and abandoned the original —
+    # which stayed in the channel, frozen, holding the position and the pin.
+    def test_unreachable_message_is_never_forked(self, tmp_path, monkeypatch):
+        self._setup(monkeypatch, tmp_path)
+        event, team = self._event(), self._team_row()
+        ours = _Msg(9001)
+        row = self._row(loot_message_id="9001", loot_state_hash="stale-hash",
+                        loot_updated_at=datetime.now() - timedelta(hours=2))
+        channel = _UnreachableChannel(ours, fail_on="fetch")
+        session, bot = _Session(team=team), _Bot(channel)
+
+        # The attempt is spent (it cost a real round trip) but nothing else
+        # moves: no repost, no new id, and the delivered hash still describes
+        # the image that IS on the message.
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (True, True)
+        assert not channel.sends
+        assert ours.deleted is False
+        assert row.loot_message_id == "9001"
+        assert row.loot_state_hash == "stale-hash"
+        # Stamped, so a channel that is broken every tick rotates to the back
+        # of the stalest-first queue instead of leading it forever.
+        assert row.loot_updated_at is not None
+
+    def test_edit_that_cannot_be_delivered_is_never_forked(self, tmp_path,
+                                                           monkeypatch):
+        # A message can be fetched (possibly from cache) and still fail to
+        # write — same rule applies.
+        self._setup(monkeypatch, tmp_path)
+        event, team = self._event(), self._team_row()
+        row = self._row(loot_message_id="9001", loot_state_hash="stale-hash",
+                        loot_updated_at=datetime.now() - timedelta(hours=2))
+        channel = _UnreachableChannel(_Msg(9001), fail_on="edit")
+        session, bot = _Session(team=team), _Bot(channel)
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (True, True)
+        assert not channel.sends
+        assert row.loot_message_id == "9001"
+        assert row.loot_state_hash == "stale-hash"
+
+    def test_message_deleted_between_fetch_and_edit_is_reposted(
+            self, tmp_path, monkeypatch):
+        # The fetch may be answered from cache, so "gone" can surface on the
+        # edit. A 404 there IS a deletion and must repost.
+        self._setup(monkeypatch, tmp_path)
+        event, team = self._event(), self._team_row()
+        stale = _Msg(9001)
+
+        async def _gone(**kwargs):
+            raise _NotFound()
+
+        stale.edit = _gone
+        row = self._row(loot_message_id="9001", loot_state_hash="stale-hash",
+                        loot_updated_at=datetime.now() - timedelta(hours=2))
+        channel, session = _Channel(stale), _Session(team=team)
+        bot = _Bot(channel)
+
+        assert self._run(bot_mod._refresh_one_loot_post(
+            bot, session, event, row)) == (True, True)
+        assert len(channel.sends) == 1
+        assert row.loot_state_hash == self._hash_for(event, team)
+
+    def test_repost_deletes_the_message_it_replaces(self, tmp_path, monkeypatch):
+        # Belt and braces: even on a path that believes the old message is
+        # gone, the replacement is only sent after trying to delete it — a
+        # repost must never be able to leave two copies behind.
+        self._setup(monkeypatch, tmp_path)
+        event, team = self._event(), self._team_row()
+        stale = _Msg(9001)
+
+        async def _gone(**kwargs):
+            raise _NotFound()
+
+        stale.edit = _gone
+        row = self._row(loot_message_id="9001", loot_state_hash="stale-hash",
+                        loot_updated_at=datetime.now() - timedelta(hours=2))
+        channel, session = _Channel(stale), _Session(team=team)
+
+        self._run(bot_mod._refresh_one_loot_post(_Bot(channel), session,
+                                                 event, row))
+        assert stale.deleted is True
+        assert len(channel.sends) == 1
 
     # -- re-created board post --------------------------------------------- #
     def test_recreated_board_post_recreates_the_lootboard_beneath_it(
@@ -805,3 +939,149 @@ def _install_fake_interactions_errors():
         sys.modules["interactions.client"] = client_pkg
         sys.modules["interactions.client.errors"] = errors
     return errors
+
+
+class _FakeRedis:
+    """Just enough redis for the retry gate: exists/incr/expire/set/delete
+    with no TTL clock (nothing here needs one to expire mid-test — a window
+    elapsing is modelled by deleting the gate key)."""
+
+    def __init__(self, *, broken=False):
+        self.store = {}
+        self.ttls = {}
+        self.broken = broken
+
+    def _check(self):
+        if self.broken:
+            raise RuntimeError("redis is down")
+
+    def exists(self, key):
+        self._check()
+        return 1 if key in self.store else 0
+
+    def incr(self, key):
+        self._check()
+        self.store[key] = int(self.store.get(key, 0)) + 1
+        return self.store[key]
+
+    def expire(self, key, seconds):
+        self._check()
+        self.ttls[key] = seconds
+
+    def set(self, key, value, ex=None):
+        self._check()
+        self.store[key] = value
+        self.ttls[key] = ex
+
+    def delete(self, *keys):
+        self._check()
+        for key in keys:
+            self.store.pop(key, None)
+            self.ttls.pop(key, None)
+
+
+class _RedisClient:
+    def __init__(self, **kwargs):
+        self.client = _FakeRedis(**kwargs)
+
+
+class TestFailedRowRetry:
+    """``failed`` used to be terminal: a row waited for a human to re-save a
+    settings page they had no reason to revisit, so an admin who fixed the
+    permission in Discord saw nothing happen. Now it is retried on an
+    escalating backoff."""
+
+    def _gate(self, rc, row_id=7):
+        return rc.client.store.get(bot_mod._retry_gate_key(row_id))
+
+    def _ttl(self, rc, row_id=7):
+        return rc.client.ttls.get(bot_mod._retry_gate_key(row_id))
+
+    def test_a_row_with_no_history_is_due(self):
+        assert bot_mod._retry_is_due(_RedisClient(), 7) is True
+
+    def test_arming_holds_the_row_back(self):
+        rc = _RedisClient()
+        bot_mod._arm_retry_backoff(rc, 7)
+        assert bot_mod._retry_is_due(rc, 7) is False
+
+    def test_backoff_widens_with_each_consecutive_failure(self):
+        rc = _RedisClient()
+        seen = []
+        for _ in range(len(bot_mod._RETRY_BACKOFF_SECONDS) + 2):
+            bot_mod._arm_retry_backoff(rc, 7)
+            seen.append(self._ttl(rc))
+            rc.client.delete(bot_mod._retry_gate_key(7))  # window elapses
+        assert seen[:len(bot_mod._RETRY_BACKOFF_SECONDS)] == \
+            list(bot_mod._RETRY_BACKOFF_SECONDS)
+        # …and then holds at the ceiling rather than running away.
+        assert seen[-1] == bot_mod._RETRY_BACKOFF_SECONDS[-1]
+
+    def test_the_counter_outlives_its_own_window(self):
+        # Otherwise every retry would look like a first failure and the
+        # backoff would never escalate past its shortest step.
+        rc = _RedisClient()
+        bot_mod._arm_retry_backoff(rc, 7)
+        assert rc.client.ttls[bot_mod._retry_count_key(7)] > self._ttl(rc)
+
+    def test_success_forgets_the_failure_history(self):
+        rc = _RedisClient()
+        bot_mod._arm_retry_backoff(rc, 7)
+        bot_mod._arm_retry_backoff(rc, 7)
+        bot_mod._clear_retry_backoff(rc, 7)
+        assert bot_mod._retry_is_due(rc, 7) is True
+        bot_mod._arm_retry_backoff(rc, 7)
+        assert self._ttl(rc) == bot_mod._RETRY_BACKOFF_SECONDS[0]
+
+    def test_redis_down_fails_open(self):
+        # A row that is never retried is the failure this mechanism exists to
+        # prevent; one extra attempt per pass is the cheaper wrong answer.
+        rc = _RedisClient(broken=True)
+        assert bot_mod._retry_is_due(rc, 7) is True
+        bot_mod._arm_retry_backoff(rc, 7)   # must not raise
+        bot_mod._clear_retry_backoff(rc, 7)
+
+    def test_taking_rows_arms_them_and_respects_the_cap(self):
+        rc = _RedisClient()
+        rows = [SimpleNamespace(id=n) for n in range(1, 20)]
+        session = _Session(rows=rows)
+
+        taken = bot_mod._take_failed_rows_for_retry(session, rc)
+
+        assert len(taken) == bot_mod.FAILED_RETRY_LIMIT
+        # Armed AS THEY ARE TAKEN, not in the failure handler: a restart
+        # mid-retry must not turn into an unthrottled retry loop.
+        assert all(not bot_mod._retry_is_due(rc, row.id) for row in taken)
+        # Rows past the cap are untouched and lead the next pass.
+        assert bot_mod._retry_is_due(rc, rows[-1].id) is True
+
+    def test_rows_still_in_backoff_are_skipped(self):
+        rc = _RedisClient()
+        rows = [SimpleNamespace(id=n) for n in (1, 2, 3)]
+        bot_mod._arm_retry_backoff(rc, 1)
+        bot_mod._arm_retry_backoff(rc, 2)
+
+        taken = bot_mod._take_failed_rows_for_retry(_Session(rows=rows), rc)
+
+        assert [row.id for row in taken] == [3]
+
+
+class TestNotFoundClassifier:
+    """The one question that decides between "edit again later" and "post a
+    replacement"."""
+
+    def test_a_404_is_gone(self):
+        assert bot_mod._is_not_found(_NotFound()) is True
+
+    def test_interactions_not_found_is_gone(self):
+        from interactions.client import errors as ix_errors
+
+        assert bot_mod._is_not_found(
+            ix_errors.NotFound.__new__(ix_errors.NotFound)) is True
+
+    def test_everything_else_is_transient(self):
+        # Forbidden, 5xx, timeouts, connection resets — the message is
+        # probably still there, so reposting would fork it.
+        assert bot_mod._is_not_found(RuntimeError("503")) is False
+        assert bot_mod._is_not_found(SimpleNamespace(status=403)) is False
+        assert bot_mod._is_not_found(TimeoutError()) is False
