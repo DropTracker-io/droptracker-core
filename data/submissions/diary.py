@@ -96,7 +96,6 @@ async def diary_processor(diary_data, external_session=None, world_type="main"):
         video_url=video_url,
         used_api=bool(diary_data.get("used_api", False)),
         unique_id=unique_id,
-        plugin_version=plugin_version,
     )
     session.add(diary_entry)
     if use_external_session:
