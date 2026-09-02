@@ -4,7 +4,7 @@ from datetime import datetime
 
 import pytest
 
-from api.routes.group_export import parse_time
+from api.routes.group_export import _unix_utc, parse_time
 
 
 class TestParseTime:
@@ -33,3 +33,12 @@ class TestParseTime:
 
     def test_whitespace_stripped(self):
         assert parse_time("  2026-07-01T00:00:00Z  ") == datetime(2026, 7, 1, 0, 0, 0)
+
+
+class TestUnixUtc:
+    def test_stored_naive_utc_becomes_unix_seconds(self):
+        # 2026-07-01T00:00:00Z — computed as UTC, never through the process zone.
+        assert _unix_utc(datetime(2026, 7, 1, 0, 0, 0)) == 1782864000
+
+    def test_none_stays_none(self):
+        assert _unix_utc(None) is None

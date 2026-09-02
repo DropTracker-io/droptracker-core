@@ -86,6 +86,52 @@ def page_params(default_page: int, max_page: int):
     return limit, cursor, None
 
 
+def drops_window():
+    """``(since, until, per_player, error)`` — the drop feed's bounds.
+
+    ``since``/``until`` are unix seconds (UTC). ``until`` defaults to now and
+    is clamped to it; ``since`` defaults to 24 hours before ``until`` and is
+    clamped so the window never exceeds :data:`sections.DROPS_MAX_WINDOW_HOURS`
+    — the published ceiling, so asking past it narrows the window rather than
+    refusing the call. A window that runs backwards (``since >= until``) is a
+    ``400``: there is no sensible clamp for a question that cannot be answered.
+
+    ``max_drops`` caps rows per player (clamped, like ``limit``).
+    """
+    from datetime import datetime, timedelta
+
+    from data_api import sections as sect
+
+    import calendar
+
+    now = datetime.utcnow().replace(microsecond=0)
+    now_ts = calendar.timegm(now.timetuple())
+
+    until_ts, error = int_param("until", now_ts, 0, now_ts)
+    if error is not None:
+        return None, None, None, error
+    default_since = until_ts - sect.DROPS_DEFAULT_WINDOW_HOURS * 3600
+    since_ts, error = int_param("since", default_since, 0, 2 ** 40)
+    if error is not None:
+        return None, None, None, error
+    if since_ts >= until_ts:
+        return None, None, None, _json({
+            "error": "malformed_parameter",
+            "detail": "'since' must be earlier than 'until'.",
+        }, 400)
+    floor = until_ts - sect.DROPS_MAX_WINDOW_HOURS * 3600
+    since_ts = max(since_ts, floor)
+
+    per_player, error = int_param("max_drops", sect.DROPS_DEFAULT_PER_PLAYER,
+                                  1, sect.DROPS_MAX_PER_PLAYER)
+    if error is not None:
+        return None, None, None, error
+
+    since = datetime.utcfromtimestamp(since_ts)
+    until = datetime.utcfromtimestamp(until_ts)
+    return since, until, per_player, None
+
+
 def date_hour_range():
     """``(start, end, days, error)`` — the rollup window, as 'YYYY-MM-DD-HH'.
 
@@ -135,6 +181,14 @@ async def serve(endpoint: str, resolve: Callable, build: Callable,
         "sections": requested,
         "per_player_limit": per_player_limit,
     }
+    if "drops" in requested:
+        # Parsed only when asked for: a caller of the profile sections should
+        # not be refused over a drop-feed parameter they never used.
+        since, until, per_player, error = drops_window()
+        if error is not None:
+            return error
+        ctx["drops_window"] = (since, until)
+        ctx["drops_per_player"] = per_player
 
     def _work():
         session = SessionLocal()
@@ -144,7 +198,7 @@ async def serve(endpoint: str, resolve: Callable, build: Callable,
                 return None, None
             # Price only once the page size is known — cost is per player.
             decision = check_and_charge(key["key_id"], key["limits"],
-                                        sect.cost_of(requested, len(player_ids)))
+                                        sect.cost_of(requested, len(player_ids), ctx))
             if not decision.allowed:
                 return "limited", decision
             with Concurrency(key["key_id"], key["limits"]["max_concurrency"]) as slot:
@@ -206,6 +260,82 @@ async def serve(endpoint: str, resolve: Callable, build: Callable,
 
     headers = dict(decision.headers)
     headers["Cache-Control"] = "private, max-age=30"
+    headers["X-Response-Time-Ms"] = str(int(duration))
+    return _json(body, 200, headers)
+
+
+async def serve_fixed(endpoint: str, cost: int, build: Callable,
+                      not_found_detail: str | None = None,
+                      cache_seconds: int = 3600):
+    """The same pipeline for an endpoint that is not about players.
+
+    Reference data (the collection log structure) has no page and no
+    sections, so it is priced at a flat ``cost`` and skips the include/window
+    parsing — but it still charges, still takes a concurrency slot, still
+    meters, and still turns a statement timeout into a 503. ``build(session)``
+    returns the body, or ``None`` for "nothing published yet" → 404.
+    """
+    key = g.api_key
+    started = time.perf_counter()
+
+    def _work():
+        decision = check_and_charge(key["key_id"], key["limits"], cost)
+        if not decision.allowed:
+            return "limited", decision
+        with Concurrency(key["key_id"], key["limits"]["max_concurrency"]) as slot:
+            if not slot.acquired:
+                return "busy", decision
+            session = SessionLocal()
+            try:
+                body = build(session)
+            finally:
+                session.close()
+            if body is None:
+                return None, decision
+            return "ok", (body, decision)
+
+    try:
+        outcome, payload = await asyncio.to_thread(_work)
+    except Exception as exc:
+        duration = (time.perf_counter() - started) * 1000
+        if is_statement_timeout(exc):
+            usage.record(key["key_id"], endpoint, 503, duration, 0)
+            return _json({
+                "error": "query_too_heavy",
+                "detail": "This request exceeded the server's query time limit.",
+            }, 503)
+        usage.record(key["key_id"], endpoint, 500, duration, 0)
+        raise
+
+    duration = (time.perf_counter() - started) * 1000
+    if outcome == "limited":
+        usage.record(key["key_id"], endpoint, 429, duration, 0, limited=True)
+        headers = dict(payload.headers)
+        if payload.retry_after:
+            headers["Retry-After"] = str(payload.retry_after)
+        return _json({"error": "rate_limited", "limit": payload.reason,
+                      "detail": f"Exceeded the {payload.reason} budget for this key."},
+                     429, headers)
+    if outcome == "busy":
+        usage.record(key["key_id"], endpoint, 429, duration, 0, limited=True)
+        headers = dict(payload.headers)
+        headers["Retry-After"] = "1"
+        return _json({"error": "too_many_concurrent_requests",
+                      "detail": "This key already has its maximum number of "
+                                "requests in flight."}, 429, headers)
+    if outcome is None:
+        usage.record(key["key_id"], endpoint, 404, duration, 0)
+        body = {"error": "not_found"}
+        if not_found_detail:
+            body["detail"] = not_found_detail
+        return _json(body, 404)
+
+    body, decision = payload
+    usage.record(key["key_id"], endpoint, 200, duration, cost, players=0)
+    if usage.touch_last_used(key["key_id"]):
+        asyncio.get_running_loop().run_in_executor(None, _touch, key["key_id"])
+    headers = dict(decision.headers)
+    headers["Cache-Control"] = f"private, max-age={int(cache_seconds)}"
     headers["X-Response-Time-Ms"] = str(int(duration))
     return _json(body, 200, headers)
 

@@ -1,0 +1,42 @@
+# Weekly refresh of the collection log structure (plugin_manifest_sections
+# key `collection_log`) from the OSRS game cache.
+# Triggered by droptracker-clog-structure.timer — do not enable the service itself.
+#
+# What it does: runs scripts/cache/extract-collection-log.mjs (reads the cache
+# over HTTP from abextm's mirror; nothing downloaded wholesale), then
+# scripts.sync_collection_log --apply, which writes the manifest row ONLY when
+# the slot set actually changed, and refuses a run that covers fewer slots
+# than what is stored (a truncated extract or a mirror mid-update).
+#
+# The manifest row is what the RuneLite plugin renders the in-game page from
+# and what GET /v2/collection-log serves, so a game update that adds a boss
+# reaches both without anyone editing a file. Its updated_at moves only on a
+# real change, which is what API consumers key their cache on.
+#
+# --structure points at an UNTRACKED file so the weekly refresh never dirties
+# the git checkout; scripts/collection_log_structure.json (tracked) stays the
+# committed snapshot and is refreshed by hand when someone wants to commit it.
+#
+# Manual dry run:  cd /store/droptracker/disc && venv/bin/python -m scripts.sync_collection_log --refresh --structure scripts/cache/collection_log_structure.live.json
+# Manual real run: sudo systemctl start droptracker-clog-structure.service
+# Watch it:        journalctl -u droptracker-clog-structure.service -f
+
+[Unit]
+Description=DropTracker collection-log structure refresh (game cache -> manifest)
+Wants=network-online.target
+After=network-online.target mariadb.service mysql.service redis-server.service
+
+[Service]
+Type=oneshot
+User=debian
+WorkingDirectory=/store/droptracker/disc
+# node lives under nvm for the debian user; the system /usr/bin/node is 18 and
+# the extractor's dependency (@abextm/cache2) is run under 20 everywhere else.
+Environment=PATH=/home/debian/.nvm/versions/node/v20.20.1/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.sync_collection_log --refresh --apply --structure /store/droptracker/disc/scripts/cache/collection_log_structure.live.json
+# The extractor fetches a few hundred small cache files; a slow mirror is
+# minutes, never hours.
+TimeoutStartSec=30min
+# Reference data, never urgent.
+Nice=15
+IOSchedulingClass=idle

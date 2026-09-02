@@ -129,6 +129,26 @@ Your key: id, label, tier, owner scope and effective limits.
 ### `GET /v2/sections`
 Every available section, its cost, and what it contains.
 
+### `GET /v2/collection-log`
+The game's collection log structure as reference data: every slot's item id
+and name, grouped into tabs and pages, plus a flat `items` map of
+`{ "item_id": "name" }`. Read from the OSRS game cache and refreshed weekly
+after the Wednesday game update, so a new boss's drops are known without
+anyone editing a file. Any valid key may read it — it is game data, not
+player data. Flat cost of 20; `updated_at` / `updated_at_unix` move only
+when the structure actually changed, so cache on them.
+
+```
+GET /v2/collection-log
+  -> { "updated_at_unix": 1787825404, "slot_count": 1921, "distinct_items": 1716,
+       "tabs": [ { "name": "Bosses", "pages": [ { "name": "Abyssal Sire",
+                   "items": [13262, 25624, 7979],
+                   "names": ["Abyssal orphan", "Unsired", "Abyssal head"] }, … ] }, … ],
+       "items": { "13262": "Abyssal orphan", "25624": "Unsired", … } }
+```
+
+Pair it with `clog_slots`: the ids there are the keys here.
+
 ### `GET /v2/players/{id_or_name}`
 One player. `{id_or_name}` is a numeric player id or an exact RSN.
 
@@ -163,6 +183,9 @@ A page of the group's roster, each player carrying the same sections.
 | `cursor` | — | `next_cursor` from the previous response |
 | `days` | 30 | Window for the loot sections, max 366 |
 | `top` | 10 | Rows per player in `loot_npcs` / `loot_items`, max 50 |
+| `since` | `until` − 24h | `drops` only: window start, unix seconds UTC. Clamped to at most 7 days before `until` |
+| `until` | now | `drops` only: window end, unix seconds UTC. Clamped to now |
+| `max_drops` | 50 | `drops` only: rows per player, newest first, max 200 |
 
 Pagination is by cursor, not offset:
 
@@ -199,6 +222,8 @@ members — the two are different answers and are reported differently.
 | `loot_npcs` | 5 | Top NPCs by loot value over the window |
 | `loot_items` | 5 | Top items by loot value over the window |
 | `clog_slots` | 8 | Every recorded collection log slot (~1,500 rows per player) |
+| `drops` | 50 per day of window | Individual drops, newest first, inside a bounded window (`since`/`until`, default the last 24 hours, max 7 days; `max_drops` per player). Each carries `received_at` as unix seconds UTC. **Not part of `all`** — ask for it by name |
+| `drop_ids` | 0 | Modifier: adds `drop_id` to every entry of `drops`. Emits nothing on its own |
 
 Requesting an unknown section is a `400` naming it, rather than a response
 quietly missing the data you asked for. The same goes for `limit`, `cursor`,
@@ -209,6 +234,42 @@ for more than it is not a mistake worth refusing.
 
 If one section fails while others succeed, that section comes back as
 `{"error": "unavailable"}` and the rest of the response is still served.
+
+### `drops` — the individual-drop feed
+
+Every other section describes a player's *state*; `drops` is a stream of
+*events*, so it has its own window and its own price. A request is charged
+the section's base cost once per 24 hours of window, rounded up: the default
+day costs 50 per player, a full week 350. Rows per player are capped by
+`max_drops` (newest first) and the payload says when that cap bit:
+
+```
+"drops": {
+  "from": 1788264000, "to": 1788350400,
+  "count": 2, "truncated": false, "oldest": 1788300000,
+  "drops": [
+    { "item_id": 4151, "item_name": "Abyssal whip",
+      "npc_id": 415, "npc_name": "Abyssal Sire",
+      "quantity": 1, "value_each": 2000000, "total_value": 2000000,
+      "received_at": 1788343200, "received_at_iso": "2026-09-02T10:00:00",
+      "drop_id": 203743875 },          // only with include=drop_ids
+    …
+  ]
+}
+```
+
+`received_at` is when DropTracker **accepted** the submission (unix seconds,
+UTC), not when the drop happened in game. `truncated: true` means the player
+had more drops in the window than `max_drops`; `oldest` is the `received_at`
+of the last row returned, so a poller continues with `until=<oldest>`.
+`drop_id` is the stable identity of a drop — include `drop_ids` when you need
+exactly-once processing (a points bot, a mirror), and leave it out when you
+only want to know what dropped.
+
+For a poller: ask for `drops,drop_ids` with `since` a few minutes before
+your last successful poll and dedupe on `drop_id`. A 100-member roster
+polled once a minute over a 10-minute overlap costs `100 × 50 = 5,000` units
+per call, well inside every tier.
 
 ---
 
@@ -280,6 +341,8 @@ render, so a figure here cannot disagree with the profile page.
 * Collection log `obtained`/`total` is the game's own counter, which knows
   about slots we hold no row for. `tracked_items` is our row count and will
   usually be lower — that is expected, not a discrepancy.
-* Timestamps are UTC ISO-8601.
+* Timestamps are UTC ISO-8601. Where an integration needs to key on time
+  rather than display it, the drop feed also carries the same instant as unix
+  seconds (`received_at`), and `/v2/collection-log` carries `updated_at_unix`.
 * `first_seen_at` on a collection log slot is when *we* recorded it, never when
   the player obtained it.

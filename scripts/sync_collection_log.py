@@ -56,13 +56,13 @@ EXTRACTOR_DIR = os.path.join(SCRIPT_DIR, "cache")
 EXTRACTOR = "extract-collection-log.mjs"
 
 
-def refresh_structure() -> int:
-    """Re-run the cache extractor over ``STRUCTURE_PATH``.
+def refresh_structure(path: str = STRUCTURE_PATH) -> int:
+    """Re-run the cache extractor over ``path``.
 
     Written to a temporary file and moved into place, so a failed extraction
     leaves the previous structure intact rather than truncating it.
     """
-    temp_path = STRUCTURE_PATH + ".new"
+    temp_path = path + ".new"
     print(f"reading the game cache via {EXTRACTOR}…", flush=True)
     try:
         with open(temp_path, "w") as handle:
@@ -81,8 +81,8 @@ def refresh_structure() -> int:
               f"`npm install` in {EXTRACTOR_DIR} first.")
         return 1
 
-    os.replace(temp_path, STRUCTURE_PATH)
-    print(f"wrote {STRUCTURE_PATH}")
+    os.replace(temp_path, path)
+    print(f"wrote {path}")
     return 0
 
 
@@ -324,6 +324,11 @@ def main() -> int:
                         help="write even if the new structure covers fewer slots than the stored one")
     parser.add_argument("--dump", metavar="PATH",
                         help="also write the manifest payload to a file, for inspection")
+    parser.add_argument("--structure", metavar="PATH", default=STRUCTURE_PATH,
+                        help="where the extracted structure lives (read, and written by "
+                             "--refresh). The weekly timer points this at an untracked "
+                             "file so a refresh on the server never dirties the checkout; "
+                             f"default: {os.path.relpath(STRUCTURE_PATH)}")
     args = parser.parse_args()
 
     from db.models import Session
@@ -336,14 +341,14 @@ def main() -> int:
             session.close()
 
     if args.refresh:
-        failed = refresh_structure()
+        failed = refresh_structure(args.structure)
         if failed:
             return failed
 
     try:
-        extract = load_structure()
+        extract = load_structure(args.structure)
     except (OSError, ValueError) as exc:
-        print(f"Could not read {STRUCTURE_PATH} ({exc}). Run with --refresh to "
+        print(f"Could not read {args.structure} ({exc}). Run with --refresh to "
               f"regenerate it from the game cache.")
         return 1
 
@@ -360,7 +365,8 @@ def main() -> int:
     session = Session()
     try:
         observed = observed_slot_ids(session)
-        previous = slot_ids(stored_structure(session))
+        stored = stored_structure(session)
+        previous = slot_ids(stored)
         game_total = reported_slot_total(session)
     finally:
         session.close()
@@ -415,6 +421,15 @@ def main() -> int:
     from services.plugin_manifest import CACHE_KEY
 
     payload = json.dumps(resolved, separators=(",", ":"))
+    if stored is not None and payload == json.dumps(stored, separators=(",", ":")) \
+            and not args.force:
+        # Byte-identical to what is stored: writing it would only bump
+        # ``updated_at``, which API consumers (``GET /v2/collection-log``) use
+        # to decide whether their cached copy is stale. A weekly no-change run
+        # must therefore write nothing — the row's timestamp means "the
+        # structure last changed", not "the timer last ran".
+        print("\nIdentical to the stored structure — nothing written.")
+        return 0
     session = Session()
     try:
         row = (

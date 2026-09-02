@@ -22,10 +22,19 @@ Production is roughly twice as slow as the box these were taken on, which the
 tier budgets account for rather than the weights: the weights only need to be
 right *relative to each other*.
 
-Nothing here may touch ``drops``. The 207M-row table has exactly one safe
-shape (``player_id`` + ``date_added`` range, index forced) and it does not
-survive being run for a page of 100 players, so the loot sections read the
-hourly rollups and Redis instead. That is the whole reason the rollups exist.
+Nothing here may touch ``drops`` for an *aggregate*. The 207M-row table has
+exactly one safe shape (``player_id`` + ``date_added`` range, index forced)
+and it does not survive being run for a page of 100 players over a month, so
+the loot sections read the hourly rollups and Redis instead. That is the whole
+reason the rollups exist.
+
+The single exception is ``drops`` — the individual-drop feed — which uses
+exactly that one shape and nothing else: the window is capped at seven days,
+the rows per player are capped, and the cost scales with the window so a
+week costs seven times a day. Measured on production: 100 players over 24
+hours in ~200 ms, over 7 days in ~800 ms, both far inside the 10 s ceiling.
+Any other read of ``drops`` in this module is a regression, and
+``tests/unit/test_data_api_sections.py`` pins the shape.
 """
 from __future__ import annotations
 
@@ -55,6 +64,19 @@ class Section(NamedTuple):
     #: ``(session, player_ids, ctx) -> {player_id: payload}``
     loader: Callable
     description: str
+    #: A modifier changes the shape of *another* section's payload and emits
+    #: nothing of its own (``drop_ids`` adds ``drop_id`` to ``drops``). It is
+    #: never run as a loader and never appears as a key in a player object.
+    modifier: bool = False
+    #: Whether ``?include=all`` expands to this section. Profile sections yes;
+    #: the drop feed no — ``all`` is "everything about a player", and a feed
+    #: of individual events is a different kind of question with its own
+    #: window parameters, so it has to be asked for by name.
+    in_all: bool = True
+    #: Optional ``(ctx) -> multiplier`` for sections whose real cost depends
+    #: on a request parameter (the drop feed's window). ``cost`` is then the
+    #: price at multiplier 1.
+    scale: Callable | None = None
 
 
 def _iso(value):
@@ -74,6 +96,21 @@ def _iso(value):
         return isoformat()
     text_value = str(value)
     return None if text_value.startswith("0000-00-00") else text_value
+
+
+def _unix(value) -> int | None:
+    """A naive-UTC DATETIME as unix seconds, or None.
+
+    ``drops.date_added`` is written by the intake path as naive UTC (the
+    server's zone is UTC, so ``NOW()`` and ``UTC_TIMESTAMP()`` agree). Treat
+    the value as UTC explicitly rather than through ``.timestamp()``, which
+    would apply the *process* zone to a naive datetime.
+    """
+    if value is None or not hasattr(value, "timetuple"):
+        return None
+    import calendar
+
+    return int(calendar.timegm(value.timetuple()))
 
 
 def _rows_by_player(rows) -> Dict[int, list]:
@@ -409,6 +446,126 @@ def _load_loot_items(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     return out
 
 
+#: Longest window the drop feed will read, in hours. Seven days of a 100-player
+#: page is ~800 ms on production; the ceiling is 10 s. Wider windows are what
+#: the rollup-backed loot sections are for.
+DROPS_MAX_WINDOW_HOURS = 24 * 7
+DROPS_DEFAULT_WINDOW_HOURS = 24
+#: Rows per player per request. Newest first, so a busy player's older drops
+#: in the window fall off the end — the payload says so (``truncated``) and
+#: carries ``oldest`` so a caller can narrow ``until`` and continue.
+DROPS_DEFAULT_PER_PLAYER = 50
+DROPS_MAX_PER_PLAYER = 200
+
+#: The index the loot pages, the recap and the profile all force for this
+#: exact shape. Kept in sync with the drops schema (ix_drops_player_id_date_added).
+_DROPS_INDEX_HINT = "FORCE INDEX (ix_drops_player_id_date_added)"
+
+
+def _drops_window_hours(ctx) -> float:
+    window = ctx.get("drops_window")
+    if not window:
+        return DROPS_DEFAULT_WINDOW_HOURS
+    since, until = window
+    return max(0.0, (until - since).total_seconds() / 3600.0)
+
+
+def _drops_cost_scale(ctx) -> int:
+    """Whole 24-hour blocks in the window, at least one.
+
+    A day costs the base price, a week costs seven times it. Rounded up so a
+    25-hour window is priced as two days rather than as one-and-a-bit — the
+    cost has to be an integer the limiter can charge before the query runs.
+    """
+    import math
+
+    return max(1, math.ceil(_drops_window_hours(ctx) / 24.0))
+
+
+def _load_drops(session, player_ids: List[int], ctx) -> Dict[int, dict]:
+    """Individual drops per player, newest first, inside a bounded window.
+
+    This is the *one* sanctioned read of ``drops`` in this module (see the
+    module docstring). The shape is fixed: ``player_id IN`` + a ``date_added``
+    range, with the composite index forced so the planner cannot pick the
+    ``player_id``-only index and walk a player's whole history. The window is
+    capped in ``serving.drops_window`` and the per-player row cap is applied
+    inside the query (``ROW_NUMBER``), so the rows crossing the wire are
+    bounded by ``players x max_drops`` regardless of how busy the clan is.
+
+    Every entry carries ``received_at`` as unix seconds (UTC) — the time the
+    submission was accepted, which is what the intake path writes to
+    ``date_added`` — alongside the ISO form. ``drop_id`` is attached only when
+    the ``drop_ids`` modifier is also included: it is the stable identity an
+    integration needs for exactly-once processing, and it is opt-in so a
+    consumer that only wants "what dropped" is not handed one more id per row.
+    """
+    since, until = ctx["drops_window"]
+    per_player = int(ctx.get("drops_per_player") or DROPS_DEFAULT_PER_PLAYER)
+    with_ids = "drop_ids" in (ctx.get("sections") or ())
+
+    rows = session.execute(text(f"""
+        SELECT player_id, drop_id, item_id, item_name, npc_id, npc_name,
+               quantity, value, date_added
+        FROM (
+            SELECT d.player_id, d.drop_id, d.item_id, i.item_name,
+                   d.npc_id, n.npc_name, d.quantity, d.value, d.date_added,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY d.player_id
+                       ORDER BY d.date_added DESC, d.drop_id DESC
+                   ) AS rn
+            FROM drops d {_DROPS_INDEX_HINT}
+            LEFT JOIN items i ON i.item_id = d.item_id
+            LEFT JOIN npc_list n ON n.npc_id = d.npc_id
+            WHERE d.player_id IN :ids
+              AND d.date_added >= :start AND d.date_added < :end
+              AND d.hidden = 0
+        ) ranked
+        WHERE rn <= :lim
+        ORDER BY player_id, date_added DESC, drop_id DESC
+    """).bindparams(ids=tuple(player_ids), start=since, end=until, lim=per_player))
+
+    window = {"from": _unix(since), "to": _unix(until)}
+    out: Dict[int, dict] = {
+        pid: {**window, "count": 0, "truncated": False, "oldest": None, "drops": []}
+        for pid in player_ids
+    }
+    for (player_id, drop_id, item_id, item_name, npc_id, npc_name,
+         quantity, value, date_added) in rows:
+        entry = out[int(player_id)]
+        quantity = int(quantity or 0)
+        value = int(value or 0)
+        drop = {
+            "item_id": int(item_id) if item_id is not None else None,
+            "item_name": item_name,
+            "npc_id": int(npc_id) if npc_id is not None else None,
+            "npc_name": npc_name,
+            "quantity": quantity,
+            "value_each": value,
+            "total_value": value * quantity,
+            "received_at": _unix(date_added),
+            "received_at_iso": _iso(date_added),
+        }
+        if with_ids:
+            drop["drop_id"] = int(drop_id)
+        entry["drops"].append(drop)
+
+    for entry in out.values():
+        entry["count"] = len(entry["drops"])
+        if entry["drops"]:
+            entry["oldest"] = entry["drops"][-1]["received_at"]
+        # A full page means the cap bit; there may be older drops in the
+        # window that were not returned. Equal-to-cap is reported as
+        # truncated even when it is exactly the cap, because the query
+        # cannot tell the two apart without fetching one more row per player.
+        entry["truncated"] = len(entry["drops"]) >= per_player
+    return out
+
+
+def _load_drop_ids(session, player_ids: List[int], ctx) -> Dict[int, dict]:
+    """Never called: ``drop_ids`` is a modifier read by ``_load_drops``."""
+    return {}
+
 
 def _load_meta(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     """Where each player sits on the boards, and which groups they are in.
@@ -477,6 +634,17 @@ _SECTIONS = (
             "Top NPCs by loot value over the requested window."),
     Section("loot_items", 121, _load_loot_items,
             "Top items by loot value over the requested window."),
+    Section("drops", 50, _load_drops,
+            "Individual drops, newest first, inside a bounded window "
+            "(?since / ?until as unix seconds, default the last 24 hours, "
+            "maximum 7 days; ?max_drops rows per player, default 50, maximum "
+            "200). Each carries received_at as unix seconds UTC. Priced per "
+            "24 hours of window. Not part of 'all'.",
+            in_all=False, scale=_drops_cost_scale),
+    Section("drop_ids", 0, _load_drop_ids,
+            "Modifier: adds drop_id to every entry of 'drops'. Free, emits "
+            "nothing on its own, and has no effect without 'drops'.",
+            modifier=True, in_all=False),
 )
 
 REGISTRY: Dict[str, Section] = {s.key: s for s in _SECTIONS}
@@ -500,6 +668,8 @@ def parse_include(raw: str) -> List[str]:
             continue
         if name == "all":
             for key in ALL_SECTION_KEYS:
+                if not REGISTRY[key].in_all:
+                    continue
                 if key not in seen:
                     seen.add(key)
                     requested.append(key)
@@ -517,9 +687,22 @@ def parse_include(raw: str) -> List[str]:
     return requested
 
 
-def cost_of(sections: Iterable[str], player_count: int) -> int:
-    """What this request will be charged against the caller's budget."""
-    per_player = sum(REGISTRY[key].cost for key in sections if key in REGISTRY)
+def cost_of(sections: Iterable[str], player_count: int, ctx: dict | None = None) -> int:
+    """What this request will be charged against the caller's budget.
+
+    ``ctx`` lets a section whose real work depends on a parameter (the drop
+    feed's window) price itself accordingly; without it every section is
+    charged at its base weight.
+    """
+    per_player = 0
+    for key in sections:
+        section = REGISTRY.get(key)
+        if section is None:
+            continue
+        cost = section.cost
+        if section.scale is not None and ctx is not None:
+            cost = int(cost * max(1, int(section.scale(ctx))))
+        per_player += cost
     return max(1, per_player * max(1, player_count))
 
 
@@ -594,7 +777,9 @@ def load_sections(session, sections: Iterable[str], player_ids: List[int],
     merged: Dict[int, dict] = {pid: {} for pid in player_ids}
     for key in sections:
         section = REGISTRY.get(key)
-        if section is None:
+        if section is None or section.modifier:
+            # A modifier is consumed by the section it modifies (it reads
+            # ctx["sections"]); it has no payload and no key of its own.
             continue
         produced, failed = _run_loader(session, section, player_ids, ctx)
         failed_ids = set(failed)

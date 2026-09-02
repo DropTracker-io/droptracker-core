@@ -1,0 +1,21 @@
+# Weekly trigger for droptracker-clog-structure.service (Thu ~05:45 UTC).
+#
+# Thursday: OSRS game updates land Wednesdays, and abextm's public cache
+# mirror (which the extractor reads) picks a new cache up within hours. Runs
+# after the wiki drop-table resync (05:15) and well before the 08:30 backup.
+#
+# Install:  sudo cp deploy/systemd/droptracker-clog-structure.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now droptracker-clog-structure.timer
+
+[Unit]
+Description=Weekly collection-log structure refresh from the game cache (Thu ~05:45 UTC)
+
+[Timer]
+OnCalendar=Thu *-*-* 05:45:00 UTC
+RandomizedDelaySec=600
+Persistent=true
+Unit=droptracker-clog-structure.service
+
+[Install]
+WantedBy=timers.target

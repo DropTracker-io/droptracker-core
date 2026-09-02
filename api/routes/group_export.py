@@ -262,6 +262,19 @@ def _iso_utc(dt) -> str:
     return dt.replace(microsecond=0).isoformat() + "Z" if dt else None
 
 
+def _unix_utc(dt):
+    """A stored naive-UTC datetime as unix seconds, or None.
+
+    ``calendar.timegm`` rather than ``.timestamp()``: the latter interprets a
+    naive datetime in the *process* zone, which is only correct when that zone
+    happens to be UTC. The stored values are UTC by construction (the intake
+    path stamps them with ``utcnow()``).
+    """
+    import calendar
+
+    return int(calendar.timegm(dt.timetuple())) if dt else None
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Query safety net
 # ──────────────────────────────────────────────────────────────────────────────
@@ -751,6 +764,11 @@ async def group_export_drops(group_id: int):
                     "value_each": int(value or 0),
                     "total_value": int((value or 0) * (quantity or 0)),
                     "date_added": _iso_utc(date_added),
+                    # The same instant as unix seconds (UTC): what an
+                    # integration keying on time actually wants, without
+                    # parsing ISO. It is the moment the submission was
+                    # accepted, not when the drop happened in game.
+                    "received_at": _unix_utc(date_added),
                     "image_url": image_url,
                 })
 

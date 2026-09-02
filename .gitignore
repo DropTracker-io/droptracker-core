@@ -104,3 +104,7 @@ scripts/.event_task_stats_cache.json
 # Local fastembed model cache (kb01a) — ~65MB of downloaded ONNX weights,
 # repopulated on demand. Path is configurable via KB_EMBED_CACHE.
 .fastembed_cache/
+
+# Weekly cache-derived structure written by droptracker-clog-structure.timer
+scripts/cache/*.live.json
+scripts/cache/*.live.json.new

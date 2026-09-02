@@ -108,7 +108,11 @@ Extra parameters:
 
 Each row: `drop_id`, `player_id`, `player_name`, `npc_id`, `npc_name`,
 `item_id`, `item_name`, `quantity`, `value_each`, `total_value`,
-`date_added`, `image_url`.
+`date_added`, `received_at`, `image_url`.
+
+`date_added` is ISO-8601 UTC; `received_at` is the same instant as unix
+seconds (UTC). Both record when DropTracker **accepted** the submission,
+not when the drop occurred in game.
 
 ## `GET /groups/<group_id>/export/members`
 
