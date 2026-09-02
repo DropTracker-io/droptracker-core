@@ -14,17 +14,22 @@ import pytest
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def _load_real_ge_value():
-    """Import utils/ge_value.py fresh, bypassing the conftest stub."""
-    sys.modules["aiohttp"] = MagicMock()
+def _load_real_ge_value(monkeypatch):
+    """Import utils/ge_value.py fresh, bypassing the conftest stub.
+
+    Stubs go in via monkeypatch.setitem so they are torn down again: a plain
+    ``sys.modules[...] =`` here leaks a Redis-less ``utils.redis`` and a
+    one-function ``utils.value_overrides`` into every later test module.
+    """
+    monkeypatch.setitem(sys.modules, "aiohttp", MagicMock())
 
     redis_stub = types.ModuleType("utils.redis")
     redis_stub.RedisClient = MagicMock
-    sys.modules["utils.redis"] = redis_stub
+    monkeypatch.setitem(sys.modules, "utils.redis", redis_stub)
 
     vo_stub = types.ModuleType("utils.value_overrides")
     vo_stub.match = lambda item_id, item_name: None
-    sys.modules["utils.value_overrides"] = vo_stub
+    monkeypatch.setitem(sys.modules, "utils.value_overrides", vo_stub)
 
     path = os.path.join(_REPO_ROOT, "utils", "ge_value.py")
     spec = importlib.util.spec_from_file_location("_real_ge_value_under_test", path)
@@ -34,8 +39,8 @@ def _load_real_ge_value():
 
 
 @pytest.fixture()
-def ge():
-    return _load_real_ge_value()
+def ge(monkeypatch):
+    return _load_real_ge_value(monkeypatch)
 
 
 @pytest.mark.asyncio

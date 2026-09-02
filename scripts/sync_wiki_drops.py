@@ -63,11 +63,9 @@ import requests
 
 sys.path.insert(0, ".")
 
+from utils.wiki_ua import USER_AGENT
+
 API_URL = "https://oldschool.runescape.wiki/api.php"
-# Keep in sync with osrs_api.client.DEFAULT_USER_AGENT (kept a literal here so
-# the script stays importable standalone). The old "@joelhalen -
-# www.droptracker.io" string is 403-blocklisted by the wiki — never reuse it.
-USER_AGENT = "DropTracker/2.0 (https://www.droptracker.io; contact: @joelhalen on Discord)"
 #: Bucket API page size (server accepts 5000; ~39k rows total).
 PAGE_SIZE = 5000
 #: Courtesy pause between paged requests.

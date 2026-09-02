@@ -51,11 +51,11 @@ from interactions.api.http.http_client import HTTPClient  # noqa: E402
 from interactions.client.utils.serializer import to_image_data  # noqa: E402
 
 from utils.rank_emojis import MAP_PATH, emoji_name, normalize_rank  # noqa: E402
+from utils.wiki_ua import USER_AGENT  # noqa: E402  (one identity for the wiki)
 
 WIKI_API = "https://oldschool.runescape.wiki/api.php"
 WIKI_FILE_PREFIX = "Clan icon - "
 #: The wiki's CDN 403s the default urllib/curl agent; identify the bot properly.
-USER_AGENT = "DropTracker/1.0 (+https://www.droptracker.io; clan rank icon sync)"
 
 #: 13x13 source art -> 104x104. Nearest-neighbour keeps the pixels square.
 UPSCALE_FACTOR = 8

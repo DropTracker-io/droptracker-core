@@ -30,6 +30,7 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.item_images import ensure_public_dir  # noqa: E402
+from utils.wiki_ua import USER_AGENT  # noqa: E402  (one identity for the wiki)
 
 OUT_DIR = "/store/droptracker/disc/static/assets/img/equipment"
 
@@ -51,10 +52,6 @@ SLOT_FILES = {
     "feet": "Feet_slot",
     "ring": "Ring_slot",
 }
-
-# The wiki blocklisted a previous generic User-Agent. Identify the project and
-# give them a way to reach us; never reuse a UA that has been blocked.
-USER_AGENT = "DropTracker/2.0 (https://www.droptracker.io; contact: @joelhalen on Discord)"
 
 
 def _write(path: str, data: bytes) -> None:

@@ -4,15 +4,16 @@ Main API client that coordinates all OSRS API interactions.
 
 import aiohttp
 from typing import Optional
+from utils.wiki_ua import USER_AGENT
 from .semantic import SemanticAPI
 from .pricing import PricingAPI
 
 
-# The previous UA ("@joelhalen - www.droptracker.io") was blocklisted by the
-# wiki on 2026-08-20 — every api.php request got a 403 anti-bot challenge and
-# high-value drop verification silently fail-opened for days. Do not reuse
-# that exact string. Kept descriptive-with-contact per the wiki's API policy.
-DEFAULT_USER_AGENT = "DropTracker/2.0 (https://www.droptracker.io; contact: @joelhalen on Discord)"
+# Re-exported for the existing callers; the string itself lives in
+# utils/wiki_ua.py so there is exactly one identity to keep off a blocklist.
+# A second private copy of it here is what left utils/ge_value.py 403ing for
+# five days after the 2026-08-20 block was "fixed" — see that module.
+DEFAULT_USER_AGENT = USER_AGENT
 
 
 class OSRSAPIClient:
