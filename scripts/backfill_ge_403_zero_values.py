@@ -183,6 +183,12 @@ def main() -> int:
     parser.add_argument("--since", default=DEFAULT_SINCE, help="window start (UTC)")
     parser.add_argument("--commit", action="store_true", help="write (default: dry run)")
     parser.add_argument(
+        "--redis-only", action="store_true",
+        help="skip the DB work and only rebuild Redis totals for the players "
+             "holding override-item drops in the window — resumes the slow "
+             "phase after an interrupted --commit run",
+    )
+    parser.add_argument(
         "--drift-tolerance", type=float, default=0.10,
         help="how far a client-reported value may sit from the override before "
              "it counts as damage (default 0.10; see _damage_reason)",
@@ -205,6 +211,16 @@ def main() -> int:
         if not rows:
             print(f"No override-item drops since {args.since}.")
             return 0
+
+        if args.redis_only:
+            # The DB is already correct; just redo the phase that got cut off.
+            # Every player with a drop in the window is in scope, since which
+            # ones the interrupted run reached is not recorded anywhere and
+            # force_update_player is a rebuild-from-DB either way.
+            players = {int(r.player_id) for r in rows}
+            print(f"Rebuilding Redis totals for {len(players)} players "
+                  f"with override-item drops since {args.since}.\n")
+            return _rebuild_redis(session, players)
 
         names, values = asyncio.run(
             _recompute_unit_values({int(r.item_id) for r in rows}, session)
@@ -291,23 +307,37 @@ def main() -> int:
         session.commit()
         print(f"Re-folded {len(item_cells)} item and {len(npc_cells)} npc rollup buckets.")
 
-        # 3. Redis. Lootboard images read drops straight from MySQL and
-        # self-heal on the next 2-minute cycle, but the website leaderboards
-        # are served from Redis and need an explicit rebuild.
-        from services.redis_updates import force_update_player
-
-        players = sorted({int(r.player_id) for r in changed})
-        rebuilt = 0
-        for player_id in players:
-            try:
-                if force_update_player(player_id, session):
-                    rebuilt += 1
-            except Exception as exc:  # one bad player must not abort the rest
-                print(f"  ! force_update_player({player_id}) failed: {exc}")
-        print(f"Rebuilt Redis totals for {rebuilt}/{len(players)} players.")
-        return 0
+        return _rebuild_redis(session, {int(r.player_id) for r in changed})
     finally:
         session.close()
+
+
+def _rebuild_redis(session, player_ids) -> int:
+    """Rebuild each affected player's Redis totals.
+
+    Lootboard images read ``drops`` straight from MySQL and self-heal on the
+    next 2-minute cycle, but the website leaderboards are served from Redis
+    and need an explicit rebuild.
+
+    This is the slow phase — a few seconds per player — so it prints progress
+    as it goes and must not be wrapped in a short ``timeout``. If it is cut
+    short anyway, the DB work is already committed and ``--redis-only`` picks
+    the phase back up on its own.
+    """
+    from services.redis_updates import force_update_player
+
+    players = sorted(player_ids)
+    rebuilt = 0
+    for index, player_id in enumerate(players, 1):
+        try:
+            if force_update_player(player_id, session):
+                rebuilt += 1
+        except Exception as exc:  # one bad player must not abort the rest
+            print(f"  ! force_update_player({player_id}) failed: {exc}", flush=True)
+        if index % 10 == 0 or index == len(players):
+            print(f"  … {index}/{len(players)} players", flush=True)
+    print(f"Rebuilt Redis totals for {rebuilt}/{len(players)} players.")
+    return 0
 
 
 if __name__ == "__main__":
