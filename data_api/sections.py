@@ -29,10 +29,13 @@ hourly rollups and Redis instead. That is the whole reason the rollups exist.
 """
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from typing import Callable, Dict, Iterable, List, NamedTuple
 
 from sqlalchemy import text
+
+logger = logging.getLogger("data_api.sections")
 
 #: Sections returned when the caller does not ask for any.
 DEFAULT_SECTIONS = ("identity",)
@@ -223,10 +226,18 @@ def _load_diaries(session, player_ids: List[int], ctx) -> Dict[int, dict]:
 def _load_personal_bests(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     # Bounded (~85 tracked bosses per player), so the whole set is safe to
     # return. MIN() collapses the per-attempt rows to the best per bracket.
+    #
+    # ``npc_id IS NOT NULL`` is not decoration: 100 legacy rows (43 players,
+    # all written May-Sep 2025, before the writers started resolving the NPC
+    # before inserting) carry a time with no boss attached. A PB that cannot
+    # name what was killed is not reportable, and `int(None)` in the loop
+    # below used to raise -- which cost every player on the page their whole
+    # personal_bests section, not just the one holding the bad row.
     rows = session.execute(text("""
         SELECT player_id, npc_id, team_size, MIN(personal_best) AS best
         FROM personal_best
-        WHERE player_id IN :ids AND personal_best IS NOT NULL AND personal_best > 0
+        WHERE player_id IN :ids AND npc_id IS NOT NULL
+          AND personal_best IS NOT NULL AND personal_best > 0
         GROUP BY player_id, npc_id, team_size
         ORDER BY player_id, npc_id
     """).bindparams(ids=tuple(player_ids)))
@@ -234,6 +245,11 @@ def _load_personal_bests(session, player_ids: List[int], ctx) -> Dict[int, dict]
     out: Dict[int, dict] = {}
     for player_id, npc_id, team_size, best in rows:
         entry = out.setdefault(int(player_id), {"bests": []})
+        if npc_id is None:
+            # Belt and braces with the WHERE clause above: the loop must not
+            # be the thing standing between a nullable column and a section
+            # that fails for everyone.
+            continue
         entry["bests"].append({
             "npc_id": int(npc_id),
             "team_size": team_size or "Solo",
@@ -507,31 +523,85 @@ def cost_of(sections: Iterable[str], player_count: int) -> int:
     return max(1, per_player * max(1, player_count))
 
 
+def _run_loader(session, section: Section, player_ids: List[int],
+                ctx: dict) -> tuple:
+    """``(produced, failed_ids)`` — a section's data, minus whoever broke it.
+
+    A loader reads the whole page in one query, so anything that raises while
+    walking the result set aborts it for *every* player on that page. One
+    legacy ``personal_best`` row with a NULL ``npc_id`` therefore returned
+    ``{"error": "unavailable"}`` for all 100 members of a roster, and the
+    section looked broken for clans where 99 players were perfectly fine.
+
+    So a page failure is not the answer, it is the prompt for a second
+    question: re-run the loader one player at a time and let only the players
+    who actually fail carry the error. Bounded by the page ceiling and only
+    ever reached once something is already wrong, which is the moment to
+    spend a few extra indexed lookups rather than throw good data away.
+
+    A statement timeout is re-raised either way: that is the server saying the
+    work is too heavy, and retrying it per player is exactly the wrong move.
+    """
+    from data_api.core import is_statement_timeout
+
+    try:
+        return section.loader(session, player_ids, ctx), []
+    except Exception as exc:
+        if is_statement_timeout(exc):
+            raise
+        logger.exception(
+            "data_api section %r failed for %d player(s); retrying per player",
+            section.key, len(player_ids))
+
+    if len(player_ids) == 1:
+        return {}, list(player_ids)
+
+    # A DBAPI error leaves the connection needing one before it is reusable;
+    # a plain TypeError in the row loop does not, and rolling back a
+    # read-only session costs nothing.
+    try:
+        session.rollback()
+    except Exception:
+        pass
+
+    produced: Dict[int, dict] = {}
+    failed: List[int] = []
+    for player_id in player_ids:
+        try:
+            produced.update(section.loader(session, [player_id], ctx))
+        except Exception as exc:
+            if is_statement_timeout(exc):
+                raise
+            logger.error("data_api section %r is unavailable for player %s: %s",
+                         section.key, player_id, exc)
+            failed.append(player_id)
+            try:
+                session.rollback()
+            except Exception:
+                pass
+    return produced, failed
+
+
 def load_sections(session, sections: Iterable[str], player_ids: List[int],
                   ctx: dict) -> Dict[int, dict]:
     """Run each loader once for the whole page and merge by player.
 
-    A loader that raises takes down only its own section: the rest of the
-    response is still useful, and the caller is told which part is missing
-    rather than getting a 500 for the whole page.
+    A loader that raises takes down only its own section, and within that
+    section only the players it actually cannot serve (see :func:`_run_loader`):
+    the rest of the response is still useful, and the caller is told which
+    part is missing rather than getting a 500 for the whole page.
     """
     merged: Dict[int, dict] = {pid: {} for pid in player_ids}
     for key in sections:
         section = REGISTRY.get(key)
         if section is None:
             continue
-        try:
-            produced = section.loader(session, player_ids, ctx)
-        except Exception as exc:
-            from data_api.core import is_statement_timeout
-
-            if is_statement_timeout(exc):
-                raise
-            for pid in player_ids:
-                merged[pid][key] = {"error": "unavailable"}
-            continue
+        produced, failed = _run_loader(session, section, player_ids, ctx)
+        failed_ids = set(failed)
         for pid in player_ids:
-            if key == "identity":
+            if pid in failed_ids:
+                merged[pid][key] = {"error": "unavailable"}
+            elif key == "identity":
                 merged[pid].update(produced.get(pid, {}))
             else:
                 merged[pid][key] = produced.get(pid)
