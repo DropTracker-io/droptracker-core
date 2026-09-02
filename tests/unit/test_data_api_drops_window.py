@@ -75,6 +75,8 @@ def harness(monkeypatch):
     monkeypatch.setattr(scope, "group_exists", lambda _s, gid: gid == 7)
     monkeypatch.setattr(scope, "group_roster_page", lambda _s, gid, _c, _l: [11, 12] if gid == 7 else [])
     monkeypatch.setattr(sect, "load_sections", _load_sections)
+    monkeypatch.setattr(sect, "resolve_npc_ids",
+                        lambda _s, raw: [415] if raw == "abyssal_sire" else [])
 
     return data_api.create_app().test_client(), seen, charged
 
@@ -166,3 +168,56 @@ class TestPricing:
         await _get(client, "/v2/groups/7/players?include=drops&since=0")
         assert charged["cost"] == day * 7
         assert day == sect.REGISTRY["drops"].cost * 2  # two players on the page
+
+
+class TestNpcFilter:
+    @pytest.mark.asyncio
+    async def test_a_known_boss_reaches_the_loader_as_ids(self, harness):
+        client, seen, _ = harness
+        status, _ = await _get(client, "/v2/groups/7/players?include=drops&npc=abyssal_sire")
+        assert status == 200
+        assert seen["ctx"]["drops_npc_ids"] == [415]
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_boss_is_a_400_that_names_it(self, harness):
+        client, _, charged = harness
+        status, body = await _get(client, "/v2/groups/7/players?include=drops&npc=nope")
+        assert status == 400
+        assert body["error"] == "malformed_parameter"
+        assert "nope" in body["detail"] and "barrows_chests" in body["detail"]
+        assert "cost" not in charged, "a caller's typo must not be billed"
+
+    @pytest.mark.asyncio
+    async def test_a_blank_npc_is_a_400(self, harness):
+        client, _, _ = harness
+        status, body = await _get(client, "/v2/groups/7/players?include=drops&npc=")
+        assert status == 400
+        assert "npc" in body["detail"]
+
+    @pytest.mark.asyncio
+    async def test_the_filter_is_ignored_without_the_feed(self, harness):
+        client, seen, _ = harness
+        status, _ = await _get(client, "/v2/groups/7/players?include=loot&npc=nope")
+        assert status == 200
+        assert "drops_npc" not in seen["ctx"]
+
+    @pytest.mark.asyncio
+    async def test_the_filter_does_not_change_the_charge(self, harness):
+        client, _, charged = harness
+        await _get(client, "/v2/groups/7/players?include=drops")
+        unfiltered = charged["cost"]
+        await _get(client, "/v2/groups/7/players?include=drops&npc=abyssal_sire")
+        assert charged["cost"] == unfiltered
+
+    @pytest.mark.asyncio
+    async def test_the_single_player_route_takes_the_filter_too(self, harness, monkeypatch):
+        # The bot walks a truncated player back through /v2/players/<id>.
+        import data_api.scope as scope
+
+        monkeypatch.setattr(scope, "resolve_player_ref", lambda _s, ref: 11)
+        monkeypatch.setattr(scope, "visible_player_ids", lambda _s, ids: ids)
+        monkeypatch.setattr(scope, "key_may_read", lambda *_a: True)
+        client, seen, _ = harness
+        status, _ = await _get(client, "/v2/players/11?include=drops&npc=abyssal_sire")
+        assert status == 200
+        assert seen["ctx"]["drops_npc_ids"] == [415]

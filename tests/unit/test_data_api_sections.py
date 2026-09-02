@@ -256,12 +256,42 @@ class TestDropsFeed:
                 "drops_window": (datetime(2026, 9, 1, 12, 0, 0), datetime(2026, 9, 2, 12, 0, 0)),
                 "drops_per_player": per_player}
 
-    def _load(self, rows, ctx):
+    def _load(self, rows, ctx, seen=None):
         class _Session:
-            def execute(self, *_a, **_k):
+            def execute(self, statement, *_a, **_k):
+                if seen is not None:
+                    seen.append(str(statement))
                 return rows
 
         return sect._load_drops(_Session(), [7, 9, 11], ctx)
+
+    def test_npc_filter_sits_inside_the_ranked_subquery(self):
+        seen = []
+        ctx = self._ctx()
+        ctx["drops_npc_ids"] = [13729, 13741]
+        self._load(self._rows(), ctx, seen)
+        sql = seen[0]
+        assert "d.npc_id IN" in sql
+        assert sql.index("d.hidden = 0") < sql.index("d.npc_id IN") < sql.index(") ranked")
+
+    def test_without_npc_the_query_is_unchanged(self):
+        seen = []
+        out = self._load(self._rows(), self._ctx(), seen)
+        assert "npc_id IN" not in seen[0]
+        assert "npc_ids" not in out[7]
+
+    def test_npc_ids_are_echoed_for_every_player(self):
+        ctx = self._ctx()
+        ctx["drops_npc_ids"] = [13729]
+        out = self._load(self._rows(), ctx)
+        assert out[7]["npc_ids"] == [13729]
+        assert out[11]["npc_ids"] == [13729], "even a player with no rows says what was asked"
+
+    def test_the_npc_filter_does_not_change_the_price(self):
+        ctx = self._ctx()
+        priced = sect.cost_of(["drops"], 5, ctx)
+        ctx["drops_npc_ids"] = [13729]
+        assert sect.cost_of(["drops"], 5, ctx) == priced
 
     def test_every_drop_carries_unix_seconds_utc(self):
         out = self._load(self._rows(), self._ctx())
@@ -342,3 +372,83 @@ class TestUnixCoercion:
     def test_none_and_strings_are_none(self):
         assert sect._unix(None) is None
         assert sect._unix("0000-00-00 00:00:00") is None
+
+
+class TestNpcResolution:
+    """``?npc=`` — a boss name or a Wise Old Man slug, resolved to npc_list ids."""
+
+    ROWS = [(13729, "Barrows"), (12821, "Sol Heredit"), (13741, "Fortis Colosseum"),
+            (13696, "Chambers of Xeric"), (14150, "Chambers of Xeric Challenge Mode"),
+            (12204, "The Whisperer"), (13703, "The Gauntlet"), (9425, "The Nightmare"),
+            (9426, "The Nightmare")]
+    SLUGS = {"Barrows": "barrows_chests", "Sol Heredit": "sol_heredit",
+             "Fortis Colosseum": "sol_heredit", "Chambers of Xeric": "chambers_of_xeric",
+             "Chambers of Xeric Challenge Mode": "chambers_of_xeric_challenge_mode",
+             "The Whisperer": "the_whisperer", "The Gauntlet": "the_gauntlet",
+             "The Nightmare": "nightmare"}
+
+    @pytest.fixture(autouse=True)
+    def _stub(self, monkeypatch):
+        calls = []
+
+        def _slug(name):
+            calls.append(name)
+            return self.SLUGS.get(name)
+
+        monkeypatch.setattr(sect, "_boss_metric_of", _slug)
+        monkeypatch.setattr(sect, "_npc_cache", {"rows": None, "at": 0.0})
+        self.calls = calls
+
+    def _session(self):
+        rows = self.ROWS
+
+        class _Result:
+            @staticmethod
+            def fetchall():
+                return rows
+
+        class _Session:
+            def execute(self, *_a, **_k):
+                return _Result()
+
+        return _Session()
+
+    def test_a_name_resolves_regardless_of_case_and_article(self):
+        assert sect.resolve_npc_ids(self._session(), "barrows") == [13729]
+        assert sect.resolve_npc_ids(self._session(), " Whisperer ") == [12204]
+        assert sect.resolve_npc_ids(self._session(), "The Nightmare") == [9425, 9426]
+
+    def test_an_alias_lands_on_the_encounter(self):
+        assert sect.resolve_npc_ids(self._session(), "Crystalline Hunllef") == [13703]
+
+    def test_a_wom_slug_resolves_through_each_rows_own_slug(self):
+        assert sect.resolve_npc_ids(self._session(), "barrows_chests") == [13729]
+        assert sect.resolve_npc_ids(self._session(), "sol_heredit") == [12821, 13741]
+
+    def test_a_base_raid_slug_never_picks_up_its_harder_mode(self):
+        assert sect.resolve_npc_ids(self._session(), "chambers_of_xeric") == [13696]
+
+    def test_unknown_and_blank_are_empty(self):
+        assert sect.resolve_npc_ids(self._session(), "not a boss") == []
+        assert sect.resolve_npc_ids(self._session(), "   ") == []
+        assert sect.resolve_npc_ids(self._session(), "") == []
+
+    def test_the_slug_pass_is_skipped_for_a_name(self):
+        # A display name cannot be a slug, so the (lazily imported) WOM mapping
+        # is never consulted for it.
+        sect.resolve_npc_ids(self._session(), "Sol Heredit")
+        assert self.calls == []
+
+    def test_the_npc_list_is_read_once_per_ttl(self):
+        counting = self._session()
+        reads = []
+        original = counting.execute
+
+        def _execute(*a, **k):
+            reads.append(1)
+            return original(*a, **k)
+
+        counting.execute = _execute
+        sect.resolve_npc_ids(counting, "barrows")
+        sect.resolve_npc_ids(counting, "zulrah")
+        assert len(reads) == 1

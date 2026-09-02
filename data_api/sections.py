@@ -462,6 +462,77 @@ DROPS_MAX_PER_PLAYER = 200
 _DROPS_INDEX_HINT = "FORCE INDEX (ix_drops_player_id_date_added)"
 
 
+#: ``npc_list`` is ~3,700 rows and only ever grows; one read per process every
+#: five minutes is plenty, and it keeps the boss filter from adding a query to
+#: every filtered request.
+_NPC_CACHE_TTL = 300
+_npc_cache: dict = {"rows": None, "at": 0.0}
+_SLUG_SHAPE = __import__("re").compile(r"^[a-z0-9_]+$")
+
+
+def _boss_metric_of(npc_name: str):
+    """NPC display name -> WOM boss slug, or None.
+
+    Lazily imports ``utils.wiseoldman``: that module pulls in the WOM client,
+    Redis and the shared DB engine at import time, none of which the data API
+    needs on its import path. Indirected through a module function so tests
+    can stub it.
+
+    ``db`` is imported first on purpose. ``db.ops`` imports ``utils.wiseoldman``
+    and ``utils.wiseoldman`` imports ``db``; every long-running process enters
+    that cycle from the ``db`` side and it resolves, but entering from the
+    ``utils.wiseoldman`` side raises ImportError on a partially initialised
+    module. The auth hook already imports ``db`` before any route runs, so in
+    production this line is a no-op; it exists so scripts and tests that call
+    the resolver cold get the same order.
+    """
+    import db  # noqa: F401  (see docstring: must precede utils.wiseoldman)
+    from utils.wiseoldman import wom_boss_metric
+
+    return wom_boss_metric(npc_name)
+
+
+def _npc_rows(session) -> list:
+    import time
+
+    now = time.monotonic()
+    if _npc_cache["rows"] is None or now - _npc_cache["at"] > _NPC_CACHE_TTL:
+        rows = session.execute(text("SELECT npc_id, npc_name FROM npc_list")).fetchall()
+        _npc_cache["rows"] = [(int(r[0]), r[1] or "") for r in rows]
+        _npc_cache["at"] = now
+    return _npc_cache["rows"]
+
+
+def resolve_npc_ids(session, raw: str) -> list[int]:
+    """A boss name or WOM boss slug -> every matching ``npc_list`` id, sorted.
+
+    Two passes, unioned. Name equality goes through ``npc_match_key`` — the
+    one spelling-insensitive identity rule in this codebase — so "Barrows",
+    "barrows", "The Whisperer"/"Whisperer" and the Hunllef/Gauntlet aliases
+    all land. A token shaped like a slug (``barrows_chests``, ``sol_heredit``)
+    is also compared with each row's own WOM slug, which is how a caller
+    holding a Wise Old Man competition metric asks for the drops without
+    knowing DropTracker's spelling. A slug can legitimately hit several rows
+    (Sol Heredit and Fortis Colosseum both score under ``sol_heredit``), and
+    a base raid slug never picks up its harder modes (they have their own).
+    """
+    from utils.npc_names import npc_match_key
+
+    token = (raw or "").strip()
+    if not token:
+        return []
+    wanted_key = npc_match_key(token)
+    wanted_slug = token.lower() if _SLUG_SHAPE.match(token.lower()) else None
+
+    ids: set = set()
+    for npc_id, npc_name in _npc_rows(session):
+        if wanted_key and npc_match_key(npc_name) == wanted_key:
+            ids.add(npc_id)
+        elif wanted_slug is not None and _boss_metric_of(npc_name) == wanted_slug:
+            ids.add(npc_id)
+    return sorted(ids)
+
+
 def _drops_window_hours(ctx) -> float:
     window = ctx.get("drops_window")
     if not window:
@@ -503,8 +574,15 @@ def _load_drops(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     since, until = ctx["drops_window"]
     per_player = int(ctx.get("drops_per_player") or DROPS_DEFAULT_PER_PLAYER)
     with_ids = "drop_ids" in (ctx.get("sections") or ())
+    npc_ids = [int(i) for i in (ctx.get("drops_npc_ids") or [])]
 
-    rows = session.execute(text(f"""
+    # The boss filter sits INSIDE the ranked subquery so the per-player cap
+    # counts only that boss's drops — a competition board wants "your 200
+    # most recent Barrows drops", not "your 200 most recent drops, some of
+    # which are Barrows". Same index either way: npc_id is filtered on rows
+    # the composite index already narrowed to this player and window.
+    npc_clause = "AND d.npc_id IN :npc_ids" if npc_ids else ""
+    statement = text(f"""
         SELECT player_id, drop_id, item_id, item_name, npc_id, npc_name,
                quantity, value, date_added
         FROM (
@@ -520,12 +598,18 @@ def _load_drops(session, player_ids: List[int], ctx) -> Dict[int, dict]:
             WHERE d.player_id IN :ids
               AND d.date_added >= :start AND d.date_added < :end
               AND d.hidden = 0
+              {npc_clause}
         ) ranked
         WHERE rn <= :lim
         ORDER BY player_id, date_added DESC, drop_id DESC
-    """).bindparams(ids=tuple(player_ids), start=since, end=until, lim=per_player))
+    """).bindparams(ids=tuple(player_ids), start=since, end=until, lim=per_player)
+    if npc_ids:
+        statement = statement.bindparams(npc_ids=tuple(npc_ids))
+    rows = session.execute(statement)
 
     window = {"from": _unix(since), "to": _unix(until)}
+    if npc_ids:
+        window["npc_ids"] = npc_ids
     out: Dict[int, dict] = {
         pid: {**window, "count": 0, "truncated": False, "oldest": None, "drops": []}
         for pid in player_ids
@@ -638,8 +722,10 @@ _SECTIONS = (
             "Individual drops, newest first, inside a bounded window "
             "(?since / ?until as unix seconds, default the last 24 hours, "
             "maximum 7 days; ?max_drops rows per player, default 50, maximum "
-            "200). Each carries received_at as unix seconds UTC. Priced per "
-            "24 hours of window. Not part of 'all'.",
+            "200). Each carries received_at as unix seconds UTC. Optional ?npc= "
+            "(a boss name or Wise Old Man boss slug) restricts the feed to that "
+            "boss, and the per-player cap then counts only its drops. Priced "
+            "per 24 hours of window. Not part of 'all'.",
             in_all=False, scale=_drops_cost_scale),
     Section("drop_ids", 0, _load_drop_ids,
             "Modifier: adds drop_id to every entry of 'drops'. Free, emits "

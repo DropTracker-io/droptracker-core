@@ -186,6 +186,7 @@ A page of the group's roster, each player carrying the same sections.
 | `since` | `until` − 24h | `drops` only: window start, unix seconds UTC. Clamped to at most 7 days before `until` |
 | `until` | now | `drops` only: window end, unix seconds UTC. Clamped to now |
 | `max_drops` | 50 | `drops` only: rows per player, newest first, max 200 |
+| `npc` | — | `drops` only: a boss name or Wise Old Man boss slug (`barrows_chests`). The feed and the per-player cap are restricted to that boss. Unknown name → `400 malformed_parameter` |
 
 Pagination is by cursor, not offset:
 
@@ -265,6 +266,25 @@ of the last row returned, so a poller continues with `until=<oldest>`.
 `drop_id` is the stable identity of a drop — include `drop_ids` when you need
 exactly-once processing (a points bot, a mirror), and leave it out when you
 only want to know what dropped.
+
+**One boss only.** `npc=` restricts the feed to a boss, by name or by Wise
+Old Man slug: `Barrows`, `barrows`, `The Whisperer`/`Whisperer`, `Crystalline
+Hunllef` (an alias of The Gauntlet) and `barrows_chests` all resolve. Spelling,
+case, articles and punctuation are ignored, and a slug that covers several
+DropTracker entries returns all of them (`sol_heredit` is both *Sol Heredit*
+and *Fortis Colosseum*); a base raid never picks up its harder modes. The
+resolved ids are echoed as `npc_ids` in each player's feed, and `max_drops`
+then counts only that boss's drops — "your 200 most recent Barrows drops",
+not "your 200 most recent drops, some of which are Barrows". A name
+DropTracker does not know is a `400` naming it, charged nothing.
+
+The Boss-of-the-Week query, for example — total GP per member at one boss
+over a competition window:
+
+```
+GET /v2/groups/299/players?include=drops,drop_ids&npc=barrows_chests
+    &since=<startsAt>&until=<endsAt>&max_drops=200&limit=100
+```
 
 For a poller: ask for `drops,drop_ids` with `since` a few minutes before
 your last successful poll and dedupe on `drop_id`. A 100-member roster

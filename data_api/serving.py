@@ -189,6 +189,15 @@ async def serve(endpoint: str, resolve: Callable, build: Callable,
             return error
         ctx["drops_window"] = (since, until)
         ctx["drops_per_player"] = per_player
+        raw_npc = request.args.get("npc")
+        if raw_npc is not None:
+            if not raw_npc.strip():
+                return _json({
+                    "error": "malformed_parameter",
+                    "detail": "'npc' must name a boss or a Wise Old Man boss slug "
+                              "(e.g. barrows_chests).",
+                }, 400)
+            ctx["drops_npc"] = raw_npc.strip()
 
     def _work():
         session = SessionLocal()
@@ -196,6 +205,13 @@ async def serve(endpoint: str, resolve: Callable, build: Callable,
             player_ids = resolve(session)
             if player_ids is None:
                 return None, None
+            if ctx.get("drops_npc"):
+                # Resolved before pricing: a name DropTracker does not know is
+                # the caller's mistake, and it must not cost them budget.
+                npc_ids = sect.resolve_npc_ids(session, ctx["drops_npc"])
+                if not npc_ids:
+                    return "bad_npc", None
+                ctx["drops_npc_ids"] = npc_ids
             # Price only once the page size is known — cost is per player.
             decision = check_and_charge(key["key_id"], key["limits"],
                                         sect.cost_of(requested, len(player_ids), ctx))
@@ -230,6 +246,14 @@ async def serve(endpoint: str, resolve: Callable, build: Callable,
         if not_found_detail:
             body["detail"] = not_found_detail
         return _json(body, 404)
+
+    if outcome == "bad_npc":
+        usage.record(key["key_id"], endpoint, 400, duration, 0)
+        return _json({
+            "error": "malformed_parameter",
+            "detail": f"No boss called '{ctx['drops_npc']}' is known to DropTracker. "
+                      "Pass a boss name or a Wise Old Man boss slug (e.g. barrows_chests).",
+        }, 400)
 
     if outcome == "limited":
         decision = payload
