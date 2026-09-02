@@ -16,11 +16,15 @@ swallowed, override-priced items were stored at whatever
   silently degraded from the override's rancour-minus-torture math to the
   raw client value, ~32M instead of ~110M.
 
-All three are the same bug and all three are in scope, so this script does not
-try to detect a damaged value: it re-values **every** override-item drop in
-the window through the real ``get_true_item_value``, which is exactly what
-intake would have stored. That is idempotent — re-running it just re-applies
-current component prices.
+The first two are unambiguous. The third is not: for most tradeable override
+items the client value lands within a few percent of the override answer, and
+rewriting those at today's component prices would be churn — some of it
+downward, on values that are already right. So only client values that are
+*materially* off are repaired (``_damage_reason``); in the 2026-08-28 window
+that separates cleanly, near misses at 1.4-3.4% and real damage at 25-95%.
+
+Re-running is idempotent: a repaired row is then within tolerance and is left
+alone on the next pass.
 
 Not in scope: non-override drops. Those fell back to the client-reported
 value, which for a tradeable item is the item's real GE price, so they are
@@ -108,6 +112,40 @@ def _partition_of(when: datetime) -> int:
     return int(when.strftime("%Y%m"))
 
 
+def _fallback_values() -> dict:
+    """item_id → the override's flat fallback_value (the outage's other floor)."""
+    from utils import value_overrides
+
+    return {
+        int(o["item_id"]): int(o.get("fallback_value") or 0)
+        for o in value_overrides.all_active()
+        if o.get("item_id") is not None
+    }
+
+
+def _damage_reason(stored: int, computed: int, fallback: int, tolerance: float):
+    """Why this drop's value is the outage's and not the override's — or None.
+
+    A *tradeable* override item degraded to the client-reported value, which
+    is usually close to the override answer and sometimes wildly under it
+    (a Bludgeon spine's own GE price is ~1.8M; the override says 1/3 of an
+    assembled bludgeon, ~6.0M). Only the wild ones are damage worth repairing:
+    rewriting a value that is already within a few percent would be churn, and
+    at today's component prices some of it would move a correct value *down*.
+
+    The measured gap in the 2026-08-28 window is clean — near misses ran
+    1.4–3.4% off and real damage 25–95% — so the default tolerance sits in the
+    middle of it rather than on either population.
+    """
+    if stored == 0:
+        return "zero"
+    if fallback and stored == fallback:
+        return "flat fallback"
+    if computed and abs(stored - computed) / computed > tolerance:
+        return "client value"
+    return None
+
+
 async def _recompute_unit_values(item_ids, session):
     """item_id → freshly computed unit value, via the real intake valuation.
 
@@ -115,7 +153,7 @@ async def _recompute_unit_values(item_ids, session):
     caller can refuse to write rather than re-storing the outage's zeros.
     """
     from db import ItemList
-    from utils.ge_value import get_true_item_value
+    from utils.ge_value import close_aiohttp_sessions, get_true_item_value
 
     names = {
         int(iid): name
@@ -134,6 +172,9 @@ async def _recompute_unit_values(item_ids, session):
         # client-reported number laundered back into the DB.
         computed = int(await get_true_item_value(name, 0, item_id=item_id))
         values[item_id] = computed or None
+    # The loop ends with this script's event loop, so hand the pooled
+    # connections back rather than leaving aiohttp to complain about them.
+    await close_aiohttp_sessions()
     return names, values
 
 
@@ -141,6 +182,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--since", default=DEFAULT_SINCE, help="window start (UTC)")
     parser.add_argument("--commit", action="store_true", help="write (default: dry run)")
+    parser.add_argument(
+        "--drift-tolerance", type=float, default=0.10,
+        help="how far a client-reported value may sit from the override before "
+             "it counts as damage (default 0.10; see _damage_reason)",
+    )
     args = parser.parse_args()
 
     from db import Session
@@ -178,12 +224,21 @@ def main() -> int:
             print("    'https://prices.runescape.wiki/api/v1/osrs/latest?id=29796'")
             return 1
 
-        changed = [r for r in rows if int(r.value) != values[int(r.item_id)]]
+        fallbacks = _fallback_values()
+        changed, near_misses = [], []
+        for r in rows:
+            reason = _damage_reason(
+                int(r.value), values[int(r.item_id)],
+                fallbacks.get(int(r.item_id), 0), args.drift_tolerance,
+            )
+            (changed if reason else near_misses).append(r)
 
         print(f"Window:   {args.since} → now")
         print(f"Override-item drops in window: {len(rows)}")
-        print(f"Would change: {len(changed)} drops "
-              f"({len({r.player_id for r in changed})} players)\n")
+        print(f"Damaged:  {len(changed)} drops "
+              f"({len({r.player_id for r in changed})} players)")
+        print(f"Left alone: {len(near_misses)} drops whose client-reported value is "
+              f"within {args.drift_tolerance:.0%} of the override\n")
 
         by_item = defaultdict(list)
         for r in changed:
