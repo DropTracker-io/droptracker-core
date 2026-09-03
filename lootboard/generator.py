@@ -1014,6 +1014,30 @@ def _ensure_public_dir(path: str) -> None:
         cur = os.path.dirname(cur)
 
 
+def _save_public_image(image, file_path: str, *args, **kwargs) -> str:
+    """image.save(file_path) leaving the result writable by every service account.
+
+    Companion to _ensure_public_dir: making the *directory* 0777 lets either
+    account create a file there, but not overwrite one the other account already
+    created — a 0644 PNG written by the bots (as `user`) is unwritable by the web
+    API's timeframe generator (as `debian`), which failed with EPERM on the
+    second render of any given range. So drop an existing file we can't write
+    (permitted: the 0777 parent has no sticky bit) and chmod what we write to
+    0666 so the next render from either account can replace it.
+    """
+    if os.path.exists(file_path) and not os.access(file_path, os.W_OK):
+        try:
+            os.unlink(file_path)
+        except OSError:
+            pass  # let image.save raise the real error below
+    image.save(file_path, *args, **kwargs)
+    try:
+        os.chmod(file_path, 0o666)
+    except OSError:
+        pass  # not the owner — already group/other-writable from whoever wrote it
+    return file_path
+
+
 def save_image(image, server_id, partition):
     """
     Save the generated lootboard image
@@ -1061,7 +1085,7 @@ def save_image(image, server_id, partition):
             except (ValueError, IndexError):
                 # Fallback: just save with the raw partition string
                 file_path = f"{base_path}/timeframe_{partition_str.replace('-', '_')}.png"
-                image.save(file_path)
+                _save_public_image(image, file_path)
                 return file_path
             
             # Create timeframes directory
@@ -1074,7 +1098,7 @@ def save_image(image, server_id, partition):
             end_str = f"{end_year}-{end_month:02d}-{end_day:02d}_{end_hour:02d}{end_min:02d}"
             file_name = f"{start_str}_to_{end_str}{npc_suffix}.png"
             file_path = f"{timeframe_dir}/{file_name}"
-            image.save(file_path)
+            _save_public_image(image, file_path)
             
             print(f"Saved timeframe lootboard to: {file_path}")
             return file_path
@@ -1089,7 +1113,7 @@ def save_image(image, server_id, partition):
             except ValueError:
                 # Fallback
                 file_path = f"{base_path}/daily_{partition_str.replace('-', '')}.png"
-                image.save(file_path)
+                _save_public_image(image, file_path)
                 return file_path
             
             # Get month name (e.g., "August")
@@ -1101,24 +1125,24 @@ def save_image(image, server_id, partition):
             
             # Save as {day}.png in the month directory
             file_path = f"{month_dir}/{day}.png"
-            image.save(file_path)
+            _save_public_image(image, file_path)
             
             # Also save with year for uniqueness if needed (e.g., {year}_{day}.png)
             year_file_path = f"{month_dir}/{year}_{day}.png"
-            image.save(year_file_path)
+            _save_public_image(image, year_file_path)
             
             # Check if this is today's date
             current_date = datetime.now().strftime('%Y-%m-%d')
             if partition_str == current_date:
                 # Also save as the default lootboard.png if it's today
-                image.save(f"{base_path}/lootboard.png")
+                _save_public_image(image, f"{base_path}/lootboard.png")
             
             return file_path
         else:
             # Unknown format with dash - save with sanitized filename
             safe_partition = partition_str.replace('-', '_').replace(':', '_')
             file_path = f"{base_path}/custom_{safe_partition}.png"
-            image.save(file_path)
+            _save_public_image(image, file_path)
             return file_path
     else:
         # For monthly partitions (YYYYMM format) or other numeric formats
@@ -1131,7 +1155,7 @@ def save_image(image, server_id, partition):
         except (ValueError, IndexError):
             # Fallback for unrecognized format
             file_path = f"{base_path}/board_{partition_str}.png"
-            image.save(file_path)
+            _save_public_image(image, file_path)
             return file_path
         
         # Get month name
@@ -1143,11 +1167,11 @@ def save_image(image, server_id, partition):
         
         # Save as monthly summary (e.g., "monthly.png" or "{year}_monthly.png")
         file_path = f"{month_dir}/{year}_monthly.png"
-        image.save(file_path)
+        _save_public_image(image, file_path)
         
         # Also save as just "monthly.png" for the current view
         monthly_path = f"{month_dir}/monthly.png"
-        image.save(monthly_path)
+        _save_public_image(image, monthly_path)
         
         # Check if this is the current month
         current_date = datetime.now()
@@ -1156,8 +1180,8 @@ def save_image(image, server_id, partition):
             if int(partition_str) == current_month_partition:
                 # Save as the default lootboard.png
                 current_date_str = current_date.strftime('%d-%m-%Y')
-                image.save(f"{base_path}/lootboard.png")
-                image.save(f"{base_path}/{current_date_str}.png")
+                _save_public_image(image, f"{base_path}/lootboard.png")
+                _save_public_image(image, f"{base_path}/{current_date_str}.png")
         except ValueError:
             pass
         

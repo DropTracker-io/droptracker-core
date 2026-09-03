@@ -343,8 +343,8 @@ async def render_team_board(session, event, team, *, force: bool = False,
         BoardFilter, FlexibleBoardGenerator, TimeGranularity,
     )
     from lootboard.generator import (
-        _ensure_public_dir, config_int, config_truthy, draw_drops_on_image,
-        draw_leaderboard, draw_recent_drops,
+        _ensure_public_dir, _save_public_image, config_int, config_truthy,
+        draw_drops_on_image, draw_leaderboard, draw_recent_drops,
     )
 
     group_id = board_group_id(event, team)
@@ -400,13 +400,9 @@ async def render_team_board(session, event, team, *, force: bool = False,
         session_to_use=session)
 
     _ensure_public_dir(team_board_dir(group_id, event.id, team.id))
-    bg_img.save(path)
-    try:
-        # Both service accounts regenerate into this tree; a 0644 file written
-        # by one is unwritable by the other (the dirs are already 0777).
-        os.chmod(path, 0o666)
-    except OSError:
-        pass
+    # Both service accounts regenerate into this tree; _save_public_image
+    # replaces a 0644 file written by the other one and leaves ours 0666.
+    _save_public_image(bg_img, path)
     return path
 
 
