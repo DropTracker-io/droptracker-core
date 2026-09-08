@@ -200,6 +200,184 @@ class TestAccountChoice:
             delivery.pick_best_account(self.ACCOUNTS)
         ]
 
+    def test_several_named_accounts_send_biggest_first(self):
+        # Ranked order, whichever way the list was written.
+        assert delivery.select_recap_accounts("1,3", self.ACCOUNTS) == [3, 1]
+        assert delivery.select_recap_accounts("3,1", self.ACCOUNTS) == [3, 1]
+        assert delivery.select_recap_accounts("3, 1", self.ACCOUNTS) == [3, 1]
+
+    def test_a_named_list_skips_the_inactive_ones(self):
+        assert delivery.select_recap_accounts("1,99", self.ACCOUNTS) == [1]
+        assert delivery.select_recap_accounts("98,99", self.ACCOUNTS) == []
+
+    def test_the_free_first_card_from_a_list_is_their_biggest_pick(self):
+        assert delivery.select_recap_accounts(
+            "1,3", self.ACCOUNTS, allow_multi=False
+        ) == [3]
+
+    def test_a_list_is_capped_like_all(self):
+        many = [(i, 1000 - i) for i in range(1, 30)]
+        chosen = delivery.select_recap_accounts(
+            ",".join(str(i) for i in range(1, 30)), many
+        )
+        assert chosen == list(range(1, delivery.MAX_ACCOUNT_CARDS + 1))
+
+    def test_junk_inside_a_list_is_ignored(self):
+        assert delivery.select_recap_accounts("1,banana", self.ACCOUNTS) == [1]
+        assert delivery.select_recap_accounts("1,1", self.ACCOUNTS) == [1]
+
+
+class TestPreferenceFormat:
+    """`recap_accounts` on disk: parse and canonical form. The settings page
+    and the Discord picker both write it, so one rule has to serve both."""
+
+    def test_blank_is_the_default(self):
+        assert delivery.parse_account_preference("") == (delivery.MODE_BEST, [])
+        assert delivery.parse_account_preference(None) == (delivery.MODE_BEST, [])
+        assert delivery.parse_account_preference("  ") == (delivery.MODE_BEST, [])
+
+    def test_all_in_any_case(self):
+        assert delivery.parse_account_preference("all") == (delivery.MODE_ALL, [])
+        assert delivery.parse_account_preference(" ALL ") == (delivery.MODE_ALL, [])
+
+    def test_one_id_and_many(self):
+        assert delivery.parse_account_preference("12") == (delivery.MODE_SOME, [12])
+        assert delivery.parse_account_preference("12,34") == (delivery.MODE_SOME, [12, 34])
+        assert delivery.parse_account_preference("34, 12") == (delivery.MODE_SOME, [34, 12])
+
+    def test_duplicates_and_junk_are_dropped(self):
+        assert delivery.parse_account_preference("12,12,x,34") == (delivery.MODE_SOME, [12, 34])
+
+    def test_nothing_usable_reads_as_the_default(self):
+        # A value we don't understand is a bug upstream, not a reason to send
+        # nothing.
+        assert delivery.parse_account_preference("banana") == (delivery.MODE_BEST, [])
+        assert delivery.parse_account_preference(",,") == (delivery.MODE_BEST, [])
+
+    def test_canonical_form_is_sorted_and_deduplicated(self):
+        assert delivery.format_account_preference(delivery.MODE_SOME, [34, 12, 34]) == "12,34"
+
+    def test_a_single_id_stores_bare(self):
+        # Exactly what the setting stored before lists existed.
+        assert delivery.format_account_preference(delivery.MODE_SOME, [12]) == "12"
+
+    def test_the_automatic_modes(self):
+        assert delivery.format_account_preference(delivery.MODE_BEST) == ""
+        assert delivery.format_account_preference(delivery.MODE_ALL) == "all"
+        # No ids is the default, not an empty list.
+        assert delivery.format_account_preference(delivery.MODE_SOME, []) == ""
+
+    def test_round_trip(self):
+        for value in ("", "all", "12", "12,34"):
+            mode, ids = delivery.parse_account_preference(value)
+            assert delivery.format_account_preference(mode, ids) == value
+        # Unordered input canonicalises.
+        mode, ids = delivery.parse_account_preference("34,12")
+        assert delivery.format_account_preference(mode, ids) == "12,34"
+
+
+class TestAccountPicker:
+    """The pure half of the "Choose accounts" select on the recap DM."""
+
+    PLAYERS = [(1, "Buzzyn", False), (2, "Buzzyn alt", False), (3, "Secret", True)]
+
+    def test_automatic_choices_come_first(self):
+        options = delivery.account_picker_options(self.PLAYERS, "")
+        assert [o["value"] for o in options[:2]] == [delivery.PICK_BEST, delivery.PICK_ALL]
+        assert [o["value"] for o in options[2:]] == ["1", "2", "3"]
+
+    def test_the_default_shows_as_a_ticked_option(self):
+        # Not an absence of ticks: the default is a thing you can see selected.
+        options = delivery.account_picker_options(self.PLAYERS, "")
+        assert [o["value"] for o in options if o["default"]] == [delivery.PICK_BEST]
+
+    def test_all_ticks_only_all(self):
+        options = delivery.account_picker_options(self.PLAYERS, "all")
+        assert [o["value"] for o in options if o["default"]] == [delivery.PICK_ALL]
+
+    def test_named_accounts_are_ticked(self):
+        options = delivery.account_picker_options(self.PLAYERS, "2,1")
+        assert [o["value"] for o in options if o["default"]] == ["1", "2"]
+
+    def test_hidden_accounts_say_so(self):
+        options = delivery.account_picker_options(self.PLAYERS, "")
+        by_value = {o["value"]: o for o in options}
+        assert "Hidden" in by_value["3"]["description"]
+        assert by_value["1"]["description"] is None
+
+    def test_the_option_count_stays_inside_discords_limit(self):
+        many = [(i, f"Alt {i}", False) for i in range(1, 60)]
+        assert len(delivery.account_picker_options(many, "")) <= 25
+
+    def test_nothing_ticked_is_the_opt_out(self):
+        assert delivery.preference_from_selection([], [1, 2]) is None
+
+    def test_all_wins_over_everything(self):
+        assert delivery.preference_from_selection(["1", "all", "best"], [1, 2]) == "all"
+
+    def test_named_accounts_win_over_the_default(self):
+        # Someone who ticks an account and leaves the default ticked meant the
+        # account.
+        assert delivery.preference_from_selection(["best", "2", "1"], [1, 2]) == "1,2"
+
+    def test_the_default_alone_is_the_default(self):
+        assert delivery.preference_from_selection(["best"], [1, 2]) == ""
+
+    def test_accounts_that_are_not_theirs_are_ignored(self):
+        assert delivery.preference_from_selection(["1", "99"], [1, 2]) == "1"
+
+    def test_a_submission_of_only_foreign_accounts_is_refused_not_an_opt_out(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            delivery.preference_from_selection(["99"], [1, 2])
+
+    def test_selection_matches_the_stored_form(self):
+        # What the picker writes is what the settings page would write for the
+        # same set, so either surface can tell "changed" from "same".
+        chosen = delivery.preference_from_selection(["2", "1"], [1, 2])
+        mode, ids = delivery.parse_account_preference(chosen)
+        assert delivery.format_account_preference(mode, ids) == chosen == "1,2"
+
+    def test_phrase_names_the_accounts(self):
+        assert delivery.preference_phrase("1,2", self.PLAYERS) == "**Buzzyn** and **Buzzyn alt**"
+        assert delivery.preference_phrase("1,2,3", self.PLAYERS) == (
+            "**Buzzyn**, **Buzzyn alt** and **Secret**"
+        )
+        assert delivery.preference_phrase("1", self.PLAYERS) == "**Buzzyn**"
+
+    def test_phrase_for_the_automatic_modes(self):
+        assert "biggest month" in delivery.preference_phrase("", self.PLAYERS)
+        assert "every account" in delivery.preference_phrase("all", self.PLAYERS)
+
+    def test_phrase_survives_an_unlinked_account(self):
+        assert delivery.preference_phrase("1,99", self.PLAYERS) == "**Buzzyn** and **account #99**"
+
+    def test_summary_states_the_new_choice(self):
+        text = delivery.preference_summary("1,2", self.PLAYERS, opted_in=True)
+        assert text.startswith("✅ **Recap preferences updated**")
+        assert "**Buzzyn** and **Buzzyn alt**" in text
+        assert "1st of every month" in text
+        assert "Choose accounts" in text
+
+    def test_summary_warns_about_a_hidden_pick(self):
+        text = delivery.preference_summary("1,3", self.PLAYERS, opted_in=True)
+        assert "**Secret** is hidden" in text
+        assert "hidden" not in delivery.preference_summary("1,2", self.PLAYERS, opted_in=True)
+
+    def test_summary_for_the_opt_out(self):
+        text = delivery.preference_summary("1,2", self.PLAYERS, opted_in=False)
+        assert text.startswith("🔕")
+        assert "off" in text
+        # Their picks are kept for later, so the off message never lists them.
+        assert "Buzzyn" not in text
+
+    def test_summary_for_the_automatic_modes(self):
+        assert "every account you play" in delivery.preference_summary(
+            "all", self.PLAYERS, opted_in=True
+        )
+        assert "biggest month" in delivery.preference_summary("", self.PLAYERS, opted_in=True)
+
 
 class TestEntitlement:
     def test_first_card_is_unsolicited(self):
@@ -269,7 +447,31 @@ class TestMessages:
             self._target(opted_in=True, card_index=2, card_total=3), {}, None
         )
         assert "Account 2 of 3" in msg["content"]
-        assert "settings" in msg["content"]
+        assert "Choose accounts" in msg["content"]
+
+    def test_every_card_offers_the_account_picker(self):
+        # The message is where the account question is prompted, so the choice
+        # is made there too — on the free card and on the ones they asked for.
+        for opted_in in (True, False):
+            msg = delivery.build_dm_message(self._target(opted_in=opted_in), {}, None)
+            buttons = msg["components"][0]["components"]
+            picker = [c for c in buttons if c.get("label") == "Choose accounts"]
+            assert len(picker) == 1
+            # The card's own account rides in the id, so the picker can say
+            # what "the biggest month" resolved to this month.
+            assert picker[0]["custom_id"] == "recap_accounts:pick:5"
+            # Discord allows five buttons per row; the link button stays last.
+            assert len(buttons) <= 5
+            assert buttons[-1]["style"] == 5
+
+    def test_first_card_points_at_the_picker(self):
+        content = delivery.build_dm_message(self._target(opted_in=False), {}, None)["content"]
+        assert "Choose accounts" in content
+
+    def test_opt_in_ids_are_the_ones_the_handler_listens_for(self):
+        msg = delivery.build_dm_message(self._target(opted_in=False), {}, None)
+        ids = {c.get("custom_id") for c in msg["components"][0]["components"]}
+        assert delivery.OPT_IN_ID in ids and delivery.OPT_OUT_ID in ids
 
     def test_image_is_attached_when_rendered(self):
         msg = delivery.build_dm_message(self._target(), {}, "https://img/card.png")

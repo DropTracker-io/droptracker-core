@@ -12,9 +12,11 @@ the same branch on their first eligible month that everyone hit on the very
 first run, so "new players get a free one" is not a special case.
 
 *Which* of a multi-account user's accounts that card covers is theirs to
-choose on the settings page (``recap_accounts``): the biggest month by default,
-one named account, or a card each. The fan-out is the only part gated on the
-opt-in — the free first card is always one card, whichever account they named.
+choose (``recap_accounts``): the biggest month by default, one or more named
+accounts, or a card each. The choice is made on the settings page or with the
+**Choose accounts** button on the DM itself (:mod:`services.recap_buttons`).
+The fan-out is the only part gated on the opt-in — the free first card is
+always one card, whichever accounts they named.
 
 Clans work differently on purpose. Their first post is authorised by *seeding*
 ``recaps_enabled`` on a chosen cohort rather than by a first-free branch here, so
@@ -111,6 +113,32 @@ USER_CFG_DM_ISSUE = "dm_delivery_issue"
 # active account; anything else is a single player id they picked on the site.
 USER_CFG_ACCOUNTS = "recap_accounts"
 ACCOUNTS_ALL = "all"
+# The three shapes that value takes once parsed (see parse_account_preference):
+# "" is MODE_BEST, "all" is MODE_ALL, and "12" or "12,34" is MODE_SOME — the
+# ids of the accounts they picked.
+MODE_BEST = "best"
+MODE_ALL = "all"
+MODE_SOME = "some"
+
+# Component ids on the DM. Answered by services/recap_buttons.py, which keeps
+# its own copies (it cannot be imported here — it pulls in the Discord client)
+# and pins them equal in tests.
+OPT_IN_ID = "recap_optin:on"
+OPT_OUT_ID = "recap_optin:off"
+# `recap_accounts:pick:{player_id}` — the card's own account rides along so
+# the picker can say which account the default resolved to this month.
+ACCOUNT_PICK_PREFIX = "recap_accounts:pick:"
+ACCOUNT_SET_ID = "recap_accounts:set"
+CHOOSE_ACCOUNTS_LABEL = "Choose accounts"
+
+# Values in the account picker that are not player ids: the two automatic
+# choices, offered ahead of the named accounts.
+PICK_BEST = "best"
+PICK_ALL = "all"
+# Discord allows 25 options in a select; two are the automatic choices. Nobody
+# has anywhere near this many linked accounts (the record is five), so the cap
+# is about staying inside Discord's limit, not about trimming anyone's list.
+MAX_PICKER_ACCOUNTS = 23
 
 # A ceiling on the fan-out, not a preference. "All my accounts" is a reasonable
 # thing to ask for with three; with thirty it is a stream of DMs against one
@@ -234,6 +262,189 @@ def user_is_entitled(*, opted_in: bool, had_prior: bool) -> bool:
     return opted_in or not had_prior
 
 
+def parse_account_preference(value: Optional[str]) -> tuple[str, list[int]]:
+    """The stored ``recap_accounts`` value as ``(mode, ids)``.
+
+    * empty/absent — ``(MODE_BEST, [])``: their biggest month, which is what
+      everyone got before the setting existed;
+    * ``"all"`` — ``(MODE_ALL, [])``: one card per active account;
+    * ``"12"`` or ``"12,34"`` — ``(MODE_SOME, [12, 34])``: those accounts, in
+      the order written, duplicates dropped.
+
+    Tokens that are not ids are skipped, and a value with no usable id at all
+    reads as the default. A value we don't understand is a bug somewhere
+    upstream, not a reason to send nothing.
+    """
+    raw = (value or "").strip().lower()
+    if not raw:
+        return MODE_BEST, []
+    if raw == ACCOUNTS_ALL:
+        return MODE_ALL, []
+    ids: list[int] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token.isdigit():
+            continue
+        player_id = int(token)
+        if player_id not in ids:
+            ids.append(player_id)
+    return (MODE_SOME, ids) if ids else (MODE_BEST, [])
+
+
+def format_account_preference(mode: str, ids: Iterable[int] = ()) -> str:
+    """The canonical stored form of a choice — the inverse of
+    :func:`parse_account_preference`.
+
+    Ids are sorted and deduplicated so the same set always stores as the same
+    string, which is what lets a fresh selection be compared with the stored
+    one to tell "changed" from "the same again". A single id stores as the
+    bare id, exactly as the setting did before lists existed; no ids at all
+    is the default, not an empty list.
+    """
+    if mode == MODE_ALL:
+        return ACCOUNTS_ALL
+    if mode == MODE_SOME:
+        return ",".join(str(pid) for pid in sorted({int(pid) for pid in ids}))
+    return ""
+
+
+def account_picker_options(
+    players: Iterable[tuple[int, str, bool]], preference: Optional[str]
+) -> list[dict]:
+    """Options for the "Choose accounts" select, with the current choice ticked.
+
+    ``players`` is ``(player_id, player_name, hidden)`` for every account the
+    user has linked — not only the ones active last month, because the choice
+    is about the months to come. The two automatic choices come first so the
+    default is a thing you can see is selected, not an absence of ticks.
+    Returned as plain dicts: this half is pure so it can be tested without a
+    Discord client, and :mod:`services.recap_buttons` turns them into
+    components.
+    """
+    mode, ids = parse_account_preference(preference)
+    out = [
+        {
+            "label": "Whichever account had the biggest month",
+            "value": PICK_BEST,
+            "description": "The default — one card, for your busiest account",
+            "default": mode == MODE_BEST,
+        },
+        {
+            "label": "Every account I play",
+            "value": PICK_ALL,
+            "description": "One card per account that tracked something",
+            "default": mode == MODE_ALL,
+        },
+    ]
+    chosen = set(ids)
+    for player_id, name, hidden in list(players)[:MAX_PICKER_ACCOUNTS]:
+        out.append(
+            {
+                "label": (name or f"Player {player_id}")[:100],
+                "value": str(int(player_id)),
+                "description": (
+                    "Hidden — no recap goes out for a hidden account" if hidden else None
+                ),
+                "default": int(player_id) in chosen,
+            }
+        )
+    return out
+
+
+def preference_from_selection(
+    values: Iterable[str], owned_ids: Iterable[int]
+) -> Optional[str]:
+    """What a picker submission means, as the string to store.
+
+    ``None`` is "no accounts": nothing ticked is a request to stop the DMs, not
+    a choice between them, and the caller turns it into the opt-out.
+
+    When several things are ticked: "every account" wins (it is the superset),
+    then any named accounts, then the biggest-month default — someone who ticks
+    one account and leaves the default ticked meant the account. Ids that are
+    not the user's are ignored; the menu never offers them, so one can only
+    arrive by hand-crafting the interaction, and a submission made of nothing
+    else is refused rather than read as an opt-out.
+    """
+    chosen = {str(v).strip().lower() for v in (values or ()) if str(v).strip()}
+    if not chosen:
+        return None
+    if PICK_ALL in chosen:
+        return ACCOUNTS_ALL
+    owned = {int(pid) for pid in owned_ids}
+    ids = [int(v) for v in chosen if v.isdigit() and int(v) in owned]
+    if ids:
+        return format_account_preference(MODE_SOME, ids)
+    if PICK_BEST in chosen:
+        return ""
+    raise ValueError("selection names no account of yours")
+
+
+def _join_names(names: list[str]) -> str:
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def preference_phrase(
+    preference: Optional[str], players: Iterable[tuple[int, str, bool]]
+) -> str:
+    """How a message names the choice: "whichever account had the biggest
+    month", "every account you play", or the accounts by name."""
+    mode, ids = parse_account_preference(preference)
+    if mode == MODE_ALL:
+        return "every account you play"
+    if mode == MODE_SOME:
+        names = {int(pid): name for pid, name, _hidden in players}
+        return _join_names([f"**{names.get(pid) or f'account #{pid}'}**" for pid in ids])
+    return "whichever account had the biggest month"
+
+
+def preference_summary(
+    preference: Optional[str],
+    players: Iterable[tuple[int, str, bool]],
+    *,
+    opted_in: bool,
+) -> str:
+    """The message confirming what the recap DMs will cover from now on.
+
+    Sent as a message of its own, not only as the ephemeral reply, so the
+    record of the choice sits in the DM under the card it was made from.
+    """
+    players = list(players)
+    if not opted_in:
+        return (
+            "🔕 **Monthly recap DMs are off**\n"
+            "You didn't pick any accounts, so we'll stop sending these. Your recaps "
+            "are still on your profile any time, and you can turn them back on with "
+            f"**{CHOOSE_ACCOUNTS_LABEL}** on any recap or in your settings on DropTracker.io."
+        )
+    mode, ids = parse_account_preference(preference)
+    phrase = preference_phrase(preference, players)
+    if mode == MODE_ALL:
+        body = f"You'll get a recap for {phrase} — one card each, on the 1st of every month."
+    elif mode == MODE_SOME:
+        body = f"You'll get a recap for {phrase} on the 1st of every month."
+    else:
+        body = f"You'll get one recap on the 1st of every month, for {phrase}."
+    lines = ["✅ **Recap preferences updated**", body]
+    hidden = [name for pid, name, is_hidden in players if is_hidden and pid in set(ids)]
+    if hidden:
+        # The same warning the settings page shows: a hidden account is
+        # excluded upstream, so naming one is a silent "send me nothing".
+        lines.append(
+            f"-# ⚠️ {_join_names([f'**{n}**' for n in hidden])} "
+            f"{'is' if len(hidden) == 1 else 'are'} hidden, so no recap goes out for "
+            f"{'it' if len(hidden) == 1 else 'them'} until you unhide "
+            f"{'it' if len(hidden) == 1 else 'them'}."
+        )
+    lines.append(
+        f"-# Change this any time with **{CHOOSE_ACCOUNTS_LABEL}** on a recap, "
+        "or in your settings on DropTracker.io."
+    )
+    return "\n".join(lines)
+
+
 def select_recap_accounts(
     preference: Optional[str],
     accounts: Iterable[tuple[int, int]],
@@ -247,18 +458,19 @@ def select_recap_accounts(
     nothing on it, so an inactive account is never a candidate here regardless
     of what was chosen.
 
-    ``preference`` is the stored ``recap_accounts`` value:
+    ``preference`` is the stored ``recap_accounts`` value
+    (:func:`parse_account_preference`):
 
     * empty/absent — their biggest month, which is what everyone got before this
       setting existed and is still what someone who never opens the page gets;
     * ``"all"`` — one card per active account, biggest first;
-    * a player id — that account and no other.
+    * one or more player ids — those accounts and no others, biggest first.
 
-    A named account that was **not** active is answered with no cards rather
+    A named account that was **not** active is answered with no card rather
     than by quietly falling back to their best one. The setting says which
-    account's recap they want; honouring it by sending a different account's is
-    the one outcome they explicitly ruled out, and silence is recoverable from
-    the settings page in a way a wrong card is not.
+    accounts' recaps they want; honouring it by sending a different account's
+    is the one outcome they explicitly ruled out, and silence is recoverable
+    from the settings page in a way a wrong card is not.
 
     ``allow_multi`` is false for the one unsolicited card everyone gets before
     they have opted in: "all my accounts" is a request for more mail, and a
@@ -269,18 +481,18 @@ def select_recap_accounts(
     if not ids:
         return []
 
-    pref = (preference or "").strip().lower()
-    if pref == ACCOUNTS_ALL:
-        return ids[:MAX_ACCOUNT_CARDS] if allow_multi else ids[:1]
-    if pref:
-        try:
-            chosen = int(pref)
-        except ValueError:
-            # A value we don't understand is a bug somewhere upstream, not a
-            # reason to send nothing — fall through to the default.
-            return ids[:1]
-        return [chosen] if chosen in ids else []
-    return ids[:1]
+    mode, wanted = parse_account_preference(preference)
+    if mode == MODE_ALL:
+        chosen = ids
+    elif mode == MODE_SOME:
+        # Ranked order, not the order the list was written in: "biggest first"
+        # is what the send order means whichever way they typed it.
+        chosen = [pid for pid in ids if pid in set(wanted)]
+    else:
+        chosen = ids[:1]
+    if not allow_multi:
+        return chosen[:1]
+    return chosen[:MAX_ACCOUNT_CARDS]
 
 
 # --------------------------------------------------------------------------- #
@@ -1003,13 +1215,23 @@ def _summary_line(payload: dict) -> str:
     return " · ".join(bits)
 
 
+def account_picker_button(player_id: int) -> dict:
+    """The button that opens the account picker (services/recap_buttons.py)."""
+    return {
+        "type": 2, "style": 2, "label": CHOOSE_ACCOUNTS_LABEL,
+        "custom_id": f"{ACCOUNT_PICK_PREFIX}{int(player_id)}",
+    }
+
+
 def build_dm_message(target: UserTarget, payload: dict, image_url: Optional[str]) -> dict:
-    """The player's own card, plus the two buttons that decide whether they get
-    another one.
+    """The player's own card, plus the buttons that decide whether they get
+    another one — and for which accounts.
 
     A first, unsolicited card offers "keep sending these" and "no thanks"; a
     card someone asked for offers only the way out. Nobody should have to
-    re-confirm a choice they already made.
+    re-confirm a choice they already made. Every card carries "Choose
+    accounts": the message is where the choice is prompted, so the choice is
+    made there too, rather than on a settings page most people never open.
     """
     url = player_recap_url(target.player_id, target.period)
     embed = {
@@ -1035,7 +1257,7 @@ def build_dm_message(target: UserTarget, payload: dict, image_url: Optional[str]
 
     if target.opted_in:
         buttons = [
-            {"type": 2, "style": 2, "label": "Stop sending these", "custom_id": "recap_optin:off"},
+            {"type": 2, "style": 2, "label": "Stop sending these", "custom_id": OPT_OUT_ID},
         ]
         # No footnote on a card they asked for: the only thing left to say is how
         # to stop, and the button already says it. The one exception is the
@@ -1045,20 +1267,22 @@ def build_dm_message(target: UserTarget, payload: dict, image_url: Optional[str]
         if target.card_total > 1:
             content += (
                 f"\n-# Account {target.card_index} of {target.card_total} — you asked "
-                "for a card per account, which you can change in your settings on "
-                "DropTracker.io."
+                "for recaps on more than one account. Change which with "
+                f"**{CHOOSE_ACCOUNTS_LABEL}** below."
             )
     else:
         buttons = [
-            {"type": 2, "style": 1, "label": "Keep sending these", "custom_id": "recap_optin:on"},
-            {"type": 2, "style": 2, "label": "No thanks", "custom_id": "recap_optin:off"},
+            {"type": 2, "style": 1, "label": "Keep sending these", "custom_id": OPT_IN_ID},
+            {"type": 2, "style": 2, "label": "No thanks", "custom_id": OPT_OUT_ID},
         ]
         content = (
             f"{greeting}\n"
             "-# P.S. **If you'd like to keep receiving these each month**, press the "
             "button below — otherwise we'll only send this one, and you can view them "
-            "yourself on your profile from here on out!"
+            "yourself on your profile from here on out! Got more than one account? "
+            f"**{CHOOSE_ACCOUNTS_LABEL}** picks which of them get a recap."
         )
+    buttons.append(account_picker_button(target.player_id))
     buttons.append({"type": 2, "style": 5, "label": "View on the site", "url": url})
 
     return {"content": content, "embeds": [embed], "components": [{"type": 1, "components": buttons}]}

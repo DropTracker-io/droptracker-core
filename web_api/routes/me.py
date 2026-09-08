@@ -96,11 +96,14 @@ _DM_DELIVERY_ISSUE_KEY = "dm_delivery_issue"
 # failing a save over.
 _RECAP_TIMEZONE_KEY = "recap_timezone"
 _RECAP_TIMEZONE_MAX_LEN = 64
-# Which linked account the monthly recap DM covers (services/recap_delivery.py
+# Which linked account(s) the monthly recap DM covers (services/recap_delivery.py
 # reads it as `recap_accounts`). Empty means the default — the account with the
-# biggest month — `all` means one card per account, and anything else is a
-# player id the caller owns. Stored as a string because it is a three-way
-# choice, not an id that happens to be optional.
+# biggest month — `all` means one card per account, and anything else is one or
+# more player ids the caller owns, comma-separated ("12", "12,34"). Stored as a
+# string because it is a three-way choice, not an id that happens to be
+# optional. The "Choose accounts" button on the recap DM
+# (services/recap_buttons.py) writes the same value, in the same canonical
+# form (services.recap_delivery.format_account_preference).
 _RECAP_ACCOUNTS_KEY = "recap_accounts"
 _RECAP_ACCOUNTS_ALL = "all"
 
@@ -428,11 +431,14 @@ async def patch_me():
             if not isinstance(value, str):
                 abort_problem(422, "Invalid value", f"'{key}' must be a string.")
             value = value.strip().lower()
-            if value not in ("", _RECAP_ACCOUNTS_ALL) and not value.isdigit():
+            if value not in ("", _RECAP_ACCOUNTS_ALL) and not all(
+                part.strip().isdigit() for part in value.split(",")
+            ):
                 abort_problem(
                     422,
                     "Invalid value",
-                    f"'{key}' must be '', '{_RECAP_ACCOUNTS_ALL}', or a player id.",
+                    f"'{key}' must be '', '{_RECAP_ACCOUNTS_ALL}', or player ids "
+                    "separated by commas.",
                 )
             updates[key] = value
         else:
@@ -454,20 +460,34 @@ async def patch_me():
                     # silently stops rather than an error anyone can see. Refuse
                     # it at the point the choice is made instead.
                     if value not in ("", _RECAP_ACCOUNTS_ALL):
-                        owned = (
-                            s.query(Player.player_id)
-                            .filter(
-                                Player.player_id == int(value),
-                                Player.user_id == user.user_id,
-                            )
-                            .first()
+                        from services.recap_delivery import (
+                            MODE_SOME,
+                            format_account_preference,
+                            parse_account_preference,
                         )
-                        if not owned:
+
+                        _mode, ids = parse_account_preference(value)
+                        owned = set()
+                        if ids:
+                            owned = {
+                                int(pid)
+                                for (pid,) in s.query(Player.player_id)
+                                .filter(
+                                    Player.player_id.in_(ids),
+                                    Player.user_id == user.user_id,
+                                )
+                                .all()
+                            }
+                        if not ids or any(pid not in owned for pid in ids):
                             abort_problem(
                                 422,
                                 "Invalid value",
-                                f"'{key}' must name one of your linked accounts.",
+                                f"'{key}' must name only your linked accounts.",
                             )
+                        # Canonical form (sorted, deduplicated), so this page
+                        # and the Discord picker store the same set the same
+                        # way and either can tell "changed" from "same".
+                        value = format_account_preference(MODE_SOME, ids)
                     _set_config_value(s, user.user_id, key, value)
                 elif (
                     key in _CONFIG_SETTINGS
