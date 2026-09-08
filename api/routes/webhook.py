@@ -18,6 +18,7 @@ from data.submissions.dispatch import (
     normalize_world_type,
 )
 from db import Player, Drop
+from db.ops import resolve_upload_player
 from db.models.video_upload import VideoUpload
 from services.seasonal_state import is_seasonal_active
 from services.submission_status import mark_submission_processed, mark_submission_rejected
@@ -499,10 +500,22 @@ async def _process_webhook_request(req_start):
 
                         if image_file:
                             processed_data["has_image"] = True
-                            player_name = processed_data.get('player', processed_data.get('player_name', None))
-                            player = db_session.query(Player).filter(Player.player_name == player_name).first()
+                            # Account hash first, then display-equivalent name
+                            # (see db.ops.resolve_upload_player). A strict
+                            # ``player_name ==`` lookup here lost the screenshot
+                            # of every player whose stored spelling differs
+                            # from the game's, with no trace in the logs.
+                            player = resolve_upload_player(db_session, processed_data)
                             log_phase("player_lookup")
                             player_wom_id = player.wom_id if player else None
+                            if not player:
+                                logger.log_sync(
+                                    "warning",
+                                    "[Webhook] Screenshot dropped: no player row for "
+                                    f"name={processed_data.get('player') or processed_data.get('player_name')!r} "
+                                    f"acc_hash={processed_data.get('acc_hash')} "
+                                    f"type={processed_data.get('type')}; the submission goes on without it",
+                                )
                             if player:
                                 file_path = await download_image(
                                     sub_type=processed_data.get('type', 'unknown'),
@@ -518,6 +531,13 @@ async def _process_webhook_request(req_start):
                                     processed_data["image_url"] = file_path
                                     processed_data["downloaded"] = True
                                     downloaded = True
+                                else:
+                                    logger.log_sync(
+                                        "warning",
+                                        "[Webhook] Screenshot dropped: download_image saved nothing for "
+                                        f"player_id={player.player_id} wom_id={player_wom_id} "
+                                        f"type={processed_data.get('type')}",
+                                    )
                         else:
                             if file_path:
                                 if processed_data.get("image_path"):

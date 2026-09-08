@@ -239,7 +239,7 @@ async def _process_submission(entry_bytes: bytes) -> None:
         flag_multipath_loot_duplicates,
         flag_raid_reloot_duplicates,
     )
-    from db.models import Player
+    from db.ops import resolve_upload_player
     from utils.download import download_image
 
     entry = json.loads(entry_bytes)
@@ -291,9 +291,21 @@ async def _process_submission(entry_bytes: bytes) -> None:
 
             if image_tmp_path and os.path.exists(image_tmp_path):
                 processed_data["has_image"] = True
-                player_name = processed_data.get("player") or processed_data.get("player_name")
-                player = db_session.query(Player).filter(Player.player_name == player_name).first()
+                # Account hash first, then display-equivalent name. This used
+                # to be ``Player.player_name == <submitted name>``, which
+                # misses whenever the stored spelling differs from the game's
+                # (``ZE_ET`` vs ``ZE ET``) -- and a miss here is invisible: the
+                # row and the notification still go out, just with no image.
+                player = resolve_upload_player(db_session, processed_data)
                 player_wom_id = player.wom_id if player else None
+                if not player:
+                    log.warning(
+                        "Screenshot dropped: no player row for name=%r acc_hash=%s "
+                        "type=%s; the submission goes on without it",
+                        processed_data.get("player") or processed_data.get("player_name"),
+                        processed_data.get("acc_hash"),
+                        submission_type,
+                    )
                 if player:
                     tmp_fh = open(image_tmp_path, "rb")
                     file_upload = _TempFileUpload(
@@ -316,6 +328,12 @@ async def _process_submission(entry_bytes: bytes) -> None:
                             file_path = processed_data["image_path"]
                         processed_data["image_url"] = file_path
                         processed_data["downloaded"] = True
+                    else:
+                        log.warning(
+                            "Screenshot dropped: download_image saved nothing for "
+                            "player_id=%s wom_id=%s type=%s",
+                            player.player_id, player_wom_id, submission_type,
+                        )
 
             norm_type = _normalize_submission_type(submission_type)
 

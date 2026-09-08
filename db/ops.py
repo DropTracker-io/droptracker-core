@@ -762,6 +762,58 @@ def resolve_player_for_display(db_session, player_name: str, player_id = None):
     )
 
 
+def resolve_upload_player(db_session, processed_data: dict):
+    """Find the Player row an intake transport should file a screenshot under.
+
+    Both API transports (``api/routes/webhook.py`` and
+    ``workers/webhook_consumer.py``) save the uploaded screenshot BEFORE the
+    processor runs, so they have to resolve the player themselves -- and they
+    did it with ``Player.player_name == <submitted name>``. That misses for
+    every player whose stored spelling differs from the game's: WOM group
+    import keeps WOM's ``displayName`` (``ZE_ET``, ``Aff_ma_tits``) where the
+    plugin sends ``ZE ET``; the submission path stores WOM's folded username
+    (``Beast Owned``) where the plugin sends ``Beast_Owned``; and an RSN change
+    the hourly sync has not caught yet matches nothing at all. On a miss the
+    transport skipped the save, unlinked the temp file, and let the row and the
+    notification go out without a picture. For a group with
+    ``only_send_messages_with_images`` that meant no post at all, plus a
+    "please enable screenshots" notice to a plugin that had them on. In the
+    week to 2026-09-08 about fifteen players lost every screenshot this way
+    (ticket #430); the processor itself was never affected, since it resolves
+    by account hash.
+
+    Resolution order: ``acc_hash`` -- the one key that cannot be spelled two
+    ways -- then the display-equivalence walk in
+    :func:`resolve_player_for_display`. ``download_image`` files the upload
+    under ``wom_id`` and silently returns None without one, so when the two
+    keys land on different rows (the wom_temp identity ghosts) a row that has
+    a wom_id wins. Returns None when nothing matches; callers must not assume
+    a row, and should log the miss -- silence is what hid this for months.
+    """
+    player_name = processed_data.get("player") or processed_data.get("player_name")
+    account_hash = processed_data.get("acc_hash") or processed_data.get("account_hash")
+
+    candidates = []
+    if account_hash not in (None, ""):
+        by_hash = (
+            db_session.query(Player)
+            .filter(Player.account_hash == str(account_hash))
+            .order_by(Player.player_id)
+            .first()
+        )
+        if by_hash is not None:
+            candidates.append(by_hash)
+
+    by_name = resolve_player_for_display(db_session, player_name) if player_name else None
+    if by_name is not None and all(c.player_id != by_name.player_id for c in candidates):
+        candidates.append(by_name)
+
+    for candidate in candidates:
+        if getattr(candidate, "wom_id", None):
+            return candidate
+    return candidates[0] if candidates else None
+
+
 def get_formatted_name(player_name:str, group_id: int, existing_session = None, player_id = None):
     """Get a formatted name for a player.
 
