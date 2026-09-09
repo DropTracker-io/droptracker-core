@@ -210,6 +210,7 @@ members — the two are different answers and are reported differently.
 |---|---|---|
 | `identity` | 0 | Name, account type, combat/total level, EHB, last sync. Always included. |
 | `loot` | 1 | Month and all-time GP — the same numbers as the leaderboard |
+| `discord` | 1 | The Discord account that has claimed the player. **Not part of `all`** — ask for it by name |
 | `stats` | 2 | Experience in all 24 skills, and the total |
 | `clog` | 2 | Collection log progress (obtained / total) |
 | `combat_achievements` | 2 | Tasks completed and points |
@@ -235,6 +236,32 @@ for more than it is not a mistake worth refusing.
 
 If one section fails while others succeed, that section comes back as
 `{"error": "unavailable"}` and the rest of the response is still served.
+
+### `discord` — who claimed the account
+
+```
+GET /v2/groups/299/players?include=discord&limit=100
+```
+
+```json
+{ "player": { "name": "Beast Owned", "player_id": 1593,
+              "discord_id": "528746710982163011", "claimed": true } }
+```
+
+The `/claim-rsn` link read back out: `discord_id` is the Discord account that
+has claimed this player, or `null` when nobody has (`claimed` says which
+without you having to test for null). It is a **string** — a Discord snowflake
+is larger than a JSON number survives intact in JavaScript.
+
+It exists so a clan's own Discord bot can match a member to their in-game name
+without asking them to type it a second time in a second bot. A group key
+reads only its own members, and a hidden player or hidden owner is invisible
+here exactly as on the site, so this discloses nobody you could not already
+enumerate by name.
+
+**`all` does not include it.** Ask for it by name, so an integration already
+calling `include=all` does not begin receiving personal identifiers it never
+asked for.
 
 ### `drops` — the individual-drop feed
 

@@ -152,6 +152,44 @@ def _load_identity(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     return out
 
 
+def _load_discord(session, player_ids: List[int], ctx) -> Dict[int, dict]:
+    """Which Discord account has claimed each player, if any.
+
+    This is the ``/claim-rsn`` link read back out. A clan's Discord bot has the
+    Discord id of everyone in its server and needs to know which in-game name
+    belongs to which member; without this it has to ask every member to say the
+    same name a second time in a second bot.
+
+    Deliberately *not* part of ``identity`` and not part of ``all``: it must be
+    asked for by name, so an integration already calling ``include=all`` does
+    not silently begin receiving personal identifiers it never requested. The
+    scope gate is what actually protects the data — a group key reads only its
+    own members, and a hidden player or hidden owner is already invisible here
+    (``data_api.scope``), so this exposes no one the caller could not already
+    enumerate by name.
+
+    ``discord_id`` is a string: a snowflake exceeds the range a JSON number
+    survives intact in JavaScript.
+    """
+    rows = session.execute(text("""
+        SELECT p.player_id, u.discord_id
+        FROM players p
+        LEFT JOIN users u ON u.user_id = p.user_id
+        WHERE p.player_id IN :ids
+    """).bindparams(ids=tuple(player_ids)))
+
+    out = {}
+    for player_id, discord_id in rows:
+        # A users row can exist with no discord_id (created by the website's
+        # forum import), which is not a claim.
+        claimed = bool(discord_id and str(discord_id).strip())
+        out[int(player_id)] = {
+            "discord_id": str(discord_id).strip() if claimed else None,
+            "claimed": claimed,
+        }
+    return out
+
+
 def _load_stats(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     columns = ", ".join(SKILLS)
     rows = session.execute(text(f"""
@@ -686,6 +724,14 @@ def _load_meta(session, player_ids: List[int], ctx) -> Dict[int, dict]:
 _SECTIONS = (
     Section("identity", 0, _load_identity,
             "Name, account type, combat/total level, EHB, last sync."),
+    Section("discord", 1, _load_discord,
+            "The Discord account that has claimed this player, from /claim-rsn: "
+            "discord_id (a string) and claimed. One indexed lookup for the whole "
+            "page — priced rather than free so polling it is budgeted like any "
+            "other read. Must be asked for by name: not part of 'all', so an "
+            "existing include=all integration does not start receiving personal "
+            "identifiers it did not ask for.",
+            in_all=False),
     Section("stats", 1, _load_stats,
             "Experience in all 24 skills, and their total."),
     Section("clog", 8, _load_clog,

@@ -388,6 +388,27 @@ if "services.split_observer" not in sys.modules:
     sys.modules["services.split_observer"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/group_sync_gate.py — the scheduling half of the hourly WOM
+# membership sync (same shape as channel_name_render: no `interactions` import,
+# no DB access). The tests drive the round ordering directly, so they need the
+# real module rather than the ``services`` stub.
+_GROUP_SYNC_GATE_PATH = _Path(__file__).resolve().parent.parent / "services" / "group_sync_gate.py"
+if "services.group_sync_gate" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.group_sync_gate", _GROUP_SYNC_GATE_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.group_sync_gate"] = _mod
+    _spec.loader.exec_module(_mod)
+
+# services/channel_cache.py — the guild channel-cache shaper plus the
+# on-demand refresh request (stdlib-only). web_api.routes.event_discord now
+# imports the refresh key from it at module level, so it must resolve here.
+_CHANNEL_CACHE_PATH = _Path(__file__).resolve().parent.parent / "services" / "channel_cache.py"
+if "services.channel_cache" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.channel_cache", _CHANNEL_CACHE_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.channel_cache"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/status_channel.py — the #status card renderers. Module imports are
 # stdlib + the stubbed db.app_logger; interactions is lazy-imported inside the
 # builders, so tests can substitute fake component classes.

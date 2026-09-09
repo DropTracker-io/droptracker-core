@@ -20,6 +20,7 @@ from monitor.sdnotifier import SystemdWatchdog
 from sqlalchemy import text
 from services.notification_service import NotificationService
 from services.channel_names import ChannelNames
+from services.channel_cache import REFRESH_REQUEST_KEY as CHANNEL_REFRESH_REQUEST_KEY
 from services.channel_cache import shape_channel_cache
 from utils.embeds import create_boss_pb_embed, update_boss_pb_embed
 from utils.app_emojis import emoji as app_emoji, use_profile
@@ -55,6 +56,7 @@ from commands import UserCommands, ClanCommands
 from db.models import Event, EventGuild, Group, GroupConfiguration, GroupPatreon, GroupPersonalBestMessage, Guild, PersonalBestEntry, PlayerPet, Session, User, WebhookPendingDeletion, session, NpcList, ItemList, Webhook, Player
 
 from db.ops import associate_player_ids, update_group_members
+from services.group_sync_gate import GATE_KEY, is_sync_due, run_group_sync_round
 from db.ops import DatabaseOperations
 from utils.messages import message_processor, joined_guild_msg
 from utils.patreon import patreon_sync
@@ -422,43 +424,78 @@ async def handle_exception(e):
     return jsonify(error=str(e)), 500
 
 def should_group_sync():
-    last_sync = redis_client.get("last_group_sync")
-    if not last_sync:
-        # First time running, allow sync and set timestamp
-        redis_client.set("last_group_sync", datetime.now().isoformat())
-        return True
-    
-    last_sync = datetime.fromisoformat(last_sync)
-    # Check if it's been over an hour since last sync
-    if datetime.now() - last_sync > timedelta(hours=1):
-        # Update timestamp before returning True to prevent multiple syncs
-        redis_client.set("last_group_sync", datetime.now().isoformat())
-        return True
-    else:
-        return False
+    """Whether the hourly WOM membership sync is due.
+
+    PURE PREDICATE — it does not touch the gate; claiming is
+    ``_claim_group_sync``. See services/group_sync_gate.py for why the two are
+    separate (this used to stamp the gate before returning True, so the gate
+    was spent on attempts rather than on work).
+    """
+    return is_sync_due(redis_client.get(GATE_KEY))
+
+
+def _claim_group_sync():
+    """Take the gate so a second firing can't start an overlapping sync."""
+    redis_client.set(GATE_KEY, datetime.now().isoformat())
+
 
 async def update_group_members_task_channel():
-    channel_id = 1489188732602024027
-    channel = await bot.fetch_channel(channel_id=channel_id)
-    global next_sync_time
-    if channel:
-        time_left = (next_sync_time - datetime.now()).total_seconds() / 60
-        if time_left < 0:
-            await channel.edit(name=f"Next WOM Refresh: soon")
-        else:
-            await channel.edit(name=f"Next WOM Refresh: ~{time_left:.0f}min")
+    """Cosmetic: rename one voice channel to advertise the next refresh.
+
+    NEVER raises. This is decoration, and it used to be able to abort the
+    membership sync that ran after it: Discord allows only ~2 renames per 10
+    minutes per channel, the loop below shares this same channel, and an
+    exhausted bucket makes interactions.py raise
+    ``RuntimeError: Attempted to lock a bucket that is already locked``.
+    Between 2026-08-31 and 2026-09-03 that killed 20 of 43 sync attempts (47%),
+    stretching the "hourly" sync to gaps of up to 7 hours. New clan members
+    then piled up unassociated until a sync finally landed and announced the
+    whole backlog at once — the "it re-added everyone / ~380 messages" report.
+    """
+    try:
+        channel_id = 1489188732602024027
+        channel = await bot.fetch_channel(channel_id=channel_id)
+        global next_sync_time
+        if channel:
+            time_left = (next_sync_time - datetime.now()).total_seconds() / 60
+            if time_left < 0:
+                await channel.edit(name=f"Next WOM Refresh: soon")
+            else:
+                await channel.edit(name=f"Next WOM Refresh: ~{time_left:.0f}min")
+    except Exception as e:
+        # Rate limits here are routine and expected; the label just goes stale.
+        print(f"Couldn't update the WOM refresh channel name: {e}")
+
 
 @Task.create(IntervalTrigger(minutes=60))
 async def start_group_sync():
-    if should_group_sync():
-        await update_group_members_task_channel()
+    """One scheduled membership-sync round.
+
+    All the ordering/isolation rules live in run_group_sync_round — read that
+    docstring before reordering anything here. The short version: the cosmetic
+    channel rename runs LAST and can never skip the sync.
+    """
+    async def _sync():
         await update_group_members(bot)
-    global next_sync_time
-    next_sync_time = datetime.now() + timedelta(minutes=70)
-    #await logger.log("access", "update_group_members completed...", "start_group_sync")
+
+    async def _refresh_label():
+        global next_sync_time
+        next_sync_time = datetime.now() + timedelta(minutes=70)
+        await update_group_members_task_channel()
+
+    await run_group_sync_round(
+        is_due=should_group_sync,
+        claim=_claim_group_sync,
+        sync=_sync,
+        refresh_label=_refresh_label,
+    )
 
 
-@Task.create(IntervalTrigger(minutes=3))
+# 10 minutes, not 3: this renames the same channel as start_group_sync, and
+# Discord's limit is ~2 renames per 10 min per channel. At 3 minutes the loop
+# alone asked for 20/hour against a 12/hour budget, so the bucket was
+# permanently saturated and every rename attempt raised.
+@Task.create(IntervalTrigger(minutes=10))
 async def update_group_members_task_channel_loop():
     await update_group_members_task_channel()
 
@@ -1442,7 +1479,7 @@ async def drain_channel_cache_requests():
     here within seconds (instead of waiting for the 5-minute sweep)."""
     try:
         for _ in range(10):
-            raw = redis_client.client.spop("bot:channels:refresh")
+            raw = redis_client.client.spop(CHANNEL_REFRESH_REQUEST_KEY)
             if not raw:
                 break
             guild_id = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)

@@ -35,7 +35,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from .common import (
     create_notification,
@@ -101,36 +101,114 @@ class KcResult:
     advanced: bool           # the watermark moved (False = no-op duplicate/regression)
 
 
-async def record_kill_count(session, player_id: int, npc_id: int, new_kc: int) -> KcResult:
-    """Advance the (player, npc) watermark and classify what happened.
+# Lock acquisition is NOWAIT + cooperative retry, never a blocking wait. See
+# _lock_watermark_row for why a blocking FOR UPDATE here deadlocks the consumer.
+# A wall-clock budget, not an attempt count: pb.py holds this lock across its
+# whole is_personal_best notification block, so the realistic hold time is
+# hundreds of ms to seconds, not microseconds. Waiting is cheap now — each
+# retry *yields* the event loop instead of blocking it — so the budget is sized
+# to outlast a normal holder while still finishing well inside both
+# innodb_lock_wait_timeout (15s) and pymysql's read_timeout (30s).
+KC_LOCK_BUDGET_S = 10.0
+KC_LOCK_BACKOFF_START_S = 0.02
+KC_LOCK_BACKOFF_MAX_S = 0.25
+# MariaDB reports a NOWAIT lock refusal as 1205 (ER_LOCK_WAIT_TIMEOUT), the same
+# errno as a genuine innodb_lock_wait_timeout expiry — verified against
+# 10.11.18, which returns it in 0.000s. Both mean "someone else holds it";
+# retrying is the right response either way, so they need no distinguishing.
+_LOCK_UNAVAILABLE_ERRNO = 1205
 
-    Row-locks the watermark (SELECT ... FOR UPDATE) so the 6-worker consumer
-    serializes concurrent submissions for the same pair: the loser of a
-    same-kill race re-reads the winner's KC and classifies as a no-op. The
-    insert race goes through a SAVEPOINT (the pb.py idiom) — an IntegrityError
-    means another worker created the row first, so re-read it locked and take
-    the update path.
+
+class KcWatermarkBusy(Exception):
+    """The (player, npc) watermark stayed locked for the whole retry budget."""
+
+
+def _is_lock_unavailable(exc: OperationalError) -> bool:
+    args = getattr(getattr(exc, "orig", None), "args", None)
+    return bool(args) and args[0] == _LOCK_UNAVAILABLE_ERRNO
+
+
+async def _lock_watermark_row(session, player_id: int, npc_id: int):
+    """Row-lock the watermark without ever blocking the asyncio event loop.
+
+    **A plain blocking ``FOR UPDATE`` here deadlocks the whole consumer.** The
+    6 webhook_consumer "workers" are asyncio tasks sharing ONE event loop
+    (workers/webhook_consumer.py), and SQLAlchemy/pymysql is a *blocking*
+    driver: a task waiting on a row lock parks the loop inside
+    ``socket.readinto``. Two submissions for the same (player, npc) in flight
+    together — routine during a slayer task or a boss grind — therefore wedge
+    like this:
+
+        worker A takes the lock, is mid-transaction, needs one more turn of the
+        loop to reach its commit;
+        worker B blocks on the same row *inside the driver*, freezing the loop —
+        including A, the only task that could release the lock.
+
+    Nothing moves until pymysql's 30s ``read_timeout`` kills B's connection
+    ("Lost connection to MySQL server during query"). On 2026-09-03 that cost
+    ~90 stalls/hour x 30s = ~45 minutes of every hour frozen, holding
+    webhook:queue at a flat ~34-minute backlog (catch-up ratio 0.97x) that
+    read as "the bot is 30 minutes behind" to group leaders.
+
+    ``NOWAIT`` turns the wait into an instant refusal, and the ``await`` between
+    attempts *yields the loop* — which is precisely what lets the holder reach
+    its commit — so the contended case resolves in a couple of milliseconds
+    instead of deadlocking. The lock window itself cannot simply be shortened:
+    pb.py holds it across the whole is_personal_best notification block, and the
+    row lock lives until the caller's commit either way.
+
+    Returns the locked row, or None when no row exists yet (the insert path).
+    Raises KcWatermarkBusy if the retry budget is exhausted.
     """
     from db.models import PlayerNpcKc
 
-    row = (
-        session.query(PlayerNpcKc)
-        .filter(PlayerNpcKc.player_id == player_id, PlayerNpcKc.npc_id == npc_id)
-        .with_for_update()
-        .first()
-    )
+    deadline = asyncio.get_running_loop().time() + KC_LOCK_BUDGET_S
+    backoff = KC_LOCK_BACKOFF_START_S
+    while True:
+        try:
+            # SAVEPOINT so a refused lock aborts only this statement and leaves
+            # the caller's transaction intact (the pb.py idiom used below for
+            # the insert race). MariaDB keeps the transaction usable after a
+            # NOWAIT abort, and RELEASE SAVEPOINT does not drop the row lock we
+            # just took — locks live to end-of-transaction.
+            with session.begin_nested():
+                return (
+                    session.query(PlayerNpcKc)
+                    .filter(PlayerNpcKc.player_id == player_id, PlayerNpcKc.npc_id == npc_id)
+                    .with_for_update(nowait=True)
+                    .first()
+                )
+        except OperationalError as e:
+            if not _is_lock_unavailable(e):
+                raise
+            if asyncio.get_running_loop().time() >= deadline:
+                raise KcWatermarkBusy(f"player {player_id} npc {npc_id}") from e
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, KC_LOCK_BACKOFF_MAX_S)
+
+
+async def record_kill_count(session, player_id: int, npc_id: int, new_kc: int) -> KcResult:
+    """Advance the (player, npc) watermark and classify what happened.
+
+    Row-locks the watermark so the 6-worker consumer serializes concurrent
+    submissions for the same pair: the loser of a same-kill race re-reads the
+    winner's KC and classifies as a no-op. The lock is taken NOWAIT with a
+    cooperative retry (_lock_watermark_row) — a *blocking* FOR UPDATE here
+    freezes the shared event loop and deadlocks the consumer; read that
+    docstring before changing it back. The insert race goes through a SAVEPOINT
+    (the pb.py idiom) — an IntegrityError means another worker created the row
+    first, so re-read it locked and take the update path.
+    """
+    from db.models import PlayerNpcKc
+
+    row = await _lock_watermark_row(session, player_id, npc_id)
     if row is None:
         try:
             with session.begin_nested():
                 session.add(PlayerNpcKc(player_id=player_id, npc_id=npc_id, kill_count=new_kc))
                 session.flush()
         except IntegrityError:
-            row = (
-                session.query(PlayerNpcKc)
-                .filter(PlayerNpcKc.player_id == player_id, PlayerNpcKc.npc_id == npc_id)
-                .with_for_update()
-                .first()
-            )
+            row = await _lock_watermark_row(session, player_id, npc_id)
             if row is None:
                 # The competing insert rolled back between raising our
                 # IntegrityError and our re-read. Vanishingly rare; skip this
@@ -195,7 +273,19 @@ async def handle_kill_count(
     if not wom_boss_metric(npc_name):
         return
 
-    result = await record_kill_count(session, player.player_id, npc_id, kill_count)
+    try:
+        result = await record_kill_count(session, player.player_id, npc_id, kill_count)
+    except KcWatermarkBusy:
+        # Another in-flight submission for this exact (player, npc) is holding
+        # the watermark. Skip rather than wait: kill_count is ABSOLUTE, so the
+        # next submission re-reads a higher value and highest_crossed_milestone
+        # still reports the milestone this one would have — no announcement is
+        # lost, and the contending submission is usually the same kill anyway.
+        debug_print(
+            f"KC watermark busy for player {player.player_id} npc {npc_id} "
+            f"({npc_name}); skipping this submission's milestone check"
+        )
+        return
     if not result.advanced or result.seeded:
         if result.seeded:
             debug_print(

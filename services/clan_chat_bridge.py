@@ -67,10 +67,11 @@ BROADCAST_PREFIX = "📢"
 #: above any human clan's rate — a sustained breach is a spoof or a loop.
 BRIDGE_RATE_LIMIT_PER_MIN = 120
 
-#: Multi-relayer collapse window for broadcasts. Wider than the chat window
-#: (``clan_chat.CHAT_SEEN_TTL_SECONDS``) because broadcasts are Jagex-generated:
-#: an identical line inside a minute is the same event seen by a second relayer,
-#: never two people typing the same thing.
+#: Multi-relayer collapse window for broadcasts. Same 60s as the chat window
+#: (``clan_chat.CHAT_SEEN_TTL_SECONDS``, which was widened to match after the
+#: shorter one leaked duplicates): an identical line inside a minute is the
+#: same event seen by a second relayer, and for a Jagex-generated broadcast it
+#: can be nothing else.
 BROADCAST_SEEN_TTL_SECONDS = 60
 
 #: Presence heartbeat per clan: ZSET of player_ids scored by last-poll time.

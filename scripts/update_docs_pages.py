@@ -46,8 +46,8 @@ There are two ways loot gets in:
 
 1. **The RuneLite plugin** (recommended) automatically submits your drops and
    achievements as you play. See [the plugin guide](/docs/runelite-plugin).
-2. **Manual submission** on the website for one-off entries with screenshot or
-   video proof. See [manual submissions](/docs/manual-submissions).
+2. **Manual submission** on the website for one-off entries, with a screenshot
+   as proof. See [manual submissions](/docs/manual-submissions).
 
 ## In three steps
 
@@ -152,8 +152,11 @@ that's expected for any Plugin Hub plugin that talks to an external server.
 
 ## Other options
 
-- **Capture mode** — choose screenshot quality, or short video clips instead
-  of stills where supported.
+- **Screenshots** — turn proof screenshots on or off, set the loot value that
+  triggers one, include notable untradeables, and set the minimum level for
+  level-up screenshots.
+- **Compress screenshots** — send large screenshots as JPEG instead of PNG,
+  with your own size threshold.
 - **Hide PMs** — hides private messages before screenshots are captured.
 - **Receive in-game messages** — get confirmations in your chatbox.
 
@@ -186,9 +189,9 @@ Sometimes the plugin isn't running when something good happens. The
    achievement, or pet.
 3. Choose which of your **accounts** it belongs to, and fill in the source
    (NPC/boss), item, value, and quantity as applicable.
-4. Optionally attach **proof** — a screenshot or video clip uploads directly
-   with your submission. Some groups require an image before a notification
-   is posted, so proof is worth including.
+4. Optionally attach **proof** — a screenshot (PNG, JPEG, WebP or GIF)
+   uploads directly with your submission. Some groups require an image
+   before a notification is posted, so proof is worth including.
 
 ## Review before it counts
 
@@ -278,11 +281,6 @@ Manage these from [Settings](/settings) after signing in.
 - **DM on rank change** — get a DM when your global rank changes.
 - **DM on points** — get a DM when you earn or spend points.
 - **Update logs** — receive DropTracker product updates.
-
-## Premium group preferences
-
-If you support DropTracker via Patreon or a group subscription, choose which
-group your **Patreon** and **premium** benefits apply to.
 
 ## Appearance
 
@@ -385,7 +383,7 @@ configuration for Leagues / seasonal worlds without touching your main setup.
 - **Announcements** — post announcements to your group's page on the site.
 - **Events** — create and run [events](/docs/events).
 - **Embeds** — customize your notification embeds
-  ([Sponsor tier and up](/docs/custom-embeds)).
+  ([Supporter tier and up](/docs/custom-embeds)).
 - **Subscription** — manage your [premium subscription](/docs/premium).
 - **Diagnostics** — check that the bot, channels, and permissions are healthy.
 """,
@@ -428,7 +426,7 @@ fresh one each time.
         "Groups", 4, """
 # Custom Discord embeds
 
-Groups on the **Sponsor** tier and above ([see premium](/docs/premium)) can
+Groups on the **Supporter** tier and above ([see premium](/docs/premium)) can
 fully customize the Discord embeds the bot posts — for drops, collection log
 slots, personal bests, combat achievements, pets, level-ups, quests, and the
 lootboard post itself.
@@ -465,14 +463,30 @@ Compare plans and current pricing on the [premium page](/premium).
 
 ## Tiers
 
-- **Supporter** — support the project and stand out: a badge on the site and
-  a Discord role.
-- **Sponsor** — everything above, plus the **Hall of Fame** extension,
-  [custom Discord embeds](/docs/custom-embeds), and access to a customizable
-  point system for running competitions.
-- **Patron** — everything above, plus the [events system](/docs/events)
-  (bingo, task races, and more) and video capture alongside notifications
-  instead of just images.
+- **Supporter** — [custom Discord embeds](/docs/custom-embeds), your clan's own
+  website on a subdomain of osrs.site, a lootboard that refreshes every
+  couple of minutes instead of hourly, and a bronze badge on your group
+  wherever it appears on the site.
+- **Sponsor** — everything above, plus the **Hall of Fame** extension, a
+  customizable point system for running competitions, and a gold badge.
+- **Patron** — everything above, plus the most [event](/docs/events) headroom:
+  five events every 30 days with up to three running at once, and an amethyst
+  badge.
+
+## Events on every plan
+
+Every group can run [events](/docs/events), including groups on the free plan.
+What a subscription buys is **how often**, and how many at a time:
+
+| Plan | Events you can start | Running at once |
+|---|---|---|
+| Free | 1 every 365 days | 1 |
+| Supporter | 1 every 120 days | 1 |
+| Sponsor | 1 every 30 days | 1 |
+| Patron | 5 every 30 days | 3 |
+
+Drafts are unlimited and don't count — build as many as you like, and the cap
+only applies when you **activate** one.
 
 ## Managing a subscription
 
@@ -539,8 +553,10 @@ these pages walk through the whole system.
 - **Lifecycle** — an event is a **draft** while you build it, **active** while it
   runs, and **past** once it ends.
 
-> Running events requires the **Patron** tier ([see premium](/docs/premium)).
-> Joining one is free for any player with a claimed account.
+> Every group can run events, including groups on the free plan — your
+> subscription tier sets how often you can start one and how many can run at
+> the same time ([see premium](/docs/premium)). Joining one is free for any
+> player with a claimed account.
 """,
     ),
 
@@ -627,8 +643,9 @@ carefully.
 # Creating & running an event
 
 Events are run from your group's **Events** tab (**Manage group → Events**).
-Creating one requires the **Patron** tier ([see premium](/docs/premium)), and a
-group can have a limited number of events running at once.
+Every group can create them, including groups on the free plan — your
+[subscription tier](/docs/premium) sets how often you can activate one and how
+many can run at the same time.
 
 ## Create the event
 
@@ -680,9 +697,11 @@ can activate it must pass a few checks:
 - a **complete bingo board** if the event uses one (every cell filled), and
 - an **end date in the future**, if one is set.
 
-Because the Patron tier allows only a limited number of **simultaneously active
-events**, activation is blocked if you're already at that limit — end an existing
-event first.
+Your tier also caps how many events can be **active at the same time** (one on
+most plans, three on Patron) and how often you can start a new one. If you're at
+either limit, activation is blocked — end an existing event first, or wait for
+the next slot to open. The message tells you which limit you hit, and when it
+clears.
 
 ### Ending
 
@@ -991,8 +1010,9 @@ Want to compete against another clan? Create the event in **Clan vs clan** mode
 and **invite an opponent clan**. Once they accept:
 
 - Each team belongs to one of the participating clans.
-- Both clans' admins can **co-manage** the event — the opponent doesn't need their
-  own Patron subscription to take part; only the host pays.
+- Both clans' admins can **co-manage** the event — the opponent doesn't need a
+  subscription of their own to take part, and the event only counts against the
+  host's event limits.
 - Players are added from their own clan's roster.
 
 Everything else — tasks, board, scoring — works exactly as in a standard event.

@@ -23,6 +23,16 @@ DATA_POOL_SIZE = int(os.getenv("DATA_DB_POOL_SIZE", "5"))
 DATA_POOL_OVERFLOW = int(os.getenv("DATA_DB_MAX_OVERFLOW", "25"))
 DATA_POOL_TIMEOUT = int(os.getenv("DATA_DB_POOL_TIMEOUT", "20"))
 
+# MUST stay comfortably below connect_args['read_timeout'] (30s) below. The
+# server default is 50, i.e. INVERTED: on 2026-09-03 a contended row lock in
+# the KC-milestone path blocked past pymysql's 30s read_timeout, so the client
+# killed the connection ("Lost connection to MySQL server during query") before
+# InnoDB could return the clean, retryable 1205 it was about to. A dropped
+# connection is strictly worse than a lock-timeout error — it dead-letters the
+# work instead of letting the caller retry. Waits longer than this are already
+# pathological; they used to fail at 30s regardless, just messily.
+DATA_LOCK_WAIT_TIMEOUT = int(os.getenv("DB_LOCK_WAIT_TIMEOUT", "15"))
+
 # Create engine with improved connection handling.
 # IMPORTANT: in multi-worker deployments, this pool is per-process.
 engine = create_engine(
@@ -70,6 +80,19 @@ engine = create_engine(
 # open transaction indefinitely. Those must be fixed at the call site (use the
 # `db_session()` context manager or pass an explicit session), plus the web_api
 # request teardown that calls `session.remove()`.
+@event.listens_for(engine, "connect")
+def _set_session_lock_wait_timeout(dbapi_connection, connection_record):
+    """Bound row-lock waits below the driver's read_timeout — see
+    DATA_LOCK_WAIT_TIMEOUT. Session-level only; @@global is untouched."""
+    try:
+        with dbapi_connection.cursor() as cur:
+            cur.execute("SET SESSION innodb_lock_wait_timeout = %s", (DATA_LOCK_WAIT_TIMEOUT,))
+    except Exception as e:
+        # Never make a connection unusable over this; the 30s read_timeout
+        # remains the outer bound if the SET fails.
+        print(f"[db] could not set innodb_lock_wait_timeout: {e}")
+
+
 @event.listens_for(engine, "checkin")
 def _rollback_on_checkin(dbapi_connection, connection_record):
     try:

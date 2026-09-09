@@ -398,15 +398,18 @@ def effective_group_tiers(s, group_ids) -> Dict[int, Any]:
 
 
 def _sites_beta_group_ids() -> set:
-    """Staged-rollout allowlist for the custom_site entitlement.
+    """Additive per-group override for the custom_site entitlement.
 
     ``SITES_BETA_GROUP_IDS`` (comma/space-separated group ids) grants
-    ``custom_site`` to specific groups without touching any tier row — the
-    launch plan keeps the entitlement off every tier until the feature opens
-    generally, and per-group entitlements have no other override mechanism
-    (the pool only selects a tier). Applied inside the resolver so every
-    consumer — dashboard gating, Server Actions, API write gates, and the
-    public render gate — sees the same answer.
+    ``custom_site`` to specific groups without touching any tier row, because
+    the pool only selects a tier and per-group entitlements have no other
+    override mechanism. Applied inside the resolver so every consumer —
+    dashboard gating, Server Actions, API write gates, and the public render
+    gate — sees the same answer.
+
+    It is no longer the only way in: the entitlement went live on every paid
+    group tier on 2026-08-12, so this list only matters for groups that should
+    get a site *without* a subscription.
     """
     raw = os.getenv("SITES_BETA_GROUP_IDS", "")
     out = set()

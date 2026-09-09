@@ -117,4 +117,10 @@ not when the drop occurred in game.
 ## `GET /groups/<group_id>/export/members`
 
 Current member list: `player_id`, `player_name`, `wom_id`, `total_level`,
-`log_slots`, `tracked_since`. Plus `member_count`.
+`log_slots`, `tracked_since`, `discord_id`. Plus `member_count`.
+
+`discord_id` is the Discord account that has claimed the account through
+`/claim-rsn`, as a **string** (a snowflake is larger than a JSON number
+survives intact in JavaScript), or `null` when nobody has claimed it. It is
+there so a clan's own Discord bot can match a member to their in-game name
+without asking them to type it a second time.

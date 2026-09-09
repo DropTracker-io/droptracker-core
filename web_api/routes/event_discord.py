@@ -80,7 +80,9 @@ event_discord_bp = Blueprint("v1_event_discord", __name__)
 # Bot-maintained caches (bots/main.py). Module-level so the verification
 # script can rebind them to throwaway test keys.
 _BOT_GUILDS_KEY = "bot:guilds"
-_CHANNEL_REFRESH_KEY = "bot:channels:refresh"
+# Defined once, in services.channel_cache, beside the bot's drain loop.
+from services.channel_cache import REFRESH_REQUEST_KEY as _CHANNEL_REFRESH_KEY  # noqa: E402
+from services.channel_cache import request_channel_refresh as _queue_channel_refresh  # noqa: E402
 
 
 def _channels_key(guild_id: str) -> str:
@@ -110,11 +112,7 @@ def _request_channel_refresh(guild_id: str) -> None:
     conn = _rc()
     if conn is None:
         return
-    try:
-        conn.sadd(_CHANNEL_REFRESH_KEY, str(guild_id))
-        conn.expire(_CHANNEL_REFRESH_KEY, 300)
-    except Exception:
-        pass
+    _queue_channel_refresh(conn, guild_id)
 
 
 def _bot_guilds():

@@ -29,10 +29,23 @@ from .common import (
 )
 from .raid_dedupe import _bundle_is_new
 
-#: Repeated identical lines are legitimate in chat ("gz", "grats") — keep the
-#: multi-relayer window short, like the interval between two humans typing the
-#: same thing, not the interval between two relayers seeing one line.
-CHAT_SEEN_TTL_SECONDS = 10
+#: Multi-relayer collapse window, matching
+#: ``clan_chat_bridge.BROADCAST_SEEN_TTL_SECONDS``. It started at 10s on the
+#: theory that repeated identical lines are legitimate in chat ("gz", "grats")
+#: so the window should sit between "two relayers seeing one line" and "two
+#: humans typing the same thing". Relayers are nowhere near that punctual: a
+#: 2026-09-02 sample of 2,606 mirrored lines across nine bridged clans found
+#: 42 duplicates, clustered at 10-25s apart (one clan ran 23% duplicated on
+#: only two relayers), while the 60s broadcast path duplicated 0 of 408 lines
+#: through the same relay, batching, queue and claim idiom. The spread is
+#: structural — the plugin's 2s flush debounce drifts out of phase per client,
+#: and its retry backoff alone reaches 15s by the fourth attempt.
+#:
+#: The false-suppression cost stays small because the digest is
+#: ``sender|message``: it takes the SAME player repeating the SAME text inside
+#: the window. In that sample only 4 repeat pairs fell between 45s and 120s;
+#: genuine human repeats sat at 120s and beyond.
+CHAT_SEEN_TTL_SECONDS = 60
 
 #: Defensive caps (the client caps chat at ~80 visible chars already).
 MESSAGE_MAX_CHARS = 200

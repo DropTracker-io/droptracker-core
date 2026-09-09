@@ -7,8 +7,11 @@ it.
 """
 from services.loadout import (
     MAX_SLOTS,
+    MODEL_SOURCE_KILL,
+    MODEL_SOURCE_RECENT,
     loadout_from_json,
     parse_loadout,
+    resolve_model_fingerprint,
     serialize_loadout,
 )
 
@@ -82,3 +85,32 @@ def test_a_full_inventory_fits_the_embed_field_limit():
     encoded = ",".join(f"{i}-{20000 + i}-2147483647" for i in range(28))
     assert len(encoded) < 1024
     assert len(parse_loadout(encoded)) == 28
+
+
+class TestResolveModelFingerprint:
+    """Which character model a personal best is rendered with, and why (web110a)."""
+
+    def test_the_clients_own_fingerprint_wins_and_is_exact(self):
+        assert resolve_model_fingerprint("2f3ab1c", "deadbeef") == ("2f3ab1c", MODEL_SOURCE_KILL)
+
+    def test_without_one_the_servers_recent_outfit_stands_in_labelled_as_such(self):
+        assert resolve_model_fingerprint(None, "deadbeef") == ("deadbeef", MODEL_SOURCE_RECENT)
+
+    def test_nothing_usable_means_no_model_not_a_guess(self):
+        assert resolve_model_fingerprint(None, None) == (None, None)
+        assert resolve_model_fingerprint("", "") == (None, None)
+
+    def test_a_hostile_value_never_becomes_a_fingerprint(self):
+        # A fingerprint ends up in a storage key and a URL path, so anything
+        # that is not plain hex is refused — from either side.
+        for bad in ("../../etc", "abcdefg!", "a" * 33, "abc def", {"fp": "abcd"}, 1.5, True):
+            assert resolve_model_fingerprint(bad, None) == (None, None)
+        assert resolve_model_fingerprint(None, "../x") == (None, None)
+
+    def test_case_and_whitespace_are_normalised(self):
+        assert resolve_model_fingerprint("  1A2B3C  ", None) == ("1a2b3c", MODEL_SOURCE_KILL)
+
+    def test_an_all_digit_fingerprint_survives_the_form_transports_int_conversion(self):
+        # The form transport turns "31337" into 31337 on the way in; a Java
+        # Integer.toHexString can be exactly that.
+        assert resolve_model_fingerprint(31337, None) == ("31337", MODEL_SOURCE_KILL)

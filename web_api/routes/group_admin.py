@@ -5,7 +5,7 @@ Members / hidden players / WOM sync / diagnostics (session + group admin):
   GET   /api/v1/groups/{id}/hidden-players
   PATCH /api/v1/groups/{id}/hidden-players     { player_id, hidden }
   POST  /api/v1/groups/{id}/wom-sync
-  GET   /api/v1/groups/{id}/diagnostics
+  GET   /api/v1/groups/{id}/diagnostics?days=7|30|90
 
 Roles & access — one owner + N admins (web86a):
   GET    /api/v1/groups/{id}/authorized-users   (any admin: read-only roster)
@@ -32,7 +32,7 @@ import os
 import time
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, text
+from sqlalchemy import bindparam, func, text
 from sqlalchemy.exc import IntegrityError
 
 from quart import Blueprint, jsonify, request
@@ -882,10 +882,66 @@ async def wom_sync(group_id: int):
 
 # --------------------------------------------------------------------------- #
 # Diagnostics
+#
+# Two different questions share this panel, and conflating them is what made the
+# original version useless:
+#
+#   1. "Is the pipeline working?" — heartbeats, warnings, last-seen per kind.
+#   2. "Is my clan actually using it?" — volume, coverage, when people play.
+#
+# (2) cannot be answered from `notified`: that table only ever gets a row when a
+# submission clears the group's announce threshold AND lands in Discord, and it
+# only records drops at all (clog/pb/ca notifications never insert). For Renatus
+# in Sept 2026 that is ~7 rows/day against ~20,000 tracked drops — the old chart
+# was plotting the announcement rate and calling it "Submissions".
+#
+# Volume therefore comes from `player_npc_hourly_totals`, the hourly rollup the
+# player-totals service already maintains (services/npc_totals.py). Measured on
+# prod: a 502-member roster over 90 days answers in ~0.2s from the rollup versus
+# ~7s for the equivalent scan of `drops` (215M rows) — same numbers, verified
+# day-by-day. The rollup's `date_hour` also hands us the hour-of-day breakdown
+# for free, which a `drops` scan would have to pay for again.
 # --------------------------------------------------------------------------- #
+DIAG_RANGE_DAYS = (7, 30, 90)
+_DIAG_CACHE_TTL = 120  # a heartbeat panel; two minutes stale is invisible
+_DIAG_TOP_LIMIT = 8
+# Every volume query is an `IN (roster)` range scan, so cost scales with the
+# roster. Real clans top out around 500 members (~1.3s for 90 days); group 2 is
+# the infrastructure pseudo-group holding all ~24,000 tracked players and takes
+# ~20s, which would pin a hypercorn worker against the engine's 30s read
+# timeout. Superadmins can open any group's panel, so the guard is on the size
+# rather than on the two known infrastructure ids.
+_DIAG_MAX_ROSTER = 2000
+
+# Non-drop submission kinds, in the order the panel lists them. Each is a small
+# table (<350k rows) indexed on (player_id) and (date_added), so the whole set
+# costs well under a second for a roster of any realistic size.
+_DIAG_SUBMISSION_KINDS = (
+    ("clogs", "Collection log", "collection"),
+    ("pbs", "Personal bests", "personal_best"),
+    ("cas", "Combat achievements", "combat_achievement"),
+    ("pets", "Pets", "player_pets"),
+    ("deaths", "Deaths", "player_deaths"),
+    ("quests", "Quests", "quest_completions"),
+)
+
+
+def _diag_hour_key(day) -> str:
+    """`date_hour` is stored as `YYYY-MM-DD-HH` (services/npc_totals.py), so the
+    window bound has to be built in that shape — an ISO datetime string would
+    still compare, but against the wrong boundary."""
+    return day.strftime("%Y-%m-%d-00")
+
+
 @group_admin_bp.get("/groups/<int:group_id>/diagnostics")
 async def diagnostics(group_id: int):
     user_id = current_user_id()
+    try:
+        range_days = int(request.args.get("days", 30))
+    except (TypeError, ValueError):
+        range_days = 30
+    if range_days not in DIAG_RANGE_DAYS:
+        range_days = 30
 
     def _load():
         with db_session() as s:
@@ -896,69 +952,502 @@ async def diagnostics(group_id: int):
             if not group:
                 abort_problem(404, "Group not found", f"No group with id {group_id}.")
 
-            # Intake heartbeat: any drop in the last 24h.
-            last_drop = s.execute(text("SELECT MAX(date_added) FROM drops")).scalar()
-            intake_healthy = bool(last_drop and (datetime.now() - last_drop) < timedelta(hours=24))
+            cached = _diag_cache_get(group_id, range_days)
+            if cached is not None:
+                return cached
 
-            last_sub = (
-                s.query(NotifiedSubmission.date_added)
-                .filter(NotifiedSubmission.group_id == group_id)
-                .order_by(NotifiedSubmission.date_added.desc())
-                .first()
-            )
-            last_submission_ts = int(last_sub[0].timestamp()) if last_sub and last_sub[0] else None
-
-            # Per-day submission counts for the last 7 days.
-            activity = []
-            for i in range(6, -1, -1):
-                day = (datetime.now() - timedelta(days=i)).date()
-                start = datetime(day.year, day.month, day.day)
-                end = start + timedelta(days=1)
-                count = (
-                    s.query(NotifiedSubmission)
-                    .filter(
-                        NotifiedSubmission.group_id == group_id,
-                        NotifiedSubmission.date_added >= start,
-                        NotifiedSubmission.date_added < end,
-                    )
-                    .count()
-                )
-                activity.append({"date": day.isoformat(), "submissions": int(count)})
-
-            warnings = []
-            drop_channel = (
-                s.query(GroupConfiguration)
-                .filter(
-                    GroupConfiguration.group_id == group_id,
-                    GroupConfiguration.config_key == "channel_id_to_post_loot",
-                )
-                .first()
-            )
-            if not drop_channel or not drop_channel.config_value:
-                warnings.append("No drops channel (channel_id_to_post_loot) configured — drop notifications won't post.")
-            if not group.guild_id:
-                warnings.append("No Discord guild linked to this group.")
-
-            # members_synced_ts from the WOM sync cooldown cache, if present.
-            members_synced_ts = None
-            conn = _rc()
-            if conn is not None:
-                try:
-                    raw = conn.get(f"wom_sync_last:{group.wom_id}")
-                    if raw:
-                        members_synced_ts = int(float(raw))
-                except Exception:
-                    members_synced_ts = None
-
-            return {
-                "intake_healthy": intake_healthy,
-                "last_submission_ts": last_submission_ts,
-                "members_synced_ts": members_synced_ts,
-                "activity_7d": activity,
-                "warnings": warnings,
-            }
+            payload = _build_diagnostics(s, group, range_days)
+            _diag_cache_set(group_id, range_days, payload)
+            return payload
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+def _diag_cache_key(group_id: int, range_days: int) -> str:
+    return f"groupdiag:{group_id}:{range_days}"
+
+
+def _diag_cache_get(group_id: int, range_days: int):
+    conn = _rc()
+    if conn is None:
+        return None
+    try:
+        raw = conn.get(_diag_cache_key(group_id, range_days))
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _diag_cache_set(group_id: int, range_days: int, payload: dict) -> None:
+    conn = _rc()
+    if conn is None:
+        return
+    try:
+        conn.setex(
+            _diag_cache_key(group_id, range_days),
+            _DIAG_CACHE_TTL,
+            json.dumps(payload, separators=(",", ":")),
+        )
+    except Exception:
+        pass
+
+
+def _build_diagnostics(s, group, range_days: int) -> dict:
+    group_id = int(group.group_id)
+    now = datetime.now()
+    today = now.date()
+    window_start_day = today - timedelta(days=range_days - 1)
+    window_start = datetime(window_start_day.year, window_start_day.month, window_start_day.day)
+    # The comparison window is the same length immediately before this one, so
+    # the deltas answer "up or down versus the last N days", not "versus a
+    # partial period" — the trap that makes a 30-day panel look like a crash
+    # every time it is opened early in a month.
+    prev_start_day = window_start_day - timedelta(days=range_days)
+    prev_start = datetime(prev_start_day.year, prev_start_day.month, prev_start_day.day)
+
+    roster_ids = [
+        int(r[0])
+        for r in s.execute(
+            text(
+                "SELECT DISTINCT player_id FROM user_group_association "
+                "WHERE group_id = :gid AND player_id IS NOT NULL"
+            ),
+            {"gid": group_id},
+        ).fetchall()
+        if r[0]
+    ]
+    roster_size = len(roster_ids)
+    oversized = roster_size > _DIAG_MAX_ROSTER
+    if oversized:
+        # Empty roster => every helper below short-circuits to zeros, and the
+        # `oversized` flag tells the panel to say so instead of reporting a dead
+        # clan.
+        roster_ids = []
+
+    try:
+        from web_api.common import hidden_player_ids
+
+        hidden_ids = set(hidden_player_ids()) & set(roster_ids)
+    except Exception:
+        hidden_ids = set()
+
+    ignored_ids = {
+        int(r[0])
+        for r in s.execute(
+            text("SELECT player_id FROM ignored_players WHERE group_id = :gid"),
+            {"gid": group_id},
+        ).fetchall()
+        if r[0]
+    }
+
+    daily = _diag_daily(s, roster_ids, window_start_day, range_days)
+    announcements = _diag_announcements(s, group_id, window_start, range_days)
+    for row in daily:
+        row["announcements"] = announcements.get(row["date"], 0)
+
+    hour_matrix = _diag_hour_matrix(s, roster_ids, window_start_day)
+    coverage = _diag_coverage(s, roster_ids, today, window_start_day)
+    coverage["roster"] = roster_size
+    kinds = _diag_submission_kinds(s, roster_ids, window_start)
+    top_players = _diag_top_players(s, roster_ids, hidden_ids, window_start_day)
+    top_npcs = _diag_top_npcs(s, roster_ids, window_start_day)
+    prev = _diag_window_totals(s, roster_ids, prev_start_day, range_days)
+
+    last_tracked_ts = _diag_last_tracked(s, roster_ids)
+    if oversized:
+        # Nothing roster-scoped was measured, so fall back to the site-wide
+        # heartbeat rather than rendering "Intake: Down" for a group whose
+        # activity we deliberately declined to compute.
+        site_last = s.execute(text("SELECT MAX(date_added) FROM drops")).scalar()
+        last_tracked_ts = int(site_last.timestamp()) if site_last else None
+    last_announced = (
+        s.query(NotifiedSubmission.date_added)
+        .filter(NotifiedSubmission.group_id == group_id)
+        .order_by(NotifiedSubmission.date_added.desc())
+        .first()
+    )
+    last_announced_ts = (
+        int(last_announced[0].timestamp()) if last_announced and last_announced[0] else None
+    )
+
+    totals = {
+        "drops": sum(r["drops"] for r in daily),
+        "gp": sum(r["gp"] for r in daily),
+        "announcements": sum(r["announcements"] for r in daily),
+        "active_players": coverage["active_window"],
+    }
+
+    return {
+        # --- Original contract (unchanged shape; the frontend still reads it) --
+        # `intake_healthy` used to be MAX(date_added) over the whole `drops`
+        # table, so it read "Healthy" on a group that had not submitted anything
+        # in a year — it was measuring the site, not the clan. It is this
+        # group's own heartbeat now.
+        "intake_healthy": bool(
+            last_tracked_ts and (int(now.timestamp()) - last_tracked_ts) < 24 * 3600
+        ),
+        "last_submission_ts": last_tracked_ts,
+        "members_synced_ts": _diag_members_synced_ts(s, group),
+        "activity_7d": [
+            {"date": r["date"], "submissions": r["announcements"]} for r in daily[-7:]
+        ],
+        "warnings": _diag_warnings(s, group, coverage, last_tracked_ts, oversized),
+        # --- Added by web111a ------------------------------------------------
+        "range_days": range_days,
+        "generated_ts": int(now.timestamp()),
+        "last_announcement_ts": last_announced_ts,
+        "totals": totals,
+        "previous_totals": prev,
+        "daily": daily,
+        "hour_matrix": hour_matrix,
+        "oversized": oversized,
+        "coverage": {
+            "roster": roster_size,
+            "active_7d": coverage["active_7d"],
+            "active_30d": coverage["active_30d"],
+            "active_window": coverage["active_window"],
+            "tracked_ever": coverage["tracked_ever"],
+            "hidden": len(hidden_ids),
+            "ignored": len(ignored_ids),
+        },
+        "kinds": kinds,
+        "top_players": top_players,
+        "top_npcs": top_npcs,
+    }
+
+
+def _diag_daily(s, roster_ids, start_day, range_days) -> list:
+    """Tracked drops/gp/active players per UTC day, zero-filled across the whole
+    window so the chart keeps its x-axis on a quiet day instead of silently
+    compressing to the days that happen to have data."""
+    days = [(start_day + timedelta(days=i)).isoformat() for i in range(range_days)]
+    buckets = {d: {"date": d, "drops": 0, "gp": 0, "players": 0} for d in days}
+    if not roster_ids:
+        return [buckets[d] for d in days]
+
+    rows = s.execute(
+        text(
+            "SELECT SUBSTRING(date_hour, 1, 10) AS d, "
+            "       SUM(drop_count) AS drops, "
+            "       SUM(total_value) AS gp, "
+            "       COUNT(DISTINCT player_id) AS players "
+            "FROM player_npc_hourly_totals "
+            "WHERE player_id IN :pids AND date_hour >= :since "
+            "GROUP BY d"
+        ).bindparams(bindparam("pids", expanding=True)),
+        {"pids": roster_ids, "since": _diag_hour_key(start_day)},
+    ).fetchall()
+    for day, drops, gp, players in rows:
+        bucket = buckets.get(str(day))
+        if bucket is not None:
+            bucket["drops"] = int(drops or 0)
+            bucket["gp"] = int(gp or 0)
+            bucket["players"] = int(players or 0)
+    return [buckets[d] for d in days]
+
+
+def _diag_announcements(s, group_id: int, window_start, range_days) -> dict:
+    """Discord posts per day for the same window — the *output* side of the
+    pipeline. Kept next to the tracked volume because the gap between the two
+    lines is exactly what an admin asking "why isn't this posting?" needs."""
+    rows = s.execute(
+        text(
+            "SELECT DATE(date_added) AS d, COUNT(*) AS n FROM notified "
+            "WHERE group_id = :gid AND date_added >= :since GROUP BY d"
+        ),
+        {"gid": group_id, "since": window_start},
+    ).fetchall()
+    return {str(d): int(n or 0) for d, n in rows}
+
+
+def _diag_hour_matrix(s, roster_ids, start_day) -> list:
+    """7x24 drop counts, `[weekday][hour]`, weekday 0 = Monday, hours UTC.
+
+    Returned as a matrix rather than a pre-rendered "most active time" because
+    the viewer's clock is the one that matters: the client rotates this by its
+    own UTC offset. That rotation is exact for whole-hour offsets and off by an
+    hour across a DST boundary inside the window, which a heatmap can absorb.
+    """
+    matrix = [[0] * 24 for _ in range(7)]
+    if not roster_ids:
+        return matrix
+    rows = s.execute(
+        text(
+            "SELECT WEEKDAY(SUBSTRING(date_hour, 1, 10)) AS dow, "
+            "       CAST(SUBSTRING(date_hour, 12, 2) AS UNSIGNED) AS hr, "
+            "       SUM(drop_count) AS drops "
+            "FROM player_npc_hourly_totals "
+            "WHERE player_id IN :pids AND date_hour >= :since "
+            "GROUP BY dow, hr"
+        ).bindparams(bindparam("pids", expanding=True)),
+        {"pids": roster_ids, "since": _diag_hour_key(start_day)},
+    ).fetchall()
+    for dow, hr, drops in rows:
+        if dow is None or hr is None:
+            continue
+        d, h = int(dow), int(hr)
+        if 0 <= d < 7 and 0 <= h < 24:
+            matrix[d][h] = int(drops or 0)
+    return matrix
+
+
+def _diag_coverage(s, roster_ids, today, window_start_day) -> dict:
+    """How much of the roster the plugin actually reaches.
+
+    This is the number most clan admins are really after: a 400-name WOM roster
+    with 80 people submitting is not a broken pipeline, it is an install
+    problem, and nothing on the old panel could tell those two apart.
+    """
+    out = {
+        "roster": len(roster_ids),
+        "active_7d": 0,
+        "active_30d": 0,
+        "active_window": 0,
+        "tracked_ever": 0,
+    }
+    if not roster_ids:
+        return out
+
+    def _distinct_since(day):
+        return int(
+            s.execute(
+                text(
+                    "SELECT COUNT(DISTINCT player_id) FROM player_npc_hourly_totals "
+                    "WHERE player_id IN :pids AND date_hour >= :since"
+                ).bindparams(bindparam("pids", expanding=True)),
+                {"pids": roster_ids, "since": _diag_hour_key(day)},
+            ).scalar()
+            or 0
+        )
+
+    out["active_7d"] = _distinct_since(today - timedelta(days=6))
+    out["active_30d"] = _distinct_since(today - timedelta(days=29))
+    out["active_window"] = (
+        out["active_7d"]
+        if window_start_day == today - timedelta(days=6)
+        else out["active_30d"]
+        if window_start_day == today - timedelta(days=29)
+        else _distinct_since(window_start_day)
+    )
+    # "Ever" is bounded by the rollup's own horizon (it starts 2024-10), which is
+    # older than the plugin adoption this number is about. Unbounded on purpose:
+    # the (player_id, ...) index turns it into a loose index scan, ~30ms for a
+    # 500-name roster, so there is nothing to gain from a date floor.
+    out["tracked_ever"] = int(
+        s.execute(
+            text(
+                "SELECT COUNT(DISTINCT player_id) FROM player_npc_hourly_totals "
+                "WHERE player_id IN :pids"
+            ).bindparams(bindparam("pids", expanding=True)),
+            {"pids": roster_ids},
+        ).scalar()
+        or 0
+    )
+    return out
+
+
+def _diag_window_totals(s, roster_ids, start_day, range_days) -> dict:
+    """Totals for an arbitrary window — used for the preceding period, so the
+    headline numbers can carry a trend instead of a bare count."""
+    out = {"drops": 0, "gp": 0, "active_players": 0}
+    if not roster_ids:
+        return out
+    end_day = start_day + timedelta(days=range_days)
+    row = s.execute(
+        text(
+            "SELECT SUM(drop_count), SUM(total_value), COUNT(DISTINCT player_id) "
+            "FROM player_npc_hourly_totals "
+            "WHERE player_id IN :pids AND date_hour >= :since AND date_hour < :until"
+        ).bindparams(bindparam("pids", expanding=True)),
+        {
+            "pids": roster_ids,
+            "since": _diag_hour_key(start_day),
+            "until": _diag_hour_key(end_day),
+        },
+    ).first()
+    if row:
+        out["drops"] = int(row[0] or 0)
+        out["gp"] = int(row[1] or 0)
+        out["active_players"] = int(row[2] or 0)
+    return out
+
+
+def _diag_submission_kinds(s, roster_ids, window_start) -> list:
+    """Per-kind counts + last-seen. `notified` cannot answer this — it only ever
+    stores drop rows (clog/pb/ca notifications insert nothing), so a clan whose
+    collection-log posts had stopped looked identical to one whose members had
+    simply not logged a slot."""
+    out = [{"key": "drops", "label": "Drops", "count": 0, "last_ts": None}]
+    if not roster_ids:
+        return out + [
+            {"key": k, "label": label, "count": 0, "last_ts": None}
+            for k, label, _ in _DIAG_SUBMISSION_KINDS
+        ]
+
+    drop_row = s.execute(
+        text(
+            "SELECT SUM(drop_count), MAX(last_drop_time) FROM player_npc_hourly_totals "
+            "WHERE player_id IN :pids AND date_hour >= :since"
+        ).bindparams(bindparam("pids", expanding=True)),
+        {"pids": roster_ids, "since": _diag_hour_key(window_start.date())},
+    ).first()
+    if drop_row:
+        out[0]["count"] = int(drop_row[0] or 0)
+        out[0]["last_ts"] = int(drop_row[1].timestamp()) if drop_row[1] else None
+
+    for key, label, table in _DIAG_SUBMISSION_KINDS:
+        row = s.execute(
+            text(
+                f"SELECT COUNT(*), MAX(date_added) FROM {table} "  # noqa: S608 - table names are a literal tuple above
+                "WHERE player_id IN :pids AND date_added >= :since"
+            ).bindparams(bindparam("pids", expanding=True)),
+            {"pids": roster_ids, "since": window_start},
+        ).first()
+        out.append(
+            {
+                "key": key,
+                "label": label,
+                "count": int(row[0] or 0) if row else 0,
+                "last_ts": int(row[1].timestamp()) if row and row[1] else None,
+            }
+        )
+    return out
+
+
+def _diag_top_players(s, roster_ids, hidden_ids, start_day) -> list:
+    """Named, so it excludes players who opted out of public display — the
+    aggregate panels above still count their loot, this list just doesn't name
+    them."""
+    visible = [pid for pid in roster_ids if pid not in hidden_ids]
+    if not visible:
+        return []
+    rows = s.execute(
+        text(
+            "SELECT h.player_id, p.player_name, SUM(h.total_value) AS gp, "
+            "       SUM(h.drop_count) AS drops "
+            "FROM player_npc_hourly_totals h "
+            "JOIN players p ON p.player_id = h.player_id "
+            "WHERE h.player_id IN :pids AND h.date_hour >= :since "
+            "GROUP BY h.player_id, p.player_name "
+            "ORDER BY gp DESC LIMIT :lim"
+        ).bindparams(bindparam("pids", expanding=True)),
+        {"pids": visible, "since": _diag_hour_key(start_day), "lim": _DIAG_TOP_LIMIT},
+    ).fetchall()
+    return [
+        {
+            "player_id": int(pid),
+            "player_name": name or f"Player {pid}",
+            "gp": int(gp or 0),
+            "drops": int(drops or 0),
+        }
+        for pid, name, gp, drops in rows
+    ]
+
+
+def _diag_top_npcs(s, roster_ids, start_day) -> list:
+    if not roster_ids:
+        return []
+    rows = s.execute(
+        text(
+            "SELECT h.npc_id, n.npc_name, SUM(h.total_value) AS gp, "
+            "       SUM(h.drop_count) AS drops "
+            "FROM player_npc_hourly_totals h "
+            "JOIN npc_list n ON n.npc_id = h.npc_id "
+            "WHERE h.player_id IN :pids AND h.date_hour >= :since "
+            "GROUP BY h.npc_id, n.npc_name "
+            "ORDER BY gp DESC LIMIT :lim"
+        ).bindparams(bindparam("pids", expanding=True)),
+        {"pids": roster_ids, "since": _diag_hour_key(start_day), "lim": _DIAG_TOP_LIMIT},
+    ).fetchall()
+    return [
+        {
+            "npc_id": int(nid),
+            "npc_name": name or f"NPC {nid}",
+            "gp": int(gp or 0),
+            "drops": int(drops or 0),
+        }
+        for nid, name, gp, drops in rows
+    ]
+
+
+def _diag_last_tracked(s, roster_ids):
+    """Newest tracked drop for anyone on the roster. The rollup's
+    `last_drop_time` carries it, so this stays off `drops` entirely."""
+    if not roster_ids:
+        return None
+    # A day's bound keeps this on the (partition, date_hour) index instead of
+    # walking the roster's whole history for a MAX.
+    since = _diag_hour_key(datetime.now().date() - timedelta(days=14))
+    row = s.execute(
+        text(
+            "SELECT MAX(last_drop_time) FROM player_npc_hourly_totals "
+            "WHERE player_id IN :pids AND date_hour >= :since"
+        ).bindparams(bindparam("pids", expanding=True)),
+        {"pids": roster_ids, "since": since},
+    ).scalar()
+    return int(row.timestamp()) if row else None
+
+
+def _diag_members_synced_ts(s, group):
+    """Last WOM roster reconcile.
+
+    This used to read a Redis key (`wom_sync_last:{wom_id}`) that no code in
+    either repo ever wrote, so every group on the site reported "never". The
+    marker below is stamped by `db.ops._sync_group_from_wom`, which is the
+    single path both the hourly automatic sync and the manual button run
+    through. Groups fall back to `groups.date_updated` (the same function has
+    always touched it) until their next sync writes the marker.
+    """
+    row = (
+        s.query(GroupConfiguration.config_value)
+        .filter(
+            GroupConfiguration.group_id == group.group_id,
+            GroupConfiguration.config_key == "last_wom_member_sync",
+        )
+        .order_by(GroupConfiguration.id)
+        .first()
+    )
+    if row and row[0]:
+        try:
+            return int(datetime.fromisoformat(row[0]).timestamp())
+        except (TypeError, ValueError):
+            pass
+    return int(group.date_updated.timestamp()) if group.date_updated else None
+
+
+def _diag_warnings(s, group, coverage, last_tracked_ts, oversized) -> list:
+    warnings = []
+    drop_channel = (
+        s.query(GroupConfiguration)
+        .filter(
+            GroupConfiguration.group_id == group.group_id,
+            GroupConfiguration.config_key == "channel_id_to_post_loot",
+        )
+        .order_by(GroupConfiguration.id)
+        .first()
+    )
+    if not drop_channel or not drop_channel.config_value:
+        warnings.append(
+            "No drops channel (channel_id_to_post_loot) configured — drop notifications won't post."
+        )
+    if not group.guild_id:
+        warnings.append("No Discord guild linked to this group.")
+    if not group.wom_id:
+        warnings.append(
+            "No WiseOldMan group linked — the member roster can't sync automatically."
+        )
+    if oversized:
+        warnings.append(
+            f"This group has {coverage['roster']:,} members — too many to summarise activity for. "
+            "Only the pipeline heartbeat is shown."
+        )
+    elif last_tracked_ts is None:
+        warnings.append(
+            "No tracked drops from any member yet — nobody has the plugin installed and configured."
+        )
+    elif coverage["roster"] and coverage["active_7d"] == 0:
+        warnings.append("No member has submitted anything in the last 7 days.")
+    return warnings
 
 
 # --------------------------------------------------------------------------- #

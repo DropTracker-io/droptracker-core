@@ -11,7 +11,8 @@ client we do not control.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 # An inventory is 28 slots and worn equipment 11-14 depending on how you count;
 # the cap is generous enough for either and small enough to bound the work.
@@ -85,6 +86,55 @@ def serialize_loadout(entries: List[Dict[str, int]]) -> Optional[str]:
     if not entries:
         return None
     return json.dumps(entries, separators=(",", ":"))
+
+
+# --- Which character model goes with the loadout ---------------------------
+
+# The plugin sent the outfit fingerprint with the kill itself: exact.
+MODEL_SOURCE_KILL = "kill"
+# An older client sent none; the server recorded the outfit it most recently
+# held for the player, which is nearly always what they walked in wearing but
+# is not a measurement of the kill.
+MODEL_SOURCE_RECENT = "recent"
+
+# Same rule as ``services.player_model.is_valid_fingerprint``: hex as written
+# by the plugin, and nothing that could become a path or a storage key.
+# Repeated here rather than imported so this module keeps no storage imports.
+_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{1,32}$")
+
+
+def _clean_fingerprint(value: Any) -> Optional[str]:
+    # The form transport turns an all-digit field into an int on the way in;
+    # a fingerprint is a Java ``Integer.toHexString``, which can be exactly
+    # that ("31337"), so an int is a fingerprint that lost its quotes.
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        value = str(value)
+    if not isinstance(value, str):
+        return None
+    value = value.strip().lower()
+    return value if _FINGERPRINT_RE.match(value) else None
+
+
+def resolve_model_fingerprint(sent: Any, recent: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Picks the outfit to render for a personal best: ``(fingerprint, source)``.
+
+    ``sent`` is whatever the client put in the ``model_fingerprint`` field
+    (hostile, possibly absent); ``recent`` is the fingerprint the server
+    currently holds for the player, if any. The client's own word wins because
+    it describes the kill; the server's is a stand-in, labelled as such.
+
+    ``(None, None)`` when neither is usable, which the caller stores as-is: a
+    loadout with no model is still a loadout.
+    """
+    fingerprint = _clean_fingerprint(sent)
+    if fingerprint is not None:
+        return fingerprint, MODEL_SOURCE_KILL
+    fingerprint = _clean_fingerprint(recent)
+    if fingerprint is not None:
+        return fingerprint, MODEL_SOURCE_RECENT
+    return None, None
 
 
 def loadout_from_json(raw: Optional[str]) -> List[Dict[str, int]]:

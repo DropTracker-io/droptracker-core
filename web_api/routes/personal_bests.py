@@ -8,6 +8,11 @@ normalized team size); an entry is a player's fastest recorded time on that
 board. Optional ``group_id`` scopes every board to the group's members (the
 group-page "Personal bests" tab) and annotates entries with their global rank.
 
+Every entry names its ``pb_id`` and whether a loadout (gear, inventory and
+character model captured at the kill) exists for it, so the site can offer
+"show gear" only where there is something to show and fetch it on demand from
+``/personal-bests/<pb_id>/loadout``.
+
 Data hygiene (the old page rendered the raw table and looked broken):
   * ``team_size`` strings are normalized — legacy rows hold truncated scale
     variants like ``"(4"`` / ``"4 s"`` alongside ``"4"``.
@@ -149,21 +154,26 @@ def _build_dataset(group_id: int | None) -> dict:
         )
         params["gid"] = group_id
     sql = text(
-        "SELECT pb.npc_id, n.npc_name, pb.team_size, pb.player_id, "
-        "       pb.personal_best, pb.date_added, pb.image_url "
+        "SELECT pb.id, pb.npc_id, n.npc_name, pb.team_size, pb.player_id, "
+        "       pb.personal_best, pb.date_added, pb.image_url, "
+        "       (l.pb_id IS NOT NULL) AS has_loadout "
         "FROM personal_best pb "
         "JOIN npc_list n ON n.npc_id = pb.npc_id "
+        # Whether the gear worn for the time was captured. A LEFT JOIN on the
+        # loadouts' primary key: the board only needs to know there is
+        # something to show; the loadout itself is fetched on demand.
+        "LEFT JOIN personal_best_loadouts l ON l.pb_id = pb.id "
         f"WHERE pb.personal_best > 0 {group_filter}"
     )
     with db_session() as s:
         rows = s.execute(sql, params).fetchall()
 
     npcs: dict[int, dict] = {}
-    # (npc_id, ts) -> {player_id: (time_ms, date_ts, image_url)}
+    # (npc_id, ts) -> {player_id: (time_ms, date_ts, image_url, pb_id, has_loadout)}
     best: dict[tuple, dict] = {}
     entry_counts: dict[int, int] = {}
     players_by_npc: dict[int, set] = {}
-    for npc_id, npc_name, raw_ts, pid, pb_ms, date_added, image_url in rows:
+    for pb_id, npc_id, npc_name, raw_ts, pid, pb_ms, date_added, image_url, has_loadout in rows:
         if pid is None or int(pid) in hidden:
             continue
         ts = normalize_team_size(raw_ts)
@@ -180,13 +190,22 @@ def _build_dataset(group_id: int | None) -> dict:
                 date_ts = int(date_added.timestamp()) if date_added else None
             except Exception:
                 date_ts = None
-            board[int(pid)] = (int(pb_ms), date_ts, proof_url(image_url))
+            board[int(pid)] = (
+                int(pb_ms), date_ts, proof_url(image_url), int(pb_id), bool(has_loadout)
+            )
 
     for (npc_id, ts), by_player in best.items():
         entries = sorted(
             (
-                {"player_id": pid, "time_ms": t, "date_ts": d, "image_url": img}
-                for pid, (t, d, img) in by_player.items()
+                {
+                    "player_id": pid,
+                    "time_ms": t,
+                    "date_ts": d,
+                    "image_url": img,
+                    "pb_id": pb_id,
+                    "has_loadout": has_loadout,
+                }
+                for pid, (t, d, img, pb_id, has_loadout) in by_player.items()
             ),
             key=lambda e: (e["time_ms"], e["date_ts"] or 0),
         )
@@ -252,6 +271,32 @@ def _parse_group_id() -> int | None:
         abort_problem(422, "Invalid group_id", "'group_id' must be an integer.")
 
 
+def _fastest_on_any_board(info: dict) -> dict | None:
+    """The overall record for a boss across its team-size boards: the head
+    entry of whichever board is fastest, tagged with that board's team size."""
+    fastest = None
+    for ts, entries in info["boards"].items():
+        head = entries[0]
+        if fastest is None or head["time_ms"] < fastest["time_ms"]:
+            fastest = {**head, "team_size": ts}
+    return fastest
+
+
+def _record_payload(fastest: dict, names: dict) -> dict:
+    """The index card's "Record by …" block. Carries the same ``pb_id`` /
+    ``has_loadout`` pair as a board entry so the index can open the record
+    holder's gear in place, without a detour through the boss page."""
+    return {
+        "time_ms": fastest["time_ms"],
+        "time_display": _convert_from_ms(fastest["time_ms"]),
+        "team_size": fastest["team_size"],
+        "player_id": fastest["player_id"],
+        "player_name": names.get(fastest["player_id"], "Unknown"),
+        "pb_id": fastest["pb_id"],
+        "has_loadout": fastest["has_loadout"],
+    }
+
+
 @personal_bests_bp.get("/personal-bests/bosses")
 async def pb_bosses():
     """Boss index: every boss with at least one ranked time, raids pinned first."""
@@ -260,14 +305,7 @@ async def pb_bosses():
     def _load():
         data = _dataset(group_id)
         # Overall fastest per boss (across team sizes) for the index cards.
-        best_by_npc: dict[int, dict] = {}
-        for npc_id, info in data.items():
-            fastest = None
-            for ts, entries in info["boards"].items():
-                head = entries[0]
-                if fastest is None or head["time_ms"] < fastest["time_ms"]:
-                    fastest = {**head, "team_size": ts}
-            best_by_npc[npc_id] = fastest
+        best_by_npc = {npc_id: _fastest_on_any_board(info) for npc_id, info in data.items()}
         names = _player_names({b["player_id"] for b in best_by_npc.values() if b})
 
         featured_rank = {nid: i for i, nid in enumerate(_FEATURED_NPC_IDS)}
@@ -282,15 +320,7 @@ async def pb_bosses():
                     "player_count": info["player_count"],
                     "featured": npc_id in featured_rank,
                     "team_sizes": list(info["boards"].keys()),
-                    "best": None
-                    if fastest is None
-                    else {
-                        "time_ms": fastest["time_ms"],
-                        "time_display": _convert_from_ms(fastest["time_ms"]),
-                        "team_size": fastest["team_size"],
-                        "player_id": fastest["player_id"],
-                        "player_name": names.get(fastest["player_id"], "Unknown"),
-                    },
+                    "best": None if fastest is None else _record_payload(fastest, names),
                 }
             )
         bosses.sort(
@@ -353,6 +383,11 @@ async def pb_board():
                     "time_ms": e["time_ms"],
                     "time_display": _convert_from_ms(e["time_ms"]),
                     "date_ts": e["date_ts"],
+                    # The site fetches the gear and character model for a
+                    # time from /personal-bests/<pb_id>/loadout, and only
+                    # offers to when has_loadout says there is one.
+                    "pb_id": e["pb_id"],
+                    "has_loadout": e["has_loadout"],
                 }
                 if e["image_url"]:
                     row["image_url"] = e["image_url"]

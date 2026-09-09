@@ -2,8 +2,10 @@
 
 The whole "new clan joins DropTracker" journey without leaving Discord:
 
-- **Bot added to a server** → welcome card in the system channel (owner DM
-  fallback) with a *Set up DropTracker* button. Requires the GUILDS intent
+- **Bot added to a server** → short welcome card in the system channel
+  (owner DM fallback): a *Set up DropTracker* button plus a live
+  ``/group-setup`` mention — no product blurb, that lives behind *What is
+  DropTracker?*. Requires the GUILDS intent
   (added alongside this module — the old services/bot_state.py listener was
   dead code without it).
 - **Wizard** (no group yet): permission health-check → WiseOldMan group link
@@ -134,6 +136,28 @@ def group_for_guild(guild_id):
         return (int(row[0]), row[1]) if row else None
     finally:
         s.close()
+
+
+def warm_channel_cache_on_join(guild_id) -> bool:
+    """Queue the just-joined guild for an immediate channel-cache fetch.
+
+    The website's group-setup wizard reaches its Channels step a minute or
+    two after the invite — well inside the 5-minute sweep that would
+    otherwise be the first time this guild's channels are cached — and an
+    empty cache there drops both pickers to raw channel-id entry. Queued for
+    known guilds too: a re-invite after a kick has a stale or dead-marked
+    cache, and the drain bypasses the dead marker.
+
+    Imports are lazy and failures swallowed: the welcome message must never
+    depend on Redis being reachable. Returns whether the request was queued.
+    """
+    try:
+        from services.channel_cache import request_channel_refresh
+        from utils.redis import redis_client
+
+        return request_channel_refresh(redis_client.client, guild_id)
+    except Exception:
+        return False
 
 
 def upsert_guild_row(guild_id) -> None:
@@ -463,6 +487,72 @@ def build_finish_step(group_id: int):
     return content, rows
 
 
+def build_welcome_card(guild_name, setup_cmd_id):
+    """The public card posted when the bot joins a server.
+
+    Deliberately short: the buttons *are* the pitch, and "What is
+    DropTracker?" is one click away for anyone who wants the description.
+    ``setup_cmd_id`` is the ``/group-setup`` command id — ``0`` still renders
+    the command name, just not as a live link.
+    """
+    where = f" to **{guild_name}**" if guild_name else ""
+    content = (
+        f"Thanks for adding DropTracker{where}!\n"
+        "Configure the rest of your group using the buttons below, or with "
+        f"</group-setup:{setup_cmd_id}> any time."
+    )
+    rows = [ActionRow(
+        Button(style=ButtonStyle.SUCCESS, label="Set up DropTracker",
+               emoji="🏰", custom_id=f"{PREFIX}begin"),
+        Button(style=ButtonStyle.SECONDARY, label="What is DropTracker?",
+               custom_id="clan_setup_info"),
+        # The card is public and permanent otherwise; let an admin clear it
+        # once the group is set up (or if they never wanted it there).
+        Button(style=ButtonStyle.DANGER, label="Delete this",
+               custom_id=f"{PREFIX}dismiss"),
+    )]
+    return content, rows
+
+
+async def setup_command_id(bot) -> int:
+    """Discord id of ``/group-setup`` for the ``</name:id>`` mention syntax.
+
+    Same fallback as services/components.py: ``0`` when the bot is not
+    connected or the command is not registered yet.
+    """
+    if bot is None:
+        return 0
+    from utils.format import get_command_id
+
+    try:
+        result = await get_command_id(bot, "group-setup")
+    except Exception:
+        return 0
+    if result and result != "`command not yet added`":
+        return result
+    return 0
+
+
+async def dismiss_welcome_card(ctx) -> None:
+    """"Delete this" on the welcome card: remove the message it sits on.
+
+    In a server that takes the same authorization as the rest of the panel.
+    In the owner-DM fallback there is no guild to check against, and the only
+    person who can see the button is the owner it was sent to.
+    """
+    if ctx.guild_id:
+        linked = group_for_guild(ctx.guild_id)
+        if not await _authorized(ctx, linked[0] if linked else None):
+            await ctx.send("Only an **Administrator** here (or someone on the "
+                           "group's authorized list) can remove this.",
+                           ephemeral=True)
+            return
+    # Acknowledge as an in-place update so Discord doesn't flag the click as
+    # failed, then remove the message itself — no follow-up needed.
+    await ctx.defer(edit_origin=True)
+    await ctx.message.delete()
+
+
 # ── Extension ────────────────────────────────────────────────────────────────
 
 class GroupOnboardingPanel(Extension):
@@ -493,6 +583,7 @@ class GroupOnboardingPanel(Extension):
         # genuinely new servers (no Guild row yet).
         try:
             guild = event.guild
+            warm_channel_cache_on_join(guild.id)
             s = Session()
             try:
                 known = s.query(Guild).filter(
@@ -502,19 +593,10 @@ class GroupOnboardingPanel(Extension):
             if known:
                 return
             upsert_guild_row(guild.id)
-            content = (
-                "## 👋 DropTracker is here!\n"
-                "Track your clan's drops, achievements and events — with "
-                "notifications, lootboards and leaderboards in this server.\n\n"
-                "An **admin** can set everything up in about two minutes, "
-                "without leaving Discord:"
+            content, rows = build_welcome_card(
+                getattr(guild, "name", None),
+                await setup_command_id(self.bot),
             )
-            rows = [ActionRow(
-                Button(style=ButtonStyle.SUCCESS, label="Set up DropTracker",
-                       emoji="🏰", custom_id=f"{PREFIX}begin"),
-                Button(style=ButtonStyle.SECONDARY, label="What is DropTracker?",
-                       custom_id="clan_setup_info"),
-            )]
             channel = getattr(guild, "system_channel", None)
             if channel is not None:
                 try:
@@ -550,6 +632,13 @@ class GroupOnboardingPanel(Extension):
                 pass
 
     async def _route(self, ctx: ComponentContext, action: str):
+        # "Delete this" on the welcome card. Sits above the server-only guard
+        # because the card falls back to the owner's DMs, where the only
+        # person who can click it is the one it was sent to.
+        if action == "dismiss":
+            await dismiss_welcome_card(ctx)
+            return
+
         if not ctx.guild_id:
             await ctx.send("This panel only works inside a server.", ephemeral=True)
             return

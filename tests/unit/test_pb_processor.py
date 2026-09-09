@@ -322,3 +322,74 @@ class TestLoadoutItemIds:
     def test_reports_ids_even_from_a_partly_malformed_payload(self):
         # A bad slot must not cost us the icons for the good ones.
         assert 11802 in self._store("0-11802-1,garbage,2-4-1", None)
+
+
+class TestLoadoutModel:
+    """The character model a loadout is stored with (web110a).
+
+    The plugin's own fingerprint describes the kill and is stored as exact;
+    without one the outfit the server most recently held stands in, labelled
+    ``recent``. Either way the model rides on the loadout row — no row, no
+    model — so a player who opted out of sending gear shows neither.
+    """
+
+    def _store(self, sent, recent, existing_row=None):
+        import data.submissions.pb as pb
+        import db
+
+        state_key = db.models.PlayerState.model_fingerprint
+        session = MagicMock()
+        queried = []
+
+        def _query(model):
+            queried.append(model)
+            q = MagicMock()
+            q.filter.return_value = q
+            if model is state_key:
+                q.first.return_value = (recent,) if recent else None
+            else:
+                q.first.return_value = existing_row
+            return q
+
+        session.query.side_effect = _query
+        db.models.PersonalBestLoadout.reset_mock()
+        entry = MagicMock()
+        entry.id = 7
+        pb._store_loadout(session, entry, "0-11802-1", None, False, sent, 5751994)
+        return db.models.PersonalBestLoadout, state_key in queried
+
+    def test_the_plugins_fingerprint_is_stored_as_exact_without_asking_the_server(self):
+        loadout_cls, looked_up_state = self._store("2f3ab1c", "deadbeef")
+        kwargs = loadout_cls.call_args.kwargs
+        assert kwargs["model_fingerprint"] == "2f3ab1c"
+        assert kwargs["model_source"] == "kill"
+        assert not looked_up_state
+
+    def test_an_old_client_gets_the_servers_recent_outfit_labelled_as_such(self):
+        loadout_cls, looked_up_state = self._store(None, "deadbeef")
+        kwargs = loadout_cls.call_args.kwargs
+        assert (kwargs["model_fingerprint"], kwargs["model_source"]) == ("deadbeef", "recent")
+        assert looked_up_state
+
+    def test_no_outfit_anywhere_stores_no_model(self):
+        loadout_cls, _ = self._store(None, None)
+        kwargs = loadout_cls.call_args.kwargs
+        assert (kwargs["model_fingerprint"], kwargs["model_source"]) == (None, None)
+
+    def test_a_better_time_replaces_the_old_outfit_even_with_none(self):
+        # The old outfit describes a time that no longer exists.
+        row = MagicMock()
+        row.model_fingerprint, row.model_source = "old", "kill"
+        self._store(None, None, existing_row=row)
+        assert (row.model_fingerprint, row.model_source) == (None, None)
+
+    def test_the_fingerprint_field_reaches_the_loadout_store(self):
+        # The hop from the submission payload to _store_loadout is the part
+        # nothing else covers (cf. the envelope-key drop, 2026-08-02).
+        import data.submissions.pb as pb
+
+        payload = dict(_payload(600_000, 0, True), model_fingerprint="2f3ab1c")
+        with patch.object(pb, "_store_loadout", return_value=set()) as store:
+            _run(payload)
+        assert store.call_args.args[5] == "2f3ab1c"
+        assert store.call_args.args[6] == _FakePlayer.player_id

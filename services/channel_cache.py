@@ -26,10 +26,38 @@ still works: Discord auto-unarchives on message send).
 
 Pure shaping lives here (unit-testable without a bot); the fetching stays in
 ``bots/main.py``.
+
+The cache is warmed by a 5-minute sweep, and on demand: anything that wants a
+guild fetched sooner adds its id to ``REFRESH_REQUEST_KEY`` (a Redis set the
+bot drains every ~15 seconds, bypassing the dead-guild marker). The web API
+does this on every picker load; the bot itself does it the moment it joins a
+server, because the group-setup wizard reaches its Channels step well inside
+the sweep's five-minute window and used to find the cache empty.
 """
 from __future__ import annotations
 
-from typing import Iterable, List
+from typing import Any, Iterable, List
+
+REFRESH_REQUEST_KEY = "bot:channels:refresh"
+# The set is a queue of "soon", not a record: if nothing drains it for five
+# minutes the bot is down, and the requests would only be replayed at restart.
+REFRESH_REQUEST_TTL = 300
+
+
+def request_channel_refresh(conn: Any, guild_id) -> bool:
+    """Ask the bot to (re)fetch one guild's channels and roles soon.
+
+    ``conn`` is a raw redis-py connection (``sadd``/``expire``). Returns True
+    when the request was queued; a Redis failure returns False rather than
+    raising, because every caller is decorating something more important
+    (a picker load, a welcome message) that must not fail over it.
+    """
+    try:
+        conn.sadd(REFRESH_REQUEST_KEY, str(guild_id))
+        conn.expire(REFRESH_REQUEST_KEY, REFRESH_REQUEST_TTL)
+        return True
+    except Exception:
+        return False
 
 
 def shape_channel_cache(raw_channels: Iterable, threads: Iterable) -> List[dict]:

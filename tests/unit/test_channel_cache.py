@@ -143,3 +143,50 @@ def test_ids_are_strings_and_missing_position_defaults_to_zero():
         [],
     )
     assert out == [{"id": "123", "name": "drops", "position": 0, "type": "text"}]
+
+
+# --- on-demand refresh requests -------------------------------------------------
+request_channel_refresh = _mod.request_channel_refresh
+REFRESH_REQUEST_KEY = _mod.REFRESH_REQUEST_KEY
+
+
+class _Conn:
+    def __init__(self, fail=False):
+        self.calls = []
+        self.fail = fail
+
+    def sadd(self, key, member):
+        if self.fail:
+            raise ConnectionError("redis down")
+        self.calls.append(("sadd", key, member))
+
+    def expire(self, key, ttl):
+        self.calls.append(("expire", key, ttl))
+
+
+def test_request_channel_refresh_queues_the_guild_under_the_shared_key():
+    conn = _Conn()
+    assert request_channel_refresh(conn, 1195743428877766836) is True
+    assert conn.calls == [
+        ("sadd", REFRESH_REQUEST_KEY, "1195743428877766836"),
+        ("expire", REFRESH_REQUEST_KEY, _mod.REFRESH_REQUEST_TTL),
+    ]
+
+
+def test_request_channel_refresh_never_raises():
+    # Every caller is decorating something more important than the refresh.
+    assert request_channel_refresh(_Conn(fail=True), 1) is False
+
+
+def test_the_bots_drain_loop_and_the_web_api_read_the_same_key():
+    # Three writers, one drain: a renamed key on either side would silently
+    # strand every refresh request. Pinned by source, since neither module
+    # imports cleanly in this harness.
+    root = os.path.join(os.path.dirname(__file__), "..", "..")
+    main_src = open(os.path.join(root, "bots", "main.py")).read()
+    api_src = open(os.path.join(root, "web_api", "routes", "event_discord.py")).read()
+    assert "spop(CHANNEL_REFRESH_REQUEST_KEY)" in main_src
+    assert "REFRESH_REQUEST_KEY as CHANNEL_REFRESH_REQUEST_KEY" in main_src
+    assert "REFRESH_REQUEST_KEY as _CHANNEL_REFRESH_KEY" in api_src
+    assert '"bot:channels:refresh"' not in main_src
+    assert '"bot:channels:refresh"' not in api_src

@@ -9,6 +9,7 @@ from quart_rate_limiter import RateLimiter
 
 from api.core import metrics
 from api.core import log_pool_status
+from api import request_timing
 from api.routes.health import health_bp
 from api.routes.players import players_bp
 from api.routes.groups import groups_bp
@@ -59,15 +60,20 @@ def create_app() -> Quart:
         start_time = getattr(g, "request_start_time", None)
         if start_time is not None:
             duration_ms = (time.perf_counter() - start_time) * 1000
+            # Long-poll handlers record the time they deliberately sat idle
+            # (api/request_timing.py); judge the work, not the hold, or every
+            # expired /notifications?wait=25 logs as a 25,000ms request.
+            held = request_timing.held_ms(g)
             submission_type = getattr(g, "submission_type", None)
             subtype_suffix = f" [type={submission_type}]" if submission_type else ""
-            if duration_ms >= _SLOW_REQUEST_THRESHOLD_MS:
+            if request_timing.work_ms(duration_ms, held) >= _SLOW_REQUEST_THRESHOLD_MS:
+                timing = request_timing.describe(duration_ms, held)
                 log_pool_status(
-                    f"slow request {request.method} {request.path}{subtype_suffix} ({duration_ms:.2f} ms)"
+                    f"slow request {request.method} {request.path}{subtype_suffix} ({timing})"
                 )
                 print(
                     f"[RequestTiming] {request.method} {request.path}{subtype_suffix} "
-                    f"took {duration_ms:.2f} ms"
+                    f"took {timing}"
                 )
         return response
 

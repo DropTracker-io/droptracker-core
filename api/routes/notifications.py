@@ -21,11 +21,13 @@ acc_hash, hash-first resolution (same as /load_config and /panel_data).
 See docs/EVENT_PLUGIN_NOTIFICATIONS_PLAN.md.
 """
 import asyncio
+import time
 from datetime import timedelta
 
-from quart import Blueprint, Response, jsonify, request
+from quart import Blueprint, Response, g, jsonify, request
 from quart_rate_limiter import rate_limit
 
+from api import request_timing
 from api.core import get_db_session
 from db import Player
 
@@ -122,10 +124,15 @@ async def get_notifications():
     try:
         notifications = await asyncio.to_thread(drain_inbox, player_id)
         if not notifications:
+            held_from = time.perf_counter()
             try:
                 await asyncio.wait_for(waiter.wait(), timeout=wait_seconds)
             except asyncio.TimeoutError:
                 pass
+            finally:
+                # Deliberate idle time, not work: the slow-request log
+                # subtracts it (api/request_timing.py).
+                request_timing.record_hold(g, time.perf_counter() - held_from)
             notifications = await asyncio.to_thread(drain_inbox, player_id)
     finally:
         notify_wake.unregister(player_id, waiter)

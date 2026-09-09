@@ -274,10 +274,27 @@ async def screenshot_url(url: str, *, width: int = 1100, scale: float = 2.0,
                               viewport_height=viewport_height,
                               ready_js=ready_js, transparent=transparent)
     finally:
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
+        # Chromium needs ~100ms to exit after SIGTERM on a quiet box and far
+        # longer under load, and proc.wait() is a blocking syscall: run inline
+        # it stalled the worker's event loop once per render. Off the loop,
+        # with the same inline fallback if the loop is already shutting down
+        # (worker recycle) and can no longer hand work to a thread.
+        try:
+            await asyncio.to_thread(_teardown, proc, tmp)
+        except RuntimeError:
+            _teardown(proc, tmp)
+
+
+def _teardown(proc: subprocess.Popen | None, tmp: str) -> None:
+    """Stop the browser and drop its profile dir. Blocking; call off-loop."""
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
             try:
                 proc.wait(timeout=5)
             except Exception:
-                proc.kill()
-        shutil.rmtree(tmp, ignore_errors=True)
+                pass
+    shutil.rmtree(tmp, ignore_errors=True)

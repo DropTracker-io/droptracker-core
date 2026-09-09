@@ -576,9 +576,47 @@ async def achievements(player_id: int):
     return with_cache_headers(jsonify(result), 60)
 
 
+def pb_model_block(player_id: int, fingerprint, source):
+    """What the site can draw of the character for a personal best, or None.
+
+    The loadout row names an outfit fingerprint; whether anything renderable
+    still exists under it is a storage question answered here, so the site
+    never offers a viewer for a model that is gone. ``has_model`` means the
+    interactive GLB is there; ``image_url`` is the still the notification
+    path pre-rendered, which outlives the model (renders are never pruned)
+    and stands in when only it remains.
+
+    Best-effort: a storage hiccup costs the picture, never the loadout.
+    """
+    if not fingerprint:
+        return None
+    try:
+        from services.gear_image import image_exists, image_url
+        from services.player_model import is_valid_fingerprint, model_exists
+
+        if not is_valid_fingerprint(fingerprint):
+            return None
+        has_model = bool(model_exists(player_id, fingerprint))
+        has_image = bool(image_exists(player_id, fingerprint))
+        if not has_model and not has_image:
+            return None
+        return {
+            "player_id": int(player_id),
+            "fingerprint": fingerprint,
+            # Rows written before the column existed carry no source; they
+            # were never exact, so say so.
+            "source": source or "recent",
+            "has_model": has_model,
+            "has_pet": has_model and bool(model_exists(player_id, fingerprint, pet=True)),
+            "image_url": image_url(player_id, fingerprint) if has_image else None,
+        }
+    except Exception:
+        return None
+
+
 @player_state_bp.get("/personal-bests/<int:pb_id>/loadout")
 async def pb_loadout(pb_id: int):
-    """Gear and inventory a personal best was set with, if it was captured."""
+    """Gear, inventory and character model a personal best was set with."""
 
     def _load():
         with db_session() as s:
@@ -593,7 +631,7 @@ async def pb_loadout(pb_id: int):
             )
             if row is None:
                 return {"pb_id": pb_id, "has_loadout": False,
-                        "equipment": [], "inventory": []}
+                        "equipment": [], "inventory": [], "model": None}
 
             from services.loadout import loadout_from_json
 
@@ -645,6 +683,9 @@ async def pb_loadout(pb_id: int):
                 "boss": npc.npc_name if npc else None,
                 "equipment": decorate(equipment),
                 "inventory": decorate(inventory),
+                "model": pb_model_block(
+                    int(pb.player_id), row.model_fingerprint, row.model_source
+                ),
             }
 
     result = await _run(_load)

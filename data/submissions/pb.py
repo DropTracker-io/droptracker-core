@@ -63,12 +63,45 @@ def _time_to_ms(value) -> int:
     return snap_to_tick(max(int(ms), 0)) if ms else 0
 
 
-def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_changed):
+def _model_for_loadout(session, player_id, sent):
+    """The outfit fingerprint to render for this personal best, with provenance.
+
+    The plugin sends the fingerprint of what the player looked like at the
+    kill itself (``model_fingerprint``, 6.1+), which is exact. An older client
+    sends none; then the outfit the server most recently received for the
+    player stands in. The model is uploaded whenever the player stands still
+    in new gear, so at the moment of a kill it is nearly always what they
+    walked in wearing - but it is a stand-in, and is recorded as ``recent``
+    rather than ``kill`` so the site can say so.
+    """
+    from services.loadout import resolve_model_fingerprint
+
+    fingerprint, source = resolve_model_fingerprint(sent, None)
+    if fingerprint is not None or player_id is None:
+        return fingerprint, source
+
+    from db.models import PlayerState
+
+    row = (
+        session.query(PlayerState.model_fingerprint)
+        .filter(PlayerState.player_id == player_id)
+        .first()
+    )
+    return resolve_model_fingerprint(None, row[0] if row else None)
+
+
+def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_changed,
+                   model_fingerprint_raw=None, player_id=None):
     """Persist the gear/inventory captured at the kill, if any was sent.
 
     Wrapped in its own try/except and a SAVEPOINT: this is an additive nicety,
     so a malformed loadout must not roll back or fail the personal best it is
     attached to.
+
+    The character model is recorded alongside (``_model_for_loadout``) - only
+    when there is a loadout row to hang it on. A player who opted out of
+    sending gear gets no row and therefore no model on the leaderboard either;
+    the two are one consent.
 
     Returns the set of item ids the loadout references so the caller can make
     sure their icons exist. Worn gear is frequently an item nobody has ever
@@ -103,6 +136,7 @@ def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_chang
             return item_ids
 
         session.flush()  # ensure pb_entry.id exists
+        fingerprint, source = _model_for_loadout(session, player_id, model_fingerprint_raw)
         with session.begin_nested():
             row = (
                 session.query(PersonalBestLoadout)
@@ -112,13 +146,21 @@ def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_chang
             if row is None:
                 session.add(
                     PersonalBestLoadout(
-                        pb_id=pb_entry.id, equipment=equipment, inventory=inventory
+                        pb_id=pb_entry.id,
+                        equipment=equipment,
+                        inventory=inventory,
+                        model_fingerprint=fingerprint,
+                        model_source=source,
                     )
                 )
             else:
-                # A later, better time replaces the loadout that achieved it.
+                # A later, better time replaces the loadout that achieved it -
+                # model included, even when the new kill has none: the old
+                # outfit describes a time that no longer exists.
                 row.equipment = equipment
                 row.inventory = inventory
+                row.model_fingerprint = fingerprint
+                row.model_source = source
     except Exception as e:
         debug_print(f"Could not store PB loadout: {e}")
     return item_ids
@@ -174,6 +216,9 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     # Absent for older clients and for players who opted out.
     equipment_raw = pb_data.get("equipment", None)
     inventory_raw = pb_data.get("inventory", None)
+    # Outfit fingerprint at the kill, keying the uploaded character model.
+    # Absent from clients before 6.1; see _model_for_loadout for the fallback.
+    model_fingerprint_raw = pb_data.get("model_fingerprint", None)
 
     notice = ""
 
@@ -367,7 +412,8 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     # decorative extra must never cost the player their personal best.
     if pb_entry is not None and not is_seasonal:
         loadout_item_ids = _store_loadout(
-            session, pb_entry, equipment_raw, inventory_raw, pb_row_changed
+            session, pb_entry, equipment_raw, inventory_raw, pb_row_changed,
+            model_fingerprint_raw, player_id,
         )
         # Make sure the site can actually draw what we just stored. Costs one
         # stat() per id once the icons are cached, which is the normal case.

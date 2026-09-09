@@ -130,3 +130,127 @@ def test_essential_toggles_are_real_boolean_fields():
         field = panel._field(key)
         assert field is not None, key
         assert field["type"] == "boolean", key
+
+
+# --- channel cache warm-up on join --------------------------------------------------
+class _FakeRedisConn:
+    def __init__(self, fail=False):
+        self.calls = []
+        self.fail = fail
+
+    def sadd(self, key, member):
+        if self.fail:
+            raise ConnectionError("redis down")
+        self.calls.append(("sadd", key, member))
+
+    def expire(self, key, ttl):
+        self.calls.append(("expire", key, ttl))
+
+
+def _with_fake_redis(monkeypatch, conn):
+    channel_cache = _load("_channel_cache_for_panel_ut", "services/channel_cache.py")
+    monkeypatch.setitem(sys.modules, "services.channel_cache", channel_cache)
+    fake_utils_redis = MagicMock()
+    fake_utils_redis.redis_client.client = conn
+    monkeypatch.setitem(sys.modules, "utils.redis", fake_utils_redis)
+    return channel_cache
+
+
+def test_joining_a_guild_queues_its_channel_cache_immediately(monkeypatch):
+    # The wizard's Channels step arrives inside the 5-minute sweep window;
+    # without this the pickers open onto an empty cache and fall to raw ids.
+    conn = _FakeRedisConn()
+    channel_cache = _with_fake_redis(monkeypatch, conn)
+
+    assert panel.warm_channel_cache_on_join(1195743428877766836) is True
+    assert ("sadd", channel_cache.REFRESH_REQUEST_KEY, "1195743428877766836") in conn.calls
+
+
+def test_a_redis_outage_never_breaks_the_welcome(monkeypatch):
+    _with_fake_redis(monkeypatch, _FakeRedisConn(fail=True))
+    assert panel.warm_channel_cache_on_join(1) is False
+
+
+def test_on_guild_join_warms_the_cache_before_deciding_whether_to_greet():
+    # Known guilds return early (no second welcome), so the warm-up has to
+    # sit above that check or a re-invited server never gets refreshed.
+    import inspect
+
+    src = inspect.getsource(panel)
+    handler = src[src.index("async def on_guild_join"):]
+    assert handler.index("warm_channel_cache_on_join(") < handler.index("if known:")
+
+
+def test_welcome_card_is_short_and_mentions_the_setup_command():
+    content, rows = panel.build_welcome_card("Iron Legion", 123456789)
+    # The description lives behind "What is DropTracker?" — the card itself
+    # is the greeting, the guidance and the command mention, nothing else.
+    assert "👋" not in content and "is here" not in content
+    assert "**Iron Legion**" in content
+    assert "</group-setup:123456789>" in content
+    assert "buttons below" in content
+    assert len(rows) == 1
+
+
+def test_welcome_card_without_a_guild_name_still_reads_cleanly():
+    content, _rows = panel.build_welcome_card(None, 0)
+    assert content.startswith("Thanks for adding DropTracker!")
+    assert "</group-setup:0>" in content
+
+
+def test_welcome_card_carries_a_delete_button():
+    panel.Button.reset_mock()
+    panel.build_welcome_card("x", 1)
+    ids = [c.kwargs.get("custom_id") for c in panel.Button.call_args_list]
+    assert ids == ["gset:begin", "clan_setup_info", "gset:dismiss"]
+
+
+def _dismiss_ctx(guild_id):
+    from unittest.mock import AsyncMock
+
+    ctx = MagicMock()
+    ctx.guild_id = guild_id
+    ctx.send = AsyncMock()
+    ctx.defer = AsyncMock()
+    ctx.message.delete = AsyncMock()
+    return ctx
+
+
+def test_delete_this_removes_the_card_for_an_admin(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(panel, "group_for_guild", lambda _g: None)
+    monkeypatch.setattr(panel, "_authorized", AsyncMock(return_value=True))
+    ctx = _dismiss_ctx(guild_id=42)
+    asyncio.run(panel.dismiss_welcome_card(ctx))
+    ctx.defer.assert_awaited_once_with(edit_origin=True)
+    ctx.message.delete.assert_awaited_once()
+    ctx.send.assert_not_awaited()
+
+
+def test_delete_this_is_refused_for_a_non_admin(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(panel, "group_for_guild", lambda _g: None)
+    monkeypatch.setattr(panel, "_authorized", AsyncMock(return_value=False))
+    ctx = _dismiss_ctx(guild_id=42)
+    asyncio.run(panel.dismiss_welcome_card(ctx))
+    ctx.message.delete.assert_not_awaited()
+    assert ctx.send.await_args.kwargs.get("ephemeral") is True
+
+
+def test_delete_this_works_on_the_owner_dm_fallback(monkeypatch):
+    # No guild → the server-only guard must not fire; the DM copy is only
+    # visible to the owner it was sent to, so no permission check either.
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    authorized = AsyncMock(return_value=False)
+    monkeypatch.setattr(panel, "_authorized", authorized)
+    ctx = _dismiss_ctx(guild_id=None)
+    asyncio.run(panel.dismiss_welcome_card(ctx))
+    ctx.message.delete.assert_awaited_once()
+    authorized.assert_not_awaited()
+    ctx.send.assert_not_awaited()

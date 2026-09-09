@@ -19,7 +19,8 @@ ENDPOINTS
     GET /groups/<group_id>/export/drops
         Raw drop records for the group over a time window (paginated).
     GET /groups/<group_id>/export/members
-        Current member list.
+        Current member list, including the Discord id that has claimed each
+        account (null when nobody has).
 
 TIME WINDOWS
     start_time / end_time accept ISO-8601 (2026-07-01T00:00:00Z) or unix
@@ -47,6 +48,7 @@ from db import (
     NpcList,
     Player,
     PlayerItemHourlyTotals,
+    User,
     user_group_association,
 )
 
@@ -806,6 +808,10 @@ async def group_export_members(group_id: int):
             return _too_large_response(group_id)
         members = []
         if member_ids:
+            # discord_id is the /claim-rsn link read back out, so a clan's own
+            # bot can match a member to their in-game name without asking them
+            # to type it a second time. A LEFT JOIN: an unclaimed player, or a
+            # users row with no discord_id, yields None.
             rows = db_session.query(
                 Player.player_id,
                 Player.player_name,
@@ -813,8 +819,11 @@ async def group_export_members(group_id: int):
                 Player.total_level,
                 Player.log_slots,
                 Player.date_added,
-            ).filter(Player.player_id.in_(member_ids)).order_by(Player.player_name).all()
-            for pid, pname, wom, total_level, log_slots, date_added in rows:
+                User.discord_id,
+            ).outerjoin(User, User.user_id == Player.user_id).filter(
+                Player.player_id.in_(member_ids)).order_by(Player.player_name).all()
+            for pid, pname, wom, total_level, log_slots, date_added, discord_id in rows:
+                claimed = bool(discord_id and str(discord_id).strip())
                 members.append({
                     "player_id": pid,
                     "player_name": pname,
@@ -822,6 +831,8 @@ async def group_export_members(group_id: int):
                     "total_level": total_level,
                     "log_slots": log_slots,
                     "tracked_since": _iso_utc(date_added),
+                    # A string: a snowflake does not survive a JSON number in JS.
+                    "discord_id": str(discord_id).strip() if claimed else None,
                 })
 
         return jsonify({

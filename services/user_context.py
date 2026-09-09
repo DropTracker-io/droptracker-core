@@ -54,21 +54,18 @@ def _format_gp(value: int) -> str:
     return f"{value:,} gp"
 
 
-def _check_points_active(group_id: int, db) -> bool:
-    """Return True if the group has a points system active (premium tier >= 2)."""
-    from sqlalchemy import text
-    try:
-        row = db.execute(
-            text(
-                "SELECT 1 FROM xenforo.xf_dt_group_upgrade_active "
-                "WHERE group_id = :gid AND is_cancelled = 0 AND group_upgrade_id >= 2 "
-                "LIMIT 1"
-            ),
-            {"gid": group_id},
-        ).first()
-        return row is not None
-    except Exception:
-        return False
+def _check_points_active(group_id: int) -> bool:
+    """Return True if the group's tier includes the custom points system.
+
+    Was a direct read of the XenForo ``xf_dt_group_upgrade_active`` table, which
+    the subscription cutover left with a handful of rows — so every group paying
+    through Stripe read as points-inactive here. ``custom_points`` is the
+    authority (60s cache, fails closed), same as the points routes and the
+    submission pipeline.
+    """
+    from db.entitlements import group_has_entitlement
+
+    return group_has_entitlement(group_id, "custom_points")
 
 
 def _detect_api_usage(player_id: int, db, limit: int = 20):
@@ -292,7 +289,7 @@ class UserContextMenu(Extension):
                     other_players.append(p)
 
             partition = get_current_partition()
-            points_active = _check_points_active(group_id, db)
+            points_active = _check_points_active(group_id)
 
             embed = Embed(
                 title=f"Player Lookup — {member.display_name}",

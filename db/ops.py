@@ -908,6 +908,11 @@ async def notify_group(bot: interactions.Client, type: str, group: Group, member
         else:
             print(f"Channel not found for ID: {channel_id}")
 
+# Set by `_sync_group_from_wom` on every successful roster reconcile — the
+# hourly automatic pass included. Read by the group diagnostics endpoint.
+WOM_MEMBER_SYNC_STAMP_KEY = "last_wom_member_sync"
+
+
 async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove=None) -> dict:
     """
     Core logic for syncing a single group's membership from the WOM API.
@@ -1007,6 +1012,28 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
                 await on_add(member)
 
     group.date_updated = func.now()
+    # Stamp when the roster was last reconciled with WOM. Deliberately NOT the
+    # `last_wom_sync` cooldown key: this runs on the hourly pass for every
+    # group, so writing that one would keep the manual "Sync from WOM" button
+    # permanently rate-limited. The admin diagnostics panel reads this marker —
+    # before it existed the panel read a Redis key nothing wrote and every
+    # group reported "Members synced: never".
+    try:
+        stamp = session.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == group.group_id,
+            GroupConfiguration.config_key == WOM_MEMBER_SYNC_STAMP_KEY,
+        ).order_by(GroupConfiguration.id).first()
+        now_iso = datetime.now().isoformat()
+        if stamp:
+            stamp.config_value = now_iso
+        else:
+            session.add(GroupConfiguration(
+                group_id=group.group_id,
+                config_key=WOM_MEMBER_SYNC_STAMP_KEY,
+                config_value=now_iso,
+            ))
+    except Exception:
+        pass  # A missing timestamp only degrades diagnostics; never fail a sync for it.
     try:
         session.commit()
     except Exception as e:

@@ -1144,7 +1144,15 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         else:
             debug_print(f"Returning success without group notifications")
             debug_print(f"=== DROP PROCESSOR END (SUCCESS) ===")
-            return SubmissionResponse(success=True, message=f"Drop created successfully")
+            # A drop withheld from EVERY group lands here, so this is exactly
+            # the case where the screenshot notice matters most - without it the
+            # players the image gate actually stops are the only ones never told
+            # why their drop went unposted.
+            return SubmissionResponse(
+                success=True,
+                message=f"Drop created successfully",
+                notice=notice if notice != "" else None,
+            )
 
     except Exception as e:
         log_checkpoint("exception_handling")

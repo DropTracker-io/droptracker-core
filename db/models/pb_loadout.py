@@ -12,7 +12,7 @@ ecosystem can answer it.
 """
 from __future__ import annotations
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, Text, func
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, func
 
 from .base import Base
 
@@ -28,4 +28,16 @@ class PersonalBestLoadout(Base):
     # player was wearing or carrying nothing at all.
     equipment = Column(Text, nullable=True)
     inventory = Column(Text, nullable=True)
+    # The character model worn for this time: an outfit fingerprint as used by
+    # ``services.player_model`` (web110a). The model itself is a separate
+    # upload keyed by that fingerprint; ``player_state.model_fingerprint`` is
+    # only "the outfit we hold right now", which is not the same thing a week
+    # and three gear swaps later.
+    model_fingerprint = Column(String(32), nullable=True)
+    # How the fingerprint was obtained (``services.loadout.MODEL_SOURCE_*``):
+    # ``kill`` when the plugin sent it with the kill itself, ``recent`` when an
+    # older client sent none and the server recorded the outfit it most
+    # recently held. The site labels the two differently, so it is stored
+    # rather than guessed later.
+    model_source = Column(String(16), nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
